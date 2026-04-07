@@ -61,4 +61,5 @@ pub fn aminoacid_to_ncbistdaa(c: u8) -> u8 {
 }
 
 /// BLASTNA sentinel byte value (used to mark query boundaries).
+#[allow(dead_code)]
 pub const BLASTNA_SENTINEL: u8 = 15;

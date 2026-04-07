@@ -77,7 +77,7 @@ pub static NCBISTDAA_TO_AMINOACID: [i8; BLASTAA_SIZE] = [
 ];
 
 
-pub static kProtSentinel: u8 = 0;
+pub static PROT_SENTINEL: u8 = 0;
 
 
-pub static kNuclSentinel: u8 = 0xF;
+pub static NUCL_SENTINEL: u8 = 0xF;

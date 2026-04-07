@@ -58,18 +58,18 @@ impl InitialWordParameters {
     /// Build the nucleotide score table for 4-base packed words.
     /// Each byte encodes 4 bases (2 bits each), and the table stores
     /// the combined match/mismatch score for all 256 possible byte values.
+    /// Build the nucleotide score table for 4-base packed words.
+    /// Indexed by XOR of query and subject packed bytes.
+    /// Each bit pair in the XOR result: 00 = match (reward), != 00 = mismatch (penalty).
     pub fn build_nucl_score_table(reward: i32, penalty: i32) -> [i32; 256] {
         let mut table = [0i32; 256];
-        for byte_val in 0..256u32 {
+        for xor_val in 0..256u32 {
             let mut score = 0i32;
             for pos in 0..4 {
-                let base = (byte_val >> (6 - 2 * pos)) & 3;
-                // For the score table, matching bases get reward, mismatching get penalty
-                // But this table is indexed by XOR of query and subject packed bytes
-                let _ = base; // placeholder — actual computation depends on query
+                let bits = (xor_val >> (6 - 2 * pos)) & 3;
+                score += if bits == 0 { reward } else { penalty };
             }
-            // Default: all matches
-            table[byte_val as usize] = score;
+            table[xor_val as usize] = score;
         }
         table
     }

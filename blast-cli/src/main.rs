@@ -449,12 +449,6 @@ unsafe fn compute_alignment_stats(
     // Context 1 (minus): query data at encoded[1+qlen+1 .. 1+qlen+1+qlen]
     // The HSP's query.offset for context 1 is relative to the context start.
     // We need to read from the correct context in the encoded buffer.
-    let ctx_offset = unsafe { (*hsp).context } as usize;
-    // Context offsets in encoded buffer: ctx0 starts at 1, ctx1 starts at 1+qlen+1
-    // But the HSP offsets after traceback are context-relative, so we use
-    // the context's query_offset in the concatenated sequence
-    // query_encoded[1 + context_query_offset + hsp.query.offset] gives the right base
-
     if hsp.gap_info.is_null() {
         let len = (hsp.query.end - hsp.query.offset) as usize;
         let mut num_ident = 0i32;

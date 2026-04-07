@@ -5,7 +5,7 @@ use blast_core_sys as ffi;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Internal data stored in the BlastSeqSrc's DataStructure pointer.
 struct RustSeqSrcData {
@@ -99,7 +99,7 @@ unsafe extern "C" fn rust_get_max_seq_len(impl_ptr: *mut c_void, _arg: *mut c_vo
     data.db.max_seq_len as ffi::Int4
 }
 
-unsafe extern "C" fn rust_get_min_seq_len(impl_ptr: *mut c_void, _arg: *mut c_void) -> ffi::Int4 {
+unsafe extern "C" fn rust_get_min_seq_len(_impl_ptr: *mut c_void, _arg: *mut c_void) -> ffi::Int4 {
     // Not tracked by BlastDb currently; return 1 as minimum
     1
 }
@@ -148,6 +148,7 @@ unsafe extern "C" fn rust_get_seq_len(impl_ptr: *mut c_void, arg: *mut c_void) -
 
 /// NCBI4NA to BLASTNA conversion table.
 /// BLASTNA is a permutation where A=0,C=1,G=2,T=3 (matching NCBI2na).
+#[allow(dead_code)]
 const NCBI4NA_TO_BLASTNA: [u8; 16] = [
     15, // 0 = gap -> sentinel
     0,  // 1 = A

@@ -1,7 +1,6 @@
 //! Rust equivalent of blast_stat.c — Karlin-Altschul statistics.
 //! This is the mathematical core for computing E-values and bit scores.
 
-use crate::math;
 
 /// Karlin-Altschul statistical parameters for one context.
 #[derive(Debug, Clone)]

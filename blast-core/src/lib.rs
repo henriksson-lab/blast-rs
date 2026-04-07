@@ -3,9 +3,13 @@
 pub use blast_core_sys as ffi;
 
 pub mod encoding;
+pub mod engine;
+pub mod extend;
+pub mod gapalign;
 pub mod gapinfo;
 pub mod hspstream;
 pub mod listnode;
+pub mod lookup;
 pub mod math;
 pub mod options;
 pub mod parameters;

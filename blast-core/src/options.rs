@@ -1,7 +1,6 @@
 //! Rust equivalent of blast_options.c — BLAST search options.
 //! Contains all the option types and their default values.
 
-use crate::program;
 
 // ---- Default constants ----
 
