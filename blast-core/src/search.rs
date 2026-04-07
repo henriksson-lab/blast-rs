@@ -46,45 +46,52 @@ pub fn blastn_ungapped_search(
 ) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
 
+    // Use a small word (8 bases = 4^8 = 65536 entries) for the lookup table
+    let lut_word = word_size.min(8);
+    let lut_size = 1usize << (2 * lut_word);
+
     // Search both strands
     for (context, query) in [(0i32, query_plus), (1i32, query_minus)] {
         if query.len() < word_size || subject.len() < word_size {
             continue;
         }
 
-        // Build lookup table: for word sizes up to 13, use direct array (4^w entries)
-        // For larger word sizes, use the first 13 bases as key
-        let lut_word = word_size.min(13);
-        let lut_size = 1usize << (2 * lut_word); // 4^lut_word
-        let mut lut: Vec<Vec<u32>> = vec![Vec::new(); lut_size];
+        // Build lookup table from query (once per strand)
+        let mut lut: Vec<i32> = vec![-1; lut_size]; // -1 = empty
+        let mut next: Vec<i32> = vec![-1; query.len()]; // chain for collisions
 
-        for i in 0..=(query.len() - word_size) {
+        for i in (0..=(query.len() - word_size)).rev() {
             let key = word_hash_n(&query[i..i + lut_word], lut_word) as usize;
-            lut[key].push(i as u32);
+            next[i] = lut[key];
+            lut[key] = i as i32;
         }
 
-        // Scan subject using the lookup table
+        // Scan subject
         for s_pos in 0..=(subject.len() - word_size) {
             let key = word_hash_n(&subject[s_pos..s_pos + lut_word], lut_word) as usize;
-            if lut[key].is_empty() { continue; }
-
-            for &q_pos in &lut[key] {
-                let q_pos = q_pos as usize;
-                // For word_size > lut_word, verify remaining bases
+            let mut q_pos = lut[key];
+            while q_pos >= 0 {
+                let qp = q_pos as usize;
+                // Verify remaining bases if word_size > lut_word
+                let mut matches = true;
                 if word_size > lut_word {
-                    if query[q_pos + lut_word..q_pos + word_size]
-                        != subject[s_pos + lut_word..s_pos + word_size] {
-                        continue;
+                    for k in lut_word..word_size {
+                        if query[qp + k] != subject[s_pos + k] {
+                            matches = false;
+                            break;
+                        }
                     }
                 }
-                // Extend the seed
-                if let Some(hsp) = extend_seed(
-                    query, subject, q_pos, s_pos,
-                    reward, penalty, x_dropoff,
-                    kbp, search_space, evalue_threshold, context,
-                ) {
-                    hsps.push(hsp);
+                if matches {
+                    if let Some(hsp) = extend_seed(
+                        query, subject, qp, s_pos,
+                        reward, penalty, x_dropoff,
+                        kbp, search_space, evalue_threshold, context,
+                    ) {
+                        hsps.push(hsp);
+                    }
                 }
+                q_pos = next[qp];
             }
         }
     }
@@ -98,16 +105,18 @@ pub fn blastn_ungapped_search(
     hsps
 }
 
-/// Hash a word (sequence of BLASTNA values) for the lookup table.
-fn word_hash(word: &[u8]) -> u64 {
-    let mut h = 0u64;
-    for &b in word {
-        h = (h << 2) | (b & 3) as u64;
+/// Hash the first n bases of a word for the lookup table.
+#[inline(always)]
+fn word_hash_n(word: &[u8], n: usize) -> u32 {
+    let mut h = 0u32;
+    for i in 0..n {
+        h = (h << 2) | (word[i] & 3) as u32;
     }
     h
 }
 
 /// Extend a seed hit in both directions using ungapped extension.
+#[inline]
 fn extend_seed(
     query: &[u8],
     subject: &[u8],
@@ -246,7 +255,7 @@ mod tests {
     #[test]
     fn test_word_hash() {
         // ACGT = 0,1,2,3
-        assert_eq!(word_hash(&[0, 1, 2, 3]), 0b00_01_10_11);
+        assert_eq!(word_hash_n(&[0, 1, 2, 3], 4), 0b00_01_10_11);
     }
 
     #[test]
