@@ -6,7 +6,9 @@ pub mod encoding;
 pub mod gapinfo;
 pub mod listnode;
 pub mod math;
+pub mod options;
 pub mod program;
+pub mod seqsrc;
 
 use std::ptr;
 
