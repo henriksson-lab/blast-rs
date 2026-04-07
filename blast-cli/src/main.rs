@@ -110,6 +110,9 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         (*query_blk).length = (encoded.len() - 2) as i32; // exclude first and last sentinel
         (*query_blk).sequence_allocated = 0; // We manage this memory
         (*query_blk).sequence_start_allocated = 0;
+        // Set sequence_nomask to same as sequence (no masking applied)
+        (*query_blk).sequence_start_nomask = encoded.as_mut_ptr();
+        (*query_blk).sequence_nomask = encoded.as_mut_ptr().add(1);
 
         // 5. Create BlastQueryInfo
         let num_contexts = num_queries * 2; // plus + minus strand
@@ -277,14 +280,21 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("PreliminarySearchEngine failed ({})", rc).into());
         }
 
-        // Get results from HSP stream BEFORE closing it
-        // (skipping traceback for now — it segfaults with multiple subjects)
-        let results = (*hsp_stream).results;
-        (*hsp_stream).results = ptr::null_mut();
         ffi::BlastHSPStreamClose(hsp_stream);
 
         // Re-open DB for result extraction
         let db_for_results = BlastDb::open(&args.db).unwrap();
+
+        let mut results: *mut ffi::BlastHSPResults = ptr::null_mut();
+        let rc = ffi::BLAST_ComputeTraceback(
+            program, hsp_stream, query_blk, query_info, seq_src,
+            gap_align, score_params, ext_params, hit_params, eff_len_params,
+            db_opts, ptr::null(), ptr::null(), ptr::null_mut(),
+            &mut results, None, ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(format!("ComputeTraceback failed ({})", rc).into());
+        }
         // 13. Extract and format results
         if !results.is_null() {
             let res = &*results;
