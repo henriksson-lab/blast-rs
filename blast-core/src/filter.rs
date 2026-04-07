@@ -106,6 +106,43 @@ fn merge_regions(mask: &mut MaskLoc) {
     mask.regions = merged;
 }
 
+/// SEG-like low complexity filter for protein sequences.
+/// Masks regions with low information content (e.g., poly-amino-acid runs).
+pub fn seg_filter(sequence: &[u8], window: usize, threshold: f64) -> MaskLoc {
+    let mut mask = MaskLoc::new();
+    if sequence.len() < window {
+        return mask;
+    }
+
+    for start in 0..=(sequence.len() - window) {
+        let window_seq = &sequence[start..start + window];
+        let entropy = sequence_entropy(window_seq, 20);
+        if entropy < threshold {
+            mask.add(start as i32, (start + window) as i32);
+        }
+    }
+    merge_regions(&mut mask);
+    mask
+}
+
+/// Compute Shannon entropy of a sequence with given alphabet size.
+fn sequence_entropy(seq: &[u8], alphabet_size: usize) -> f64 {
+    let mut counts = vec![0u32; alphabet_size + 1];
+    for &b in seq {
+        let idx = (b as usize).min(alphabet_size);
+        counts[idx] += 1;
+    }
+    let n = seq.len() as f64;
+    let mut entropy = 0.0;
+    for &c in &counts {
+        if c > 0 {
+            let p = c as f64 / n;
+            entropy -= p * p.log2();
+        }
+    }
+    entropy
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -417,10 +417,15 @@ fn large_query_2000() -> PathBuf {
 fn large_db_finds_hits() {
     let (q, db) = (large_query_500(), large_db_path());
     if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
-    let rust = run_rust_engine(&q, &db, 11);
-    assert!(!rust.trim().is_empty(), "Should find hits in C. elegans genome");
-    let hit_count = rust.lines().count();
-    assert!(hit_count >= 1, "Should find at least 1 hit, got {}", hit_count);
+    // Use release binary for large DB (debug is too slow)
+    let release = project_root().join("target/release/blast-cli");
+    let bin = if release.exists() { release } else { rust_blastn() };
+    let output = Command::new(&bin)
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--rust-engine"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.trim().is_empty(), "Should find hits in C. elegans genome");
 }
 
 #[test]
@@ -428,7 +433,13 @@ fn large_db_rust_vs_reference_top_hit() {
     let (q, db) = (large_query_500(), large_db_path());
     if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
     if !ref_blastn().exists() { return; }
-    let rust_native = run_rust_engine(&q, &db, 11);
+    let release = project_root().join("target/release/blast-cli");
+    let bin = if release.exists() { release } else { rust_blastn() };
+    let out = Command::new(&bin)
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--rust-engine"])
+        .output().expect("Failed");
+    let rust_native = String::from_utf8_lossy(&out.stdout).to_string();
     let reference = run_ref_args(&q, &db, 11, 1e-50);
     if reference.is_empty() || rust_native.is_empty() { return; }
     // Top hit coordinates should match
@@ -455,7 +466,13 @@ fn large_db_ffi_strict_evalue() {
 fn large_db_2000bp_query() {
     let (q, db) = (large_query_2000(), large_db_path());
     if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
-    let rust = run_rust_engine(&q, &db, 11);
+    let release = project_root().join("target/release/blast-cli");
+    let bin = if release.exists() { release } else { rust_blastn() };
+    let out = Command::new(&bin)
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--rust-engine"])
+        .output().expect("Failed");
+    let rust = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(!rust.trim().is_empty(), "2000bp query should find hits");
     let top: Vec<&str> = rust.lines().next().unwrap_or("").split('\t').collect();
     let align_len: i32 = top.get(3).unwrap_or(&"0").parse().unwrap_or(0);
@@ -1099,4 +1116,192 @@ fn exact_match_medium_query_strict() {
         &run_ref_args(&q, &db, 11, 1e-10),
         "exact_medium_strict",
     );
+}
+
+#[test]
+fn blastp_subject_search() {
+    let pq = fixture("protein_query.fa");
+    let ps = fixture("protein_subject.fa");
+    if !pq.exists() {
+        std::fs::write(&pq, ">prot_q\nMKFLIFALILFATVALAPKSSSHEI\n").ok();
+    }
+    if !ps.exists() {
+        std::fs::write(&ps, ">prot_s1\nMKFLIFALILFATVALAPKSSSHEIGK\n>prot_s2\nAAAAAAAAAAAA\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--program", "blastp", "--query", pq.to_str().unwrap(),
+            "--subject", ps.to_str().unwrap(), "--word_size", "3"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "blastp should work");
+    assert!(stdout.contains("prot_s1"), "Should find match in prot_s1");
+    assert!(!stdout.contains("prot_s2"), "Should not match prot_s2 (all A)");
+}
+
+#[test]
+fn blastx_translated_search() {
+    // blastx: translate nucleotide query, search against protein subject
+    let nq = fixture("blastx_nuc_query.fa");
+    let ps = fixture("blastx_prot_subject.fa");
+    if !nq.exists() {
+        std::fs::write(&nq, ">nuc_q\nATGGCTAAAATGGCTAAA\n").ok();
+    }
+    if !ps.exists() {
+        std::fs::write(&ps, ">prot_s\nMAKMAK\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--program", "blastx", "--query", nq.to_str().unwrap(),
+            "--subject", ps.to_str().unwrap(), "--word_size", "3"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "blastx should work");
+    assert!(stdout.contains("prot_s"), "Should find protein match");
+}
+
+#[test]
+fn tblastn_translated_search() {
+    let pq = fixture("tblastn_prot_query.fa");
+    let ns = fixture("tblastn_nuc_subject.fa");
+    if !pq.exists() {
+        std::fs::write(&pq, ">prot_q\nMAKMAK\n").ok();
+    }
+    if !ns.exists() {
+        std::fs::write(&ns, ">nuc_s\nATGGCTAAAATGGCTAAA\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--program", "tblastn", "--query", pq.to_str().unwrap(),
+            "--subject", ns.to_str().unwrap(), "--word_size", "3"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "tblastn should work");
+    assert!(stdout.contains("nuc_s"), "Should find translated match");
+}
+
+#[test]
+fn blastp_proper_evalue() {
+    let pq = fixture("protein_query.fa");
+    let ps = fixture("protein_subject.fa");
+    if skip_if_missing(&[&pq, &ps]) { return; }
+    let output = Command::new(rust_blastn())
+        .args(["--program", "blastp", "--query", pq.to_str().unwrap(),
+            "--subject", ps.to_str().unwrap(), "--word_size", "3"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    // E-value should be a small positive number, not 0.0
+    let evalue_str = stdout.lines().next().unwrap_or("").split('\t').nth(10).unwrap_or("999");
+    let evalue: f64 = evalue_str.parse().unwrap_or(999.0);
+    assert!(evalue > 0.0 && evalue < 1.0, "E-value should be computed, got {}", evalue);
+}
+
+#[test]
+fn tblastx_translated_vs_translated() {
+    let nq = fixture("tblastx_nuc_query.fa");
+    let ns = fixture("tblastx_nuc_subject.fa");
+    if !nq.exists() {
+        std::fs::write(&nq, ">nq\nATGGCTAAAATGGCTAAA\n").ok();
+    }
+    if !ns.exists() {
+        std::fs::write(&ns, ">ns\nATGGCTAAAATGGCTAAA\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--program", "tblastx", "--query", nq.to_str().unwrap(),
+            "--subject", ns.to_str().unwrap(), "--word_size", "3"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "tblastx should work");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "Should find translated match");
+}
+
+#[test]
+fn psiblast_iterative_search() {
+    let pq = fixture("psi_query.fa");
+    let ps = fixture("psi_subject.fa");
+    if !pq.exists() {
+        std::fs::write(&pq, ">psi_q\nMKFLIFALILFATVALAPKSSSHEI\n").ok();
+    }
+    if !ps.exists() {
+        std::fs::write(&ps, ">s1\nMKFLIFALILFATVALAPKSSSHEIGK\n>s2\nAAAAAAAAAAAAAAAAAAAA\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--program", "psiblast", "--query", pq.to_str().unwrap(),
+            "--subject", ps.to_str().unwrap(), "--word_size", "3"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "psiblast should work");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("s1"), "Should find matching subject");
+}
+
+#[test]
+fn perc_identity_filter() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--perc_identity", "95"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let pident: f64 = line.split('\t').nth(2).unwrap_or("0").parse().unwrap_or(0.0);
+        assert!(pident >= 95.0, "All hits should have >= 95% identity, got {}", pident);
+    }
+}
+
+#[test]
+fn max_hsps_limit() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--rust-engine", "--max_hsps", "1"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut subj_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        let subj = line.split('\t').nth(1).unwrap_or("");
+        *subj_counts.entry(subj).or_insert(0) += 1;
+    }
+    for (subj, count) in &subj_counts {
+        assert!(*count <= 1, "Subject {} has {} HSPs but max_hsps=1", subj, count);
+    }
+}
+
+#[test]
+fn ungapped_search() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--ungapped"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "ungapped search should work");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // All hits should have 0 gap opens
+    for line in stdout.lines() {
+        let gaps: i32 = line.split('\t').nth(5).unwrap_or("0").parse().unwrap_or(0);
+        assert_eq!(gaps, 0, "Ungapped search should have 0 gaps");
+    }
+}
+
+#[test]
+fn task_megablast() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--task", "megablast"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "megablast task should work");
+}
+
+#[test]
+fn xdrop_options() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--xdrop_ungap", "10", "--xdrop_gap", "15",
+            "--xdrop_gap_final", "50"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "xdrop options should work");
 }

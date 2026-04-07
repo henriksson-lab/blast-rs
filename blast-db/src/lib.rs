@@ -2,7 +2,9 @@
 
 pub use blast_core_sys as ffi;
 
+pub mod alias;
 mod index;
+pub mod makedb;
 mod seqsrc;
 
 pub use index::{BlastDb, DbType};

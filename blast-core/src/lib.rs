@@ -2,12 +2,14 @@
 
 pub use blast_core_sys as ffi;
 
+pub mod diagnostics;
 pub mod encoding;
 pub mod engine;
 pub mod extend;
 pub mod filter;
 pub mod gapalign;
 pub mod gapinfo;
+pub mod greedy;
 pub mod hits;
 pub mod hspstream;
 pub mod itree;
@@ -18,6 +20,8 @@ pub mod options;
 pub mod parameters;
 pub mod program;
 pub mod protein;
+pub mod pssm;
+pub mod rps;
 pub mod queryinfo;
 pub mod search;
 pub mod sequence;

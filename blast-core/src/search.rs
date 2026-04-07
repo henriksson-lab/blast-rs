@@ -2,6 +2,7 @@
 //! This module implements the complete blastn search pipeline in Rust.
 
 
+use crate::itree::{IntervalTree, Interval};
 use crate::stat::KarlinBlk;
 use crate::traceback::traceback_align_abs;
 
@@ -216,24 +217,27 @@ fn extend_seed(
     })
 }
 
-/// Remove HSPs that overlap significantly with higher-scoring ones.
+/// Remove HSPs that are contained within or significantly overlap higher-scoring ones.
+/// Uses an interval tree for efficient containment checking.
 fn dedup_hsps(hsps: &mut Vec<SearchHsp>) {
     if hsps.len() <= 1 {
         return;
     }
-    let mut keep = vec![true; hsps.len()];
-    for i in 0..hsps.len() {
-        if !keep[i] { continue; }
-        for j in (i + 1)..hsps.len() {
-            if !keep[j] { continue; }
-            if hsps[i].context != hsps[j].context { continue; }
-            // Check if j's query range overlaps significantly with i
-            let q_overlap = (hsps[i].query_end.min(hsps[j].query_end)
-                - hsps[i].query_start.max(hsps[j].query_start)).max(0);
-            let q_len = hsps[j].query_end - hsps[j].query_start;
-            if q_len > 0 && q_overlap as f64 / q_len as f64 > 0.5 {
-                keep[j] = false;
-            }
+    hsps.sort_by(|a, b| b.score.cmp(&a.score));
+
+    // Separate trees per context (strand)
+    let q_max = hsps.iter().map(|h| h.query_end).max().unwrap_or(0) + 1;
+    let s_max = hsps.iter().map(|h| h.subject_end).max().unwrap_or(0) + 1;
+    let mut trees: std::collections::HashMap<i32, IntervalTree> = std::collections::HashMap::new();
+
+    let mut keep = vec![false; hsps.len()];
+    for (i, hsp) in hsps.iter().enumerate() {
+        let tree = trees.entry(hsp.context).or_insert_with(|| IntervalTree::new(q_max, s_max));
+        let qi = Interval::new(hsp.query_start, hsp.query_end);
+        let si = Interval::new(hsp.subject_start, hsp.subject_end);
+        if !tree.is_contained(qi, si) && !tree.has_significant_overlap(qi, si, 0.5) {
+            keep[i] = true;
+            tree.insert(qi, si, hsp.score);
         }
     }
     let mut idx = 0;

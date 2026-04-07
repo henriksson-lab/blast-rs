@@ -76,6 +76,45 @@ fn format_bitscore(val: f64) -> String {
     }
 }
 
+/// Get a field value by column name for custom tabular output.
+pub fn get_field(hit: &TabularHit, column: &str) -> String {
+    match column {
+        "qseqid" | "qacc" => hit.query_id.clone(),
+        "sseqid" | "sacc" => hit.subject_id.clone(),
+        "pident" => format!("{:.3}", hit.pct_identity),
+        "length" => hit.align_len.to_string(),
+        "mismatch" => hit.mismatches.to_string(),
+        "gapopen" => hit.gap_opens.to_string(),
+        "qstart" => hit.query_start.to_string(),
+        "qend" => hit.query_end.to_string(),
+        "sstart" => hit.subject_start.to_string(),
+        "send" => hit.subject_end.to_string(),
+        "evalue" => format_evalue(hit.evalue),
+        "bitscore" => format_bitscore(hit.bit_score),
+        "score" => format!("{:.0}", hit.bit_score), // raw score approximation
+        "nident" => (hit.align_len - hit.mismatches).to_string(),
+        "gaps" => hit.gap_opens.to_string(),
+        "qlen" => "0".to_string(), // not available in TabularHit
+        "slen" => "0".to_string(),
+        _ => "N/A".to_string(),
+    }
+}
+
+/// Write tabular output with custom columns.
+/// `columns` is a space-separated list of field names.
+pub fn format_tabular_custom<W: Write>(
+    writer: &mut W,
+    hits: &[TabularHit],
+    columns: &str,
+) -> std::io::Result<()> {
+    let cols: Vec<&str> = columns.split_whitespace().collect();
+    for hit in hits {
+        let fields: Vec<String> = cols.iter().map(|c| get_field(hit, c)).collect();
+        writeln!(writer, "{}", fields.join("\t"))?;
+    }
+    Ok(())
+}
+
 /// Write tabular output (outfmt 6) for a set of hits.
 pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io::Result<()> {
     for hit in hits {

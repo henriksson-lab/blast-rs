@@ -182,6 +182,81 @@ pub fn lookup_nucleotide_params(
     None
 }
 
+/// Compute length adjustment using the Altschul-Gish formula.
+/// This adjusts query and database lengths to account for edge effects.
+/// length_adj satisfies: K * (q - length_adj) * (d - N * length_adj) * exp(-lambda * S) = threshold
+pub fn compute_length_adjustment(
+    query_length: i32,
+    db_length: i64,
+    num_seqs: i32,
+    kbp: &KarlinBlk,
+) -> i32 {
+    if !kbp.is_valid() || query_length <= 0 || db_length <= 0 {
+        return 0;
+    }
+
+    let alpha = kbp.lambda * kbp.h;
+    if alpha <= 0.0 {
+        return 0;
+    }
+
+    // Iteratively solve for length_adjustment
+    let q = query_length as f64;
+    let d = db_length as f64;
+    let n = num_seqs as f64;
+    let k = kbp.k;
+    let log_k = kbp.log_k;
+
+    let mut len_adj = 0.0;
+    for _ in 0..20 {
+        let eff_q = (q - len_adj).max(1.0);
+        let eff_d = (d - n * len_adj).max(1.0);
+        let new_adj = (log_k + (eff_q * eff_d).ln()) / alpha;
+        let new_adj = new_adj.min(q - 1.0).min(d / n - 1.0).max(0.0);
+        if (new_adj - len_adj).abs() < 0.5 {
+            break;
+        }
+        len_adj = new_adj;
+    }
+
+    len_adj.round() as i32
+}
+
+/// Precomputed Karlin-Altschul parameters for BLOSUM62 with various gap costs.
+/// Format: (gap_open, gap_extend, lambda, K, H, alpha, beta)
+pub const BLOSUM62_PARAMS: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
+    (11, 1, 0.267, 0.041, 0.14, 1.24, -0.70),
+    (10, 1, 0.291, 0.075, 0.23, 1.00, -0.55),
+    (9, 1, 0.305, 0.10, 0.30, 0.89, -0.46),
+    (8, 2, 0.270, 0.047, 0.15, 1.18, -0.67),
+    (7, 2, 0.290, 0.070, 0.22, 1.02, -0.57),
+    (6, 2, 0.305, 0.097, 0.29, 0.90, -0.48),
+    (11, 2, 0.235, 0.020, 0.073, 1.55, -0.91),
+    (10, 2, 0.256, 0.032, 0.11, 1.30, -0.76),
+    (9, 2, 0.271, 0.044, 0.15, 1.16, -0.67),
+];
+
+/// Look up gapped KBP for protein scoring (BLOSUM62).
+pub fn lookup_protein_params(gap_open: i32, gap_extend: i32) -> Option<GappedParams> {
+    for &(go, ge, lambda, k, h, alpha, beta) in BLOSUM62_PARAMS {
+        if go == gap_open && ge == gap_extend {
+            return Some(GappedParams { gap_open: go, gap_extend: ge, lambda, k, h, alpha, beta });
+        }
+    }
+    None
+}
+
+/// Compute ungapped KBP for protein BLOSUM62.
+/// Lambda ≈ 0.3176, K ≈ 0.134 for standard amino acid frequencies.
+pub fn protein_ungapped_kbp() -> KarlinBlk {
+    KarlinBlk {
+        lambda: 0.3176,
+        k: 0.134,
+        log_k: 0.134_f64.ln(),
+        h: 0.401,
+    }
+}
+
 /// Compute effective search space.
 /// eff_length = db_length - num_seqs * length_adjustment
 /// eff_query_length = query_length - length_adjustment
