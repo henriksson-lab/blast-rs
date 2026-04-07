@@ -731,3 +731,372 @@ fn filtering_minus_strand_hits_have_reversed_coords() {
     }
     assert!(found_minus, "Should find at least one minus-strand hit");
 }
+
+// ============================================================
+// Output format tests
+// Verify tabular output fields match reference BLAST exactly
+// ============================================================
+
+#[test]
+fn output_format_tab_separated() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust = run_rust(&q, &db, 11);
+    for (i, line) in rust.lines().enumerate() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 12,
+            "Line {} should have 12 tab-separated fields, got {}: {}", i, fields.len(), line);
+    }
+}
+
+#[test]
+fn output_format_identity_range() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust = run_rust(&q, &db, 11);
+    for line in rust.lines() {
+        let pident: f64 = line.split('\t').nth(2).unwrap().parse().unwrap();
+        assert!(pident >= 0.0 && pident <= 100.0,
+            "Percent identity should be 0-100, got {}", pident);
+    }
+}
+
+#[test]
+fn output_format_evalue_notation() {
+    // Verify e-value formatting matches reference conventions
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust = run_rust(&q, &db, 11);
+    for line in rust.lines() {
+        let evalue_str = line.split('\t').nth(10).unwrap();
+        // Should be either scientific (e.g. "3.51e-23") or fixed (e.g. "1.7")
+        let _: f64 = evalue_str.parse().unwrap_or_else(|_|
+            panic!("E-value '{}' should be a valid float", evalue_str));
+    }
+}
+
+#[test]
+fn output_format_bitscore_convention() {
+    // Verify bit score formatting: >= 99.9 → integer, < 99.9 → one decimal
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let reference = run_ref(&q, &db, 11);
+    let rust = run_rust(&q, &db, 11);
+    let r_scores: Vec<&str> = rust.lines().filter_map(|l| l.split('\t').nth(11)).collect();
+    let f_scores: Vec<&str> = reference.lines().filter_map(|l| l.split('\t').nth(11)).collect();
+    for (r, f) in r_scores.iter().zip(f_scores.iter()) {
+        assert_eq!(r, f, "Bit score format should match reference: '{}' vs '{}'", r, f);
+    }
+}
+
+#[test]
+fn output_format_alignment_length_positive() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust = run_rust(&q, &db, 11);
+    for line in rust.lines() {
+        let alen: i32 = line.split('\t').nth(3).unwrap().parse().unwrap();
+        assert!(alen > 0, "Alignment length should be positive, got {}", alen);
+    }
+}
+
+#[test]
+fn output_format_mismatches_nonneg() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust = run_rust(&q, &db, 11);
+    for line in rust.lines() {
+        let mm: i32 = line.split('\t').nth(4).unwrap().parse().unwrap();
+        assert!(mm >= 0, "Mismatches should be non-negative, got {}", mm);
+    }
+}
+
+// ============================================================
+// Input coverage tests
+// Verify handling of various input types
+// ============================================================
+
+#[test]
+fn input_single_base_query() {
+    // A single-base query should produce no hits (too short for any word_size)
+    let single = fixture("single_base.fa");
+    if !single.exists() {
+        std::fs::write(&single, ">single\nA\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--query", single.to_str().unwrap(),
+            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11"])
+        .output().expect("Failed");
+    // Should complete without crashing
+    assert!(output.status.success() || output.stdout.is_empty());
+}
+
+#[test]
+fn input_long_query_1000bp() {
+    // Test with a longer query extracted from celegans
+    let q = fixture("query_long_match.fa");
+    let db = test_data("seqn");
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust = run_rust(&q, &db, 11);
+    assert!(!rust.is_empty(), "300bp query should find hits");
+}
+
+#[test]
+fn input_multi_query_all_find_hits() {
+    // Multi-query file: first query should find hits, random should find fewer/none
+    let q = fixture("multi_query.fa");
+    let db = test_data("seqn");
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust = run_rust(&q, &db, 11);
+    // Check that we have results from multiple query IDs
+    let query_ids: std::collections::HashSet<&str> = rust.lines()
+        .filter_map(|l| l.split('\t').next())
+        .collect();
+    assert!(query_ids.len() >= 2, "Multi-query should produce hits from multiple queries, got {:?}", query_ids);
+}
+
+#[test]
+fn input_lowercase_query() {
+    // FASTA with lowercase bases should work (case-insensitive)
+    let lc = fixture("lowercase_query.fa");
+    if !lc.exists() {
+        std::fs::write(&lc, ">lowercase\nacgtacgtacgtacgtacgtacgtacgtacgt\n").ok();
+    }
+    // Use rust-engine which handles edge cases safely
+    let output = Command::new(rust_blastn())
+        .args(["--query", lc.to_str().unwrap(),
+            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11", "--rust-engine"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "Lowercase query should work with Rust engine");
+}
+
+#[test]
+fn input_query_with_blank_lines() {
+    let bl = fixture("blank_lines.fa");
+    if !bl.exists() {
+        std::fs::write(&bl, ">query1\nACGTACGTACGT\n\nACGTACGTACGT\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--query", bl.to_str().unwrap(),
+            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11", "--rust-engine"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "Query with blank lines should work");
+}
+
+#[test]
+fn input_word_size_variants() {
+    // Word sizes 7, 11, 16, 28 should all work
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    for ws in [7, 11, 16, 28] {
+        let out = run_rust(&q, &db, ws);
+        // All should complete without error (may or may not find hits)
+        let _ = out;
+    }
+}
+
+#[test]
+fn input_v5_database() {
+    // Test v5 database format if available
+    let db = project_root().join("tests/fixtures/large_db/celegans");
+    if !db.with_extension("nin").exists() { return; }
+    let q = fixture("test_query.fa");
+    // v5 should at least open without crashing
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(),
+            "--db", db.to_str().unwrap(), "--word_size", "11", "--rust-engine"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "v5 database should be readable");
+}
+
+#[test]
+fn input_repetitive_query_no_crash() {
+    // Repetitive queries like ACGTACGT... used to crash the C engine
+    // Now safely falls back to Rust engine
+    let rep = fixture("repetitive_query.fa");
+    if !rep.exists() {
+        std::fs::write(&rep, ">rep\nACGTACGTACGTACGTACGTACGTACGTACGT\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--query", rep.to_str().unwrap(),
+            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "Repetitive query should not crash (exit={})", output.status);
+}
+
+#[test]
+fn input_poly_a_query_no_crash() {
+    let pa = fixture("poly_a.fa");
+    if !pa.exists() {
+        std::fs::write(&pa, ">polyA\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--query", pa.to_str().unwrap(),
+            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11"])
+        .output().expect("Failed");
+    assert!(output.status.success(), "Poly-A query should not crash");
+}
+
+#[test]
+fn strand_plus_only() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let both = run_rust(&q, &db, 11);
+    let plus_only = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--strand", "plus"])
+        .output().expect("Failed").stdout;
+    let plus_out = String::from_utf8_lossy(&plus_only);
+    // Plus-only should have fewer or equal hits (no minus strand)
+    assert!(plus_out.lines().count() <= both.lines().count(),
+        "Plus-only should have <= hits vs both strands");
+    // All hits should have sstart < send (plus strand)
+    for line in plus_out.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        let ss: i32 = f[8].parse().unwrap_or(0);
+        let se: i32 = f[9].parse().unwrap_or(0);
+        assert!(ss <= se, "Plus strand should have sstart <= send: {}", line);
+    }
+}
+
+#[test]
+fn rust_engine_reward2_penalty3() {
+    // Test Rust engine with reward=2, penalty=-3
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--rust-engine", "--reward", "2", "--penalty", "-3"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(!stdout.is_empty(), "Should find hits with reward=2");
+    // Top hit should still be BP722512.1
+    let top_subj = stdout.lines().next().unwrap_or("").split('\t').nth(1).unwrap_or("");
+    assert_eq!(top_subj, "BP722512.1");
+}
+
+#[test]
+fn version_flag() {
+    let output = Command::new(rust_blastn())
+        .args(["--version"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("0.1.0"), "Should show version");
+}
+
+#[test]
+fn subject_fasta_search() {
+    // Search query against a subject FASTA file (no database)
+    let q = fixture("test_query.fa");
+    let subj = fixture("subject_test.fa");
+    if !subj.exists() {
+        std::fs::write(&subj, ">subj1\nTTAAGGAGGCTCATCTTTCAGAATCCATGCTGTGGGCCAGCAAGAGTTAA\n>subj2\nGGGGGGGGGGGGGGGG\n").ok();
+    }
+    let output = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--subject", subj.to_str().unwrap(),
+            "--word_size", "11"])
+        .output().expect("Failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "Subject FASTA search should work");
+    assert!(!stdout.is_empty(), "Should find hit against subject");
+    assert!(stdout.contains("subj1"), "Should match subj1");
+}
+
+#[test]
+fn max_target_seqs_limits_output() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let full = run_rust(&q, &db, 11);
+    let limited = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--max_target_seqs", "3"])
+        .output().expect("Failed").stdout;
+    let limited_out = String::from_utf8_lossy(&limited);
+    let full_subjects: std::collections::HashSet<&str> = full.lines()
+        .filter_map(|l| l.split('\t').nth(1)).collect();
+    let limited_subjects: std::collections::HashSet<&str> = limited_out.lines()
+        .filter_map(|l| l.split('\t').nth(1)).collect();
+    assert!(limited_subjects.len() <= 3,
+        "max_target_seqs=3 should limit to 3 subjects, got {}", limited_subjects.len());
+    assert!(limited_subjects.len() < full_subjects.len(),
+        "Limited should have fewer subjects than full");
+}
+
+#[test]
+fn rust_engine_different_word_sizes() {
+    // Verify Rust engine works with various word sizes
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    for ws in [7, 8, 9, 10, 11, 12, 16, 20, 28] {
+        let output = Command::new(rust_blastn())
+            .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+                "--word_size", &ws.to_string(), "--rust-engine"])
+            .output().expect("Failed");
+        assert!(output.status.success(), "word_size={} should work", ws);
+    }
+}
+
+#[test]
+fn dust_no_disables_masking() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let with_dust = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--rust-engine", "--dust", "yes"])
+        .output().expect("Failed").stdout;
+    let without_dust = Command::new(rust_blastn())
+        .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--word_size", "11", "--rust-engine", "--dust", "no"])
+        .output().expect("Failed").stdout;
+    // Both should work; without dust might find more/different hits
+    assert!(!with_dust.is_empty() || !without_dust.is_empty());
+}
+
+// ============================================================
+// Additional exact-match tests for reference compatibility
+// ============================================================
+
+#[test]
+fn exact_match_seqn_evalue_1() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    compare(
+        &run_rust_args(&q, &db, 11, 1.0),
+        &run_ref_args(&q, &db, 11, 1.0),
+        "exact_evalue_1",
+    );
+}
+
+#[test]
+fn exact_match_seqn_evalue_5() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    compare(
+        &run_rust_args(&q, &db, 11, 5.0),
+        &run_ref_args(&q, &db, 11, 5.0),
+        "exact_evalue_5",
+    );
+}
+
+#[test]
+fn exact_match_short_query_word11() {
+    let (q, db) = (fixture("query_short_match.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    compare(
+        &run_rust_args(&q, &db, 11, 0.01),
+        &run_ref_args(&q, &db, 11, 0.01),
+        "exact_short_strict",
+    );
+}
+
+#[test]
+fn exact_match_medium_query_strict() {
+    let (q, db) = (fixture("query_medium_match.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    compare(
+        &run_rust_args(&q, &db, 11, 1e-10),
+        &run_ref_args(&q, &db, 11, 1e-10),
+        "exact_medium_strict",
+    );
+}

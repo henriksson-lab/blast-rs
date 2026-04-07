@@ -17,10 +17,15 @@ pub mod math;
 pub mod options;
 pub mod parameters;
 pub mod program;
+pub mod protein;
+pub mod queryinfo;
 pub mod search;
+pub mod sequence;
 pub mod seqsrc;
 pub mod stat;
 pub mod traceback;
+pub mod matrix;
+pub mod util;
 
 use std::ptr;
 

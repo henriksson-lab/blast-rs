@@ -3,6 +3,7 @@
 
 
 use crate::stat::KarlinBlk;
+use crate::traceback::traceback_align_abs;
 
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -282,10 +283,41 @@ pub fn blastn_gapped_search(
             continue;
         }
 
-        // For gapped alignment, just use the ungapped seed coordinates
-        // The seed extension already found the optimal ungapped alignment
-        // TODO: implement proper gapped DP that returns correct coordinates
-        hsps.push(seed.clone());
+        // Do gapped traceback around the seed
+        let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
+        let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
+        let margin = (seed.align_length as usize).max(50);
+
+        if let Some(tb) = traceback_align_abs(
+            query, subject, seed_q, seed_s,
+            reward, penalty, _gap_open, _gap_extend, margin,
+        ) {
+            let evalue = kbp.raw_to_evalue(tb.score, search_space);
+            if evalue > evalue_threshold { continue; }
+
+            let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(
+                &query[tb.query_start..tb.query_end],
+                &subject[tb.subject_start..tb.subject_end],
+            );
+
+            hsps.push(SearchHsp {
+                query_start: tb.query_start as i32,
+                query_end: tb.query_end as i32,
+                subject_start: tb.subject_start as i32,
+                subject_end: tb.subject_end as i32,
+                score: tb.score,
+                bit_score: kbp.raw_to_bit(tb.score),
+                evalue,
+                num_ident,
+                align_length: align_len,
+                mismatches: (align_len - num_ident - gap_opens).max(0),
+                gap_opens,
+                context: seed.context,
+            });
+        } else {
+            // Traceback failed, use ungapped seed
+            hsps.push(seed.clone());
+        }
     }
 
     hsps.sort_by(|a, b| b.score.cmp(&a.score));

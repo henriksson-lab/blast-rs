@@ -427,3 +427,27 @@ mod tests {
             "Header should contain sequence info");
     }
 }
+
+    #[test]
+    fn test_open_protein_db() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ncbi-blast-2.17.0+-src/c++/src/algo/blast/unit_tests/api/data/seqp");
+        if !path.with_extension("pin").exists() { return; }
+        let db = BlastDb::open(&path).unwrap();
+        assert_eq!(db.db_type, DbType::Protein);
+        assert_eq!(db.version, 4);
+        assert_eq!(db.num_oids, 2005);
+        assert!(db.total_length > 0);
+    }
+
+    #[test]
+    fn test_protein_seq_length() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ncbi-blast-2.17.0+-src/c++/src/algo/blast/unit_tests/api/data/seqp");
+        if !path.with_extension("pin").exists() { return; }
+        let db = BlastDb::open(&path).unwrap();
+        let len = db.get_seq_len(0);
+        assert!(len > 0 && len <= db.max_seq_len, "Protein seq length should be valid");
+    }

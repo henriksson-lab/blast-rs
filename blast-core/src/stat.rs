@@ -59,7 +59,6 @@ pub struct GappedParams {
 /// Precomputed gap parameter tables for nucleotide scoring.
 /// Format: (gap_open, gap_extend, lambda, K, H, alpha, beta)
 pub const BLASTN_PARAMS_1_3: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
-    // reward=1, penalty=-3
     (5, 2, 0.208, 0.049, 0.14, 1.24, -0.70),
     (2, 2, 0.278, 0.075, 0.27, 0.96, -0.52),
     (1, 2, 0.308, 0.084, 0.34, 0.86, -0.42),
@@ -69,11 +68,8 @@ pub const BLASTN_PARAMS_1_3: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
     (2, 1, 0.278, 0.075, 0.28, 0.95, -0.48),
 ];
 
-/// Precomputed gap parameter tables for nucleotide scoring.
-/// Format: (gap_open, gap_extend, lambda, K, H, alpha, beta)
 pub const BLASTN_PARAMS_1_2: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
-    // reward=1, penalty=-2
-    (0, 0, 0.549, 0.205, 1.02, 0.45, -0.19),  // ungapped/linear
+    (0, 0, 0.549, 0.205, 1.02, 0.45, -0.19),
     (2, 2, 0.439, 0.14, 0.64, 0.60, -0.26),
     (1, 2, 0.477, 0.16, 0.78, 0.53, -0.22),
     (0, 2, 0.549, 0.205, 1.02, 0.45, -0.19),
@@ -81,6 +77,79 @@ pub const BLASTN_PARAMS_1_2: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
     (2, 1, 0.456, 0.15, 0.71, 0.56, -0.24),
     (1, 1, 0.499, 0.18, 0.88, 0.49, -0.21),
 ];
+
+pub const BLASTN_PARAMS_2_3: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
+    (4, 4, 0.22, 0.065, 0.35, 1.00, -0.43),
+    (2, 4, 0.29, 0.086, 0.52, 0.82, -0.31),
+    (0, 4, 0.38, 0.13, 0.92, 0.62, -0.17),
+    (3, 3, 0.23, 0.068, 0.38, 0.96, -0.40),
+    (6, 2, 0.21, 0.057, 0.30, 1.06, -0.48),
+    (5, 2, 0.23, 0.068, 0.38, 0.95, -0.39),
+    (4, 2, 0.25, 0.078, 0.45, 0.87, -0.34),
+];
+
+pub const BLASTN_PARAMS_1_1: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
+    (3, 2, 0.549, 0.205, 1.02, 0.45, -0.19),
+    (2, 2, 0.659, 0.26, 1.50, 0.37, -0.14),
+    (1, 2, 0.730, 0.29, 1.83, 0.33, -0.12),
+    (0, 2, 0.854, 0.37, 2.69, 0.27, -0.08),
+    (4, 1, 0.549, 0.205, 1.02, 0.45, -0.19),
+    (3, 1, 0.624, 0.24, 1.30, 0.39, -0.16),
+    (2, 1, 0.693, 0.27, 1.64, 0.35, -0.13),
+];
+
+/// Compute ungapped Karlin-Altschul lambda parameter for nucleotide scoring.
+/// Solves: 0.25 * exp(lambda * reward) + 0.75 * exp(lambda * penalty) = 1
+/// using Newton's method.
+pub fn compute_ungapped_lambda(reward: i32, penalty: i32) -> f64 {
+    let r = reward as f64;
+    let p = penalty as f64;
+    // Initial guess
+    let mut lambda = 1.0;
+    for _ in 0..100 {
+        let er = (lambda * r).exp();
+        let ep = (lambda * p).exp();
+        let f = 0.25 * er + 0.75 * ep - 1.0;
+        let fp = 0.25 * r * er + 0.75 * p * ep;
+        if fp.abs() < 1e-30 { break; }
+        let delta = f / fp;
+        lambda -= delta;
+        if delta.abs() < 1e-12 { break; }
+    }
+    lambda
+}
+
+/// Compute ungapped Karlin-Altschul K parameter for nucleotide scoring.
+/// K = (1 - exp(-lambda)) * (1 - exp(-lambda)) / (sum of prob * exp(lambda*score) * score^2 / 2)
+/// Simplified for uniform base frequencies.
+pub fn compute_ungapped_k(lambda: f64, reward: i32, penalty: i32) -> f64 {
+    let r = reward as f64;
+    let p = penalty as f64;
+    let er = (lambda * r).exp();
+    let ep = (lambda * p).exp();
+    // H = lambda * (0.25 * r * er + 0.75 * p * ep)
+    let h = lambda * (0.25 * r * er + 0.75 * p * ep);
+    // K approximation for simple scoring
+    // K = H / (lambda * lambda * variance)
+    // For nucleotide with uniform freqs, use the standard approximation
+    let variance = 0.25 * r * r * er + 0.75 * p * p * ep;
+    if variance.abs() < 1e-30 { return 0.1; }
+    h / (lambda * variance)
+}
+
+/// Compute ungapped KarlinBlk for nucleotide scoring with given reward/penalty.
+pub fn compute_ungapped_kbp(reward: i32, penalty: i32) -> KarlinBlk {
+    let lambda = compute_ungapped_lambda(reward, penalty);
+    let k = compute_ungapped_k(lambda, reward, penalty);
+    let h = lambda * (0.25 * (reward as f64) * (lambda * reward as f64).exp()
+        + 0.75 * (penalty as f64) * (lambda * penalty as f64).exp());
+    KarlinBlk {
+        lambda,
+        k,
+        log_k: k.ln(),
+        h,
+    }
+}
 
 /// Look up gapped Karlin-Altschul parameters for nucleotide scoring.
 pub fn lookup_nucleotide_params(
@@ -92,6 +161,8 @@ pub fn lookup_nucleotide_params(
     let table = match (reward, penalty) {
         (1, -3) => BLASTN_PARAMS_1_3,
         (1, -2) => BLASTN_PARAMS_1_2,
+        (2, -3) => BLASTN_PARAMS_2_3,
+        (1, -1) => BLASTN_PARAMS_1_1,
         _ => return None,
     };
 
@@ -162,6 +233,28 @@ mod tests {
         assert_eq!(params.gap_open, 5);
         assert_eq!(params.gap_extend, 2);
         assert!((params.lambda - 0.208).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_compute_ungapped_lambda() {
+        // For reward=1, penalty=-3: known lambda ≈ 1.374
+        let lambda = compute_ungapped_lambda(1, -3);
+        assert!((lambda - 1.374).abs() < 0.01,
+            "lambda for 1/-3 should be ~1.374, got {}", lambda);
+
+        // For reward=2, penalty=-3: different lambda
+        let lambda2 = compute_ungapped_lambda(2, -3);
+        assert!(lambda2 > 0.0 && lambda2 < lambda,
+            "lambda for 2/-3 should be positive and < 1/-3 lambda");
+    }
+
+    #[test]
+    fn test_compute_ungapped_kbp() {
+        let kbp = compute_ungapped_kbp(1, -3);
+        assert!(kbp.lambda > 0.0);
+        assert!(kbp.k > 0.0);
+        assert!(kbp.h > 0.0);
+        assert!(kbp.is_valid());
     }
 
     #[test]

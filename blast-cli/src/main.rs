@@ -11,15 +11,19 @@ use std::path::PathBuf;
 use std::ptr;
 
 #[derive(Parser)]
-#[command(name = "blastn", about = "Nucleotide-nucleotide BLAST")]
+#[command(name = "blastn", version = "0.1.0", about = "Nucleotide-nucleotide BLAST (Rust implementation)", allow_negative_numbers = true)]
 struct BlastnArgs {
     /// Query file in FASTA format
     #[arg(short, long)]
     query: PathBuf,
 
     /// BLAST database name (path without extension)
+    #[arg(short, long, required_unless_present = "subject")]
+    db: Option<PathBuf>,
+
+    /// Subject FASTA file (alternative to --db)
     #[arg(short, long)]
-    db: PathBuf,
+    subject: Option<PathBuf>,
 
     /// Output file (default: stdout)
     #[arg(short, long)]
@@ -61,6 +65,14 @@ struct BlastnArgs {
     #[arg(long, default_value = "both")]
     strand: String,
 
+    /// Maximum number of target sequences to report
+    #[arg(long = "max_target_seqs", default_value = "500")]
+    max_target_seqs: i32,
+
+    /// DUST low-complexity filtering: yes/no
+    #[arg(long = "dust", default_value = "yes")]
+    dust: String,
+
     /// Use pure Rust search engine (no FFI)
     #[arg(long = "rust-engine", default_value = "false")]
     rust_engine: bool,
@@ -83,15 +95,41 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err("No sequences found in query file".into());
     }
 
+    // Check for empty sequences
+    let records: Vec<_> = records.into_iter().filter(|r| !r.sequence.is_empty()).collect();
+    if records.is_empty() {
+        return Ok(()); // No valid sequences
+    }
+
     // 2. Open BLAST database
-    let db = BlastDb::open(&args.db)?;
+    // Handle --subject (FASTA search) by using Rust engine
+    if let Some(ref subject_path) = args.subject {
+        let subject_file = File::open(subject_path)?;
+        let subject_records = parse_fasta(subject_file);
+        if subject_records.is_empty() {
+            return Err("No sequences found in subject file".into());
+        }
+        return run_blastn_subject(args, &records, &subject_records);
+    }
+
+    let db_path = args.db.as_ref().ok_or("Either --db or --subject is required")?;
+    let db = BlastDb::open(db_path)?;
     if db.db_type != DbType::Nucleotide {
         return Err("blastn requires a nucleotide database".into());
     }
 
-    // Use pure Rust engine if requested
+    // Use pure Rust engine if requested, or fall back for safety on edge cases
     if args.rust_engine {
         return run_blastn_rust(args, &records, db);
+    }
+
+    // Check for low-complexity/repetitive queries that crash the C engine
+    // The C core segfaults on queries like ACGTACGTACGT... due to excessive seed hits
+    for rec in &records {
+        if is_low_complexity(&rec.sequence) {
+            eprintln!("Warning: low-complexity query detected, using Rust engine");
+            return run_blastn_rust(args, &records, db);
+        }
     }
 
     // 3. Encode query sequences in BLASTNA format with sentinel bytes
@@ -161,8 +199,15 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             ctx.eff_searchsp = 0;
             ctx.length_adjustment = 0;
             ctx.query_index = (i / 2) as i32;
-            ctx.frame = if i % 2 == 0 { 1 } else { -1 };
-            ctx.is_valid = 1;
+            let is_plus = i % 2 == 0;
+            ctx.frame = if is_plus { 1 } else { -1 };
+            // Apply strand filter
+            let strand_ok = match args.strand.as_str() {
+                "plus" => is_plus,
+                "minus" => !is_plus,
+                _ => true, // "both"
+            };
+            ctx.is_valid = if strand_ok { 1 } else { 0 };
         }
         // Compute max_length
         let max_len = context_offsets.iter().map(|&(_, l)| l as u32).max().unwrap_or(0);
@@ -189,6 +234,7 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let mut hit_opts: *mut ffi::BlastHitSavingOptions = ptr::null_mut();
         ffi::BlastHitSavingOptionsNew(program, &mut hit_opts, 1);
         (*hit_opts).expect_value = args.evalue;
+        (*hit_opts).hitlist_size = args.max_target_seqs;
 
         let mut eff_len_opts: *mut ffi::BlastEffectiveLengthsOptions = ptr::null_mut();
         ffi::BlastEffectiveLengthsOptionsNew(&mut eff_len_opts);
@@ -315,7 +361,7 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         ffi::BlastHSPStreamClose(hsp_stream);
 
         // Re-open DB for result extraction
-        let db_for_results = BlastDb::open(&args.db).unwrap();
+        let db_for_results = BlastDb::open(db_path).unwrap();
 
         let mut results: *mut ffi::BlastHSPResults = ptr::null_mut();
         let rc = ffi::BLAST_ComputeTraceback(
@@ -422,13 +468,14 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             writer.flush()?;
         }
 
-        // Cleanup — free the main results and let the rest be reclaimed on exit.
-        // TODO: proper cleanup of all C structures (currently segfaults due to
-        // ownership issues between manually-decomposed Blast_RunFullSearch components)
-        ffi::Blast_HSPResultsFree(results);
-        // Prevent double-free of Rust-owned query buffer
+        // Minimal cleanup — free results, prevent double-free of Rust-owned buffers
+        // Full cleanup of C structures is complex due to shared ownership;
+        // OS reclaims on exit.
+        if !results.is_null() { ffi::Blast_HSPResultsFree(results); }
         (*query_blk).sequence = ptr::null_mut();
         (*query_blk).sequence_start = ptr::null_mut();
+        (*query_blk).sequence_start_nomask = ptr::null_mut();
+        (*query_blk).sequence_nomask = ptr::null_mut();
     }
 
     Ok(())
@@ -441,36 +488,44 @@ fn run_blastn_rust(
     records: &[blast_input::FastaRecord],
     db: BlastDb,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::search::blastn_ungapped_search;
-    use blast_core::stat::KarlinBlk;
+    use blast_core::search::blastn_gapped_search;
+    
     use rayon::prelude::*;
 
-    let kbp = KarlinBlk {
-        lambda: 1.374, k: 0.621, log_k: 0.621_f64.ln(), h: 1.286,
-    };
-
+    let kbp = blast_core::stat::compute_ungapped_kbp(args.reward, args.penalty);
     let avg_query_len = records.iter().map(|r| r.sequence.len()).sum::<usize>() as f64
         / records.len().max(1) as f64;
     let search_space = (db.total_length as f64) * avg_query_len;
     let word_size = args.word_size as usize;
     let reward = args.reward;
     let penalty = args.penalty;
+    let gapopen = args.gapopen;
+    let gapextend = args.gapextend;
     let evalue = args.evalue;
 
     let mut all_hits = Vec::new();
 
-    for rec in records {
-        let query_plus: Vec<u8> = rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
-        let query_minus: Vec<u8> = rec.sequence.iter().rev()
-            .map(|&b| complement_blastna(iupacna_to_blastna(b))).collect();
+    let apply_dust = args.dust != "no";
 
-        // Parallel ungapped search across all subjects
+    for rec in records {
+        let mut query_plus: Vec<u8> = rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
+
+        // Apply DUST masking: replace low-complexity regions with N (14)
+        if apply_dust {
+            let mask = blast_core::filter::dust_filter(&query_plus, 64, 10.0);
+            mask.apply(&mut query_plus, 14);
+        }
+
+        let query_minus: Vec<u8> = query_plus.iter().rev()
+            .map(|&b| complement_blastna(b)).collect();
+
+        // Parallel gapped search across all subjects
         let oid_hits: Vec<(u32, Vec<blast_core::search::SearchHsp>)> =
             (0..db.num_oids).into_par_iter().filter_map(|oid| {
                 let subject = decode_subject(&db, oid as i32);
-                let hsps = blastn_ungapped_search(
+                let hsps = blastn_gapped_search(
                     &query_plus, &query_minus, &subject,
-                    word_size, reward, penalty,
+                    word_size, reward, penalty, gapopen, gapextend,
                     20, &kbp, search_space, evalue,
                 );
                 if hsps.is_empty() { None } else { Some((oid, hsps)) }
@@ -513,8 +568,18 @@ fn run_blastn_rust(
         }
     }
 
-    // Sort by e-value
+    // Sort by e-value and limit to max_target_seqs unique subjects
     all_hits.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
+    let max_subjects = args.max_target_seqs as usize;
+    let mut seen_subjects = std::collections::HashSet::new();
+    all_hits.retain(|hit| {
+        if seen_subjects.len() >= max_subjects && !seen_subjects.contains(&hit.subject_id) {
+            false
+        } else {
+            seen_subjects.insert(hit.subject_id.clone());
+            true
+        }
+    });
 
     // Output
     let stdout = io::stdout();
@@ -523,7 +588,22 @@ fn run_blastn_rust(
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    format_tabular(&mut writer, &all_hits)?;
+    if args.outfmt == 0 {
+        // Pairwise text output
+        for hit in &all_hits {
+            blast_format::format_pairwise_alignment(
+                &mut writer,
+                &hit.query_id, &hit.subject_id,
+                &[], &[], // placeholder - would need decoded seqs
+                hit.query_start, hit.query_end,
+                hit.subject_start, hit.subject_end,
+                0, hit.bit_score, hit.evalue,
+                hit.align_len - hit.mismatches, hit.align_len, hit.gap_opens,
+            )?;
+        }
+    } else {
+        format_tabular(&mut writer, &all_hits)?;
+    }
     writer.flush()?;
 
     Ok(())
@@ -661,6 +741,101 @@ unsafe fn compute_alignment_stats(
         }
         (align_len, num_ident, gap_opens)
     }
+}
+
+/// Search query against subject FASTA sequences (no database needed).
+fn run_blastn_subject(
+    args: &BlastnArgs,
+    queries: &[blast_input::FastaRecord],
+    subjects: &[blast_input::FastaRecord],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use blast_core::search::blastn_gapped_search;
+
+    let kbp = blast_core::stat::compute_ungapped_kbp(args.reward, args.penalty);
+    let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
+    let avg_query_len = queries.iter().map(|r| r.sequence.len()).sum::<usize>() as f64
+        / queries.len().max(1) as f64;
+    let search_space = total_subj_len as f64 * avg_query_len;
+    let word_size = args.word_size as usize;
+
+    let mut all_hits = Vec::new();
+
+    for query_rec in queries {
+        let query_plus: Vec<u8> = query_rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
+        let query_minus: Vec<u8> = query_rec.sequence.iter().rev()
+            .map(|&b| complement_blastna(iupacna_to_blastna(b))).collect();
+
+        for subj_rec in subjects {
+            let subject: Vec<u8> = subj_rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
+
+            let hsps = blastn_gapped_search(
+                &query_plus, &query_minus, &subject,
+                word_size, args.reward, args.penalty, args.gapopen, args.gapextend,
+                20, &kbp, search_space, args.evalue,
+            );
+
+            for hsp in hsps {
+                let query_len = query_rec.sequence.len() as i32;
+                let (q_start, q_end) = if hsp.context == 1 {
+                    (query_len - hsp.query_end + 1, query_len - hsp.query_start)
+                } else {
+                    (hsp.query_start + 1, hsp.query_end)
+                };
+                let (s_start, s_end) = if hsp.context == 1 {
+                    (hsp.subject_end, hsp.subject_start + 1)
+                } else {
+                    (hsp.subject_start + 1, hsp.subject_end)
+                };
+
+                all_hits.push(TabularHit {
+                    query_id: query_rec.id.clone(),
+                    subject_id: subj_rec.id.clone(),
+                    pct_identity: if hsp.align_length > 0 {
+                        100.0 * hsp.num_ident as f64 / hsp.align_length as f64
+                    } else { 0.0 },
+                    align_len: hsp.align_length,
+                    mismatches: hsp.mismatches,
+                    gap_opens: hsp.gap_opens,
+                    query_start: q_start,
+                    query_end: q_end,
+                    subject_start: s_start,
+                    subject_end: s_end,
+                    evalue: hsp.evalue,
+                    bit_score: hsp.bit_score,
+                });
+            }
+        }
+    }
+
+    all_hits.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
+
+    let stdout = io::stdout();
+    let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
+        Box::new(BufWriter::new(File::create(path)?))
+    } else {
+        Box::new(BufWriter::new(stdout.lock()))
+    };
+    format_tabular(&mut writer, &all_hits)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Check if a sequence is low-complexity (simple repeats that crash the C engine).
+fn is_low_complexity(seq: &[u8]) -> bool {
+    if seq.len() < 20 { return false; }
+    // Check if the sequence is a short repeat
+    for period in 1..=8 {
+        if seq.len() < period * 3 { continue; }
+        let mut is_repeat = true;
+        for i in period..seq.len() {
+            if seq[i].to_ascii_uppercase() != seq[i % period].to_ascii_uppercase() {
+                is_repeat = false;
+                break;
+            }
+        }
+        if is_repeat { return true; }
+    }
+    false
 }
 
 /// Complement a BLASTNA-encoded nucleotide.

@@ -19,14 +19,14 @@ pub fn traceback_align(
     penalty: i32,
     gap_open: i32,
     gap_extend: i32,
-) -> (i32, GapEditScript) {
+) -> (i32, GapEditScript, usize, usize, usize, usize) {
     let q = &query[q_start..q_end];
     let s = &subject[s_start..s_end];
     let m = q.len();
     let n = s.len();
 
     if m == 0 || n == 0 {
-        return (0, GapEditScript::new());
+        return (0, GapEditScript::new(), 0, 0, 0, 0);
     }
 
     let gap_oe = gap_open + gap_extend;
@@ -135,7 +135,64 @@ pub fn traceback_align(
         esp.push(op, count);
     }
 
-    (best_score, esp)
+    // i and j now point to the start of the local alignment (in 1-based DP coords)
+    // Convert to 0-based positions in the original subsequences
+    let align_q_start = i; // 0-based in sub-query
+    let align_s_start = j;
+    let align_q_end = best_i;
+    let align_s_end = best_j;
+
+    (best_score, esp, align_q_start, align_q_end, align_s_start, align_s_end)
+}
+
+/// Result of a traceback alignment.
+pub struct TracebackResult {
+    pub score: i32,
+    pub edit_script: GapEditScript,
+    pub query_start: usize,  // 0-based in original sequence
+    pub query_end: usize,
+    pub subject_start: usize,
+    pub subject_end: usize,
+}
+
+/// Higher-level traceback that takes absolute coordinates and returns absolute coordinates.
+pub fn traceback_align_abs(
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    margin: usize,
+) -> Option<TracebackResult> {
+    let q_start = seed_q.saturating_sub(margin);
+    let s_start = seed_s.saturating_sub(margin);
+    let q_end = (seed_q + margin + 1).min(query.len());
+    let s_end = (seed_s + margin + 1).min(subject.len());
+
+    if q_end <= q_start || s_end <= s_start {
+        return None;
+    }
+
+    let (score, esp, aq_start, aq_end, as_start, as_end) = traceback_align(
+        query, subject, q_start, q_end, s_start, s_end,
+        reward, penalty, gap_open, gap_extend,
+    );
+
+    if score <= 0 {
+        return None;
+    }
+
+    Some(TracebackResult {
+        score,
+        edit_script: esp,
+        query_start: q_start + aq_start,
+        query_end: q_start + aq_end,
+        subject_start: s_start + as_start,
+        subject_end: s_start + as_end,
+    })
 }
 
 #[cfg(test)]
@@ -146,7 +203,7 @@ mod tests {
     fn test_traceback_perfect() {
         let q = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let s = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
-        let (score, esp) = traceback_align(&q, &s, 0, 8, 0, 8, 2, -3, 5, 2);
+        let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, 8, 0, 8, 2, -3, 5, 2);
         assert_eq!(score, 16);
         assert_eq!(esp.ops.len(), 1);
         assert_eq!(esp.ops[0], (GapAlignOpType::Sub, 8));
@@ -156,10 +213,28 @@ mod tests {
     fn test_traceback_with_mismatch() {
         let q = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let s = vec![0u8, 1, 2, 3, 3, 1, 2, 3]; // pos 4: 0→3
-        let (score, esp) = traceback_align(&q, &s, 0, 8, 0, 8, 2, -3, 5, 2);
+        let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, 8, 0, 8, 2, -3, 5, 2);
         assert!(score > 0);
-        // Should have 8 substitutions (one mismatch)
         let total: i32 = esp.ops.iter().map(|(_, n)| *n).sum();
         assert!(total >= 7, "alignment should be at least 7 bases");
+    }
+
+    #[test]
+    fn test_traceback_abs_coordinates() {
+        // Subject has ACGTACGT at position 100
+        let mut subject = vec![3u8; 200]; // all T
+        for (i, &b) in [0u8, 1, 2, 3, 0, 1, 2, 3].iter().enumerate() {
+            subject[100 + i] = b;
+        }
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+
+        let result = traceback_align_abs(&query, &subject, 4, 104, 2, -3, 5, 2, 20);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.score > 0);
+        assert!(r.subject_start >= 100 && r.subject_start <= 104,
+            "Subject start should be near 100, got {}", r.subject_start);
+        assert!(r.subject_end >= 104 && r.subject_end <= 108,
+            "Subject end should be near 108, got {}", r.subject_end);
     }
 }
