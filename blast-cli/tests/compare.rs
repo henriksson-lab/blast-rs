@@ -182,12 +182,17 @@ fn long_300bp() {
     let (q, db) = (fixture("query_long_match.fa"), test_data("seqn"));
     if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
     let (rust, reference) = (run_rust(&q, &db, 11), run_ref(&q, &db, 11));
-    // Known: traceback extends alignment further than reference for this query.
-    // Verify top hit is same subject at same position, allow alignment length difference.
+    // Top hit is same subject with same alignment boundaries.
+    // Minor identity/score differences due to ambiguity handling.
     let r1: Vec<&str> = rust.lines().next().unwrap_or("").split('\t').collect();
     let f1: Vec<&str> = reference.lines().next().unwrap_or("").split('\t').collect();
-    assert_eq!(r1[0], f1[0], "query ID"); // same query
-    assert_eq!(r1[1], f1[1], "subject ID"); // same subject
+    assert_eq!(r1[0], f1[0], "query ID");
+    assert_eq!(r1[1], f1[1], "subject ID");
+    assert_eq!(r1[3], f1[3], "alignment length"); // both 190
+    assert_eq!(r1[6], f1[6], "qstart");
+    assert_eq!(r1[7], f1[7], "qend");
+    assert_eq!(r1[8], f1[8], "sstart");
+    assert_eq!(r1[9], f1[9], "send");
 }
 
 #[test]
@@ -199,6 +204,9 @@ fn long_300bp_megablast() {
     let f1: Vec<&str> = reference.lines().next().unwrap_or("").split('\t').collect();
     assert_eq!(r1[0], f1[0], "query ID");
     assert_eq!(r1[1], f1[1], "subject ID");
+    assert_eq!(r1[3], f1[3], "alignment length");
+    assert_eq!(r1[6], f1[6], "qstart");
+    assert_eq!(r1[7], f1[7], "qend");
 }
 
 // ============================================================

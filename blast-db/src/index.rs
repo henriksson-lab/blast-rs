@@ -135,8 +135,11 @@ impl BlastDb {
         let hdr_offsets = read_u32_array(&mut cur, n)?;
 
         let (seq_offsets, amb_offsets) = if db_type == DbType::Nucleotide {
-            // For nucleotide: header offsets, then seq offsets, then amb offsets
-            // (despite the confusing naming in the C++ code)
+            // For nucleotide, the index has 3 arrays after the header:
+            //   1. Header offsets
+            //   2. Sequence start offsets in .nsq (packed NCBI2na data)
+            //   3. Ambiguity start offsets in .nsq (= end of sequence data for each OID)
+            // Sequence data for OID i: nsq[seq_off[i] .. amb_off[i]]
             let seq_offs = read_u32_array(&mut cur, n)?;
             let amb_offs = read_u32_array(&mut cur, n)?;
             (seq_offs, Some(amb_offs))
@@ -169,30 +172,38 @@ impl BlastDb {
     }
 
     /// Get the raw sequence bytes for the given OID.
-    /// For nucleotide: returns packed 2-bit data (4 bases per byte) + remainder byte.
+    /// For nucleotide: returns packed 2-bit data from seq_start to amb_start.
     /// For protein: returns raw amino acid codes.
     pub fn get_sequence(&self, oid: u32) -> &[u8] {
         let start = self.seq_offsets[oid as usize] as usize;
-        let end = self.seq_offsets[oid as usize + 1] as usize;
+        let end = if self.db_type == DbType::Nucleotide {
+            // For nucleotide, sequence data ends at the ambiguity offset
+            self.amb_offsets.as_ref().unwrap()[oid as usize] as usize
+        } else {
+            self.seq_offsets[oid as usize + 1] as usize
+        };
         &self.seq_mmap[start..end]
     }
 
     /// Get the sequence length in residues for the given OID.
     pub fn get_seq_len(&self, oid: u32) -> u32 {
         let start = self.seq_offsets[oid as usize] as usize;
-        let end = self.seq_offsets[oid as usize + 1] as usize;
-        let byte_len = end - start;
         if self.db_type == DbType::Nucleotide {
-            // For nucleotide: last byte encodes remainder
+            // For nucleotide: sequence ends at amb_offset
+            // Length = (whole_bytes * 4) + remainder
+            // where whole_bytes = amb_off - seq_off - 1, remainder = last_byte & 3
+            let end = self.amb_offsets.as_ref().unwrap()[oid as usize] as usize;
+            let byte_len = end - start;
             if byte_len == 0 {
                 return 0;
             }
-            let last_byte = self.seq_mmap[end - 1];
+            let whole_bytes = (byte_len - 1) as u32;
+            let last_byte = self.seq_mmap[start + whole_bytes as usize];
             let remainder = (last_byte & 0x03) as u32;
-            let full_bytes = (byte_len - 1) as u32;
-            full_bytes * 4 + remainder
+            whole_bytes * 4 + remainder
         } else {
-            byte_len as u32
+            let end = self.seq_offsets[oid as usize + 1] as usize;
+            (end - start) as u32
         }
     }
 
@@ -250,11 +261,13 @@ impl BlastDb {
         None
     }
 
-    /// Get the ambiguity data offset range for a nucleotide OID.
+    /// Get the ambiguity data for a nucleotide OID.
+    /// Ambiguity data is stored between amb_offset and the next sequence's start.
     pub fn get_ambiguity_data(&self, oid: u32) -> Option<&[u8]> {
         let amb_offsets = self.amb_offsets.as_ref()?;
         let start = amb_offsets[oid as usize] as usize;
-        let end = amb_offsets[oid as usize + 1] as usize;
+        // Ambiguity data ends at the next sequence's start offset
+        let end = self.seq_offsets[oid as usize + 1] as usize;
         if start == end {
             None
         } else {
