@@ -328,11 +328,95 @@ mod tests {
     fn test_all_seq_lengths_sum() {
         let db = BlastDb::open(&test_db_path()).unwrap();
         let total: u64 = (0..db.num_oids).map(|oid| db.get_seq_len(oid) as u64).sum();
-        // Total should be close to reported total_length
-        // (might not be exact due to how nucleotide lengths work)
-        assert!(
-            total > 0,
-            "Total sequence length should be positive"
-        );
+        assert_eq!(total, db.total_length,
+            "Sum of individual lengths must match reported total_length");
+    }
+
+    #[test]
+    fn test_seq_len_oid0_matches_reference() {
+        let db = BlastDb::open(&test_db_path()).unwrap();
+        // Reference BLAST reports slen=386 for OID 0
+        assert_eq!(db.get_seq_len(0), 386);
+    }
+
+    #[test]
+    fn test_accession_seqn() {
+        let db = BlastDb::open(&test_db_path()).unwrap();
+        let acc = db.get_accession(0);
+        assert_eq!(acc.as_deref(), Some("BP722512.1"));
+    }
+
+    #[test]
+    fn test_accession_pombe() {
+        let pombe = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ncbi-blast-2.17.0+-src/c++/src/algo/blast/unit_tests/api/data/pombe");
+        if !pombe.with_extension("nin").exists() { return; }
+        let db = BlastDb::open(&pombe).unwrap();
+        assert_eq!(db.get_accession(0).as_deref(), Some("NC_003421.2"));
+    }
+
+    // ---- Validation / error handling tests ----
+
+    fn corrupt_db_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join(format!("tests/fixtures/corrupt_db/{}", name))
+    }
+
+    #[test]
+    fn test_missing_database() {
+        let result = BlastDb::open(&PathBuf::from("/nonexistent/db"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_truncated_index() {
+        let result = BlastDb::open(&corrupt_db_path("truncated"));
+        assert!(result.is_err(), "Truncated index should fail to open");
+    }
+
+    #[test]
+    fn test_bad_version() {
+        let result = BlastDb::open(&corrupt_db_path("badversion"));
+        assert!(result.is_err(), "Unsupported version should fail");
+    }
+
+    #[test]
+    fn test_empty_database() {
+        let result = BlastDb::open(&corrupt_db_path("empty"));
+        // Empty DB should either open with 0 sequences or fail gracefully
+        match result {
+            Ok(db) => assert_eq!(db.num_oids, 0),
+            Err(_) => {} // Also acceptable
+        }
+    }
+
+    #[test]
+    fn test_wrong_type_detection() {
+        // Try opening a nucleotide DB as protein
+        let path = test_db_path();
+        let result = BlastDb::open_typed(&path, DbType::Protein);
+        assert!(result.is_err(), "Opening nuc DB as protein should fail");
+    }
+
+    #[test]
+    fn test_ambiguity_data() {
+        let db = BlastDb::open(&test_db_path()).unwrap();
+        // OID 0 should have ambiguity data (1 N at position 293)
+        let amb = db.get_ambiguity_data(0);
+        assert!(amb.is_some(), "OID 0 should have ambiguity data");
+        let amb = amb.unwrap();
+        assert!(amb.len() >= 8, "Ambiguity data should have header + at least 1 record");
+    }
+
+    #[test]
+    fn test_header_data() {
+        let db = BlastDb::open(&test_db_path()).unwrap();
+        let hdr = db.get_header(0);
+        assert!(!hdr.is_empty(), "Header should not be empty");
+        // Should contain the title string somewhere
+        assert!(hdr.windows(8).any(|w| w == b"Xenopus " || w == b"BP722512"),
+            "Header should contain sequence info");
     }
 }
