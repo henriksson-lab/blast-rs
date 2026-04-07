@@ -30,6 +30,22 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn run_rust_args(query: &Path, db: &Path, word_size: i32, evalue: f64) -> String {
+    // Use FFI engine for exact reference matching
+    let output = Command::new(rust_blastn())
+        .args([
+            "--query", query.to_str().unwrap(),
+            "--db", db.to_str().unwrap(),
+            "--word_size", &word_size.to_string(),
+            "--evalue", &evalue.to_string(),
+            "--ffi-engine",
+        ])
+        .output()
+        .expect("Failed to run Rust blastn");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn run_native_args(query: &Path, db: &Path, word_size: i32, evalue: f64) -> String {
+    // Pure Rust engine (default)
     let output = Command::new(rust_blastn())
         .args([
             "--query", query.to_str().unwrap(),
@@ -63,12 +79,12 @@ fn run_rust(query: &Path, db: &Path, word_size: i32) -> String {
 }
 
 fn run_rust_engine(query: &Path, db: &Path, word_size: i32) -> String {
+    // Rust engine is now default — no need for --rust-engine flag
     let output = Command::new(rust_blastn())
         .args([
             "--query", query.to_str().unwrap(),
             "--db", db.to_str().unwrap(),
             "--word_size", &word_size.to_string(),
-            "--rust-engine",
         ])
         .output()
         .expect("Failed to run Rust engine");
@@ -961,7 +977,7 @@ fn strand_plus_only() {
     let both = run_rust(&q, &db, 11);
     let plus_only = Command::new(rust_blastn())
         .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
-            "--word_size", "11", "--strand", "plus"])
+            "--word_size", "11", "--strand", "plus", "--ffi-engine"])
         .output().expect("Failed").stdout;
     let plus_out = String::from_utf8_lossy(&plus_only);
     // Plus-only should have fewer or equal hits (no minus strand)

@@ -289,9 +289,13 @@ struct BlastnArgs {
     #[arg(long, default_value = "false")]
     no_taxid_expansion: bool,
 
-    /// Use pure Rust search engine (no FFI)
-    #[arg(long = "rust-engine", default_value = "false")]
+    /// Use pure Rust search engine (default). Use --ffi-engine for C core.
+    #[arg(long = "rust-engine", default_value = "true")]
     rust_engine: bool,
+
+    /// Use C core via FFI (legacy, for exact reference matching)
+    #[arg(long = "ffi-engine", default_value = "false")]
+    ffi_engine: bool,
 }
 
 fn main() {
@@ -792,16 +796,15 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err("blastn requires a nucleotide database".into());
     }
 
-    // Use pure Rust engine if requested, or fall back for safety on edge cases
-    if args.rust_engine {
+    // Default: pure Rust engine. Use --ffi-engine to use C core.
+    if !args.ffi_engine {
         return run_blastn_rust(args, &records, db);
     }
 
-    // Check for low-complexity/repetitive queries that crash the C engine
-    // The C core segfaults on queries like ACGTACGTACGT... due to excessive seed hits
+    // FFI path: check for low-complexity queries that crash the C engine
     for rec in &records {
         if is_low_complexity(&rec.sequence) {
-            eprintln!("Warning: low-complexity query detected, using Rust engine");
+            eprintln!("Warning: low-complexity query detected, falling back to Rust engine");
             return run_blastn_rust(args, &records, db);
         }
     }
