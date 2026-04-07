@@ -5,17 +5,22 @@ pub use blast_core_sys as ffi;
 pub mod encoding;
 pub mod engine;
 pub mod extend;
+pub mod filter;
 pub mod gapalign;
 pub mod gapinfo;
+pub mod hits;
 pub mod hspstream;
+pub mod itree;
 pub mod listnode;
 pub mod lookup;
 pub mod math;
 pub mod options;
 pub mod parameters;
 pub mod program;
+pub mod search;
 pub mod seqsrc;
 pub mod stat;
+pub mod traceback;
 
 use std::ptr;
 

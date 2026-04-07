@@ -168,10 +168,9 @@ const NCBI4NA_TO_BLASTNA: [u8; 16] = [
     14, // 15 = N (ACGT)
 ];
 
-/// Decode a packed 2-bit nucleotide sequence to BLASTNA encoding.
-/// The packed format stores 4 bases per byte: bits 7-6 = base0, 5-4 = base1, etc.
-/// NCBI2na: A=0, C=1, G=2, T=3 — these map directly to BLASTNA 0-3.
-fn decode_ncbi2na_to_blastna(packed: &[u8], seq_len: u32) -> Vec<u8> {
+/// Decode a packed 2-bit nucleotide sequence to BLASTNA encoding,
+/// applying ambiguity corrections from the database's ambiguity data.
+fn decode_ncbi2na_to_blastna(packed: &[u8], seq_len: u32, amb_data: Option<&[u8]>) -> Vec<u8> {
     let mut result = Vec::with_capacity(seq_len as usize + 2);
     // Leading sentinel byte
     result.push(15); // BLASTNA sentinel
@@ -190,6 +189,53 @@ fn decode_ncbi2na_to_blastna(packed: &[u8], seq_len: u32) -> Vec<u8> {
         let byte = packed[full_bytes];
         for j in 0..remainder {
             result.push((byte >> (6 - 2 * j)) & 3);
+        }
+    }
+
+    // Apply ambiguity corrections
+    if let Some(amb) = amb_data {
+        if amb.len() >= 4 {
+            let header = u32::from_be_bytes([amb[0], amb[1], amb[2], amb[3]]);
+            let new_format = (header & 0x80000000) != 0;
+            let count = (header & 0x7FFFFFFF) as usize;
+
+            if !new_format {
+                // Old format: 4 bytes per region
+                for i in 0..count {
+                    let off = 4 + i * 4;
+                    if off + 4 > amb.len() { break; }
+                    let word = u32::from_be_bytes([amb[off], amb[off+1], amb[off+2], amb[off+3]]);
+                    let value = ((word >> 28) & 0xF) as u8;
+                    let length = ((word >> 24) & 0xF) as usize + 1;
+                    let position = (word & 0xFFFFFF) as usize;
+                    let blastna_val = NCBI4NA_TO_BLASTNA[value as usize];
+                    for j in 0..length {
+                        let idx = 1 + position + j; // +1 for leading sentinel
+                        if idx < result.len() {
+                            result[idx] = blastna_val;
+                        }
+                    }
+                }
+            } else {
+                // New format: 8 bytes per region
+                let num_regions = count / 2;
+                for i in 0..num_regions {
+                    let off = 4 + i * 8;
+                    if off + 8 > amb.len() { break; }
+                    let w1 = u32::from_be_bytes([amb[off], amb[off+1], amb[off+2], amb[off+3]]);
+                    let w2 = u32::from_be_bytes([amb[off+4], amb[off+5], amb[off+6], amb[off+7]]);
+                    let value = ((w1 >> 28) & 0xF) as u8;
+                    let length = ((w1 >> 16) & 0xFFF) as usize + 1;
+                    let position = w2 as usize;
+                    let blastna_val = NCBI4NA_TO_BLASTNA[value as usize];
+                    for j in 0..length {
+                        let idx = 1 + position + j;
+                        if idx < result.len() {
+                            result[idx] = blastna_val;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -252,8 +298,9 @@ unsafe extern "C" fn rust_get_sequence(
         seq_blk.sequence_start_allocated = 0;
         seq_blk.oid = oid as i32;
     } else if is_nuc && needs_decoded {
-        // Traceback: provide decoded BLASTNA with sentinel bytes
-        let decoded = decode_ncbi2na_to_blastna(seq_data, seq_len);
+        // Traceback: provide decoded BLASTNA with sentinel bytes + ambiguity corrections
+        let amb_data = data.db.get_ambiguity_data(oid);
+        let decoded = decode_ncbi2na_to_blastna(seq_data, seq_len, amb_data);
         let buf_len = decoded.len();
         let buf = unsafe { libc::malloc(buf_len) as *mut u8 };
         if buf.is_null() {

@@ -62,6 +62,19 @@ fn run_rust(query: &Path, db: &Path, word_size: i32) -> String {
     run_rust_args(query, db, word_size, 10.0)
 }
 
+fn run_rust_engine(query: &Path, db: &Path, word_size: i32) -> String {
+    let output = Command::new(rust_blastn())
+        .args([
+            "--query", query.to_str().unwrap(),
+            "--db", db.to_str().unwrap(),
+            "--word_size", &word_size.to_string(),
+            "--rust-engine",
+        ])
+        .output()
+        .expect("Failed to run Rust engine");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
 fn run_ref(query: &Path, db: &Path, word_size: i32) -> String {
     run_ref_args(query, db, word_size, 10.0)
 }
@@ -182,17 +195,7 @@ fn long_300bp() {
     let (q, db) = (fixture("query_long_match.fa"), test_data("seqn"));
     if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
     let (rust, reference) = (run_rust(&q, &db, 11), run_ref(&q, &db, 11));
-    // Top hit is same subject with same alignment boundaries.
-    // Minor identity/score differences due to ambiguity handling.
-    let r1: Vec<&str> = rust.lines().next().unwrap_or("").split('\t').collect();
-    let f1: Vec<&str> = reference.lines().next().unwrap_or("").split('\t').collect();
-    assert_eq!(r1[0], f1[0], "query ID");
-    assert_eq!(r1[1], f1[1], "subject ID");
-    assert_eq!(r1[3], f1[3], "alignment length"); // both 190
-    assert_eq!(r1[6], f1[6], "qstart");
-    assert_eq!(r1[7], f1[7], "qend");
-    assert_eq!(r1[8], f1[8], "sstart");
-    assert_eq!(r1[9], f1[9], "send");
+    compare_top_hits(&rust, &reference, 1, "long_300bp_top1");
 }
 
 #[test]
@@ -200,13 +203,7 @@ fn long_300bp_megablast() {
     let (q, db) = (fixture("query_long_match.fa"), test_data("seqn"));
     if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
     let (rust, reference) = (run_rust(&q, &db, 28), run_ref(&q, &db, 28));
-    let r1: Vec<&str> = rust.lines().next().unwrap_or("").split('\t').collect();
-    let f1: Vec<&str> = reference.lines().next().unwrap_or("").split('\t').collect();
-    assert_eq!(r1[0], f1[0], "query ID");
-    assert_eq!(r1[1], f1[1], "subject ID");
-    assert_eq!(r1[3], f1[3], "alignment length");
-    assert_eq!(r1[6], f1[6], "qstart");
-    assert_eq!(r1[7], f1[7], "qend");
+    compare_top_hits(&rust, &reference, 1, "long_300bp_mb_top1");
 }
 
 // ============================================================
@@ -355,6 +352,50 @@ fn blastn_size4d() {
     let (rust, reference) = (run_rust(&q, &db, 11), run_ref(&q, &db, 11));
     compare_superset(&rust, &reference, "size4d");
 }
+
+#[test]
+// ============================================================
+// Pure Rust engine tests
+// ============================================================
+
+#[test]
+fn rust_engine_finds_top_hit() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust_native = run_rust_engine(&q, &db, 11);
+    let ffi_output = run_rust(&q, &db, 11);
+    // Both should find the same top subject
+    let r_subj = rust_native.lines().next().unwrap_or("").split('\t').nth(1);
+    let f_subj = ffi_output.lines().next().unwrap_or("").split('\t').nth(1);
+    assert_eq!(r_subj, f_subj, "Rust engine should find same top subject as FFI engine");
+}
+
+#[test]
+fn rust_engine_finds_top_coords() {
+    let (q, db) = (fixture("test_query.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let rust_native = run_rust_engine(&q, &db, 11);
+    let ffi_output = run_rust(&q, &db, 11);
+    // Top hit coordinates should match
+    let r1: Vec<&str> = rust_native.lines().next().unwrap_or("").split('\t').collect();
+    let f1: Vec<&str> = ffi_output.lines().next().unwrap_or("").split('\t').collect();
+    assert_eq!(r1.get(6), f1.get(6), "qstart");
+    assert_eq!(r1.get(7), f1.get(7), "qend");
+    assert_eq!(r1.get(8), f1.get(8), "sstart");
+    assert_eq!(r1.get(9), f1.get(9), "send");
+}
+
+#[test]
+fn rust_engine_no_hits() {
+    let (q, db) = (fixture("query_random_200.fa"), test_data("seqn"));
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    let output = run_rust_engine(&q, &db, 28);
+    assert!(output.trim().is_empty(), "Random query should find no hits with word_size 28");
+}
+
+// ============================================================
+// BLAST test suite queries
+// ============================================================
 
 #[test]
 fn greedy1a() {

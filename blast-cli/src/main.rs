@@ -40,6 +40,10 @@ struct BlastnArgs {
     /// Word size for initial seed
     #[arg(short, long = "word_size", default_value = "28")]
     word_size: i32,
+
+    /// Use pure Rust search engine (experimental, for testing)
+    #[arg(long = "rust-engine", default_value = "false")]
+    rust_engine: bool,
 }
 
 fn main() {
@@ -63,6 +67,11 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let db = BlastDb::open(&args.db)?;
     if db.db_type != DbType::Nucleotide {
         return Err("blastn requires a nucleotide database".into());
+    }
+
+    // Use pure Rust engine if requested
+    if args.rust_engine {
+        return run_blastn_rust(args, &records, db);
     }
 
     // 3. Encode query sequences in BLASTNA format with sentinel bytes
@@ -403,6 +412,110 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Decode packed NCBI2na subject to per-base BLASTNA for identity calculation.
+/// Pure Rust blastn search — no FFI calls.
+fn run_blastn_rust(
+    args: &BlastnArgs,
+    records: &[blast_input::FastaRecord],
+    db: BlastDb,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use blast_core::search::blastn_ungapped_search;
+    use blast_core::stat::KarlinBlk;
+
+    // Ungapped Karlin-Altschul parameters for nucleotide reward=1, penalty=-3
+    // These are computed from the scoring matrix, not the gapped params table.
+    // For r=1, p=-3 with uniform base frequencies:
+    // 0.25*exp(lambda) + 0.75*exp(-3*lambda) = 1 → lambda ≈ 1.374
+    let kbp = KarlinBlk {
+        lambda: 1.374,
+        k: 0.621,
+        log_k: 0.621_f64.ln(),
+        h: 1.286,
+    };
+
+    let avg_query_len = records.iter().map(|r| r.sequence.len()).sum::<usize>() as f64
+        / records.len().max(1) as f64;
+    let search_space = (db.total_length as f64) * avg_query_len;
+
+    let mut all_hits = Vec::new();
+
+    for rec in records {
+        // Encode query in BLASTNA
+        let query_plus: Vec<u8> = rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
+        let query_minus: Vec<u8> = rec.sequence.iter().rev()
+            .map(|&b| complement_blastna(iupacna_to_blastna(b))).collect();
+
+        // Search against each subject
+        for oid in 0..db.num_oids {
+            // Decode subject with ambiguity
+            let subject = decode_subject(&db, oid as i32);
+
+            let hsps = blastn_ungapped_search(
+                &query_plus, &query_minus, &subject,
+                args.word_size as usize,
+                1, -3, // reward, penalty
+                20,    // x_dropoff
+                &kbp,
+                search_space,
+                args.evalue,
+            );
+
+            for hsp in hsps {
+                let subject_id = db.get_accession(oid)
+                    .unwrap_or_else(|| format!("gnl|BL_ORD_ID|{}", oid));
+                let query_len = rec.sequence.len() as i32;
+
+                let (q_start, q_end) = if hsp.context == 1 {
+                    (query_len - hsp.query_end + 1, query_len - hsp.query_start)
+                } else {
+                    (hsp.query_start + 1, hsp.query_end)
+                };
+                let (s_start, s_end) = if hsp.context == 1 {
+                    (hsp.subject_end, hsp.subject_start + 1)
+                } else {
+                    (hsp.subject_start + 1, hsp.subject_end)
+                };
+
+                all_hits.push(TabularHit {
+                    query_id: rec.id.clone(),
+                    subject_id,
+                    pct_identity: if hsp.align_length > 0 {
+                        100.0 * hsp.num_ident as f64 / hsp.align_length as f64
+                    } else { 0.0 },
+                    align_len: hsp.align_length,
+                    mismatches: hsp.mismatches,
+                    gap_opens: hsp.gap_opens,
+                    query_start: q_start,
+                    query_end: q_end,
+                    subject_start: s_start,
+                    subject_end: s_end,
+                    evalue: hsp.evalue,
+                    bit_score: hsp.bit_score,
+                });
+            }
+        }
+    }
+
+    // Sort by e-value
+    all_hits.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Output
+    let stdout = io::stdout();
+    let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
+        Box::new(BufWriter::new(File::create(path)?))
+    } else {
+        Box::new(BufWriter::new(stdout.lock()))
+    };
+    format_tabular(&mut writer, &all_hits)?;
+    writer.flush()?;
+
+    Ok(())
+}
+
+/// NCBI4NA to BLASTNA conversion for ambiguity codes.
+const NCBI4NA_TO_BLASTNA: [u8; 16] = [
+    15, 0, 1, 6, 2, 4, 9, 13, 3, 8, 5, 12, 7, 11, 10, 14,
+];
+
 fn decode_subject(db: &BlastDb, oid: i32) -> Vec<u8> {
     let packed = db.get_sequence(oid as u32);
     let seq_len = db.get_seq_len(oid as u32) as usize;
@@ -422,6 +535,32 @@ fn decode_subject(db: &BlastDb, oid: i32) -> Vec<u8> {
             decoded.push((b >> (6 - 2 * j)) & 3);
         }
     }
+
+    // Apply ambiguity corrections
+    if let Some(amb) = db.get_ambiguity_data(oid as u32) {
+        if amb.len() >= 4 {
+            let header = u32::from_be_bytes([amb[0], amb[1], amb[2], amb[3]]);
+            let new_format = (header & 0x80000000) != 0;
+            let count = (header & 0x7FFFFFFF) as usize;
+            if !new_format {
+                for i in 0..count {
+                    let off = 4 + i * 4;
+                    if off + 4 > amb.len() { break; }
+                    let word = u32::from_be_bytes([amb[off], amb[off+1], amb[off+2], amb[off+3]]);
+                    let value = ((word >> 28) & 0xF) as u8;
+                    let length = ((word >> 24) & 0xF) as usize + 1;
+                    let position = (word & 0xFFFFFF) as usize;
+                    let blastna_val = NCBI4NA_TO_BLASTNA[value as usize];
+                    for j in 0..length {
+                        if position + j < decoded.len() {
+                            decoded[position + j] = blastna_val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     decoded
 }
 
