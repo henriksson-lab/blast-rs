@@ -20,12 +20,32 @@ pub struct TabularHit {
     pub bit_score: f64,
 }
 
+/// Format an e-value matching BLAST reference output style.
+/// Values >= 0.1 use fixed-point (e.g. "1.7"), smaller use scientific ("3.51e-23").
+fn format_evalue(val: f64) -> String {
+    if val == 0.0 {
+        "0.0".to_string()
+    } else if val >= 1e100 {
+        format!("{:.2e}", val)
+    } else if val >= 0.01 {
+        // Use 2 significant digits like BLAST reference
+        let digits = if val >= 100.0 { 0usize }
+            else if val >= 10.0 { 1 }
+            else if val >= 1.0 { 1 }
+            else { 2 };
+        let s = format!("{:.prec$}", val, prec = digits);
+        s
+    } else {
+        format!("{:.2e}", val)
+    }
+}
+
 /// Write tabular output (outfmt 6) for a set of hits.
 pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io::Result<()> {
     for hit in hits {
         writeln!(
             writer,
-            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2e}\t{:.1}",
+            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}",
             hit.query_id,
             hit.subject_id,
             hit.pct_identity,
@@ -36,7 +56,7 @@ pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io:
             hit.query_end,
             hit.subject_start,
             hit.subject_end,
-            hit.evalue,
+            format_evalue(hit.evalue),
             hit.bit_score,
         )?;
     }

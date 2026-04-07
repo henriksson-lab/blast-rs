@@ -203,6 +203,51 @@ impl BlastDb {
         &self.hdr_mmap[start..end]
     }
 
+    /// Extract the first accession-like string from the ASN.1 header.
+    /// This is a simple heuristic — matches patterns like BP722512, NM_001234, etc.
+    pub fn get_accession(&self, oid: u32) -> Option<String> {
+        let hdr = self.get_header(oid);
+        // Find accession pattern: 2+ uppercase letters followed by digits, with optional version
+        let mut i = 0;
+        while i < hdr.len() {
+            if hdr[i].is_ascii_uppercase() {
+                let start = i;
+                // Count uppercase letters
+                while i < hdr.len() && hdr[i].is_ascii_uppercase() {
+                    i += 1;
+                }
+                let letter_count = i - start;
+                if letter_count >= 1 && i < hdr.len() && hdr[i].is_ascii_digit() {
+                    // Count digits
+                    while i < hdr.len() && hdr[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    let total = i - start;
+                    if total >= 6 {
+                        let acc = String::from_utf8_lossy(&hdr[start..i]).to_string();
+                        // Look for ASN.1 version after the accession:
+                        // pattern: \x00\x00\xa3\x80\x02\x01\xNN where NN is the version
+                        let mut vi = i;
+                        while vi < hdr.len() && hdr[vi] == 0 { vi += 1; }
+                        if vi + 4 < hdr.len()
+                            && hdr[vi] == 0xa3
+                            && hdr[vi + 1] == 0x80
+                            && hdr[vi + 2] == 0x02
+                            && hdr[vi + 3] == 0x01
+                        {
+                            let version = hdr[vi + 4];
+                            return Some(format!("{}.{}", acc, version));
+                        }
+                        return Some(acc);
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        None
+    }
+
     /// Get the ambiguity data offset range for a nucleotide OID.
     pub fn get_ambiguity_data(&self, oid: u32) -> Option<&[u8]> {
         let amb_offsets = self.amb_offsets.as_ref()?;

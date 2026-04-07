@@ -314,7 +314,9 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     let hsplist = &*hsplist_ptr;
-                    let subject_id = format!("gnl|BL_ORD_ID|{}", hsplist.oid);
+                    let subject_id = db_for_results
+                        .get_accession(hsplist.oid as u32)
+                        .unwrap_or_else(|| format!("gnl|BL_ORD_ID|{}", hsplist.oid));
 
                     for s in 0..hsplist.hspcnt {
                         let hsp_ptr = *hsplist.hsp_array.add(s as usize);
@@ -325,9 +327,34 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                         // Compute alignment stats from GapEditScript
                         let (align_len, num_ident, gap_opens) =
-                            compute_alignment_stats(hsp, &encoded, &db_for_results, hsplist.oid);
+                            compute_alignment_stats(hsp, &encoded, &db_for_results, hsplist.oid, query_info);
 
                         let mismatches = align_len - num_ident - gap_opens;
+
+                        // Determine strand from context
+                        let ctx_info = &*(*query_info).contexts.add(hsp.context as usize);
+                        let is_minus = ctx_info.frame < 0;
+                        let query_len = ctx_info.query_length;
+
+                        // For minus strand, convert query coords back to original strand
+                        let (q_start, q_end) = if is_minus {
+                            // After traceback, HSP query offsets are context-relative
+                            let rc_start = hsp.query.offset;
+                            let rc_end = hsp.query.end;
+                            // Convert RC coords to original: orig = query_len - rc_pos
+                            let orig_start = query_len - rc_end + 1;
+                            let orig_end = query_len - rc_start;
+                            (orig_start, orig_end)
+                        } else {
+                            (hsp.query.offset + 1, hsp.query.end)
+                        };
+
+                        // For minus strand, flip subject coords
+                        let (s_start, s_end) = if is_minus {
+                            (hsp.subject.end, hsp.subject.offset + 1)
+                        } else {
+                            (hsp.subject.offset + 1, hsp.subject.end)
+                        };
 
                         hits.push(TabularHit {
                             query_id: query_id.clone(),
@@ -340,10 +367,10 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                             align_len,
                             mismatches: if mismatches > 0 { mismatches } else { 0 },
                             gap_opens,
-                            query_start: hsp.query.offset + 1,
-                            query_end: hsp.query.end,
-                            subject_start: hsp.subject.offset + 1,
-                            subject_end: hsp.subject.end,
+                            query_start: q_start,
+                            query_end: q_end,
+                            subject_start: s_start,
+                            subject_end: s_end,
                             evalue: hsp.evalue,
                             bit_score: hsp.bit_score,
                         });
@@ -404,20 +431,34 @@ unsafe fn compute_alignment_stats(
     query_encoded: &[u8],
     db: &BlastDb,
     oid: i32,
+    query_info: *const ffi::BlastQueryInfo,
 ) -> (i32, i32, i32) {
     // Decode subject
     let subject_decoded = decode_subject(db, oid);
 
-    // Query is in BLASTNA encoding; sequence starts at encoded[1]
-    let q_start = hsp.query.offset as usize;
+    // Get the context's query_offset to find the right query data
+    let ctx = &*(*query_info).contexts.add(hsp.context as usize);
+    // HSP offsets are context-relative after traceback
+    // Query base at alignment pos i: query_encoded[1 + ctx.query_offset + hsp.query.offset + i]
+    let q_start = (ctx.query_offset + hsp.query.offset) as usize;
     let s_start = hsp.subject.offset as usize;
 
+    // For the identity comparison, we need the query bases for this context.
+    // The encoded buffer has: [sentinel] [plus_strand] [sentinel] [minus_strand] [sentinel]
+    // Context 0 (plus): query data at encoded[1 .. 1+qlen]
+    // Context 1 (minus): query data at encoded[1+qlen+1 .. 1+qlen+1+qlen]
+    // The HSP's query.offset for context 1 is relative to the context start.
+    // We need to read from the correct context in the encoded buffer.
+    let ctx_offset = unsafe { (*hsp).context } as usize;
+    // Context offsets in encoded buffer: ctx0 starts at 1, ctx1 starts at 1+qlen+1
+    // But the HSP offsets after traceback are context-relative, so we use
+    // the context's query_offset in the concatenated sequence
+    // query_encoded[1 + context_query_offset + hsp.query.offset] gives the right base
+
     if hsp.gap_info.is_null() {
-        // Ungapped: simple comparison
         let len = (hsp.query.end - hsp.query.offset) as usize;
         let mut num_ident = 0i32;
         for i in 0..len {
-            // query_encoded[0] is the leading sentinel, query data starts at [1]
             let q_base = query_encoded[1 + q_start + i];
             let s_base = if s_start + i < subject_decoded.len() {
                 subject_decoded[s_start + i]
@@ -430,7 +471,6 @@ unsafe fn compute_alignment_stats(
         }
         (len as i32, num_ident, 0)
     } else {
-        // Gapped: walk the GapEditScript
         let esp = &*hsp.gap_info;
         let mut q_pos = q_start;
         let mut s_pos = s_start;
@@ -458,15 +498,12 @@ unsafe fn compute_alignment_stats(
                     s_pos += 1;
                 }
             } else if op == ffi::EGapAlignOpType_eGapAlignDel {
-                // Deletion in query = gap in query, advance subject
                 s_pos += count;
                 gap_opens += 1;
             } else if op >= ffi::EGapAlignOpType_eGapAlignIns1 {
-                // Insertion in query = gap in subject, advance query
                 q_pos += count;
                 gap_opens += 1;
             } else {
-                // Other op types (Del1, Del2) - advance both
                 q_pos += count;
                 s_pos += count;
             }
