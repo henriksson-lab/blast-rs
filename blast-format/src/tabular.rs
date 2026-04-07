@@ -20,23 +20,39 @@ pub struct TabularHit {
     pub bit_score: f64,
 }
 
-/// Format an e-value matching BLAST reference output style.
-/// Values >= 0.1 use fixed-point (e.g. "1.7"), smaller use scientific ("3.51e-23").
+/// Format an e-value matching BLAST tabular output (-outfmt 6).
+/// Uses NStr::DoubleToString(evalue, 2, fDoubleScientific) which is
+/// essentially %.2e for small values, transitioning to fixed for larger ones.
 fn format_evalue(val: f64) -> String {
-    if val == 0.0 {
+    if val < 1.0e-180 {
         "0.0".to_string()
-    } else if val >= 1e100 {
+    } else if val < 0.001 {
+        // Scientific notation with 2 decimal places in mantissa
         format!("{:.2e}", val)
-    } else if val >= 0.01 {
-        // Use 2 significant digits like BLAST reference
-        let digits = if val >= 100.0 { 0usize }
-            else if val >= 10.0 { 1 }
-            else if val >= 1.0 { 1 }
-            else { 2 };
-        let s = format!("{:.prec$}", val, prec = digits);
-        s
+    } else if val < 0.1 {
+        // Fixed with 3 decimal places
+        format!("{:.3}", val)
+    } else if val < 1.0 {
+        // Fixed with 2 decimal places
+        format!("{:.2}", val)
+    } else if val < 10.0 {
+        // Fixed with 1 decimal place
+        format!("{:.1}", val)
     } else {
-        format!("{:.2e}", val)
+        // Integer
+        format!("{:.0}", val)
+    }
+}
+
+/// Format a bit score matching BLAST reference style.
+/// >= 99.9: integer (e.g. "198"), < 99.9: one decimal (e.g. "56.0").
+fn format_bitscore(val: f64) -> String {
+    if val > 99999.0 {
+        format!("{:.3e}", val)
+    } else if val > 99.9 {
+        format!("{:.0}", val as i64)
+    } else {
+        format!("{:.1}", val)
     }
 }
 
@@ -45,7 +61,7 @@ pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io:
     for hit in hits {
         writeln!(
             writer,
-            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}",
+            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             hit.query_id,
             hit.subject_id,
             hit.pct_identity,
@@ -57,7 +73,7 @@ pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io:
             hit.subject_start,
             hit.subject_end,
             format_evalue(hit.evalue),
-            hit.bit_score,
+            format_bitscore(hit.bit_score),
         )?;
     }
     Ok(())
