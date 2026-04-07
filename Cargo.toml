@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "blast-core-sys",
+    "blast-core",
+    "blast-db",
+    "blast-format",
+    "blast-input",
+    "blast-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

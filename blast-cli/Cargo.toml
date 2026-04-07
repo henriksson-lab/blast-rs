@@ -1,0 +1,14 @@
+[package]
+name = "blast-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blast-core = { path = "../blast-core" }
+blast-core-sys = { path = "../blast-core-sys" }
+blast-db = { path = "../blast-db" }
+blast-format = { path = "../blast-format" }
+blast-input = { path = "../blast-input" }
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
