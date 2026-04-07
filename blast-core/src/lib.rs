@@ -4,11 +4,14 @@ pub use blast_core_sys as ffi;
 
 pub mod encoding;
 pub mod gapinfo;
+pub mod hspstream;
 pub mod listnode;
 pub mod math;
 pub mod options;
+pub mod parameters;
 pub mod program;
 pub mod seqsrc;
+pub mod stat;
 
 use std::ptr;
 
