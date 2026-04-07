@@ -1,10 +1,7 @@
 //! Rust equivalent of blast_engine.c — top-level search orchestration.
 //! This module will eventually replace Blast_RunFullSearch.
 
-use crate::hspstream::{HspStream, HspResults, HspList, Hsp};
-use crate::seqsrc::BlastSeqSource;
 use crate::options::*;
-use crate::stat::KarlinBlk;
 
 /// Search configuration combining all options.
 pub struct SearchConfig {

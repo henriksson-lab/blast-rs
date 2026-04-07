@@ -429,13 +429,26 @@ fn large_db_rust_vs_reference_top_hit() {
     if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
     if !ref_blastn().exists() { return; }
     let rust_native = run_rust_engine(&q, &db, 11);
-    let reference = run_ref(&q, &db, 11);
+    let reference = run_ref_args(&q, &db, 11, 1e-50);
     if reference.is_empty() || rust_native.is_empty() { return; }
-    // Top hit coordinates should match (same perfect match from the genome)
+    // Top hit coordinates should match
     let r1: Vec<&str> = rust_native.lines().next().unwrap_or("").split('\t').collect();
     let f1: Vec<&str> = reference.lines().next().unwrap_or("").split('\t').collect();
     assert_eq!(r1.get(6), f1.get(6), "qstart should match");
     assert_eq!(r1.get(7), f1.get(7), "qend should match");
+}
+
+#[test]
+fn large_db_ffi_strict_evalue() {
+    // Test FFI path on large DB with strict e-value (completes quickly)
+    let (q, db) = (large_query_500(), large_db_path());
+    if skip_if_missing(&[&q, &db.with_extension("nin")]) { return; }
+    if !ref_blastn().exists() { return; }
+    let ffi = run_rust_args(&q, &db, 11, 1e-50);
+    let reference = run_ref_args(&q, &db, 11, 1e-50);
+    // Both should find the perfect match
+    assert!(!ffi.is_empty(), "FFI should find hits");
+    compare_top_hits(&ffi, &reference, 1, "large_db_ffi_top1");
 }
 
 #[test]

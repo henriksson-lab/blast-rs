@@ -446,15 +446,16 @@ fn run_blastn_rust(
     use rayon::prelude::*;
 
     let kbp = KarlinBlk {
-        lambda: 1.374,
-        k: 0.621,
-        log_k: 0.621_f64.ln(),
-        h: 1.286,
+        lambda: 1.374, k: 0.621, log_k: 0.621_f64.ln(), h: 1.286,
     };
 
     let avg_query_len = records.iter().map(|r| r.sequence.len()).sum::<usize>() as f64
         / records.len().max(1) as f64;
     let search_space = (db.total_length as f64) * avg_query_len;
+    let word_size = args.word_size as usize;
+    let reward = args.reward;
+    let penalty = args.penalty;
+    let evalue = args.evalue;
 
     let mut all_hits = Vec::new();
 
@@ -463,34 +464,15 @@ fn run_blastn_rust(
         let query_minus: Vec<u8> = rec.sequence.iter().rev()
             .map(|&b| complement_blastna(iupacna_to_blastna(b))).collect();
 
-        let word_size = args.word_size as usize;
-        let lut_word = word_size.min(8);
-        let lut_size = 1usize << (2 * lut_word);
-        let reward = args.reward;
-        let penalty = args.penalty;
-        let search_plus = args.strand != "minus";
-        let search_minus = args.strand != "plus";
-
-        let lut_plus = if search_plus { Some(build_query_lut(&query_plus, word_size, lut_word, lut_size)) } else { None };
-        let lut_minus = if search_minus { Some(build_query_lut(&query_minus, word_size, lut_word, lut_size)) } else { None };
-
-        // Parallel search across all subjects
+        // Parallel ungapped search across all subjects
         let oid_hits: Vec<(u32, Vec<blast_core::search::SearchHsp>)> =
             (0..db.num_oids).into_par_iter().filter_map(|oid| {
                 let subject = decode_subject(&db, oid as i32);
-                let mut hsps = Vec::new();
-                if let Some(ref lut) = lut_plus {
-                    hsps.extend(scan_with_lut(
-                        &query_plus, &subject, lut, word_size, lut_word,
-                        reward, penalty, 20, &kbp, search_space, args.evalue, 0,
-                    ));
-                }
-                if let Some(ref lut) = lut_minus {
-                    hsps.extend(scan_with_lut(
-                        &query_minus, &subject, lut, word_size, lut_word,
-                        reward, penalty, 20, &kbp, search_space, args.evalue, 1,
-                    ));
-                }
+                let hsps = blastn_ungapped_search(
+                    &query_plus, &query_minus, &subject,
+                    word_size, reward, penalty,
+                    20, &kbp, search_space, evalue,
+                );
                 if hsps.is_empty() { None } else { Some((oid, hsps)) }
             }).collect();
 
@@ -545,128 +527,6 @@ fn run_blastn_rust(
     writer.flush()?;
 
     Ok(())
-}
-
-/// Query lookup table: lut[hash] = first query position, next[pos] = chain.
-struct QueryLut {
-    lut: Vec<i32>,
-    next: Vec<i32>,
-}
-
-fn build_query_lut(query: &[u8], word_size: usize, lut_word: usize, lut_size: usize) -> QueryLut {
-    let mut lut = vec![-1i32; lut_size];
-    let mut next = vec![-1i32; query.len()];
-    if query.len() >= word_size {
-        for i in (0..=(query.len() - word_size)).rev() {
-            let mut h = 0u32;
-            for j in 0..lut_word { h = (h << 2) | (query[i + j] & 3) as u32; }
-            let key = h as usize;
-            next[i] = lut[key];
-            lut[key] = i as i32;
-        }
-    }
-    QueryLut { lut, next }
-}
-
-fn scan_with_lut(
-    query: &[u8], subject: &[u8], qlut: &QueryLut,
-    word_size: usize, lut_word: usize,
-    reward: i32, penalty: i32, x_dropoff: i32,
-    kbp: &blast_core::stat::KarlinBlk, search_space: f64, evalue_threshold: f64,
-    context: i32,
-) -> Vec<blast_core::search::SearchHsp> {
-    use blast_core::search::SearchHsp;
-    let mut hsps = Vec::new();
-    if subject.len() < word_size { return hsps; }
-
-    for s_pos in 0..=(subject.len() - word_size) {
-        let mut h = 0u32;
-        for j in 0..lut_word { h = (h << 2) | (subject[s_pos + j] & 3) as u32; }
-        let mut q_pos = qlut.lut[h as usize];
-        while q_pos >= 0 {
-            let qp = q_pos as usize;
-            let mut ok = true;
-            if word_size > lut_word {
-                for k in lut_word..word_size {
-                    if query[qp + k] != subject[s_pos + k] { ok = false; break; }
-                }
-            }
-            if ok {
-                if let Some(hsp) = extend_and_score(
-                    query, subject, qp, s_pos, reward, penalty, x_dropoff,
-                    kbp, search_space, evalue_threshold, context,
-                ) {
-                    hsps.push(hsp);
-                }
-            }
-            q_pos = qlut.next[qp];
-        }
-    }
-    // Dedup overlapping HSPs
-    hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    let mut keep = vec![true; hsps.len()];
-    for i in 0..hsps.len() {
-        if !keep[i] { continue; }
-        for j in (i+1)..hsps.len() {
-            if !keep[j] { continue; }
-            let qi = hsps[i].query_end.min(hsps[j].query_end) - hsps[i].query_start.max(hsps[j].query_start);
-            let ql = hsps[j].query_end - hsps[j].query_start;
-            if ql > 0 && qi > 0 && qi as f64 / ql as f64 > 0.5 { keep[j] = false; }
-        }
-    }
-    let mut idx = 0;
-    hsps.retain(|_| { let k = keep[idx]; idx += 1; k });
-    hsps
-}
-
-#[inline]
-fn extend_and_score(
-    query: &[u8], subject: &[u8], q_seed: usize, s_seed: usize,
-    reward: i32, penalty: i32, x_dropoff: i32,
-    kbp: &blast_core::stat::KarlinBlk, search_space: f64, evalue_threshold: f64,
-    context: i32,
-) -> Option<blast_core::search::SearchHsp> {
-    // Extend right
-    let mut score = 0i32;
-    let mut best = 0i32;
-    let mut best_r = 0usize;
-    let (mut qi, mut si) = (q_seed, s_seed);
-    while qi < query.len() && si < subject.len() {
-        score += if query[qi] == subject[si] { reward } else { penalty };
-        if score > best { best = score; best_r = qi - q_seed + 1; }
-        if best - score > x_dropoff { break; }
-        qi += 1; si += 1;
-    }
-    // Extend left
-    let mut sl = 0i32;
-    let mut best_l = 0i32;
-    let mut best_left = 0usize;
-    if q_seed > 0 && s_seed > 0 {
-        qi = q_seed - 1; si = s_seed - 1;
-        loop {
-            sl += if query[qi] == subject[si] { reward } else { penalty };
-            if sl > best_l { best_l = sl; best_left = q_seed - qi; }
-            if best_l - sl > x_dropoff { break; }
-            if qi == 0 || si == 0 { break; }
-            qi -= 1; si -= 1;
-        }
-    }
-    let total = best + best_l;
-    if total <= 0 { return None; }
-    let evalue = kbp.raw_to_evalue(total, search_space);
-    if evalue > evalue_threshold { return None; }
-    let qs = (q_seed - best_left) as i32;
-    let qe = (q_seed + best_r) as i32;
-    let ss = (s_seed - best_left) as i32;
-    let se = (s_seed + best_r) as i32;
-    let alen = qe - qs;
-    let mut ni = 0i32;
-    for i in 0..alen as usize { if query[qs as usize + i] == subject[ss as usize + i] { ni += 1; } }
-    Some(blast_core::search::SearchHsp {
-        query_start: qs, query_end: qe, subject_start: ss, subject_end: se,
-        score: total, bit_score: kbp.raw_to_bit(total), evalue,
-        num_ident: ni, align_length: alen, mismatches: alen - ni, gap_opens: 0, context,
-    })
 }
 
 /// NCBI4NA to BLASTNA conversion for ambiguity codes.

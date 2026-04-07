@@ -2,6 +2,7 @@
 
 use crate::hspstream::{Hsp, HspList};
 
+
 /// Compute identities and alignment length from query/subject sequences
 /// and a gap edit script. Used after traceback to populate HSP stats.
 pub fn compute_identities(

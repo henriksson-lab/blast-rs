@@ -238,6 +238,13 @@ impl BlastDb {
                     }
                     let total = i - start;
                     if total >= 6 {
+                        // Check for text-format version: ".N" right after accession
+                        if i + 1 < hdr.len() && hdr[i] == b'.' && hdr[i + 1].is_ascii_digit() {
+                            let _dot_start = i;
+                            i += 1;
+                            while i < hdr.len() && hdr[i].is_ascii_digit() { i += 1; }
+                            return Some(String::from_utf8_lossy(&hdr[start..i]).to_string());
+                        }
                         let acc = String::from_utf8_lossy(&hdr[start..i]).to_string();
                         // Look for ASN.1 version: \x00+\xa3\x80\x02\x01\xNN
                         let mut vi = i;
