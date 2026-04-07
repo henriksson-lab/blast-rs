@@ -27,8 +27,28 @@ fn format_evalue(val: f64) -> String {
     if val < 1.0e-180 {
         "0.0".to_string()
     } else if val < 0.001 {
-        // Scientific notation with 2 decimal places in mantissa
-        format!("{:.2e}", val)
+        // Scientific notation with 2 decimal places, C-style zero-padded exponent
+        let s = format!("{:.2e}", val);
+        // Rust: "2.01e-4" → need "2.01e-04"
+        // Fix: ensure exponent has at least 2 digits
+        if let Some(e_pos) = s.find('e') {
+            let (mantissa, exp_part) = s.split_at(e_pos);
+            let exp_str = &exp_part[1..]; // skip 'e'
+            let (sign, digits) = if exp_str.starts_with('-') {
+                ("-", &exp_str[1..])
+            } else if exp_str.starts_with('+') {
+                ("", &exp_str[1..])
+            } else {
+                ("", exp_str)
+            };
+            if digits.len() < 2 {
+                format!("{}e{}{:02}", mantissa, sign, digits.parse::<u32>().unwrap_or(0))
+            } else {
+                s
+            }
+        } else {
+            s
+        }
     } else if val < 0.1 {
         // Fixed with 3 decimal places
         format!("{:.3}", val)

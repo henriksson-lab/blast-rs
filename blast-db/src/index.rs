@@ -204,29 +204,31 @@ impl BlastDb {
     }
 
     /// Extract the first accession-like string from the ASN.1 header.
-    /// This is a simple heuristic — matches patterns like BP722512, NM_001234, etc.
+    /// Matches patterns like BP722512, NC_003421, NM_001234, etc.
     pub fn get_accession(&self, oid: u32) -> Option<String> {
         let hdr = self.get_header(oid);
-        // Find accession pattern: 2+ uppercase letters followed by digits, with optional version
         let mut i = 0;
         while i < hdr.len() {
             if hdr[i].is_ascii_uppercase() {
                 let start = i;
-                // Count uppercase letters
+                // Match: [A-Z]+[_]?[0-9]+
                 while i < hdr.len() && hdr[i].is_ascii_uppercase() {
                     i += 1;
                 }
-                let letter_count = i - start;
-                if letter_count >= 1 && i < hdr.len() && hdr[i].is_ascii_digit() {
-                    // Count digits
+                // Allow optional underscore
+                let mut j = i;
+                if j < hdr.len() && hdr[j] == b'_' {
+                    j += 1;
+                }
+                if j < hdr.len() && hdr[j].is_ascii_digit() {
+                    i = j;
                     while i < hdr.len() && hdr[i].is_ascii_digit() {
                         i += 1;
                     }
                     let total = i - start;
                     if total >= 6 {
                         let acc = String::from_utf8_lossy(&hdr[start..i]).to_string();
-                        // Look for ASN.1 version after the accession:
-                        // pattern: \x00\x00\xa3\x80\x02\x01\xNN where NN is the version
+                        // Look for ASN.1 version: \x00+\xa3\x80\x02\x01\xNN
                         let mut vi = i;
                         while vi < hdr.len() && hdr[vi] == 0 { vi += 1; }
                         if vi + 4 < hdr.len()
