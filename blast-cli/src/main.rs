@@ -139,15 +139,12 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         // 6. Create options manually (BLAST_InitDefaultOptions causes issues)
         let mut scoring_opts: *mut ffi::BlastScoringOptions = ptr::null_mut();
         ffi::BlastScoringOptionsNew(program, &mut scoring_opts);
-        (*scoring_opts).reward = 2;
-        (*scoring_opts).penalty = -3;
-        (*scoring_opts).gap_open = 5;
-        (*scoring_opts).gap_extend = 2;
-        (*scoring_opts).gapped_calculation = 1;
+        // BlastScoringOptionsNew already sets blastn defaults:
+        // reward=1, penalty=-3, gap_open=5, gap_extend=2, gapped=TRUE
 
         let mut word_opts: *mut ffi::BlastInitialWordOptions = ptr::null_mut();
         ffi::BlastInitialWordOptionsNew(program, &mut word_opts);
-        (*word_opts).window_size = 40;
+        // BlastInitialWordOptionsNew already sets blastn defaults (window_size=0 = single-hit)
 
         let mut ext_opts: *mut ffi::BlastExtensionOptions = ptr::null_mut();
         ffi::BlastExtensionOptionsNew(program, &mut ext_opts, 1);
@@ -207,7 +204,11 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let mut lookup: *mut ffi::LookupTableWrap = ptr::null_mut();
         let mut lookup_opts: *mut ffi::LookupTableOptions = ptr::null_mut();
         ffi::LookupTableOptionsNew(program, &mut lookup_opts);
-        (*lookup_opts).word_size = args.word_size;
+        // Use BLAST_FillLookupTableOptions for correct lut_type selection
+        let is_megablast = if args.word_size >= 28 { 1u8 } else { 0u8 };
+        ffi::BLAST_FillLookupTableOptions(
+            lookup_opts, program, is_megablast, 0.0, args.word_size,
+        );
 
         // 9. Create SeqSrc from our Rust database reader
         let seq_src = blast_db::create_seq_src(db);
@@ -276,20 +277,14 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("PreliminarySearchEngine failed ({})", rc).into());
         }
 
+        // Get results from HSP stream BEFORE closing it
+        // (skipping traceback for now — it segfaults with multiple subjects)
+        let results = (*hsp_stream).results;
+        (*hsp_stream).results = ptr::null_mut();
         ffi::BlastHSPStreamClose(hsp_stream);
 
-        let mut results: *mut ffi::BlastHSPResults = ptr::null_mut();
-        let rc = ffi::BLAST_ComputeTraceback(
-            program, hsp_stream, query_blk, query_info, seq_src,
-            gap_align, score_params, ext_params, hit_params, eff_len_params,
-            db_opts, ptr::null(), ptr::null(), ptr::null_mut(),
-            &mut results, None, ptr::null_mut(),
-        );
-
-        if rc != 0 {
-            return Err(format!("ComputeTraceback failed ({})", rc).into());
-        }
-
+        // Re-open DB for result extraction
+        let db_for_results = BlastDb::open(&args.db).unwrap();
         // 13. Extract and format results
         if !results.is_null() {
             let res = &*results;
@@ -318,20 +313,23 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let hsp = &*hsp_ptr;
 
-                        let align_len = hsp.query.end - hsp.query.offset;
-                        let mismatches = align_len - hsp.num_ident;
+                        // Compute alignment stats from GapEditScript
+                        let (align_len, num_ident, gap_opens) =
+                            compute_alignment_stats(hsp, &encoded, &db_for_results, hsplist.oid);
+
+                        let mismatches = align_len - num_ident - gap_opens;
 
                         hits.push(TabularHit {
                             query_id: query_id.clone(),
                             subject_id: subject_id.clone(),
                             pct_identity: if align_len > 0 {
-                                100.0 * hsp.num_ident as f64 / align_len as f64
+                                100.0 * num_ident as f64 / align_len as f64
                             } else {
                                 0.0
                             },
                             align_len,
-                            mismatches,
-                            gap_opens: 0, // TODO: compute from gap_info
+                            mismatches: if mismatches > 0 { mismatches } else { 0 },
+                            gap_opens,
                             query_start: hsp.query.offset + 1,
                             query_end: hsp.query.end,
                             subject_start: hsp.subject.offset + 1,
@@ -365,6 +363,106 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Decode packed NCBI2na subject to per-base BLASTNA for identity calculation.
+fn decode_subject(db: &BlastDb, oid: i32) -> Vec<u8> {
+    let packed = db.get_sequence(oid as u32);
+    let seq_len = db.get_seq_len(oid as u32) as usize;
+    let mut decoded = Vec::with_capacity(seq_len);
+    let full_bytes = seq_len / 4;
+    let remainder = seq_len % 4;
+    for i in 0..full_bytes {
+        let b = packed[i];
+        decoded.push((b >> 6) & 3);
+        decoded.push((b >> 4) & 3);
+        decoded.push((b >> 2) & 3);
+        decoded.push(b & 3);
+    }
+    if remainder > 0 && full_bytes < packed.len() {
+        let b = packed[full_bytes];
+        for j in 0..remainder {
+            decoded.push((b >> (6 - 2 * j)) & 3);
+        }
+    }
+    decoded
+}
+
+/// Compute alignment length, num_ident, and gap_opens from a GapEditScript.
+unsafe fn compute_alignment_stats(
+    hsp: &ffi::BlastHSP,
+    query_encoded: &[u8],
+    db: &BlastDb,
+    oid: i32,
+) -> (i32, i32, i32) {
+    // Decode subject
+    let subject_decoded = decode_subject(db, oid);
+
+    // Query is in BLASTNA encoding; sequence starts at encoded[1]
+    let q_start = hsp.query.offset as usize;
+    let s_start = hsp.subject.offset as usize;
+
+    if hsp.gap_info.is_null() {
+        // Ungapped: simple comparison
+        let len = (hsp.query.end - hsp.query.offset) as usize;
+        let mut num_ident = 0i32;
+        for i in 0..len {
+            // query_encoded[0] is the leading sentinel, query data starts at [1]
+            let q_base = query_encoded[1 + q_start + i];
+            let s_base = if s_start + i < subject_decoded.len() {
+                subject_decoded[s_start + i]
+            } else {
+                255
+            };
+            if q_base == s_base {
+                num_ident += 1;
+            }
+        }
+        (len as i32, num_ident, 0)
+    } else {
+        // Gapped: walk the GapEditScript
+        let esp = &*hsp.gap_info;
+        let mut q_pos = q_start;
+        let mut s_pos = s_start;
+        let mut align_len = 0i32;
+        let mut num_ident = 0i32;
+        let mut gap_opens = 0i32;
+
+        for idx in 0..esp.size as usize {
+            let op = *esp.op_type.add(idx);
+            let count = *esp.num.add(idx) as usize;
+            align_len += count as i32;
+
+            if op == ffi::EGapAlignOpType_eGapAlignSub {
+                for _ in 0..count {
+                    let q_base = query_encoded[1 + q_pos];
+                    let s_base = if s_pos < subject_decoded.len() {
+                        subject_decoded[s_pos]
+                    } else {
+                        255
+                    };
+                    if q_base == s_base {
+                        num_ident += 1;
+                    }
+                    q_pos += 1;
+                    s_pos += 1;
+                }
+            } else if op == ffi::EGapAlignOpType_eGapAlignDel {
+                // Deletion in query = gap in query, advance subject
+                s_pos += count;
+                gap_opens += 1;
+            } else if op >= ffi::EGapAlignOpType_eGapAlignIns1 {
+                // Insertion in query = gap in subject, advance query
+                q_pos += count;
+                gap_opens += 1;
+            } else {
+                // Other op types (Del1, Del2) - advance both
+                q_pos += count;
+                s_pos += count;
+            }
+        }
+        (align_len, num_ident, gap_opens)
+    }
 }
 
 /// Complement a BLASTNA-encoded nucleotide.

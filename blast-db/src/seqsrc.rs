@@ -250,7 +250,7 @@ unsafe extern "C" fn rust_get_sequence(
         seq_blk.sequence_allocated = 1;
         seq_blk.sequence_start_allocated = 0;
         seq_blk.oid = oid as i32;
-    } else if is_nuc {
+    } else if is_nuc && needs_decoded {
         // Traceback: provide decoded BLASTNA with sentinel bytes
         let decoded = decode_ncbi2na_to_blastna(seq_data, seq_len);
         let buf_len = decoded.len();
