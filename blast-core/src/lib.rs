@@ -2,6 +2,12 @@
 
 pub use blast_core_sys as ffi;
 
+pub mod encoding;
+pub mod gapinfo;
+pub mod listnode;
+pub mod math;
+pub mod program;
+
 use std::ptr;
 
 /// Result type for BLAST operations.
