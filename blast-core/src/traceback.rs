@@ -226,7 +226,8 @@ fn align_ex(
     if m == 0 || n == 0 { return (0, 0, 0, Vec::new()); }
 
     let extra = if gap_extend > 0 { (x_dropoff / gap_extend) as usize + 3 } else { n + 3 };
-    let alloc = n + extra + 10;
+    // Cap allocation: band never exceeds extra width from diagonal
+    let alloc = (extra * 2 + 20).min(n + extra + 10);
     let mut sa = vec![GapDP { best: MININT, best_gap: MININT }; alloc];
 
     // Row 0 initialization
@@ -402,6 +403,120 @@ fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
 }
 
 /// BLAST-style gapped alignment with traceback — extends bidirectionally from seed.
+/// Fast score-only gapped extension (no traceback).
+/// Port of C engine's Blast_SemiGappedAlign — computes only the score.
+pub fn blast_gapped_score_only(
+    query: &[u8], subject: &[u8],
+    seed_q: usize, seed_s: usize,
+    reward: i32, penalty: i32,
+    gap_open: i32, gap_extend: i32,
+    x_dropoff: i32,
+) -> i32 {
+    let gap_oe = gap_open + gap_extend;
+    let matrix = build_blastna_matrix(reward, penalty);
+
+    // Left extension (score only)
+    let score_l = gapped_score_one_dir(
+        &query[..seed_q + 1], &subject[..seed_s + 1],
+        seed_q + 1, seed_s + 1, &matrix, gap_oe, gap_extend, x_dropoff, true);
+
+    // Right extension (score only)
+    let score_r = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
+        gapped_score_one_dir(
+            &query[seed_q..], &subject[seed_s..],
+            query.len() - seed_q - 1, subject.len() - seed_s - 1,
+            &matrix, gap_oe, gap_extend, x_dropoff, false)
+    } else { 0 };
+
+    score_l + score_r
+}
+
+/// One-directional score-only gapped extension with X-dropoff.
+/// Much faster than align_ex because no traceback storage/recording.
+fn gapped_score_one_dir(
+    a: &[u8], b: &[u8], m: usize, n: usize,
+    matrix: &[[i32; 16]; 16],
+    gap_oe: i32, gap_extend: i32, mut x_dropoff: i32,
+    reverse: bool,
+) -> i32 {
+    if x_dropoff < gap_oe { x_dropoff = gap_oe; }
+    if m == 0 || n == 0 { return 0; }
+
+    // Cap allocation to x_dropoff band width (like C engine's dp_mem_alloc = 1000)
+    // The band never grows wider than x_dropoff/gap_extend + some margin
+    let max_band = ((x_dropoff / gap_extend.max(1)) as usize + 10).min(n + 1);
+    let mut sa = vec![GapDP { best: MININT, best_gap: MININT }; max_band];
+
+    sa[0] = GapDP { best: 0, best_gap: -gap_oe };
+    let mut score = -gap_oe;
+    let mut b_size = 1usize;
+    while b_size <= n && b_size < sa.len() && score >= -x_dropoff {
+        sa[b_size] = GapDP { best: score, best_gap: score - gap_oe };
+        score -= gap_extend;
+        b_size += 1;
+    }
+
+    let mut best_score = 0i32;
+    let mut first_b = 0usize;
+
+    for ai in 1..=m {
+        let a_letter = if reverse { a[m - ai] } else { a[ai] };
+        let mrow = &matrix[a_letter as usize & 0x0F];
+        let mut sc = MININT;
+        let mut sgr = MININT;
+        let mut last_b = first_b;
+
+        for bi in first_b..b_size {
+            let b_idx = if reverse {
+                n.checked_sub(1 + bi).unwrap_or(usize::MAX)
+            } else { bi + 1 };
+            if b_idx >= b.len() { break; }
+            let b_letter = b[b_idx];
+
+            let sgc = sa[bi].best_gap;
+            let next_sc = sa[bi].best + mrow[b_letter as usize & 0x0F];
+
+            // Three-way max
+            if sc < sgc { sc = sgc; }
+            if sc < sgr { sc = sgr; }
+
+            if best_score - sc > x_dropoff {
+                if first_b == bi { first_b += 1; }
+                sa[bi].best = MININT;
+            } else {
+                last_b = bi;
+                if sc > best_score { best_score = sc; }
+                if sgc - gap_extend < sc - gap_oe { sa[bi].best_gap = sc - gap_oe; }
+                else { sa[bi].best_gap = sgc - gap_extend; }
+                if sgr - gap_extend < sc - gap_oe { sgr = sc - gap_oe; }
+                else { sgr -= gap_extend; }
+                sa[bi].best = sc;
+            }
+            sc = next_sc;
+        }
+
+        // Handle last diagonal value
+        if sc != MININT && best_score - sc <= x_dropoff && sc > best_score {
+            best_score = sc;
+        }
+
+        if first_b >= b_size { break; }
+        if last_b < b_size - 1 { b_size = last_b + 1; }
+        else {
+            while sgr >= best_score - x_dropoff && b_size <= n && b_size < sa.len() {
+                sa[b_size] = GapDP { best: sgr, best_gap: sgr - gap_oe };
+                sgr -= gap_extend;
+                b_size += 1;
+            }
+        }
+        if b_size <= n && b_size < sa.len() {
+            sa[b_size] = GapDP { best: MININT, best_gap: MININT };
+            b_size += 1;
+        }
+    }
+    best_score
+}
+
 pub fn blast_gapped_align(
     query: &[u8], subject: &[u8],
     seed_q: usize, seed_s: usize,

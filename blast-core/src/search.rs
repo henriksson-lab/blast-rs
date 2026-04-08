@@ -4,7 +4,7 @@
 
 use crate::itree::{IntervalTree, Interval};
 use crate::stat::KarlinBlk;
-use crate::traceback::{traceback_align_abs, blast_gapped_align};
+use crate::traceback::{traceback_align_abs, blast_gapped_align, blast_gapped_score_only};
 
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -48,19 +48,17 @@ pub fn blastn_ungapped_search(
 ) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
 
-    // Use a small word (up to 8 bases) for the lookup table
     let lut_word = word_size.min(8);
     let lut_size = 1usize << (2 * lut_word);
 
-    // Search both strands
     for (context, query) in [(0i32, query_plus), (1i32, query_minus)] {
         if query.len() < word_size || subject.len() < word_size {
             continue;
         }
 
-        // Build lookup table from query (once per strand)
-        let mut lut: Vec<i32> = vec![-1; lut_size]; // -1 = empty
-        let mut next: Vec<i32> = vec![-1; query.len()]; // chain for collisions
+        // Build lookup table from query
+        let mut lut: Vec<i32> = vec![-1; lut_size];
+        let mut next: Vec<i32> = vec![-1; query.len()];
 
         for i in (0..=(query.len() - word_size)).rev() {
             let key = word_hash_n(&query[i..i + lut_word], lut_word) as usize;
@@ -68,16 +66,13 @@ pub fn blastn_ungapped_search(
             lut[key] = i as i32;
         }
 
-        // Scan with stride matching C engine's lookup table scan
-        // C engine: scan_step = word_length - lut_word_length + 1
-        // This matches how BlastSmallNaScanSubject/BlastNaScanSubject work
+        // Scan subject
         let mut s_pos = 0;
         while s_pos + word_size <= subject.len() {
             let key = word_hash_n(&subject[s_pos..s_pos + lut_word], lut_word) as usize;
             let mut q_pos = lut[key];
             while q_pos >= 0 {
                 let qp = q_pos as usize;
-                // Verify remaining bases if word_size > lut_word
                 let mut matches = true;
                 if word_size > lut_word {
                     for k in lut_word..word_size {
@@ -102,13 +97,281 @@ pub fn blastn_ungapped_search(
         }
     }
 
-    // Sort by score descending
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
-
-    // Remove overlapping HSPs (simple dedup)
     dedup_hsps(&mut hsps);
-
     hsps
+}
+
+/// Fast ungapped search on packed NCBI2na subject data.
+/// Port of C engine's s_BlastSmallNaScanSubject_8_4 algorithm:
+/// processes one packed byte (4 bases) per iteration using shift+OR hash update.
+pub fn blastn_ungapped_search_packed(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    let mut hsps = Vec::new();
+
+    let lut_word = word_size.min(8);
+    let lut_size = 1usize << (2 * lut_word);
+    let lut_mask = (lut_size - 1) as u32;
+
+    for (context, query) in [(0i32, query_plus), (1i32, query_minus)] {
+        if query.len() < word_size || subject_len < word_size {
+            continue;
+        }
+
+        // Build lookup table (Int16 backbone like C engine) + PV
+        let mut lut: Vec<i16> = vec![-1; lut_size]; // 128KB for 8-mer, fits in L2
+        let mut next: Vec<i16> = vec![-1; query.len()]; // chain for collisions
+        let pv_size = (lut_size + 63) / 64;
+        let mut pv: Vec<u64> = vec![0; pv_size]; // 8KB, fits in L1
+
+        for i in (0..=(query.len() - word_size)).rev() {
+            let key = word_hash_n(&query[i..i + lut_word], lut_word) as usize;
+            next[i] = lut[key];
+            lut[key] = i as i16;
+            pv[key >> 6] |= 1u64 << (key & 63);
+        }
+
+        if subject_len < word_size { continue; }
+        let end = subject_len - word_size + 1;
+
+        // Diagonal tracking: prevent re-extending the same query-subject diagonal
+        // Use power-of-2 sized table with hash (like C engine's diag_mask)
+        let diag_array_len = (query.len() * 2).next_power_of_two().max(256);
+        let diag_mask = diag_array_len - 1;
+        let mut last_hit: Vec<i32> = vec![-1; diag_array_len];
+
+        if lut_word == 8 {
+            // Fast path: 8-mer hash = 16 bits = exactly 2 packed bytes
+            // Process 4 positions per byte using C engine's shift-by-8 approach
+            let packed_bytes = (subject_len + 3) / 4;
+            if packed_bytes < 3 { continue; }
+
+            let mut init_index: u32 = subject_packed[0] as u32;
+
+            // Process byte by byte: each new byte shifts in 4 bases (8 bits).
+            // init_index holds 2+ bytes; lower 16 bits = 8-mer hash.
+            // The 2-byte window covers 4 starting positions:
+            //   shift 0: 8-mer at position (byte_idx-1)*4
+            //   shift 2: 8-mer at position (byte_idx-1)*4 - 1 (= previous byte offset 3)
+            //   shift 4: 8-mer at position (byte_idx-1)*4 - 2
+            //   shift 6: 8-mer at position (byte_idx-1)*4 - 3
+            // By checking all 4 shifts per byte, we cover every position (step=1).
+            for byte_idx in 1..packed_bytes {
+                init_index = (init_index << 8) | subject_packed[byte_idx] as u32;
+                let h = (init_index & lut_mask) as usize;
+                if pv[h >> 6] & (1u64 << (h & 63)) == 0 { continue; }
+
+                let base_pos = (byte_idx - 1) * 4;
+
+                let sp = base_pos; // 8-mer starts at this byte-aligned position
+                let mut q_pos = lut[h];
+                while q_pos >= 0 {
+                    let qp = q_pos as usize;
+                    // 8 bases at (qp, sp) are verified by the hash match.
+                    // For word_size > 8: extend left then right to find 'extra' more matching bases.
+                    let extra = if word_size > 8 { word_size - 8 } else { 0 };
+                    let mut ext_left = 0usize;
+                    let mut ext_right = 0usize;
+
+                    if extra > 0 {
+                        // Extend left from the 8-mer start
+                        let max_left = extra.min(sp).min(qp);
+                        while ext_left < max_left {
+                            if query[qp - ext_left - 1] != packed_base_at(subject_packed, sp - ext_left - 1) {
+                                break;
+                            }
+                            ext_left += 1;
+                        }
+                        // Extend right from the 8-mer end for remaining bases
+                        let need_right = extra - ext_left;
+                        let max_right = if sp + 8 + need_right <= subject_len && qp + 8 + need_right <= query.len() { need_right } else { 0 };
+                        while ext_right < max_right {
+                            if query[qp + 8 + ext_right] != packed_base_at(subject_packed, sp + 8 + ext_right) {
+                                break;
+                            }
+                            ext_right += 1;
+                        }
+                    }
+
+                    if ext_left + ext_right >= extra {
+                        // Full word verified. The word starts at (qp - ext_left, sp - ext_left).
+                        let wq = qp - ext_left;
+                        let ws = sp - ext_left;
+                        let diag = (ws + query.len() - wq) & diag_mask;
+                        if !(last_hit[diag] >= 0 && (last_hit[diag] as usize) > ws) {
+                            if let Some(hsp) = extend_seed_packed(
+                                query, subject_packed, subject_len, wq, ws,
+                                reward, penalty, x_dropoff,
+                                kbp, search_space, evalue_threshold, context,
+                            ) {
+                                last_hit[diag] = hsp.subject_end;
+                                hsps.push(hsp);
+                            } else {
+                                last_hit[diag] = (ws + word_size) as i32;
+                            }
+                        }
+                    }
+                    q_pos = next[qp];
+                }
+            }
+        } else {
+            // Generic path: per-base scanning using packed_base_at
+            let mut hash: u32 = 0;
+            for i in 0..lut_word - 1 {
+                hash = (hash << 2) | packed_base_at(subject_packed, i) as u32;
+            }
+            let mut s_pos = 0;
+            while s_pos < end {
+                hash = ((hash << 2) | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32) & lut_mask;
+                let h = hash as usize;
+                if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
+                    let mut q_pos = lut[h];
+                    while q_pos >= 0 {
+                        let qp = q_pos as usize;
+                        let diag = (s_pos + query.len() - qp) & diag_mask;
+                        if last_hit[diag] >= 0 && (last_hit[diag] as usize) > s_pos {
+                            q_pos = next[qp];
+                            continue;
+                        }
+                        let mut ok = true;
+                        if word_size > lut_word {
+                            for k in lut_word..word_size {
+                                if query[qp + k] != packed_base_at(subject_packed, s_pos + k) {
+                                    ok = false; break;
+                                }
+                            }
+                        }
+                        if ok {
+                            if let Some(hsp) = extend_seed_packed(
+                                query, subject_packed, subject_len, qp, s_pos,
+                                reward, penalty, x_dropoff,
+                                kbp, search_space, evalue_threshold, context,
+                            ) {
+                                last_hit[diag] = hsp.subject_end;
+                                hsps.push(hsp);
+                            } else {
+                                last_hit[diag] = (s_pos + word_size) as i32;
+                            }
+                        }
+                        q_pos = next[qp];
+                    }
+                }
+                s_pos += 1;
+            }
+        }
+    }
+
+    hsps.sort_by(|a, b| b.score.cmp(&a.score));
+    dedup_hsps(&mut hsps);
+    hsps
+}
+
+/// Extract a single base from packed NCBI2na data (4 bases per byte).
+#[inline(always)]
+fn packed_base_at(packed: &[u8], pos: usize) -> u8 {
+    let byte = packed[pos >> 2];
+    (byte >> (6 - 2 * (pos & 3))) & 3
+}
+
+/// Ungapped extension on packed subject data.
+#[inline]
+fn extend_seed_packed(
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    q_seed: usize,
+    s_seed: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    context: i32,
+) -> Option<SearchHsp> {
+    // Extend right
+    let mut score = 0i32;
+    let mut best_score = 0i32;
+    let mut best_right = 0usize;
+    let mut qi = q_seed;
+    let mut si = s_seed;
+    while qi < query.len() && si < subject_len {
+        let sb = packed_base_at(subject_packed, si);
+        score += if query[qi] == sb { reward } else { penalty };
+        if score > best_score {
+            best_score = score;
+            best_right = qi - q_seed + 1;
+        }
+        if best_score - score > x_dropoff { break; }
+        qi += 1;
+        si += 1;
+    }
+
+    // Extend left
+    let mut left_score = 0i32;
+    let mut best_left_score = 0i32;
+    let mut best_left = 0usize;
+    if q_seed > 0 && s_seed > 0 {
+        let mut qi = q_seed - 1;
+        let mut si = s_seed - 1;
+        loop {
+            let sb = packed_base_at(subject_packed, si);
+            left_score += if query[qi] == sb { reward } else { penalty };
+            if left_score > best_left_score {
+                best_left_score = left_score;
+                best_left = q_seed - qi;
+            }
+            if best_left_score - left_score > x_dropoff { break; }
+            if qi == 0 || si == 0 { break; }
+            qi -= 1;
+            si -= 1;
+        }
+    }
+
+    let total_score = best_score + best_left_score;
+    if total_score <= 0 { return None; }
+
+    let evalue = kbp.raw_to_evalue(total_score, search_space);
+    if evalue > evalue_threshold { return None; }
+
+    let q_start = (q_seed - best_left) as i32;
+    let q_end = (q_seed + best_right) as i32;
+    let s_start = (s_seed - best_left) as i32;
+    let s_end = (s_seed + best_right) as i32;
+    let align_len = q_end - q_start;
+
+    // Count identities
+    let mut num_ident = 0i32;
+    for i in 0..align_len as usize {
+        let sb = packed_base_at(subject_packed, s_start as usize + i);
+        if query[q_start as usize + i] == sb { num_ident += 1; }
+    }
+
+    Some(SearchHsp {
+        query_start: q_start,
+        query_end: q_end,
+        subject_start: s_start,
+        subject_end: s_end,
+        score: total_score,
+        bit_score: kbp.raw_to_bit(total_score),
+        evalue,
+        num_ident,
+        align_length: align_len,
+        mismatches: align_len - num_ident,
+        gap_opens: 0,
+        context,
+    })
 }
 
 /// Choose lookup table width matching C engine's BlastChooseNaLookupTable.
@@ -370,6 +633,116 @@ pub fn blastn_gapped_search_nomask(
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
     dedup_hsps(&mut hsps);
     hsps
+}
+
+/// Fast gapped search on packed NCBI2na subject.
+/// Decodes subject once, then does seed finding + gapped alignment.
+pub fn blastn_gapped_search_packed(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    // Two-phase search:
+    // 1. Fast packed scan to find seeds (no decode needed for scanning)
+    // 2. Decode subject only if seeds found (for verify + gapped alignment)
+    let ungapped = blastn_ungapped_search_packed(
+        query_plus, query_minus, subject_packed, subject_len,
+        word_size, reward, penalty, x_dropoff,
+        kbp, search_space, evalue_threshold * 100.0,
+    );
+    let mut hsps = Vec::new();
+    if ungapped.is_empty() { return hsps; }
+
+    let subject_decoded = decode_packed_ncbi2na(subject_packed, subject_len);
+
+    let cutoff_score = {
+        let e = evalue_threshold.max(1.0e-297);
+        ((kbp.k * search_space / e).ln() / kbp.lambda).ceil() as i32
+    };
+
+    for seed in &ungapped {
+        // C engine: ungapped score must meet cutoff before gapped extension
+        if seed.score < cutoff_score { continue; }
+
+        let query = if seed.context == 0 { query_plus_nomask } else { query_minus_nomask };
+        let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
+        let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
+
+        // Score-only preliminary gapped extension
+        let prelim_score = blast_gapped_score_only(
+            query, &subject_decoded, seed_q, seed_s,
+            reward, penalty, gap_open, gap_extend, x_dropoff,
+        );
+        if prelim_score < cutoff_score { continue; }
+
+        // Full traceback only for seeds that pass the score cutoff
+        if let Some(tb) = blast_gapped_align(
+            query, &subject_decoded, seed_q, seed_s,
+            reward, penalty, gap_open, gap_extend, x_dropoff,
+        ) {
+            let evalue = kbp.raw_to_evalue(tb.score, search_space);
+            if evalue > evalue_threshold { continue; }
+
+            let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(
+                &query[tb.query_start..tb.query_end],
+                &subject_decoded[tb.subject_start..tb.subject_end],
+            );
+
+            hsps.push(SearchHsp {
+                query_start: tb.query_start as i32,
+                query_end: tb.query_end as i32,
+                subject_start: tb.subject_start as i32,
+                subject_end: tb.subject_end as i32,
+                score: tb.score,
+                bit_score: kbp.raw_to_bit(tb.score),
+                evalue,
+                num_ident,
+                align_length: align_len,
+                mismatches: (align_len - num_ident - gap_opens).max(0),
+                gap_opens,
+                context: seed.context,
+            });
+        } else {
+            hsps.push(seed.clone());
+        }
+    }
+
+    hsps.sort_by(|a, b| b.score.cmp(&a.score));
+    dedup_hsps(&mut hsps);
+    hsps
+}
+
+/// Decode packed NCBI2na to per-base (0=A, 1=C, 2=G, 3=T).
+pub fn decode_packed_ncbi2na(packed: &[u8], len: usize) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(len);
+    let full_bytes = len / 4;
+    let remainder = len % 4;
+    for i in 0..full_bytes {
+        let b = packed[i];
+        decoded.push((b >> 6) & 3);
+        decoded.push((b >> 4) & 3);
+        decoded.push((b >> 2) & 3);
+        decoded.push(b & 3);
+    }
+    if remainder > 0 && full_bytes < packed.len() {
+        let b = packed[full_bytes];
+        for j in 0..remainder {
+            decoded.push((b >> (6 - 2 * j)) & 3);
+        }
+    }
+    decoded
 }
 
 #[cfg(test)]
