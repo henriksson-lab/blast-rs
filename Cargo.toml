@@ -12,6 +12,7 @@ categories = ["science", "command-line-utilities"]
 include = [
     "src/**/*",
     "tests/**/*",
+    "!tests/fixtures/large_db/**",
     "Cargo.toml",
     "Cargo.lock",
     "LICENSE.md",
