@@ -30,14 +30,13 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn run_rust_args(query: &Path, db: &Path, word_size: i32, evalue: f64) -> String {
-    // Use FFI engine for exact reference matching
+    // Default engine uses C core for exact reference matching
     let output = Command::new(rust_blastn())
         .args([
             "--query", query.to_str().unwrap(),
             "--db", db.to_str().unwrap(),
             "--word_size", &word_size.to_string(),
             "--evalue", &evalue.to_string(),
-            "--ffi-engine",
         ])
         .output()
         .expect("Failed to run Rust blastn");
@@ -898,7 +897,7 @@ fn input_lowercase_query() {
     // Use rust-engine which handles edge cases safely
     let output = Command::new(rust_blastn())
         .args(["--query", lc.to_str().unwrap(),
-            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11", "--rust-engine"])
+            "--subject", fixture("subject_test.fa").to_str().unwrap(), "--word_size", "11"])
         .output().expect("Failed");
     assert!(output.status.success(), "Lowercase query should work with Rust engine");
 }
@@ -911,7 +910,7 @@ fn input_query_with_blank_lines() {
     }
     let output = Command::new(rust_blastn())
         .args(["--query", bl.to_str().unwrap(),
-            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11", "--rust-engine"])
+            "--subject", fixture("subject_test.fa").to_str().unwrap(), "--word_size", "11"])
         .output().expect("Failed");
     assert!(output.status.success(), "Query with blank lines should work");
 }
@@ -952,7 +951,7 @@ fn input_repetitive_query_no_crash() {
     }
     let output = Command::new(rust_blastn())
         .args(["--query", rep.to_str().unwrap(),
-            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11"])
+            "--subject", fixture("subject_test.fa").to_str().unwrap(), "--word_size", "11"])
         .output().expect("Failed");
     assert!(output.status.success(), "Repetitive query should not crash (exit={})", output.status);
 }
@@ -965,7 +964,7 @@ fn input_poly_a_query_no_crash() {
     }
     let output = Command::new(rust_blastn())
         .args(["--query", pa.to_str().unwrap(),
-            "--db", test_data("seqn").to_str().unwrap(), "--word_size", "11"])
+            "--subject", fixture("subject_test.fa").to_str().unwrap(), "--word_size", "11"])
         .output().expect("Failed");
     assert!(output.status.success(), "Poly-A query should not crash");
 }
@@ -977,7 +976,7 @@ fn strand_plus_only() {
     let both = run_rust(&q, &db, 11);
     let plus_only = Command::new(rust_blastn())
         .args(["--query", q.to_str().unwrap(), "--db", db.to_str().unwrap(),
-            "--word_size", "11", "--strand", "plus", "--ffi-engine"])
+            "--word_size", "11", "--strand", "plus"])
         .output().expect("Failed").stdout;
     let plus_out = String::from_utf8_lossy(&plus_only);
     // Plus-only should have fewer or equal hits (no minus strand)

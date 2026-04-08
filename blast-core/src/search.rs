@@ -4,7 +4,7 @@
 
 use crate::itree::{IntervalTree, Interval};
 use crate::stat::KarlinBlk;
-use crate::traceback::traceback_align_abs;
+use crate::traceback::{traceback_align_abs, blast_gapped_align};
 
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -48,7 +48,7 @@ pub fn blastn_ungapped_search(
 ) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
 
-    // Use a small word (8 bases = 4^8 = 65536 entries) for the lookup table
+    // Use a small word (up to 8 bases) for the lookup table
     let lut_word = word_size.min(8);
     let lut_size = 1usize << (2 * lut_word);
 
@@ -68,8 +68,11 @@ pub fn blastn_ungapped_search(
             lut[key] = i as i32;
         }
 
-        // Scan subject
-        for s_pos in 0..=(subject.len() - word_size) {
+        // Scan with stride matching C engine's lookup table scan
+        // C engine: scan_step = word_length - lut_word_length + 1
+        // This matches how BlastSmallNaScanSubject/BlastNaScanSubject work
+        let mut s_pos = 0;
+        while s_pos + word_size <= subject.len() {
             let key = word_hash_n(&subject[s_pos..s_pos + lut_word], lut_word) as usize;
             let mut q_pos = lut[key];
             while q_pos >= 0 {
@@ -95,6 +98,7 @@ pub fn blastn_ungapped_search(
                 }
                 q_pos = next[qp];
             }
+            s_pos += 1;
         }
     }
 
@@ -105,6 +109,34 @@ pub fn blastn_ungapped_search(
     dedup_hsps(&mut hsps);
 
     hsps
+}
+
+/// Choose lookup table width matching C engine's BlastChooseNaLookupTable.
+/// Returns lut_width (number of bases used as hash key).
+fn choose_lut_width(word_size: usize, approx_entries: usize) -> usize {
+    match word_size {
+        0..=6 => word_size,
+        7 => if approx_entries < 250 { 6 } else { 7 },
+        8 => if approx_entries < 8500 { 7 } else { 8 },
+        9 => if approx_entries < 1250 { 7 }
+             else if approx_entries < 21000 { 8 }
+             else { 9 },
+        10 => if approx_entries < 1250 { 7 }
+              else if approx_entries < 8500 { 8 }
+              else if approx_entries < 18000 { 9 }
+              else { 10 },
+        11 => if approx_entries < 12000 { 8 }
+              else if approx_entries < 180000 { 10 }
+              else { 11 },
+        12 => if approx_entries < 8500 { 8 }
+              else if approx_entries < 18000 { 9 }
+              else if approx_entries < 60000 { 10 }
+              else if approx_entries < 900000 { 11 }
+              else { 12 },
+        _ => if approx_entries < 8500 { 8 }
+             else if approx_entries < 300000 { 11 }
+             else { 12 },
+    }
 }
 
 /// Hash the first n bases of a word for the lookup table.
@@ -261,7 +293,32 @@ pub fn blastn_gapped_search(
     search_space: f64,
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
-    // First do ungapped search to find seeds
+    // Delegate to extended version with nomask = same as query (no separate masking)
+    blastn_gapped_search_nomask(
+        query_plus, query_minus, query_plus, query_minus,
+        subject, word_size, reward, penalty, _gap_open, _gap_extend,
+        x_dropoff, kbp, search_space, evalue_threshold,
+    )
+}
+
+/// Gapped search with separate masked (for seeds) and unmasked (for gapped alignment) queries.
+pub fn blastn_gapped_search_nomask(
+    query_plus: &[u8],        // masked, for seed finding
+    query_minus: &[u8],       // masked, for seed finding
+    query_plus_nomask: &[u8], // unmasked, for gapped alignment
+    query_minus_nomask: &[u8],// unmasked, for gapped alignment
+    subject: &[u8],
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    _gap_open: i32,
+    _gap_extend: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    // First do ungapped search to find seeds (uses masked query)
     let ungapped = blastn_ungapped_search(
         query_plus, query_minus, subject,
         word_size, reward, penalty, x_dropoff,
@@ -271,30 +328,16 @@ pub fn blastn_gapped_search(
     let mut hsps = Vec::new();
 
     for seed in &ungapped {
-        let query = if seed.context == 0 { query_plus } else { query_minus };
+        // Use UNMASKED query for gapped alignment (matches C engine's sequence_nomask)
+        let query = if seed.context == 0 { query_plus_nomask } else { query_minus_nomask };
 
-        // Determine the region to align (extend seed boundaries)
-        let q_margin = 50.min(seed.query_start as usize);
-        let s_margin = 50.min(seed.subject_start as usize);
-        let q_start = seed.query_start as usize - q_margin;
-        let s_start = seed.subject_start as usize - s_margin;
-        let q_end = (seed.query_end as usize + 50).min(query.len());
-        let s_end = (seed.subject_end as usize + 50).min(subject.len());
-
-        if q_end <= q_start || s_end <= s_start {
-            // Use the ungapped hit as-is
-            hsps.push(seed.clone());
-            continue;
-        }
-
-        // Do gapped traceback around the seed
+        // BLAST-style gapped alignment: bidirectional X-dropoff extension from seed
         let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
         let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
-        let margin = (seed.align_length as usize).max(50);
 
-        if let Some(tb) = traceback_align_abs(
+        if let Some(tb) = blast_gapped_align(
             query, subject, seed_q, seed_s,
-            reward, penalty, _gap_open, _gap_extend, margin,
+            reward, penalty, _gap_open, _gap_extend, x_dropoff,
         ) {
             let evalue = kbp.raw_to_evalue(tb.score, search_space);
             if evalue > evalue_threshold { continue; }

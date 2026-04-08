@@ -11,4 +11,5 @@ blast-db = { path = "../blast-db" }
 blast-format = { path = "../blast-format" }
 blast-input = { path = "../blast-input" }
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
 rayon = "1"
