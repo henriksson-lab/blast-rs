@@ -1,4 +1,4 @@
-//! Multi-FASTA parser.
+//! Multi-FASTA parser using noodles-fasta.
 
 use std::io::{BufRead, BufReader, Read};
 
@@ -14,54 +14,30 @@ pub struct FastaRecord {
 }
 
 /// Parse a multi-FASTA input, returning records in order.
+/// Uses noodles-fasta for parsing.
 pub fn parse_fasta<R: Read>(reader: R) -> Vec<FastaRecord> {
     let buf = BufReader::new(reader);
+    let mut noodles_reader = noodles_fasta::io::Reader::new(buf);
     let mut records = Vec::new();
-    let mut current_id = String::new();
-    let mut current_defline = String::new();
-    let mut current_seq = Vec::new();
 
-    for line in buf.lines() {
-        let line = match line {
-            Ok(l) => l,
+    for result in noodles_reader.records() {
+        let record = match result {
+            Ok(r) => r,
             Err(_) => break,
         };
-        let line = line.trim_end();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(header) = line.strip_prefix('>') {
-            // Save previous record if any
-            if !current_defline.is_empty() || !current_seq.is_empty() {
-                records.push(FastaRecord {
-                    id: current_id,
-                    defline: current_defline,
-                    sequence: current_seq,
-                });
-            }
-            current_defline = header.to_string();
-            current_id = header
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
-            current_seq = Vec::new();
-        } else {
-            // Sequence line: append bytes, skip whitespace
-            for &b in line.as_bytes() {
-                if !b.is_ascii_whitespace() {
-                    current_seq.push(b);
-                }
-            }
-        }
-    }
 
-    // Don't forget the last record
-    if !current_defline.is_empty() || !current_seq.is_empty() {
+        let name = std::str::from_utf8(record.name()).unwrap_or("").to_string();
+        let defline = if let Some(desc) = record.description() {
+            format!("{} {}", name, std::str::from_utf8(desc).unwrap_or(""))
+        } else {
+            name.clone()
+        };
+        let sequence = record.sequence().as_ref().to_vec();
+
         records.push(FastaRecord {
-            id: current_id,
-            defline: current_defline,
-            sequence: current_seq,
+            id: name,
+            defline,
+            sequence,
         });
     }
 

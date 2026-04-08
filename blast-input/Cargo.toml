@@ -1,9 +1,0 @@
-[package]
-name = "blast-input"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-blast-core-sys = { path = "../blast-core-sys" }
-clap = { version = "4", features = ["derive"] }

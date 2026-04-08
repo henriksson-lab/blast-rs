@@ -1,0 +1,33 @@
+//! blast-rs: Pure-Rust implementation of NCBI BLAST.
+
+pub mod blastn;
+pub mod db;
+pub mod diagnostics;
+pub mod encoding;
+pub mod engine;
+pub mod extend;
+pub mod filter;
+pub mod format;
+pub mod gapalign;
+pub mod gapinfo;
+pub mod greedy;
+pub mod hits;
+pub mod hspstream;
+pub mod input;
+pub mod itree;
+pub mod listnode;
+pub mod lookup;
+pub mod math;
+pub mod matrix;
+pub mod options;
+pub mod parameters;
+pub mod program;
+pub mod protein;
+pub mod pssm;
+pub mod queryinfo;
+pub mod rps;
+pub mod search;
+pub mod sequence;
+pub mod stat;
+pub mod traceback;
+pub mod util;

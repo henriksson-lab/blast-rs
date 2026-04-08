@@ -23,7 +23,7 @@ pub struct TabularHit {
 /// Format an e-value matching BLAST tabular output (-outfmt 6).
 /// Uses NStr::DoubleToString(evalue, 2, fDoubleScientific) which is
 /// essentially %.2e for small values, transitioning to fixed for larger ones.
-fn format_evalue(val: f64) -> String {
+pub fn format_evalue(val: f64) -> String {
     if val < 1.0e-180 {
         "0.0".to_string()
     } else if val < 0.001 {
@@ -66,7 +66,7 @@ fn format_evalue(val: f64) -> String {
 
 /// Format a bit score matching BLAST reference style.
 /// >= 99.9: integer (e.g. "198"), < 99.9: one decimal (e.g. "56.0").
-fn format_bitscore(val: f64) -> String {
+pub fn format_bitscore(val: f64) -> String {
     if val > 99999.0 {
         format!("{:.3e}", val)
     } else if val > 99.9 {

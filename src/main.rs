@@ -1,8 +1,8 @@
 //! BLAST command-line interface.
 
-use blast_db::{BlastDb, DbType};
-use blast_format::{format_tabular, TabularHit};
-use blast_input::{iupacna_to_blastna, parse_fasta};
+use blast_rs::db::{BlastDb, DbType};
+use blast_rs::format::{format_tabular, TabularHit};
+use blast_rs::input::{iupacna_to_blastna, parse_fasta};
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -312,8 +312,8 @@ fn main() {
 }
 
 fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::protein;
-    use blast_core::matrix::AA_SIZE;
+    use blast_rs::protein;
+    use blast_rs::matrix::AA_SIZE;
 
     let query_file = File::open(&args.query)?;
     let queries = parse_fasta(query_file);
@@ -331,25 +331,25 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         for i in 1..21 { matrix[i][i] = 5; }
 
         // Protein KBP parameters
-        let prot_kbp = blast_core::stat::lookup_protein_params(args.gapopen, args.gapextend)
-            .map(|p| blast_core::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
-            .unwrap_or_else(blast_core::stat::protein_ungapped_kbp);
+        let prot_kbp = blast_rs::stat::lookup_protein_params(args.gapopen, args.gapextend)
+            .map(|p| blast_rs::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
+            .unwrap_or_else(blast_rs::stat::protein_ungapped_kbp);
 
         let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
         let avg_q_len = queries.iter().map(|q| q.sequence.len()).sum::<usize>() / queries.len().max(1);
-        let len_adj = blast_core::stat::compute_length_adjustment(
+        let len_adj = blast_rs::stat::compute_length_adjustment(
             avg_q_len as i32, total_subj_len as i64, subjects.len() as i32, &prot_kbp);
-        let search_space = blast_core::stat::compute_search_space(
+        let search_space = blast_rs::stat::compute_search_space(
             avg_q_len as i64, total_subj_len as i64, subjects.len() as i32, len_adj);
 
         let mut hits = Vec::new();
         for qrec in &queries {
             let query_aa: Vec<u8> = qrec.sequence.iter()
-                .map(|&b| blast_input::aminoacid_to_ncbistdaa(b)).collect();
+                .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
 
             for srec in &subjects {
                 let subj_aa: Vec<u8> = srec.sequence.iter()
-                    .map(|&b| blast_input::aminoacid_to_ncbistdaa(b)).collect();
+                    .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
 
                 // Simple word scan + extend
                 let word_size = args.word_size.max(3) as usize;
@@ -413,9 +413,9 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::protein;
-    use blast_core::matrix::AA_SIZE;
-    use blast_core::util::{six_frame_translation, STANDARD_GENETIC_CODE};
+    use blast_rs::protein;
+    use blast_rs::matrix::AA_SIZE;
+    use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
     let query_file = File::open(&args.query)?;
     let queries = parse_fasta(query_file);
@@ -431,7 +431,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
     for i in 1..21 { matrix[i][i] = 5; }
 
-    let prot_kbp = blast_core::stat::protein_ungapped_kbp();
+    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
     let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
 
     let mut all_hits = Vec::new();
@@ -450,12 +450,12 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         for (frame, protein_query) in &frames {
             if protein_query.len() < 3 { continue; }
 
-            let search_space = blast_core::stat::compute_search_space(
+            let search_space = blast_rs::stat::compute_search_space(
                 protein_query.len() as i64, total_subj_len as i64, subjects.len() as i32, 0);
 
             for srec in &subjects {
                 let subj_aa: Vec<u8> = srec.sequence.iter()
-                    .map(|&b| blast_input::aminoacid_to_ncbistdaa(b)).collect();
+                    .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
 
                 let word_size = 3usize;
                 if protein_query.len() < word_size || subj_aa.len() < word_size { continue; }
@@ -516,9 +516,9 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::protein;
-    use blast_core::matrix::AA_SIZE;
-    use blast_core::util::{six_frame_translation, STANDARD_GENETIC_CODE};
+    use blast_rs::protein;
+    use blast_rs::matrix::AA_SIZE;
+    use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
     // tblastn: protein query vs translated nucleotide subject
     let query_file = File::open(&args.query)?;
@@ -530,12 +530,12 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
     for i in 1..21 { matrix[i][i] = 5; }
-    let prot_kbp = blast_core::stat::protein_ungapped_kbp();
+    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
 
     let mut all_hits = Vec::new();
     for qrec in &queries {
         let query_aa: Vec<u8> = qrec.sequence.iter()
-            .map(|&b| blast_input::aminoacid_to_ncbistdaa(b)).collect();
+            .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
 
         for srec in &subjects {
             let nuc_seq: Vec<u8> = srec.sequence.iter().map(|&b| {
@@ -592,8 +592,8 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::pssm::Pssm;
-    use blast_core::matrix::AA_SIZE;
+    use blast_rs::pssm::Pssm;
+    use blast_rs::matrix::AA_SIZE;
 
     let query_file = File::open(&args.query)?;
     let queries = parse_fasta(query_file);
@@ -607,24 +607,24 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
     for i in 1..21 { matrix[i][i] = 5; }
 
-    let prot_kbp = blast_core::stat::protein_ungapped_kbp();
+    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
     let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
     let search_space = (queries[0].sequence.len() * total_subj_len) as f64;
 
     // Build initial PSSM from query
     let query_aa: Vec<u8> = queries[0].sequence.iter()
-        .map(|&b| blast_input::aminoacid_to_ncbistdaa(b)).collect();
+        .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
     let mut pssm = Pssm::from_sequence(&query_aa, &matrix);
 
     // Prepare subjects as (id, aa_sequence) pairs
     let subj_pairs: Vec<(String, Vec<u8>)> = subjects.iter()
-        .map(|s| (s.id.clone(), s.sequence.iter().map(|&b| blast_input::aminoacid_to_ncbistdaa(b)).collect()))
+        .map(|s| (s.id.clone(), s.sequence.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect()))
         .collect();
 
     // Run 3 iterations
     let mut all_hits = Vec::new();
     for _iter in 0..3 {
-        let results = blast_core::pssm::psi_blast_iteration(
+        let results = blast_rs::pssm::psi_blast_iteration(
             &pssm, &subj_pairs, args.evalue, search_space, prot_kbp.lambda, prot_kbp.k);
 
         if results.is_empty() { break; }
@@ -645,7 +645,7 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let aligned: Vec<Vec<u8>> = results.iter()
             .filter_map(|(id, _, _)| subj_pairs.iter().find(|(sid, _)| sid == id).map(|(_, s)| s.clone()))
             .collect();
-        pssm.update_from_alignment(&aligned, &blast_core::matrix::AA_FREQUENCIES, 10.0);
+        pssm.update_from_alignment(&aligned, &blast_rs::matrix::AA_FREQUENCIES, 10.0);
     }
 
     let stdout = io::stdout();
@@ -679,9 +679,9 @@ fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::protein;
-    use blast_core::matrix::AA_SIZE;
-    use blast_core::util::{six_frame_translation, STANDARD_GENETIC_CODE};
+    use blast_rs::protein;
+    use blast_rs::matrix::AA_SIZE;
+    use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
     // tblastx: translated nucleotide query vs translated nucleotide subject
     let query_file = File::open(&args.query)?;
@@ -693,7 +693,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
     for i in 1..21 { matrix[i][i] = 5; }
-    let prot_kbp = blast_core::stat::protein_ungapped_kbp();
+    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
 
     let mut all_hits = Vec::new();
     for qrec in &queries {
@@ -783,10 +783,10 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 /// Pure Rust blastn search — no FFI calls.
 fn run_blastn_rust(
     args: &BlastnArgs,
-    records: &[blast_input::FastaRecord],
+    records: &[blast_rs::input::FastaRecord],
     db: BlastDb,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::search::blastn_gapped_search;
+    use blast_rs::search::blastn_gapped_search;
     
     use rayon::prelude::*;
 
@@ -821,28 +821,28 @@ fn run_blastn_rust(
 
         // Compute KBP for both contexts
         let ctxs = [
-            blast_core::stat::UngappedKbpContext { query_offset: 0, query_length: qlen, is_valid: true },
+            blast_rs::stat::UngappedKbpContext { query_offset: 0, query_length: qlen, is_valid: true },
         ];
-        let plus_kbp_results = blast_core::stat::ungapped_kbp_calc(&query_plus, &ctxs, lo, hi, BLASTNA_SIZE, ambig, &matrix_fn);
-        let minus_kbp_results = blast_core::stat::ungapped_kbp_calc(&query_minus, &ctxs, lo, hi, BLASTNA_SIZE, ambig, &matrix_fn);
+        let plus_kbp_results = blast_rs::stat::ungapped_kbp_calc(&query_plus, &ctxs, lo, hi, BLASTNA_SIZE, ambig, &matrix_fn);
+        let minus_kbp_results = blast_rs::stat::ungapped_kbp_calc(&query_minus, &ctxs, lo, hi, BLASTNA_SIZE, ambig, &matrix_fn);
 
-        let default_kbp = blast_core::stat::KarlinBlk { lambda: 1.374, k: 0.621, log_k: 0.621_f64.ln(), h: 1.286 };
+        let default_kbp = blast_rs::stat::KarlinBlk { lambda: 1.374, k: 0.621, log_k: 0.621_f64.ln(), h: 1.286 };
         let ungapped_plus = plus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
         let ungapped_minus = minus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
 
         // Gapped KBP (from table — may fall back to ungapped for large gap costs)
-        let (gkbp_plus, _) = blast_core::stat::nucl_gapped_kbp_lookup(
+        let (gkbp_plus, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
             args.gapopen, args.gapextend, reward, penalty, &ungapped_plus,
         ).unwrap_or((ungapped_plus.clone(), false));
-        let (gkbp_minus, _) = blast_core::stat::nucl_gapped_kbp_lookup(
+        let (gkbp_minus, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
             args.gapopen, args.gapextend, reward, penalty, &ungapped_minus,
         ).unwrap_or((ungapped_minus.clone(), false));
 
         // Per-context search space
-        let compute_searchsp = |kbp: &blast_core::stat::KarlinBlk, ukbp: &blast_core::stat::KarlinBlk| -> f64 {
-            let (alpha, beta) = blast_core::stat::nucl_alpha_beta(
+        let compute_searchsp = |kbp: &blast_rs::stat::KarlinBlk, ukbp: &blast_rs::stat::KarlinBlk| -> f64 {
+            let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
                 reward, penalty, args.gapopen, args.gapextend, ukbp.lambda, ukbp.h, true);
-            let (len_adj, _) = blast_core::stat::compute_length_adjustment_exact(
+            let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
                 kbp.k, kbp.log_k, alpha / kbp.lambda, beta,
                 qlen, db.total_length as i64, db.num_oids as i32);
             let eff_db = std::cmp::max(db.total_length as i64 - db.num_oids as i64 * len_adj as i64, 1);
@@ -876,7 +876,7 @@ fn run_blastn_rust(
         // Masked query for seed finding (lookup table uses masked version)
         let mut query_plus_masked = query_plus_nomask.clone();
         if apply_dust {
-            let mask = blast_core::filter::dust_filter(&query_plus_masked, 64, 2.0);
+            let mask = blast_rs::filter::dust_filter(&query_plus_masked, 64, 2.0);
             mask.apply(&mut query_plus_masked, 14);
         }
         let query_minus_masked: Vec<u8> = query_plus_masked.iter().rev()
@@ -898,11 +898,11 @@ fn run_blastn_rust(
 
         // Gapped search across all subjects using packed NCBI2na (fast, no full decode)
         let gapped_x_dropoff = (args.xdrop_gap_final * std::f64::consts::LN_2 / kbp.lambda) as i32;
-        let oid_hits: Vec<(u32, Vec<blast_core::search::SearchHsp>)> =
+        let oid_hits: Vec<(u32, Vec<blast_rs::search::SearchHsp>)> =
             (0..db.num_oids).into_par_iter().filter_map(|oid| {
                 let packed = db.get_sequence(oid);
                 let seq_len = db.get_seq_len(oid) as usize;
-                let mut hsps = blast_core::search::blastn_gapped_search_packed(
+                let mut hsps = blast_rs::search::blastn_gapped_search_packed(
                     qp, qm, qp_nomask, qm_nomask,
                     packed, seq_len,
                     word_size, reward, penalty, gapopen, gapextend,
@@ -1081,7 +1081,7 @@ fn run_blastn_rust(
     if outfmt_num == 0 {
         // Pairwise text output
         for hit in &hits {
-            blast_format::format_pairwise_alignment(
+            blast_rs::format::format_pairwise_alignment(
                 &mut writer,
                 &hit.query_id, &hit.subject_id,
                 &[], &[], // placeholder - would need decoded seqs
@@ -1092,7 +1092,7 @@ fn run_blastn_rust(
             )?;
         }
     } else if let Some(ref cols) = custom_columns {
-        blast_format::format_tabular_custom(&mut writer, &hits, cols)?;
+        blast_rs::format::format_tabular_custom(&mut writer, &hits, cols)?;
     } else {
         format_tabular(&mut writer, &hits)?;
     }
@@ -1159,12 +1159,12 @@ fn decode_subject(db: &BlastDb, oid: i32) -> Vec<u8> {
 /// Search query against subject FASTA sequences (no database needed).
 fn run_blastn_subject(
     args: &BlastnArgs,
-    queries: &[blast_input::FastaRecord],
-    subjects: &[blast_input::FastaRecord],
+    queries: &[blast_rs::input::FastaRecord],
+    subjects: &[blast_rs::input::FastaRecord],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_core::search::blastn_gapped_search;
+    use blast_rs::search::blastn_gapped_search;
 
-    let kbp = blast_core::stat::compute_ungapped_kbp(args.reward, args.penalty);
+    let kbp = blast_rs::stat::compute_ungapped_kbp(args.reward, args.penalty);
     let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
     let avg_query_len = queries.iter().map(|r| r.sequence.len()).sum::<usize>() as f64
         / queries.len().max(1) as f64;

@@ -1,15 +1,5 @@
-[workspace]
-members = [
-    "blast-core-sys",
-    "blast-core",
-    "blast-db",
-    "blast-format",
-    "blast-input",
-    "blast-cli",
-]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "blast-rs"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Unlicense"
@@ -18,6 +8,21 @@ repository = "https://github.com/henriksson-lab/blast-rs"
 homepage = "https://github.com/henriksson-lab/blast-rs"
 keywords = ["bioinformatics", "blast", "alignment", "sequence", "genomics"]
 categories = ["science", "command-line-utilities"]
+
+[[bin]]
+name = "blast-cli"
+path = "src/main.rs"
+
+[lib]
+name = "blast_rs"
+path = "src/lib.rs"
+
+[dependencies]
+byteorder = "1"
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"
+noodles-fasta = "0.47"
+rayon = "1"
 
 [profile.release]
 lto = true

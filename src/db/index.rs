@@ -71,7 +71,7 @@ impl BlastDb {
         } else if base_path.with_extension("nal").exists() || base_path.with_extension("pal").exists() {
             // Alias file — open first volume (multi-volume merge is TODO)
             let alias_ext = if base_path.with_extension("nal").exists() { "nal" } else { "pal" };
-            let alias = crate::alias::parse_alias_file(&base_path.with_extension(alias_ext))?;
+            let alias = crate::db::alias::parse_alias_file(&base_path.with_extension(alias_ext))?;
             if let Some(first_vol) = alias.dblist.first() {
                 return Self::open(first_vol);
             }

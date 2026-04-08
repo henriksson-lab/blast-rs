@@ -113,7 +113,7 @@ for oid in 0..db.num_oids {
 }
 ```
 
-### blast-input -- Parse FASTA files
+### blast-input -- Parse FASTA files (powered by noodles-fasta)
 
 ```rust
 use blast_input::parse_fasta;
@@ -179,7 +179,7 @@ format_tabular(&mut io::stdout(), &hits).unwrap();
 | `blast-cli` | Command-line binary |
 | `blast-core` | Search engine, statistics, gapped alignment, traceback |
 | `blast-db` | BLAST database reader (v4/v5 `.nin/.nsq/.nhr`) and writer |
-| `blast-input` | FASTA parser with BLASTNA/NCBIstdaa encoding |
+| `blast-input` | FASTA parser (via noodles-fasta) with BLASTNA/NCBIstdaa encoding |
 | `blast-format` | Output formatting (tabular, pairwise, XML, SAM) |
 
 ## Benchmarks
