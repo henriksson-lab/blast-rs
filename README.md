@@ -1,14 +1,22 @@
 # blast-rs
 
-Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool) for nucleotide sequence similarity searching. Produces byte-identical output to the C reference implementation (NCBI BLAST+ 2.17.0) with no C dependencies.
+Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool). Produces byte-identical output to the C reference implementation (NCBI BLAST+ 2.17.0) for blastn, with no C dependencies. Supports blastn, blastp, blastx, tblastn, tblastx, and psiblast.
+
+Based on [NCBI BLAST+ 2.17.0](https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/) source distribution (`ncbi-blast-2.17.0+-src.tar.gz`, also on [GitHub](https://github.com/ncbi/blast)). The C core algorithms in `src/algo/blast/core/` were ported function-by-function to Rust.
 
 ## Features
 
 - **Pure Rust** -- zero C/C++ FFI calls, no unsafe dependencies
 - **Byte-identical output** to NCBI BLAST+ for blastn searches
 - **Faster than C** -- 1.1-10x speedup on real genomes (see benchmarks)
+- **All major programs**: blastn, blastp, blastx, tblastn, tblastx, psiblast
+- **Subcommand CLI**: `blast-cli blastn`, `blast-cli blastp`, etc.
+- **Task presets**: `--task blastn-short` for primer search with automatic parameter tuning
+- Protein search with neighborhood-word lookup table (matching NCBI's algorithm)
+- PSI-BLAST with Henikoff position-based weighting and proper PSSM computation
+- Six-frame translation with correct nucleotide coordinate mapping
 - Reads standard BLAST database files (v4/v5 `.nin/.nsq/.nhr`)
-- Supports all standard blastn options (word size, scoring, e-value, output formats)
+- Custom tabular columns: `qlen`, `slen`, `saccver`, `qcovs`, `qcovhsp`, and more
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
 
@@ -38,35 +46,43 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 ### Basic search against a BLAST database
 
 ```bash
-blast-cli --query query.fa --db mydb --word_size 11 --outfmt 6
+blast-cli blastn --query query.fa --db mydb --word_size 11 --outfmt 6
 ```
 
 ### Search against a FASTA file (no database needed)
 
 ```bash
-blast-cli --query query.fa --subject reference.fa
+blast-cli blastn --query query.fa --subject reference.fa
+```
+
+### Short primer search
+
+```bash
+blast-cli blastn --query primers.fa --db mydb --task blastn-short \
+    --max_hsps 1 --max_target_seqs 10000
 ```
 
 ### Common options
 
 ```bash
 # Custom scoring
-blast-cli --query query.fa --db mydb \
+blast-cli blastn --query query.fa --db mydb \
     --reward 2 --penalty -3 \
     --gapopen 5 --gapextend 2 \
     --evalue 0.001
 
 # Plus strand only, no DUST masking
-blast-cli --query query.fa --db mydb --strand plus --dust no
+blast-cli blastn --query query.fa --db mydb --strand plus --dust no
 
 # Limit results
-blast-cli --query query.fa --db mydb --max_target_seqs 100
+blast-cli blastn --query query.fa --db mydb --max_target_seqs 100
 
 # Pairwise text output
-blast-cli --query query.fa --db mydb --outfmt 0
+blast-cli blastn --query query.fa --db mydb --outfmt 0
 
 # Custom tabular columns
-blast-cli --query query.fa --db mydb --outfmt "6 qseqid sseqid pident length evalue"
+blast-cli blastn --query query.fa --db mydb \
+    --outfmt "6 qseqid qlen saccver slen sstart send bitscore pident"
 ```
 
 ### All options
@@ -92,14 +108,28 @@ blast-cli --query query.fa --db mydb --outfmt "6 qseqid sseqid pident length eva
 | `--xdrop_gap_final` | `100` | X-dropoff for final gapped extension (bits) |
 | `--perc_identity` | `0` | Minimum percent identity |
 
+### Protein search
+
+```bash
+# blastp: protein query vs protein subject
+blast-cli blastp --query protein.fa --subject database.fa
+
+# blastx: translated nucleotide query vs protein subject
+blast-cli blastx --query nucleotide.fa --subject protein.fa
+
+# tblastn: protein query vs translated nucleotide subject
+blast-cli tblastn --query protein.fa --subject nucleotide.fa
+
+# psiblast: iterative position-specific search
+blast-cli psiblast --query protein.fa --subject database.fa
+```
+
 ## Library Usage
 
-The project is split into reusable crates:
-
-### blast-db -- Read BLAST databases
+### Read BLAST databases
 
 ```rust
-use blast_db::BlastDb;
+use blast_rs::db::BlastDb;
 use std::path::Path;
 
 let db = BlastDb::open(Path::new("mydb")).unwrap();
@@ -113,10 +143,10 @@ for oid in 0..db.num_oids {
 }
 ```
 
-### blast-input -- Parse FASTA files (powered by noodles-fasta)
+### Parse FASTA files (powered by noodles-fasta)
 
 ```rust
-use blast_input::parse_fasta;
+use blast_rs::input::parse_fasta;
 use std::fs::File;
 
 let records = parse_fasta(File::open("query.fa").unwrap());
@@ -125,10 +155,10 @@ for rec in &records {
 }
 ```
 
-### blast-core -- Search engine (high-level API)
+### Search engine (high-level API)
 
 ```rust
-use blast_core::blastn::BlastnSearch;
+use blast_rs::blastn::BlastnSearch;
 
 let results = BlastnSearch::new()
     .query(b"ACGTACGTACGTACGTACGTACGTACGT")
@@ -146,7 +176,7 @@ for hit in &results {
 With custom parameters:
 
 ```rust
-use blast_core::blastn::{BlastnSearch, Strand};
+use blast_rs::blastn::{BlastnSearch, Strand};
 
 let results = BlastnSearch::new()
     .query(b"ACGTACGTACGT")
@@ -162,25 +192,34 @@ let results = BlastnSearch::new()
     .run();
 ```
 
-### blast-format -- Output formatting
+### Output formatting
 
 ```rust
-use blast_format::{format_tabular, TabularHit};
+use blast_rs::format::{format_tabular, TabularHit};
 use std::io;
 
 let hits: Vec<TabularHit> = /* ... */;
 format_tabular(&mut io::stdout(), &hits).unwrap();
 ```
 
-## Crate Structure
+## Module Structure
 
-| Crate | Description |
-|-------|-------------|
-| `blast-cli` | Command-line binary |
-| `blast-core` | Search engine, statistics, gapped alignment, traceback |
-| `blast-db` | BLAST database reader (v4/v5 `.nin/.nsq/.nhr`) and writer |
-| `blast-input` | FASTA parser (via noodles-fasta) with BLASTNA/NCBIstdaa encoding |
-| `blast-format` | Output formatting (tabular, pairwise, XML, SAM) |
+Single crate `blast-rs` with modules:
+
+| Module | Description |
+|--------|-------------|
+| `blast_rs::blastn` | High-level builder API for blastn searches |
+| `blast_rs::search` | Core nucleotide search engine (seed scanning, ungapped/gapped extension) |
+| `blast_rs::protein_lookup` | Protein word lookup table with neighborhood word generation |
+| `blast_rs::protein` | Protein ungapped extension and scoring |
+| `blast_rs::pssm` | PSI-BLAST PSSM computation (Henikoff weighting, pseudocounts) |
+| `blast_rs::stat` | Karlin-Altschul statistics, KBP computation |
+| `blast_rs::traceback` | Gapped alignment with traceback |
+| `blast_rs::db` | BLAST database reader/writer (v4/v5 `.nin/.nsq/.nhr`) |
+| `blast_rs::input` | FASTA parser (via noodles-fasta) with BLASTNA/NCBIstdaa encoding |
+| `blast_rs::format` | Output formatting (tabular, pairwise, XML, SAM) |
+| `blast_rs::filter` | DUST low-complexity masking |
+| `blast_rs::util` | Six-frame translation, genetic code, coordinate mapping |
 
 ## Benchmarks
 
@@ -211,6 +250,8 @@ sequences using rayon.
 
 This is a faithful port of the NCBI BLAST+ C engine algorithms:
 
+### Nucleotide (blastn)
+
 - **Seed scanning**: Step-4 packed byte scanning with 8-mer lookup table and presence vector (PV) array, matching `s_BlastSmallNaScanSubject_8_4`
 - **Word extension**: Left/right extension from 8-mer to full word size, matching `s_BlastSmallNaExtend`
 - **Diagonal tracking**: Hash-based diagonal table to prevent redundant extensions, matching `BLAST_DiagTable`
@@ -221,11 +262,43 @@ This is a faithful port of the NCBI BLAST+ C engine algorithms:
 - **Scoring matrix**: Full BLASTNA 16x16 matrix with ambiguity codes
 - **DUST masking**: Low-complexity filtering with separate masked/unmasked query handling
 
+### Protein (blastp, blastx, tblastn, tblastx)
+
+- **Neighborhood word lookup table**: For each query w-mer, all amino acid words scoring >= threshold are hashed into a table with PV array for fast rejection, matching `BlastAaLookupIndexQuery`
+- **Two-phase extension**: Ungapped X-dropoff extension for filtering, then gapped X-dropoff DP with affine gap penalties for high-scoring seeds
+- **Gapped alignment**: Bidirectional Smith-Waterman style DP with substitution matrix (e.g., BLOSUM62), gap open/extend penalties, and X-dropoff banding
+- **Six-frame translation**: Forward and reverse frames with correct nucleotide coordinate mapping
+
+### PSI-BLAST
+
+- **Henikoff position-based sequence weighting**: Matches `_PSIComputeSequenceWeights`
+- **Effective observations estimation**: Entropy-based calculation matching `s_effectiveObservations`
+- **Column-specific pseudocounts**: Matches `s_columnSpecificPseudocounts` with NCBI constants
+- **PSSM score conversion**: Frequency ratio blending with BLOSUM62 background, matching `_PSIConvertFreqRatiosToPSSM`
+
 ## Compatibility
 
 - Reads BLAST databases created by NCBI `makeblastdb` (v4 and v5 format)
 - Output matches NCBI BLAST+ 2.17.0 byte-for-byte for blastn tabular format (`-outfmt 6`)
 - Supports scoring parameters: reward/penalty 1/-1 through 5/-4, gap costs 0/0 through 12/8
+- Protein programs (blastp/blastx/tblastn/tblastx) use lookup-table seeding with gapped X-dropoff DP extension
+
+## What's not ported
+
+The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (~140MB source). The following are **not** yet included in blast-rs:
+
+- **Taxonomy lookups** -- `staxid`, `ssciname`, `sskingdom` output columns require `.ndb`/`.ntf`/`.nto` taxonomy files; not yet supported
+- **Composition-based statistics** -- `composition_adjustment/` used by blastp/blastx for compositional score correction
+- **IgBLAST** -- immunoglobulin/T-cell receptor analysis (`igblast/`)
+- **Remote BLAST** -- network search against NCBI servers (`connect/`)
+- **SRA/VDB integration** -- searching against Sequence Read Archive data (`vdb/`, `sra/`)
+- **ASN.1 object model** -- the full `objects/` and `serial/` framework (~40MB) for Seq-entry, Bioseq, etc.
+- **Object Manager** -- `objmgr/` for GenBank sequence retrieval and data loading
+- **Database indexing** -- `dbindex/` for MegaBLAST indexed searches
+- **Gumbel parameter estimation** -- `gumbel_params/` for domain-specific statistics
+- **Protein k-mer search** -- `proteinkmer/` for fast protein pre-filtering
+- **NCBI application framework** -- `corelib/` (logging, config, threading, diagnostics)
+- **blast_formatter** -- standalone tool for reformatting archived BLAST results
 
 ## License
 

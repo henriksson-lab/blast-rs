@@ -94,6 +94,196 @@ pub fn find_neighboring_words(
     neighbors
 }
 
+/// Result of a protein gapped alignment.
+#[derive(Debug, Clone)]
+pub struct ProteinGappedResult {
+    pub query_start: usize,
+    pub query_end: usize,
+    pub subject_start: usize,
+    pub subject_end: usize,
+    pub score: i32,
+    pub num_ident: i32,
+    pub align_length: i32,
+    pub mismatches: i32,
+    pub gap_opens: i32,
+}
+
+const MININT: i32 = i32::MIN / 2;
+
+struct GapDP {
+    best: i32,
+    best_gap: i32,
+}
+
+/// Score-only gapped extension in one direction (left or right from seed).
+/// Returns the best score found.
+fn protein_gapped_score_one_dir(
+    query: &[u8], subject: &[u8],
+    m: usize, n: usize,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    gap_oe: i32, gap_extend: i32,
+    mut x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize) {
+    if x_dropoff < gap_oe { x_dropoff = gap_oe; }
+    if m == 0 || n == 0 { return (0, 0, 0); }
+
+    let max_band = ((x_dropoff / gap_extend.max(1)) as usize + 10).min(n + 1);
+    let mut sa = Vec::with_capacity(max_band);
+    sa.push(GapDP { best: 0, best_gap: -gap_oe });
+
+    let mut score = -gap_oe;
+    while sa.len() < max_band && score >= -x_dropoff {
+        sa.push(GapDP { best: score, best_gap: score - gap_oe });
+        score -= gap_extend;
+    }
+    let mut b_size = sa.len();
+
+    let mut best_score = 0i32;
+    let mut best_q = 0usize;
+    let mut best_s = 0usize;
+    let mut first_b = 0usize;
+
+    for ai in 1..=m {
+        let a_idx = if reverse { m - ai } else { ai };
+        if a_idx >= query.len() { break; }
+        let a_letter = query[a_idx] as usize;
+
+        let mut sc = MININT;
+        let mut sgr = MININT;
+        let mut last_b = first_b;
+
+        for bi in first_b..b_size {
+            let b_idx = if reverse {
+                n.checked_sub(1 + bi).unwrap_or(usize::MAX)
+            } else { bi + 1 };
+            if b_idx >= subject.len() { break; }
+            let b_letter = subject[b_idx] as usize;
+
+            let sgc = sa[bi].best_gap;
+            let mat_score = if a_letter < AA_SIZE && b_letter < AA_SIZE {
+                matrix[a_letter][b_letter]
+            } else { -4 };
+            let next_sc = sa[bi].best + mat_score;
+
+            if sc < sgc { sc = sgc; }
+            if sc < sgr { sc = sgr; }
+
+            if best_score - sc > x_dropoff {
+                if first_b == bi { first_b += 1; }
+                sa[bi].best = MININT;
+            } else {
+                last_b = bi;
+                if sc > best_score {
+                    best_score = sc;
+                    best_q = ai;
+                    best_s = bi + 1;
+                }
+                sa[bi].best_gap = sc.max(sgc) - gap_oe;
+                sgr = sc.max(sgr) - gap_oe;
+                sa[bi].best = sc;
+                sc = next_sc;
+                sgr -= gap_extend;
+                continue;
+            }
+
+            sa[bi].best_gap = MININT;
+            sgr = MININT;
+            sa[bi].best = MININT;
+            sc = next_sc;
+        }
+
+        // Handle possible extension past current band
+        if sc >= best_score - x_dropoff && last_b + 1 < max_band {
+            let new_bi = last_b + 1;
+            if new_bi >= sa.len() {
+                sa.push(GapDP { best: MININT, best_gap: MININT });
+            }
+            if new_bi < b_size || b_size < max_band {
+                sa[new_bi].best = sc;
+                sa[new_bi].best_gap = sc - gap_oe;
+                if sc > best_score {
+                    best_score = sc;
+                    best_q = ai;
+                    best_s = new_bi + 1;
+                }
+                last_b = new_bi;
+            }
+        }
+
+        if last_b < first_b { break; }
+        b_size = last_b + 1;
+    }
+
+    (best_score, best_q, best_s)
+}
+
+/// Perform gapped protein alignment from a seed position using X-dropoff DP.
+///
+/// This is the protein equivalent of `blast_gapped_score_only` from traceback.rs,
+/// using a substitution matrix (e.g., BLOSUM62) instead of match/mismatch rewards.
+pub fn protein_gapped_align(
+    query: &[u8], subject: &[u8],
+    seed_q: usize, seed_s: usize,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    gap_open: i32, gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<ProteinGappedResult> {
+    let gap_oe = gap_open + gap_extend;
+
+    // Left extension
+    let (score_l, ext_q_l, ext_s_l) = protein_gapped_score_one_dir(
+        &query[..seed_q + 1], &subject[..seed_s + 1],
+        seed_q + 1, seed_s + 1,
+        matrix, gap_oe, gap_extend, x_dropoff, true,
+    );
+
+    // Right extension
+    let (score_r, ext_q_r, ext_s_r) = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
+        protein_gapped_score_one_dir(
+            &query[seed_q..], &subject[seed_s..],
+            query.len() - seed_q - 1, subject.len() - seed_s - 1,
+            matrix, gap_oe, gap_extend, x_dropoff, false,
+        )
+    } else { (0, 0, 0) };
+
+    let total_score = score_l + score_r;
+    if total_score <= 0 { return None; }
+
+    let q_start = seed_q + 1 - ext_q_l;
+    let q_end = seed_q + ext_q_r;
+    let s_start = seed_s + 1 - ext_s_l;
+    let s_end = seed_s + ext_s_r;
+
+    // Compute identity statistics from the aligned region
+    let alen = (q_end - q_start).max(s_end - s_start) as i32;
+    let mut ident = 0i32;
+    let mut mismatches = 0i32;
+    let match_len = (q_end - q_start).min(s_end - s_start);
+    for k in 0..match_len {
+        if q_start + k < query.len() && s_start + k < subject.len() {
+            if query[q_start + k] == subject[s_start + k] {
+                ident += 1;
+            } else {
+                mismatches += 1;
+            }
+        }
+    }
+    let gap_opens = ((q_end - q_start) as i32 - (s_end - s_start) as i32).unsigned_abs() as i32;
+
+    Some(ProteinGappedResult {
+        query_start: q_start,
+        query_end: q_end,
+        subject_start: s_start,
+        subject_end: s_end,
+        score: total_score,
+        num_ident: ident,
+        align_length: alen.max(match_len as i32),
+        mismatches,
+        gap_opens,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

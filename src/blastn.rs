@@ -1,6 +1,6 @@
 //! High-level blastn search API with builder pattern.
 
-use crate::search::{SearchHsp, blastn_gapped_search};
+use crate::search::{SearchHsp, blastn_gapped_search_nomask};
 use crate::stat::{KarlinBlk, ungapped_kbp_calc, nucl_gapped_kbp_lookup,
                    nucl_alpha_beta, compute_length_adjustment_exact, UngappedKbpContext};
 use crate::filter;
@@ -158,8 +158,8 @@ impl BlastnSearch {
 
         let qp = if self.strand != Strand::Minus { &query_plus[..] } else { &[] };
         let qm = if self.strand != Strand::Plus { &query_minus[..] } else { &[] };
-        let _qpn = if self.strand != Strand::Minus { &query_plus_nomask[..] } else { &[] };
-        let _qmn = if self.strand != Strand::Plus { &query_minus_nomask[..] } else { &[] };
+        let qpn = if self.strand != Strand::Minus { &query_plus_nomask[..] } else { &[] };
+        let qmn = if self.strand != Strand::Plus { &query_minus_nomask[..] } else { &[] };
 
         // Encode subject
         let subject: Vec<u8> = self.subject_raw.iter()
@@ -207,9 +207,9 @@ impl BlastnSearch {
 
         let x_dropoff = (self.xdrop_gap_final * std::f64::consts::LN_2 / gapped_kbp.lambda) as i32;
 
-        blastn_gapped_search(
-            qp, qm, &subject,
-            self.word_size, self.reward, self.penalty,
+        blastn_gapped_search_nomask(
+            qp, qm, qpn, qmn,
+            &subject, self.word_size, self.reward, self.penalty,
             self.gap_open, self.gap_extend, x_dropoff,
             &gapped_kbp, search_space, self.evalue,
         )

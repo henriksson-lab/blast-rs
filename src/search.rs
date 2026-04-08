@@ -378,35 +378,6 @@ fn extend_seed_packed(
     })
 }
 
-/// Choose lookup table width matching C engine's BlastChooseNaLookupTable.
-/// Returns lut_width (number of bases used as hash key).
-#[allow(dead_code)]
-fn choose_lut_width(word_size: usize, approx_entries: usize) -> usize {
-    match word_size {
-        0..=6 => word_size,
-        7 => if approx_entries < 250 { 6 } else { 7 },
-        8 => if approx_entries < 8500 { 7 } else { 8 },
-        9 => if approx_entries < 1250 { 7 }
-             else if approx_entries < 21000 { 8 }
-             else { 9 },
-        10 => if approx_entries < 1250 { 7 }
-              else if approx_entries < 8500 { 8 }
-              else if approx_entries < 18000 { 9 }
-              else { 10 },
-        11 => if approx_entries < 12000 { 8 }
-              else if approx_entries < 180000 { 10 }
-              else { 11 },
-        12 => if approx_entries < 8500 { 8 }
-              else if approx_entries < 18000 { 9 }
-              else if approx_entries < 60000 { 10 }
-              else if approx_entries < 900000 { 11 }
-              else { 12 },
-        _ => if approx_entries < 8500 { 8 }
-             else if approx_entries < 300000 { 11 }
-             else { 12 },
-    }
-}
-
 /// Hash the first n bases of a word for the lookup table.
 #[inline(always)]
 fn word_hash_n(word: &[u8], n: usize) -> u32 {

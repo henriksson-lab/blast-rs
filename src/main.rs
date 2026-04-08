@@ -375,6 +375,17 @@ fn main() {
 
     args.apply_task_defaults();
 
+    // Warn about unsupported options that are silently ignored
+    if args.gilist.is_some() { eprintln!("Warning: --gilist is not yet supported, ignoring"); }
+    if args.seqidlist.is_some() { eprintln!("Warning: --seqidlist is not yet supported, ignoring"); }
+    if args.negative_gilist.is_some() { eprintln!("Warning: --negative-gilist is not yet supported, ignoring"); }
+    if args.negative_seqidlist.is_some() { eprintln!("Warning: --negative-seqidlist is not yet supported, ignoring"); }
+    if args.taxidlist.is_some() { eprintln!("Warning: --taxidlist is not yet supported, ignoring"); }
+    if args.taxids.is_some() { eprintln!("Warning: --taxids is not yet supported, ignoring"); }
+    if args.negative_taxidlist.is_some() { eprintln!("Warning: --negative-taxidlist is not yet supported, ignoring"); }
+    if args.negative_taxids.is_some() { eprintln!("Warning: --negative-taxids is not yet supported, ignoring"); }
+    if args.remote { eprintln!("Warning: --remote is not supported, ignoring"); }
+
     if args.db.is_none() && args.subject.is_none() {
         eprintln!("Error: Either --db or --subject is required");
         std::process::exit(1);
@@ -400,7 +411,6 @@ fn main() {
 }
 
 fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::protein;
     use blast_rs::matrix::AA_SIZE;
 
     let query_file = File::open(&args.query)?;
@@ -409,7 +419,6 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err("No sequences found in query file".into());
     }
 
-    // For --subject mode
     if let Some(ref subject_path) = args.subject {
         let subject_file = File::open(subject_path)?;
         let subjects = parse_fasta(subject_file);
@@ -418,7 +427,6 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let mut matrix = [[(-2i32); AA_SIZE]; AA_SIZE];
         for i in 1..21 { matrix[i][i] = 5; }
 
-        // Protein KBP parameters
         let prot_kbp = blast_rs::stat::lookup_protein_params(args.gapopen(), args.gapextend())
             .map(|p| blast_rs::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
             .unwrap_or_else(blast_rs::stat::protein_ungapped_kbp);
@@ -430,6 +438,10 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let search_space = blast_rs::stat::compute_search_space(
             avg_q_len as i64, total_subj_len as i64, subjects.len() as i32, len_adj);
 
+        // Protein default word_size=3 (NCBI default), cap at 6 to keep table size manageable
+        let word_size = if args.word_size.is_none() { 3 } else { args.word_size().max(2).min(6) as usize };
+        let threshold = 11.0; // NCBI default for word_size=3
+
         let mut hits = Vec::new();
         for qrec in &queries {
             let query_aa: Vec<u8> = qrec.sequence.iter()
@@ -439,52 +451,36 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let subj_aa: Vec<u8> = srec.sequence.iter()
                     .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
 
-                // Simple word scan + extend
-                let word_size = args.word_size().max(3) as usize;
-                if query_aa.len() < word_size || subj_aa.len() < word_size { continue; }
-
-                for qi in 0..=(query_aa.len() - word_size) {
-                    for si in 0..=(subj_aa.len() - word_size) {
-                        // Check word match
-                        let mut word_score = 0;
-                        for k in 0..word_size {
-                            word_score += protein::score_aa(&matrix, query_aa[qi + k], subj_aa[si + k]);
-                        }
-                        if word_score < (word_size as i32 * 3) { continue; }
-
-                        // Extend
-                        if let Some((qs, qe, ss, se, score)) =
-                            protein::protein_ungapped_extend(&query_aa, &subj_aa, qi, si, &matrix, 30)
-                        {
-                            let alen = (qe - qs) as i32;
-                            let mut ident = 0i32;
-                            for k in 0..alen as usize {
-                                if query_aa[qs + k] == subj_aa[ss + k] { ident += 1; }
-                            }
-                            hits.push(TabularHit {
-                                query_id: qrec.id.clone(),
-                                subject_id: srec.id.clone(),
-                                pct_identity: if alen > 0 { 100.0 * ident as f64 / alen as f64 } else { 0.0 },
-                                align_len: alen,
-                                mismatches: alen - ident,
-                                gap_opens: 0,
-                                query_start: qs as i32 + 1,
-                                query_end: qe as i32,
-                                subject_start: ss as i32 + 1,
-                                subject_end: se as i32,
-                                evalue: prot_kbp.raw_to_evalue(score, search_space),
-                                bit_score: prot_kbp.raw_to_bit(score),
-                                query_len: query_aa.len() as i32,
-                                subject_len: subj_aa.len() as i32,
-                            });
-                        }
-                    }
+                let phits = blast_rs::protein_lookup::protein_gapped_scan(
+                    &query_aa, &subj_aa, &matrix, word_size, threshold,
+                    30, args.gapopen(), args.gapextend(), 50, 0,
+                );
+                for ph in phits {
+                    let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                    if evalue > args.evalue { continue; }
+                    hits.push(TabularHit {
+                        query_id: qrec.id.clone(),
+                        subject_id: srec.id.clone(),
+                        pct_identity: if ph.align_length > 0 {
+                            100.0 * ph.num_ident as f64 / ph.align_length as f64
+                        } else { 0.0 },
+                        align_len: ph.align_length,
+                        mismatches: ph.mismatches,
+                        gap_opens: ph.gap_opens,
+                        query_start: ph.query_start as i32 + 1,
+                        query_end: ph.query_end as i32,
+                        subject_start: ph.subject_start as i32 + 1,
+                        subject_end: ph.subject_end as i32,
+                        evalue,
+                        bit_score: prot_kbp.raw_to_bit(ph.score),
+                        query_len: query_aa.len() as i32,
+                        subject_len: subj_aa.len() as i32,
+                    });
                 }
             }
         }
 
         hits.sort_by(|a, b| b.bit_score.partial_cmp(&a.bit_score).unwrap_or(std::cmp::Ordering::Equal));
-        // Dedup overlapping
         let mut seen = std::collections::HashSet::new();
         hits.retain(|h| seen.insert((h.query_start, h.subject_start)));
 
@@ -503,7 +499,6 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::protein;
     use blast_rs::matrix::AA_SIZE;
     use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
@@ -537,7 +532,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         // Translate in 6 frames
         let frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
 
-        for (_frame, protein_query) in &frames {
+        for (frame, protein_query) in &frames {
             if protein_query.len() < 3 { continue; }
 
             let search_space = blast_rs::stat::compute_search_space(
@@ -547,46 +542,34 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let subj_aa: Vec<u8> = srec.sequence.iter()
                     .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
 
-                let word_size = 3usize;
-                if protein_query.len() < word_size || subj_aa.len() < word_size { continue; }
+                let phits = blast_rs::protein_lookup::protein_gapped_scan(
+                    &protein_query, &subj_aa, &matrix, 3, 11.0,
+                    30, args.gapopen(), args.gapextend(), 50, 0,
+                );
+                let nuc_len = nuc_seq.len() as i32;
 
-                for qi in 0..=(protein_query.len() - word_size) {
-                    for si in 0..=(subj_aa.len() - word_size) {
-                        let mut ws = 0;
-                        for k in 0..word_size {
-                            ws += protein::score_aa(&matrix, protein_query[qi + k], subj_aa[si + k]);
-                        }
-                        if ws < 11 { continue; }
+                for ph in phits {
+                    let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                    if evalue > args.evalue { continue; }
 
-                        if let Some((qs, qe, ss, se, score)) =
-                            protein::protein_ungapped_extend(&protein_query, &subj_aa, qi, si, &matrix, 30)
-                        {
-                            let alen = (qe - qs) as i32;
-                            let mut ident = 0i32;
-                            for k in 0..alen as usize {
-                                if protein_query[qs + k] == subj_aa[ss + k] { ident += 1; }
-                            }
-                            let evalue = prot_kbp.raw_to_evalue(score, search_space);
-                            if evalue > args.evalue { continue; }
+                    let (q_nuc_start, q_nuc_end) = blast_rs::util::protein_to_nuc_coords(
+                        ph.query_start as i32, ph.query_end as i32, *frame, nuc_len);
 
-                            all_hits.push(TabularHit {
-                                query_id: qrec.id.clone(),
-                                subject_id: srec.id.clone(),
-                                pct_identity: if alen > 0 { 100.0 * ident as f64 / alen as f64 } else { 0.0 },
-                                align_len: alen,
-                                mismatches: alen - ident,
-                                gap_opens: 0,
-                                query_start: qs as i32 + 1,
-                                query_end: qe as i32,
-                                subject_start: ss as i32 + 1,
-                                subject_end: se as i32,
-                                evalue,
-                                bit_score: prot_kbp.raw_to_bit(score),
-                                query_len: protein_query.len() as i32,
-                                subject_len: subj_aa.len() as i32,
-                            });
-                        }
-                    }
+                    all_hits.push(TabularHit {
+                        query_id: qrec.id.clone(),
+                        subject_id: srec.id.clone(),
+                        pct_identity: if ph.align_length > 0 {
+                            100.0 * ph.num_ident as f64 / ph.align_length as f64
+                        } else { 0.0 },
+                        align_len: ph.align_length, mismatches: ph.mismatches, gap_opens: ph.gap_opens,
+                        query_start: q_nuc_start, query_end: q_nuc_end,
+                        subject_start: ph.subject_start as i32 + 1,
+                        subject_end: ph.subject_end as i32,
+                        evalue,
+                        bit_score: prot_kbp.raw_to_bit(ph.score),
+                        query_len: nuc_len,
+                        subject_len: subj_aa.len() as i32,
+                    });
                 }
             }
         }
@@ -608,7 +591,6 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::protein;
     use blast_rs::matrix::AA_SIZE;
     use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
@@ -635,39 +617,35 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             }).collect();
             let frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
 
-            for (_frame, subj_protein) in &frames {
+            for (frame, subj_protein) in &frames {
                 if subj_protein.len() < 3 || query_aa.len() < 3 { continue; }
                 let search_space = (query_aa.len() * subj_protein.len()) as f64;
+                let subj_nuc_len = nuc_seq.len() as i32;
 
-                for qi in 0..=(query_aa.len() - 3) {
-                    for si in 0..=(subj_protein.len() - 3) {
-                        let mut ws = 0;
-                        for k in 0..3 {
-                            ws += protein::score_aa(&matrix, query_aa[qi+k], subj_protein[si+k]);
-                        }
-                        if ws < 11 { continue; }
-                        if let Some((qs,qe,ss,se,score)) =
-                            protein::protein_ungapped_extend(&query_aa, &subj_protein, qi, si, &matrix, 30)
-                        {
-                            let alen = (qe-qs) as i32;
-                            let mut ident = 0;
-                            for k in 0..alen as usize {
-                                if query_aa[qs+k] == subj_protein[ss+k] { ident += 1; }
-                            }
-                            let evalue = prot_kbp.raw_to_evalue(score, search_space);
-                            if evalue > args.evalue { continue; }
-                            all_hits.push(TabularHit {
-                                query_id: qrec.id.clone(), subject_id: srec.id.clone(),
-                                pct_identity: if alen>0 {100.0*ident as f64/alen as f64} else {0.0},
-                                align_len: alen, mismatches: alen-ident, gap_opens: 0,
-                                query_start: qs as i32+1, query_end: qe as i32,
-                                subject_start: ss as i32+1, subject_end: se as i32,
-                                evalue, bit_score: prot_kbp.raw_to_bit(score),
-                                query_len: query_aa.len() as i32,
-                                subject_len: subj_protein.len() as i32,
-                            });
-                        }
-                    }
+                let phits = blast_rs::protein_lookup::protein_gapped_scan(
+                    &query_aa, &subj_protein, &matrix, 3, 11.0,
+                    30, args.gapopen(), args.gapextend(), 50, 0,
+                );
+
+                for ph in phits {
+                    let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                    if evalue > args.evalue { continue; }
+
+                    let (s_nuc_start, s_nuc_end) = blast_rs::util::protein_to_nuc_coords(
+                        ph.subject_start as i32, ph.subject_end as i32, *frame, subj_nuc_len);
+
+                    all_hits.push(TabularHit {
+                        query_id: qrec.id.clone(), subject_id: srec.id.clone(),
+                        pct_identity: if ph.align_length > 0 {
+                            100.0 * ph.num_ident as f64 / ph.align_length as f64
+                        } else { 0.0 },
+                        align_len: ph.align_length, mismatches: ph.mismatches, gap_opens: ph.gap_opens,
+                        query_start: ph.query_start as i32 + 1, query_end: ph.query_end as i32,
+                        subject_start: s_nuc_start, subject_end: s_nuc_end,
+                        evalue, bit_score: prot_kbp.raw_to_bit(ph.score),
+                        query_len: query_aa.len() as i32,
+                        subject_len: subj_nuc_len,
+                    });
                 }
             }
         }
@@ -774,7 +752,6 @@ fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::protein;
     use blast_rs::matrix::AA_SIZE;
     use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
@@ -808,32 +785,25 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                     if q_prot.len() < 3 || s_prot.len() < 3 { continue; }
                     let search_space = (q_prot.len() * s_prot.len()) as f64;
 
-                    for qi in 0..=(q_prot.len() - 3) {
-                        for si in 0..=(s_prot.len() - 3) {
-                            let mut ws = 0;
-                            for k in 0..3 { ws += protein::score_aa(&matrix, q_prot[qi+k], s_prot[si+k]); }
-                            if ws < 13 { continue; }
-                            if let Some((qs,qe,ss,se,score)) =
-                                protein::protein_ungapped_extend(q_prot, s_prot, qi, si, &matrix, 25)
-                            {
-                                let alen = (qe-qs) as i32;
-                                let mut ident = 0;
-                                for k in 0..alen as usize {
-                                    if q_prot[qs+k] == s_prot[ss+k] { ident += 1; }
-                                }
-                                let evalue = prot_kbp.raw_to_evalue(score, search_space);
-                                if evalue > args.evalue { continue; }
-                                all_hits.push(TabularHit {
-                                    query_id: qrec.id.clone(), subject_id: srec.id.clone(),
-                                    pct_identity: if alen>0 {100.0*ident as f64/alen as f64} else {0.0},
-                                    align_len: alen, mismatches: alen-ident, gap_opens: 0,
-                                    query_start: qs as i32+1, query_end: qe as i32,
-                                    subject_start: ss as i32+1, subject_end: se as i32,
-                                    evalue, bit_score: prot_kbp.raw_to_bit(score),
-                                    query_len: q_prot.len() as i32, subject_len: s_prot.len() as i32,
-                                });
-                            }
-                        }
+                    let phits = blast_rs::protein_lookup::protein_gapped_scan(
+                        q_prot, s_prot, &matrix, 3, 13.0,
+                        25, args.gapopen(), args.gapextend(), 50, 0,
+                    );
+
+                    for ph in phits {
+                        let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                        if evalue > args.evalue { continue; }
+                        all_hits.push(TabularHit {
+                            query_id: qrec.id.clone(), subject_id: srec.id.clone(),
+                            pct_identity: if ph.align_length > 0 {
+                                100.0 * ph.num_ident as f64 / ph.align_length as f64
+                            } else { 0.0 },
+                            align_len: ph.align_length, mismatches: ph.mismatches, gap_opens: ph.gap_opens,
+                            query_start: ph.query_start as i32 + 1, query_end: ph.query_end as i32,
+                            subject_start: ph.subject_start as i32 + 1, subject_end: ph.subject_end as i32,
+                            evalue, bit_score: prot_kbp.raw_to_bit(ph.score),
+                            query_len: q_prot.len() as i32, subject_len: s_prot.len() as i32,
+                        });
                     }
                 }
             }
@@ -1197,63 +1167,6 @@ fn run_blastn_rust(
     Ok(())
 }
 
-/// NCBI4NA to BLASTNA conversion for ambiguity codes.
-#[allow(dead_code)]
-const NCBI4NA_TO_BLASTNA: [u8; 16] = [
-    15, 0, 1, 6, 2, 4, 9, 13, 3, 8, 5, 12, 7, 11, 10, 14,
-];
-
-#[allow(dead_code)]
-fn decode_subject(db: &BlastDb, oid: i32) -> Vec<u8> {
-    let packed = db.get_sequence(oid as u32);
-    let seq_len = db.get_seq_len(oid as u32) as usize;
-    let mut decoded = Vec::with_capacity(seq_len);
-    let full_bytes = seq_len / 4;
-    let remainder = seq_len % 4;
-    for i in 0..full_bytes {
-        let b = packed[i];
-        decoded.push((b >> 6) & 3);
-        decoded.push((b >> 4) & 3);
-        decoded.push((b >> 2) & 3);
-        decoded.push(b & 3);
-    }
-    if remainder > 0 && full_bytes < packed.len() {
-        let b = packed[full_bytes];
-        for j in 0..remainder {
-            decoded.push((b >> (6 - 2 * j)) & 3);
-        }
-    }
-
-    // Apply ambiguity corrections
-    if let Some(amb) = db.get_ambiguity_data(oid as u32) {
-        if amb.len() >= 4 {
-            let header = u32::from_be_bytes([amb[0], amb[1], amb[2], amb[3]]);
-            let new_format = (header & 0x80000000) != 0;
-            let count = (header & 0x7FFFFFFF) as usize;
-            if !new_format {
-                for i in 0..count {
-                    let off = 4 + i * 4;
-                    if off + 4 > amb.len() { break; }
-                    let word = u32::from_be_bytes([amb[off], amb[off+1], amb[off+2], amb[off+3]]);
-                    let value = ((word >> 28) & 0xF) as u8;
-                    let length = ((word >> 24) & 0xF) as usize + 1;
-                    let position = (word & 0xFFFFFF) as usize;
-                    let blastna_val = NCBI4NA_TO_BLASTNA[value as usize];
-                    for j in 0..length {
-                        if position + j < decoded.len() {
-                            decoded[position + j] = blastna_val;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    decoded
-}
-
-/// Compute alignment length, num_ident, and gap_opens from a GapEditScript.
-
 /// Search query against subject FASTA sequences (no database needed).
 fn run_blastn_subject(
     args: &BlastnArgs,
@@ -1359,25 +1272,6 @@ fn apply_filters(hits: &mut Vec<TabularHit>, args: &BlastnArgs, query_len: i32) 
             *c <= max
         });
     }
-}
-
-/// Check if a sequence is low-complexity (simple repeats that crash the C engine).
-#[allow(dead_code)]
-fn is_low_complexity(seq: &[u8]) -> bool {
-    if seq.len() < 20 { return false; }
-    // Check if the sequence is a short repeat
-    for period in 1..=8 {
-        if seq.len() < period * 3 { continue; }
-        let mut is_repeat = true;
-        for i in period..seq.len() {
-            if seq[i].to_ascii_uppercase() != seq[i % period].to_ascii_uppercase() {
-                is_repeat = false;
-                break;
-            }
-        }
-        if is_repeat { return true; }
-    }
-    false
 }
 
 /// Complement a BLASTNA-encoded nucleotide.
