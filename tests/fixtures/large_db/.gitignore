@@ -1,0 +1,10 @@
+# Large test databases - download with make_test_dbs.sh
+*.fna
+*.nin
+*.nsq
+*.nhr
+*.ndb
+*.njs
+*.not
+*.ntf
+*.nto
