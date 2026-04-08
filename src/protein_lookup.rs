@@ -9,7 +9,7 @@
 //! and ungapped extensions triggered.
 
 use crate::matrix::AA_SIZE;
-use crate::protein::{protein_ungapped_extend, protein_gapped_align};
+use crate::protein::{protein_ungapped_extend, protein_gapped_align, ncbistdaa_to_char};
 
 /// Result of a protein hit after extension.
 #[derive(Debug, Clone)]
@@ -23,6 +23,8 @@ pub struct ProteinHit {
     pub align_length: i32,
     pub mismatches: i32,
     pub gap_opens: i32,
+    pub qseq: Option<String>,
+    pub sseq: Option<String>,
 }
 
 /// Protein word lookup table.
@@ -237,6 +239,8 @@ pub fn protein_scan(
                     if qs + k < query.len() && ss + k < subject.len()
                         && query[qs + k] == subject[ss + k] { ident += 1; }
                 }
+                let qseq: String = query[qs..qe].iter().map(|&b| ncbistdaa_to_char(b)).collect();
+                let sseq: String = subject[ss..se].iter().map(|&b| ncbistdaa_to_char(b)).collect();
                 hits.push(ProteinHit {
                     query_start: qs,
                     query_end: qe,
@@ -247,6 +251,8 @@ pub fn protein_scan(
                     align_length: alen,
                     mismatches: alen - ident,
                     gap_opens: 0,
+                    qseq: Some(qseq),
+                    sseq: Some(sseq),
                 });
             }
         }
@@ -297,6 +303,11 @@ pub fn protein_gapped_scan(
             query, subject, seed_q, seed_s,
             matrix, gap_open, gap_extend, gap_x_dropoff,
         ) {
+            let q_slice = &query[gr.query_start..gr.query_end];
+            let s_slice = &subject[gr.subject_start..gr.subject_end];
+            let (qseq, sseq) = gr.edit_script.render_alignment(
+                q_slice, s_slice, ncbistdaa_to_char,
+            );
             gapped_hits.push(ProteinHit {
                 query_start: gr.query_start,
                 query_end: gr.query_end,
@@ -307,6 +318,8 @@ pub fn protein_gapped_scan(
                 align_length: gr.align_length,
                 mismatches: gr.mismatches,
                 gap_opens: gr.gap_opens,
+                qseq: Some(qseq),
+                sseq: Some(sseq),
             });
         }
     }

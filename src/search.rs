@@ -3,6 +3,7 @@
 
 
 use crate::itree::{IntervalTree, Interval};
+use crate::sequence::blastna_to_iupac;
 use crate::stat::KarlinBlk;
 use crate::traceback::{blast_gapped_align, blast_gapped_score_only};
 
@@ -22,6 +23,8 @@ pub struct SearchHsp {
     pub mismatches: i32,
     pub gap_opens: i32,
     pub context: i32, // 0=plus, 1=minus
+    pub qseq: Option<String>,
+    pub sseq: Option<String>,
 }
 
 /// Result of searching one query against one subject.
@@ -355,11 +358,16 @@ fn extend_seed_packed(
     let s_end = (s_seed + best_right) as i32;
     let align_len = q_end - q_start;
 
-    // Count identities
+    // Count identities and build aligned sequences
     let mut num_ident = 0i32;
+    let mut qseq_str = String::with_capacity(align_len as usize);
+    let mut sseq_str = String::with_capacity(align_len as usize);
     for i in 0..align_len as usize {
+        let qb = query[q_start as usize + i];
         let sb = packed_base_at(subject_packed, s_start as usize + i);
-        if query[q_start as usize + i] == sb { num_ident += 1; }
+        if qb == sb { num_ident += 1; }
+        qseq_str.push(blastna_to_iupac(qb));
+        sseq_str.push(blastna_to_iupac(sb));
     }
 
     Some(SearchHsp {
@@ -375,6 +383,8 @@ fn extend_seed_packed(
         mismatches: align_len - num_ident,
         gap_opens: 0,
         context,
+        qseq: Some(qseq_str),
+        sseq: Some(sseq_str),
     })
 }
 
@@ -464,12 +474,16 @@ fn extend_seed(
     let s_end = (s_seed + best_right) as i32;
     let align_len = q_end - q_start;
 
-    // Count identities
+    // Count identities and build aligned sequences
     let mut num_ident = 0;
+    let mut qseq_str = String::with_capacity(align_len as usize);
+    let mut sseq_str = String::with_capacity(align_len as usize);
     for i in 0..align_len as usize {
-        if query[q_start as usize + i] == subject[s_start as usize + i] {
-            num_ident += 1;
-        }
+        let qb = query[q_start as usize + i];
+        let sb = subject[s_start as usize + i];
+        if qb == sb { num_ident += 1; }
+        qseq_str.push(blastna_to_iupac(qb));
+        sseq_str.push(blastna_to_iupac(sb));
     }
 
     Some(SearchHsp {
@@ -485,6 +499,8 @@ fn extend_seed(
         mismatches: align_len - num_ident,
         gap_opens: 0,
         context,
+        qseq: Some(qseq_str),
+        sseq: Some(sseq_str),
     })
 }
 
@@ -581,9 +597,13 @@ pub fn blastn_gapped_search_nomask(
             let evalue = kbp.raw_to_evalue(tb.score, search_space);
             if evalue > evalue_threshold { continue; }
 
+            let q_slice = &query[tb.query_start..tb.query_end];
+            let s_slice = &subject[tb.subject_start..tb.subject_end];
             let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(
-                &query[tb.query_start..tb.query_end],
-                &subject[tb.subject_start..tb.subject_end],
+                q_slice, s_slice,
+            );
+            let (qseq, sseq) = tb.edit_script.render_alignment(
+                q_slice, s_slice, blastna_to_iupac,
             );
 
             hsps.push(SearchHsp {
@@ -599,6 +619,8 @@ pub fn blastn_gapped_search_nomask(
                 mismatches: (align_len - num_ident - gap_opens).max(0),
                 gap_opens,
                 context: seed.context,
+                qseq: Some(qseq),
+                sseq: Some(sseq),
             });
         } else {
             // Traceback failed, use ungapped seed
@@ -675,9 +697,13 @@ pub fn blastn_gapped_search_packed(
             let evalue = kbp.raw_to_evalue(tb.score, search_space);
             if evalue > evalue_threshold { continue; }
 
+            let q_slice = &query[tb.query_start..tb.query_end];
+            let s_slice = &subject_decoded[tb.subject_start..tb.subject_end];
             let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(
-                &query[tb.query_start..tb.query_end],
-                &subject_decoded[tb.subject_start..tb.subject_end],
+                q_slice, s_slice,
+            );
+            let (qseq, sseq) = tb.edit_script.render_alignment(
+                q_slice, s_slice, blastna_to_iupac,
             );
 
             hsps.push(SearchHsp {
@@ -693,6 +719,8 @@ pub fn blastn_gapped_search_packed(
                 mismatches: (align_len - num_ident - gap_opens).max(0),
                 gap_opens,
                 context: seed.context,
+                qseq: Some(qseq),
+                sseq: Some(sseq),
             });
         } else {
             hsps.push((*seed).clone());

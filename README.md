@@ -15,8 +15,8 @@ Based on [NCBI BLAST+ 2.17.0](https://ftp.ncbi.nlm.nih.gov/blast/executables/bla
 - Protein search with neighborhood-word lookup table (matching NCBI's algorithm)
 - PSI-BLAST with Henikoff position-based weighting and proper PSSM computation
 - Six-frame translation with correct nucleotide coordinate mapping
-- Reads standard BLAST database files (v4/v5 `.nin/.nsq/.nhr`)
-- Custom tabular columns: `qlen`, `slen`, `saccver`, `qcovs`, `qcovhsp`, and more
+- Reads standard BLAST database files (v4/v5 `.nin/.nsq/.nhr`) with taxonomy support (`.nto`, `taxdb.bti`/`taxdb.btd`)
+- **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
 
@@ -82,7 +82,7 @@ blast-cli blastn --query query.fa --db mydb --outfmt 0
 
 # Custom tabular columns
 blast-cli blastn --query query.fa --db mydb \
-    --outfmt "6 qseqid qlen saccver slen sstart send bitscore pident"
+    --outfmt "6 qseqid sseqid pident qseq sseq staxid ssciname"
 ```
 
 ### All options
@@ -215,7 +215,7 @@ Single crate `blast-rs` with modules:
 | `blast_rs::pssm` | PSI-BLAST PSSM computation (Henikoff weighting, pseudocounts) |
 | `blast_rs::stat` | Karlin-Altschul statistics, KBP computation |
 | `blast_rs::traceback` | Gapped alignment with traceback |
-| `blast_rs::db` | BLAST database reader/writer (v4/v5 `.nin/.nsq/.nhr`) |
+| `blast_rs::db` | BLAST database reader/writer (v4/v5), taxonomy ID/name lookups (`.nto`, `taxdb`) |
 | `blast_rs::input` | FASTA parser (via noodles-fasta) with BLASTNA/NCBIstdaa encoding |
 | `blast_rs::format` | Output formatting (tabular, pairwise, XML, SAM) |
 | `blast_rs::filter` | DUST low-complexity masking |
@@ -278,7 +278,7 @@ This is a faithful port of the NCBI BLAST+ C engine algorithms:
 
 ## Compatibility
 
-- Reads BLAST databases created by NCBI `makeblastdb` (v4 and v5 format)
+- Reads BLAST databases created by NCBI `makeblastdb` (v4 and v5 format), including taxonomy (`.nto` taxid files, `taxdb.bti`/`taxdb.btd` name database)
 - Output matches NCBI BLAST+ 2.17.0 byte-for-byte for blastn tabular format (`-outfmt 6`)
 - Supports scoring parameters: reward/penalty 1/-1 through 5/-4, gap costs 0/0 through 12/8
 - Protein programs (blastp/blastx/tblastn/tblastx) use lookup-table seeding with gapped X-dropoff DP extension
@@ -287,7 +287,6 @@ This is a faithful port of the NCBI BLAST+ C engine algorithms:
 
 The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (~140MB source). The following are **not** yet included in blast-rs:
 
-- **Taxonomy lookups** -- `staxid`, `ssciname`, `sskingdom` output columns require `.ndb`/`.ntf`/`.nto` taxonomy files; not yet supported
 - **Composition-based statistics** -- `composition_adjustment/` used by blastp/blastx for compositional score correction
 - **IgBLAST** -- immunoglobulin/T-cell receptor analysis (`igblast/`)
 - **Remote BLAST** -- network search against NCBI servers (`connect/`)

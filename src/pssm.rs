@@ -752,6 +752,20 @@ fn compute_information_content(
 /// Run one iteration of PSI-BLAST.
 /// Takes a query, a set of subject sequences, and the current PSSM.
 /// Returns hits that pass the inclusion threshold.
+/// Result of a PSI-BLAST hit.
+#[derive(Debug, Clone)]
+pub struct PsiBlastHit {
+    pub subject_id: String,
+    pub score: i32,
+    pub evalue: f64,
+    /// Start offset in subject where the best alignment begins.
+    pub subject_start: usize,
+    /// Length of the aligned region.
+    pub align_len: usize,
+    /// Subject sequence length.
+    pub subject_len: usize,
+}
+
 pub fn psi_blast_iteration(
     pssm: &Pssm,
     subjects: &[(String, Vec<u8>)], // (id, NCBIstdaa sequence)
@@ -759,13 +773,14 @@ pub fn psi_blast_iteration(
     search_space: f64,
     kbp_lambda: f64,
     kbp_k: f64,
-) -> Vec<(String, i32, f64)> { // (subject_id, score, evalue)
+) -> Vec<PsiBlastHit> {
     let mut results = Vec::new();
 
     for (subj_id, subj_seq) in subjects {
         if subj_seq.len() < 3 || pssm.length < 3 { continue; }
 
         let mut best_score = 0i32;
+        let mut best_start = 0usize;
         // Simple scan: try each subject position
         for si in 0..=(subj_seq.len().saturating_sub(pssm.length)) {
             let mut score = 0i32;
@@ -773,18 +788,29 @@ pub fn psi_blast_iteration(
             for k in 0..len {
                 score += pssm.score_at(k, subj_seq[si + k]);
             }
-            best_score = best_score.max(score);
+            if score > best_score {
+                best_score = score;
+                best_start = si;
+            }
         }
 
         if best_score > 0 {
             let evalue = kbp_k * search_space * (-kbp_lambda * best_score as f64).exp();
             if evalue <= inclusion_evalue {
-                results.push((subj_id.clone(), best_score, evalue));
+                let align_len = pssm.length.min(subj_seq.len() - best_start);
+                results.push(PsiBlastHit {
+                    subject_id: subj_id.clone(),
+                    score: best_score,
+                    evalue,
+                    subject_start: best_start,
+                    align_len,
+                    subject_len: subj_seq.len(),
+                });
             }
         }
     }
 
-    results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
     results
 }
 
@@ -822,7 +848,9 @@ mod tests {
 
         let results = psi_blast_iteration(&pssm, &subjects, 1.0, 1000.0, 0.3176, 0.134);
         assert!(!results.is_empty(), "Should find matching subject");
-        assert_eq!(results[0].0, "match");
+        assert_eq!(results[0].subject_id, "match");
+        assert_eq!(results[0].subject_start, 0);
+        assert_eq!(results[0].align_len, 5);
     }
 
     #[test]

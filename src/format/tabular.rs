@@ -20,6 +20,16 @@ pub struct TabularHit {
     pub bit_score: f64,
     pub query_len: i32,
     pub subject_len: i32,
+    pub raw_score: i32,
+    pub qseq: Option<String>,
+    pub sseq: Option<String>,
+    pub qframe: i32,
+    pub sframe: i32,
+    pub subject_taxids: Vec<i32>,
+    pub subject_sci_name: String,
+    pub subject_common_name: String,
+    pub subject_blast_name: String,
+    pub subject_kingdom: String,
 }
 
 /// Format an e-value matching BLAST tabular output (-outfmt 6).
@@ -93,7 +103,7 @@ pub fn get_field(hit: &TabularHit, column: &str) -> String {
         "send" => hit.subject_end.to_string(),
         "evalue" => format_evalue(hit.evalue),
         "bitscore" => format_bitscore(hit.bit_score),
-        "score" => format!("{:.0}", hit.bit_score),
+        "score" => hit.raw_score.to_string(),
         "nident" => (hit.align_len - hit.mismatches).to_string(),
         "gaps" => hit.gap_opens.to_string(),
         "qlen" => hit.query_len.to_string(),
@@ -110,14 +120,22 @@ pub fn get_field(hit: &TabularHit, column: &str) -> String {
                 format!("{:.0}", cov.min(100.0))
             } else { "0".to_string() }
         }
-        // Taxonomy fields — requires .ndb taxonomy data (not yet supported)
-        "staxid" | "staxids" | "ssciname" | "sscinames"
-        | "scomname" | "scomnames" | "sskingdom" | "sskingdoms"
-        | "sblastname" | "sblastnames" => "N/A".to_string(),
+        // Taxonomy ID fields — from .nto database file
+        "staxid" => hit.subject_taxids.first().map(|t| t.to_string()).unwrap_or_else(|| "N/A".to_string()),
+        "staxids" => if hit.subject_taxids.is_empty() { "N/A".to_string() }
+            else { hit.subject_taxids.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(";") },
+        // Taxonomy name fields — from taxdb.bti/taxdb.btd
+        "ssciname" | "sscinames" => if hit.subject_sci_name.is_empty() { "N/A".to_string() } else { hit.subject_sci_name.clone() },
+        "scomname" | "scomnames" => if hit.subject_common_name.is_empty() { "N/A".to_string() } else { hit.subject_common_name.clone() },
+        "sblastname" | "sblastnames" => if hit.subject_blast_name.is_empty() { "N/A".to_string() } else { hit.subject_blast_name.clone() },
+        "sskingdom" | "sskingdoms" => if hit.subject_kingdom.is_empty() { "N/A".to_string() } else { hit.subject_kingdom.clone() },
         // Sequence hash
-        "qseq" | "sseq" => "N/A".to_string(),
+        "qseq" => hit.qseq.as_deref().unwrap_or("N/A").to_string(),
+        "sseq" => hit.sseq.as_deref().unwrap_or("N/A").to_string(),
         // Frame fields
-        "qframe" | "sframe" | "frames" => "0".to_string(),
+        "qframe" => hit.qframe.to_string(),
+        "sframe" => hit.sframe.to_string(),
+        "frames" => format!("{}/{}", hit.qframe, hit.sframe),
         _ => "N/A".to_string(),
     }
 }
@@ -158,4 +176,115 @@ pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io:
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_hit(qseq: Option<&str>, sseq: Option<&str>) -> TabularHit {
+        TabularHit {
+            query_id: "q1".to_string(),
+            subject_id: "s1".to_string(),
+            pct_identity: 95.0,
+            align_len: 50,
+            mismatches: 2,
+            gap_opens: 1,
+            query_start: 1,
+            query_end: 50,
+            subject_start: 10,
+            subject_end: 59,
+            evalue: 1e-20,
+            bit_score: 80.0,
+            query_len: 100,
+            subject_len: 200,
+            raw_score: 120,
+            qseq: qseq.map(|s| s.to_string()),
+            sseq: sseq.map(|s| s.to_string()),
+            qframe: 1,
+            sframe: 0,
+            subject_taxids: vec![9606],
+            subject_sci_name: "Homo sapiens".to_string(),
+            subject_common_name: "human".to_string(),
+            subject_blast_name: "primates".to_string(),
+            subject_kingdom: "E".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_qseq_sseq_returned_when_present() {
+        let hit = make_hit(Some("ACGTACGT"), Some("ACGT-CGT"));
+        assert_eq!(get_field(&hit, "qseq"), "ACGTACGT");
+        assert_eq!(get_field(&hit, "sseq"), "ACGT-CGT");
+    }
+
+    #[test]
+    fn test_qseq_sseq_na_when_none() {
+        let hit = make_hit(None, None);
+        assert_eq!(get_field(&hit, "qseq"), "N/A");
+        assert_eq!(get_field(&hit, "sseq"), "N/A");
+    }
+
+    #[test]
+    fn test_custom_format_includes_aligned_seqs() {
+        let hit = make_hit(Some("AAACCC"), Some("AAA-CC"));
+        let hits = vec![hit];
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "qseqid qseq sseq").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert_eq!(output.trim(), "q1\tAAACCC\tAAA-CC");
+    }
+
+    #[test]
+    fn test_raw_score_field() {
+        let hit = make_hit(None, None);
+        assert_eq!(get_field(&hit, "score"), "120");
+    }
+
+    #[test]
+    fn test_frame_fields() {
+        let hit = make_hit(None, None);
+        assert_eq!(get_field(&hit, "qframe"), "1");
+        assert_eq!(get_field(&hit, "sframe"), "0");
+        assert_eq!(get_field(&hit, "frames"), "1/0");
+    }
+
+    #[test]
+    fn test_taxid_fields() {
+        let hit = make_hit(None, None);
+        assert_eq!(get_field(&hit, "staxid"), "9606");
+        assert_eq!(get_field(&hit, "staxids"), "9606");
+    }
+
+    #[test]
+    fn test_taxid_multiple() {
+        let mut hit = make_hit(None, None);
+        hit.subject_taxids = vec![9606, 9605];
+        assert_eq!(get_field(&hit, "staxid"), "9606");
+        assert_eq!(get_field(&hit, "staxids"), "9606;9605");
+    }
+
+    #[test]
+    fn test_tax_name_fields() {
+        let hit = make_hit(None, None);
+        assert_eq!(get_field(&hit, "ssciname"), "Homo sapiens");
+        assert_eq!(get_field(&hit, "scomname"), "human");
+        assert_eq!(get_field(&hit, "sblastname"), "primates");
+        assert_eq!(get_field(&hit, "sskingdom"), "E");
+    }
+
+    #[test]
+    fn test_tax_name_empty_fallback() {
+        let mut hit = make_hit(None, None);
+        hit.subject_sci_name = String::new();
+        assert_eq!(get_field(&hit, "ssciname"), "N/A");
+    }
+
+    #[test]
+    fn test_taxid_empty() {
+        let mut hit = make_hit(None, None);
+        hit.subject_taxids = vec![];
+        assert_eq!(get_field(&hit, "staxid"), "N/A");
+        assert_eq!(get_field(&hit, "staxids"), "N/A");
+    }
 }

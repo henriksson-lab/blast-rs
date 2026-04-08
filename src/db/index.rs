@@ -59,6 +59,145 @@ pub struct BlastDb {
     seq_mmap: Mmap,
     /// Memory-mapped header data.
     hdr_mmap: Mmap,
+    /// OID-to-taxid lookup (from .nto file, v5 databases).
+    tax_lookup: Option<TaxIdLookup>,
+}
+
+/// OID-to-taxid lookup table parsed from a .nto file.
+struct TaxIdLookup {
+    /// Index: (num_oids+1) u64 entries — cumulative end offsets into `taxids`.
+    index: Vec<u64>,
+    /// Flat array of i32 taxids, indexed by the `index` array.
+    taxids: Vec<i32>,
+}
+
+impl TaxIdLookup {
+    /// Parse a .nto file. Format (native-endian / little-endian on x86):
+    ///   u64         num_oids
+    ///   u64[n+1]    index (cumulative end offsets into taxid data)
+    ///   i32[]       taxid data
+    fn from_file(path: &Path) -> io::Result<Self> {
+        let data = std::fs::read(path)?;
+        if data.len() < 8 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "nto file too small"));
+        }
+        let mut cur = Cursor::new(&data);
+        let num_oids = cur.read_u64::<LittleEndian>()? as usize;
+
+        // Need (num_oids+1) u64 index entries
+        let index_bytes = (num_oids + 1) * 8;
+        if data.len() < 8 + index_bytes {
+            // File too small for full index — no taxonomy data
+            return Ok(TaxIdLookup { index: vec![0; num_oids + 1], taxids: Vec::new() });
+        }
+
+        let mut index = Vec::with_capacity(num_oids + 1);
+        for _ in 0..=num_oids {
+            index.push(cur.read_u64::<LittleEndian>()?);
+        }
+
+        // Remaining bytes are i32 taxids
+        let data_offset = 8 + index_bytes;
+        let remaining = data.len() - data_offset;
+        let num_taxids = remaining / 4;
+        let mut taxids = Vec::with_capacity(num_taxids);
+        for _ in 0..num_taxids {
+            taxids.push(cur.read_i32::<LittleEndian>()?);
+        }
+
+        Ok(TaxIdLookup { index, taxids })
+    }
+
+    /// Get the taxid(s) for a given OID.
+    fn get_taxids(&self, oid: u32) -> Vec<i32> {
+        let oid = oid as usize;
+        if oid >= self.index.len() { return Vec::new(); }
+        let end = self.index[oid] as usize;
+        let start = if oid == 0 { 0 } else { self.index[oid - 1] as usize };
+        if start >= self.taxids.len() || end > self.taxids.len() || start >= end {
+            return Vec::new();
+        }
+        self.taxids[start..end].to_vec()
+    }
+}
+
+/// Taxonomy name information for a single taxid.
+#[derive(Debug, Clone, Default)]
+pub struct TaxInfo {
+    pub scientific_name: String,
+    pub common_name: String,
+    pub blast_name: String,
+    pub kingdom: String,
+}
+
+/// Taxonomy name database parsed from taxdb.bti/taxdb.btd files.
+/// These are NCBI-distributed files, not per-database — typically found
+/// alongside the BLAST databases or in $BLASTDB.
+pub struct TaxNameDb {
+    /// Sorted (taxid, offset) pairs from taxdb.bti.
+    index: Vec<(i32, u32)>,
+    /// Raw data from taxdb.btd.
+    data: Vec<u8>,
+}
+
+impl TaxNameDb {
+    /// Try to load taxdb from a directory. Looks for taxdb.bti + taxdb.btd.
+    pub fn open(dir: &Path) -> io::Result<Self> {
+        let bti_path = dir.join("taxdb.bti");
+        let btd_path = dir.join("taxdb.btd");
+        let bti_data = std::fs::read(&bti_path)?;
+        let btd_data = std::fs::read(&btd_path)?;
+
+        if bti_data.len() < 24 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "taxdb.bti too small"));
+        }
+        let mut cur = Cursor::new(&bti_data);
+        let magic = cur.read_u32::<BigEndian>()?;
+        if magic != 0x8739 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("taxdb.bti bad magic: 0x{:04x}", magic)));
+        }
+        let count = cur.read_u32::<BigEndian>()? as usize;
+        // Skip 4 reserved u32 fields
+        for _ in 0..4 {
+            let _ = cur.read_u32::<BigEndian>()?;
+        }
+        // Read index entries: (taxid, offset) pairs, each 8 bytes, big-endian
+        let mut index = Vec::with_capacity(count);
+        for _ in 0..count {
+            let taxid = cur.read_i32::<BigEndian>()?;
+            let offset = cur.read_u32::<BigEndian>()?;
+            index.push((taxid, offset));
+        }
+
+        Ok(TaxNameDb { index, data: btd_data })
+    }
+
+    /// Look up taxonomy info by taxid. Uses binary search on sorted index.
+    pub fn get_info(&self, taxid: i32) -> Option<TaxInfo> {
+        let idx = self.index.binary_search_by_key(&taxid, |&(t, _)| t).ok()?;
+        let offset = self.index[idx].1 as usize;
+        if offset >= self.data.len() { return None; }
+
+        // Find end of record (next entry's offset, or end of data)
+        let end = if idx + 1 < self.index.len() {
+            (self.index[idx + 1].1 as usize).min(self.data.len())
+        } else {
+            self.data.len()
+        };
+
+        let record = &self.data[offset..end];
+        // Tab-delimited: scientific_name \t common_name \t blast_name \t kingdom
+        let s = std::str::from_utf8(record).ok()?;
+        let s = s.trim_end_matches('\0');
+        let fields: Vec<&str> = s.split('\t').collect();
+        Some(TaxInfo {
+            scientific_name: fields.first().unwrap_or(&"").to_string(),
+            common_name: fields.get(1).unwrap_or(&"").to_string(),
+            blast_name: fields.get(2).unwrap_or(&"").to_string(),
+            kingdom: fields.get(3).unwrap_or(&"").to_string(),
+        })
+    }
 }
 
 impl BlastDb {
@@ -165,6 +304,12 @@ impl BlastDb {
         let hdr_file = File::open(&hdr_path)?;
         let hdr_mmap = unsafe { Mmap::map(&hdr_file)? };
 
+        // Try to load taxonomy data from .nto file (v5 databases)
+        let nto_path = base_path.with_extension(
+            if db_type == DbType::Nucleotide { "nto" } else { "pto" }
+        );
+        let tax_lookup = TaxIdLookup::from_file(&nto_path).ok();
+
         Ok(BlastDb {
             db_type,
             title,
@@ -178,6 +323,7 @@ impl BlastDb {
             amb_offsets,
             seq_mmap,
             hdr_mmap,
+            tax_lookup,
         })
     }
 
@@ -276,6 +422,11 @@ impl BlastDb {
             }
         }
         None
+    }
+
+    /// Get the taxid(s) for a given OID. Returns empty vec if no taxonomy data.
+    pub fn get_taxids(&self, oid: u32) -> Vec<i32> {
+        self.tax_lookup.as_ref().map(|t| t.get_taxids(oid)).unwrap_or_default()
     }
 
     /// Get the ambiguity data for a nucleotide OID.
@@ -460,4 +611,94 @@ mod tests {
         let db = BlastDb::open(&path).unwrap();
         let len = db.get_seq_len(0);
         assert!(len > 0 && len <= db.max_seq_len, "Protein seq length should be valid");
+    }
+
+    #[test]
+    fn test_taxid_lookup_parse() {
+        // Build a .nto file in memory: 3 OIDs
+        // OID 0: [6239], OID 1: [9606, 9605], OID 2: [7227]
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("blast_tax_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let nto_path = dir.join("test.nto");
+        {
+            let mut f = std::fs::File::create(&nto_path).unwrap();
+            // u64 num_oids = 3
+            f.write_all(&3u64.to_le_bytes()).unwrap();
+            // (num_oids+1) u64 index entries: [1, 3, 4, 4]
+            for v in &[1u64, 3, 4, 4] {
+                f.write_all(&v.to_le_bytes()).unwrap();
+            }
+            // i32 taxid data: [6239, 9606, 9605, 7227]
+            for t in &[6239i32, 9606, 9605, 7227] {
+                f.write_all(&t.to_le_bytes()).unwrap();
+            }
+        }
+        let lookup = TaxIdLookup::from_file(&nto_path).unwrap();
+        assert_eq!(lookup.get_taxids(0), vec![6239]);
+        assert_eq!(lookup.get_taxids(1), vec![9606, 9605]);
+        assert_eq!(lookup.get_taxids(2), vec![7227]);
+        assert_eq!(lookup.get_taxids(3), Vec::<i32>::new()); // out of range
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_taxid_lookup_empty_file() {
+        // Truncated .nto file should gracefully return empty
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("blast_tax_test2");
+        let _ = std::fs::create_dir_all(&dir);
+        let nto_path = dir.join("test.nto");
+        {
+            let mut f = std::fs::File::create(&nto_path).unwrap();
+            f.write_all(&7u64.to_le_bytes()).unwrap(); // header only
+        }
+        let lookup = TaxIdLookup::from_file(&nto_path).unwrap();
+        assert_eq!(lookup.get_taxids(0), Vec::<i32>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tax_name_db() {
+        let dir = std::env::temp_dir().join("blast_taxdb_test");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Build taxdb.btd (data file): tab-delimited records
+        let record0 = "Caenorhabditis elegans\tnematode\tnematodes\tE";
+        let record1 = "Homo sapiens\thuman\tprimates\tE";
+        let mut btd = Vec::new();
+        btd.extend_from_slice(record0.as_bytes());
+        btd.push(0); // null terminator
+        let offset1 = btd.len() as u32;
+        btd.extend_from_slice(record1.as_bytes());
+        btd.push(0);
+        std::fs::write(dir.join("taxdb.btd"), &btd).unwrap();
+
+        // Build taxdb.bti (index file): big-endian
+        let mut bti = Vec::new();
+        bti.extend_from_slice(&0x8739u32.to_be_bytes()); // magic
+        bti.extend_from_slice(&2u32.to_be_bytes());      // count = 2
+        for _ in 0..4 { bti.extend_from_slice(&0u32.to_be_bytes()); } // reserved
+        // Entry 0: taxid=6239, offset=0
+        bti.extend_from_slice(&6239i32.to_be_bytes());
+        bti.extend_from_slice(&0u32.to_be_bytes());
+        // Entry 1: taxid=9606, offset=offset1
+        bti.extend_from_slice(&9606i32.to_be_bytes());
+        bti.extend_from_slice(&offset1.to_be_bytes());
+        std::fs::write(dir.join("taxdb.bti"), &bti).unwrap();
+
+        let tdb = TaxNameDb::open(&dir).unwrap();
+        let info = tdb.get_info(6239).unwrap();
+        assert_eq!(info.scientific_name, "Caenorhabditis elegans");
+        assert_eq!(info.common_name, "nematode");
+        assert_eq!(info.blast_name, "nematodes");
+        assert_eq!(info.kingdom, "E");
+
+        let info2 = tdb.get_info(9606).unwrap();
+        assert_eq!(info2.scientific_name, "Homo sapiens");
+        assert_eq!(info2.common_name, "human");
+
+        assert!(tdb.get_info(99999).is_none()); // not found
+
+        let _ = std::fs::remove_dir_all(&dir);
     }

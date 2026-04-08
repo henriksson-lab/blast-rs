@@ -2,4 +2,4 @@ pub mod alias;
 mod index;
 pub mod makedb;
 
-pub use index::{BlastDb, DbType};
+pub use index::{BlastDb, DbType, TaxInfo, TaxNameDb};

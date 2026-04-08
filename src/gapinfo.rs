@@ -40,6 +40,62 @@ impl GapEditScript {
         self.ops.iter().map(|(_, n)| *n).sum()
     }
 
+    /// Render aligned query and subject strings from edit script.
+    /// `query` and `subject` are the byte slices covering the aligned region.
+    /// `to_char` converts a single encoded byte to a display character.
+    pub fn render_alignment(
+        &self,
+        query: &[u8],
+        subject: &[u8],
+        to_char: fn(u8) -> char,
+    ) -> (String, String) {
+        let mut q_str = String::new();
+        let mut s_str = String::new();
+        let mut q_pos = 0usize;
+        let mut s_pos = 0usize;
+
+        for &(op, count) in &self.ops {
+            let count = count as usize;
+            match op {
+                GapAlignOpType::Sub => {
+                    for _ in 0..count {
+                        q_str.push(if q_pos < query.len() { to_char(query[q_pos]) } else { 'N' });
+                        s_str.push(if s_pos < subject.len() { to_char(subject[s_pos]) } else { 'N' });
+                        q_pos += 1;
+                        s_pos += 1;
+                    }
+                }
+                GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2 => {
+                    // Gap in query, bases in subject
+                    for _ in 0..count {
+                        q_str.push('-');
+                        s_str.push(if s_pos < subject.len() { to_char(subject[s_pos]) } else { 'N' });
+                        s_pos += 1;
+                    }
+                }
+                GapAlignOpType::Ins | GapAlignOpType::Ins1 | GapAlignOpType::Ins2 => {
+                    // Bases in query, gap in subject
+                    for _ in 0..count {
+                        q_str.push(if q_pos < query.len() { to_char(query[q_pos]) } else { 'N' });
+                        s_str.push('-');
+                        q_pos += 1;
+                    }
+                }
+                _ => {
+                    // Decline or unknown — treat as substitution
+                    for _ in 0..count {
+                        q_str.push(if q_pos < query.len() { to_char(query[q_pos]) } else { 'N' });
+                        s_str.push(if s_pos < subject.len() { to_char(subject[s_pos]) } else { 'N' });
+                        q_pos += 1;
+                        s_pos += 1;
+                    }
+                }
+            }
+        }
+
+        (q_str, s_str)
+    }
+
     /// Count identities given query and subject byte slices.
     pub fn count_identities(&self, query: &[u8], subject: &[u8]) -> (i32, i32, i32) {
         let mut q_pos = 0usize;
@@ -110,5 +166,60 @@ mod tests {
         assert_eq!(len, 10);
         assert_eq!(ident, 8);
         assert_eq!(gaps, 1);
+    }
+
+    /// Helper: BLASTNA byte to IUPAC char (A=0,C=1,G=2,T=3).
+    fn to_iupac(b: u8) -> char {
+        match b { 0 => 'A', 1 => 'C', 2 => 'G', 3 => 'T', _ => 'N' }
+    }
+
+    #[test]
+    fn test_render_alignment_perfect_match() {
+        let mut esp = GapEditScript::new();
+        esp.push(GapAlignOpType::Sub, 5);
+        let query   = &[0u8, 1, 2, 3, 0]; // ACGTA
+        let subject = &[0u8, 1, 2, 3, 0]; // ACGTA
+        let (qseq, sseq) = esp.render_alignment(query, subject, to_iupac);
+        assert_eq!(qseq, "ACGTA");
+        assert_eq!(sseq, "ACGTA");
+    }
+
+    #[test]
+    fn test_render_alignment_with_mismatch() {
+        let mut esp = GapEditScript::new();
+        esp.push(GapAlignOpType::Sub, 5);
+        let query   = &[0u8, 1, 2, 3, 0]; // ACGTA
+        let subject = &[0u8, 3, 2, 1, 0]; // ATGCA
+        let (qseq, sseq) = esp.render_alignment(query, subject, to_iupac);
+        assert_eq!(qseq, "ACGTA");
+        assert_eq!(sseq, "ATGCA");
+    }
+
+    #[test]
+    fn test_render_alignment_with_gap_in_query() {
+        // Del = gap in query
+        let mut esp = GapEditScript::new();
+        esp.push(GapAlignOpType::Sub, 3);
+        esp.push(GapAlignOpType::Del, 2);
+        esp.push(GapAlignOpType::Sub, 2);
+        let query   = &[0u8, 1, 2, 3, 0];       // ACGTA (5 bases, 2 gapped)
+        let subject = &[0u8, 1, 2, 1, 1, 3, 0]; // ACGCCTA (7 bases)
+        let (qseq, sseq) = esp.render_alignment(query, subject, to_iupac);
+        assert_eq!(qseq, "ACG--TA");
+        assert_eq!(sseq, "ACGCCTA");
+    }
+
+    #[test]
+    fn test_render_alignment_with_gap_in_subject() {
+        // Ins = gap in subject
+        let mut esp = GapEditScript::new();
+        esp.push(GapAlignOpType::Sub, 2);
+        esp.push(GapAlignOpType::Ins, 2);
+        esp.push(GapAlignOpType::Sub, 2);
+        let query   = &[0u8, 1, 2, 3, 0, 1]; // ACGTAC (6 bases)
+        let subject = &[0u8, 1, 0, 1];         // ACAC (4 bases)
+        let (qseq, sseq) = esp.render_alignment(query, subject, to_iupac);
+        assert_eq!(qseq, "ACGTAC");
+        assert_eq!(sseq, "AC--AC");
     }
 }

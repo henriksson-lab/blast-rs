@@ -475,6 +475,14 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         bit_score: prot_kbp.raw_to_bit(ph.score),
                         query_len: query_aa.len() as i32,
                         subject_len: subj_aa.len() as i32,
+                        raw_score: ph.score,
+                        qseq: ph.qseq.clone(),
+                        sseq: ph.sseq.clone(),
+                        qframe: 0,
+                        sframe: 0,
+                        subject_taxids: vec![],
+                        subject_sci_name: String::new(), subject_common_name: String::new(),
+                        subject_blast_name: String::new(), subject_kingdom: String::new(),
                     });
                 }
             }
@@ -490,7 +498,13 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Box::new(BufWriter::new(stdout.lock()))
         };
-        format_tabular(&mut writer, &hits)?;
+        let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
+        if outfmt_parts.len() > 1 {
+            let cols = outfmt_parts[1..].join(" ");
+            blast_rs::format::format_tabular_custom(&mut writer, &hits, &cols)?;
+        } else {
+            format_tabular(&mut writer, &hits)?;
+        }
         writer.flush()?;
         return Ok(());
     }
@@ -569,6 +583,14 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         bit_score: prot_kbp.raw_to_bit(ph.score),
                         query_len: nuc_len,
                         subject_len: subj_aa.len() as i32,
+                        raw_score: ph.score,
+                        qseq: ph.qseq.clone(),
+                        sseq: ph.sseq.clone(),
+                        qframe: *frame,
+                        sframe: 0,
+                        subject_taxids: vec![],
+                        subject_sci_name: String::new(), subject_common_name: String::new(),
+                        subject_blast_name: String::new(), subject_kingdom: String::new(),
                     });
                 }
             }
@@ -585,7 +607,13 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    format_tabular(&mut writer, &all_hits)?;
+    let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
+    if outfmt_parts.len() > 1 {
+        let cols = outfmt_parts[1..].join(" ");
+        blast_rs::format::format_tabular_custom(&mut writer, &all_hits, &cols)?;
+    } else {
+        format_tabular(&mut writer, &all_hits)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -645,6 +673,14 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         evalue, bit_score: prot_kbp.raw_to_bit(ph.score),
                         query_len: query_aa.len() as i32,
                         subject_len: subj_nuc_len,
+                        raw_score: ph.score,
+                        qseq: ph.qseq.clone(),
+                        sseq: ph.sseq.clone(),
+                        qframe: 0,
+                        sframe: *frame,
+                        subject_taxids: vec![],
+                        subject_sci_name: String::new(), subject_common_name: String::new(),
+                        subject_blast_name: String::new(), subject_kingdom: String::new(),
                     });
                 }
             }
@@ -658,7 +694,13 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
         Box::new(BufWriter::new(File::create(path)?))
     } else { Box::new(BufWriter::new(stdout.lock())) };
-    format_tabular(&mut writer, &all_hits)?;
+    let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
+    if outfmt_parts.len() > 1 {
+        let cols = outfmt_parts[1..].join(" ");
+        blast_rs::format::format_tabular_custom(&mut writer, &all_hits, &cols)?;
+    } else {
+        format_tabular(&mut writer, &all_hits)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -702,21 +744,48 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if results.is_empty() { break; }
 
         all_hits.clear();
-        for (subj_id, score, evalue) in &results {
+        for hit in &results {
+            // Extract aligned sequences (ungapped PSSM scan)
+            let subj_seq = subj_pairs.iter()
+                .find(|(sid, _)| sid == &hit.subject_id)
+                .map(|(_, s)| s.as_slice());
+            let qseq: String = query_aa[..hit.align_len].iter()
+                .map(|&b| blast_rs::protein::ncbistdaa_to_char(b)).collect();
+            let sseq: String = subj_seq.map(|s| {
+                s[hit.subject_start..hit.subject_start + hit.align_len].iter()
+                    .map(|&b| blast_rs::protein::ncbistdaa_to_char(b)).collect()
+            }).unwrap_or_default();
+            // Compute identity
+            let num_ident = query_aa[..hit.align_len].iter()
+                .zip(subj_seq.map(|s| &s[hit.subject_start..hit.subject_start + hit.align_len]).unwrap_or(&[]))
+                .filter(|(a, b)| a == b).count() as i32;
+            let pct_identity = if hit.align_len > 0 {
+                100.0 * num_ident as f64 / hit.align_len as f64
+            } else { 0.0 };
+
             all_hits.push(TabularHit {
-                query_id: queries[0].id.clone(), subject_id: subj_id.clone(),
-                pct_identity: 0.0, align_len: pssm.length as i32,
-                mismatches: 0, gap_opens: 0,
-                query_start: 1, query_end: pssm.length as i32,
-                subject_start: 1, subject_end: pssm.length as i32,
-                evalue: *evalue, bit_score: prot_kbp.raw_to_bit(*score),
-                query_len: pssm.length as i32, subject_len: 0,
+                query_id: queries[0].id.clone(), subject_id: hit.subject_id.clone(),
+                pct_identity,
+                align_len: hit.align_len as i32,
+                mismatches: hit.align_len as i32 - num_ident,
+                gap_opens: 0,
+                query_start: 1, query_end: hit.align_len as i32,
+                subject_start: hit.subject_start as i32 + 1,
+                subject_end: (hit.subject_start + hit.align_len) as i32,
+                evalue: hit.evalue, bit_score: prot_kbp.raw_to_bit(hit.score),
+                query_len: pssm.length as i32, subject_len: hit.subject_len as i32,
+                raw_score: hit.score,
+                qseq: Some(qseq), sseq: Some(sseq),
+                qframe: 0, sframe: 0,
+                subject_taxids: vec![],
+                subject_sci_name: String::new(), subject_common_name: String::new(),
+                subject_blast_name: String::new(), subject_kingdom: String::new(),
             });
         }
 
         // Update PSSM from aligned sequences (simplified)
         let aligned: Vec<Vec<u8>> = results.iter()
-            .filter_map(|(id, _, _)| subj_pairs.iter().find(|(sid, _)| sid == id).map(|(_, s)| s.clone()))
+            .filter_map(|h| subj_pairs.iter().find(|(sid, _)| sid == &h.subject_id).map(|(_, s)| s.clone()))
             .collect();
         pssm.update_from_alignment(&aligned, &blast_rs::matrix::AA_FREQUENCIES, 10.0);
     }
@@ -725,7 +794,13 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
         Box::new(BufWriter::new(File::create(path)?))
     } else { Box::new(BufWriter::new(stdout.lock())) };
-    format_tabular(&mut writer, &all_hits)?;
+    let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
+    if outfmt_parts.len() > 1 {
+        let cols = outfmt_parts[1..].join(" ");
+        blast_rs::format::format_tabular_custom(&mut writer, &all_hits, &cols)?;
+    } else {
+        format_tabular(&mut writer, &all_hits)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -780,8 +855,8 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             }).collect();
             let s_frames = six_frame_translation(&s_nuc, &STANDARD_GENETIC_CODE);
 
-            for (_qframe, q_prot) in &q_frames {
-                for (_sframe, s_prot) in &s_frames {
+            for (qframe, q_prot) in &q_frames {
+                for (sframe, s_prot) in &s_frames {
                     if q_prot.len() < 3 || s_prot.len() < 3 { continue; }
                     let search_space = (q_prot.len() * s_prot.len()) as f64;
 
@@ -803,6 +878,12 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                             subject_start: ph.subject_start as i32 + 1, subject_end: ph.subject_end as i32,
                             evalue, bit_score: prot_kbp.raw_to_bit(ph.score),
                             query_len: q_prot.len() as i32, subject_len: s_prot.len() as i32,
+                            raw_score: ph.score,
+                            qseq: ph.qseq.clone(), sseq: ph.sseq.clone(),
+                            qframe: *qframe, sframe: *sframe,
+                            subject_taxids: vec![],
+                            subject_sci_name: String::new(), subject_common_name: String::new(),
+                            subject_blast_name: String::new(), subject_kingdom: String::new(),
                         });
                     }
                 }
@@ -817,7 +898,13 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
         Box::new(BufWriter::new(File::create(path)?))
     } else { Box::new(BufWriter::new(stdout.lock())) };
-    format_tabular(&mut writer, &all_hits)?;
+    let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
+    if outfmt_parts.len() > 1 {
+        let cols = outfmt_parts[1..].join(" ");
+        blast_rs::format::format_tabular_custom(&mut writer, &all_hits, &cols)?;
+    } else {
+        format_tabular(&mut writer, &all_hits)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -853,6 +940,11 @@ fn run_blastn_rust(
     db: BlastDb,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use rayon::prelude::*;
+
+    // Try to load taxonomy name database (taxdb.bti/taxdb.btd)
+    let db_dir = std::path::Path::new(args.db.as_ref().unwrap()).parent().unwrap_or(std::path::Path::new("."));
+    let tax_name_db = blast_rs::db::TaxNameDb::open(db_dir).ok()
+        .or_else(|| std::env::var("BLASTDB").ok().and_then(|p| blast_rs::db::TaxNameDb::open(std::path::Path::new(&p)).ok()));
 
     // Pure Rust KBP computation — per-context (plus + minus) for exact e-value matching
     // The C engine computes separate KBP for each context based on strand composition
@@ -1042,6 +1134,14 @@ fn run_blastn_rust(
                     },
                     query_len,
                     subject_len: db.get_seq_len(oid) as i32,
+                    raw_score: hsp.score,
+                    qseq: hsp.qseq.clone(),
+                    sseq: hsp.sseq.clone(),
+                    qframe: if hsp.context == 1 { -1 } else { 1 },
+                    sframe: if hsp.context == 1 { -1 } else { 1 },
+                    subject_taxids: db.get_taxids(oid),
+                    subject_sci_name: String::new(), subject_common_name: String::new(),
+                    subject_blast_name: String::new(), subject_kingdom: String::new(),
                 }));
             }
         }
@@ -1130,6 +1230,20 @@ fn run_blastn_rust(
     let query_len = records.first().map(|r| r.sequence.len() as i32).unwrap_or(0);
     let mut hits: Vec<TabularHit> = all_hits.into_iter().map(|(_, h)| h).collect();
     apply_filters(&mut hits, args, query_len);
+
+    // Enrich hits with taxonomy names from taxdb (if available)
+    if let Some(ref tdb) = tax_name_db {
+        for hit in &mut hits {
+            if let Some(&taxid) = hit.subject_taxids.first() {
+                if let Some(info) = tdb.get_info(taxid) {
+                    hit.subject_sci_name = info.scientific_name;
+                    hit.subject_common_name = info.common_name;
+                    hit.subject_blast_name = info.blast_name;
+                    hit.subject_kingdom = info.kingdom;
+                }
+            }
+        }
+    }
 
     // Output
     let stdout = io::stdout();
@@ -1228,6 +1342,14 @@ fn run_blastn_subject(
                     bit_score: hsp.bit_score,
                     query_len: query_rec.sequence.len() as i32,
                     subject_len: subj_rec.sequence.len() as i32,
+                    raw_score: hsp.score,
+                    qseq: hsp.qseq.clone(),
+                    sseq: hsp.sseq.clone(),
+                    qframe: if hsp.context == 1 { -1 } else { 1 },
+                    sframe: if hsp.context == 1 { -1 } else { 1 },
+                    subject_taxids: vec![],
+                    subject_sci_name: String::new(), subject_common_name: String::new(),
+                    subject_blast_name: String::new(), subject_kingdom: String::new(),
                 });
             }
         }
@@ -1241,7 +1363,13 @@ fn run_blastn_subject(
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    format_tabular(&mut writer, &all_hits)?;
+    let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
+    if outfmt_parts.len() > 1 {
+        let cols = outfmt_parts[1..].join(" ");
+        blast_rs::format::format_tabular_custom(&mut writer, &all_hits, &cols)?;
+    } else {
+        format_tabular(&mut writer, &all_hits)?;
+    }
     writer.flush()?;
     Ok(())
 }

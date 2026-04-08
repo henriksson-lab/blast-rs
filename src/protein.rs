@@ -1,7 +1,18 @@
 //! Protein BLAST (blastp) support.
 //! Implements scoring matrices and protein word finding.
 
+use crate::encoding::NCBISTDAA_TO_AMINOACID;
+use crate::gapinfo::{GapEditScript, GapAlignOpType};
 use crate::matrix::AA_SIZE;
+
+/// Convert an NCBIstdaa-encoded amino acid to its single-letter IUPAC character.
+pub fn ncbistdaa_to_char(b: u8) -> char {
+    if (b as usize) < NCBISTDAA_TO_AMINOACID.len() {
+        NCBISTDAA_TO_AMINOACID[b as usize] as u8 as char
+    } else {
+        'X'
+    }
+}
 
 /// Score two amino acids using a scoring matrix.
 #[inline]
@@ -106,6 +117,7 @@ pub struct ProteinGappedResult {
     pub align_length: i32,
     pub mismatches: i32,
     pub gap_opens: i32,
+    pub edit_script: GapEditScript,
 }
 
 const MININT: i32 = i32::MIN / 2;
@@ -218,6 +230,115 @@ fn protein_gapped_score_one_dir(
     (best_score, best_q, best_s)
 }
 
+/// Needleman-Wunsch affine-gap traceback on a sub-region.
+/// Returns (edit_script, num_ident, mismatches, gap_opens, align_length).
+fn protein_nw_traceback(
+    query: &[u8],   // NCBIstdaa, q_start..q_end
+    subject: &[u8], // NCBIstdaa, s_start..s_end
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+) -> GapEditScript {
+    let m = query.len();
+    let n = subject.len();
+    if m == 0 || n == 0 {
+        let mut esp = GapEditScript::new();
+        if m > 0 { esp.push(GapAlignOpType::Ins, m as i32); }
+        if n > 0 { esp.push(GapAlignOpType::Del, n as i32); }
+        return esp;
+    }
+
+    let gap_oe = gap_open + gap_extend;
+
+    // DP matrices: H = best score, E = gap-in-query (Del), F = gap-in-subject (Ins)
+    // Traceback: 0 = Sub, 1 = Del (gap in query), 2 = Ins (gap in subject)
+    let sz = (m + 1) * (n + 1);
+    let mut h = vec![i32::MIN / 2; sz];
+    let mut e = vec![i32::MIN / 2; sz]; // best score ending with gap in query
+    let mut f = vec![i32::MIN / 2; sz]; // best score ending with gap in subject
+    let mut tb = vec![0u8; sz];
+
+    let idx = |i: usize, j: usize| -> usize { i * (n + 1) + j };
+
+    h[idx(0, 0)] = 0;
+    for j in 1..=n {
+        h[idx(0, j)] = -gap_oe - gap_extend * (j as i32 - 1);
+        e[idx(0, j)] = h[idx(0, j)];
+        tb[idx(0, j)] = 1; // Del
+    }
+    for i in 1..=m {
+        h[idx(i, 0)] = -gap_oe - gap_extend * (i as i32 - 1);
+        f[idx(i, 0)] = h[idx(i, 0)];
+        tb[idx(i, 0)] = 2; // Ins
+    }
+
+    for i in 1..=m {
+        let qi = query[i - 1] as usize;
+        for j in 1..=n {
+            let sj = subject[j - 1] as usize;
+
+            // Del: gap in query (consume subject)
+            let e1 = e[idx(i, j - 1)] - gap_extend;
+            let e2 = h[idx(i, j - 1)] - gap_oe;
+            e[idx(i, j)] = e1.max(e2);
+
+            // Ins: gap in subject (consume query)
+            let f1 = f[idx(i - 1, j)] - gap_extend;
+            let f2 = h[idx(i - 1, j)] - gap_oe;
+            f[idx(i, j)] = f1.max(f2);
+
+            // Sub: aligned pair
+            let mat = if qi < AA_SIZE && sj < AA_SIZE { matrix[qi][sj] } else { -4 };
+            let diag = h[idx(i - 1, j - 1)] + mat;
+
+            let best = diag.max(e[idx(i, j)]).max(f[idx(i, j)]);
+            h[idx(i, j)] = best;
+
+            if best == diag {
+                tb[idx(i, j)] = 0; // Sub
+            } else if best == e[idx(i, j)] {
+                tb[idx(i, j)] = 1; // Del
+            } else {
+                tb[idx(i, j)] = 2; // Ins
+            }
+        }
+    }
+
+    // Traceback from (m, n)
+    let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
+    let mut i = m;
+    let mut j = n;
+    while i > 0 || j > 0 {
+        let op = if i == 0 {
+            j -= 1;
+            GapAlignOpType::Del
+        } else if j == 0 {
+            i -= 1;
+            GapAlignOpType::Ins
+        } else {
+            match tb[idx(i, j)] {
+                0 => { i -= 1; j -= 1; GapAlignOpType::Sub }
+                1 => { j -= 1; GapAlignOpType::Del }
+                _ => { i -= 1; GapAlignOpType::Ins }
+            }
+        };
+        if let Some(last) = ops.last_mut() {
+            if last.0 == op {
+                last.1 += 1;
+                continue;
+            }
+        }
+        ops.push((op, 1));
+    }
+    ops.reverse();
+
+    let mut esp = GapEditScript::new();
+    for (op, count) in ops {
+        esp.push(op, count);
+    }
+    esp
+}
+
 /// Perform gapped protein alignment from a seed position using X-dropoff DP.
 ///
 /// This is the protein equivalent of `blast_gapped_score_only` from traceback.rs,
@@ -250,26 +371,18 @@ pub fn protein_gapped_align(
     let total_score = score_l + score_r;
     if total_score <= 0 { return None; }
 
-    let q_start = seed_q + 1 - ext_q_l;
-    let q_end = seed_q + ext_q_r;
-    let s_start = seed_s + 1 - ext_s_l;
-    let s_end = seed_s + ext_s_r;
+    let q_start = (seed_q + 1).saturating_sub(ext_q_l);
+    let q_end = (seed_q + ext_q_r).min(query.len());
+    let s_start = (seed_s + 1).saturating_sub(ext_s_l);
+    let s_end = (seed_s + ext_s_r).min(subject.len());
+    if q_start >= q_end || s_start >= s_end { return None; }
 
-    // Compute identity statistics from the aligned region
-    let alen = (q_end - q_start).max(s_end - s_start) as i32;
-    let mut ident = 0i32;
-    let mut mismatches = 0i32;
-    let match_len = (q_end - q_start).min(s_end - s_start);
-    for k in 0..match_len {
-        if q_start + k < query.len() && s_start + k < subject.len() {
-            if query[q_start + k] == subject[s_start + k] {
-                ident += 1;
-            } else {
-                mismatches += 1;
-            }
-        }
-    }
-    let gap_opens = ((q_end - q_start) as i32 - (s_end - s_start) as i32).unsigned_abs() as i32;
+    // Full NW traceback on the identified region
+    let q_slice = &query[q_start..q_end];
+    let s_slice = &subject[s_start..s_end];
+    let edit_script = protein_nw_traceback(q_slice, s_slice, matrix, gap_open, gap_extend);
+    let (align_length, num_ident, gap_opens) = edit_script.count_identities(q_slice, s_slice);
+    let mismatches = (align_length - num_ident - gap_opens).max(0);
 
     Some(ProteinGappedResult {
         query_start: q_start,
@@ -277,10 +390,11 @@ pub fn protein_gapped_align(
         subject_start: s_start,
         subject_end: s_end,
         score: total_score,
-        num_ident: ident,
-        align_length: alen.max(match_len as i32),
+        num_ident,
+        align_length,
         mismatches,
         gap_opens,
+        edit_script,
     })
 }
 
@@ -330,5 +444,67 @@ mod tests {
         // The exact match (1,2,3) scores 4+4+4=12 >= 11, so it should be included
         assert!(neighbors.iter().any(|w| w == &vec![1u8, 2, 3]),
             "Exact match should be a neighbor");
+    }
+
+    #[test]
+    fn test_protein_gapped_align_produces_edit_script() {
+        let m = simple_blosum62();
+        let query   = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let result = protein_gapped_align(&query, &subject, 4, 4, &m, 11, 1, 50);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.edit_script.alignment_length() > 0);
+        let (qseq, sseq) = r.edit_script.render_alignment(
+            &query[r.query_start..r.query_end],
+            &subject[r.subject_start..r.subject_end],
+            ncbistdaa_to_char,
+        );
+        assert!(!qseq.is_empty());
+        assert!(!sseq.is_empty());
+        // Aligned strings should have the same length (alignment property)
+        assert_eq!(qseq.len(), sseq.len(),
+            "aligned strings must have equal length: qseq={}, sseq={}", qseq, sseq);
+    }
+
+    #[test]
+    fn test_protein_gapped_align_with_gap() {
+        let m = simple_blosum62();
+        // Test that NW traceback correctly handles different-length regions
+        // (which naturally arise from X-dropoff boundary asymmetry)
+        let query   = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let result = protein_gapped_align(&query, &subject, 5, 5, &m, 11, 1, 50);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        let (qseq, sseq) = r.edit_script.render_alignment(
+            &query[r.query_start..r.query_end],
+            &subject[r.subject_start..r.subject_end],
+            ncbistdaa_to_char,
+        );
+        assert_eq!(qseq.len(), sseq.len(),
+            "aligned strings must have equal length: qseq={}, sseq={}", qseq, sseq);
+        assert!(!qseq.is_empty());
+    }
+
+    #[test]
+    fn test_nw_traceback_identical() {
+        let m = simple_blosum62();
+        let seq = vec![1u8, 2, 3, 4, 5];
+        let esp = protein_nw_traceback(&seq, &seq, &m, 11, 1);
+        let (qseq, sseq) = esp.render_alignment(&seq, &seq, ncbistdaa_to_char);
+        assert_eq!(qseq, sseq);
+        assert!(!qseq.contains('-'));
+    }
+
+    #[test]
+    fn test_nw_traceback_with_insertion() {
+        let m = simple_blosum62();
+        let query   = vec![1u8, 2, 3, 4, 5, 6];
+        let subject = vec![1u8, 2, 4, 5, 6]; // missing 3
+        let esp = protein_nw_traceback(&query, &subject, &m, 11, 1);
+        let (qseq, sseq) = esp.render_alignment(&query, &subject, ncbistdaa_to_char);
+        assert!(sseq.contains('-'),
+            "subject should have a gap: qseq={}, sseq={}", qseq, sseq);
     }
 }
