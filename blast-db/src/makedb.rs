@@ -87,15 +87,14 @@ pub fn make_nucleotide_db(
     amb_offsets.push(*seq_offsets.last().unwrap_or(&0));
     nsq.flush()?;
 
-    // Write .nhr (header data) — simplified ASN.1-like
+    // Write .nhr (header data) — ASN.1 BER encoded Blast-def-line-set
     let mut nhr = BufWriter::new(File::create(output_base.with_extension("nhr"))?);
     let mut hdr_offsets = vec![0u32];
-    for (header, _) in &sequences {
+    for (oid, (header, _)) in sequences.iter().enumerate() {
         let start = hdr_offsets.last().copied().unwrap_or(0);
-        // Write a minimal header: just the defline as raw bytes
-        nhr.write_all(header.as_bytes())?;
-        nhr.write_all(&[0])?; // null terminator
-        hdr_offsets.push(start + header.len() as u32 + 1);
+        let asn1 = encode_defline_asn1(header, oid as i32);
+        nhr.write_all(&asn1)?;
+        hdr_offsets.push(start + asn1.len() as u32);
     }
     nhr.flush()?;
 
@@ -103,7 +102,7 @@ pub fn make_nucleotide_db(
     let mut nin = BufWriter::new(File::create(output_base.with_extension("nin"))?);
     // Version
     nin.write_all(&4u32.to_be_bytes())?;
-    // Type (0 = nucleotide)
+    // Type (0 = nucleotide in v4 format)
     nin.write_all(&0u32.to_be_bytes())?;
     // Title
     let title_bytes = title.as_bytes();
@@ -136,6 +135,97 @@ pub fn make_nucleotide_db(
     nin.flush()?;
 
     Ok((num_seqs, total_length))
+}
+
+/// Encode a Blast-def-line-set ASN.1 BER header matching NCBI format.
+/// Structure: SEQUENCE { SEQUENCE { title [0] VisibleString, seqid [1] { general { db "BL_ORD_ID", tag id INTEGER } } } }
+fn encode_defline_asn1(title: &str, oid: i32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    // Blast-def-line-set ::= SEQUENCE OF Blast-def-line
+    buf.extend_from_slice(&[0x30, 0x80]); // SEQUENCE, indefinite
+    {
+        // Blast-def-line ::= SEQUENCE
+        buf.extend_from_slice(&[0x30, 0x80]);
+        {
+            // title [0] VisibleString
+            buf.extend_from_slice(&[0xa0, 0x80]);
+            // VisibleString
+            buf.push(0x1a);
+            let title_bytes = title.as_bytes();
+            encode_asn1_length(&mut buf, title_bytes.len());
+            buf.extend_from_slice(title_bytes);
+            buf.extend_from_slice(&[0x00, 0x00]); // END context[0]
+
+            // seqid [1] SET OF Seq-id
+            buf.extend_from_slice(&[0xa1, 0x80]);
+            {
+                // Seq-id ::= CHOICE { general Dbtag }
+                // general [10] in Seq-id CHOICE
+                buf.extend_from_slice(&[0x30, 0x80]);
+                {
+                    buf.extend_from_slice(&[0xaa, 0x80]); // context[10] = general
+                    {
+                        // Dbtag ::= SEQUENCE { db VisibleString, tag Object-id }
+                        buf.extend_from_slice(&[0x30, 0x80]);
+                        {
+                            // db [0] VisibleString "BL_ORD_ID"
+                            buf.extend_from_slice(&[0xa0, 0x80]);
+                            buf.push(0x1a);
+                            buf.push(9); // length
+                            buf.extend_from_slice(b"BL_ORD_ID");
+                            buf.extend_from_slice(&[0x00, 0x00]); // END
+
+                            // tag [1] Object-id ::= CHOICE { id INTEGER }
+                            buf.extend_from_slice(&[0xa1, 0x80]);
+                            {
+                                // id [0] INTEGER
+                                buf.extend_from_slice(&[0xa0, 0x80]);
+                                buf.push(0x02); // INTEGER
+                                let oid_bytes = encode_asn1_integer(oid);
+                                encode_asn1_length(&mut buf, oid_bytes.len());
+                                buf.extend_from_slice(&oid_bytes);
+                                buf.extend_from_slice(&[0x00, 0x00]); // END id
+                            }
+                            buf.extend_from_slice(&[0x00, 0x00]); // END tag
+                        }
+                        buf.extend_from_slice(&[0x00, 0x00]); // END Dbtag
+                    }
+                    buf.extend_from_slice(&[0x00, 0x00]); // END general
+                }
+                buf.extend_from_slice(&[0x00, 0x00]); // END inner SEQUENCE
+            }
+            buf.extend_from_slice(&[0x00, 0x00]); // END seqid
+        }
+        buf.extend_from_slice(&[0x00, 0x00]); // END Blast-def-line
+    }
+    buf.extend_from_slice(&[0x00, 0x00]); // END Blast-def-line-set
+    buf
+}
+
+fn encode_asn1_length(buf: &mut Vec<u8>, len: usize) {
+    if len < 128 {
+        buf.push(len as u8);
+    } else if len < 256 {
+        buf.push(0x81);
+        buf.push(len as u8);
+    } else {
+        buf.push(0x82);
+        buf.push((len >> 8) as u8);
+        buf.push(len as u8);
+    }
+}
+
+fn encode_asn1_integer(val: i32) -> Vec<u8> {
+    if val == 0 {
+        vec![0]
+    } else if val > 0 && val < 128 {
+        vec![val as u8]
+    } else if val > 0 && val < 32768 {
+        if val < 256 { vec![0, val as u8] }
+        else { vec![(val >> 8) as u8, val as u8] }
+    } else {
+        vec![(val >> 24) as u8, (val >> 16) as u8, (val >> 8) as u8, val as u8]
+    }
 }
 
 #[cfg(test)]

@@ -378,7 +378,7 @@ fn align_ex(
 }
 
 /// Build full BLASTNA 16x16 scoring matrix matching C engine's BlastScoreBlkNuclMatrixCreate.
-fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
+pub fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
     const BLASTNA_TO_NCBI4NA: [u8; 16] = [1,2,4,8,5,10,3,12,9,6,14,13,11,7,15,0];
     let mut matrix = [[0i32; 16]; 16];
     // Compute degeneracy

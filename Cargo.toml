@@ -12,7 +12,12 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "MIT OR Unlicense"
+description = "Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool)"
+repository = "https://github.com/henriksson-lab/blast-rs"
+homepage = "https://github.com/henriksson-lab/blast-rs"
+keywords = ["bioinformatics", "blast", "alignment", "sequence", "genomics"]
+categories = ["science", "command-line-utilities"]
 
 [profile.release]
 lto = true

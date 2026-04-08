@@ -2,6 +2,7 @@
 
 pub use blast_core_sys as ffi;
 
+pub mod blastn;
 pub mod diagnostics;
 pub mod encoding;
 pub mod engine;
