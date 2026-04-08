@@ -6,7 +6,7 @@ use std::io::Write;
 /// Format a single alignment in pairwise text format.
 pub fn format_pairwise_alignment<W: Write>(
     writer: &mut W,
-    query_id: &str,
+    _query_id: &str,
     subject_id: &str,
     query_seq: &[u8],   // BLASTNA encoded
     subject_seq: &[u8], // BLASTNA encoded

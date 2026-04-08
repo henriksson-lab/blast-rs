@@ -2,6 +2,7 @@
 //! Searches a query sequence against a database of PSSMs (domain profiles).
 
 use crate::pssm::Pssm;
+#[cfg(test)]
 use crate::matrix::AA_SIZE;
 
 /// An RPS database entry (domain profile).

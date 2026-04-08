@@ -231,7 +231,6 @@ fn encode_asn1_integer(val: i32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_make_nucleotide_db() {

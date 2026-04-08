@@ -18,6 +18,8 @@ pub struct TabularHit {
     pub subject_end: i32,
     pub evalue: f64,
     pub bit_score: f64,
+    pub query_len: i32,
+    pub subject_len: i32,
 }
 
 /// Format an e-value matching BLAST tabular output (-outfmt 6).
@@ -79,8 +81,8 @@ pub fn format_bitscore(val: f64) -> String {
 /// Get a field value by column name for custom tabular output.
 pub fn get_field(hit: &TabularHit, column: &str) -> String {
     match column {
-        "qseqid" | "qacc" => hit.query_id.clone(),
-        "sseqid" | "sacc" => hit.subject_id.clone(),
+        "qseqid" | "qacc" | "qaccver" => hit.query_id.clone(),
+        "sseqid" | "sacc" | "saccver" => hit.subject_id.clone(),
         "pident" => format!("{:.3}", hit.pct_identity),
         "length" => hit.align_len.to_string(),
         "mismatch" => hit.mismatches.to_string(),
@@ -91,11 +93,31 @@ pub fn get_field(hit: &TabularHit, column: &str) -> String {
         "send" => hit.subject_end.to_string(),
         "evalue" => format_evalue(hit.evalue),
         "bitscore" => format_bitscore(hit.bit_score),
-        "score" => format!("{:.0}", hit.bit_score), // raw score approximation
+        "score" => format!("{:.0}", hit.bit_score),
         "nident" => (hit.align_len - hit.mismatches).to_string(),
         "gaps" => hit.gap_opens.to_string(),
-        "qlen" => "0".to_string(), // not available in TabularHit
-        "slen" => "0".to_string(),
+        "qlen" => hit.query_len.to_string(),
+        "slen" => hit.subject_len.to_string(),
+        "qcovs" => {
+            if hit.query_len > 0 {
+                let cov = 100.0 * (hit.query_end - hit.query_start + 1).abs() as f64 / hit.query_len as f64;
+                format!("{:.0}", cov.min(100.0))
+            } else { "0".to_string() }
+        }
+        "qcovhsp" => {
+            if hit.query_len > 0 {
+                let cov = 100.0 * hit.align_len as f64 / hit.query_len as f64;
+                format!("{:.0}", cov.min(100.0))
+            } else { "0".to_string() }
+        }
+        // Taxonomy fields — requires .ndb taxonomy data (not yet supported)
+        "staxid" | "staxids" | "ssciname" | "sscinames"
+        | "scomname" | "scomnames" | "sskingdom" | "sskingdoms"
+        | "sblastname" | "sblastnames" => "N/A".to_string(),
+        // Sequence hash
+        "qseq" | "sseq" => "N/A".to_string(),
+        // Frame fields
+        "qframe" | "sframe" | "frames" => "0".to_string(),
         _ => "N/A".to_string(),
     }
 }

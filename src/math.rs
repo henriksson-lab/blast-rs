@@ -93,7 +93,7 @@ mod tests {
         let x = 1e-10;
         let result = expm1(x);
         let expected = x.exp() - 1.0;
-        assert!((result - x).abs() < 1e-19, "expm1({}) = {}, expected ~{}", x, result, x);
+        assert!((result - expected).abs() < 1e-19, "expm1({}) = {}, expected ~{}", x, result, expected);
     }
 
     #[test]

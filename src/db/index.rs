@@ -6,7 +6,9 @@ use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::{self, Cursor, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// Database type: nucleotide or protein.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

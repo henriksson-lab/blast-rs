@@ -7,7 +7,7 @@ pub const AA_SIZE: usize = 28;
 /// BLOSUM62 scoring matrix (NCBIstdaa order, 28x28).
 /// Row/column order: -ABCDEFGHIKLMNPQRSTVWXYZU*OJ
 pub static BLOSUM62: [[i32; AA_SIZE]; AA_SIZE] = {
-    let mut m = [[0i32; AA_SIZE]; AA_SIZE];
+    let m = [[0i32; AA_SIZE]; AA_SIZE];
     // Only fill the standard 20 amino acids + B, Z, X
     // This is a compile-time approximation; the full matrix is loaded at runtime
     // from the NCBI data files in the C code.

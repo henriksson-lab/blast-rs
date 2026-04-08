@@ -1,6 +1,8 @@
 //! Rust equivalent of blast_hits.c — HSP list management and filtering.
 
-use crate::hspstream::{Hsp, HspList};
+use crate::hspstream::HspList;
+#[cfg(test)]
+use crate::hspstream::Hsp;
 
 
 /// Compute identities and alignment length from query/subject sequences

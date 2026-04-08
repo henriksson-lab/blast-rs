@@ -204,7 +204,6 @@ pub fn compute_length_adjustment(
     let q = query_length as f64;
     let d = db_length as f64;
     let n = num_seqs as f64;
-    let k = kbp.k;
     let log_k = kbp.log_k;
 
     let mut len_adj = 0.0;
@@ -410,7 +409,7 @@ pub fn nucl_gapped_kbp_lookup(
     let meta = get_kbp_table(nr, np)
         .ok_or_else(|| format!("Unsupported scores {} {}", reward, penalty))?;
 
-    let mut round_down = meta.round_down;
+    let round_down = meta.round_down;
 
     // Split: first row with gap_open==0 && gap_extend==0 is the linear entry
     let (affine, linear) = if !meta.table.is_empty()
@@ -752,7 +751,7 @@ pub struct UngappedKbpContext {
     pub is_valid: bool,
 }
 
-/// Compute ungapped KBP for all contexts. Returns per-context Option<KarlinBlk>.
+/// Compute ungapped KBP for all contexts. Returns per-context `Option<KarlinBlk>`.
 /// Port of Blast_ScoreBlkKbpUngappedCalc from blast_stat.c.
 pub fn ungapped_kbp_calc(
     query: &[u8],

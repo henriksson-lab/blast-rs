@@ -97,7 +97,6 @@ pub fn find_neighboring_words(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::nucleotide_matrix;
 
     fn simple_blosum62() -> [[i32; AA_SIZE]; AA_SIZE] {
         let mut m = [[0i32; AA_SIZE]; AA_SIZE];
@@ -128,7 +127,7 @@ mod tests {
         let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8]; // identical
         let result = protein_ungapped_extend(&query, &subject, 4, 4, &m, 20);
         assert!(result.is_some());
-        let (qs, qe, ss, se, score) = result.unwrap();
+        let (qs, qe, _ss, _se, score) = result.unwrap();
         assert_eq!(score, 32); // 8 matches * 4
         assert_eq!(qe - qs, 8);
     }

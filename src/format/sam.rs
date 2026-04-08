@@ -3,7 +3,7 @@
 use std::io::Write;
 
 /// Write SAM header.
-pub fn write_sam_header<W: Write>(writer: &mut W, db_name: &str) -> std::io::Result<()> {
+pub fn write_sam_header<W: Write>(writer: &mut W, _db_name: &str) -> std::io::Result<()> {
     writeln!(writer, "@HD\tVN:1.0\tSO:queryname")?;
     writeln!(writer, "@PG\tID:blast\tPN:blastn\tCL:blast")?;
     Ok(())
@@ -14,10 +14,10 @@ pub fn write_sam_record<W: Write>(
     writer: &mut W,
     query_id: &str,
     subject_id: &str,
-    query_start: i32,
-    query_end: i32,
+    _query_start: i32,
+    _query_end: i32,
     subject_start: i32,
-    subject_end: i32,
+    _subject_end: i32,
     score: i32,
     align_len: i32,
     num_ident: i32,

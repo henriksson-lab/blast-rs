@@ -1,11 +1,10 @@
 //! High-level blastn search API with builder pattern.
 
-use crate::search::{SearchHsp, blastn_gapped_search, blastn_gapped_search_packed};
+use crate::search::{SearchHsp, blastn_gapped_search};
 use crate::stat::{KarlinBlk, ungapped_kbp_calc, nucl_gapped_kbp_lookup,
                    nucl_alpha_beta, compute_length_adjustment_exact, UngappedKbpContext};
 use crate::filter;
 use crate::traceback::build_blastna_matrix;
-use crate::search::decode_packed_ncbi2na;
 
 /// Builder for configuring and running a blastn search.
 ///
@@ -159,8 +158,8 @@ impl BlastnSearch {
 
         let qp = if self.strand != Strand::Minus { &query_plus[..] } else { &[] };
         let qm = if self.strand != Strand::Plus { &query_minus[..] } else { &[] };
-        let qpn = if self.strand != Strand::Minus { &query_plus_nomask[..] } else { &[] };
-        let qmn = if self.strand != Strand::Plus { &query_minus_nomask[..] } else { &[] };
+        let _qpn = if self.strand != Strand::Minus { &query_plus_nomask[..] } else { &[] };
+        let _qmn = if self.strand != Strand::Plus { &query_minus_nomask[..] } else { &[] };
 
         // Encode subject
         let subject: Vec<u8> = self.subject_raw.iter()

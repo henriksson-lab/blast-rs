@@ -7,7 +7,7 @@ use crate::matrix::AA_SIZE;
 /// A Position-Specific Scoring Matrix.
 #[derive(Debug, Clone)]
 pub struct Pssm {
-    /// Scoring matrix: pssm[position][amino_acid] = score
+    /// Scoring matrix: `pssm[position][amino_acid]` = score
     pub scores: Vec<[i32; AA_SIZE]>,
     /// Query length (number of positions)
     pub length: usize,

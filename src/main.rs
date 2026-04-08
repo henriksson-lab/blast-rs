@@ -3,24 +3,49 @@
 use blast_rs::db::{BlastDb, DbType};
 use blast_rs::format::{format_tabular, TabularHit};
 use blast_rs::input::{iupacna_to_blastna, parse_fasta};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "blast", version = "0.1.0", about = "BLAST sequence search (Rust implementation)", allow_negative_numbers = true)]
-struct BlastnArgs {
-    /// Program: blastn, blastp, blastx, tblastn
-    #[arg(short, long, default_value = "blastn")]
-    program: String,
+#[command(name = "blast-cli", version, about = "BLAST sequence search (Rust implementation)", allow_negative_numbers = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
+#[derive(Subcommand)]
+enum Commands {
+    /// Nucleotide-nucleotide BLAST
+    Blastn(BlastnArgs),
+    /// Protein-protein BLAST
+    Blastp(BlastnArgs),
+    /// Translated nucleotide query vs protein subject
+    Blastx(BlastnArgs),
+    /// Protein query vs translated nucleotide subject
+    Tblastn(BlastnArgs),
+    /// Translated query vs translated subject
+    Tblastx(BlastnArgs),
+    /// Position-specific iterated BLAST
+    Psiblast(BlastnArgs),
+    /// Reverse position-specific BLAST
+    Rpsblast(BlastnArgs),
+    /// Translated RPS-BLAST
+    Rpstblastn(BlastnArgs),
+    /// Domain enhanced lookup time accelerated BLAST
+    Deltablast(BlastnArgs),
+}
+
+#[derive(Parser, Clone)]
+#[command(allow_negative_numbers = true)]
+struct BlastnArgs {
     /// Query file in FASTA format
     #[arg(short, long)]
     query: PathBuf,
 
     /// BLAST database name (path without extension)
-    #[arg(short, long, required_unless_present = "subject")]
+    #[arg(short, long)]
     db: Option<PathBuf>,
 
     /// Subject FASTA file (alternative to --db)
@@ -44,31 +69,31 @@ struct BlastnArgs {
     outfmt: String,
 
     /// Word size for initial seed
-    #[arg(short, long = "word_size", default_value = "11")]
-    word_size: i32,
+    #[arg(short = 'W', long = "word_size")]
+    word_size: Option<i32>,
 
     /// Reward for nucleotide match
-    #[arg(long, default_value = "1")]
-    reward: i32,
+    #[arg(long)]
+    reward: Option<i32>,
 
     /// Penalty for nucleotide mismatch
-    #[arg(long, default_value = "-3")]
-    penalty: i32,
+    #[arg(long)]
+    penalty: Option<i32>,
 
     /// Cost to open a gap
-    #[arg(long, default_value = "5")]
-    gapopen: i32,
+    #[arg(long)]
+    gapopen: Option<i32>,
 
     /// Cost to extend a gap
-    #[arg(long, default_value = "2")]
-    gapextend: i32,
+    #[arg(long)]
+    gapextend: Option<i32>,
 
     /// Query strand(s) to search: both, plus, minus
     #[arg(long, default_value = "both")]
     strand: String,
 
     /// Maximum number of target sequences to report
-    #[arg(long = "max_target_seqs", default_value = "500")]
+    #[arg(long = "max_target_seqs", alias = "max-target-seqs", default_value = "500")]
     max_target_seqs: i32,
 
     /// DUST low-complexity filtering: yes/no
@@ -100,7 +125,7 @@ struct BlastnArgs {
     qcov_hsp_perc: f64,
 
     /// Maximum number of HSPs per subject
-    #[arg(long = "max_hsps", default_value = "0")]
+    #[arg(long = "max_hsps", alias = "max-hsps", default_value = "0")]
     max_hsps: i32,
 
     /// Culling limit: delete hits enveloped by higher-scoring hits
@@ -286,13 +311,76 @@ struct BlastnArgs {
     /// Disable TaxID expansion
     #[arg(long, default_value = "false")]
     no_taxid_expansion: bool,
+}
 
+impl BlastnArgs {
+    /// Apply task-specific defaults for parameters not explicitly set by the user.
+    fn apply_task_defaults(&mut self) {
+        if let Some(ref task) = self.task {
+            match task.as_str() {
+                "blastn-short" => {
+                    // NCBI defaults for blastn-short
+                    if self.word_size.is_none() { self.word_size = Some(7); }
+                    if self.reward.is_none() { self.reward = Some(1); }
+                    if self.penalty.is_none() { self.penalty = Some(-3); }
+                    if self.gapopen.is_none() { self.gapopen = Some(5); }
+                    if self.gapextend.is_none() { self.gapextend = Some(2); }
+                }
+                "blastn" => {
+                    if self.word_size.is_none() { self.word_size = Some(11); }
+                    if self.reward.is_none() { self.reward = Some(2); }
+                    if self.penalty.is_none() { self.penalty = Some(-3); }
+                    if self.gapopen.is_none() { self.gapopen = Some(5); }
+                    if self.gapextend.is_none() { self.gapextend = Some(2); }
+                }
+                "megablast" | "dc-megablast" => {
+                    if self.word_size.is_none() { self.word_size = Some(28); }
+                    if self.reward.is_none() { self.reward = Some(1); }
+                    if self.penalty.is_none() { self.penalty = Some(-2); }
+                    if self.gapopen.is_none() { self.gapopen = Some(0); }
+                    if self.gapextend.is_none() { self.gapextend = Some(0); }
+                }
+                _ => {}
+            }
+        }
+        // Fill in defaults for anything still unset
+        if self.word_size.is_none() { self.word_size = Some(11); }
+        if self.reward.is_none() { self.reward = Some(1); }
+        if self.penalty.is_none() { self.penalty = Some(-3); }
+        if self.gapopen.is_none() { self.gapopen = Some(5); }
+        if self.gapextend.is_none() { self.gapextend = Some(2); }
+    }
+
+    fn word_size(&self) -> i32 { self.word_size.unwrap_or(11) }
+    fn reward(&self) -> i32 { self.reward.unwrap_or(1) }
+    fn penalty(&self) -> i32 { self.penalty.unwrap_or(-3) }
+    fn gapopen(&self) -> i32 { self.gapopen.unwrap_or(5) }
+    fn gapextend(&self) -> i32 { self.gapextend.unwrap_or(2) }
 }
 
 fn main() {
-    let args = BlastnArgs::parse();
+    let cli = Cli::parse();
 
-    let result = match args.program.as_str() {
+    let (program, mut args) = match cli.command {
+        Commands::Blastn(a) => ("blastn", a),
+        Commands::Blastp(a) => ("blastp", a),
+        Commands::Blastx(a) => ("blastx", a),
+        Commands::Tblastn(a) => ("tblastn", a),
+        Commands::Tblastx(a) => ("tblastx", a),
+        Commands::Psiblast(a) => ("psiblast", a),
+        Commands::Rpsblast(a) => ("rpsblast", a),
+        Commands::Rpstblastn(a) => ("rpstblastn", a),
+        Commands::Deltablast(a) => ("deltablast", a),
+    };
+
+    args.apply_task_defaults();
+
+    if args.db.is_none() && args.subject.is_none() {
+        eprintln!("Error: Either --db or --subject is required");
+        std::process::exit(1);
+    }
+
+    let result = match program {
         "blastn" => run_blastn(&args),
         "blastp" => run_blastp(&args),
         "blastx" => run_blastx(&args),
@@ -302,7 +390,7 @@ fn main() {
         "rpsblast" => run_rpsblast(&args),
         "rpstblastn" => run_rpstblastn(&args),
         "deltablast" => run_deltablast(&args),
-        other => Err(format!("Unknown program: {}. Supported: blastn, blastp, blastx, tblastn, tblastx, psiblast, rpsblast, rpstblastn, deltablast", other).into()),
+        _ => unreachable!(),
     };
 
     if let Err(e) = result {
@@ -331,7 +419,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         for i in 1..21 { matrix[i][i] = 5; }
 
         // Protein KBP parameters
-        let prot_kbp = blast_rs::stat::lookup_protein_params(args.gapopen, args.gapextend)
+        let prot_kbp = blast_rs::stat::lookup_protein_params(args.gapopen(), args.gapextend())
             .map(|p| blast_rs::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
             .unwrap_or_else(blast_rs::stat::protein_ungapped_kbp);
 
@@ -352,7 +440,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                     .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
 
                 // Simple word scan + extend
-                let word_size = args.word_size.max(3) as usize;
+                let word_size = args.word_size().max(3) as usize;
                 if query_aa.len() < word_size || subj_aa.len() < word_size { continue; }
 
                 for qi in 0..=(query_aa.len() - word_size) {
@@ -386,6 +474,8 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                                 subject_end: se as i32,
                                 evalue: prot_kbp.raw_to_evalue(score, search_space),
                                 bit_score: prot_kbp.raw_to_bit(score),
+                                query_len: query_aa.len() as i32,
+                                subject_len: subj_aa.len() as i32,
                             });
                         }
                     }
@@ -447,7 +537,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         // Translate in 6 frames
         let frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
 
-        for (frame, protein_query) in &frames {
+        for (_frame, protein_query) in &frames {
             if protein_query.len() < 3 { continue; }
 
             let search_space = blast_rs::stat::compute_search_space(
@@ -492,6 +582,8 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                                 subject_end: se as i32,
                                 evalue,
                                 bit_score: prot_kbp.raw_to_bit(score),
+                                query_len: protein_query.len() as i32,
+                                subject_len: subj_aa.len() as i32,
                             });
                         }
                     }
@@ -543,7 +635,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             }).collect();
             let frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
 
-            for (frame, subj_protein) in &frames {
+            for (_frame, subj_protein) in &frames {
                 if subj_protein.len() < 3 || query_aa.len() < 3 { continue; }
                 let search_space = (query_aa.len() * subj_protein.len()) as f64;
 
@@ -571,6 +663,8 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                                 query_start: qs as i32+1, query_end: qe as i32,
                                 subject_start: ss as i32+1, subject_end: se as i32,
                                 evalue, bit_score: prot_kbp.raw_to_bit(score),
+                                query_len: query_aa.len() as i32,
+                                subject_len: subj_protein.len() as i32,
                             });
                         }
                     }
@@ -638,6 +732,7 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 query_start: 1, query_end: pssm.length as i32,
                 subject_start: 1, subject_end: pssm.length as i32,
                 evalue: *evalue, bit_score: prot_kbp.raw_to_bit(*score),
+                query_len: pssm.length as i32, subject_len: 0,
             });
         }
 
@@ -657,11 +752,11 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_rpsblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_rpsblast(_args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     Err("rpsblast requires a pre-built PSSM database (CDD). Use --program blastp for protein search.".into())
 }
 
-fn run_rpstblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_rpstblastn(_args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     // rpstblastn: translated nucleotide query vs RPS (PSSM) database
     // Like rpsblast but translates the nucleotide query first
     Err("rpstblastn requires a pre-built PSSM database (CDD). Use --program blastx for translated search.".into())
@@ -735,6 +830,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                                     query_start: qs as i32+1, query_end: qe as i32,
                                     subject_start: ss as i32+1, subject_end: se as i32,
                                     evalue, bit_score: prot_kbp.raw_to_bit(score),
+                                    query_len: q_prot.len() as i32, subject_len: s_prot.len() as i32,
                                 });
                             }
                         }
@@ -786,8 +882,6 @@ fn run_blastn_rust(
     records: &[blast_rs::input::FastaRecord],
     db: BlastDb,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::search::blastn_gapped_search;
-    
     use rayon::prelude::*;
 
     // Pure Rust KBP computation — per-context (plus + minus) for exact e-value matching
@@ -799,8 +893,8 @@ fn run_blastn_rust(
 
         const BLASTNA_SIZE: usize = 16;
         const BLASTNA_TO_NCBI4NA: [u8; BLASTNA_SIZE] = [1,2,4,8,5,10,3,12,9,6,14,13,11,7,15,0];
-        let reward = args.reward;
-        let penalty = args.penalty;
+        let reward = args.reward();
+        let penalty = args.penalty();
         let matrix_fn = |i: usize, j: usize| -> i32 {
             if i >= BLASTNA_SIZE || j >= BLASTNA_SIZE { return penalty; }
             if i == BLASTNA_SIZE - 1 || j == BLASTNA_SIZE - 1 { return i32::MIN / 2; }
@@ -832,16 +926,16 @@ fn run_blastn_rust(
 
         // Gapped KBP (from table — may fall back to ungapped for large gap costs)
         let (gkbp_plus, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
-            args.gapopen, args.gapextend, reward, penalty, &ungapped_plus,
+            args.gapopen(), args.gapextend(), reward, penalty, &ungapped_plus,
         ).unwrap_or((ungapped_plus.clone(), false));
         let (gkbp_minus, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
-            args.gapopen, args.gapextend, reward, penalty, &ungapped_minus,
+            args.gapopen(), args.gapextend(), reward, penalty, &ungapped_minus,
         ).unwrap_or((ungapped_minus.clone(), false));
 
         // Per-context search space
         let compute_searchsp = |kbp: &blast_rs::stat::KarlinBlk, ukbp: &blast_rs::stat::KarlinBlk| -> f64 {
             let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
-                reward, penalty, args.gapopen, args.gapextend, ukbp.lambda, ukbp.h, true);
+                reward, penalty, args.gapopen(), args.gapextend(), ukbp.lambda, ukbp.h, true);
             let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
                 kbp.k, kbp.log_k, alpha / kbp.lambda, beta,
                 qlen, db.total_length as i64, db.num_oids as i32);
@@ -856,11 +950,11 @@ fn run_blastn_rust(
     // Use plus-strand KBP as the primary (for seed finding threshold)
     let kbp = &kbp_plus;
     let search_space = searchsp_plus;
-    let word_size = args.word_size as usize;
-    let reward = args.reward;
-    let penalty = args.penalty;
-    let gapopen = args.gapopen;
-    let gapextend = args.gapextend;
+    let word_size = args.word_size() as usize;
+    let reward = args.reward();
+    let penalty = args.penalty();
+    let gapopen = args.gapopen();
+    let gapextend = args.gapextend();
     let evalue = args.evalue;
 
     let mut all_hits: Vec<(u32, TabularHit)> = Vec::new();
@@ -976,6 +1070,8 @@ fn run_blastn_rust(
                     } else {
                         kbp_plus.raw_to_bit(hsp.score)
                     },
+                    query_len,
+                    subject_len: db.get_seq_len(oid) as i32,
                 }));
             }
         }
@@ -1102,10 +1198,12 @@ fn run_blastn_rust(
 }
 
 /// NCBI4NA to BLASTNA conversion for ambiguity codes.
+#[allow(dead_code)]
 const NCBI4NA_TO_BLASTNA: [u8; 16] = [
     15, 0, 1, 6, 2, 4, 9, 13, 3, 8, 5, 12, 7, 11, 10, 14,
 ];
 
+#[allow(dead_code)]
 fn decode_subject(db: &BlastDb, oid: i32) -> Vec<u8> {
     let packed = db.get_sequence(oid as u32);
     let seq_len = db.get_seq_len(oid as u32) as usize;
@@ -1164,12 +1262,12 @@ fn run_blastn_subject(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use blast_rs::search::blastn_gapped_search;
 
-    let kbp = blast_rs::stat::compute_ungapped_kbp(args.reward, args.penalty);
+    let kbp = blast_rs::stat::compute_ungapped_kbp(args.reward(), args.penalty());
     let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
     let avg_query_len = queries.iter().map(|r| r.sequence.len()).sum::<usize>() as f64
         / queries.len().max(1) as f64;
     let search_space = total_subj_len as f64 * avg_query_len;
-    let word_size = args.word_size as usize;
+    let word_size = args.word_size() as usize;
 
     let mut all_hits = Vec::new();
 
@@ -1183,7 +1281,7 @@ fn run_blastn_subject(
 
             let hsps = blastn_gapped_search(
                 &query_plus, &query_minus, &subject,
-                word_size, args.reward, args.penalty, args.gapopen, args.gapextend,
+                word_size, args.reward(), args.penalty(), args.gapopen(), args.gapextend(),
                 20, &kbp, search_space, args.evalue,
             );
 
@@ -1215,6 +1313,8 @@ fn run_blastn_subject(
                     subject_end: s_end,
                     evalue: hsp.evalue,
                     bit_score: hsp.bit_score,
+                    query_len: query_rec.sequence.len() as i32,
+                    subject_len: subj_rec.sequence.len() as i32,
                 });
             }
         }
@@ -1262,6 +1362,7 @@ fn apply_filters(hits: &mut Vec<TabularHit>, args: &BlastnArgs, query_len: i32) 
 }
 
 /// Check if a sequence is low-complexity (simple repeats that crash the C engine).
+#[allow(dead_code)]
 fn is_low_complexity(seq: &[u8]) -> bool {
     if seq.len() < 20 { return false; }
     // Check if the sequence is a short repeat

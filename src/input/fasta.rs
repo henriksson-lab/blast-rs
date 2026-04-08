@@ -1,6 +1,6 @@
 //! Multi-FASTA parser using noodles-fasta.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 
 /// A single FASTA record.
 #[derive(Debug, Clone)]

@@ -18,7 +18,7 @@ pub fn greedy_align(
     x_dropoff: i32,
 ) -> Option<(i32, usize, usize, usize, usize, GapEditScript)> {
     // Extend right from seed
-    let (r_score, r_q_end, r_s_end, mut r_ops) =
+    let (r_score, r_q_end, r_s_end, r_ops) =
         extend_greedy(query, subject, q_seed, s_seed, reward, penalty, x_dropoff, true);
 
     // Extend left from seed
