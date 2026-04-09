@@ -11,7 +11,7 @@ use crate::traceback::build_blastna_matrix;
 /// # Example
 ///
 /// ```no_run
-/// use blast_core::blastn::BlastnSearch;
+/// use blast_rs::blastn::BlastnSearch;
 ///
 /// let results = BlastnSearch::new()
 ///     .query(b"ACGTACGTACGT")

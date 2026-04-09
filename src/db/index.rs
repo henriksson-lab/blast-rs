@@ -469,9 +469,7 @@ mod tests {
 
     fn test_db_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("ncbi-blast-2.17.0+-src/c++/src/algo/blast/unit_tests/api/data/seqn")
+            .join("tests/fixtures/seqn/seqn")
     }
 
     #[test]
@@ -517,8 +515,7 @@ mod tests {
     #[test]
     fn test_accession_pombe() {
         let pombe = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .join("ncbi-blast-2.17.0+-src/c++/src/algo/blast/unit_tests/api/data/pombe");
+            .join("tests/fixtures/pombe/pombe");
         if !pombe.with_extension("nin").exists() { return; }
         let db = BlastDb::open(&pombe).unwrap();
         assert_eq!(db.get_accession(0).as_deref(), Some("NC_003421.2"));
@@ -528,7 +525,6 @@ mod tests {
 
     fn corrupt_db_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
             .join(format!("tests/fixtures/corrupt_db/{}", name))
     }
 
@@ -592,8 +588,7 @@ mod tests {
     #[test]
     fn test_open_protein_db() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .join("ncbi-blast-2.17.0+-src/c++/src/algo/blast/unit_tests/api/data/seqp");
+            .join("tests/fixtures/seqp/seqp");
         if !path.with_extension("pin").exists() { return; }
         let db = BlastDb::open(&path).unwrap();
         assert_eq!(db.db_type, DbType::Protein);
@@ -605,8 +600,7 @@ mod tests {
     #[test]
     fn test_protein_seq_length() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .join("ncbi-blast-2.17.0+-src/c++/src/algo/blast/unit_tests/api/data/seqp");
+            .join("tests/fixtures/seqp/seqp");
         if !path.with_extension("pin").exists() { return; }
         let db = BlastDb::open(&path).unwrap();
         let len = db.get_seq_len(0);

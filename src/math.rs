@@ -92,8 +92,8 @@ mod tests {
     fn test_expm1_small() {
         let x = 1e-10;
         let result = expm1(x);
-        let expected = x.exp() - 1.0;
-        assert!((result - expected).abs() < 1e-19, "expm1({}) = {}, expected ~{}", x, result, expected);
+        let expected = x.exp_m1(); // Use Rust's built-in as reference
+        assert!((result - expected).abs() < 1e-22, "expm1({}) = {}, expected ~{}", x, result, expected);
     }
 
     #[test]
