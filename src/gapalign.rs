@@ -81,9 +81,74 @@ pub fn gapped_align(
         return None;
     }
 
-    // Traceback (simplified — just record substitution for the aligned region)
+    // Traceback from best position through the DP matrix
+    // We need to recompute or store the full matrices for traceback.
+    // Recompute H, E, F with full storage for traceback.
+    let mut h_full = vec![vec![0i32; cols]; q_len + 1];
+    let mut e_full = vec![vec![i32::MIN / 2; cols]; q_len + 1];
+    let mut f_full = vec![vec![i32::MIN / 2; cols]; q_len + 1];
+    // 0=diag, 1=left(gap in subject=ins), 2=up(gap in query=del), 255=reset
+    let mut trace = vec![vec![255u8; cols]; q_len + 1];
+
+    for i in 1..=q_len {
+        let mut fi = i32::MIN / 2;
+        for j in 1..=cols - 1 {
+            let match_score = if q[i - 1] == s[j - 1] { reward } else { penalty };
+            let diag = h_full[i - 1][j - 1] + match_score;
+
+            e_full[i][j] = (h_full[i - 1][j] - gap_open_extend).max(e_full[i - 1][j] - gap_extend);
+            fi = (h_full[i][j - 1] - gap_open_extend).max(fi - gap_extend);
+            f_full[i][j] = fi;
+
+            let val = diag.max(e_full[i][j]).max(f_full[i][j]).max(0);
+            h_full[i][j] = val;
+
+            if val == 0 {
+                trace[i][j] = 255;
+            } else if val == diag {
+                trace[i][j] = 0;
+            } else if val == f_full[i][j] {
+                trace[i][j] = 1; // gap in subject
+            } else {
+                trace[i][j] = 2; // gap in query
+            }
+        }
+    }
+
+    let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
+    let mut i = best_i;
+    let mut j = best_j;
+
+    while i > 0 && j > 0 && h_full[i][j] > 0 {
+        match trace[i][j] {
+            0 => {
+                if let Some(last) = ops.last_mut() {
+                    if last.0 == GapAlignOpType::Sub { last.1 += 1; } else { ops.push((GapAlignOpType::Sub, 1)); }
+                } else { ops.push((GapAlignOpType::Sub, 1)); }
+                i -= 1;
+                j -= 1;
+            }
+            1 => {
+                if let Some(last) = ops.last_mut() {
+                    if last.0 == GapAlignOpType::Ins { last.1 += 1; } else { ops.push((GapAlignOpType::Ins, 1)); }
+                } else { ops.push((GapAlignOpType::Ins, 1)); }
+                j -= 1;
+            }
+            2 => {
+                if let Some(last) = ops.last_mut() {
+                    if last.0 == GapAlignOpType::Del { last.1 += 1; } else { ops.push((GapAlignOpType::Del, 1)); }
+                } else { ops.push((GapAlignOpType::Del, 1)); }
+                i -= 1;
+            }
+            _ => break,
+        }
+    }
+
+    ops.reverse();
     let mut esp = GapEditScript::new();
-    esp.push(GapAlignOpType::Sub, best_j.min(best_i) as i32);
+    for (op, count) in ops {
+        esp.push(op, count);
+    }
 
     Some((best_score, esp))
 }

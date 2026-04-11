@@ -374,6 +374,17 @@ impl Pssm {
         }
     }
 
+    /// Return the consensus residue (highest-scoring amino acid) at a given position.
+    pub fn consensus_at(&self, position: usize) -> Option<u8> {
+        if position >= self.length { return None; }
+        let row = &self.scores[position];
+        // Only consider standard amino acids (indices 1-20 in NCBIstdaa)
+        let (best_aa, _) = (1u8..=20)
+            .map(|aa| (aa, row[aa as usize]))
+            .max_by_key(|&(_, s)| s)?;
+        Some(best_aa)
+    }
+
     /// Update the PSSM from a set of aligned sequences (PSI-BLAST iteration).
     ///
     /// This implements the full NCBI PSI-BLAST PSSM computation:

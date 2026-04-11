@@ -23,6 +23,9 @@ pub fn rps_blast_search(
 ) -> Vec<RpsHit> {
     let mut hits = Vec::new();
 
+    // Total database length = sum of all profile PSSM lengths
+    let total_db_len: usize = profiles.iter().map(|p| p.pssm.length).sum();
+
     for profile in profiles {
         let pssm = &profile.pssm;
         if query.len() < pssm.length { continue; }
@@ -35,13 +38,15 @@ pub fn rps_blast_search(
             }
 
             if score > 0 {
-                let search_space = (query.len() * pssm.length) as f64;
+                let search_space = (query.len() * total_db_len) as f64;
                 let evalue = kbp_k * search_space * (-kbp_lambda * score as f64).exp();
                 if evalue <= evalue_threshold {
                     let mut ident = 0;
-                    // Count "identities" as positions where the PSSM score is positive
+                    // Count identities: positions where query matches the PSSM consensus residue
                     for k in 0..pssm.length {
-                        if pssm.score_at(k, query[qi + k]) > 0 { ident += 1; }
+                        if let Some(consensus) = pssm.consensus_at(k) {
+                            if query[qi + k] == consensus { ident += 1; }
+                        }
                     }
                     hits.push(RpsHit {
                         profile_id: profile.id.clone(),

@@ -411,7 +411,7 @@ fn main() {
 }
 
 fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::matrix::AA_SIZE;
+
 
     let query_file = File::open(&args.query)?;
     let queries = parse_fasta(query_file);
@@ -423,9 +423,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let subject_file = File::open(subject_path)?;
         let subjects = parse_fasta(subject_file);
 
-        // BLOSUM62-like scoring matrix (simplified)
-        let mut matrix = [[(-2i32); AA_SIZE]; AA_SIZE];
-        for i in 1..21 { matrix[i][i] = 5; }
+        let matrix = blast_rs::matrix::BLOSUM62;
 
         let prot_kbp = blast_rs::stat::lookup_protein_params(args.gapopen(), args.gapextend())
             .map(|p| blast_rs::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
@@ -483,6 +481,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         subject_taxids: vec![],
                         subject_sci_name: String::new(), subject_common_name: String::new(),
                         subject_blast_name: String::new(), subject_kingdom: String::new(),
+                        num_ident: ph.num_ident,
                     });
                 }
             }
@@ -490,7 +489,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         hits.sort_by(|a, b| b.bit_score.partial_cmp(&a.bit_score).unwrap_or(std::cmp::Ordering::Equal));
         let mut seen = std::collections::HashSet::new();
-        hits.retain(|h| seen.insert((h.query_start, h.subject_start)));
+        hits.retain(|h| seen.insert((h.query_id.clone(), h.subject_id.clone(), h.query_start, h.subject_start)));
 
         let stdout = io::stdout();
         let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -513,7 +512,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::matrix::AA_SIZE;
+
     use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
     let query_file = File::open(&args.query)?;
@@ -527,8 +526,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let subject_file = File::open(subject_path)?;
     let subjects = parse_fasta(subject_file);
 
-    let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
-    for i in 1..21 { matrix[i][i] = 5; }
+    let matrix = blast_rs::matrix::BLOSUM62;
 
     let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
     let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
@@ -591,6 +589,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         subject_taxids: vec![],
                         subject_sci_name: String::new(), subject_common_name: String::new(),
                         subject_blast_name: String::new(), subject_kingdom: String::new(),
+                        num_ident: ph.num_ident,
                     });
                 }
             }
@@ -619,7 +618,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::matrix::AA_SIZE;
+
     use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
     // tblastn: protein query vs translated nucleotide subject
@@ -630,8 +629,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let subject_file = File::open(subject_path)?;
     let subjects = parse_fasta(subject_file);
 
-    let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
-    for i in 1..21 { matrix[i][i] = 5; }
+    let matrix = blast_rs::matrix::BLOSUM62;
     let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
 
     let mut all_hits = Vec::new();
@@ -681,6 +679,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         subject_taxids: vec![],
                         subject_sci_name: String::new(), subject_common_name: String::new(),
                         subject_blast_name: String::new(), subject_kingdom: String::new(),
+                        num_ident: ph.num_ident,
                     });
                 }
             }
@@ -688,7 +687,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     all_hits.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
     let mut seen = std::collections::HashSet::new();
-    all_hits.retain(|h| seen.insert((h.query_start, h.subject_start)));
+    all_hits.retain(|h| seen.insert((h.query_id.clone(), h.subject_id.clone(), h.query_start, h.subject_start)));
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -707,7 +706,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     use blast_rs::pssm::Pssm;
-    use blast_rs::matrix::AA_SIZE;
+
 
     let query_file = File::open(&args.query)?;
     let queries = parse_fasta(query_file);
@@ -718,8 +717,7 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let subject_file = File::open(subject_path)?;
     let subjects = parse_fasta(subject_file);
 
-    let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
-    for i in 1..21 { matrix[i][i] = 5; }
+    let matrix = blast_rs::matrix::BLOSUM62;
 
     let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
     let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
@@ -780,6 +778,7 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 subject_taxids: vec![],
                 subject_sci_name: String::new(), subject_common_name: String::new(),
                 subject_blast_name: String::new(), subject_kingdom: String::new(),
+                num_ident,
             });
         }
 
@@ -827,7 +826,7 @@ fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::matrix::AA_SIZE;
+
     use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
     // tblastx: translated nucleotide query vs translated nucleotide subject
@@ -838,8 +837,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let subject_file = File::open(subject_path)?;
     let subjects = parse_fasta(subject_file);
 
-    let mut matrix = [[-2i32; AA_SIZE]; AA_SIZE];
-    for i in 1..21 { matrix[i][i] = 5; }
+    let matrix = blast_rs::matrix::BLOSUM62;
     let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
 
     let mut all_hits = Vec::new();
@@ -884,6 +882,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                             subject_taxids: vec![],
                             subject_sci_name: String::new(), subject_common_name: String::new(),
                             subject_blast_name: String::new(), subject_kingdom: String::new(),
+                            num_ident: ph.num_ident,
                         });
                     }
                 }
@@ -892,7 +891,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     all_hits.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
     let mut seen = std::collections::HashSet::new();
-    all_hits.retain(|h| seen.insert((h.query_start, h.subject_start)));
+    all_hits.retain(|h| seen.insert((h.query_id.clone(), h.subject_id.clone(), h.query_start, h.subject_start)));
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -1142,6 +1141,7 @@ fn run_blastn_rust(
                     subject_taxids: db.get_taxids(oid),
                     subject_sci_name: String::new(), subject_common_name: String::new(),
                     subject_blast_name: String::new(), subject_kingdom: String::new(),
+                    num_ident: hsp.num_ident,
                 }));
             }
         }
@@ -1350,6 +1350,7 @@ fn run_blastn_subject(
                     subject_taxids: vec![],
                     subject_sci_name: String::new(), subject_common_name: String::new(),
                     subject_blast_name: String::new(), subject_kingdom: String::new(),
+                    num_ident: hsp.num_ident,
                 });
             }
         }

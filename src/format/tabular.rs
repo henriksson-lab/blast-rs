@@ -30,6 +30,7 @@ pub struct TabularHit {
     pub subject_common_name: String,
     pub subject_blast_name: String,
     pub subject_kingdom: String,
+    pub num_ident: i32,
 }
 
 /// Format an e-value matching BLAST tabular output (-outfmt 6).
@@ -104,8 +105,8 @@ pub fn get_field(hit: &TabularHit, column: &str) -> String {
         "evalue" => format_evalue(hit.evalue),
         "bitscore" => format_bitscore(hit.bit_score),
         "score" => hit.raw_score.to_string(),
-        "nident" => (hit.align_len - hit.mismatches).to_string(),
-        "gaps" => hit.gap_opens.to_string(),
+        "nident" => hit.num_ident.to_string(),
+        "gaps" => (hit.align_len - hit.num_ident - hit.mismatches).max(0).to_string(),
         "qlen" => hit.query_len.to_string(),
         "slen" => hit.subject_len.to_string(),
         "qcovs" => {
@@ -208,6 +209,7 @@ mod tests {
             subject_common_name: "human".to_string(),
             subject_blast_name: "primates".to_string(),
             subject_kingdom: "E".to_string(),
+            num_ident: 47,
         }
     }
 

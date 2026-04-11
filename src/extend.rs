@@ -55,9 +55,23 @@ pub fn na_ungapped_extend(
     penalty: i32,
     x_dropoff: i32,
 ) -> Option<UngappedData> {
+    na_ungapped_extend_len(query, subject, subject.len() * 4, q_offset, s_offset, reward, penalty, x_dropoff)
+}
+
+/// Ungapped extension with explicit subject length in bases.
+pub fn na_ungapped_extend_len(
+    query: &[u8],       // BLASTNA encoded
+    subject: &[u8],     // NCBI2na packed (4 bases/byte)
+    subject_len: usize, // actual number of bases
+    q_offset: i32,      // seed position in query
+    s_offset: i32,      // seed position in subject
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+) -> Option<UngappedData> {
     // Extend right from the seed
     let q_len = query.len() as i32;
-    let s_len_bases = subject.len() as i32 * 4; // approximate
+    let s_len_bases = subject_len as i32;
 
     let mut score = 0i32;
     let mut best_score = 0i32;

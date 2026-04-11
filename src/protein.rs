@@ -398,6 +398,23 @@ pub fn protein_gapped_align(
     })
 }
 
+/// Combined ungapped extend + gapped alignment for a seed hit.
+/// Returns a ProteinGappedResult if the hit passes extension.
+pub fn protein_search_hit(
+    query: &[u8], subject: &[u8],
+    q_seed: usize, s_seed: usize,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    gap_open: i32, gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<ProteinGappedResult> {
+    // First do ungapped extension to filter
+    let ug = protein_ungapped_extend(query, subject, q_seed, s_seed, matrix, x_dropoff)?;
+    // If ungapped score is reasonable, do full gapped alignment
+    let mid_q = (ug.0 + ug.1) / 2;
+    let mid_s = (ug.2 + ug.3) / 2;
+    protein_gapped_align(query, subject, mid_q, mid_s, matrix, gap_open, gap_extend, x_dropoff)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

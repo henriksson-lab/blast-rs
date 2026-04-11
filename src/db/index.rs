@@ -331,6 +331,8 @@ impl BlastDb {
     /// For nucleotide: returns packed 2-bit data from seq_start to amb_start.
     /// For protein: returns raw amino acid codes.
     pub fn get_sequence(&self, oid: u32) -> &[u8] {
+        assert!((oid as usize) < self.seq_offsets.len().saturating_sub(1),
+            "OID {} out of range (num_oids={})", oid, self.num_oids);
         let start = self.seq_offsets[oid as usize] as usize;
         let end = if self.db_type == DbType::Nucleotide {
             // For nucleotide, sequence data ends at the ambiguity offset
@@ -343,6 +345,8 @@ impl BlastDb {
 
     /// Get the sequence length in residues for the given OID.
     pub fn get_seq_len(&self, oid: u32) -> u32 {
+        assert!((oid as usize) < self.seq_offsets.len().saturating_sub(1),
+            "OID {} out of range (num_oids={})", oid, self.num_oids);
         let start = self.seq_offsets[oid as usize] as usize;
         if self.db_type == DbType::Nucleotide {
             // For nucleotide: sequence ends at amb_offset
@@ -365,6 +369,8 @@ impl BlastDb {
 
     /// Get the raw header bytes (ASN.1) for the given OID.
     pub fn get_header(&self, oid: u32) -> &[u8] {
+        assert!((oid as usize) < self.hdr_offsets.len().saturating_sub(1),
+            "OID {} out of range (num_oids={})", oid, self.num_oids);
         let start = self.hdr_offsets[oid as usize] as usize;
         let end = self.hdr_offsets[oid as usize + 1] as usize;
         &self.hdr_mmap[start..end]

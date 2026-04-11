@@ -28,7 +28,11 @@ impl KarlinBlk {
 
     /// Convert an E-value to the minimum raw score needed.
     pub fn evalue_to_raw(&self, evalue: f64, search_space: f64) -> i32 {
-        let score = -(evalue / (search_space * self.k)).ln() / self.lambda;
+        let denom = search_space * self.k;
+        if denom <= 0.0 || self.lambda <= 0.0 || evalue <= 0.0 {
+            return 1;
+        }
+        let score = -(evalue / denom).ln() / self.lambda;
         score.ceil() as i32
     }
 }
@@ -195,12 +199,13 @@ pub fn compute_length_adjustment(
         return 0;
     }
 
-    let alpha = kbp.lambda * kbp.h;
-    if alpha <= 0.0 {
+    let h = kbp.h;
+    if h <= 0.0 {
         return 0;
     }
 
     // Iteratively solve for length_adjustment
+    // Formula: len_adj = (ln(K) + ln(eff_q * eff_d)) / H
     let q = query_length as f64;
     let d = db_length as f64;
     let n = num_seqs as f64;
@@ -210,7 +215,7 @@ pub fn compute_length_adjustment(
     for _ in 0..20 {
         let eff_q = (q - len_adj).max(1.0);
         let eff_d = (d - n * len_adj).max(1.0);
-        let new_adj = (log_k + (eff_q * eff_d).ln()) / alpha;
+        let new_adj = (log_k + (eff_q * eff_d).ln()) / h;
         let new_adj = new_adj.min(q - 1.0).min(d / n - 1.0).max(0.0);
         if (new_adj - len_adj).abs() < 0.5 {
             break;

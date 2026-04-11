@@ -60,13 +60,13 @@ pub fn blastn_ungapped_search(
         }
 
         // Build lookup table from query
-        let mut lut: Vec<i16> = vec![-1; lut_size];
-        let mut next: Vec<i16> = vec![-1; query.len()];
+        let mut lut: Vec<i32> = vec![-1; lut_size];
+        let mut next: Vec<i32> = vec![-1; query.len()];
 
         for i in (0..=(query.len() - word_size)).rev() {
             let key = word_hash_n(&query[i..i + lut_word], lut_word) as usize;
             next[i] = lut[key];
-            lut[key] = i as i16;
+            lut[key] = i as i32;
         }
 
         // Scan subject
@@ -79,6 +79,10 @@ pub fn blastn_ungapped_search(
                 let mut matches = true;
                 if word_size > lut_word {
                     for k in lut_word..word_size {
+                        if qp + k >= query.len() || s_pos + k >= subject.len() {
+                            matches = false;
+                            break;
+                        }
                         if query[qp + k] != subject[s_pos + k] {
                             matches = false;
                             break;
@@ -109,7 +113,7 @@ pub fn blastn_ungapped_search(
 #[inline]
 fn process_hit(
     query: &[u8], subject_packed: &[u8], subject_len: usize, word_size: usize,
-    lut: &[i16], next: &[i16], last_hit: &mut [i32], diag_mask: usize,
+    lut: &[i32], next: &[i32], last_hit: &mut [i32], diag_mask: usize,
     h: usize, base_pos: usize,
     reward: i32, penalty: i32, x_dropoff: i32,
     kbp: &KarlinBlk, search_space: f64, evalue_threshold: f64,
@@ -189,16 +193,16 @@ pub fn blastn_ungapped_search_packed(
             continue;
         }
 
-        // Build lookup table (Int16 backbone like C engine) + PV
-        let mut lut: Vec<i16> = vec![-1; lut_size]; // 128KB for 8-mer, fits in L2
-        let mut next: Vec<i16> = vec![-1; query.len()]; // chain for collisions
+        // Build lookup table + PV
+        let mut lut: Vec<i32> = vec![-1; lut_size];
+        let mut next: Vec<i32> = vec![-1; query.len()];
         let pv_size = (lut_size + 63) / 64;
         let mut pv: Vec<u64> = vec![0; pv_size]; // 8KB, fits in L1
 
         for i in (0..=(query.len() - word_size)).rev() {
             let key = word_hash_n(&query[i..i + lut_word], lut_word) as usize;
             next[i] = lut[key];
-            lut[key] = i as i16;
+            lut[key] = i as i32;
             pv[key >> 6] |= 1u64 << (key & 63);
         }
 

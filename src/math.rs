@@ -30,22 +30,20 @@ pub fn log1p(x: f64) -> f64 {
     if x.abs() >= 0.2 {
         return (x + 1.0).ln();
     }
+    // Taylor series: ln(1+x) = x - x^2/2 + x^3/3 - x^4/4 + ...
     let mut sum = 0.0;
-    let mut y = x;
-    let mut i = 0i32;
-    while i < 500 {
-        i += 1;
-        sum += y / i as f64;
-        if y.abs() < f64::EPSILON {
+    let mut power = x; // x^i
+    for i in 1..=500 {
+        let term = power / i as f64;
+        if i % 2 == 1 {
+            sum += term;
+        } else {
+            sum -= term;
+        }
+        if term.abs() < f64::EPSILON {
             break;
         }
-        y *= x;
-        i += 1;
-        sum -= y / i as f64;
-        if y < f64::EPSILON {
-            break;
-        }
-        y *= x;
+        power *= x;
     }
     sum
 }

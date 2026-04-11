@@ -53,7 +53,8 @@ pub fn format_pairwise_alignment<W: Write>(
     let q_len = (q_end - q_start) as usize;
     let mut pos = 0;
     let mut qi = q_start;
-    let mut si = if s_start <= s_end { s_start } else { s_start };
+    let mut si = s_start;
+    let s_dir: i32 = if s_start <= s_end { 1 } else { -1 };
 
     while pos < q_len {
         let chunk = line_width.min(q_len - pos);
@@ -61,17 +62,17 @@ pub fn format_pairwise_alignment<W: Write>(
         // Query line
         write!(writer, "Query  {:<6} ", qi)?;
         for i in 0..chunk {
-            let idx = (q_start as usize + pos + i).min(query_seq.len().saturating_sub(1));
-            write!(writer, "{}", blastna_to_char(query_seq[idx]))?;
+            if pos + i < query_seq.len() {
+                write!(writer, "{}", blastna_to_char(query_seq[pos + i]))?;
+            }
         }
         writeln!(writer, "  {}", qi + chunk as i32 - 1)?;
 
         // Match line
         write!(writer, "              ")?;
         for i in 0..chunk {
-            let qidx = (q_start as usize + pos + i).min(query_seq.len().saturating_sub(1));
-            let sidx = (s_start.unsigned_abs() as usize + pos + i).min(subject_seq.len().saturating_sub(1));
-            if qidx < query_seq.len() && sidx < subject_seq.len() && query_seq[qidx] == subject_seq[sidx] {
+            if pos + i < query_seq.len() && pos + i < subject_seq.len()
+                && query_seq[pos + i] == subject_seq[pos + i] {
                 write!(writer, "|")?;
             } else {
                 write!(writer, " ")?;
@@ -82,16 +83,17 @@ pub fn format_pairwise_alignment<W: Write>(
         // Subject line
         write!(writer, "Sbjct  {:<6} ", si)?;
         for i in 0..chunk {
-            let idx = (s_start.unsigned_abs() as usize + pos + i).min(subject_seq.len().saturating_sub(1));
-            write!(writer, "{}", blastna_to_char(subject_seq[idx]))?;
+            if pos + i < subject_seq.len() {
+                write!(writer, "{}", blastna_to_char(subject_seq[pos + i]))?;
+            }
         }
-        let s_chunk = if s_start <= s_end { chunk as i32 } else { -(chunk as i32) };
-        writeln!(writer, "  {}", si + s_chunk - if s_start <= s_end { 1 } else { -1 })?;
+        let s_end_pos = si + s_dir * (chunk as i32 - 1);
+        writeln!(writer, "  {}", s_end_pos)?;
         writeln!(writer)?;
 
         pos += chunk;
         qi += chunk as i32;
-        si += s_chunk;
+        si += s_dir * chunk as i32;
     }
 
     Ok(())

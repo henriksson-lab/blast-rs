@@ -20,6 +20,95 @@ pub static STANDARD_GENETIC_CODE: [u8; 64] = [
     25, 22, 25, 22, 17, 17, 17, 17, 25, 3, 20, 3, 11, 6, 11, 6,
 ];
 
+/// Build a genetic code table by modifying the standard code.
+const fn make_code(changes: &[(usize, u8)]) -> [u8; 64] {
+    let mut t = STANDARD_GENETIC_CODE;
+    let mut i = 0;
+    while i < changes.len() {
+        t[changes[i].0] = changes[i].1;
+        i += 1;
+    }
+    t
+}
+
+/// Code 2: Vertebrate Mitochondrial (AGA=*, AGG=*, ATA=M, TGA=W)
+pub static GENETIC_CODE_2: [u8; 64] = make_code(&[(8, 25), (10, 25), (12, 12), (56, 20)]);
+/// Code 3: Yeast Mitochondrial (ATA=M, CTN=T, TGA=W)
+pub static GENETIC_CODE_3: [u8; 64] = make_code(&[(12, 12), (28, 18), (29, 18), (30, 18), (31, 18), (56, 20)]);
+/// Code 4: Mold/Protozoan Mitochondrial (TGA=W)
+pub static GENETIC_CODE_4: [u8; 64] = make_code(&[(56, 20)]);
+/// Code 5: Invertebrate Mitochondrial (AGA=S, AGG=S, ATA=M, TGA=W)
+pub static GENETIC_CODE_5: [u8; 64] = make_code(&[(8, 17), (10, 17), (12, 12), (56, 20)]);
+/// Code 6: Ciliate Nuclear (TAA=Q, TAG=Q)
+pub static GENETIC_CODE_6: [u8; 64] = make_code(&[(48, 15), (50, 15)]);
+/// Code 9: Echinoderm Mitochondrial (AAA=N, AGA=S, AGG=S, TGA=W)
+pub static GENETIC_CODE_9: [u8; 64] = make_code(&[(0, 13), (8, 17), (10, 17), (56, 20)]);
+/// Code 10: Euplotid Nuclear (TGA=C)
+pub static GENETIC_CODE_10: [u8; 64] = make_code(&[(56, 3)]);
+/// Code 12: Alternative Yeast Nuclear (CTG=S)
+pub static GENETIC_CODE_12: [u8; 64] = make_code(&[(30, 17)]);
+/// Code 13: Ascidian Mitochondrial (AGA=G, AGG=G, ATA=M, TGA=W)
+pub static GENETIC_CODE_13: [u8; 64] = make_code(&[(8, 7), (10, 7), (12, 12), (56, 20)]);
+/// Code 14: Alternative Flatworm Mitochondrial (AAA=N, AGA=S, AGG=S, TAA=Y, TGA=W)
+pub static GENETIC_CODE_14: [u8; 64] = make_code(&[(0, 13), (8, 17), (10, 17), (48, 22), (56, 20)]);
+/// Code 15: Blepharisma Nuclear (TAG=Q)
+pub static GENETIC_CODE_15: [u8; 64] = make_code(&[(50, 15)]);
+/// Code 16: Chlorophycean Mitochondrial (TAG=L)
+pub static GENETIC_CODE_16: [u8; 64] = make_code(&[(50, 11)]);
+/// Code 21: Trematode Mitochondrial (AAA=N, AGA=S, AGG=S, ATA=M, TGA=W)
+pub static GENETIC_CODE_21: [u8; 64] = make_code(&[(0, 13), (8, 17), (10, 17), (12, 12), (56, 20)]);
+/// Code 22: Scenedesmus obliquus Mitochondrial (TCA=*, TAG=L)
+pub static GENETIC_CODE_22: [u8; 64] = make_code(&[(52, 25), (50, 11)]);
+/// Code 23: Thraustochytrium Mitochondrial (TTA=*)
+pub static GENETIC_CODE_23: [u8; 64] = make_code(&[(60, 25)]);
+/// Code 24: Rhabdopleuridae Mitochondrial (AGA=S, AGG=K, TGA=W)
+pub static GENETIC_CODE_24: [u8; 64] = make_code(&[(8, 17), (10, 10), (56, 20)]);
+/// Code 25: Candidate Division SR1 (TGA=G)
+pub static GENETIC_CODE_25: [u8; 64] = make_code(&[(56, 7)]);
+/// Code 26: Pachysolen tannophilus Nuclear (CTG=A)
+pub static GENETIC_CODE_26: [u8; 64] = make_code(&[(30, 1)]);
+/// Code 27: Karyorelictea Nuclear (TAA=Q, TAG=Q, TGA=W)
+pub static GENETIC_CODE_27: [u8; 64] = make_code(&[(48, 15), (50, 15), (56, 20)]);
+/// Code 29: Mesodinium Nuclear (TAA=Y, TAG=Y)
+pub static GENETIC_CODE_29: [u8; 64] = make_code(&[(48, 22), (50, 22)]);
+/// Code 30: Peritrich Nuclear (TAA=E, TAG=E)
+pub static GENETIC_CODE_30: [u8; 64] = make_code(&[(48, 5), (50, 5)]);
+/// Code 31: Blastocrithidia Nuclear (TAA=E, TAG=E, TGA=W)
+pub static GENETIC_CODE_31: [u8; 64] = make_code(&[(48, 5), (50, 5), (56, 20)]);
+/// Code 33: Cephalodiscidae Mitochondrial (AGA=S, AGG=K, TAA=Y, TGA=W)
+pub static GENETIC_CODE_33: [u8; 64] = make_code(&[(8, 17), (10, 10), (48, 22), (56, 20)]);
+
+/// Look up a genetic code table by NCBI code number.
+pub fn lookup_genetic_code(code: u8) -> &'static [u8; 64] {
+    match code {
+        1 | 11 => &STANDARD_GENETIC_CODE,
+        2  => &GENETIC_CODE_2,
+        3  => &GENETIC_CODE_3,
+        4  => &GENETIC_CODE_4,
+        5  => &GENETIC_CODE_5,
+        6  => &GENETIC_CODE_6,
+        9  => &GENETIC_CODE_9,
+        10 => &GENETIC_CODE_10,
+        12 => &GENETIC_CODE_12,
+        13 => &GENETIC_CODE_13,
+        14 => &GENETIC_CODE_14,
+        15 => &GENETIC_CODE_15,
+        16 => &GENETIC_CODE_16,
+        21 => &GENETIC_CODE_21,
+        22 => &GENETIC_CODE_22,
+        23 => &GENETIC_CODE_23,
+        24 => &GENETIC_CODE_24,
+        25 => &GENETIC_CODE_25,
+        26 => &GENETIC_CODE_26,
+        27 => &GENETIC_CODE_27,
+        29 => &GENETIC_CODE_29,
+        30 => &GENETIC_CODE_30,
+        31 => &GENETIC_CODE_31,
+        33 => &GENETIC_CODE_33,
+        _ => &STANDARD_GENETIC_CODE,
+    }
+}
+
 /// Translate a nucleotide sequence to protein in all 6 reading frames.
 /// Returns Vec of (frame, protein_sequence) where frame is 1,2,3,-1,-2,-3.
 pub fn six_frame_translation(nuc_seq: &[u8], genetic_code: &[u8; 64]) -> Vec<(i32, Vec<u8>)> {
@@ -67,10 +156,12 @@ pub fn protein_to_nuc_coords(prot_start: i32, prot_end: i32, frame: i32, nuc_len
         let offset = frame - 1;
         (prot_start * 3 + offset + 1, prot_end * 3 + offset)
     } else {
+        // Reverse strand: map RC protein coords to forward strand nucleotide coords.
+        // Returns (low, high) on forward strand; caller uses qframe to indicate direction.
         let offset = (-frame) - 1;
         let rc_start = prot_start * 3 + offset;
         let rc_end = prot_end * 3 + offset - 1;
-        (nuc_len - rc_end, nuc_len - rc_start + 1)
+        (nuc_len - rc_end, nuc_len - rc_start)
     }
 }
 
@@ -143,9 +234,11 @@ mod tests {
         // For BLAST output on minus strand, coordinates go high→low.
         // A protein alignment at positions 0..3 on the reverse complement
         // means nucleotides rc[0..9] which maps to forward strand [21..30].
+        // 30bp sequence, frame -1, protein pos 0..3 (0-based on rev-comp)
+        // rc_start=0, rc_end=8, fwd: (30-8, 30-0) = (22, 30)
         let (start, end) = protein_to_nuc_coords(0, 3, -1, 30);
         assert_eq!(start, 22);
-        assert_eq!(end, 31);
+        assert_eq!(end, 30);
     }
 
     #[test]
@@ -153,9 +246,9 @@ mod tests {
         // 30bp, frame -2, protein pos 1..4
         // offset = 1
         // rc_start = 1*3 + 1 = 4, rc_end = 4*3 + 1 - 1 = 12
-        // nuc: (30 - 12, 30 - 4 + 1) = (18, 27)
+        // nuc: (30 - 12, 30 - 4) = (18, 26)
         let (start, end) = protein_to_nuc_coords(1, 4, -2, 30);
         assert_eq!(start, 18);
-        assert_eq!(end, 27);
+        assert_eq!(end, 26);
     }
 }
