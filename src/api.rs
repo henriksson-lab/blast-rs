@@ -598,6 +598,198 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     results
 }
 
+/// Run a batch blastp search: multiple protein queries vs one protein database.
+///
+/// This is much more efficient than calling `blastp()` per query because
+/// subjects are scanned once and checked against all query lookup tables.
+/// Each subject is loaded into cache once, then all queries are checked.
+///
+/// Returns one `Vec<SearchResult>` per query, in the same order as `queries`.
+pub fn blastp_batch(
+    db: &BlastDb,
+    queries: &[&[u8]],
+    params: &SearchParams,
+) -> Vec<Vec<SearchResult>> {
+    if queries.is_empty() { return Vec::new(); }
+
+    let matrix = *get_matrix(params.matrix);
+    let word_size = params.word_size.max(2).min(6);
+    let threshold = 11.0;
+
+    let prot_kbp = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend)
+        .map(|p| crate::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
+        .unwrap_or_else(crate::stat::protein_ungapped_kbp);
+
+    let total_subj_len: usize = (0..db.num_oids)
+        .map(|oid| db.get_seq_len(oid) as usize)
+        .sum();
+
+    let max_hsps = params.max_hsps;
+    let evalue_threshold = params.evalue_threshold;
+    let x_drop_ungapped = params.x_drop_ungapped;
+    let gap_open = params.gap_open;
+    let gap_extend = params.gap_extend;
+    let x_drop_gapped = params.x_drop_gapped;
+
+    // Prepare all queries: encode, build lookup tables, compute search spaces
+    struct PreparedQuery {
+        aa: Vec<u8>,
+        lookup: crate::protein_lookup::ProteinLookupTable,
+        search_space: f64,
+    }
+    let prepared: Vec<PreparedQuery> = queries.iter().map(|q| {
+        let aa: Vec<u8> = q.iter()
+            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+            .collect();
+        let len_adj = crate::stat::compute_length_adjustment(
+            aa.len() as i32, total_subj_len as i64, db.num_oids as i32, &prot_kbp);
+        let search_space = crate::stat::compute_search_space(
+            aa.len() as i64, total_subj_len as i64, db.num_oids as i32, len_adj);
+        let lookup = crate::protein_lookup::ProteinLookupTable::build(
+            &aa, word_size, &matrix, threshold);
+        PreparedQuery { aa, lookup, search_space }
+    }).collect();
+
+    // Per-query results accumulator
+    let num_queries = queries.len();
+
+    let num_threads = if params.num_threads == 0 { rayon::current_num_threads() } else { params.num_threads };
+
+    // Process subjects — each subject is loaded once, checked against all queries.
+    // Parallelize over subjects (each subject checks all queries).
+    let process_oid = |oid: u32| -> Vec<(usize, SearchResult)> {
+        let subj_raw = db.get_sequence(oid);
+        let subj_len = db.get_seq_len(oid) as usize;
+        if subj_len < word_size { return Vec::new(); }
+
+        let subj_aa: Vec<u8> = subj_raw.iter().filter(|&&b| b != 0).copied().collect();
+        if subj_aa.is_empty() { return Vec::new(); }
+
+        let mut hits_for_queries: Vec<(usize, SearchResult)> = Vec::new();
+
+        for (qi, pq) in prepared.iter().enumerate() {
+            if pq.aa.len() < word_size { continue; }
+
+            let ungapped = crate::protein_lookup::protein_scan_with_table(
+                &pq.aa, &subj_aa, &matrix, &pq.lookup, x_drop_ungapped,
+            );
+            if ungapped.is_empty() { continue; }
+
+            let ungap_cutoff = 22;
+            let best_seed = ungapped.iter()
+                .filter(|uh| uh.score >= ungap_cutoff)
+                .max_by_key(|uh| uh.score);
+
+            let mut phits = Vec::new();
+            if let Some(uh) = best_seed.filter(|uh| {
+                prot_kbp.raw_to_evalue(uh.score, pq.search_space) < 10.0
+            }) {
+                let seed_q = (uh.query_start + uh.query_end) / 2;
+                let seed_s = (uh.subject_start + uh.subject_end) / 2;
+                if let Some(gr) = crate::protein::protein_gapped_align(
+                    &pq.aa, &subj_aa, seed_q, seed_s,
+                    &matrix, gap_open, gap_extend, x_drop_gapped,
+                ) {
+                    let q_slice = &pq.aa[gr.query_start..gr.query_end];
+                    let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
+                    let (qs, ss) = gr.edit_script.render_alignment(
+                        q_slice, s_slice, crate::protein::ncbistdaa_to_char,
+                    );
+                    phits.push(crate::protein_lookup::ProteinHit {
+                        query_start: gr.query_start, query_end: gr.query_end,
+                        subject_start: gr.subject_start, subject_end: gr.subject_end,
+                        score: gr.score, num_ident: gr.num_ident,
+                        align_length: gr.align_length, mismatches: gr.mismatches,
+                        gap_opens: gr.gap_opens, qseq: Some(qs), sseq: Some(ss),
+                    });
+                }
+            }
+            if phits.is_empty() { phits = ungapped; }
+            if phits.is_empty() { continue; }
+
+            let best_ev = phits.iter()
+                .map(|ph| prot_kbp.raw_to_evalue(ph.score, pq.search_space))
+                .fold(f64::MAX, f64::min);
+            if best_ev > evalue_threshold { continue; }
+
+            let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
+            let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+            let sl = subj_aa.len();
+
+            let hsps: Vec<Hsp> = phits.iter().filter_map(|ph| {
+                let evalue = prot_kbp.raw_to_evalue(ph.score, pq.search_space);
+                if evalue > evalue_threshold { return None; }
+                let (q_aln, s_aln) = if let (Some(ref qs), Some(ref ss)) = (&ph.qseq, &ph.sseq) {
+                    (qs.as_bytes().to_vec(), ss.as_bytes().to_vec())
+                } else {
+                    let qa: Vec<u8> = (0..ph.align_length as usize).map(|i| {
+                        let idx = ph.query_start + i;
+                        if idx < pq.aa.len() { ncbistdaa_to_ascii(pq.aa[idx]) } else { b'-' }
+                    }).collect();
+                    let sa: Vec<u8> = (0..ph.align_length as usize).map(|i| {
+                        let idx = ph.subject_start + i;
+                        if idx < sl { ncbistdaa_to_ascii(subj_aa[idx]) } else { b'-' }
+                    }).collect();
+                    (qa, sa)
+                };
+                let midline: Vec<u8> = q_aln.iter().zip(s_aln.iter()).map(|(&q, &s)| {
+                    if q == s { q } else if q != b'-' && s != b'-' { b'+' } else { b' ' }
+                }).collect();
+                Some(Hsp {
+                    score: ph.score, bit_score: prot_kbp.raw_to_bit(ph.score), evalue,
+                    query_start: ph.query_start, query_end: ph.query_end,
+                    subject_start: ph.subject_start, subject_end: ph.subject_end,
+                    num_identities: ph.num_ident as usize, num_gaps: ph.gap_opens as usize,
+                    alignment_length: ph.align_length as usize,
+                    query_aln: q_aln, midline, subject_aln: s_aln,
+                    query_frame: 0, subject_frame: 0,
+                })
+            }).collect();
+
+            if hsps.is_empty() { continue; }
+            let hsps = if let Some(max) = max_hsps { hsps.into_iter().take(max).collect() } else { hsps };
+            hits_for_queries.push((qi, SearchResult {
+                subject_oid: oid, subject_title: title, subject_accession: accession,
+                subject_len: sl, hsps, taxids: vec![],
+            }));
+        }
+
+        hits_for_queries
+    };
+
+    // Dispatch: sequential or parallel over subjects
+    let all_hits: Vec<Vec<(usize, SearchResult)>> = if num_threads <= 1 {
+        (0..db.num_oids).map(|oid| process_oid(oid)).collect()
+    } else {
+        use rayon::prelude::*;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        pool.install(|| {
+            (0..db.num_oids).into_par_iter().map(|oid| process_oid(oid)).collect()
+        })
+    };
+
+    // Scatter results into per-query buckets
+    let mut results: Vec<Vec<SearchResult>> = vec![Vec::new(); num_queries];
+    for oid_hits in all_hits {
+        for (qi, sr) in oid_hits {
+            results[qi].push(sr);
+        }
+    }
+
+    // Sort each query's results by e-value and truncate
+    for r in &mut results {
+        r.sort_by(|a, b| a.best_evalue().partial_cmp(&b.best_evalue()).unwrap_or(std::cmp::Ordering::Equal));
+        if r.len() > params.max_target_seqs {
+            r.truncate(params.max_target_seqs);
+        }
+    }
+
+    results
+}
+
 /// Run a blastn search (nucleotide query vs nucleotide database).
 pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     if query.is_empty() { return Vec::new(); }

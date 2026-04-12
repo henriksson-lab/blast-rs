@@ -23,7 +23,7 @@ pub mod api;
 // Re-export high-level API at crate root for convenience
 pub use api::{
     // Search functions (high-level)
-    blastp, blastn, blastn_search, blastx, tblastn, tblastx, psiblast,
+    blastp, blastp_batch, blastn, blastn_search, blastx, tblastn, tblastx, psiblast,
     // Search functions (low-level aliases)
     blast_search, blastx_search, tblastn_search, tblastx_search, psiblast_search,
     // PSSM functions
