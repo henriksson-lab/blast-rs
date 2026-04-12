@@ -216,26 +216,25 @@ pub fn blastn_ungapped_search_packed(
         let mut last_hit: Vec<i32> = vec![-1; diag_array_len];
 
         if lut_word == 8 {
-            // Fast path: 8-mer hash = 16 bits = exactly 2 packed bytes
-            // Process 4 positions per byte using C engine's shift-by-8 approach
-            let packed_bytes = (subject_len + 3) / 4;
-            if packed_bytes < 3 { continue; }
-
-            let mut init_index: u32 = subject_packed[0] as u32;
-
-            for byte_idx in 1..packed_bytes {
-                init_index = (init_index << 8) | subject_packed[byte_idx] as u32;
-                let h = (init_index & lut_mask) as usize;
-                if pv[h >> 6] & (1u64 << (h & 63)) == 0 { continue; }
-
-                let base_pos = (byte_idx - 1) * 4;
-                process_hit(query, subject_packed, subject_len, word_size,
-                    &lut, &next, &mut last_hit, diag_mask,
-                    h, base_pos, reward, penalty, x_dropoff,
-                    kbp, search_space, evalue_threshold, context, &mut hsps);
+            // Fast path: 8-mer = 16 bits. Use per-base scanning with packed_base_at
+            // but with the efficient hash update (shift by 2 bits per base).
+            // This is simpler and correct — checks every position.
+            let mut hash: u32 = 0;
+            for i in 0..7 {
+                hash = (hash << 2) | packed_base_at(subject_packed, i) as u32;
             }
-            // Note: manual loop unrolling was tested and found to be SLOWER than
-            // the simple loop — the Rust compiler already optimizes this well.
+            let mut s_pos = 0;
+            while s_pos < end {
+                hash = ((hash << 2) | packed_base_at(subject_packed, s_pos + 7) as u32) & lut_mask;
+                let h = hash as usize;
+                if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
+                    process_hit(query, subject_packed, subject_len, word_size,
+                        &lut, &next, &mut last_hit, diag_mask,
+                        h, s_pos, reward, penalty, x_dropoff,
+                        kbp, search_space, evalue_threshold, context, &mut hsps);
+                }
+                s_pos += 1;
+            }
         } else {
             // Generic path: per-base scanning using packed_base_at
             let mut hash: u32 = 0;

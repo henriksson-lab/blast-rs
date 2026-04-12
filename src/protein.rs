@@ -232,20 +232,22 @@ fn protein_gapped_score_one_dir(
 
 /// Needleman-Wunsch affine-gap traceback on a sub-region.
 /// Returns (edit_script, num_ident, mismatches, gap_opens, align_length).
+/// Local alignment (Smith-Waterman) with traceback.
+/// Returns (edit_script, score, q_start_in_slice, s_start_in_slice, q_end_in_slice, s_end_in_slice).
 fn protein_nw_traceback(
-    query: &[u8],   // NCBIstdaa, q_start..q_end
-    subject: &[u8], // NCBIstdaa, s_start..s_end
+    query: &[u8],
+    subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     gap_open: i32,
     gap_extend: i32,
-) -> GapEditScript {
+) -> (GapEditScript, i32, usize, usize, usize, usize) {
     let m = query.len();
     let n = subject.len();
     if m == 0 || n == 0 {
         let mut esp = GapEditScript::new();
         if m > 0 { esp.push(GapAlignOpType::Ins, m as i32); }
         if n > 0 { esp.push(GapAlignOpType::Del, n as i32); }
-        return esp;
+        return (esp, 0, 0, 0, 0, 0);
     }
 
     let gap_oe = gap_open + gap_extend;
@@ -260,17 +262,13 @@ fn protein_nw_traceback(
 
     let idx = |i: usize, j: usize| -> usize { i * (n + 1) + j };
 
+    // Free end gaps: first row/column initialized to 0 (semi-global)
     h[idx(0, 0)] = 0;
-    for j in 1..=n {
-        h[idx(0, j)] = -gap_oe - gap_extend * (j as i32 - 1);
-        e[idx(0, j)] = h[idx(0, j)];
-        tb[idx(0, j)] = 1; // Del
-    }
-    for i in 1..=m {
-        h[idx(i, 0)] = -gap_oe - gap_extend * (i as i32 - 1);
-        f[idx(i, 0)] = h[idx(i, 0)];
-        tb[idx(i, 0)] = 2; // Ins
-    }
+    // Leave h[0][j] = 0 and h[i][0] = 0 (no penalty for leading gaps)
+
+    let mut best_score = 0i32;
+    let mut best_i = 0usize;
+    let mut best_j = 0usize;
 
     for i in 1..=m {
         let qi = query[i - 1] as usize;
@@ -291,36 +289,39 @@ fn protein_nw_traceback(
             let mat = if qi < AA_SIZE && sj < AA_SIZE { matrix[qi][sj] } else { -4 };
             let diag = h[idx(i - 1, j - 1)] + mat;
 
-            let best = diag.max(e[idx(i, j)]).max(f[idx(i, j)]);
+            // Smith-Waterman: allow restart from 0
+            let best = diag.max(e[idx(i, j)]).max(f[idx(i, j)]).max(0);
             h[idx(i, j)] = best;
 
-            if best == diag {
+            if best == 0 {
+                tb[idx(i, j)] = 3; // local restart
+            } else if best == diag {
                 tb[idx(i, j)] = 0; // Sub
             } else if best == e[idx(i, j)] {
                 tb[idx(i, j)] = 1; // Del
             } else {
                 tb[idx(i, j)] = 2; // Ins
             }
+
+            if best > best_score {
+                best_score = best;
+                best_i = i;
+                best_j = j;
+            }
         }
     }
 
-    // Traceback from (m, n)
+    let nw_score = best_score;
+
+    // Traceback from best score position (Smith-Waterman style)
     let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
-    let mut i = m;
-    let mut j = n;
-    while i > 0 || j > 0 {
-        let op = if i == 0 {
-            j -= 1;
-            GapAlignOpType::Del
-        } else if j == 0 {
-            i -= 1;
-            GapAlignOpType::Ins
-        } else {
-            match tb[idx(i, j)] {
-                0 => { i -= 1; j -= 1; GapAlignOpType::Sub }
-                1 => { j -= 1; GapAlignOpType::Del }
-                _ => { i -= 1; GapAlignOpType::Ins }
-            }
+    let mut i = best_i;
+    let mut j = best_j;
+    while i > 0 && j > 0 && tb[idx(i, j)] != 3 {
+        let op = match tb[idx(i, j)] {
+            0 => { i -= 1; j -= 1; GapAlignOpType::Sub }
+            1 => { j -= 1; GapAlignOpType::Del }
+            _ => { i -= 1; GapAlignOpType::Ins }
         };
         if let Some(last) = ops.last_mut() {
             if last.0 == op {
@@ -332,11 +333,17 @@ fn protein_nw_traceback(
     }
     ops.reverse();
 
+    // i, j are now the start of the local alignment (0-based in the slice)
+    let sw_q_start = i;
+    let sw_s_start = j;
+    let sw_q_end = best_i;  // 1-based → end exclusive
+    let sw_s_end = best_j;
+
     let mut esp = GapEditScript::new();
     for (op, count) in ops {
         esp.push(op, count);
     }
-    esp
+    (esp, nw_score, sw_q_start, sw_s_start, sw_q_end, sw_s_end)
 }
 
 /// Perform gapped protein alignment from a seed position using X-dropoff DP.
@@ -371,25 +378,42 @@ pub fn protein_gapped_align(
     let total_score = score_l + score_r;
     if total_score <= 0 { return None; }
 
-    let q_start = (seed_q + 1).saturating_sub(ext_q_l);
-    let q_end = (seed_q + ext_q_r).min(query.len());
-    let s_start = (seed_s + 1).saturating_sub(ext_s_l);
-    let s_end = (seed_s + ext_s_r).min(subject.len());
+    // X-drop boundaries with a small margin to let SW find the optimal local
+    // alignment. Keep margin small to avoid O(m*n) blowup on long sequences.
+    let margin = 20;
+    let q_start = (seed_q + 1).saturating_sub(ext_q_l).saturating_sub(margin);
+    let q_end = (seed_q + ext_q_r + margin).min(query.len());
+    let s_start = (seed_s + 1).saturating_sub(ext_s_l).saturating_sub(margin);
+    let s_end = (seed_s + ext_s_r + margin).min(subject.len());
     if q_start >= q_end || s_start >= s_end { return None; }
 
-    // Full NW traceback on the identified region
+    // Smith-Waterman local alignment on the x-drop region — produces the
+    // optimal local score regardless of seed position.
     let q_slice = &query[q_start..q_end];
     let s_slice = &subject[s_start..s_end];
-    let edit_script = protein_nw_traceback(q_slice, s_slice, matrix, gap_open, gap_extend);
-    let (align_length, num_ident, gap_opens) = edit_script.count_identities(q_slice, s_slice);
+    let (edit_script, sw_score, sw_qs, sw_ss, sw_qe, sw_se) =
+        protein_nw_traceback(q_slice, s_slice, matrix, gap_open, gap_extend);
+    let final_score = total_score.max(sw_score);
+    if final_score <= 0 { return None; }
+
+    // Adjust boundaries to the SW local alignment region
+    let final_q_start = q_start + sw_qs;
+    let final_q_end = q_start + sw_qe;
+    let final_s_start = s_start + sw_ss;
+    let final_s_end = s_start + sw_se;
+    if final_q_start >= final_q_end || final_s_start >= final_s_end { return None; }
+
+    let local_q = &query[final_q_start..final_q_end];
+    let local_s = &subject[final_s_start..final_s_end];
+    let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
     let mismatches = (align_length - num_ident - gap_opens).max(0);
 
     Some(ProteinGappedResult {
-        query_start: q_start,
-        query_end: q_end,
-        subject_start: s_start,
-        subject_end: s_end,
-        score: total_score,
+        query_start: final_q_start,
+        query_end: final_q_end,
+        subject_start: final_s_start,
+        subject_end: final_s_end,
+        score: final_score,
         num_ident,
         align_length,
         mismatches,
@@ -508,20 +532,42 @@ mod tests {
     fn test_nw_traceback_identical() {
         let m = simple_blosum62();
         let seq = vec![1u8, 2, 3, 4, 5];
-        let esp = protein_nw_traceback(&seq, &seq, &m, 11, 1);
+        let (esp, _, _, _, _, _) = protein_nw_traceback(&seq, &seq, &m, 11, 1);
         let (qseq, sseq) = esp.render_alignment(&seq, &seq, ncbistdaa_to_char);
         assert_eq!(qseq, sseq);
         assert!(!qseq.contains('-'));
     }
 
     #[test]
-    fn test_nw_traceback_with_insertion() {
+    fn test_sw_traceback_local_alignment() {
         let m = simple_blosum62();
+        // Short sequences: SW finds best local alignment
         let query   = vec![1u8, 2, 3, 4, 5, 6];
         let subject = vec![1u8, 2, 4, 5, 6]; // missing 3
-        let esp = protein_nw_traceback(&query, &subject, &m, 11, 1);
-        let (qseq, sseq) = esp.render_alignment(&query, &subject, ncbistdaa_to_char);
-        assert!(sseq.contains('-'),
-            "subject should have a gap: qseq={}, sseq={}", qseq, sseq);
+        let (esp, score, qs, ss, qe, se) = protein_nw_traceback(&query, &subject, &m, 11, 1);
+        assert!(score > 0, "Should have positive score");
+        let q_slice = &query[qs..qe];
+        let s_slice = &subject[ss..se];
+        let (qseq, sseq) = esp.render_alignment(q_slice, s_slice, ncbistdaa_to_char);
+        assert!(!qseq.is_empty(), "alignment should not be empty: qseq={}, sseq={}", qseq, sseq);
+    }
+
+    #[test]
+    fn test_gapped_align_srta_vs_p0dpq5() {
+        use crate::encoding::AMINOACID_TO_NCBISTDAA;
+        let matrix = crate::matrix::BLOSUM62;
+
+        // srtA query vs P0DPQ5 sortase A (NCBI BLAST+ gets score 183)
+        let q_raw = b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPSISLKLPIYDGTSDKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK";
+        let s_raw = b"MNKQRIYSIVAILLFVVGGVLIGKPFYDGYQAEKKQTENVQAVQKMDYEKHETEFVDASKIDQPDLAEVANASLDKKQVIGRISIPSVSLELPVLKSSTEKNLLSGAATVKENQVMGKGNYALAGHNMSKKGVLFSDIASLKKGDKIYLYDNENEYEYAVTGVSEVTPDKWEVVEDHGKDEITLITCVSVKDNSKRYVVAGDLVGTKAKK";
+        let query: Vec<u8> = q_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+        let subject: Vec<u8> = s_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+
+        // Gapped alignment from a seed in the middle of the alignment
+        let result = protein_gapped_align(&query, &subject, 50, 45, &matrix, 11, 1, 260);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.score >= 150,
+            "Gapped alignment should get score >= 150, got {}", r.score);
     }
 }

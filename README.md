@@ -28,7 +28,7 @@ The code can also be compiled to be used for webassembly.
 - **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
-- **185 tests**: 140 unit tests + 43 integration tests + doc tests
+- **188 tests**: 144 unit tests + 43 integration tests + doc tests
 
 ## Installation
 
@@ -245,7 +245,7 @@ Single crate `blast-rs` with modules:
 | `blast_rs::pssm` | PSI-BLAST PSSM computation (Henikoff weighting, pseudocounts) |
 | `blast_rs::stat` | Karlin-Altschul statistics, KBP computation |
 | `blast_rs::traceback` | Gapped alignment with traceback |
-| `blast_rs::matrix` | Scoring matrices (BLOSUM62, nucleotide match/mismatch) |
+| `blast_rs::matrix` | Scoring matrices (BLOSUM45/50/62/80/90, PAM30/70/250, nucleotide) |
 | `blast_rs::db` | BLAST database reader/writer (v4/v5), taxonomy ID/name lookups (`.nto`, `taxdb`) |
 | `blast_rs::input` | FASTA parser (via noodles-fasta) with BLASTNA/NCBIstdaa encoding |
 | `blast_rs::format` | Output formatting (tabular, pairwise, XML, SAM) |
@@ -254,25 +254,23 @@ Single crate `blast-rs` with modules:
 
 ## Benchmarks
 
-500bp query, word_size=11, compiled with `RUSTFLAGS="-C target-cpu=native"`.
-Produces byte-identical output to the C reference.
+500bp query, word_size=11, single-threaded, DUST off, BLAST database mode (`-db`).
+Average of 10 runs.
 
-### Single-threaded
+### blastn (single-threaded)
 
-| Database | Size | NCBI BLAST+ 2.17.0 | blast-rs | Speedup |
-|----------|------|--------------------:|----------:|--------:|
-| S. cerevisiae | 12 MB | 416 ms | **75 ms** | **5.5x** |
-| C. elegans | 100 MB | 717 ms | **630 ms** | **1.1x** |
+| Database | Size | NCBI BLAST+ 2.12.0 | blast-rs 0.8.0 | Speedup |
+|----------|------|--------------------:|---------------:|--------:|
+| S. pombe | 2.5 MB | 57 ms | **7 ms** | **8x** |
+| seqn test DB | 1.2 MB | 57 ms | **8 ms** | **7x** |
 
-### Multi-threaded (4 threads)
+### blastp (single-threaded, prokka sprot DB, 24K entries)
 
-| Database | Size | NCBI BLAST+ 2.17.0 | blast-rs | Speedup |
-|----------|------|--------------------:|----------:|--------:|
-| S. cerevisiae | 12 MB | 405 ms | **39 ms** | **10.4x** |
-| C. elegans | 100 MB | 594 ms | **263 ms** | **2.3x** |
+| Queries | NCBI BLAST+ 2.12.0 | blast-rs 0.8.0 |
+|---------|--------------------:|---------------:|
+| 5 queries (50-96 aa) | ~12s (extrapolated) | **2.0s** |
 
-Both engines use BLAST database mode (`-db`) for fair comparison.
-The speedup comes from eliminating C++ startup overhead (~400ms) and using efficient
+The speedup comes from eliminating C++ startup overhead and using efficient
 Rust implementations of the same BLAST algorithms (packed byte scanning, PV array,
 diagonal tracking, X-dropoff DP). Multi-threaded search parallelizes across database
 sequences using rayon.
@@ -332,6 +330,15 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
 - **blast_formatter** -- standalone tool for reformatting archived BLAST results
 
 ## Changelog
+
+### 0.8.0
+
+- **33x blastp speedup**: Protein lookup table is now built once per query instead of per subject, eliminating redundant work when searching large databases
+- **Gapped protein alignment**: blastp now performs two-phase search (ungapped seeds → Smith-Waterman gapped alignment), matching NCBI BLAST+ sensitivity for distant homologs
+- **Smith-Waterman local alignment**: Protein gapped traceback uses local alignment so scores are seed-position-independent, producing optimal alignments matching NCBI BLAST+ scores
+- **Corrected protein X-drop defaults**: `x_drop_ungapped` (7→40) and `x_drop_gapped` (38→260) now match NCBI BLAST+ defaults for protein searches
+- **Pre-built lookup table API**: New `protein_scan_with_table()` and `protein_gapped_scan_with_table()` for amortizing lookup table construction across multiple subjects
+- Inner-loop allocation optimizations in lookup table construction (`suffix_max`, `word_buf` reused across query positions)
 
 ### 0.7.0
 

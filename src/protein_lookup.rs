@@ -74,19 +74,22 @@ impl ProteinLookupTable {
         // For each query position, generate all neighboring words and insert.
         let thresh_i = threshold as i32; // integer threshold for comparison
         if query.len() >= word_size {
+            // Pre-allocate buffers reused across all query positions.
+            let mut suffix_max = vec![0i32; word_size + 1];
+            let mut word_buf = vec![0u8; word_size];
+
             for i in 0..=(query.len() - word_size) {
                 let query_word = &query[i..i + word_size];
 
                 // Compute max possible score at each suffix position for pruning.
                 // suffix_max[k] = sum of row_max for positions k..word_size-1
-                let mut suffix_max = vec![0i32; word_size + 1];
+                suffix_max[word_size] = 0;
                 for k in (0..word_size).rev() {
                     suffix_max[k] =
                         suffix_max[k + 1] + row_max[query_word[k] as usize];
                 }
 
                 // Recursive enumeration with pruning.
-                let mut word_buf = vec![0u8; word_size];
                 enumerate_neighbors(
                     query_word,
                     matrix,
@@ -194,8 +197,22 @@ pub fn protein_scan(
     if query.len() < word_size || subject.len() < word_size {
         return Vec::new();
     }
-
     let table = ProteinLookupTable::build(query, word_size, matrix, threshold);
+    protein_scan_with_table(query, subject, matrix, &table, x_dropoff)
+}
+
+/// Scan a subject using a pre-built lookup table (avoids rebuilding per subject).
+pub fn protein_scan_with_table(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+) -> Vec<ProteinHit> {
+    let word_size = table.word_size;
+    if query.len() < word_size || subject.len() < word_size {
+        return Vec::new();
+    }
 
     // Diagonal tracking to avoid redundant extensions.
     // diagonal = s_pos - q_pos (shifted by query.len() to keep non-negative)
@@ -239,8 +256,6 @@ pub fn protein_scan(
                     if qs + k < query.len() && ss + k < subject.len()
                         && query[qs + k] == subject[ss + k] { ident += 1; }
                 }
-                let qseq: String = query[qs..qe].iter().map(|&b| ncbistdaa_to_char(b)).collect();
-                let sseq: String = subject[ss..se].iter().map(|&b| ncbistdaa_to_char(b)).collect();
                 hits.push(ProteinHit {
                     query_start: qs,
                     query_end: qe,
@@ -251,8 +266,8 @@ pub fn protein_scan(
                     align_length: alen,
                     mismatches: alen - ident,
                     gap_opens: 0,
-                    qseq: Some(qseq),
-                    sseq: Some(sseq),
+                    qseq: None,
+                    sseq: None,
                 });
             }
         }
@@ -280,8 +295,27 @@ pub fn protein_gapped_scan(
     gap_x_dropoff: i32,
     ungap_cutoff: i32,
 ) -> Vec<ProteinHit> {
+    let table = ProteinLookupTable::build(query, word_size, matrix, threshold);
+    protein_gapped_scan_with_table(
+        query, subject, matrix, &table, ungap_x_dropoff,
+        gap_open, gap_extend, gap_x_dropoff, ungap_cutoff,
+    )
+}
+
+/// Gapped scan using a pre-built lookup table.
+pub fn protein_gapped_scan_with_table(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    ungap_x_dropoff: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    gap_x_dropoff: i32,
+    ungap_cutoff: i32,
+) -> Vec<ProteinHit> {
     // Phase 1: ungapped seeds
-    let ungapped = protein_scan(query, subject, matrix, word_size, threshold, ungap_x_dropoff);
+    let ungapped = protein_scan_with_table(query, subject, matrix, table, ungap_x_dropoff);
 
     // Phase 2: gapped extension on seeds above cutoff
     let mut gapped_hits = Vec::new();

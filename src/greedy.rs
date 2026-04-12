@@ -3,9 +3,9 @@
 
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
 
-/// Perform greedy gapped alignment between two nucleotide sequences.
-/// Optimized for high-identity matches — extends greedily and only
-/// introduces gaps when the score drops significantly.
+/// Perform greedy ungapped alignment between two nucleotide sequences.
+/// Optimized for high-identity matches (>90%) — extends greedily without gaps.
+/// Used by megablast for fast initial extension before full gapped DP.
 ///
 /// Returns (score, query_start, query_end, subject_start, subject_end, edit_script)
 pub fn greedy_align(

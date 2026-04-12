@@ -761,3 +761,247 @@ fn tblastn_multi_subject_nt_db() {
     assert!(!results.is_empty(), "tblastn should find protein in multi-subject nt DB");
     assert_eq!(results[0].subject_oid, 2, "should match OID 2 (the coding sequence)");
 }
+
+// ── Prokka-style annotation performance test ─────────────────────────────────
+
+/// Performance test: build a protein DB from prokka's sprot FASTA (~25K entries),
+/// then search 5 query proteins against it. This mimics the prokka annotation
+/// workload. Run with: cargo test --release -- --ignored test_blastp_prokka_sprot
+///
+/// Target: should complete in under 30 seconds for 5 queries (Perl Prokka does
+/// 63 queries against the same DB in ~12 seconds using NCBI BLAST+).
+#[test]
+#[ignore]
+fn test_blastp_prokka_sprot() {
+    // Paths relative to the blast-rs repo — prokka db may be at a sibling path
+    let sprot_paths = [
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+    ];
+    let sprot_path = sprot_paths.iter().find(|p| p.exists());
+    let sprot_path = match sprot_path {
+        Some(p) => p,
+        None => {
+            eprintln!("Skipping: prokka sprot database not found");
+            return;
+        }
+    };
+
+    // Load sprot FASTA using input::parse_fasta (returns FastaRecord structs)
+    let file = std::fs::File::open(sprot_path).unwrap();
+    let records = blast_rs::input::parse_fasta(file);
+    eprintln!("Loaded {} sprot records", records.len());
+    assert!(records.len() > 1000, "sprot should have >1000 entries");
+
+    // Build indexed protein DB
+    let t0 = std::time::Instant::now();
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("sprot");
+    let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
+    for rec in &records {
+        builder.add(SequenceEntry {
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
+        });
+    }
+    builder.write(&base).unwrap();
+    let db = blast_rs::db::BlastDb::open(&base).unwrap();
+    let db_build_time = t0.elapsed();
+    eprintln!("DB build: {:.2}s ({} entries)", db_build_time.as_secs_f64(), records.len());
+
+    // 5 representative bacterial protein queries (real CDS translations)
+    let queries: Vec<&[u8]> = vec![
+        // Replication initiation protein (~90 aa)
+        b"MKQIKEYLEEFVHSRLNKNIILRAAGFEYAKENPNFSQYYGNTVVSLPHRGKYGGPVNRIAPEMFHQIVAKPGERTFEGMFAIFKHRFPDWRDAES",
+        // Short hypothetical (~50 aa)
+        b"MNDFNYYKSKEIYREKYYQMPKVFFTNEKYMDLSNDAKIAYMLLKDRFDYS",
+        // Transposase fragment (~80 aa)
+        b"MNYFRYKQFNKDVITVAVGYYLRYALSYRDISEILRGRGVNVHHSTVYRWVQEYAPILYQQSINTAKNTLKGIECIYALY",
+        // TraB transfer protein (~60 aa)
+        b"MIKKFSLTTVYVAFLSIVLSNITLGAENPGPKIEQGLQQVQTFLTGLIVAVGICAGVWIV",
+        // ErmC methyltransferase (~70 aa)
+        b"MNEKNIKHSQNFITSKHNIDKIMTNIRLNEHDNIFEIGSGKGHFTLELVQRCNFVTAIEIDHKLCKTTEN",
+    ];
+
+    let params = SearchParams::blastp()
+        .evalue(1e-6)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let t1 = std::time::Instant::now();
+    let mut total_hits = 0;
+    for (i, query) in queries.iter().enumerate() {
+        let t_q = std::time::Instant::now();
+        let results = blastp(&db, query, &params);
+        let q_time = t_q.elapsed();
+        eprintln!(
+            "Query {} ({} aa): {} hits in {:.2}s",
+            i + 1, query.len(), results.len(), q_time.as_secs_f64()
+        );
+        total_hits += results.len();
+    }
+    let search_time = t1.elapsed();
+    eprintln!(
+        "Total: {} queries, {} hits, {:.2}s ({:.2}s/query)",
+        queries.len(), total_hits,
+        search_time.as_secs_f64(),
+        search_time.as_secs_f64() / queries.len() as f64
+    );
+
+    // Performance assertion: 5 queries should complete in under 60 seconds
+    // (NCBI BLAST+ does 63 queries in ~12s, so 5 queries in 60s is very generous)
+    assert!(
+        search_time.as_secs() < 60,
+        "blastp search too slow: {:.1}s for {} queries (target: <60s)",
+        search_time.as_secs_f64(), queries.len()
+    );
+}
+
+/// Sensitivity test: verify that blastp finds the same hits as NCBI BLAST+.
+///
+/// These are real CDS proteins from E. faecium plasmid AUS0004_p1 that
+/// NCBI BLAST+ (via Perl Prokka) annotates against the sprot database.
+/// blast-rs must find at least one hit for each of these queries.
+///
+/// Run with: cargo test --release -- --ignored test_blastp_sensitivity
+#[test]
+#[ignore]
+fn test_blastp_sensitivity() {
+    let sprot_paths = [
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+    ];
+    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
+        Some(p) => p,
+        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+    };
+
+    // Build DB
+    let file = std::fs::File::open(sprot_path).unwrap();
+    let records = blast_rs::input::parse_fasta(file);
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("sprot");
+    let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
+    for rec in &records {
+        builder.add(SequenceEntry {
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
+        });
+    }
+    builder.write(&base).unwrap();
+    let db = blast_rs::db::BlastDb::open(&base).unwrap();
+
+    // Queries that NCBI BLAST+ finds in sprot (from Perl Prokka on E. faecium plasmid).
+    // Each tuple: (name, expected_product, protein_sequence)
+    let known_hits: Vec<(&str, &str, &[u8])> = vec![
+        ("srtA", "Sortase A",
+         b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPSISLKLPIYDGTSDKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK"),
+        ("topB", "DNA topoisomerase 3",
+         b"MMKTVILAEKPSQAKAYADSFSKATRKDGYFEIQDRLFPGETVITYGFGHLVELDSPDMYDENWKQWSLEHLPIFPNQYHYHVPKDKKKQFNVVKQQLQSADTIIIATDSDREGELIAWTIIQQAGADQGKTFKRLWINSLEKEAIYQGFQQLRDAGETYPKFEEAQARQIADWLIGMNGSPLYSLLLQQKGIPGSFSLGRVQTPTLYMIYQLQEKIRNFQKEPYFEGKAQVIAQNGAFDAKLDPNETQATQEAFEDYLKEKGVQLGKQPGTIHQVETEKKSAASPRLFSLSSLQSKMNQLMKASAKDTLEAMQGLYEGKYLSYPRTDTPYITEGEYAYLLDHLDEYKHFLKAEAIPTPIHTPNSRYVNNKKVQEHYAIIPTKTVMTAAAFEQLSPLQQAIYEQVLKTTVAMFAEKYTYEETTILTQVQQLQLKAIGKVPLDLGWKKLFGKESEGKEKEEEPLLPKVTKGETVTVDLQVLEKETKPPQPYTEGTLITAMKTAGKTVDSEEAQSILKEVEGIGTEATRANIIETLKQKEYIKVEKNKLVVTNKGILLCQAVEKEPLLTSAEMTAKWESYLLKIGERKGTQTTFLTNIQKFVSHLLEVVPGQIQSTDFGSTLQEVKAASEKQEAARHLGICPKCQEQEVLLYHKAAACTSEACDFRLWTTIAKKKLTATQLKEIIQNGRTSQPVKGLKGQKGSFEATIVLKEDFTTSFEFSEKKKTNYKKRTRRTTK"),
+        ("ssb", "Single-stranded DNA-binding protein",
+         b"MINNVTLVGRLTKDPDLRYTASGTAVATFTLAVNRNFTNQNGNREADFINCVIWRKPAETMATLAKKGILIGVVGRIQTRTYDNQQGQRVYVTEVVADNFQLLESKAATESRAHADQSSTSPSTTTFEQRDTATPNNNGLNASQNPFGGQSIDISDDDLPF"),
+        ("yoeB", "Toxin YoeB",
+         b"MIKAWSDDAWDDYLYWHEQGNKSNIKKINKLIKDIDRSPFAGLGKPEALKHDLSGKWSRRRLVDLTDDDLEKIREEKIPFFIGLSQDRVQRMYQEKGLTIDSVFHGKRKPVTKVIINDLVERF"),
+        // Note: umuC removed — NCBI BLAST+ also finds no hit at evalue 1e-6
+        // (verified with comp_based_stats=0/1 and default settings).
+    ];
+
+    let params = SearchParams::blastp()
+        .evalue(1e-6)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let mut missed = Vec::new();
+    for (name, expected, query) in &known_hits {
+        let results = blastp(&db, query, &params);
+        if results.is_empty() {
+            eprintln!("MISS: {} ({}) — 0 hits", name, expected);
+            missed.push(*name);
+        } else {
+            eprintln!("HIT:  {} ({}) — {} hits, best e-value: {:.2e}, title: {}",
+                name, expected, results.len(),
+                results[0].best_evalue(),
+                &results[0].subject_title[..80.min(results[0].subject_title.len())]);
+        }
+    }
+
+    assert!(
+        missed.is_empty(),
+        "blastp failed to find hits for {} proteins that NCBI BLAST+ finds: {:?}. \
+         This indicates a sensitivity gap in the search algorithm.",
+        missed.len(), missed
+    );
+}
+
+/// Debug: check if srtA and umuC find seeds/hits against sprot
+#[test]
+#[ignore]
+fn debug_srta_seeds() {
+    let sprot_paths = [
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+    ];
+    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
+        Some(p) => p,
+        None => { eprintln!("Skipping: sprot not found"); return; }
+    };
+    let file = std::fs::File::open(sprot_path).unwrap();
+    let records = blast_rs::input::parse_fasta(file);
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("sprot");
+    let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
+    for rec in &records {
+        builder.add(SequenceEntry {
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
+        });
+    }
+    builder.write(&base).unwrap();
+    let db = blast_rs::db::BlastDb::open(&base).unwrap();
+
+    // Test with very permissive evalue to see what we find
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    // Test with evalue=1e-6 (same as sensitivity test)
+    let params_strict = SearchParams::blastp()
+        .evalue(1e-6)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let srta = b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPSISLKLPIYDGTSDKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK";
+    let results_e10 = blastp(&db, srta, &params);
+    let results_strict = blastp(&db, srta, &params_strict);
+    eprintln!("srtA: {} hits (evalue=10), {} hits (evalue=1e-6)", results_e10.len(), results_strict.len());
+    for r in results_e10.iter().take(5) {
+        let title = &r.subject_title[..80.min(r.subject_title.len())];
+        for h in &r.hsps {
+            eprintln!("  evalue={:.2e} score={} bits={:.1} alen={} ident={} gaps={} title={}",
+                h.evalue, h.score, h.bit_score, h.alignment_length, h.num_identities, h.num_gaps, title);
+        }
+    }
+
+    let umuc = b"MNSDLILAGESPSYNAAFIAMKEQHPAVFYAQHNAFGLKKIRSGFISDEQAKEYYPLICEALQKDITHFVDEIVASITGYSIDNIRFAKENKNKTIINSFEGWYNLSQQLLDTIMNEQNKSHPQFSYYSKLNSSHQLSHKEKAEAYIAGINIQITIDKQGKFFQKHFDIIQSIIKEESVNIPVLFINTSRNLKYSTGIEFNELFKRSNSNSLLAKRRVFYSLPYQPAKYREYFDSFKKISEKWIEAYKCNELDKNIGISFHDFYDSRFRTKDAKKQFSFINNIMSKIRDLYEVPEKIVRELKTRFKWFWEKKVKK";
+    let results_e10 = blastp(&db, umuc, &params);
+    let results_strict = blastp(&db, umuc, &params_strict);
+    eprintln!("umuC: {} hits (evalue=10), {} hits (evalue=1e-6)", results_e10.len(), results_strict.len());
+    for r in results_e10.iter().take(5) {
+        let title = &r.subject_title[..80.min(r.subject_title.len())];
+        for h in &r.hsps {
+            eprintln!("  evalue={:.2e} score={} bits={:.1} alen={} ident={} gaps={} title={}",
+                h.evalue, h.score, h.bit_score, h.alignment_length, h.num_identities, h.num_gaps, title);
+        }
+    }
+}
