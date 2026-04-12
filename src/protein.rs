@@ -25,6 +25,7 @@ pub fn score_aa(matrix: &[[i32; AA_SIZE]; AA_SIZE], aa1: u8, aa2: u8) -> i32 {
 }
 
 /// Perform ungapped protein extension from a seed position.
+/// Ungapped extension result: (query_start, query_end, subject_start, subject_end, score, num_identities)
 pub fn protein_ungapped_extend(
     query: &[u8],    // NCBIstdaa encoded
     subject: &[u8],  // NCBIstdaa encoded
@@ -32,15 +33,30 @@ pub fn protein_ungapped_extend(
     s_seed: usize,
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     x_dropoff: i32,
-) -> Option<(usize, usize, usize, usize, i32)> {
-    // Extend right
+) -> Option<(usize, usize, usize, usize, i32, i32)> {
+    // SAFETY: qi/si are bounded by query.len()/subject.len() (while condition).
+    // Matrix indices are NCBIstdaa [0,27] which is always < AA_SIZE (28).
+    // Removing bounds checks matches NCBI C's direct pointer arithmetic.
+    let qptr = query.as_ptr();
+    let sptr = subject.as_ptr();
+    let qlen = query.len();
+    let slen = subject.len();
+
+    // Extend right — count identities inline (matches NCBI C approach)
     let mut score = 0i32;
     let mut best = 0i32;
     let mut best_r = 0usize;
+    let mut ident_r = 0i32;
+    let mut best_ident_r = 0i32;
     let (mut qi, mut si) = (q_seed, s_seed);
-    while qi < query.len() && si < subject.len() {
-        score += score_aa(matrix, query[qi], subject[si]);
-        if score > best { best = score; best_r = qi - q_seed + 1; }
+    while qi < qlen && si < slen {
+        unsafe {
+            let q = *qptr.add(qi);
+            let s = *sptr.add(si);
+            score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
+            if q == s { ident_r += 1; }
+        }
+        if score > best { best = score; best_r = qi - q_seed + 1; best_ident_r = ident_r; }
         if best - score > x_dropoff { break; }
         qi += 1;
         si += 1;
@@ -50,12 +66,19 @@ pub fn protein_ungapped_extend(
     let mut sl = 0i32;
     let mut best_l = 0i32;
     let mut best_left = 0usize;
+    let mut ident_l = 0i32;
+    let mut best_ident_l = 0i32;
     if q_seed > 0 && s_seed > 0 {
         qi = q_seed - 1;
         si = s_seed - 1;
         loop {
-            sl += score_aa(matrix, query[qi], subject[si]);
-            if sl > best_l { best_l = sl; best_left = q_seed - qi; }
+            unsafe {
+                let q = *qptr.add(qi);
+                let s = *sptr.add(si);
+                sl += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
+                if q == s { ident_l += 1; }
+            }
+            if sl > best_l { best_l = sl; best_left = q_seed - qi; best_ident_l = ident_l; }
             if best_l - sl > x_dropoff { break; }
             if qi == 0 || si == 0 { break; }
             qi -= 1;
@@ -72,6 +95,7 @@ pub fn protein_ungapped_extend(
         s_seed - best_left,
         s_seed + best_r,
         total,
+        best_ident_r + best_ident_l,
     ))
 }
 
@@ -129,6 +153,8 @@ struct GapDP {
 
 /// Score-only gapped extension in one direction (left or right from seed).
 /// Returns the best score found.
+/// Score-only gapped extension in one direction, matching NCBI Blast_SemiGappedAlign.
+/// Band dynamically expands as needed (no fixed max_band).
 fn protein_gapped_score_one_dir(
     query: &[u8], subject: &[u8],
     m: usize, n: usize,
@@ -140,12 +166,13 @@ fn protein_gapped_score_one_dir(
     if x_dropoff < gap_oe { x_dropoff = gap_oe; }
     if m == 0 || n == 0 { return (0, 0, 0); }
 
-    let max_band = ((x_dropoff / gap_extend.max(1)) as usize + 10).min(n + 1);
-    let mut sa = Vec::with_capacity(max_band);
+    // Initial band size: enough cells to fail x-dropoff (NCBI: num_extra_cells)
+    let num_extra_cells = (x_dropoff / gap_extend.max(1)) as usize + 3;
+    let mut sa = Vec::with_capacity(num_extra_cells + 100);
     sa.push(GapDP { best: 0, best_gap: -gap_oe });
 
     let mut score = -gap_oe;
-    while sa.len() < max_band && score >= -x_dropoff {
+    while sa.len() <= n && score >= -x_dropoff {
         sa.push(GapDP { best: score, best_gap: score - gap_oe });
         score -= gap_extend;
     }
@@ -205,26 +232,26 @@ fn protein_gapped_score_one_dir(
             sc = next_sc;
         }
 
-        // Handle possible extension past current band
-        if sc >= best_score - x_dropoff && last_b + 1 < max_band {
-            let new_bi = last_b + 1;
-            if new_bi >= sa.len() {
-                sa.push(GapDP { best: MININT, best_gap: MININT });
-            }
-            if new_bi < b_size || b_size < max_band {
-                sa[new_bi].best = sc;
-                sa[new_bi].best_gap = sc - gap_oe;
-                if sc > best_score {
-                    best_score = sc;
-                    best_q = ai;
-                    best_s = new_bi + 1;
+        // NCBI band expansion: if the last column's score is still viable,
+        // extend the band for the next row (matching Blast_SemiGappedAlign).
+        if first_b >= b_size { break; } // all columns failed x-dropoff
+
+        if last_b < b_size - 1 {
+            // Row ended early — shrink band
+            b_size = last_b + 1;
+        } else {
+            // Row used the full band — try to expand it
+            // (NCBI: "while score_gap_row >= best_score - x_dropoff")
+            while sgr >= best_score - x_dropoff && b_size <= n {
+                if b_size >= sa.len() {
+                    sa.push(GapDP { best: MININT, best_gap: MININT });
                 }
-                last_b = new_bi;
+                sa[b_size].best = sgr;
+                sa[b_size].best_gap = sgr - gap_oe;
+                sgr -= gap_extend;
+                b_size += 1;
             }
         }
-
-        if last_b < first_b { break; }
-        b_size = last_b + 1;
     }
 
     (best_score, best_q, best_s)
@@ -289,7 +316,7 @@ fn protein_nw_traceback(
             let mat = if qi < AA_SIZE && sj < AA_SIZE { matrix[qi][sj] } else { -4 };
             let diag = h[idx(i - 1, j - 1)] + mat;
 
-            // Smith-Waterman: allow restart from 0
+            // Local alignment (Smith-Waterman) within x-drop region.
             let best = diag.max(e[idx(i, j)]).max(f[idx(i, j)]).max(0);
             h[idx(i, j)] = best;
 
@@ -313,7 +340,7 @@ fn protein_nw_traceback(
 
     let nw_score = best_score;
 
-    // Traceback from best score position (Smith-Waterman style)
+    // Traceback from best score position (local alignment)
     let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
     let mut i = best_i;
     let mut j = best_j;
@@ -380,7 +407,7 @@ pub fn protein_gapped_align(
 
     // X-drop boundaries with a small margin to let SW find the optimal local
     // alignment. Keep margin small to avoid O(m*n) blowup on long sequences.
-    let margin = 20;
+    let margin = 5; // Small margin to let SW find optimal local alignment
     let q_start = (seed_q + 1).saturating_sub(ext_q_l).saturating_sub(margin);
     let q_end = (seed_q + ext_q_r + margin).min(query.len());
     let s_start = (seed_s + 1).saturating_sub(ext_s_l).saturating_sub(margin);
@@ -472,7 +499,7 @@ mod tests {
         let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8]; // identical
         let result = protein_ungapped_extend(&query, &subject, 4, 4, &m, 20);
         assert!(result.is_some());
-        let (qs, qe, _ss, _se, score) = result.unwrap();
+        let (qs, qe, _ss, _se, score, _ident) = result.unwrap();
         assert_eq!(score, 32); // 8 matches * 4
         assert_eq!(qe - qs, 8);
     }
@@ -565,7 +592,7 @@ mod tests {
 
         let result = protein_ungapped_extend(&query, &subject, 2, 2, &matrix, 15);
         assert!(result.is_some());
-        let (_qs, qe, _ss, _se, score) = result.unwrap();
+        let (_qs, qe, _ss, _se, score, _ident) = result.unwrap();
         // The best region should be the first 5 matching residues.
         // The xdrop should prevent extending far into the mismatching tail.
         assert!(score > 0);
@@ -581,7 +608,7 @@ mod tests {
         let subject = vec![1u8]; // A
         let result = protein_ungapped_extend(&query, &subject, 0, 0, &matrix, 20);
         assert!(result.is_some());
-        let (_qs, _qe, _ss, _se, score) = result.unwrap();
+        let (_qs, _qe, _ss, _se, score, _ident) = result.unwrap();
         assert!(score > 0);
 
         // Two residues, seed at 0.
@@ -647,7 +674,7 @@ mod tests {
 
         // Ungapped extension
         let ug = protein_ungapped_extend(&query, &subject, 3, 3, &matrix, 100);
-        let ug_score = ug.map_or(0, |(_,_,_,_,s)| s);
+        let ug_score = ug.map_or(0, |(_,_,_,_,s,_)| s);
 
         // Gapped alignment
         let gapped = protein_gapped_align(&query, &subject, 3, 3, &matrix, 11, 1, 100);

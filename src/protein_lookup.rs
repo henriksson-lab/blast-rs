@@ -34,13 +34,26 @@ pub struct ProteinHit {
 /// neighborhood contains the word that hashes to `hash`.
 /// `pv` is a presence-vector bit array for fast rejection.
 #[allow(dead_code)]
+/// Maximum hits stored inline per backbone cell (matches NCBI AA_HITS_PER_CELL).
+const HITS_PER_CELL: usize = 3;
+
+/// One cell of the thick backbone. Stores up to HITS_PER_CELL query offsets
+/// inline (no pointer chase). Overflows to a separate array.
+#[derive(Clone, Copy)]
+struct BackboneCell {
+    num_used: u16,
+    /// If num_used <= HITS_PER_CELL: inline entries.
+    /// If num_used > HITS_PER_CELL: entries[0] is overflow cursor into `overflow`.
+    entries: [i32; HITS_PER_CELL],
+}
+
 pub struct ProteinLookupTable {
     word_size: usize,
     alphabet_size: usize,
-    /// Flattened backbone in CSR format for cache-friendly access.
-    /// `offsets[hash]..offsets[hash+1]` indexes into `data`.
-    offsets: Vec<u32>,
-    data: Vec<i32>,
+    /// Thick backbone: each cell stores up to 3 hits inline.
+    backbone: Vec<BackboneCell>,
+    /// Overflow array for cells with > HITS_PER_CELL hits.
+    overflow: Vec<i32>,
     pv: Vec<u64>,
 }
 
@@ -58,7 +71,8 @@ impl ProteinLookupTable {
         threshold: f64,
     ) -> Self {
         let alphabet_size = AA_SIZE;
-        let table_size = alphabet_size.pow(word_size as u32);
+        // Table size uses power-of-2 charsize (NCBI approach) for fast shift-based hashing
+        let table_size = 1usize << (word_size * CHARSIZE);
         let mut backbone: Vec<Vec<i32>> = vec![Vec::new(); table_size];
 
         // Precompute per-row maximums for branch-and-bound pruning.
@@ -118,22 +132,35 @@ impl ProteinLookupTable {
             }
         }
 
-        // Flatten backbone Vec<Vec<i32>> into CSR format for cache-friendly access.
-        // offsets[hash]..offsets[hash+1] indexes into flat data array.
-        let mut offsets = Vec::with_capacity(table_size + 1);
-        let total_entries: usize = backbone.iter().map(|v| v.len()).sum();
-        let mut data = Vec::with_capacity(total_entries);
-        for entries in &backbone {
-            offsets.push(data.len() as u32);
-            data.extend_from_slice(entries);
+        // Convert to thick backbone (inline ≤3 hits, overflow for rest).
+        // Matches NCBI BLAST+ AaLookupBackboneCell layout.
+        let empty_cell = BackboneCell { num_used: 0, entries: [0; HITS_PER_CELL] };
+        let mut thick: Vec<BackboneCell> = vec![empty_cell; table_size];
+        let mut overflow: Vec<i32> = Vec::new();
+
+        for (idx, entries) in backbone.iter().enumerate() {
+            let n = entries.len();
+            if n == 0 {
+                continue;
+            }
+            thick[idx].num_used = n as u16;
+            if n <= HITS_PER_CELL {
+                // Store inline — no pointer chase needed at scan time
+                for (i, &val) in entries.iter().enumerate() {
+                    thick[idx].entries[i] = val;
+                }
+            } else {
+                // Store overflow cursor in entries[0]
+                thick[idx].entries[0] = overflow.len() as i32;
+                overflow.extend_from_slice(entries);
+            }
         }
-        offsets.push(data.len() as u32);
 
         ProteinLookupTable {
             word_size,
             alphabet_size,
-            offsets,
-            data,
+            backbone: thick,
+            overflow,
             pv,
         }
     }
@@ -186,15 +213,152 @@ fn enumerate_neighbors(
     }
 }
 
-/// Hash a word of length `word_size` with alphabet of size `alphabet_size`.
-/// hash = w[0]*alphabet_size^(n-1) + w[1]*alphabet_size^(n-2) + ... + w[n-1]
+/// Bits per residue for hashing (ceil(log2(alphabet_size))).
+/// AA_SIZE=28, charsize=5 (rounds up to 32). Matches NCBI BLAST+ `charsize`.
+const CHARSIZE: usize = 5;
+/// Mask for the hash: (1 << (word_size * CHARSIZE)) - 1.
+/// For word_size=3: mask = (1 << 15) - 1 = 32767.
+const HASH_MASK_W3: usize = (1 << (3 * CHARSIZE)) - 1;
+
+/// Hash a word using NCBI-style shift+or (matching ComputeTableIndex).
+/// hash = (w[0] << (n-1)*charsize) | (w[1] << (n-2)*charsize) | ... | w[n-1]
 #[inline]
-fn word_hash(word: &[u8], alphabet_size: usize) -> usize {
+fn word_hash(word: &[u8], _alphabet_size: usize) -> usize {
     let mut h: usize = 0;
     for &b in word {
-        h = h * alphabet_size + b as usize;
+        h = (h << CHARSIZE) | b as usize;
     }
     h
+}
+
+/// Incremental hash update (NCBI ComputeTableIndexIncremental).
+#[inline]
+fn word_hash_incremental(prev_hash: usize, new_char: u8, mask: usize) -> usize {
+    ((prev_hash << CHARSIZE) | new_char as usize) & mask
+}
+
+/// Build a merged presence vector from multiple lookup tables.
+///
+/// The merged PV is the bitwise OR of all individual PVs. A subject word
+/// only needs to be checked against individual queries if the merged PV bit
+/// is set — this skips ~90% of positions when queries are diverse.
+pub fn merge_pv(tables: &[&ProteinLookupTable]) -> Vec<u64> {
+    if tables.is_empty() {
+        return Vec::new();
+    }
+    let pv_len = tables[0].pv.len();
+    let mut merged = vec![0u64; pv_len];
+    for table in tables {
+        for (i, &bits) in table.pv.iter().enumerate() {
+            merged[i] |= bits;
+        }
+    }
+    merged
+}
+
+/// Batch scan: scan ONE subject against MULTIPLE queries using a merged PV.
+///
+/// For each subject position, the merged PV is checked first (one branch).
+/// Only on a hit, individual query tables are checked. This reduces the
+/// inner loop from O(positions × queries) to O(positions + hits × queries).
+///
+/// Returns a Vec of (query_index, Vec<ProteinHit>) for queries that had hits.
+pub fn batch_scan_subject(
+    queries: &[&[u8]],
+    tables: &[&ProteinLookupTable],
+    merged_pv: &[u64],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    x_dropoff: i32,
+) -> Vec<(usize, Vec<ProteinHit>)> {
+    if tables.is_empty() || subject.is_empty() {
+        return Vec::new();
+    }
+    let word_size = tables[0].word_size;
+    let alphabet_size = tables[0].alphabet_size;
+
+    if subject.len() < word_size {
+        return Vec::new();
+    }
+
+    // Per-query results and diagonal tracking
+    let num_queries = queries.len();
+    let mut results: Vec<Vec<ProteinHit>> = vec![Vec::new(); num_queries];
+
+    // Diagonal tracking per query — lazily initialized
+    let diag_count_max = subject.len() + queries.iter().map(|q| q.len()).max().unwrap_or(0);
+    let mut diag_bufs: Vec<Vec<i32>> = (0..num_queries)
+        .map(|_| vec![-1i32; diag_count_max])
+        .collect();
+
+    // Slide over the subject — ONE pass
+    for s_pos in 0..=(subject.len() - word_size) {
+        let s_word = &subject[s_pos..s_pos + word_size];
+        let hash = word_hash(s_word, alphabet_size);
+
+        // Merged PV check — rejects ~90% of positions in one branch
+        if merged_pv[hash >> 6] & (1u64 << (hash & 63)) == 0 {
+            continue;
+        }
+
+        // This position matched the merged PV — check individual queries
+        for qi in 0..num_queries {
+            let table = tables[qi];
+            let query = queries[qi];
+
+            // Individual PV check
+            if table.pv[hash >> 6] & (1u64 << (hash & 63)) == 0 {
+                continue;
+            }
+
+            // Thick backbone lookup
+            let cell = &table.backbone[hash];
+            let num = cell.num_used as usize;
+            if num == 0 { continue; }
+            let hit_slice: &[i32] = if num <= HITS_PER_CELL {
+                &cell.entries[..num]
+            } else {
+                let cursor = cell.entries[0] as usize;
+                &table.overflow[cursor..cursor + num]
+            };
+
+            for &q_off in hit_slice {
+                let q_pos = q_off as usize;
+
+                // Diagonal tracking
+                let diag = s_pos + query.len() - q_pos;
+                if diag >= diag_bufs[qi].len() { continue; }
+                let last = diag_bufs[qi][diag];
+                if last >= 0 && (s_pos as i32) < last + word_size as i32 {
+                    continue;
+                }
+
+                // Ungapped extension
+                if let Some((qs, qe, ss, se, score, ident)) =
+                    protein_ungapped_extend(query, subject, q_pos, s_pos, matrix, x_dropoff)
+                {
+                    diag_bufs[qi][diag] = se as i32;
+                    let alen = (qe - qs) as i32;
+                    results[qi].push(ProteinHit {
+                        query_start: qs, query_end: qe,
+                        subject_start: ss, subject_end: se,
+                        score, num_ident: ident,
+                        align_length: alen, mismatches: alen - ident,
+                        gap_opens: 0, qseq: None, sseq: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Collect non-empty results with query index
+    results.into_iter().enumerate()
+        .filter(|(_, hits)| !hits.is_empty())
+        .map(|(qi, mut hits)| {
+            hits.sort_by(|a, b| b.score.cmp(&a.score));
+            (qi, hits)
+        })
+        .collect()
 }
 
 /// Scan a subject sequence against a query using the protein lookup table,
@@ -228,8 +392,85 @@ pub fn protein_scan_with_table(
     protein_scan_with_table_reuse(query, subject, matrix, table, x_dropoff, &mut diag_buf)
 }
 
-/// Like `protein_scan_with_table` but reuses a diagonal tracking buffer
-/// across calls to avoid repeated allocations in tight loops.
+/// Two-hit window size (matches NCBI BLAST+ default for protein).
+const TWO_HIT_WINDOW: i32 = 40;
+
+/// Extend left from position (q_start-1, s_start-1) with x-dropoff.
+/// Returns (best_score, left_displacement, num_identities).
+/// Matches NCBI s_BlastAaExtendLeft.
+#[inline]
+fn extend_left(
+    query: &[u8], subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    q_start: usize, s_start: usize,
+    x_dropoff: i32,
+) -> (i32, i32, i32) {
+    let mut score = 0i32;
+    let mut best = 0i32;
+    let mut best_d = 0i32;
+    let mut ident = 0i32;
+    let mut best_ident = 0i32;
+    if q_start == 0 || s_start == 0 { return (0, 0, 0); }
+    let mut qi = q_start - 1;
+    let mut si = s_start - 1;
+    let mut d = 1i32;
+    loop {
+        unsafe {
+            let q = *query.as_ptr().add(qi);
+            let s = *subject.as_ptr().add(si);
+            score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
+            if q == s { ident += 1; }
+        }
+        if score > best { best = score; best_d = d; best_ident = ident; }
+        if best - score > x_dropoff { break; }
+        if qi == 0 || si == 0 { break; }
+        qi -= 1;
+        si -= 1;
+        d += 1;
+    }
+    (best, best_d, best_ident)
+}
+
+/// Extend right from position (q_start, s_start) with x-dropoff.
+/// `init_score` is the cumulative score from left extension.
+/// Returns (best_score, right_displacement, num_identities).
+/// Matches NCBI s_BlastAaExtendRight.
+#[inline]
+fn extend_right(
+    query: &[u8], subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    q_start: usize, s_start: usize,
+    x_dropoff: i32, init_score: i32,
+) -> (i32, i32, i32) {
+    let mut score = init_score;
+    let mut best = init_score;
+    let mut best_d = 0i32;
+    let mut ident = 0i32;
+    let mut best_ident = 0i32;
+    let mut qi = q_start;
+    let mut si = s_start;
+    let qlen = query.len();
+    let slen = subject.len();
+    while qi < qlen && si < slen {
+        unsafe {
+            let q = *query.as_ptr().add(qi);
+            let s = *subject.as_ptr().add(si);
+            score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
+            if q == s { ident += 1; }
+        }
+        if score > best { best = score; best_d = (qi - q_start + 1) as i32; best_ident = ident; }
+        if best - score > x_dropoff { break; }
+        qi += 1;
+        si += 1;
+    }
+    (best, best_d, best_ident)
+}
+
+/// Like `protein_scan_with_table` but reuses a diagonal tracking buffer.
+///
+/// Uses the NCBI BLAST+ two-hit algorithm: a word hit on a diagonal only
+/// triggers ungapped extension if a second hit was seen on the same diagonal
+/// within `TWO_HIT_WINDOW` positions. This dramatically reduces extensions.
 pub fn protein_scan_with_table_reuse(
     query: &[u8],
     subject: &[u8],
@@ -243,70 +484,143 @@ pub fn protein_scan_with_table_reuse(
         return Vec::new();
     }
 
-    // Diagonal tracking to avoid redundant extensions.
     let diag_count = query.len() + subject.len();
     diag_buf.clear();
-    diag_buf.resize(diag_count, -1);
-    let last_diag_hit = diag_buf;
+    diag_buf.resize(diag_count, i32::MIN);
+    let diag_array = diag_buf;
 
     let mut hits: Vec<ProteinHit> = Vec::new();
+    let ws = word_size as i32;
+    let qlen = query.len();
+    let mask = (1usize << (word_size * CHARSIZE)) - 1;
 
-    // Slide over the subject.
-    for s_pos in 0..=(subject.len() - word_size) {
-        let s_word = &subject[s_pos..s_pos + word_size];
+    let last_pos = subject.len() - word_size;
+    let mut hash = word_hash(&subject[0..word_size], 0);
 
-        // Hash the subject word.
-        let hash = word_hash(s_word, table.alphabet_size);
+    // SAFETY: All indices are bounds-checked by loop structure:
+    // - s_pos in 0..=last_pos where last_pos = subject.len() - word_size
+    // - hash < table_size (= alphabet_size^word_size), PV/backbone sized to table_size
+    // - diag < diag_count = query.len() + subject.len()
+    // Removing bounds checks in this hot loop matches NCBI C approach.
+    let pv = table.pv.as_ptr();
+    let backbone = table.backbone.as_ptr();
+    let overflow = table.overflow.as_ptr();
+    let subj = subject.as_ptr();
+    let diag_ptr = diag_array.as_mut_ptr();
 
-        // PV check.
-        if table.pv[hash >> 6] & (1u64 << (hash & 63)) == 0 {
-            continue;
+    for s_pos in 0..=last_pos {
+        if s_pos > 0 {
+            unsafe {
+                // NCBI ComputeTableIndexIncremental: shift + or + mask (no multiply)
+                let new = *subj.add(s_pos + word_size - 1) as usize;
+                hash = ((hash << CHARSIZE) | new) & mask;
+            }
         }
 
-        // Check backbone entries (CSR lookup — contiguous memory).
-        let start = table.offsets[hash] as usize;
-        let end = table.offsets[hash + 1] as usize;
-        for &q_off in &table.data[start..end] {
-            let q_pos = q_off as usize;
-
-            // Diagonal tracking: skip if we already extended on this diagonal
-            // at or past this subject position.
-            let diag = s_pos + query.len() - q_pos;
-            let last = last_diag_hit[diag];
-            if last >= 0 && (s_pos as i32) < last + word_size as i32 {
+        unsafe {
+            if *pv.add(hash >> 6) & (1u64 << (hash & 63)) == 0 {
                 continue;
             }
 
-            // Ungapped extension.
-            if let Some((qs, qe, ss, se, score)) =
-                protein_ungapped_extend(query, subject, q_pos, s_pos, matrix, x_dropoff)
-            {
-                last_diag_hit[diag] = se as i32;
-                let alen = (qe - qs) as i32;
-                let mut ident = 0i32;
-                for k in 0..alen as usize {
-                    if qs + k < query.len() && ss + k < subject.len()
-                        && query[qs + k] == subject[ss + k] { ident += 1; }
+            let cell = &*backbone.add(hash);
+            let num = cell.num_used as usize;
+            if num == 0 { continue; }
+
+            let (hit_ptr, hit_len) = if num <= HITS_PER_CELL {
+                (cell.entries.as_ptr(), num)
+            } else {
+                let cursor = cell.entries[0] as usize;
+                (overflow.add(cursor), num)
+            };
+
+            let s_off = s_pos as i32;
+
+            for i in 0..hit_len {
+                let q_pos = *hit_ptr.add(i) as usize;
+                let diag = s_pos + qlen - q_pos;
+                let last = *diag_ptr.add(diag);
+
+                if last == i32::MIN {
+                    *diag_ptr.add(diag) = s_off;
+                    continue;
                 }
-                hits.push(ProteinHit {
-                    query_start: qs,
-                    query_end: qe,
-                    subject_start: ss,
-                    subject_end: se,
-                    score,
-                    num_ident: ident,
-                    align_length: alen,
-                    mismatches: alen - ident,
-                    gap_opens: 0,
-                    qseq: None,
-                    sseq: None,
-                });
+                if last < 0 {
+                    if s_off < -(last + 1) { continue; }
+                    *diag_ptr.add(diag) = s_off;
+                    continue;
+                }
+                let diff = s_off - last;
+                if diff >= TWO_HIT_WINDOW { *diag_ptr.add(diag) = s_off; continue; }
+                if diff < ws { continue; }
+
+                // NCBI two-hit extension (s_BlastAaExtendTwoHit):
+                // 1. Find best starting point within the word at s_pos
+                // 2. Extend LEFT — must reach the first hit (at `last`)
+                // 3. Extend RIGHT only if left reached far enough
+                let s_left_off = (last + ws) as usize; // end of first hit
+                let s_right_off = s_pos;
+                let q_right_off = q_pos;
+
+                // Find best start within the word
+                let mut wscore = 0i32;
+                let mut best_wscore = 0i32;
+                let mut right_d = 0usize;
+                for k in 0..word_size {
+                    let qi = q_right_off + k;
+                    let si = s_right_off + k;
+                    if qi < qlen && si < subject.len() {
+                        wscore += *matrix.get_unchecked(
+                            *query.as_ptr().add(qi) as usize
+                        ).get_unchecked(
+                            *subject.as_ptr().add(si) as usize
+                        );
+                    }
+                    if wscore > best_wscore {
+                        best_wscore = wscore;
+                        right_d = k + 1;
+                    }
+                }
+                let ext_q = q_right_off + right_d;
+                let ext_s = s_right_off + right_d;
+
+                // Extend left from ext_s-1 — must reach s_left_off
+                let (left_score, left_d, left_ident) = extend_left(
+                    query, subject, matrix, ext_q, ext_s, x_dropoff);
+
+                let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
+
+                if reached_first {
+                    // Extend right with cumulative score
+                    let (right_score, right_d_r, right_ident) = extend_right(
+                        query, subject, matrix, ext_q, ext_s, x_dropoff, left_score);
+
+                    let total_score = left_score.max(right_score);
+                    if total_score > 0 {
+                        let qs = ext_q - left_d as usize;
+                        let qe = ext_q + right_d_r as usize;
+                        let ss = ext_s - left_d as usize;
+                        let se = ext_s + right_d_r as usize;
+                        *diag_ptr.add(diag) = -(se as i32 + 1);
+                        let alen = (qe - qs) as i32;
+                        let ident = left_ident + right_ident;
+                        hits.push(ProteinHit {
+                            query_start: qs, query_end: qe,
+                            subject_start: ss, subject_end: se,
+                            score: total_score, num_ident: ident,
+                            align_length: alen, mismatches: alen - ident,
+                            gap_opens: 0, qseq: None, sseq: None,
+                        });
+                        continue;
+                    }
+                }
+                *diag_ptr.add(diag) = s_off;
             }
         }
     }
 
-    // Sort by descending score.
-    hits.sort_by(|a, b| b.score.cmp(&a.score));
+    if hits.len() > 1 {
+        hits.sort_unstable_by(|a, b| b.score.cmp(&a.score));
+    }
     hits
 }
 
@@ -421,7 +735,9 @@ mod tests {
 
     #[test]
     fn test_word_hash() {
-        assert_eq!(word_hash(&[1, 2, 3], 28), 1 * 28 * 28 + 2 * 28 + 3);
+        // Shift-based hash: h = (h << 5) | b for each byte
+        // [1,2,3] = (1 << 10) | (2 << 5) | 3 = 1024 + 64 + 3 = 1091
+        assert_eq!(word_hash(&[1, 2, 3], 28), (1 << 10) | (2 << 5) | 3);
         assert_eq!(word_hash(&[0, 0, 0], 28), 0);
         assert_eq!(word_hash(&[0, 0, 1], 28), 1);
     }
@@ -433,10 +749,16 @@ mod tests {
         let query = vec![1u8, 2, 3];
         let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
         let hash = word_hash(&[1, 2, 3], AA_SIZE);
-        let start = table.offsets[hash] as usize;
-        let end = table.offsets[hash + 1] as usize;
+        let cell = &table.backbone[hash];
+        assert!(cell.num_used > 0, "Cell should have hits");
+        let hits: &[i32] = if (cell.num_used as usize) <= HITS_PER_CELL {
+            &cell.entries[..cell.num_used as usize]
+        } else {
+            let c = cell.entries[0] as usize;
+            &table.overflow[c..c + cell.num_used as usize]
+        };
         assert!(
-            table.data[start..end].contains(&0),
+            hits.contains(&0),
             "Exact match word should have query offset 0"
         );
         // PV bit should be set.
@@ -487,10 +809,15 @@ mod tests {
             word_hash(&[3, 4, 5], AA_SIZE),
         ];
         for (i, &hash) in hashes.iter().enumerate() {
-            let start = table.offsets[hash] as usize;
-            let end = table.offsets[hash + 1] as usize;
-            assert!(end > start, "Word at position {} should have entries", i);
-            assert!(table.data[start..end].contains(&(i as i32)),
+            let cell = &table.backbone[hash];
+            assert!(cell.num_used > 0, "Word at position {} should have entries", i);
+            let hits: &[i32] = if (cell.num_used as usize) <= HITS_PER_CELL {
+                &cell.entries[..cell.num_used as usize]
+            } else {
+                let c = cell.entries[0] as usize;
+                &table.overflow[c..c + cell.num_used as usize]
+            };
+            assert!(hits.contains(&(i as i32)),
                 "Word at position {} should map to query offset {}", i, i);
             // PV bit should be set
             assert_ne!(table.pv[hash >> 6] & (1u64 << (hash & 63)), 0,
@@ -504,8 +831,8 @@ mod tests {
         // threshold=13 > max possible score (4*3=12), so NO words should match
         let query = vec![1u8, 2, 3, 4, 5];
         let table = ProteinLookupTable::build(&query, 3, &m, 13.0);
-        let total_entries: usize = (0..table.offsets.len() - 1)
-            .map(|i| (table.offsets[i + 1] - table.offsets[i]) as usize)
+        let total_entries: usize = table.backbone.iter()
+            .map(|c| c.num_used as usize)
             .sum();
         assert_eq!(total_entries, 0, "No words should meet threshold > max score");
     }
@@ -516,8 +843,8 @@ mod tests {
         // threshold=7 allows words with 2 matches + 1 mismatch (4+4-1=7)
         let query = vec![1u8, 2, 3];
         let table = ProteinLookupTable::build(&query, 3, &m, 7.0);
-        let total_entries: usize = (0..table.offsets.len() - 1)
-            .map(|i| (table.offsets[i + 1] - table.offsets[i]) as usize)
+        let total_entries: usize = table.backbone.iter()
+            .map(|c| c.num_used as usize)
             .sum();
         assert!(total_entries > 1,
             "Low threshold should produce neighboring words (got {})", total_entries);
@@ -550,8 +877,8 @@ mod tests {
 
     #[test]
     fn test_word_hash_range() {
-        // All hashes should be in [0, AA_SIZE^word_size)
-        let max_hash = AA_SIZE * AA_SIZE * AA_SIZE;
+        // All hashes should be in [0, 2^(word_size*CHARSIZE))
+        let max_hash = 1usize << (3 * CHARSIZE); // 32768
         for a in 0..AA_SIZE {
             for b in 0..AA_SIZE {
                 for c in 0..AA_SIZE {

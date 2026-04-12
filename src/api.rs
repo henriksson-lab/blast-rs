@@ -151,8 +151,8 @@ impl SearchParams {
             gap_extend: 1,
             evalue_threshold: 10.0,
             max_target_seqs: 500,
-            x_drop_ungapped: 40,
-            x_drop_gapped: 260,
+            x_drop_ungapped: 7,   // BLAST_UNGAPPED_X_DROPOFF_PROT (bits)
+            x_drop_gapped: 15,    // BLAST_GAP_X_DROPOFF_PROT (in bits, converted to raw by blastp())
             ungapped_cutoff: 0,
             min_score: 0,
             match_score: 1,
@@ -167,7 +167,7 @@ impl SearchParams {
             culling_limit: None,
             two_hit: false,
             two_hit_window: 40,
-            x_drop_final: 100,
+            x_drop_final: 25,     // BLAST_GAP_X_DROPOFF_FINAL_PROT
             soft_masking: false,
             lcase_masking: false,
         }
@@ -181,8 +181,8 @@ impl SearchParams {
             gap_extend: 2,
             evalue_threshold: 10.0,
             max_target_seqs: 500,
-            x_drop_ungapped: 20,
-            x_drop_gapped: 30,
+            x_drop_ungapped: 20,  // BLAST_UNGAPPED_X_DROPOFF_NUCL
+            x_drop_gapped: 30,    // BLAST_GAP_X_DROPOFF_NUCL
             ungapped_cutoff: 0,
             min_score: 0,
             match_score: 2,
@@ -197,7 +197,7 @@ impl SearchParams {
             culling_limit: None,
             two_hit: false,
             two_hit_window: 40,
-            x_drop_final: 100,
+            x_drop_final: 100,    // BLAST_GAP_X_DROPOFF_FINAL_NUCL
             soft_masking: false,
             lcase_masking: false,
         }
@@ -459,6 +459,15 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         .map(|p| crate::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
+    // Convert ALL bit-score x_dropoff values to raw scores
+    // (matching NCBI blast_parameters.c: raw = ceil(bits * ln(2) / lambda))
+    let ln2 = std::f64::consts::LN_2;
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
+    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
+    // Gap trigger: BLAST_GAP_TRIGGER_PROT = 22.0 bits → raw
+    let gap_trigger_raw = (22.0 * ln2 / prot_kbp.lambda).ceil() as i32;
+
     let total_subj_len: usize = (0..db.num_oids)
         .map(|oid| db.get_seq_len(oid) as usize)
         .sum();
@@ -477,10 +486,8 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
     let max_hsps = params.max_hsps;
     let evalue_threshold = params.evalue_threshold;
-    let x_drop_ungapped = params.x_drop_ungapped;
     let gap_open = params.gap_open;
     let gap_extend = params.gap_extend;
-    let x_drop_gapped = params.x_drop_gapped;
 
     // Process a single subject OID — extracted so it can be called
     // either sequentially or in parallel without per-call pool overhead.
@@ -489,15 +496,16 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         let subj_len = db.get_seq_len(oid) as usize;
         if subj_len < word_size { return None; }
 
-        let subj_aa: Vec<u8> = subj_raw.iter().filter(|&&b| b != 0).copied().collect();
-        if subj_aa.is_empty() { return None; }
+        // Use length-based slice — no allocation (matches NCBI C approach).
+        // get_sequence() includes trailing sentinel; subj_len excludes it.
+        let subj_aa = &subj_raw[..subj_len];
 
         let ungapped_hits = crate::protein_lookup::protein_scan_with_table(
             &query_aa, &subj_aa, &matrix, &lookup_table, x_drop_ungapped,
         );
         if ungapped_hits.is_empty() { return None; }
 
-        let ungap_cutoff = 22;
+        let ungap_cutoff = gap_trigger_raw;
         let best_seed = ungapped_hits.iter()
             .filter(|uh| uh.score >= ungap_cutoff)
             .max_by_key(|uh| uh.score);
@@ -510,7 +518,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             let seed_s = (uh.subject_start + uh.subject_end) / 2;
             if let Some(gr) = crate::protein::protein_gapped_align(
                 &query_aa, &subj_aa, seed_q, seed_s,
-                &matrix, gap_open, gap_extend, x_drop_gapped,
+                &matrix, gap_open, gap_extend, x_drop_final,
             ) {
                 let q_slice = &query_aa[gr.query_start..gr.query_end];
                 let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
@@ -577,7 +585,6 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     };
 
     // Run sequentially or in parallel depending on num_threads.
-    // Avoids creating a thread pool when num_threads == 1 (saves ~0.5ms per call).
     let mut results: Vec<SearchResult> = if num_threads <= 1 {
         (0..db.num_oids).filter_map(|oid| search_oid(oid)).collect()
     } else {
@@ -626,10 +633,14 @@ pub fn blastp_batch(
 
     let max_hsps = params.max_hsps;
     let evalue_threshold = params.evalue_threshold;
-    let x_drop_ungapped = params.x_drop_ungapped;
+    // Convert bit-score parameters to raw (same as blastp())
+    let ln2_b = std::f64::consts::LN_2;
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2_b / prot_kbp.lambda).ceil() as i32;
+    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2_b / prot_kbp.lambda).ceil() as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2_b / prot_kbp.lambda).ceil() as i32;
+    let gap_trigger_raw = (22.0 * ln2_b / prot_kbp.lambda).ceil() as i32;
     let gap_open = params.gap_open;
     let gap_extend = params.gap_extend;
-    let x_drop_gapped = params.x_drop_gapped;
 
     // Prepare all queries: encode, build lookup tables, compute search spaces
     struct PreparedQuery {
@@ -650,13 +661,18 @@ pub fn blastp_batch(
         PreparedQuery { aa, lookup, search_space }
     }).collect();
 
-    // Per-query results accumulator
     let num_queries = queries.len();
-
     let num_threads = if params.num_threads == 0 { rayon::current_num_threads() } else { params.num_threads };
 
-    // Process subjects — each subject is loaded once, checked against all queries.
-    // Parallelize over subjects (each subject checks all queries).
+    // Build merged PV — bitwise OR of all query PVs.
+    // Subject positions that don't match the merged PV can't match ANY query.
+    let table_refs: Vec<&crate::protein_lookup::ProteinLookupTable> =
+        prepared.iter().map(|pq| &pq.lookup).collect();
+    let merged_pv = crate::protein_lookup::merge_pv(&table_refs);
+
+    let query_refs: Vec<&[u8]> = prepared.iter().map(|pq| pq.aa.as_slice()).collect();
+
+    // Process one subject: use merged PV scan, then gapped alignment on hits.
     let process_oid = |oid: u32| -> Vec<(usize, SearchResult)> {
         let subj_raw = db.get_sequence(oid);
         let subj_len = db.get_seq_len(oid) as usize;
@@ -665,17 +681,19 @@ pub fn blastp_batch(
         let subj_aa: Vec<u8> = subj_raw.iter().filter(|&&b| b != 0).copied().collect();
         if subj_aa.is_empty() { return Vec::new(); }
 
+        // Batch scan: one pass over subject, checks merged PV first
+        let batch_ungapped = crate::protein_lookup::batch_scan_subject(
+            &query_refs, &table_refs, &merged_pv,
+            &subj_aa, &matrix, x_drop_ungapped,
+        );
+
         let mut hits_for_queries: Vec<(usize, SearchResult)> = Vec::new();
 
-        for (qi, pq) in prepared.iter().enumerate() {
-            if pq.aa.len() < word_size { continue; }
+        for (qi, ungapped) in batch_ungapped {
+            let pq = &prepared[qi];
 
-            let ungapped = crate::protein_lookup::protein_scan_with_table(
-                &pq.aa, &subj_aa, &matrix, &pq.lookup, x_drop_ungapped,
-            );
-            if ungapped.is_empty() { continue; }
-
-            let ungap_cutoff = 22;
+            // Phase 2: gapped extension on best seed
+            let ungap_cutoff = gap_trigger_raw;
             let best_seed = ungapped.iter()
                 .filter(|uh| uh.score >= ungap_cutoff)
                 .max_by_key(|uh| uh.score);
@@ -688,7 +706,7 @@ pub fn blastp_batch(
                 let seed_s = (uh.subject_start + uh.subject_end) / 2;
                 if let Some(gr) = crate::protein::protein_gapped_align(
                     &pq.aa, &subj_aa, seed_q, seed_s,
-                    &matrix, gap_open, gap_extend, x_drop_gapped,
+                    &matrix, gap_open, gap_extend, x_drop_final,
                 ) {
                     let q_slice = &pq.aa[gr.query_start..gr.query_end];
                     let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
