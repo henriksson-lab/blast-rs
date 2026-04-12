@@ -120,4 +120,67 @@ mod tests {
         assert!(output.contains("Query"));
         assert!(output.contains("Sbjct"));
     }
+
+    #[test]
+    fn test_pairwise_with_gaps() {
+        // Query:   ACGT-ACGT (gap at position 4 in query => '-' = code 15 or 0xFF)
+        // Subject: ACGTGACGT
+        // BLASTNA: A=0, C=1, G=2, T=3, gap=15
+        let query   = vec![0u8, 1, 2, 3, 15, 0, 1, 2, 3];
+        let subject = vec![0u8, 1, 2, 3,  2, 0, 1, 2, 3];
+        let mut buf = Vec::new();
+        format_pairwise_alignment(
+            &mut buf, "query1", "subject1",
+            &query, &subject,
+            1, 9, 1, 9,
+            14, 28.0, 1e-3, 8, 9, 1,
+        ).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // The gap character should appear as '-' in query line
+        assert!(output.contains("-"), "query line should contain a gap character '-'");
+        // Should show identities and gaps info
+        assert!(output.contains("Gaps = 1/9"));
+        // Match line should have pipe where bases match
+        assert!(output.contains("|"), "match line should contain pipe characters");
+    }
+
+    #[test]
+    fn test_pairwise_minus_strand() {
+        let query   = vec![0u8, 1, 2, 3, 0, 1, 2, 3]; // ACGTACGT
+        let subject = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let mut buf = Vec::new();
+        // Minus strand: s_start > s_end
+        format_pairwise_alignment(
+            &mut buf, "query1", "subject1",
+            &query, &subject,
+            1, 8, 100, 93,   // subject coords decrease for minus strand
+            16, 30.0, 1e-5, 8, 8, 0,
+        ).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // Should indicate Minus strand
+        assert!(output.contains("Strand=Plus/Minus"), "output should indicate minus strand");
+        // Subject should start at 100 and decrease
+        assert!(output.contains("Sbjct  100"), "subject line should start at position 100");
+    }
+
+    #[test]
+    fn test_pairwise_long_alignment() {
+        // Create an alignment longer than 60 characters to test wrapping
+        let len = 130;
+        let query: Vec<u8> = (0..len).map(|i| (i % 4) as u8).collect();   // repeating ACGT
+        let subject: Vec<u8> = (0..len).map(|i| (i % 4) as u8).collect();
+        let mut buf = Vec::new();
+        format_pairwise_alignment(
+            &mut buf, "query1", "subject1",
+            &query, &subject,
+            1, len as i32, 1, len as i32,
+            260, 480.0, 1e-100, len as i32, len as i32, 0,
+        ).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // Count "Query" lines — should be ceil(130/60) = 3 blocks
+        let query_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("Query")).collect();
+        assert_eq!(query_lines.len(), 3, "130-char alignment should wrap into 3 blocks (60+60+10)");
+        let sbjct_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("Sbjct")).collect();
+        assert_eq!(sbjct_lines.len(), 3, "subject should also have 3 lines");
+    }
 }

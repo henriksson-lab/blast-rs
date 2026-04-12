@@ -85,6 +85,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_rps_search_space_calculation() {
+        // Verify search space uses sum of profile lengths (total_db_len).
+        // search_space = query.len() * sum(profile.pssm.length for all profiles)
+        let mut matrix = [[0i32; AA_SIZE]; AA_SIZE];
+        for i in 1..21 { matrix[i][i] = 5; }
+        for i in 1..21 { for j in 1..21 { if i != j { matrix[i][j] = -2; } } }
+
+        let profile1_seq = vec![1u8, 2, 3]; // length 3
+        let profile2_seq = vec![4u8, 5, 6, 7, 8]; // length 5
+        let pssm1 = Pssm::from_sequence(&profile1_seq, &matrix);
+        let pssm2 = Pssm::from_sequence(&profile2_seq, &matrix);
+
+        let profiles = vec![
+            RpsProfile { id: "dom1".to_string(), description: "d1".to_string(), pssm: pssm1 },
+            RpsProfile { id: "dom2".to_string(), description: "d2".to_string(), pssm: pssm2 },
+        ];
+
+        // Total db length = 3 + 5 = 8
+        let total_db_len: usize = profiles.iter().map(|p| p.pssm.length).sum();
+        assert_eq!(total_db_len, 8, "Total DB length should be sum of profile lengths");
+
+        // Query of length 10 -> search_space = 10 * 8 = 80
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let expected_search_space = (query.len() * total_db_len) as f64;
+        assert!((expected_search_space - 80.0).abs() < f64::EPSILON,
+                "Search space should be query_len * total_db_len = 80");
+
+        // Run the actual search and verify hits use this search space
+        // by checking the E-value formula: E = K * search_space * exp(-lambda * score)
+        let lambda = 0.3176;
+        let k = 0.134;
+        let hits = rps_blast_search(&query, &profiles, 10.0, lambda, k);
+
+        // Profile 1 matches at position 0 (query starts with 1,2,3)
+        if let Some(hit) = hits.iter().find(|h| h.profile_id == "dom1") {
+            let expected_e = k * expected_search_space * (-lambda * hit.score as f64).exp();
+            assert!((hit.evalue - expected_e).abs() < 1e-6,
+                    "E-value should use total DB length in search space. Expected {}, got {}",
+                    expected_e, hit.evalue);
+        }
+    }
+
+    #[test]
     fn test_rps_blast() {
         let mut matrix = [[0i32; AA_SIZE]; AA_SIZE];
         for i in 1..21 { matrix[i][i] = 5; }

@@ -142,4 +142,165 @@ mod tests {
         assert_eq!(list.hsps.len(), 1);
         assert_eq!(list.hsps[0].score, 100);
     }
+
+    /// Helper to create an HSP with specified fields, defaulting others.
+    fn make_hsp(score: i32, evalue: f64, q_off: i32, q_end: i32, s_off: i32, s_end: i32) -> Hsp {
+        Hsp {
+            score,
+            num_ident: score / 2,
+            bit_score: score as f64 * 0.9,
+            evalue,
+            query_offset: q_off,
+            query_end: q_end,
+            subject_offset: s_off,
+            subject_end: s_end,
+            context: 0,
+            num_gaps: 0,
+        }
+    }
+
+    #[test]
+    fn test_hsp_list_sort_by_score() {
+        let mut list = HspList::new(0);
+        list.add_hsp(make_hsp(30, 1e-5, 0, 30, 0, 30));
+        list.add_hsp(make_hsp(90, 1e-20, 0, 90, 0, 90));
+        list.add_hsp(make_hsp(10, 1.0, 0, 10, 0, 10));
+        list.add_hsp(make_hsp(60, 1e-12, 0, 60, 0, 60));
+
+        sort_by_score(&mut list);
+
+        let scores: Vec<i32> = list.hsps.iter().map(|h| h.score).collect();
+        assert_eq!(scores, vec![90, 60, 30, 10]);
+    }
+
+    #[test]
+    fn test_hsp_list_purge_nulls() {
+        // In Rust we don't have NULL pointers, but we can simulate purging
+        // invalid/zero-score entries by filtering them out.
+        let mut list = HspList::new(0);
+        list.add_hsp(make_hsp(50, 1e-10, 0, 50, 0, 50));
+        list.add_hsp(make_hsp(0, f64::MAX, 0, 0, 0, 0)); // "null" / invalid
+        list.add_hsp(make_hsp(40, 1e-8, 10, 50, 10, 50));
+        list.add_hsp(make_hsp(0, f64::MAX, 0, 0, 0, 0)); // "null" / invalid
+
+        // Purge zero-score entries (Rust analog of purging NULLs)
+        list.hsps.retain(|h| h.score > 0);
+
+        assert_eq!(list.hsps.len(), 2);
+        assert_eq!(list.hsps[0].score, 50);
+        assert_eq!(list.hsps[1].score, 40);
+    }
+
+    #[test]
+    fn test_hsp_overlap_detection() {
+        // Two HSPs on the same diagonal (query_offset - subject_offset is the same)
+        // that overlap in coordinate space.
+        let hsp_a = make_hsp(80, 1e-15, 10, 60, 10, 60); // diagonal = 0
+        let hsp_b = make_hsp(50, 1e-8, 40, 80, 40, 80);  // diagonal = 0, overlaps 40..60
+
+        // Check overlap: ranges [10,60) and [40,80) overlap on both query and subject
+        let q_overlap = hsp_a.query_end > hsp_b.query_offset && hsp_b.query_end > hsp_a.query_offset;
+        let s_overlap = hsp_a.subject_end > hsp_b.subject_offset && hsp_b.subject_end > hsp_a.subject_offset;
+        assert!(q_overlap && s_overlap, "HSPs on the same diagonal should overlap");
+    }
+
+    #[test]
+    fn test_hsp_no_overlap() {
+        // Two HSPs on different diagonals with non-overlapping coordinates.
+        let hsp_a = make_hsp(80, 1e-15, 0, 50, 100, 150);   // diagonal = -100
+        let hsp_b = make_hsp(50, 1e-8, 200, 250, 0, 50);    // diagonal = 200
+
+        let q_overlap = hsp_a.query_end > hsp_b.query_offset && hsp_b.query_end > hsp_a.query_offset;
+        let s_overlap = hsp_a.subject_end > hsp_b.subject_offset && hsp_b.subject_end > hsp_a.subject_offset;
+        assert!(!q_overlap || !s_overlap, "HSPs on different diagonals should not overlap");
+    }
+
+    #[test]
+    fn test_hsp_containment() {
+        // One HSP fully contained within another; remove_contained should drop it.
+        let mut list = HspList::new(0);
+        list.add_hsp(make_hsp(100, 1e-25, 10, 100, 10, 100)); // outer, higher score
+        list.add_hsp(make_hsp(40, 1e-5, 30, 70, 30, 70));     // inner, fully contained
+        list.add_hsp(make_hsp(60, 1e-10, 80, 130, 80, 130));   // separate, not contained
+
+        remove_contained(&mut list);
+
+        assert_eq!(list.hsps.len(), 2);
+        let scores: Vec<i32> = list.hsps.iter().map(|h| h.score).collect();
+        // Sorted by score descending, the contained one (40) should be gone
+        assert!(scores.contains(&100));
+        assert!(scores.contains(&60));
+        assert!(!scores.contains(&40));
+    }
+
+    #[test]
+    fn test_hsp_merge() {
+        // Simulate merging overlapping HSPs by taking the union of their coordinates.
+        let hsp_a = make_hsp(80, 1e-15, 10, 60, 10, 60);
+        let hsp_b = make_hsp(50, 1e-8, 40, 90, 40, 90);
+
+        // Merged HSP covers the union of both ranges
+        let merged_q_off = hsp_a.query_offset.min(hsp_b.query_offset);
+        let merged_q_end = hsp_a.query_end.max(hsp_b.query_end);
+        let merged_s_off = hsp_a.subject_offset.min(hsp_b.subject_offset);
+        let merged_s_end = hsp_a.subject_end.max(hsp_b.subject_end);
+        let merged_score = hsp_a.score.max(hsp_b.score);
+
+        assert_eq!(merged_q_off, 10);
+        assert_eq!(merged_q_end, 90);
+        assert_eq!(merged_s_off, 10);
+        assert_eq!(merged_s_end, 90);
+        assert_eq!(merged_score, 80);
+
+        // Verify the merged region covers both originals
+        assert!(merged_q_off <= hsp_a.query_offset && merged_q_end >= hsp_a.query_end);
+        assert!(merged_q_off <= hsp_b.query_offset && merged_q_end >= hsp_b.query_end);
+    }
+
+    #[test]
+    fn test_hsp_evalue_filter() {
+        let mut list = HspList::new(0);
+        list.add_hsp(make_hsp(100, 1e-30, 0, 100, 0, 100));
+        list.add_hsp(make_hsp(60, 1e-10, 0, 60, 0, 60));
+        list.add_hsp(make_hsp(30, 0.5, 0, 30, 0, 30));
+        list.add_hsp(make_hsp(10, 10.0, 0, 10, 0, 10));
+        list.add_hsp(make_hsp(50, 1e-6, 0, 50, 0, 50));
+
+        filter_by_evalue(&mut list, 1e-5);
+
+        assert_eq!(list.hsps.len(), 3);
+        // Only HSPs with evalue <= 1e-5 should remain
+        for hsp in &list.hsps {
+            assert!(hsp.evalue <= 1e-5, "HSP with evalue {} should have been filtered", hsp.evalue);
+        }
+        let scores: Vec<i32> = list.hsps.iter().map(|h| h.score).collect();
+        assert!(scores.contains(&100));
+        assert!(scores.contains(&60));
+        assert!(scores.contains(&50));
+    }
+
+    #[test]
+    fn test_hsp_max_target_seqs() {
+        // Simulate max_target_seqs by sorting hit lists by evalue and truncating.
+        use crate::hspstream::HitList;
+
+        let mut hitlist = HitList::new();
+        for i in 0..10 {
+            let mut hsp_list = HspList::new(i);
+            hsp_list.add_hsp(make_hsp(100 - i * 10, 1e-5 * (i as f64 + 1.0), 0, 50, 0, 50));
+            hitlist.add_hsp_list(hsp_list);
+        }
+        assert_eq!(hitlist.hsp_lists.len(), 10);
+
+        hitlist.sort_by_evalue();
+
+        let max_target_seqs = 5;
+        hitlist.hsp_lists.truncate(max_target_seqs);
+
+        assert_eq!(hitlist.hsp_lists.len(), 5);
+        // The kept entries should have the lowest evalues
+        for i in 1..hitlist.hsp_lists.len() {
+            assert!(hitlist.hsp_lists[i].best_evalue >= hitlist.hsp_lists[i - 1].best_evalue);
+        }
+    }
 }

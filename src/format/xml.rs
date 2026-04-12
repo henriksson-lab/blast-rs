@@ -73,4 +73,66 @@ mod tests {
         assert!(output.contains("subj1"));
         assert!(output.contains("</BlastOutput>"));
     }
+
+    #[test]
+    fn test_xml_well_formed() {
+        let mut buf = Vec::new();
+        write_xml_header(&mut buf, "blastn", "0.1.0", "mydb").unwrap();
+        write_xml_hit(&mut buf, 1, "hit1", "first hit", 500,
+            &[(10, 60, 200, 250, 1e-20, 100.0, 48, 51, 0)]).unwrap();
+        write_xml_hit(&mut buf, 2, "hit2", "second hit", 800,
+            &[(1, 30, 50, 80, 5e-5, 45.0, 28, 31, 1)]).unwrap();
+        write_xml_footer(&mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        // Verify XML declaration
+        assert!(output.starts_with("<?xml version=\"1.0\"?>"), "should start with XML declaration");
+        // Verify matching open/close tags for key elements
+        assert!(output.contains("<BlastOutput>"));
+        assert!(output.contains("</BlastOutput>"));
+        assert!(output.contains("<BlastOutput_iterations>"));
+        assert!(output.contains("</BlastOutput_iterations>"));
+        assert!(output.contains("<Hit>"));
+        assert!(output.contains("</Hit>"));
+        assert!(output.contains("<Hit_hsps>"));
+        assert!(output.contains("</Hit_hsps>"));
+        assert!(output.contains("<Hsp>"));
+        assert!(output.contains("</Hsp>"));
+        // Count that opening and closing tags match
+        let hit_opens = output.matches("<Hit>").count();
+        let hit_closes = output.matches("</Hit>").count();
+        assert_eq!(hit_opens, hit_closes, "Hit open/close tags must match");
+        assert_eq!(hit_opens, 2, "should have 2 hits");
+    }
+
+    #[test]
+    fn test_xml_contains_hit_data() {
+        let mut buf = Vec::new();
+        write_xml_header(&mut buf, "blastn", "0.1.0", "testdb").unwrap();
+        write_xml_hit(&mut buf, 1, "gi|12345|ref|NM_001.1|", "Homo sapiens gene", 2500,
+            &[(1, 100, 500, 599, 3.5e-40, 156.3, 95, 100, 2)]).unwrap();
+        write_xml_footer(&mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        // Hit metadata
+        assert!(output.contains("<Hit_num>1</Hit_num>"));
+        assert!(output.contains("<Hit_id>gi|12345|ref|NM_001.1|</Hit_id>"));
+        assert!(output.contains("<Hit_def>Homo sapiens gene</Hit_def>"));
+        assert!(output.contains("<Hit_len>2500</Hit_len>"));
+        // HSP data fields
+        assert!(output.contains("<Hsp_num>1</Hsp_num>"));
+        assert!(output.contains("<Hsp_query-from>1</Hsp_query-from>"));
+        assert!(output.contains("<Hsp_query-to>100</Hsp_query-to>"));
+        assert!(output.contains("<Hsp_hit-from>500</Hsp_hit-from>"));
+        assert!(output.contains("<Hsp_hit-to>599</Hsp_hit-to>"));
+        assert!(output.contains("<Hsp_identity>95</Hsp_identity>"));
+        assert!(output.contains("<Hsp_align-len>100</Hsp_align-len>"));
+        assert!(output.contains("<Hsp_gaps>2</Hsp_gaps>"));
+        // E-value and bit-score should be present
+        assert!(output.contains("<Hsp_evalue>"));
+        assert!(output.contains("<Hsp_bit-score>"));
+        // Program info
+        assert!(output.contains("<BlastOutput_program>blastn</BlastOutput_program>"));
+        assert!(output.contains("<BlastOutput_db>testdb</BlastOutput_db>"));
+    }
 }

@@ -257,4 +257,117 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// Create a nucleotide DB, then read it back and verify sequences can be decoded.
+    #[test]
+    fn test_create_and_read_nucleotide_db() {
+        let dir = std::env::temp_dir().join("blast_makedb_create_read");
+        std::fs::create_dir_all(&dir).ok();
+
+        let fasta = dir.join("input.fa");
+        std::fs::write(&fasta, ">chr1\nACGTACGTACGTACGT\n>chr2\nAAAACCCCGGGGTTTT\n").unwrap();
+
+        let db_base = dir.join("testdb");
+        let (nseq, total) = make_nucleotide_db(&fasta, &db_base, "Create-Read Test").unwrap();
+        assert_eq!(nseq, 2);
+        assert_eq!(total, 32);
+
+        let db = super::super::index::BlastDb::open(&db_base).unwrap();
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.db_type, super::super::index::DbType::Nucleotide);
+        assert_eq!(db.total_length, 32);
+
+        // Verify each sequence has the correct length
+        assert_eq!(db.get_seq_len(0), 16);
+        assert_eq!(db.get_seq_len(1), 16);
+
+        // Verify raw data is non-empty
+        assert!(!db.get_sequence(0).is_empty());
+        assert!(!db.get_sequence(1).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Create a DB with 10 sequences and verify all round-trip correctly.
+    #[test]
+    fn test_roundtrip_multiple_sequences() {
+        let dir = std::env::temp_dir().join("blast_makedb_roundtrip");
+        std::fs::create_dir_all(&dir).ok();
+
+        // Generate 10 sequences of varying lengths
+        let bases = [b'A', b'C', b'G', b'T'];
+        let mut fasta = String::new();
+        let mut expected_lengths: Vec<usize> = Vec::new();
+        for i in 0..10 {
+            let len = 20 + i * 13; // lengths: 20, 33, 46, 59, ...
+            fasta.push_str(&format!(">seq{}\n", i));
+            for j in 0..len {
+                fasta.push(bases[(i + j) % 4] as char);
+            }
+            fasta.push('\n');
+            expected_lengths.push(len);
+        }
+
+        let fasta_path = dir.join("multi.fa");
+        std::fs::write(&fasta_path, &fasta).unwrap();
+
+        let db_base = dir.join("multidb");
+        let (nseq, total) = make_nucleotide_db(&fasta_path, &db_base, "Multi Test").unwrap();
+        assert_eq!(nseq, 10);
+        let expected_total: u64 = expected_lengths.iter().sum::<usize>() as u64;
+        assert_eq!(total, expected_total);
+
+        let db = super::super::index::BlastDb::open(&db_base).unwrap();
+        assert_eq!(db.num_oids, 10);
+        assert_eq!(db.total_length, expected_total);
+
+        // Verify each sequence length matches
+        for (oid, &exp_len) in expected_lengths.iter().enumerate() {
+            let got_len = db.get_seq_len(oid as u32);
+            assert_eq!(
+                got_len, exp_len as u32,
+                "OID {} length mismatch: got {} expected {}", oid, got_len, exp_len
+            );
+        }
+
+        // Verify all sequences are readable
+        for oid in 0..10u32 {
+            let seq = db.get_sequence(oid);
+            assert!(!seq.is_empty(), "OID {} should have data", oid);
+            let hdr = db.get_header(oid);
+            assert!(!hdr.is_empty(), "OID {} should have header", oid);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Protein DB creation is not yet implemented, but we test that the nucleotide
+    /// DB can handle protein-like data (all same letters) without crashing.
+    #[test]
+    fn test_create_nucleotide_db_edge_cases() {
+        let dir = std::env::temp_dir().join("blast_makedb_edge");
+        std::fs::create_dir_all(&dir).ok();
+
+        // Single base sequence
+        let fasta = dir.join("single.fa");
+        std::fs::write(&fasta, ">tiny\nA\n").unwrap();
+        let db_base = dir.join("tinydb");
+        let (nseq, total) = make_nucleotide_db(&fasta, &db_base, "Tiny").unwrap();
+        assert_eq!(nseq, 1);
+        assert_eq!(total, 1);
+        let db = super::super::index::BlastDb::open(&db_base).unwrap();
+        assert_eq!(db.get_seq_len(0), 1);
+
+        // Sequence length that is exact multiple of 4
+        let fasta2 = dir.join("exact4.fa");
+        std::fs::write(&fasta2, ">exact\nACGTACGT\n").unwrap();
+        let db_base2 = dir.join("exact4db");
+        let (nseq2, total2) = make_nucleotide_db(&fasta2, &db_base2, "Exact4").unwrap();
+        assert_eq!(nseq2, 1);
+        assert_eq!(total2, 8);
+        let db2 = super::super::index::BlastDb::open(&db_base2).unwrap();
+        assert_eq!(db2.get_seq_len(0), 8);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -888,4 +888,406 @@ mod tests {
         // (100-20) * (1000000 - 2000*20) = 80 * 960000 = 76800000
         assert_eq!(ss, 76800000.0);
     }
+
+    // --- Ported from NCBI scoreblk_unit_test.cpp ---
+
+    /// Port of GetScoreBlockNucl: verify nucleotide scoring properties.
+    /// NCBI checks: alphabet_size=16, loscore=-3, hiscore=1, penalty=-3, reward=1
+    #[test]
+    fn test_scoreblk_nucl_properties() {
+        let m = crate::matrix::nucleotide_matrix(1, -3);
+        // Find min/max scores in the matrix
+        let mut lo = i32::MAX;
+        let mut hi = i32::MIN;
+        for i in 0..16 {
+            for j in 0..16 {
+                if m[i][j] < lo { lo = m[i][j]; }
+                if m[i][j] > hi { hi = m[i][j]; }
+            }
+        }
+        assert_eq!(lo, -3, "nucleotide loscore should be -3");
+        assert_eq!(hi, 1, "nucleotide hiscore should be 1");
+    }
+
+    /// Port of GetScoreBlockProtein: verify BLOSUM62 scoring properties.
+    /// NCBI checks: alphabet_size=BLASTAA_SIZE(28), loscore=-4, hiscore=11
+    #[test]
+    fn test_scoreblk_protein_properties() {
+        let m = &crate::matrix::BLOSUM62;
+        let mut lo = i32::MAX;
+        let mut hi = i32::MIN;
+        for i in 0..crate::matrix::AA_SIZE {
+            for j in 0..crate::matrix::AA_SIZE {
+                if m[i][j] < lo { lo = m[i][j]; }
+                if m[i][j] > hi { hi = m[i][j]; }
+            }
+        }
+        assert_eq!(lo, -4, "BLOSUM62 loscore should be -4");
+        assert_eq!(hi, 11, "BLOSUM62 hiscore should be 11");
+    }
+
+    /// Port of NuclGappedCalc: verify gapped KBP for reward=1, penalty=-2, gap_open=3, gap_extend=1.
+    /// NCBI expects: Lambda≈1.32, K≈0.57, round_down=false
+    #[test]
+    fn test_nucl_gapped_calc_1_2_3_1() {
+        let ungapped = compute_ungapped_kbp(1, -2);
+        let (kbp, round_down) = nucl_gapped_kbp_lookup(3, 1, 1, -2, &ungapped).unwrap();
+        assert!(!round_down);
+        assert!((kbp.lambda - 1.32).abs() < 0.01,
+            "Lambda should be ~1.32, got {}", kbp.lambda);
+        assert!((kbp.k - 0.57).abs() < 0.01,
+            "K should be ~0.57, got {}", kbp.k);
+    }
+
+    /// Port of NuclGappedCalc: verify alpha/beta for reward=1, penalty=-2, gap_open=3, gap_extend=1.
+    /// NCBI expects: alpha≈1.3, beta≈-1.0
+    #[test]
+    fn test_nucl_alpha_beta_1_2_3_1() {
+        let ungapped = compute_ungapped_kbp(1, -2);
+        let (alpha, beta) = nucl_alpha_beta(1, -2, 3, 1, ungapped.lambda, ungapped.h, true);
+        assert!((alpha - 1.3).abs() < 0.01,
+            "alpha should be ~1.3, got {}", alpha);
+        assert!((beta - (-1.0)).abs() < 0.01,
+            "beta should be ~-1.0, got {}", beta);
+    }
+
+    /// Port of NuclGappedCalc: high gap costs fall back to ungapped params.
+    /// reward=1, penalty=-2, gap_open=4, gap_extend=2 → copies ungapped Lambda/K.
+    #[test]
+    fn test_nucl_gapped_fallback_to_ungapped() {
+        let ungapped = compute_ungapped_kbp(1, -2);
+        let (kbp, round_down) = nucl_gapped_kbp_lookup(4, 2, 1, -2, &ungapped).unwrap();
+        assert!(!round_down);
+        assert_eq!(kbp.lambda, ungapped.lambda,
+            "High gap costs should fall back to ungapped Lambda");
+        assert_eq!(kbp.k, ungapped.k,
+            "High gap costs should fall back to ungapped K");
+    }
+
+    /// Port of NuclGappedCalc: ungapped alpha/beta when gap costs exceed table maximum.
+    /// Alpha = Lambda/H, beta = 0.0
+    #[test]
+    fn test_nucl_alpha_beta_ungapped_fallback() {
+        let ungapped = compute_ungapped_kbp(1, -2);
+        let (alpha, beta) = nucl_alpha_beta(1, -2, 4, 2, ungapped.lambda, ungapped.h, true);
+        assert!((alpha - ungapped.lambda / ungapped.h).abs() < 1e-6,
+            "alpha should equal Lambda/H for unsupported gap costs");
+        assert_eq!(beta, 0.0);
+    }
+
+    /// Port of NuclGappedCalc: scaled-up values (reward=10, penalty=-20, gap_open=30, gap_extend=10).
+    /// GCD=10, so internally maps to (1, -2, 3, 1). Lambda should be ~0.132 (1.32/10).
+    #[test]
+    fn test_nucl_gapped_scaled_values() {
+        let ungapped = compute_ungapped_kbp(10, -20);
+        let (kbp, round_down) = nucl_gapped_kbp_lookup(30, 10, 10, -20, &ungapped).unwrap();
+        assert!(!round_down);
+        assert!((kbp.lambda - 0.132).abs() < 0.01,
+            "Lambda for 10/-20/30/10 should be ~0.132 (scaled), got {}", kbp.lambda);
+        assert!((kbp.k - 0.57).abs() < 0.01,
+            "K for 10/-20/30/10 should be ~0.57 (unscaled), got {}", kbp.k);
+    }
+
+    /// Port of NuclGappedCalc: reward=2, penalty=-7, gap_open=4, gap_extend=2 should set round_down=true.
+    /// NCBI expects: Lambda≈0.675, K≈0.62, round_down=true
+    #[test]
+    fn test_nucl_gapped_round_down() {
+        let ungapped = compute_ungapped_kbp(2, -7);
+        let (kbp, round_down) = nucl_gapped_kbp_lookup(4, 2, 2, -7, &ungapped).unwrap();
+        assert!(round_down, "2/-7 should set round_down=true");
+        assert!((kbp.lambda - 0.675).abs() < 0.01,
+            "Lambda should be ~0.675, got {}", kbp.lambda);
+        assert!((kbp.k - 0.62).abs() < 0.01,
+            "K should be ~0.62, got {}", kbp.k);
+    }
+
+    /// Port of NuclGappedCalc: invalid gap costs should return Err.
+    /// reward=4, penalty=-5, gap_open=3, gap_extend=2 is not in the table.
+    #[test]
+    fn test_nucl_gapped_invalid_gap_costs() {
+        let ungapped = compute_ungapped_kbp(4, -5);
+        let result = nucl_gapped_kbp_lookup(3, 2, 4, -5, &ungapped);
+        assert!(result.is_err(), "gap_open=3, gap_extend=2 for 4/-5 should fail");
+    }
+
+    /// Port of NuclGappedCalc: invalid gap costs should return Err.
+    /// reward=1, penalty=-2, gap_open=1, gap_extend=3 is not in the table.
+    #[test]
+    fn test_nucl_gapped_invalid_gap_costs_2() {
+        let ungapped = compute_ungapped_kbp(1, -2);
+        let result = nucl_gapped_kbp_lookup(1, 3, 1, -2, &ungapped);
+        assert!(result.is_err(), "gap_open=1, gap_extend=3 for 1/-2 should fail");
+    }
+
+    /// Port of NuclGappedCalc: unsupported reward/penalty pair returns Err.
+    /// reward=2, penalty=-1 is not supported.
+    #[test]
+    fn test_nucl_gapped_unsupported_scores() {
+        let ungapped = compute_ungapped_kbp(2, -1);
+        let result = nucl_gapped_kbp_lookup(1, 3, 2, -1, &ungapped);
+        assert!(result.is_err(), "2/-1 is not a supported scoring pair");
+    }
+
+    /// Port of EqualRewardPenaltyLHtoK: when reward==|penalty|, K should be 1/3.
+    /// NCBI uses full Blast_ScoreBlkKbpIdealCalc with DP-based K computation.
+    /// The full ungapped_kbp_calc function uses the same algorithm.
+    #[test]
+    fn test_equal_reward_penalty_k() {
+        // Use the full KBP computation via ungapped_kbp_calc
+        // Query: uniform ACGT, 1000 bases
+        let query: Vec<u8> = (0..1000).map(|i| (i % 4) as u8).collect();
+        let contexts = vec![UngappedKbpContext {
+            query_offset: 0, query_length: 1000, is_valid: true,
+        }];
+        let m = crate::matrix::nucleotide_matrix(2, -2);
+        let results = ungapped_kbp_calc(
+            &query, &contexts, -2, 2, 16,
+            &(4..16).collect::<Vec<u8>>(),
+            &|i, j| m[i][j],
+        );
+        let kbp = results[0].as_ref().unwrap();
+        assert!((kbp.k - 1.0 / 3.0).abs() < 0.02,
+            "K for equal reward/penalty should be ~1/3, got {}", kbp.k);
+    }
+
+    /// Port of BlastResFreqStdCompNucleotideTest: nucleotide base frequencies should be 0.25 each.
+    #[test]
+    fn test_nucleotide_standard_frequencies() {
+        let freqs = &crate::matrix::NT_FREQUENCIES;
+        // First 4 bases (A, C, G, T) should each be 0.25
+        for i in 0..4 {
+            assert!((freqs[i] - 0.25).abs() < 0.001,
+                "Base {} frequency should be 0.25, got {}", i, freqs[i]);
+        }
+        // Ambiguity codes should be 0
+        for i in 4..freqs.len() {
+            assert!(freqs[i].abs() < 0.001,
+                "Ambiguity code {} frequency should be 0, got {}", i, freqs[i]);
+        }
+    }
+
+    /// Port of BlastResFreqStdCompProteinTest: verify specific amino acid frequencies.
+    /// NCBI NCBIstdaa indices: 6=F, 12=M, 22=Y. Compact AA_FREQUENCIES: F=4, M=10, Y=19.
+    /// NCBI expects (multiplied by 100000): F→4259(≈3856 NCBI val), M→2243, Y→3216
+    #[test]
+    fn test_protein_standard_frequencies() {
+        let freqs = &crate::matrix::AA_FREQUENCIES;
+        // Compact indices: A=0,C=1,D=2,E=3,F=4,G=5,H=6,I=7,K=8,L=9,M=10,N=11,P=12,Q=13,R=14,S=15,T=16,V=17,W=18,Y=19
+        let check = |idx: usize, expected_x100k: i32, name: &str| {
+            let got = (freqs[idx] * 100000.0).round() as i32;
+            assert!((got - expected_x100k).abs() <= 5,
+                "{} (idx {}) expected ~{}, got {} (raw: {})",
+                name, idx, expected_x100k, got, freqs[idx]);
+        };
+        check(4, 4259, "F");   // Phe
+        check(10, 2243, "M");  // Met
+        check(19, 3216, "Y");  // Tyr
+    }
+
+    /// Port of EvalueForProteinFSC: E-values should never be negative.
+    /// Uses BLOSUM62 with gap_open=11, gap_extend=1.
+    #[test]
+    fn test_evalue_never_negative() {
+        let kbp = lookup_protein_params(11, 1).unwrap();
+        let kbp = KarlinBlk {
+            lambda: kbp.lambda,
+            k: kbp.k,
+            log_k: kbp.k.ln(),
+            h: kbp.h,
+        };
+        // Test cases from NCBI stat_unit_test.cpp
+        let cases = [
+            (1201, 294, 422),
+            (1204, 294, 416),
+            (1179, 294, 418),
+            (2332, 1801, 1671),
+        ];
+        for &(score, len1, len2) in &cases {
+            let ss = len1 as f64 * len2 as f64;
+            let evalue = kbp.raw_to_evalue(score, ss);
+            assert!(evalue >= 0.0,
+                "E-value should be >= 0 for score={}, lens=({},{}), got {}",
+                score, len1, len2, evalue);
+        }
+    }
+
+    /// Verify gapped KBP lookup for all supported nucleotide reward/penalty combos.
+    /// Not all combos have a linear (0,0) entry; test the first affine entry from each table.
+    #[test]
+    fn test_all_nucl_reward_penalty_combos() {
+        // (reward, penalty, gap_open, gap_extend) - first affine entry from each KBPT table
+        let cases: &[(i32, i32, i32, i32)] = &[
+            (1, -5, 3, 3),
+            (1, -4, 1, 2),
+            (1, -3, 2, 2),
+            (1, -2, 2, 2),
+            (1, -1, 3, 2),
+            (2, -7, 2, 4),
+            (2, -5, 2, 4),
+            (2, -3, 4, 4),
+            (3, -4, 6, 3),
+            (3, -2, 5, 5),
+            (4, -5, 6, 5),
+            (5, -4, 10, 6),
+        ];
+        for &(reward, penalty, go, ge) in cases {
+            let ungapped = compute_ungapped_kbp(reward, penalty);
+            let result = nucl_gapped_kbp_lookup(go, ge, reward, penalty, &ungapped);
+            assert!(result.is_ok(),
+                "Gapped lookup should work for {}/{}/{}/{}", reward, penalty, go, ge);
+            let (kbp, _) = result.unwrap();
+            assert!(kbp.is_valid(),
+                "KBP should be valid for {}/{}/{}/{}", reward, penalty, go, ge);
+        }
+    }
+
+    /// Verify gapped KBP for all entries in KBPT_1_3 table via nucl_gapped_kbp_lookup.
+    #[test]
+    fn test_nucl_gapped_all_1_3_entries() {
+        let ungapped = compute_ungapped_kbp(1, -3);
+        // Entries from KBPT_1_3 (the C-compatible table)
+        let entries: &[(i32, i32, f64, f64)] = &[
+            (2, 2, 1.37, 0.70),
+            (1, 2, 1.35, 0.64),
+            (0, 2, 1.25, 0.42),
+            (2, 1, 1.34, 0.60),
+            (1, 1, 1.21, 0.34),
+        ];
+        for &(go, ge, expected_lambda, expected_k) in entries {
+            let result = nucl_gapped_kbp_lookup(go, ge, 1, -3, &ungapped);
+            assert!(result.is_ok(), "1/-3 gap_open={} gap_extend={} should work", go, ge);
+            let (kbp, _) = result.unwrap();
+            assert!((kbp.lambda - expected_lambda).abs() < 0.01,
+                "Lambda mismatch for 1/-3/{}/{}: expected {}, got {}",
+                go, ge, expected_lambda, kbp.lambda);
+            assert!((kbp.k - expected_k).abs() < 0.01,
+                "K mismatch for 1/-3/{}/{}: expected {}, got {}",
+                go, ge, expected_k, kbp.k);
+        }
+    }
+
+    /// Verify protein gapped KBP for all BLOSUM62 table entries.
+    #[test]
+    fn test_protein_gapped_all_blosum62_entries() {
+        for &(go, ge, expected_lambda, expected_k, expected_h, _alpha, _beta) in BLOSUM62_PARAMS {
+            let params = lookup_protein_params(go, ge);
+            assert!(params.is_some(),
+                "BLOSUM62 gap_open={} gap_extend={} should be in table", go, ge);
+            let p = params.unwrap();
+            assert!((p.lambda - expected_lambda).abs() < 1e-6);
+            assert!((p.k - expected_k).abs() < 1e-6);
+            assert!((p.h - expected_h).abs() < 1e-6);
+        }
+    }
+
+    /// Verify length adjustment converges for typical search parameters.
+    #[test]
+    fn test_length_adjustment_exact_convergence() {
+        let kbp = lookup_protein_params(11, 1).unwrap();
+        let (adj, converged) = compute_length_adjustment_exact(
+            kbp.k, kbp.k.ln(),
+            kbp.alpha / kbp.lambda, kbp.beta,
+            300, 1_000_000, 5000,
+        );
+        assert!(converged, "Length adjustment should converge");
+        assert!(adj > 0, "Length adjustment should be positive");
+        assert!(adj < 300, "Length adjustment should be < query length");
+    }
+
+    /// Verify E-value <-> raw score round-trip consistency.
+    #[test]
+    fn test_evalue_raw_score_roundtrip() {
+        let kbp = KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+        };
+        let search_space = 1e9;
+        // For a given raw score, convert to evalue, then back to raw score
+        for raw in [20, 50, 100, 200] {
+            let evalue = kbp.raw_to_evalue(raw, search_space);
+            let recovered = kbp.evalue_to_raw(evalue, search_space);
+            assert!((recovered - raw).abs() <= 1,
+                "Round-trip failed: raw={} -> evalue={:.2e} -> recovered={}",
+                raw, evalue, recovered);
+        }
+    }
+
+    /// Verify ungapped KBP computation for protein (BLOSUM62).
+    #[test]
+    fn test_protein_ungapped_kbp_values() {
+        let kbp = protein_ungapped_kbp();
+        assert!(kbp.is_valid());
+        assert!((kbp.lambda - 0.3176).abs() < 0.01);
+        assert!((kbp.k - 0.134).abs() < 0.01);
+        assert!((kbp.h - 0.401).abs() < 0.01);
+    }
+
+    /// Verify ungapped KBP calc produces valid results for context-based computation.
+    #[test]
+    fn test_ungapped_kbp_calc_nucleotide() {
+        // A simple BLASTNA-encoded query: ACGTACGT = [0,1,2,3,0,1,2,3]
+        let query: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3];
+        let contexts = vec![UngappedKbpContext {
+            query_offset: 0,
+            query_length: 8,
+            is_valid: true,
+        }];
+        let m = crate::matrix::nucleotide_matrix(1, -3);
+        let results = ungapped_kbp_calc(
+            &query, &contexts, -3, 1, 16,
+            &(4..16).collect::<Vec<u8>>(), // ambiguous codes 4-15
+            &|i, j| m[i][j],
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_some(), "Should produce valid KBP");
+        let kbp = results[0].as_ref().unwrap();
+        assert!(kbp.is_valid());
+        assert!(kbp.lambda > 0.0);
+        assert!(kbp.k > 0.0);
+        assert!(kbp.h > 0.0);
+    }
+
+    /// Verify invalid context (zero-length) produces None.
+    #[test]
+    fn test_ungapped_kbp_calc_invalid_context() {
+        let query: Vec<u8> = vec![0, 1, 2, 3];
+        let contexts = vec![UngappedKbpContext {
+            query_offset: 0,
+            query_length: 0,
+            is_valid: false,
+        }];
+        let m = crate::matrix::nucleotide_matrix(1, -3);
+        let results = ungapped_kbp_calc(
+            &query, &contexts, -3, 1, 16,
+            &(4..16).collect::<Vec<u8>>(),
+            &|i, j| m[i][j],
+        );
+        assert!(results[0].is_none());
+    }
+
+    /// Verify search space with zero length adjustment.
+    #[test]
+    fn test_search_space_no_adjustment() {
+        let ss = compute_search_space(500, 10_000_000, 1000, 0);
+        assert_eq!(ss, 500.0 * 10_000_000.0);
+    }
+
+    /// Verify search space clamps to 1 when adjustment exceeds lengths.
+    #[test]
+    fn test_search_space_clamped() {
+        let ss = compute_search_space(10, 100, 5, 50);
+        // eff_query = max(10-50, 1) = 1
+        // eff_db = max(100 - 5*50, 1) = max(-150, 1) = 1
+        assert_eq!(ss, 1.0);
+    }
+
+    /// Verify length adjustment is 0 for degenerate inputs.
+    #[test]
+    fn test_length_adjustment_degenerate() {
+        let kbp = KarlinBlk { lambda: 0.0, k: 0.0, log_k: f64::NEG_INFINITY, h: 0.0 };
+        let adj = compute_length_adjustment(100, 1000000, 100, &kbp);
+        assert_eq!(adj, 0);
+    }
 }

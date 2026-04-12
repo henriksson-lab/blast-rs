@@ -97,4 +97,55 @@ mod tests {
         assert_eq!(params.gap_extend, 2);
         assert_eq!(params.scale_factor, 1.0);
     }
+
+    /// Port of NCBI blastsetup_unit_test: derive parameters from blastn options.
+    #[test]
+    fn test_parameters_from_blastn_options() {
+        let scoring_opts = ScoringOptions::new_blastn();
+        let params = ScoringParameters::from_options(&scoring_opts, 1.0);
+
+        // Parameters should faithfully carry over scoring options
+        assert_eq!(params.reward, REWARD);
+        assert_eq!(params.penalty, PENALTY);
+        assert_eq!(params.gap_open, GAP_OPEN_NUCL);
+        assert_eq!(params.gap_extend, GAP_EXTN_NUCL);
+        assert_eq!(params.scale_factor, 1.0);
+
+        // The stored options should match
+        assert_eq!(params.options.reward, params.reward);
+        assert_eq!(params.options.penalty, params.penalty);
+        assert_eq!(params.options.gap_open, params.gap_open);
+        assert_eq!(params.options.gap_extend, params.gap_extend);
+
+        // Verify nucl score table for reward=1, penalty=-3
+        let table = InitialWordParameters::build_nucl_score_table(
+            scoring_opts.reward,
+            scoring_opts.penalty,
+        );
+        // XOR 0x00 = all 4 bases match -> 4 * reward = 4
+        assert_eq!(table[0x00], 4 * scoring_opts.reward);
+        // XOR 0xFF = all 4 bases mismatch -> 4 * penalty = -12
+        assert_eq!(table[0xFF], 4 * scoring_opts.penalty);
+        // XOR 0x01 = 3 match + 1 mismatch -> 3*1 + 1*(-3) = 0
+        assert_eq!(table[0x01], 3 * scoring_opts.reward + scoring_opts.penalty);
+    }
+
+    /// Port of NCBI blastsetup_unit_test: derive parameters from blastp options.
+    #[test]
+    fn test_parameters_from_blastp_options() {
+        let scoring_opts = ScoringOptions::new_blastp();
+        let params = ScoringParameters::from_options(&scoring_opts, 1.0);
+
+        assert_eq!(params.gap_open, GAP_OPEN_PROT);
+        assert_eq!(params.gap_extend, GAP_EXTN_PROT);
+        assert_eq!(params.options.matrix_name.as_deref(), Some("BLOSUM62"));
+        assert!(params.options.gapped_calculation);
+
+        // With a non-default scale factor
+        let scaled = ScoringParameters::from_options(&scoring_opts, 2.5);
+        assert_eq!(scaled.scale_factor, 2.5);
+        // Gap costs remain unscaled in the parameters struct
+        assert_eq!(scaled.gap_open, GAP_OPEN_PROT);
+        assert_eq!(scaled.gap_extend, GAP_EXTN_PROT);
+    }
 }

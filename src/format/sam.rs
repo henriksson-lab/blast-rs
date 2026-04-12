@@ -167,7 +167,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_sam_gapped_cigar() {
         let mut buf = Vec::new();
         // Query:   ACGT--ACGT
@@ -198,5 +197,61 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(!output.contains("my\tdb")); // tab should be sanitized
         assert!(output.contains("my db path")); // replaced with spaces
+    }
+
+    #[test]
+    fn test_sam_cigar_with_gaps() {
+        // Query:   ACGT--TTACGT
+        // Subject: ACGTGGTT--GT
+        // Expected CIGAR: 4M2D2M2I2M
+        let qaln = b"ACGT--TTACGT";
+        let saln = b"ACGTGGTT--GT";
+        let cigar = build_cigar(qaln, saln);
+        assert_eq!(cigar, "4M2D2M2I2M", "CIGAR should encode both insertions and deletions");
+
+        // Verify it also works through write_sam_record_gapped
+        let mut buf = Vec::new();
+        write_sam_record_gapped(
+            &mut buf, "q1", "s1", 1, 10, 1, 10, 50, 12, 8, false, qaln, saln,
+        ).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("4M2D2M2I2M"), "SAM record should contain correct CIGAR");
+    }
+
+    #[test]
+    fn test_sam_multiple_records() {
+        let mut buf = Vec::new();
+        write_sam_header(&mut buf, "testdb").unwrap();
+        // Write 3 records
+        write_sam_record(&mut buf, "query1", "chr1", 1, 50, 100, 149, 100, 50, 48, false).unwrap();
+        write_sam_record(&mut buf, "query1", "chr2", 1, 50, 200, 249, 90, 50, 45, false).unwrap();
+        write_sam_record(&mut buf, "query1", "chr3", 1, 50, 300, 349, 80, 50, 42, false).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // Count non-header lines (those not starting with @)
+        let records: Vec<&str> = output.lines()
+            .filter(|l| !l.starts_with('@'))
+            .collect();
+        assert_eq!(records.len(), 3, "should have 3 SAM alignment records");
+        // Verify each record references the correct subject
+        assert!(records[0].contains("chr1"));
+        assert!(records[1].contains("chr2"));
+        assert!(records[2].contains("chr3"));
+    }
+
+    #[test]
+    fn test_sam_unmapped() {
+        // When a query has no hits, no SAM alignment records should be produced.
+        // Only the header is written.
+        let mut buf = Vec::new();
+        write_sam_header(&mut buf, "testdb").unwrap();
+        // Do NOT write any records (no hits found)
+        let output = String::from_utf8(buf).unwrap();
+        let records: Vec<&str> = output.lines()
+            .filter(|l| !l.starts_with('@'))
+            .collect();
+        assert_eq!(records.len(), 0, "query with no hits should produce no alignment records");
+        // Header should still be present
+        assert!(output.contains("@HD"));
+        assert!(output.contains("@PG"));
     }
 }

@@ -959,4 +959,289 @@ mod tests {
         let obs = compute_effective_observations(&seqs, 0, 1, &std_prob);
         assert!(obs > 0.0, "Should have positive effective observations");
     }
+
+    // ---- Tests ported from pssmcreate_unit_test.cpp / pssmenginefreqratios_unit_test.cpp ----
+
+    #[test]
+    fn test_pssm_henikoff_weights_three_diverse_seqs() {
+        // Three sequences with completely different residues at each position.
+        // Henikoff weighting should assign more uniform weights (~1/3 each).
+        let seqs = vec![
+            vec![1u8, 4, 7, 10],   // A, D, G, K
+            vec![3u8, 5, 8, 11],   // C, E, H, L
+            vec![6u8, 9, 12, 13],  // F, I, M, N
+        ];
+        let mw = compute_sequence_weights_and_match_weights(&seqs, 4);
+
+        for pos in 0..4 {
+            let total: f64 = mw[pos].iter().sum();
+            assert!((total - 1.0).abs() < 0.01,
+                    "Match weights should sum to ~1 at pos {}, got {}", pos, total);
+
+            // Each of the 3 residues should get weight ~1/3
+            let nonzero: Vec<f64> = mw[pos].iter().copied().filter(|&v| v > 0.0).collect();
+            assert_eq!(nonzero.len(), 3, "Should have 3 non-zero weights at pos {}", pos);
+            for &w in &nonzero {
+                assert!((w - 1.0 / 3.0).abs() < 0.05,
+                        "Each weight should be ~0.333, got {} at pos {}", w, pos);
+            }
+        }
+    }
+
+    #[test]
+    fn test_pssm_henikoff_weights_two_identical_one_different() {
+        // Two identical seqs and one different. Henikoff weighting assigns
+        // each distinct residue type equal total weight (1/num_distinct each),
+        // then normalizes. So with 2 distinct types, each gets 0.5.
+        // The key insight: the *per-sequence* weight for the rare residue's
+        // sequence (0.5) is higher than each identical sequence's weight (0.25).
+        let seqs = vec![
+            vec![1u8, 4],  // A, D
+            vec![1u8, 4],  // A, D  (duplicate)
+            vec![3u8, 5],  // C, E  (different)
+        ];
+        let mw = compute_sequence_weights_and_match_weights(&seqs, 2);
+
+        // At each position, 2 distinct residues -> each residue type gets equal weight
+        // Position 0: A (2 seqs) and C (1 seq) each get normalized weight 0.5
+        let weight_a = mw[0][1];  // A = NCBIstdaa 1
+        let weight_c = mw[0][3];  // C = NCBIstdaa 3
+        assert!((weight_a - 0.5).abs() < 0.01,
+                "A weight should be ~0.5, got {}", weight_a);
+        assert!((weight_c - 0.5).abs() < 0.01,
+                "C weight should be ~0.5, got {}", weight_c);
+
+        // The per-sequence weights show the difference: the unique sequence
+        // contributes its full 0.5 alone, while the two identical sequences
+        // split their 0.5. Verify by checking a 4-sequence case where the
+        // imbalance is more visible in a different way.
+        let seqs2 = vec![
+            vec![1u8],  // A
+            vec![1u8],  // A
+            vec![1u8],  // A
+            vec![3u8],  // C (rare)
+        ];
+        let mw2 = compute_sequence_weights_and_match_weights(&seqs2, 1);
+        // 2 distinct, A=3, C=1. Henikoff: A seqs each get 1/(2*3), C gets 1/(2*1)
+        // Sum = 3/(2*3) + 1/2 = 0.5 + 0.5 = 1.0.  After normalization: A=0.5, C=0.5
+        // Equal residue-type weights, but per-seq the rare one is 3x heavier.
+        assert!((mw2[0][1] - 0.5).abs() < 0.01, "A total weight ~0.5");
+        assert!((mw2[0][3] - 0.5).abs() < 0.01, "C total weight ~0.5");
+    }
+
+    #[test]
+    fn test_pssm_frequency_computation() {
+        // Given known sequences, verify the match weight (frequency) matrix values.
+        // 4 seqs, length 2. Position 0: all Ala. Position 1: 2x Asp, 1x Glu, 1x Ala.
+        let seqs = vec![
+            vec![1u8, 4],  // A, D
+            vec![1u8, 4],  // A, D
+            vec![1u8, 5],  // A, E
+            vec![1u8, 1],  // A, A
+        ];
+        let mw = compute_sequence_weights_and_match_weights(&seqs, 2);
+
+        // Position 0: only A present, weight should be 1.0
+        assert!((mw[0][1] - 1.0).abs() < 0.01, "All-A column should have weight 1.0 on A");
+
+        // Position 1: 3 distinct residues (D=2, E=1, A=1)
+        // Henikoff: D seqs get 1/(3*2) each, E seq gets 1/(3*1), A seq gets 1/(3*1)
+        // sum = 2/(3*2) + 1/3 + 1/3 = 1/3 + 1/3 + 1/3 = 1.0
+        // After normalization: D = 1/3, E = 1/3, A = 1/3
+        let total_pos1: f64 = mw[1].iter().sum();
+        assert!((total_pos1 - 1.0).abs() < 0.01,
+                "Position 1 weights should sum to 1.0, got {}", total_pos1);
+        assert!(mw[1][4] > 0.0, "D should have nonzero weight");
+        assert!(mw[1][5] > 0.0, "E should have nonzero weight");
+        assert!(mw[1][1] > 0.0, "A should have nonzero weight");
+    }
+
+    #[test]
+    fn test_pssm_pseudocount_blending() {
+        // Verify pseudocounts blend PSSM frequencies with BLOSUM62 background.
+        // A conserved column should have low pseudocount weight,
+        // a diverse column should have higher pseudocount weight.
+        let std_prob = std_prob_ncbistdaa();
+
+        // Highly conserved: all weight on Ala
+        let mut mw_conserved = [0.0f64; AA_SIZE];
+        mw_conserved[1] = 1.0;
+        let pseudo_conserved = compute_column_pseudocounts(&mw_conserved, &std_prob, 50.0);
+
+        // More diverse: weight spread across 5 residues
+        let mut mw_diverse = [0.0f64; AA_SIZE];
+        for &r in &[1u8, 4, 7, 10, 13] {
+            mw_diverse[r as usize] = 0.2;
+        }
+        let pseudo_diverse = compute_column_pseudocounts(&mw_diverse, &std_prob, 50.0);
+
+        // Diverse column should get more pseudocounts (lower information content
+        // leads to higher alpha and thus higher pseudocount weight)
+        assert!(pseudo_diverse > pseudo_conserved,
+                "Diverse column pseudo ({}) should exceed conserved ({})",
+                pseudo_diverse, pseudo_conserved);
+    }
+
+    #[test]
+    fn test_pssm_score_matrix_signs() {
+        // In the final PSSM score matrix after alignment update,
+        // self-match scores should generally be positive and mismatches negative.
+        let query = vec![1u8, 4, 7, 10, 13]; // A, D, G, K, N
+        let matrix = simple_matrix();
+        let mut pssm = Pssm::from_sequence(&query, &matrix);
+
+        // Create aligned sequences that strongly conserve the query residues
+        let aligned = vec![
+            vec![1u8, 4, 7, 10, 13],
+            vec![1u8, 4, 7, 10, 13],
+            vec![1u8, 4, 7, 10, 13],
+            vec![1u8, 4, 7, 10, 13],
+            vec![1u8, 4, 7, 10, 13],
+            vec![1u8, 5, 7, 10, 13], // slight variation at pos 1
+        ];
+
+        let bg = crate::matrix::AA_FREQUENCIES;
+        pssm.update_from_alignment(&aligned, &bg, 10.0);
+
+        // For each position, the query residue score should be positive
+        for (pos, &qr) in query.iter().enumerate() {
+            let self_score = pssm.score_at(pos, qr);
+            assert!(self_score > 0,
+                    "Self-match score at pos {} for residue {} should be positive, got {}",
+                    pos, qr, self_score);
+        }
+
+        // At least some mismatches should be negative
+        let mut negative_count = 0;
+        for pos in 0..query.len() {
+            for &r in STD_RESIDUES.iter() {
+                if r != query[pos] && pssm.score_at(pos, r) < 0 {
+                    negative_count += 1;
+                }
+            }
+        }
+        assert!(negative_count > 0, "Should have at least some negative mismatch scores");
+    }
+
+    #[test]
+    fn test_pssm_from_single_sequence() {
+        // Building a PSSM from a single sequence should approximate the scoring matrix.
+        // After update_from_alignment with just 1 sequence, pseudocounts dominate
+        // and the result should be driven by BLOSUM62 frequency ratios.
+        let query = vec![1u8, 7, 11, 17]; // A, G, L, S
+        let matrix = simple_matrix();
+        let mut pssm = Pssm::from_sequence(&query, &matrix);
+
+        let aligned = vec![
+            vec![1u8, 7, 11, 17], // single sequence = query itself
+        ];
+        let bg = crate::matrix::AA_FREQUENCIES;
+        pssm.update_from_alignment(&aligned, &bg, 10.0);
+
+        // With a single sequence, the PSSM should still assign positive scores
+        // to the query residues (BLOSUM62 self-scores are positive).
+        for (pos, &qr) in query.iter().enumerate() {
+            let score = pssm.score_at(pos, qr);
+            assert!(score > 0,
+                    "Single-seq PSSM should have positive self-score at pos {} (residue {}), got {}",
+                    pos, qr, score);
+        }
+
+        // The overall pattern should resemble BLOSUM62: self > mismatch on average
+        let mut self_total = 0i64;
+        let mut mismatch_total = 0i64;
+        let mut mismatch_count = 0i64;
+        for (pos, &qr) in query.iter().enumerate() {
+            self_total += pssm.score_at(pos, qr) as i64;
+            for &r in STD_RESIDUES.iter() {
+                if r != qr {
+                    mismatch_total += pssm.score_at(pos, r) as i64;
+                    mismatch_count += 1;
+                }
+            }
+        }
+        let avg_self = self_total as f64 / query.len() as f64;
+        let avg_mismatch = mismatch_total as f64 / mismatch_count as f64;
+        assert!(avg_self > avg_mismatch,
+                "Average self-score ({}) should exceed average mismatch ({})",
+                avg_self, avg_mismatch);
+    }
+
+    #[test]
+    fn test_pssm_effective_observations() {
+        // Test effective observations with known inputs.
+        let std_prob = std_prob_ncbistdaa();
+
+        // All identical residues: 1 distinct -> low effective observations
+        let seqs_identical: Vec<Vec<u8>> = (0..10).map(|_| vec![1u8]).collect();
+        let obs_identical = compute_effective_observations(&seqs_identical, 0, 1, &std_prob);
+
+        // All different residues: 10 distinct -> higher effective observations
+        let seqs_diverse: Vec<Vec<u8>> = (0..10).map(|i| {
+            vec![STD_RESIDUES[i % 20]]
+        }).collect();
+        let obs_diverse = compute_effective_observations(&seqs_diverse, 0, 1, &std_prob);
+
+        assert!(obs_diverse > obs_identical,
+                "Diverse column ({}) should have more effective observations than identical ({})",
+                obs_diverse, obs_identical);
+
+        // Identical seqs: 1 distinct residue among 10 seqs
+        // The formula caps at num_participating and subtracts 1, minimum 0.
+        // With 1 distinct residue, the expected value lookup finds j=1 quickly,
+        // so effective obs should be small.
+        assert!(obs_identical < 5.0,
+                "Identical seqs should have low effective observations, got {}", obs_identical);
+
+        // 10 diverse residues should yield substantially more
+        assert!(obs_diverse > 5.0,
+                "10 diverse residues should yield substantial observations, got {}", obs_diverse);
+    }
+
+    #[test]
+    fn test_pssm_purging_identical_sequences() {
+        // If all sequences are identical, the effective observations should be
+        // much lower than when sequences are diverse. This tests the conceptual
+        // equivalent of NCBI's sequence purging: identical sequences contribute
+        // less independent information.
+        let std_prob = std_prob_ncbistdaa();
+
+        // 20 identical sequences
+        let seqs_identical: Vec<Vec<u8>> = (0..20).map(|_| {
+            vec![1u8, 4, 7, 10] // A, D, G, K
+        }).collect();
+
+        // 20 sequences with variation at each position
+        let seqs_varied: Vec<Vec<u8>> = (0..20).map(|i| {
+            vec![
+                STD_RESIDUES[i % 20],
+                STD_RESIDUES[(i + 3) % 20],
+                STD_RESIDUES[(i + 7) % 20],
+                STD_RESIDUES[(i + 11) % 20],
+            ]
+        }).collect();
+
+        // Check effective observations at each position
+        for pos in 0..4 {
+            let obs_ident = compute_effective_observations(&seqs_identical, pos, 4, &std_prob);
+            let obs_varied = compute_effective_observations(&seqs_varied, pos, 4, &std_prob);
+
+            assert!(obs_varied > obs_ident,
+                    "At pos {}: varied obs ({}) should exceed identical obs ({})",
+                    pos, obs_varied, obs_ident);
+        }
+
+        // Also verify via match weights: identical sequences produce less diversity
+        let mw_ident = compute_sequence_weights_and_match_weights(&seqs_identical, 4);
+        let mw_varied = compute_sequence_weights_and_match_weights(&seqs_varied, 4);
+
+        // Identical seqs: each position has exactly 1 nonzero weight entry
+        for pos in 0..4 {
+            let nonzero_ident = mw_ident[pos].iter().filter(|&&v| v > 0.0).count();
+            let nonzero_varied = mw_varied[pos].iter().filter(|&&v| v > 0.0).count();
+            assert!(nonzero_varied > nonzero_ident,
+                    "Varied alignment should have more nonzero weights at pos {} ({} vs {})",
+                    pos, nonzero_varied, nonzero_ident);
+        }
+    }
 }

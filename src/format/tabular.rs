@@ -289,4 +289,101 @@ mod tests {
         assert_eq!(get_field(&hit, "staxid"), "N/A");
         assert_eq!(get_field(&hit, "staxids"), "N/A");
     }
+
+    #[test]
+    fn test_tabular_all_standard_fields() {
+        let hit = make_hit(None, None);
+        let hits = vec![hit];
+        let mut buf = Vec::new();
+        format_tabular(&mut buf, &hits).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = output.trim().split('\t').collect();
+        assert_eq!(fields.len(), 12, "standard tabular format must have 12 fields");
+        assert_eq!(fields[0], "q1");       // qseqid
+        assert_eq!(fields[1], "s1");       // sseqid
+        assert_eq!(fields[2], "95.000");   // pident
+        assert_eq!(fields[3], "50");       // length
+        assert_eq!(fields[4], "2");        // mismatch
+        assert_eq!(fields[5], "1");        // gapopen
+        assert_eq!(fields[6], "1");        // qstart
+        assert_eq!(fields[7], "50");       // qend
+        assert_eq!(fields[8], "10");       // sstart
+        assert_eq!(fields[9], "59");       // send
+        // evalue and bitscore are formatted strings
+        assert!(!fields[10].is_empty(), "evalue field must be present");
+        assert!(!fields[11].is_empty(), "bitscore field must be present");
+    }
+
+    #[test]
+    fn test_tabular_custom_columns() {
+        let hit = make_hit(Some("ACGTACGT"), Some("ACGT-CGT"));
+        let hits = vec![hit];
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "qseq sseq qframe sframe score staxid").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = output.trim().split('\t').collect();
+        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[0], "ACGTACGT"); // qseq
+        assert_eq!(fields[1], "ACGT-CGT"); // sseq
+        assert_eq!(fields[2], "1");        // qframe
+        assert_eq!(fields[3], "0");        // sframe
+        assert_eq!(fields[4], "120");      // score
+        assert_eq!(fields[5], "9606");     // staxid
+    }
+
+    #[test]
+    fn test_tabular_multiple_hits() {
+        let hit1 = make_hit(None, None);
+        let mut hit2 = make_hit(None, None);
+        hit2.query_id = "q2".to_string();
+        hit2.subject_id = "s2".to_string();
+        let mut hit3 = make_hit(None, None);
+        hit3.query_id = "q3".to_string();
+        hit3.subject_id = "s3".to_string();
+        let hits = vec![hit1, hit2, hit3];
+        let mut buf = Vec::new();
+        format_tabular(&mut buf, &hits).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = output.trim().split('\n').collect();
+        assert_eq!(lines.len(), 3, "3 hits should produce 3 lines");
+        assert!(lines[0].starts_with("q1\ts1\t"));
+        assert!(lines[1].starts_with("q2\ts2\t"));
+        assert!(lines[2].starts_with("q3\ts3\t"));
+    }
+
+    #[test]
+    fn test_tabular_evalue_formatting() {
+        // Very small evalue: scientific notation
+        assert_eq!(format_evalue(1e-20), "1.00e-20");
+        // Tiny evalue below threshold: "0.0"
+        assert_eq!(format_evalue(0.0), "0.0");
+        // Medium small: fixed with 3 decimals
+        assert_eq!(format_evalue(0.005), "0.005");
+        // Near 1: fixed with 2 decimals
+        assert_eq!(format_evalue(0.5), "0.50");
+        // Moderate: fixed with 1 decimal
+        assert_eq!(format_evalue(5.0), "5.0");
+        // Large: integer
+        assert_eq!(format_evalue(100.0), "100");
+        // Single-digit exponent should be zero-padded
+        assert_eq!(format_evalue(1e-5), "1.00e-05");
+    }
+
+    #[test]
+    fn test_tabular_identity_calculation() {
+        let mut hit = make_hit(None, None);
+        // 47 identities out of 50 alignment length = 94.0%
+        hit.num_ident = 47;
+        hit.align_len = 50;
+        hit.pct_identity = 100.0 * 47.0 / 50.0; // 94.0
+        assert_eq!(get_field(&hit, "pident"), "94.000");
+
+        // Perfect identity
+        hit.pct_identity = 100.0;
+        assert_eq!(get_field(&hit, "pident"), "100.000");
+
+        // Low identity
+        hit.pct_identity = 33.333;
+        assert_eq!(get_field(&hit, "pident"), "33.333");
+    }
 }

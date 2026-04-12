@@ -553,6 +553,112 @@ mod tests {
     }
 
     #[test]
+    fn test_protein_ungapped_extend_xdrop() {
+        // Use real BLOSUM62 matrix. Build sequences that match for a stretch
+        // then diverge so the X-dropoff terminates extension.
+        let matrix = crate::matrix::BLOSUM62;
+        // NCBIstdaa: A=1, R=2, N=3, D=4, C=5
+        // Query:   ARNDCARND (9 residues, all match subject for first 5, then differ)
+        let query   = vec![1u8, 2, 3, 4, 5, 1, 2, 3, 4];
+        // Subject: ARNDC + XXXXX (first 5 match, last 4 are very different: W=17)
+        let subject = vec![1u8, 2, 3, 4, 5, 17, 17, 17, 17];
+
+        let result = protein_ungapped_extend(&query, &subject, 2, 2, &matrix, 15);
+        assert!(result.is_some());
+        let (_qs, qe, _ss, _se, score) = result.unwrap();
+        // The best region should be the first 5 matching residues.
+        // The xdrop should prevent extending far into the mismatching tail.
+        assert!(score > 0);
+        // End of aligned region should not extend much past position 5.
+        assert!(qe <= 7, "X-dropoff should terminate extension, qe={}", qe);
+    }
+
+    #[test]
+    fn test_protein_ungapped_extend_short_sequence() {
+        let matrix = crate::matrix::BLOSUM62;
+        // Single residue sequences — should not crash.
+        let query   = vec![1u8]; // A
+        let subject = vec![1u8]; // A
+        let result = protein_ungapped_extend(&query, &subject, 0, 0, &matrix, 20);
+        assert!(result.is_some());
+        let (_qs, _qe, _ss, _se, score) = result.unwrap();
+        assert!(score > 0);
+
+        // Two residues, seed at 0.
+        let q2 = vec![1u8, 2]; // A, R
+        let s2 = vec![1u8, 2]; // A, R
+        let result2 = protein_ungapped_extend(&q2, &s2, 0, 0, &matrix, 20);
+        assert!(result2.is_some());
+
+        // Empty-like: query length 1, subject length 1, mismatching.
+        let q3 = vec![5u8]; // C
+        let s3 = vec![17u8]; // W
+        let result3 = protein_ungapped_extend(&q3, &s3, 0, 0, &matrix, 5);
+        // This should return None since the score is negative.
+        assert!(result3.is_none());
+    }
+
+    #[test]
+    fn test_protein_gapped_align_identical() {
+        let matrix = crate::matrix::BLOSUM62;
+        // Identical sequences should produce a perfect alignment with no gaps.
+        let seq = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10]; // A R N D C Q E G H I
+        let result = protein_gapped_align(&seq, &seq, 5, 5, &matrix, 11, 1, 100);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.score > 0);
+        assert_eq!(r.gap_opens, 0, "Identical sequences should have no gaps");
+        assert_eq!(r.mismatches, 0, "Identical sequences should have no mismatches");
+        // All residues should be identities.
+        assert!(r.num_ident > 0);
+    }
+
+    #[test]
+    fn test_protein_gapped_align_with_multiple_gaps() {
+        use crate::encoding::AMINOACID_TO_NCBISTDAA;
+        let matrix = crate::matrix::BLOSUM62;
+        // Query has two insertions relative to subject.
+        // Query:   ARNDCQ--EGHIKLM--NQRST
+        // Subject: ARNDCQWWEGHIKLMPPNQRST
+        // We encode so that alignment requires two gaps.
+        let q_raw = b"ARNDCQEGHIKLMNQRST";
+        let s_raw = b"ARNDCQWWEGHIKLMPPNQRST";
+        let query: Vec<u8> = q_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+        let subject: Vec<u8> = s_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+
+        let result = protein_gapped_align(&query, &subject, 3, 3, &matrix, 11, 1, 100);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.score > 0);
+        assert!(r.gap_opens >= 1,
+            "Alignment with inserted residues should have gaps, got gap_opens={}", r.gap_opens);
+    }
+
+    #[test]
+    fn test_protein_gapped_align_score_vs_ungapped() {
+        use crate::encoding::AMINOACID_TO_NCBISTDAA;
+        let matrix = crate::matrix::BLOSUM62;
+        // Two sequences that are mostly similar but have a gap.
+        // Gapped alignment should score >= ungapped for the same pair.
+        let q_raw = b"ARNDCQEGHIKLMNPQRSTVWY";
+        let s_raw = b"ARNDCQXXEGHIKLMNPQRSTVWY"; // two insertions after Q
+        let query: Vec<u8> = q_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+        let subject: Vec<u8> = s_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+
+        // Ungapped extension
+        let ug = protein_ungapped_extend(&query, &subject, 3, 3, &matrix, 100);
+        let ug_score = ug.map_or(0, |(_,_,_,_,s)| s);
+
+        // Gapped alignment
+        let gapped = protein_gapped_align(&query, &subject, 3, 3, &matrix, 11, 1, 100);
+        assert!(gapped.is_some());
+        let g_score = gapped.unwrap().score;
+
+        assert!(g_score >= ug_score,
+            "Gapped score ({}) should be >= ungapped score ({})", g_score, ug_score);
+    }
+
+    #[test]
     fn test_gapped_align_srta_vs_p0dpq5() {
         use crate::encoding::AMINOACID_TO_NCBISTDAA;
         let matrix = crate::matrix::BLOSUM62;

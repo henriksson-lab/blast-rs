@@ -126,4 +126,128 @@ mod tests {
         assert_eq!(plus, vec![0, 1, 2]);
         assert_eq!(minus, vec![1, 2, 3]); // CGT
     }
+
+    #[test]
+    fn test_blastna_to_iupac_standard_bases() {
+        assert_eq!(blastna_to_iupac(0), 'A');
+        assert_eq!(blastna_to_iupac(1), 'C');
+        assert_eq!(blastna_to_iupac(2), 'G');
+        assert_eq!(blastna_to_iupac(3), 'T');
+    }
+
+    #[test]
+    fn test_blastna_to_iupac_ambiguity() {
+        assert_eq!(blastna_to_iupac(4), 'R');
+        assert_eq!(blastna_to_iupac(5), 'Y');
+        assert_eq!(blastna_to_iupac(6), 'M');
+        assert_eq!(blastna_to_iupac(7), 'K');
+        assert_eq!(blastna_to_iupac(8), 'W');
+        assert_eq!(blastna_to_iupac(9), 'S');
+        assert_eq!(blastna_to_iupac(10), 'B');
+        assert_eq!(blastna_to_iupac(11), 'D');
+        assert_eq!(blastna_to_iupac(12), 'H');
+        assert_eq!(blastna_to_iupac(13), 'V');
+        assert_eq!(blastna_to_iupac(14), 'N');
+    }
+
+    #[test]
+    fn test_blastna_to_iupac_sentinel() {
+        assert_eq!(blastna_to_iupac(15), '-');
+        assert_eq!(blastna_to_iupac(16), '-'); // out of range
+        assert_eq!(blastna_to_iupac(255), '-');
+    }
+
+    #[test]
+    fn test_complement_blastna_ambiguity_codes() {
+        // R (purine A/G) <-> Y (pyrimidine C/T)
+        assert_eq!(complement_blastna(4), 5);
+        assert_eq!(complement_blastna(5), 4);
+        // M (amino A/C) <-> K (keto G/T)
+        assert_eq!(complement_blastna(6), 7);
+        assert_eq!(complement_blastna(7), 6);
+        // W (weak A/T) is self-complementary
+        assert_eq!(complement_blastna(8), 8);
+        // S (strong C/G) is self-complementary
+        assert_eq!(complement_blastna(9), 9);
+        // B (not A) <-> V (not T)
+        assert_eq!(complement_blastna(10), 13);
+        assert_eq!(complement_blastna(13), 10);
+        // D (not C) <-> H (not G)
+        assert_eq!(complement_blastna(11), 12);
+        assert_eq!(complement_blastna(12), 11);
+    }
+
+    #[test]
+    fn test_complement_out_of_range() {
+        assert_eq!(complement_blastna(16), 15);
+        assert_eq!(complement_blastna(255), 15);
+    }
+
+    #[test]
+    fn test_reverse_complement_single_base() {
+        assert_eq!(reverse_complement(&[0]), vec![3]); // A -> T
+        assert_eq!(reverse_complement(&[1]), vec![2]); // C -> G
+        assert_eq!(reverse_complement(&[2]), vec![1]); // G -> C
+        assert_eq!(reverse_complement(&[3]), vec![0]); // T -> A
+    }
+
+    #[test]
+    fn test_reverse_complement_empty() {
+        assert_eq!(reverse_complement(&[]), vec![]);
+    }
+
+    #[test]
+    fn test_double_reverse_complement_is_identity() {
+        let seq = encode_nucleotide(b"ATCGATCG");
+        let rc = reverse_complement(&seq);
+        let rcrc = reverse_complement(&rc);
+        assert_eq!(seq, rcrc);
+    }
+
+    #[test]
+    fn test_build_query_block_single_query() {
+        let (block, offsets) = build_query_block(&[b"ACG"]);
+        // Should have sentinel + ACG + sentinel + CGT + sentinel = 9 bytes
+        assert_eq!(block.len(), 9); // 1 + 3 + 1 + 3 + 1
+        assert_eq!(block[0], 15); // leading sentinel
+        assert_eq!(block[4], 15); // middle sentinel
+        assert_eq!(block[8], 15); // trailing sentinel
+        assert_eq!(offsets.len(), 2); // plus and minus contexts
+    }
+
+    #[test]
+    fn test_build_query_block_two_queries() {
+        let (block, offsets) = build_query_block(&[b"AC", b"GT"]);
+        assert_eq!(offsets.len(), 4); // 2 queries * 2 contexts
+        // Count sentinels: for 2 queries, each has leading+middle, plus final trailing = 5 sentinels
+        let sentinel_count = block.iter().filter(|&&b| b == 15).count();
+        assert_eq!(sentinel_count, 5);
+    }
+
+    #[test]
+    fn test_encode_nucleotide_all_ambiguity() {
+        // Test all IUPAC ambiguity codes
+        let seq = b"RYMSW";
+        let encoded = encode_nucleotide(seq);
+        assert_eq!(encoded, vec![4, 5, 6, 9, 8]);
+    }
+
+    #[test]
+    fn test_iupac_to_blastna_unknown() {
+        // Non-nucleotide characters should map to 15
+        assert_eq!(iupac_to_blastna(b'X'), 15);
+        assert_eq!(iupac_to_blastna(b'Z'), 15);
+        assert_eq!(iupac_to_blastna(b'0'), 15);
+        assert_eq!(iupac_to_blastna(b' '), 15);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip() {
+        // Encode standard bases then decode back, verify identity
+        for &base in &[b'A', b'C', b'G', b'T'] {
+            let encoded = iupac_to_blastna(base);
+            let decoded = blastna_to_iupac(encoded);
+            assert_eq!(decoded as u8, base);
+        }
+    }
 }

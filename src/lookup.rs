@@ -107,4 +107,89 @@ mod tests {
         assert_eq!(table.table_type(), LookupTableType::MegablastLookup);
         assert_eq!(table.word_length(), 28);
     }
+
+    #[test]
+    fn test_small_na_lookup_table_word_length() {
+        let table = SmallNaLookupTable {
+            word_length: 8,
+            backbone: vec![-1; 65536], // 4^8 = 65536 entries
+            overflow: vec![],
+            pv_array: vec![],
+            scan_step: 4,
+        };
+        assert_eq!(table.word_length, 8);
+        assert_eq!(table.backbone.len(), 65536, "8-mer backbone should have 4^8=65536 entries");
+        assert_eq!(table.scan_step, 4);
+    }
+
+    #[test]
+    fn test_small_na_lookup_backbone_size() {
+        // For word_size=7: 4^7 = 16384 backbone entries
+        let table = SmallNaLookupTable {
+            word_length: 7,
+            backbone: vec![-1; 16384],
+            overflow: vec![],
+            pv_array: vec![],
+            scan_step: 4,
+        };
+        assert_eq!(table.backbone.len(), 16384);
+    }
+
+    #[test]
+    fn test_megablast_lookup_table_properties() {
+        let table = MbLookupTable {
+            word_length: 28,
+            lut_word_length: 12,
+            hashtable: vec![0; 4_194_304], // 4^12 = 4194304
+            next_pos: vec![],
+            pv_array: vec![],
+            longest_chain: 0,
+            scan_step: 1,
+        };
+        assert_eq!(table.word_length, 28);
+        assert_eq!(table.lut_word_length, 12);
+        assert_eq!(table.hashtable.len(), 4_194_304, "Megablast hash size should be 4^12");
+    }
+
+    #[test]
+    fn test_aa_lookup_table_properties() {
+        let table = AaLookupTable {
+            word_length: 3,
+            threshold: 11.0,
+            backbone: vec![vec![]; 28 * 28 * 28], // 28^3 for NCBIstdaa
+            pv_array: vec![],
+        };
+        assert_eq!(table.word_length, 3);
+        assert_eq!(table.threshold, 11.0);
+        assert_eq!(table.backbone.len(), 21952, "3-mer AA backbone should have 28^3=21952 entries");
+    }
+
+    #[test]
+    fn test_lookup_table_wrap_variants() {
+        let small = LookupTableWrap::SmallNa(SmallNaLookupTable {
+            word_length: 11, backbone: vec![], overflow: vec![], pv_array: vec![], scan_step: 4,
+        });
+        assert_eq!(small.table_type(), LookupTableType::SmallNaLookup);
+        assert_eq!(small.word_length(), 11);
+
+        let aa = LookupTableWrap::Aa(AaLookupTable {
+            word_length: 3, threshold: 11.0, backbone: vec![], pv_array: vec![],
+        });
+        assert_eq!(aa.table_type(), LookupTableType::AaLookup);
+        assert_eq!(aa.word_length(), 3);
+    }
+
+    #[test]
+    fn test_pv_array_bit_operations() {
+        // Simulate PV array: set bit for index 100, check it
+        let mut pv = vec![0u32; 8]; // 256 bits
+        let idx = 100usize;
+        let word = idx / 32;
+        let bit = idx % 32;
+        pv[word] |= 1 << bit;
+        assert_ne!(pv[word] & (1 << bit), 0, "PV bit should be set");
+        assert_eq!(pv[3] & (1 << 4), 1 << 4, "Bit 100 = word 3, bit 4");
+        // Unset bit should be 0
+        assert_eq!(pv[0] & (1 << 0), 0, "Bit 0 should not be set");
+    }
 }

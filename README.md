@@ -15,7 +15,7 @@ The code can also be compiled to be used for webassembly.
 
 - **Pure Rust** -- zero C/C++ FFI calls, no unsafe dependencies
 - **Byte-identical output** to NCBI BLAST+ for blastn searches
-- **Faster than C** -- 1.1-10x speedup on real genomes (see benchmarks)
+- **Faster than C** -- 1.1-5.8x speedup on real genomes (see benchmarks)
 - **All major programs**: blastn, blastp, blastx, tblastn, tblastx, psiblast
 - **High-level library API**: `blastp()`, `blastn_search()`, `blastx()`, `tblastn()`, `tblastx()` with builder-pattern `SearchParams`
 - **Database creation**: `BlastDbBuilder` for creating protein and nucleotide databases programmatically
@@ -28,7 +28,7 @@ The code can also be compiled to be used for webassembly.
 - **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
-- **188 tests**: 144 unit tests + 43 integration tests + doc tests
+- **393 tests**: 336 unit tests + 55 integration tests + doc tests
 
 ## Installation
 
@@ -255,25 +255,26 @@ Single crate `blast-rs` with modules:
 ## Benchmarks
 
 500bp query, word_size=11, single-threaded, DUST off, BLAST database mode (`-db`).
-Average of 10 runs.
+Average of 10 runs. Wall-clock time including process startup and database loading.
 
 ### blastn (single-threaded)
 
-| Database | Size | NCBI BLAST+ 2.12.0 | blast-rs 0.8.0 | Speedup |
+| Database | Size | NCBI BLAST+ 2.12.0 | blast-rs 0.9.0 | Speedup |
 |----------|------|--------------------:|---------------:|--------:|
-| S. pombe | 2.5 MB | 57 ms | **7 ms** | **8x** |
-| seqn test DB | 1.2 MB | 57 ms | **8 ms** | **7x** |
+| C. elegans | 100 MB | 653 ms | **444 ms** | **1.5x** |
+| S. cerevisiae | 12 MB | 83 ms | **54 ms** | **1.5x** |
+| S. pombe | 2.5 MB | 74 ms | **67 ms** | **1.1x** |
+| seqn test DB | 0.9 MB | 57 ms | **35 ms** | **1.6x** |
 
-### blastp (single-threaded, prokka sprot DB, 24K entries)
+### blastp (single-threaded, seqp test DB, 2K entries)
 
-| Queries | NCBI BLAST+ 2.12.0 | blast-rs 0.8.0 |
-|---------|--------------------:|---------------:|
-| 5 queries (50-96 aa) | ~12s (extrapolated) | **2.0s** |
+| Query | NCBI BLAST+ 2.12.0 | blast-rs 0.9.0 | Speedup |
+|-------|--------------------:|---------------:|--------:|
+| 1 query (25 aa) | 58 ms | **10 ms** | **5.8x** |
 
-The speedup comes from eliminating C++ startup overhead and using efficient
-Rust implementations of the same BLAST algorithms (packed byte scanning, PV array,
-diagonal tracking, X-dropoff DP). Multi-threaded search parallelizes across database
-sequences using rayon.
+The speedup comes from efficient Rust implementations of the same BLAST
+algorithms (packed byte scanning, PV array, diagonal tracking, X-dropoff DP).
+Multi-threaded search parallelizes across database sequences using rayon.
 
 ## Algorithms
 
@@ -330,6 +331,11 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
 - **blast_formatter** -- standalone tool for reformatting archived BLAST results
 
 ## Changelog
+
+### 0.9.0
+
+- **204 new tests** (189 → 393): ported from NCBI BLAST+ unit test suite covering scoring/statistics, lookup tables, scanning, extension, HSP processing, traceback, gapped alignment, PSSM/PSI-BLAST, options, DUST filtering, database I/O, output formatting, encoding, and end-to-end integration
+- Updated benchmarks with larger databases (C. elegans 100 MB, S. cerevisiae 12 MB) and wall-clock timing
 
 ### 0.8.0
 

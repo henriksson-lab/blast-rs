@@ -29,15 +29,18 @@ pub struct ProteinHit {
 
 /// Protein word lookup table.
 ///
-/// `backbone[hash]` holds the list of query offsets whose neighborhood
-/// contains the word that hashes to `hash`.  `pv` is a presence-vector
-/// bit array for fast rejection: if the bit for a hash is clear, the
-/// backbone entry is guaranteed empty.
+/// Uses a CSR (compressed sparse row) layout for cache-friendly access:
+/// `data[offsets[hash]..offsets[hash+1]]` holds query offsets whose
+/// neighborhood contains the word that hashes to `hash`.
+/// `pv` is a presence-vector bit array for fast rejection.
 #[allow(dead_code)]
 pub struct ProteinLookupTable {
     word_size: usize,
     alphabet_size: usize,
-    backbone: Vec<Vec<i32>>,
+    /// Flattened backbone in CSR format for cache-friendly access.
+    /// `offsets[hash]..offsets[hash+1]` indexes into `data`.
+    offsets: Vec<u32>,
+    data: Vec<i32>,
     pv: Vec<u64>,
 }
 
@@ -109,16 +112,28 @@ impl ProteinLookupTable {
         // Build presence vector.
         let pv_len = (table_size + 63) / 64;
         let mut pv = vec![0u64; pv_len];
-        for (idx, offsets) in backbone.iter().enumerate() {
-            if !offsets.is_empty() {
+        for (idx, entries) in backbone.iter().enumerate() {
+            if !entries.is_empty() {
                 pv[idx >> 6] |= 1u64 << (idx & 63);
             }
         }
 
+        // Flatten backbone Vec<Vec<i32>> into CSR format for cache-friendly access.
+        // offsets[hash]..offsets[hash+1] indexes into flat data array.
+        let mut offsets = Vec::with_capacity(table_size + 1);
+        let total_entries: usize = backbone.iter().map(|v| v.len()).sum();
+        let mut data = Vec::with_capacity(total_entries);
+        for entries in &backbone {
+            offsets.push(data.len() as u32);
+            data.extend_from_slice(entries);
+        }
+        offsets.push(data.len() as u32);
+
         ProteinLookupTable {
             word_size,
             alphabet_size,
-            backbone,
+            offsets,
+            data,
             pv,
         }
     }
@@ -209,15 +224,30 @@ pub fn protein_scan_with_table(
     table: &ProteinLookupTable,
     x_dropoff: i32,
 ) -> Vec<ProteinHit> {
+    let mut diag_buf = Vec::new();
+    protein_scan_with_table_reuse(query, subject, matrix, table, x_dropoff, &mut diag_buf)
+}
+
+/// Like `protein_scan_with_table` but reuses a diagonal tracking buffer
+/// across calls to avoid repeated allocations in tight loops.
+pub fn protein_scan_with_table_reuse(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    diag_buf: &mut Vec<i32>,
+) -> Vec<ProteinHit> {
     let word_size = table.word_size;
     if query.len() < word_size || subject.len() < word_size {
         return Vec::new();
     }
 
     // Diagonal tracking to avoid redundant extensions.
-    // diagonal = s_pos - q_pos (shifted by query.len() to keep non-negative)
     let diag_count = query.len() + subject.len();
-    let mut last_diag_hit: Vec<i32> = vec![-1; diag_count];
+    diag_buf.clear();
+    diag_buf.resize(diag_count, -1);
+    let last_diag_hit = diag_buf;
 
     let mut hits: Vec<ProteinHit> = Vec::new();
 
@@ -233,8 +263,10 @@ pub fn protein_scan_with_table(
             continue;
         }
 
-        // Check backbone entries.
-        for &q_off in &table.backbone[hash] {
+        // Check backbone entries (CSR lookup — contiguous memory).
+        let start = table.offsets[hash] as usize;
+        let end = table.offsets[hash + 1] as usize;
+        for &q_off in &table.data[start..end] {
             let q_pos = q_off as usize;
 
             // Diagonal tracking: skip if we already extended on this diagonal
@@ -401,8 +433,10 @@ mod tests {
         let query = vec![1u8, 2, 3];
         let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
         let hash = word_hash(&[1, 2, 3], AA_SIZE);
+        let start = table.offsets[hash] as usize;
+        let end = table.offsets[hash + 1] as usize;
         assert!(
-            table.backbone[hash].contains(&0),
+            table.data[start..end].contains(&0),
             "Exact match word should have query offset 0"
         );
         // PV bit should be set.
@@ -438,5 +472,113 @@ mod tests {
         let subject = vec![1u8, 2, 3];
         let hits = protein_scan(&query, &subject, &m, 3, 11.0, 20);
         assert!(hits.is_empty(), "Sequences shorter than word_size yield no hits");
+    }
+
+    #[test]
+    fn test_lookup_table_pv_array_exact_match() {
+        let m = simple_matrix();
+        // Query: [1, 2, 3, 4, 5], word_size=3, threshold=12 (exact match only)
+        let query = vec![1u8, 2, 3, 4, 5];
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        // Should have entries for words [1,2,3], [2,3,4], [3,4,5]
+        let hashes = [
+            word_hash(&[1, 2, 3], AA_SIZE),
+            word_hash(&[2, 3, 4], AA_SIZE),
+            word_hash(&[3, 4, 5], AA_SIZE),
+        ];
+        for (i, &hash) in hashes.iter().enumerate() {
+            let start = table.offsets[hash] as usize;
+            let end = table.offsets[hash + 1] as usize;
+            assert!(end > start, "Word at position {} should have entries", i);
+            assert!(table.data[start..end].contains(&(i as i32)),
+                "Word at position {} should map to query offset {}", i, i);
+            // PV bit should be set
+            assert_ne!(table.pv[hash >> 6] & (1u64 << (hash & 63)), 0,
+                "PV bit should be set for word at position {}", i);
+        }
+    }
+
+    #[test]
+    fn test_lookup_table_no_neighbors_high_threshold() {
+        let m = simple_matrix();
+        // threshold=13 > max possible score (4*3=12), so NO words should match
+        let query = vec![1u8, 2, 3, 4, 5];
+        let table = ProteinLookupTable::build(&query, 3, &m, 13.0);
+        let total_entries: usize = (0..table.offsets.len() - 1)
+            .map(|i| (table.offsets[i + 1] - table.offsets[i]) as usize)
+            .sum();
+        assert_eq!(total_entries, 0, "No words should meet threshold > max score");
+    }
+
+    #[test]
+    fn test_lookup_table_neighbors_low_threshold() {
+        let m = simple_matrix();
+        // threshold=7 allows words with 2 matches + 1 mismatch (4+4-1=7)
+        let query = vec![1u8, 2, 3];
+        let table = ProteinLookupTable::build(&query, 3, &m, 7.0);
+        let total_entries: usize = (0..table.offsets.len() - 1)
+            .map(|i| (table.offsets[i + 1] - table.offsets[i]) as usize)
+            .sum();
+        assert!(total_entries > 1,
+            "Low threshold should produce neighboring words (got {})", total_entries);
+    }
+
+    #[test]
+    fn test_protein_scan_with_table_reuse() {
+        let m = crate::matrix::BLOSUM62;
+        let query = vec![1u8, 5, 8, 12, 17, 1, 5, 8]; // AGIMV AGI in NCBIstdaa
+        let table = ProteinLookupTable::build(&query, 3, &m, 11.0);
+        // Scan two different subjects with same table
+        let subject1 = query.clone();
+        let subject2 = vec![2u8, 3, 4, 5, 6, 7]; // completely different
+        let hits1 = protein_scan_with_table(&query, &subject1, &m, &table, 40);
+        let hits2 = protein_scan_with_table(&query, &subject2, &m, &table, 40);
+        assert!(!hits1.is_empty(), "Should find hits for identical sequences");
+        // hits2 may or may not be empty depending on BLOSUM62 neighborhood
+    }
+
+    #[test]
+    fn test_word_hash_deterministic() {
+        // Same input should always produce same hash
+        let h1 = word_hash(&[5, 10, 15], AA_SIZE);
+        let h2 = word_hash(&[5, 10, 15], AA_SIZE);
+        assert_eq!(h1, h2);
+        // Different input should (generally) produce different hash
+        let h3 = word_hash(&[5, 10, 16], AA_SIZE);
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_word_hash_range() {
+        // All hashes should be in [0, AA_SIZE^word_size)
+        let max_hash = AA_SIZE * AA_SIZE * AA_SIZE;
+        for a in 0..AA_SIZE {
+            for b in 0..AA_SIZE {
+                for c in 0..AA_SIZE {
+                    let h = word_hash(&[a as u8, b as u8, c as u8], AA_SIZE);
+                    assert!(h < max_hash, "Hash {} out of range for [{},{},{}]", h, a, b, c);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_protein_gapped_scan_with_table_finds_alignment() {
+        let m = crate::matrix::BLOSUM62;
+        // Two related protein sequences
+        let query = vec![1u8, 5, 8, 12, 17, 1, 5, 8, 12, 17]; // repeat of AGIMV
+        let subject = query.clone();
+        let table = ProteinLookupTable::build(&query, 3, &m, 11.0);
+        let hits = protein_gapped_scan_with_table(
+            &query, &subject, &m, &table,
+            40,     // ungap_x_dropoff
+            11, 1,  // gap_open, gap_extend
+            260,    // gap_x_dropoff
+            40,     // ungap_cutoff
+        );
+        assert!(!hits.is_empty(), "Gapped scan should find alignment for identical sequences");
+        let best = &hits[0];
+        assert!(best.score > 0);
+        assert_eq!(best.query_start, 0);
     }
 }

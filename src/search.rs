@@ -877,4 +877,318 @@ mod tests {
         );
         assert!(results.is_empty(), "Should find no hits");
     }
+
+    // --- Helper: pack a BLASTNA-encoded sequence into NCBI2na packed format ---
+    fn pack_ncbi2na(bases: &[u8]) -> Vec<u8> {
+        let full_bytes = bases.len() / 4;
+        let remainder = bases.len() % 4;
+        let total = full_bytes + if remainder > 0 { 1 } else { 0 };
+        let mut packed = vec![0u8; total];
+        for (i, &b) in bases.iter().enumerate() {
+            let byte_idx = i / 4;
+            let shift = 6 - 2 * (i % 4);
+            packed[byte_idx] |= (b & 3) << shift;
+        }
+        packed
+    }
+
+    // ---- Tests ported from NCBI ntscan_unit_test, nuclwordfinder_unit_test, blastdiag_unit_test ----
+
+    #[test]
+    fn test_word_hash_all_bases() {
+        // Single-base hashes: A=0, C=1, G=2, T=3
+        assert_eq!(word_hash_n(&[0], 1), 0, "A should hash to 0");
+        assert_eq!(word_hash_n(&[1], 1), 1, "C should hash to 1");
+        assert_eq!(word_hash_n(&[2], 1), 2, "G should hash to 2");
+        assert_eq!(word_hash_n(&[3], 1), 3, "T should hash to 3");
+    }
+
+    #[test]
+    fn test_word_hash_8mer() {
+        // ACGTACGT = [0,1,2,3,0,1,2,3]
+        // Hash built as: h = (h<<2) | base for each base
+        // = 0b_00_01_10_11_00_01_10_11 = 0x1B1B = 6939
+        let word: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3];
+        let h = word_hash_n(&word, 8);
+        assert_eq!(h, 0b00_01_10_11_00_01_10_11);
+        assert_eq!(h, 0x1B1B);
+        assert_eq!(h, 6939);
+    }
+
+    #[test]
+    fn test_scan_finds_all_positions() {
+        // Create an 11-mer pattern and place it at subject positions 0, 20, 40
+        let pattern: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2]; // 11 bases
+        let query = pattern.clone();
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+
+        // Subject of all T's (3) with pattern inserted at 0, 20, 40
+        let mut subject = vec![3u8; 60];
+        for &offset in &[0usize, 20, 40] {
+            for (i, &b) in pattern.iter().enumerate() {
+                subject[offset + i] = b;
+            }
+        }
+
+        let kbp = test_kbp();
+        let results = blastn_ungapped_search(
+            &query, &rc, &subject, 11, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        // Should find hits at all 3 positions
+        let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
+        assert!(plus_hits.len() >= 3, "Should find hits at all 3 positions, got {}", plus_hits.len());
+        let starts: Vec<i32> = plus_hits.iter().map(|h| h.subject_start).collect();
+        for &pos in &[0i32, 20, 40] {
+            assert!(starts.contains(&pos), "Should find hit at position {}, got starts {:?}", pos, starts);
+        }
+    }
+
+    #[test]
+    fn test_scan_no_hits_random() {
+        // Query of all A's (0), subject of all C's (1). No word match possible.
+        let query = vec![0u8; 20];
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect(); // all T's
+        let subject = vec![1u8; 50]; // all C's
+
+        let kbp = test_kbp();
+        let results = blastn_ungapped_search(
+            &query, &rc, &subject, 11, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+        assert!(results.is_empty(), "All-A query vs all-C subject should produce no hits");
+    }
+
+    #[test]
+    fn test_diagonal_tracking() {
+        // Place the same 11-mer at subject positions 5 and 6 (overlapping).
+        // The diagonal tracker should prevent redundant extensions but we should
+        // still get a hit that covers the overlapping region.
+        let pattern: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2]; // 11 bases
+        let query = pattern.clone();
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+
+        // Subject: T's with pattern at positions 5 and 6 (overlap => positions 5..17 merge)
+        let mut subject = vec![3u8; 30];
+        for (i, &b) in pattern.iter().enumerate() {
+            subject[5 + i] = b;
+        }
+        for (i, &b) in pattern.iter().enumerate() {
+            subject[6 + i] = b;
+        }
+
+        let kbp = test_kbp();
+        let results = blastn_ungapped_search(
+            &query, &rc, &subject, 11, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
+        assert!(!plus_hits.is_empty(), "Should find at least one hit covering the overlapping region");
+        // The overlapping patterns at 5 and 6 create a merged region 5..17.
+        // The diagonal tracker may deduplicate, so we should get exactly one plus-strand hit.
+        assert_eq!(plus_hits.len(), 1,
+            "Diagonal tracker should merge overlapping seeds into one hit, got {}", plus_hits.len());
+        // The hit should cover the overlapping region (starts at 5 or 6)
+        assert!(plus_hits[0].subject_start <= 6, "Hit should start at or near position 5");
+    }
+
+    #[test]
+    fn test_different_word_sizes() {
+        // Same query/subject with word_size=7 vs word_size=11.
+        // Smaller word size should find at least as many hits.
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]; // 12 bases
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+
+        // Subject with partial match (only first 9 bases match at pos 5)
+        let mut subject = vec![3u8; 40];
+        for i in 0..9 {
+            subject[5 + i] = query[i];
+        }
+        // Also a full match at position 25
+        for (i, &b) in query.iter().enumerate() {
+            subject[25 + i] = b;
+        }
+
+        let kbp = test_kbp();
+        let results_7 = blastn_ungapped_search(
+            &query, &rc, &subject, 7, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+        let results_11 = blastn_ungapped_search(
+            &query, &rc, &subject, 11, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        let plus_7: Vec<&SearchHsp> = results_7.iter().filter(|h| h.context == 0).collect();
+        let plus_11: Vec<&SearchHsp> = results_11.iter().filter(|h| h.context == 0).collect();
+        assert!(
+            plus_7.len() >= plus_11.len(),
+            "word_size=7 should find >= as many plus-strand hits as word_size=11 ({} vs {})",
+            plus_7.len(), plus_11.len()
+        );
+    }
+
+    #[test]
+    fn test_gapped_search_with_insertion() {
+        // Longer query for robust seed finding
+        // Query: ACGTACGTACGTACGTACGTACGT (24 bases, 6 repeats of ACGT)
+        let query: Vec<u8> = (0..24).map(|i| [0u8, 1, 2, 3][i % 4]).collect();
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+        // Subject: same as query but with 1-base insertion after position 12
+        // ACGTACGTACGT A ACGTACGTACGT  (insert A in the middle)
+        let mut sub_seq: Vec<u8> = Vec::new();
+        sub_seq.extend_from_slice(&query[..12]);
+        sub_seq.push(0); // insertion
+        sub_seq.extend_from_slice(&query[12..]);
+        let mut subject = vec![3u8; 50];
+        for (i, &b) in sub_seq.iter().enumerate() {
+            subject[5 + i] = b;
+        }
+
+        let kbp = test_kbp();
+        let results = blastn_gapped_search(
+            &query, &rc, &subject, 7, 2, -3, 5, 2, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        assert!(!results.is_empty(), "Gapped search should find hit with 1-base insertion");
+        let best = &results[0];
+        // With a 24-base query and 1 insertion, we expect high identity
+        assert!(best.num_ident >= 20,
+            "Should have high identity (got {} ident out of {} align_len)",
+            best.num_ident, best.align_length);
+    }
+
+    #[test]
+    fn test_gapped_search_with_deletion() {
+        // Longer query for robust seed finding
+        // Query: ACGTACGTACGTACGTACGTACGT (24 bases)
+        let query: Vec<u8> = (0..24).map(|i| [0u8, 1, 2, 3][i % 4]).collect();
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+        // Subject: same as query but with 1-base deletion at position 12
+        let mut sub_seq: Vec<u8> = Vec::new();
+        sub_seq.extend_from_slice(&query[..12]);
+        // skip query[12], creating a deletion
+        sub_seq.extend_from_slice(&query[13..]);
+        let mut subject = vec![3u8; 50];
+        for (i, &b) in sub_seq.iter().enumerate() {
+            subject[5 + i] = b;
+        }
+
+        let kbp = test_kbp();
+        let results = blastn_gapped_search(
+            &query, &rc, &subject, 7, 2, -3, 5, 2, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        assert!(!results.is_empty(), "Gapped search should handle 1-base deletion");
+        let best = &results[0];
+        // With a 24-base query and 1 deletion, we expect high identity
+        assert!(best.num_ident >= 19,
+            "Should have high identity (got {} ident out of {} align_len)",
+            best.num_ident, best.align_length);
+    }
+
+    #[test]
+    fn test_packed_search_basic() {
+        // Verify packed search produces same results as unpacked search for the same input.
+        let query: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+        let mut subject = vec![3u8; 30];
+        for (i, &b) in query.iter().enumerate() {
+            subject[5 + i] = b;
+        }
+
+        let kbp = test_kbp();
+        let subject_packed = pack_ncbi2na(&subject);
+
+        let unpacked_results = blastn_ungapped_search(
+            &query, &rc, &subject, 7, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+        let packed_results = blastn_ungapped_search_packed(
+            &query, &rc, &subject_packed, subject.len(), 7, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        assert!(!unpacked_results.is_empty(), "Unpacked search should find hits");
+        assert!(!packed_results.is_empty(), "Packed search should find hits");
+
+        // Both should find the same best hit
+        let u = &unpacked_results[0];
+        let p = &packed_results[0];
+        assert_eq!(u.subject_start, p.subject_start,
+            "Packed and unpacked should agree on subject_start");
+        assert_eq!(u.subject_end, p.subject_end,
+            "Packed and unpacked should agree on subject_end");
+        assert_eq!(u.score, p.score,
+            "Packed and unpacked should agree on score");
+    }
+
+    #[test]
+    fn test_search_near_sequence_boundary() {
+        // Place matching region at the very start (position 0) and very end of subject.
+        let pattern: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2]; // 11 bases
+        let query = pattern.clone();
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+
+        // Subject: pattern at start, filler, pattern at end
+        let filler_len = 20;
+        let total_len = pattern.len() + filler_len + pattern.len();
+        let mut subject = vec![3u8; total_len];
+        // Place at position 0
+        for (i, &b) in pattern.iter().enumerate() {
+            subject[i] = b;
+        }
+        // Place at the very end
+        let end_start = total_len - pattern.len();
+        for (i, &b) in pattern.iter().enumerate() {
+            subject[end_start + i] = b;
+        }
+
+        let kbp = test_kbp();
+        let results = blastn_ungapped_search(
+            &query, &rc, &subject, 11, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
+        assert!(plus_hits.len() >= 2, "Should find hits at both boundaries, got {}", plus_hits.len());
+        let starts: Vec<i32> = plus_hits.iter().map(|h| h.subject_start).collect();
+        assert!(starts.contains(&0), "Should find hit at position 0");
+        assert!(starts.contains(&(end_start as i32)), "Should find hit at end position {}", end_start);
+    }
+
+    #[test]
+    fn test_large_subject_search() {
+        // 10,000-base subject with a known query embedded at a specific position.
+        let subject_len = 10_000;
+        let embed_pos = 4567;
+        let query: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2]; // 15 bases
+        let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
+
+        // Fill subject with a pseudo-random-ish pattern that avoids matching the query
+        // Use alternating C,G (1,2) which won't match ACGTACGT...
+        let mut subject: Vec<u8> = (0..subject_len).map(|i| if i % 2 == 0 { 1u8 } else { 2u8 }).collect();
+        // Embed the query
+        for (i, &b) in query.iter().enumerate() {
+            subject[embed_pos + i] = b;
+        }
+
+        let kbp = test_kbp();
+        let results = blastn_ungapped_search(
+            &query, &rc, &subject, 11, 2, -3, 20,
+            &kbp, 1e6, 1e10,
+        );
+
+        assert!(!results.is_empty(), "Should find the embedded query in large subject");
+        let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
+        assert!(!plus_hits.is_empty(), "Should find plus-strand hit");
+        assert_eq!(plus_hits[0].subject_start, embed_pos as i32,
+            "Hit should be at the embedded position {}", embed_pos);
+        assert_eq!(plus_hits[0].num_ident, query.len() as i32,
+            "Should be a perfect match of {} bases", query.len());
+    }
 }

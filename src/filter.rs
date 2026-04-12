@@ -178,4 +178,111 @@ mod tests {
         assert_eq!(mask.regions[0].end, 8);
         assert_eq!(mask.regions[1].start, 10);
     }
+
+    /// Low-complexity poly-A sequence should be flagged by DUST.
+    #[test]
+    fn test_dust_low_complexity_sequence() {
+        // 64-base poly-A — maximally repetitive
+        let seq: Vec<u8> = vec![0u8; 64]; // all A (encoded as 0)
+        let mask = dust_filter(&seq, 64, 0.5);
+        assert!(
+            !mask.regions.is_empty(),
+            "Poly-A sequence should produce at least one masked region"
+        );
+    }
+
+    /// A sequence with high complexity (all distinct triplets) should not be masked.
+    #[test]
+    fn test_dust_normal_sequence() {
+        // Construct a sequence with maximal triplet diversity:
+        // cycle through 0,1,2,3 in a non-repeating pattern
+        let seq: Vec<u8> = (0..64).map(|i| ((i * 7 + 3) % 4) as u8).collect();
+        let mask = dust_filter(&seq, 64, 10.0);
+        assert!(
+            mask.regions.is_empty(),
+            "High-complexity sequence should produce no masked regions with a generous threshold"
+        );
+    }
+
+    /// Empty and very short sequences must not crash.
+    #[test]
+    fn test_dust_empty_sequence() {
+        let empty: Vec<u8> = vec![];
+        let mask = dust_filter(&empty, 64, 2.0);
+        assert!(mask.regions.is_empty());
+
+        let short = vec![0u8; 3];
+        let mask = dust_filter(&short, 64, 2.0);
+        assert!(mask.regions.is_empty());
+
+        let single = vec![1u8];
+        let mask = dust_filter(&single, 64, 2.0);
+        assert!(mask.regions.is_empty());
+    }
+
+    /// Verify specific masked positions for a known input.
+    #[test]
+    fn test_dust_mask_positions() {
+        // Use a small window so we can precisely control which regions get masked.
+        // Build: 30 bases of poly-A, then 30 bases of high-complexity sequence.
+        let window = 10;
+        let threshold = 2.0;
+        let mut seq = Vec::new();
+        for _ in 0..30 {
+            seq.push(0u8); // A — maximally repetitive
+        }
+        // High-complexity tail: pseudo-random, non-repeating triplet pattern
+        // Using (i*7+3)%4 over a 10-base window yields diverse triplets
+        for i in 0..30 {
+            seq.push(((i * 7 + 3) % 4) as u8);
+        }
+
+        let mask = dust_filter(&seq, window, threshold);
+        // The poly-A region should be masked
+        assert!(
+            mask.is_masked(0),
+            "Position 0 (inside poly-A) should be masked"
+        );
+        assert!(
+            mask.is_masked(15),
+            "Position 15 (middle of poly-A) should be masked"
+        );
+        // Positions well into the high-complexity tail should NOT be masked.
+        // The last window that can touch any poly-A is at start=(30-window)=20,
+        // covering [20..30). Beyond that, windows are fully in the tail.
+        // So position 50+ is guaranteed to be in a fully high-complexity window region.
+        assert!(
+            !mask.is_masked(55),
+            "Position 55 (fully inside high-complexity region) should not be masked"
+        );
+    }
+
+    /// Different window/threshold parameters should change the filtering outcome.
+    #[test]
+    fn test_dust_with_different_parameters() {
+        // Dinucleotide repeat: ACACAC...
+        let seq: Vec<u8> = (0..100).map(|i| if i % 2 == 0 { 0 } else { 1 }).collect();
+
+        // Very high threshold => nothing masked
+        let mask_high = dust_filter(&seq, 20, 1000.0);
+        assert!(
+            mask_high.regions.is_empty(),
+            "Very high threshold should mask nothing"
+        );
+
+        // Very low threshold => regions masked
+        let mask_low = dust_filter(&seq, 20, 0.1);
+        assert!(
+            !mask_low.regions.is_empty(),
+            "Very low threshold should mask the dinucleotide repeat"
+        );
+
+        // Larger window
+        let mask_big_win = dust_filter(&seq, 50, 0.5);
+        // Smaller window
+        let mask_small_win = dust_filter(&seq, 10, 0.5);
+        // Both should find low-complexity regions (just different sizes)
+        assert!(!mask_big_win.regions.is_empty());
+        assert!(!mask_small_win.regions.is_empty());
+    }
 }

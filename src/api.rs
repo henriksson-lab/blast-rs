@@ -472,24 +472,31 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         &query_aa, word_size, &matrix, threshold,
     );
 
-    let mut results = Vec::new();
-    for oid in 0..db.num_oids {
+    // Configure threading
+    let num_threads = if params.num_threads == 0 { rayon::current_num_threads() } else { params.num_threads };
+
+    let max_hsps = params.max_hsps;
+    let evalue_threshold = params.evalue_threshold;
+    let x_drop_ungapped = params.x_drop_ungapped;
+    let gap_open = params.gap_open;
+    let gap_extend = params.gap_extend;
+    let x_drop_gapped = params.x_drop_gapped;
+
+    // Process a single subject OID — extracted so it can be called
+    // either sequentially or in parallel without per-call pool overhead.
+    let search_oid = |oid: u32| -> Option<SearchResult> {
         let subj_raw = db.get_sequence(oid);
-        let subj_aa: Vec<u8> = subj_raw.iter()
-            .filter(|&&b| b != 0)
-            .copied()
-            .collect();
-        if subj_aa.is_empty() { continue; }
+        let subj_len = db.get_seq_len(oid) as usize;
+        if subj_len < word_size { return None; }
 
-        // Phase 1: ungapped seeds via lookup table
+        let subj_aa: Vec<u8> = subj_raw.iter().filter(|&&b| b != 0).copied().collect();
+        if subj_aa.is_empty() { return None; }
+
         let ungapped_hits = crate::protein_lookup::protein_scan_with_table(
-            &query_aa, &subj_aa, &matrix, &lookup_table, params.x_drop_ungapped,
+            &query_aa, &subj_aa, &matrix, &lookup_table, x_drop_ungapped,
         );
+        if ungapped_hits.is_empty() { return None; }
 
-        if ungapped_hits.is_empty() { continue; }
-
-        // Phase 2: gapped extension on the best ungapped seed per subject.
-        // Only extend seeds above cutoff whose ungapped evalue is promising.
         let ungap_cutoff = 22;
         let best_seed = ungapped_hits.iter()
             .filter(|uh| uh.score >= ungap_cutoff)
@@ -497,15 +504,13 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
         let mut phits = Vec::new();
         if let Some(uh) = best_seed.filter(|uh| {
-            // Skip expensive gapped alignment for clearly insignificant seeds.
-            // Gapped alignment can improve score ~2-3x, so use a generous cutoff.
             prot_kbp.raw_to_evalue(uh.score, search_space) < 10.0
         }) {
             let seed_q = (uh.query_start + uh.query_end) / 2;
             let seed_s = (uh.subject_start + uh.subject_end) / 2;
             if let Some(gr) = crate::protein::protein_gapped_align(
                 &query_aa, &subj_aa, seed_q, seed_s,
-                &matrix, params.gap_open, params.gap_extend, params.x_drop_gapped,
+                &matrix, gap_open, gap_extend, x_drop_gapped,
             ) {
                 let q_slice = &query_aa[gr.query_start..gr.query_end];
                 let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
@@ -513,35 +518,29 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                     q_slice, s_slice, crate::protein::ncbistdaa_to_char,
                 );
                 phits.push(crate::protein_lookup::ProteinHit {
-                    query_start: gr.query_start,
-                    query_end: gr.query_end,
-                    subject_start: gr.subject_start,
-                    subject_end: gr.subject_end,
-                    score: gr.score,
-                    num_ident: gr.num_ident,
-                    align_length: gr.align_length,
-                    mismatches: gr.mismatches,
-                    gap_opens: gr.gap_opens,
-                    qseq: Some(qs),
-                    sseq: Some(ss),
+                    query_start: gr.query_start, query_end: gr.query_end,
+                    subject_start: gr.subject_start, subject_end: gr.subject_end,
+                    score: gr.score, num_ident: gr.num_ident,
+                    align_length: gr.align_length, mismatches: gr.mismatches,
+                    gap_opens: gr.gap_opens, qseq: Some(qs), sseq: Some(ss),
                 });
             }
         }
-        // Fall back to ungapped hits if no gapped hit produced
-        if phits.is_empty() {
-            phits = ungapped_hits;
-        }
+        if phits.is_empty() { phits = ungapped_hits; }
+        if phits.is_empty() { return None; }
 
-        if phits.is_empty() { continue; }
+        let best_ev = phits.iter()
+            .map(|ph| prot_kbp.raw_to_evalue(ph.score, search_space))
+            .fold(f64::MAX, f64::min);
+        if best_ev > evalue_threshold { return None; }
 
         let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
         let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+        let sl = subj_aa.len();
 
         let hsps: Vec<Hsp> = phits.iter().filter_map(|ph| {
             let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-            if evalue > params.evalue_threshold { return None; }
-
-            // Use gapped alignment strings if available, else ungapped
+            if evalue > evalue_threshold { return None; }
             let (q_aln, s_aln) = if let (Some(ref qs), Some(ref ss)) = (&ph.qseq, &ph.sseq) {
                 (qs.as_bytes().to_vec(), ss.as_bytes().to_vec())
             } else {
@@ -551,55 +550,46 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 }).collect();
                 let s_aln: Vec<u8> = (0..ph.align_length as usize).map(|i| {
                     let idx = ph.subject_start + i;
-                    if idx < subj_aa.len() { ncbistdaa_to_ascii(subj_aa[idx]) } else { b'-' }
+                    if idx < sl { ncbistdaa_to_ascii(subj_aa[idx]) } else { b'-' }
                 }).collect();
                 (q_aln, s_aln)
             };
             let midline: Vec<u8> = q_aln.iter().zip(s_aln.iter()).map(|(&q, &s)| {
                 if q == s { q } else if q != b'-' && s != b'-' { b'+' } else { b' ' }
             }).collect();
-
             Some(Hsp {
-                score: ph.score,
-                bit_score: prot_kbp.raw_to_bit(ph.score),
-                evalue,
-                query_start: ph.query_start,
-                query_end: ph.query_end,
-                subject_start: ph.subject_start,
-                subject_end: ph.subject_end,
-                num_identities: ph.num_ident as usize,
-                num_gaps: ph.gap_opens as usize,
+                score: ph.score, bit_score: prot_kbp.raw_to_bit(ph.score), evalue,
+                query_start: ph.query_start, query_end: ph.query_end,
+                subject_start: ph.subject_start, subject_end: ph.subject_end,
+                num_identities: ph.num_ident as usize, num_gaps: ph.gap_opens as usize,
                 alignment_length: ph.align_length as usize,
-                query_aln: q_aln,
-                midline,
-                subject_aln: s_aln,
-                query_frame: 0,
-                subject_frame: 0,
+                query_aln: q_aln, midline, subject_aln: s_aln,
+                query_frame: 0, subject_frame: 0,
             })
         }).collect();
 
-        if let Some(max) = params.max_hsps {
-            let r = SearchResult {
-                subject_oid: oid,
-                subject_title: title,
-                subject_accession: accession,
-                subject_len: subj_aa.len(),
-                hsps: hsps.into_iter().take(max).collect(),
-                taxids: vec![],
-            };
-            if !r.hsps.is_empty() { results.push(r); }
-        } else {
-            let r = SearchResult {
-                subject_oid: oid,
-                subject_title: title,
-                subject_accession: accession,
-                subject_len: subj_aa.len(),
-                hsps,
-                taxids: vec![],
-            };
-            if !r.hsps.is_empty() { results.push(r); }
-        }
-    }
+        if hsps.is_empty() { return None; }
+        let hsps = if let Some(max) = max_hsps { hsps.into_iter().take(max).collect() } else { hsps };
+        Some(SearchResult {
+            subject_oid: oid, subject_title: title, subject_accession: accession,
+            subject_len: sl, hsps, taxids: vec![],
+        })
+    };
+
+    // Run sequentially or in parallel depending on num_threads.
+    // Avoids creating a thread pool when num_threads == 1 (saves ~0.5ms per call).
+    let mut results: Vec<SearchResult> = if num_threads <= 1 {
+        (0..db.num_oids).filter_map(|oid| search_oid(oid)).collect()
+    } else {
+        use rayon::prelude::*;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        pool.install(|| {
+            (0..db.num_oids).into_par_iter().filter_map(|oid| search_oid(oid)).collect()
+        })
+    };
 
     results.sort_by(|a, b| a.best_evalue().partial_cmp(&b.best_evalue()).unwrap_or(std::cmp::Ordering::Equal));
     if results.len() > params.max_target_seqs {

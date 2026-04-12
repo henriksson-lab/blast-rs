@@ -589,6 +589,95 @@ mod tests {
         assert!(hdr.windows(8).any(|w| w == b"Xenopus " || w == b"BP722512"),
             "Header should contain sequence info");
     }
+
+    // ---- Tests ported from NCBI seqdb_unit_test.cpp ----
+
+    fn pombe_db_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pombe/pombe")
+    }
+
+    fn seqp_db_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/seqp/seqp")
+    }
+
+    /// Open the pombe nucleotide database and verify basic metadata.
+    #[test]
+    fn test_open_nucleotide_db() {
+        let path = pombe_db_path();
+        if !path.with_extension("nin").exists() { return; }
+        let db = BlastDb::open(&path).unwrap();
+        assert_eq!(db.db_type, DbType::Nucleotide);
+        assert!(db.num_oids > 0, "pombe database should have sequences");
+        // pombe has small number of chromosomes
+        assert!(db.num_oids < 100, "pombe should have < 100 sequences");
+    }
+
+    /// Open the protein database and verify sequence count and type.
+    #[test]
+    fn test_open_protein_db_info() {
+        let path = seqp_db_path();
+        if !path.with_extension("pin").exists() { return; }
+        let db = BlastDb::open(&path).unwrap();
+        assert_eq!(db.db_type, DbType::Protein);
+        assert_eq!(db.num_oids, 2005);
+        assert!(db.total_length > 0);
+    }
+
+    /// For every OID, get_seq_len should return a positive value consistent
+    /// with the raw bytes returned by get_sequence.
+    #[test]
+    fn test_sequence_length_consistency() {
+        let path = seqp_db_path();
+        if !path.with_extension("pin").exists() { return; }
+        let db = BlastDb::open(&path).unwrap();
+        for oid in 0..db.num_oids {
+            let len = db.get_seq_len(oid);
+            assert!(len > 0, "OID {} should have positive length", oid);
+            let raw = db.get_sequence(oid);
+            // For protein, raw length == residue count
+            assert_eq!(
+                raw.len() as u32, len,
+                "OID {} raw bytes ({}) != reported length ({})", oid, raw.len(), len
+            );
+        }
+    }
+
+    /// Verify accessions can be retrieved for known OIDs.
+    #[test]
+    fn test_accession_retrieval() {
+        let db = BlastDb::open(&test_db_path()).unwrap();
+        // OID 0 should have a known accession
+        let acc = db.get_accession(0);
+        assert!(acc.is_some(), "OID 0 should have an accession");
+        let acc = acc.unwrap();
+        assert!(!acc.is_empty());
+        // Accession format: letters + optional underscore + digits
+        assert!(acc.chars().next().unwrap().is_ascii_uppercase());
+    }
+
+    /// Accessing OID >= num_oids should panic.
+    #[test]
+    #[should_panic]
+    fn test_oid_out_of_bounds() {
+        let db = BlastDb::open(&test_db_path()).unwrap();
+        let _ = db.get_sequence(db.num_oids);
+    }
+
+    /// Iterate all OIDs in a database and verify each sequence is readable.
+    #[test]
+    fn test_all_sequences_readable() {
+        let db = BlastDb::open(&test_db_path()).unwrap();
+        for oid in 0..db.num_oids {
+            let seq = db.get_sequence(oid);
+            assert!(!seq.is_empty(), "OID {} should have non-empty sequence data", oid);
+            let len = db.get_seq_len(oid);
+            assert!(len > 0, "OID {} should have positive length", oid);
+            let hdr = db.get_header(oid);
+            assert!(!hdr.is_empty(), "OID {} should have non-empty header", oid);
+        }
+    }
 }
 
     #[test]

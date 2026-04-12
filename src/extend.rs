@@ -166,4 +166,88 @@ mod tests {
         assert_eq!(data.score, 8); // 4 matches * reward=2
         assert_eq!(data.length, 4);
     }
+
+    /// Helper: pack a slice of bases (0..3) into NCBI2na packed bytes.
+    fn pack_ncbi2na(bases: &[u8]) -> Vec<u8> {
+        let mut packed = vec![0u8; (bases.len() + 3) / 4];
+        for (i, &b) in bases.iter().enumerate() {
+            packed[i / 4] |= (b & 3) << (6 - 2 * (i % 4));
+        }
+        packed
+    }
+
+    #[test]
+    fn test_ungapped_extend_with_xdrop() {
+        // Build a sequence that starts matching then diverges.
+        // Query:   A C G T  A A A A  (BLASTNA: 0,1,2,3,0,0,0,0)
+        // Subject: A C G T  C C C C  (NCBI2na: 0,1,2,3,1,1,1,1)
+        // First 4 positions match (+2 each = +8), then 4 mismatches (-3 each).
+        // With x_dropoff=5 the extension should stop before consuming all mismatches.
+        let query   = vec![0u8, 1, 2, 3, 0, 0, 0, 0];
+        let subject = pack_ncbi2na(&[0, 1, 2, 3, 1, 1, 1, 1]);
+
+        let result = na_ungapped_extend(&query, &subject, 0, 0, 2, -3, 5);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        // Best score should be from the first 4 matching positions.
+        assert_eq!(data.score, 8);
+        // The alignment length should be 4 (only the matching region).
+        assert_eq!(data.length, 4);
+    }
+
+    #[test]
+    fn test_ungapped_extend_at_boundary() {
+        // Seed at position 0 — left extension has nothing to extend into.
+        // Query and subject: ACGT (4 bases, all match)
+        let query   = vec![0u8, 1, 2, 3];
+        let subject = pack_ncbi2na(&[0, 1, 2, 3]);
+
+        let result = na_ungapped_extend(&query, &subject, 0, 0, 2, -3, 20);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.q_start, 0);
+        assert_eq!(data.s_start, 0);
+        assert_eq!(data.score, 8);
+        assert_eq!(data.length, 4);
+
+        // Seed at the last position — right extension has nothing beyond it.
+        let result2 = na_ungapped_extend(&query, &subject, 3, 3, 2, -3, 20);
+        assert!(result2.is_some());
+        let data2 = result2.unwrap();
+        assert_eq!(data2.score, 8);
+        assert_eq!(data2.length, 4);
+        assert_eq!(data2.q_start, 0);
+    }
+
+    #[test]
+    fn test_ungapped_extend_all_matches() {
+        // 16 bases, all A, perfect match — extension should cover full length.
+        let query   = vec![0u8; 16];
+        let subject = pack_ncbi2na(&vec![0u8; 16]);
+
+        let result = na_ungapped_extend_len(&query, &subject, 16, 8, 8, 2, -3, 100);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.score, 32); // 16 * 2
+        assert_eq!(data.length, 16);
+        assert_eq!(data.q_start, 0);
+        assert_eq!(data.s_start, 0);
+    }
+
+    #[test]
+    fn test_ungapped_extend_score_calculation() {
+        // Manually verify score for a known pattern.
+        // Query:   A C A C  G  (BLASTNA: 0,1,0,1,2)
+        // Subject: A C G C  G  (NCBI2na: 0,1,2,1,2)
+        // Position: 0:match(+2) 1:match(+2) 2:mismatch(-3) 3:match(+2) 4:match(+2)
+        // Total = 2+2-3+2+2 = 5
+        let query   = vec![0u8, 1, 0, 1, 2];
+        let subject = pack_ncbi2na(&[0, 1, 2, 1, 2]);
+
+        let result = na_ungapped_extend_len(&query, &subject, 5, 0, 0, 2, -3, 20);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.score, 5);
+        assert_eq!(data.length, 5);
+    }
 }

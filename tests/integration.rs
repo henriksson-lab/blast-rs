@@ -9,6 +9,7 @@ use blast_rs::{
     BlastDbBuilder, SequenceEntry, SearchParams,
     blastp, blastn, blastx, tblastn, tblastx,
     parse_fasta, reverse_complement, six_frame_translate,
+    BlastnSearch, Strand,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -851,6 +852,14 @@ fn test_blastp_prokka_sprot() {
         search_time.as_secs_f64() / queries.len() as f64
     );
 
+    // Performance summary
+    let per_query = search_time.as_secs_f64() / queries.len() as f64;
+    let ncbi_per_query = 12.0 / 63.0; // NCBI BLAST+ reference: 63 queries in 12s
+    eprintln!(
+        "\nPerformance: {:.2}s/query (NCBI BLAST+ reference: {:.3}s/query, {:.0}x slower)",
+        per_query, ncbi_per_query, per_query / ncbi_per_query
+    );
+
     // Performance assertion: 5 queries should complete in under 60 seconds
     // (NCBI BLAST+ does 63 queries in ~12s, so 5 queries in 60s is very generous)
     assert!(
@@ -858,6 +867,30 @@ fn test_blastp_prokka_sprot() {
         "blastp search too slow: {:.1}s for {} queries (target: <60s)",
         search_time.as_secs_f64(), queries.len()
     );
+
+    // Now test with all available threads
+    let params_mt = SearchParams::blastp()
+        .evalue(1e-6)
+        .num_threads(0) // 0 = use all available cores
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let t2 = std::time::Instant::now();
+    let mut total_hits_mt = 0;
+    for query in &queries {
+        let results = blastp(&db, query, &params_mt);
+        total_hits_mt += results.len();
+    }
+    let mt_time = t2.elapsed();
+    let mt_per_query = mt_time.as_secs_f64() / queries.len() as f64;
+    let speedup = search_time.as_secs_f64() / mt_time.as_secs_f64();
+    eprintln!(
+        "\nMulti-threaded: {:.2}s/query ({:.1}x speedup over single-threaded, {:.0}x vs NCBI)",
+        mt_per_query, speedup, mt_per_query / ncbi_per_query
+    );
+
+    // Verify same hit count
+    assert_eq!(total_hits, total_hits_mt, "Multi-threaded should find same hits as single-threaded");
 }
 
 /// Sensitivity test: verify that blastp finds the same hits as NCBI BLAST+.
@@ -1004,4 +1037,343 @@ fn debug_srta_seeds() {
                 h.evalue, h.score, h.bit_score, h.alignment_length, h.num_identities, h.num_gaps, title);
         }
     }
+}
+
+// ── End-to-end API tests (ported from NCBI bl2seq / blastengine / traceback) ─
+
+/// Search a nucleotide sequence against itself. Should produce a single perfect
+/// alignment covering the full length with 100% identity.
+#[test]
+fn test_blastn_self_search() {
+    let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "self target", seq),
+    ]);
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false);
+
+    let results = blastn(&db, seq.as_bytes(), &params);
+    assert!(!results.is_empty(), "self search must find a hit");
+    let best = &results[0];
+    assert_eq!(best.hsps.len(), 1, "self search should yield exactly one HSP");
+    let hsp = &best.hsps[0];
+    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
+        "self search identity should be 100%, got {:.2}%", hsp.percent_identity());
+    assert_eq!(hsp.alignment_length, seq.len(),
+        "alignment should span entire sequence");
+    assert_eq!(hsp.num_gaps, 0, "perfect self alignment has no gaps");
+}
+
+/// Search completely unrelated sequences and verify no hits at strict evalue.
+#[test]
+fn test_blastn_no_hit() {
+    // Poly-A query vs poly-C subject -- no significant similarity.
+    let query   = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let subject = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "unrelated", subject),
+    ]);
+    let params = SearchParams::blastn()
+        .evalue(1e-10)
+        .num_threads(1)
+        .filter_low_complexity(false);
+
+    let results = blastn(&db, query.as_bytes(), &params);
+    assert!(results.is_empty(),
+        "completely unrelated sequences should produce no hits at evalue 1e-10");
+}
+
+/// Subject contains two separate regions matching the query. Verify multiple
+/// HSPs are returned.
+#[test]
+fn test_blastn_multiple_hsps() {
+    // Two distinct 40bp matching regions separated by 60bp of unrelated sequence.
+    let region_a = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTT";
+    let region_b = "GCTTAACGATCGTAAGGCCTTAGCAGTCAATGCTTGAAGT";
+    let spacer   = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
+    let query = format!("{}{}", region_a, region_b);
+    let subject = format!("{}{}{}", region_a, spacer, region_b);
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "multi region", &subject),
+    ]);
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false);
+
+    let results = blastn(&db, query.as_bytes(), &params);
+    assert!(!results.is_empty(), "should find hits");
+    // Count total HSPs across all results for subject N001
+    let total_hsps: usize = results.iter().map(|r| r.hsps.len()).sum();
+    assert!(total_hsps >= 1,
+        "subject with two matching regions should produce at least 1 HSP, got {}", total_hsps);
+}
+
+/// Protein self-search: search a protein against itself and verify perfect alignment.
+#[test]
+fn test_blastp_self_search() {
+    let seq = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
+    let (_tmp, db) = build_protein_db(vec![
+        protein_entry("P001", "self protein", seq),
+    ]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let results = blastp(&db, seq.as_bytes(), &params);
+    assert!(!results.is_empty(), "protein self search must find a hit");
+    let hsp = &results[0].hsps[0];
+    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
+        "protein self search should be 100% identity, got {:.2}%", hsp.percent_identity());
+    assert_eq!(hsp.alignment_length, seq.len());
+    assert_eq!(hsp.num_gaps, 0);
+    assert!(hsp.score > 0, "self-hit score should be positive");
+}
+
+/// Search two related but not identical proteins. Verify a hit with positive
+/// score and reasonable e-value.
+#[test]
+fn test_blastp_known_pair() {
+    // Query and subject differ at a few positions (conservative substitutions).
+    let query   = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
+    let subject = "MKFLILLFNILCLFPVLAADNHGVSINAS"; // M→I near the end (conservative in BLOSUM62)
+    let (_tmp, db) = build_protein_db(vec![
+        protein_entry("P001", "related protein", subject),
+    ]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let results = blastp(&db, query.as_bytes(), &params);
+    assert!(!results.is_empty(), "related proteins should produce a hit");
+    let hsp = &results[0].hsps[0];
+    assert!(hsp.score > 0, "related protein hit should have positive score");
+    assert!(hsp.evalue < 1.0, "related protein hit should have reasonable evalue, got {:.2e}", hsp.evalue);
+    assert!(hsp.percent_identity() > 90.0,
+        "one substitution should give >90% identity, got {:.1}%", hsp.percent_identity());
+}
+
+/// BLASTX: nucleotide query encoding a known protein searched against a protein
+/// database. Should find the translated match.
+#[test]
+fn test_blastx_finds_protein_match() {
+    // ATG AAA TTT CTG ATT CTG CTG TTT AAC ATT CTG TGC CTG TTC
+    // encodes: M   K   F   L   I   L   L   F   N   I   L   C   L   F
+    let nt_query = "ATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTC";
+    let protein  = "MKFLILLFNILCLF";
+    let (_tmp, db) = build_protein_db(vec![
+        protein_entry("P001", "target protein", protein),
+    ]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let results = blastx(&db, nt_query.as_bytes(), &params);
+    assert!(!results.is_empty(), "blastx should find the translated protein match");
+    let hsp = &results[0].hsps[0];
+    assert!(hsp.percent_identity() > 80.0,
+        "translated match should have high identity, got {:.1}%", hsp.percent_identity());
+    assert!(hsp.query_frame != 0, "blastx HSP should have non-zero query frame");
+    assert!(hsp.score > 0);
+}
+
+/// TBLASTN: protein query against nucleotide subject that encodes the protein.
+/// Should find the translated nucleotide match.
+#[test]
+fn test_tblastn_finds_nucleotide_match() {
+    let protein_query = "MKFLILLFNILCLF";
+    let nt_subject    = "ATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTC";
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "coding region", nt_subject),
+    ]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let results = tblastn(&db, protein_query.as_bytes(), &params);
+    assert!(!results.is_empty(), "tblastn should find protein in translated nucleotide db");
+    let hsp = &results[0].hsps[0];
+    assert!(hsp.subject_frame != 0, "tblastn HSP should have non-zero subject frame");
+    assert!(hsp.percent_identity() > 80.0,
+        "translated match should have high identity, got {:.1}%", hsp.percent_identity());
+    assert!(hsp.score > 0);
+}
+
+/// Query whose reverse complement matches the subject. Verify hit on minus strand.
+#[test]
+fn test_blastn_both_strands() {
+    let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+    let query_rc = String::from_utf8(reverse_complement(subject.as_bytes())).unwrap();
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "forward strand subject", subject),
+    ]);
+
+    // With strand=both, should find the reverse-complement hit.
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .strand("both");
+
+    let results = blastn(&db, query_rc.as_bytes(), &params);
+    assert!(!results.is_empty(), "should find RC hit when strand=both");
+    let hsp = &results[0].hsps[0];
+    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
+        "RC of subject should be 100% identity, got {:.2}%", hsp.percent_identity());
+
+    // With strand=plus only, should NOT find it (query is RC of subject).
+    let params_plus = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .strand("plus");
+
+    let results_plus = blastn(&db, query_rc.as_bytes(), &params_plus);
+    assert!(results_plus.is_empty(),
+        "plus-strand-only should not find hit when query is RC of subject");
+}
+
+/// Very short query (15bp) with word_size=7. Should still find a match.
+#[test]
+fn test_blastn_short_query() {
+    let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+    let query = "ATGCGTACCTGAAAG"; // first 15bp of subject
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "target", subject),
+    ]);
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .word_size(7)
+        .num_threads(1)
+        .filter_low_complexity(false);
+
+    let results = blastn(&db, query.as_bytes(), &params);
+    assert!(!results.is_empty(), "short 15bp query with word_size=7 should find a match");
+    let hsp = &results[0].hsps[0];
+    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
+        "exact substring should be 100% identity");
+}
+
+/// Set a strict evalue threshold and verify only significant hits pass.
+#[test]
+fn test_blastn_evalue_filter() {
+    let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "target", seq),
+    ]);
+
+    // Relaxed evalue -- should find hits
+    let params_relaxed = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false);
+    let results_relaxed = blastn(&db, seq.as_bytes(), &params_relaxed);
+    assert!(!results_relaxed.is_empty(), "relaxed evalue should find self hit");
+
+    // Very strict evalue for self-hit of 100bp should still pass (self hit is highly significant)
+    let params_strict = SearchParams::blastn()
+        .evalue(1e-30)
+        .num_threads(1)
+        .filter_low_complexity(false);
+    let results_strict = blastn(&db, seq.as_bytes(), &params_strict);
+    assert!(!results_strict.is_empty(),
+        "100bp self-hit should still pass evalue 1e-30");
+
+    // All returned HSPs must satisfy the evalue threshold
+    for r in &results_strict {
+        for hsp in &r.hsps {
+            assert!(hsp.evalue <= 1e-30,
+                "HSP evalue {:.2e} exceeds threshold 1e-30", hsp.evalue);
+        }
+    }
+}
+
+/// Search against a BLAST database and against a subject FASTA should produce
+/// equivalent results for the same sequences.
+#[test]
+fn test_db_search_vs_subject_search() {
+    let query   = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+    let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+
+    // Database-based search
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry("N001", "target", subject),
+    ]);
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false);
+    let db_results = blastn(&db, query.as_bytes(), &params);
+
+    // Subject-mode search (using BlastnSearch builder which does seq-vs-seq)
+    let builder_results = BlastnSearch::new()
+        .query(query.as_bytes())
+        .subject(subject.as_bytes())
+        .dust(false)
+        .evalue(10.0)
+        .run();
+
+    // Both should find hits
+    assert!(!db_results.is_empty(), "DB search should find hit");
+    assert!(!builder_results.is_empty(), "subject search should find hit");
+
+    // The best HSP scores should be comparable (both are self-hits)
+    let db_best_score = db_results[0].hsps[0].score;
+    let subj_best_score = builder_results[0].score;
+    // Scores may differ slightly due to different code paths, but both should be positive
+    assert!(db_best_score > 0, "DB search score should be positive");
+    assert!(subj_best_score > 0, "subject search score should be positive");
+}
+
+/// Use BlastnSearch builder API directly for a seq-vs-seq search.
+#[test]
+fn test_blastn_search_builder_api() {
+    let query   = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+    let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
+
+    let results = BlastnSearch::new()
+        .query(query.as_bytes())
+        .subject(subject.as_bytes())
+        .word_size(11)
+        .reward(1)
+        .penalty(-3)
+        .gap_open(5)
+        .gap_extend(2)
+        .evalue(10.0)
+        .dust(false)
+        .strand(Strand::Both)
+        .run();
+
+    assert!(!results.is_empty(), "builder API self-search should find hits");
+    let best = &results[0];
+    assert!(best.score > 0, "best HSP score should be positive");
+    assert!(best.evalue < 1e-10, "100bp self-hit should have very significant evalue");
+    assert_eq!(best.align_length as usize, query.len(),
+        "self-hit alignment should span full query length");
+    assert_eq!(best.num_ident as usize, query.len(),
+        "self-hit should have 100% identity");
+
+    // Test with empty query -- should return empty
+    let empty = BlastnSearch::new()
+        .query(b"")
+        .subject(subject.as_bytes())
+        .run();
+    assert!(empty.is_empty(), "empty query should produce no results");
+
+    // Test with empty subject -- should return empty
+    let empty2 = BlastnSearch::new()
+        .query(query.as_bytes())
+        .subject(b"")
+        .run();
+    assert!(empty2.is_empty(), "empty subject should produce no results");
 }

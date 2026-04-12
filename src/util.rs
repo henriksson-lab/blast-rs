@@ -251,4 +251,142 @@ mod tests {
         assert_eq!(start, 18);
         assert_eq!(end, 26);
     }
+
+    #[test]
+    fn test_translate_codon_all_standard_amino_acids() {
+        // Verify a selection of codons from the standard genetic code
+        // GCN = Ala (1): GCA = idx 2*16+1*4+0 = 36
+        assert_eq!(translate_codon(2, 1, 0, &STANDARD_GENETIC_CODE), 1); // GCA -> A
+        // TGC = Cys (3): idx = 3*16+2*4+1 = 57
+        assert_eq!(translate_codon(3, 2, 1, &STANDARD_GENETIC_CODE), 3); // TGC -> C
+        // GAT = Asp (4): idx = 2*16+0*4+3 = 35
+        assert_eq!(translate_codon(2, 0, 3, &STANDARD_GENETIC_CODE), 4); // GAT -> D
+        // TTT = Phe (6): idx = 3*16+3*4+3 = 63
+        assert_eq!(translate_codon(3, 3, 3, &STANDARD_GENETIC_CODE), 6); // TTT -> F
+        // GGT = Gly (7): idx = 2*16+2*4+3 = 43
+        assert_eq!(translate_codon(2, 2, 3, &STANDARD_GENETIC_CODE), 7); // GGT -> G
+        // TGG = Trp (20): idx = 3*16+2*4+2 = 58
+        assert_eq!(translate_codon(3, 2, 2, &STANDARD_GENETIC_CODE), 20); // TGG -> W
+    }
+
+    #[test]
+    fn test_translate_codon_stop_codons() {
+        // TAA (25): T=3, A=0, A=0 -> idx=48
+        assert_eq!(translate_codon(3, 0, 0, &STANDARD_GENETIC_CODE), 25);
+        // TAG (25): T=3, A=0, G=2 -> idx=50
+        assert_eq!(translate_codon(3, 0, 2, &STANDARD_GENETIC_CODE), 25);
+        // TGA (25): T=3, G=2, A=0 -> idx=56
+        assert_eq!(translate_codon(3, 2, 0, &STANDARD_GENETIC_CODE), 25);
+    }
+
+    #[test]
+    fn test_genetic_code_2_vertebrate_mito() {
+        // AGA -> * (stop, 25) instead of R
+        assert_eq!(translate_codon(0, 2, 0, &GENETIC_CODE_2), 25);
+        // AGG -> * (stop, 25) instead of R
+        assert_eq!(translate_codon(0, 2, 2, &GENETIC_CODE_2), 25);
+        // ATA -> M (12) instead of I
+        assert_eq!(translate_codon(0, 3, 0, &GENETIC_CODE_2), 12);
+        // TGA -> W (20) instead of * (stop)
+        assert_eq!(translate_codon(3, 2, 0, &GENETIC_CODE_2), 20);
+    }
+
+    #[test]
+    fn test_genetic_code_6_ciliate() {
+        // TAA -> Q (15) instead of * (stop)
+        assert_eq!(translate_codon(3, 0, 0, &GENETIC_CODE_6), 15);
+        // TAG -> Q (15) instead of * (stop)
+        assert_eq!(translate_codon(3, 0, 2, &GENETIC_CODE_6), 15);
+        // TGA should still be stop
+        assert_eq!(translate_codon(3, 2, 0, &GENETIC_CODE_6), 25);
+    }
+
+    #[test]
+    fn test_lookup_genetic_code_standard() {
+        let code = lookup_genetic_code(1);
+        assert_eq!(code as *const _, &STANDARD_GENETIC_CODE as *const _);
+        // Code 11 (bacterial) uses same table as standard
+        let code11 = lookup_genetic_code(11);
+        assert_eq!(code11 as *const _, &STANDARD_GENETIC_CODE as *const _);
+    }
+
+    #[test]
+    fn test_lookup_genetic_code_unknown_returns_standard() {
+        let code = lookup_genetic_code(99);
+        assert_eq!(code as *const _, &STANDARD_GENETIC_CODE as *const _);
+    }
+
+    #[test]
+    fn test_six_frame_translation_short_seq() {
+        // Sequence shorter than 3 bases: no codons in any frame
+        let seq = vec![0u8, 1]; // AC
+        let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
+        assert_eq!(frames.len(), 6);
+        for (_, protein) in &frames {
+            assert_eq!(protein.len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_six_frame_translation_exact_codon() {
+        // Exactly 3 bases: one codon in frame +1, zero in +2 and +3
+        let seq = vec![0u8, 3, 2]; // ATG = Met
+        let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
+        assert_eq!(frames[0].1.len(), 1); // frame +1
+        assert_eq!(frames[0].1[0], 12);   // Met = 12
+        assert_eq!(frames[1].1.len(), 0); // frame +2
+        assert_eq!(frames[2].1.len(), 0); // frame +3
+    }
+
+    #[test]
+    fn test_six_frame_frame_numbers() {
+        let seq = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]; // 12 bases
+        let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
+        assert_eq!(frames[0].0, 1);
+        assert_eq!(frames[1].0, 2);
+        assert_eq!(frames[2].0, 3);
+        assert_eq!(frames[3].0, -1);
+        assert_eq!(frames[4].0, -2);
+        assert_eq!(frames[5].0, -3);
+    }
+
+    #[test]
+    fn test_protein_to_nuc_coords_forward_frame1_start() {
+        // First protein position, frame +1
+        let (start, end) = protein_to_nuc_coords(0, 1, 1, 30);
+        // nuc_start = 0*3 + 0 + 1 = 1, nuc_end = 1*3 + 0 = 3
+        assert_eq!(start, 1);
+        assert_eq!(end, 3);
+    }
+
+    #[test]
+    fn test_protein_to_nuc_coords_reverse_frame3() {
+        // 30bp, frame -3, protein pos 0..2
+        // offset = 2
+        // rc_start = 0*3 + 2 = 2, rc_end = 2*3 + 2 - 1 = 7
+        // nuc: (30 - 7, 30 - 2) = (23, 28)
+        let (start, end) = protein_to_nuc_coords(0, 2, -3, 30);
+        assert_eq!(start, 23);
+        assert_eq!(end, 28);
+    }
+
+    #[test]
+    fn test_genetic_code_4_mold_mito() {
+        // TGA -> W (20) instead of stop
+        assert_eq!(translate_codon(3, 2, 0, &GENETIC_CODE_4), 20);
+        // Everything else same as standard - ATG still Met
+        assert_eq!(translate_codon(0, 3, 2, &GENETIC_CODE_4), 12);
+    }
+
+    #[test]
+    fn test_genetic_code_10_euplotid() {
+        // TGA -> C (3) instead of stop
+        assert_eq!(translate_codon(3, 2, 0, &GENETIC_CODE_10), 3);
+    }
+
+    #[test]
+    fn test_genetic_code_25_sr1() {
+        // TGA -> G (7) instead of stop
+        assert_eq!(translate_codon(3, 2, 0, &GENETIC_CODE_25), 7);
+    }
 }

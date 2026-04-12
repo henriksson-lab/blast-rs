@@ -87,3 +87,4 @@ pub mod util;
 #[allow(dead_code)] pub(crate) mod queryinfo;
 #[allow(dead_code)] pub(crate) mod rps;
 #[allow(dead_code)] pub(crate) mod sequence;
+#[allow(dead_code)] pub(crate) mod seqsrc;
