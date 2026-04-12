@@ -259,7 +259,7 @@ Average of 10 runs. Wall-clock time including process startup and database loadi
 
 ### blastn (single-threaded)
 
-| Database | Size | NCBI BLAST+ 2.12.0 | blast-rs 0.9.0 | Speedup |
+| Database | Size | NCBI BLAST+ 2.12.0 | blast-rs 0.9.1 | Speedup |
 |----------|------|--------------------:|---------------:|--------:|
 | C. elegans | 100 MB | 653 ms | **444 ms** | **1.5x** |
 | S. cerevisiae | 12 MB | 83 ms | **54 ms** | **1.5x** |
@@ -268,7 +268,7 @@ Average of 10 runs. Wall-clock time including process startup and database loadi
 
 ### blastp (single-threaded, seqp test DB, 2K entries)
 
-| Query | NCBI BLAST+ 2.12.0 | blast-rs 0.9.0 | Speedup |
+| Query | NCBI BLAST+ 2.12.0 | blast-rs 0.9.1 | Speedup |
 |-------|--------------------:|---------------:|--------:|
 | 1 query (25 aa) | 58 ms | **10 ms** | **5.8x** |
 
@@ -331,6 +331,10 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
 - **blast_formatter** -- standalone tool for reformatting archived BLAST results
 
 ## Changelog
+
+### 0.9.1
+
+- Maintenance release
 
 ### 0.9.0
 

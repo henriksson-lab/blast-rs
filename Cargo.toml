@@ -1,6 +1,6 @@
 [package]
 name = "blast-rs"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 license = "MIT OR Unlicense"
 description = "Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool)"
