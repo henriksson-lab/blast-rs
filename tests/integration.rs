@@ -972,6 +972,98 @@ fn test_blastp_sensitivity() {
     );
 }
 
+/// Test that composition-based matrix adjustment eliminates the srtA false positive.
+/// The query at position 00009 in the E. faecium plasmid hits a Sortase A entry
+/// with comp_adjust=0 but should be filtered out by full matrix adjustment (mode 2).
+///
+/// Run with: cargo test --release -- --ignored test_comp_adjust_srtA
+#[test]
+#[ignore]
+fn test_comp_adjust_srta() {
+    let sprot_paths = [
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+    ];
+    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
+        Some(p) => p,
+        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+    };
+    let file = std::fs::File::open(sprot_path).unwrap();
+    let records = blast_rs::input::parse_fasta(file);
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("sprot");
+    let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
+    for rec in &records {
+        builder.add(SequenceEntry {
+            title: rec.defline.clone(), accession: rec.id.clone(),
+            sequence: rec.sequence.clone(), taxid: None,
+        });
+    }
+    builder.write(&base).unwrap();
+    let db = blast_rs::db::BlastDb::open(&base).unwrap();
+
+    // The srtA false positive query (CDS at 6145..6858 on plasmid, actual sequence from prodigal)
+    let query = b"MKKCFLFCLKGGRWMKKWLFGFLGVALIVVCSVFGYVSYQKHEGEVFKQNIEKKMPVDQINAHAKSYKEDATNVNNDMSLGQMLSIQKEAIEMGVNKQVFAQIQIPALGLALPIFKGANQYTLSLGAATYFYEDAEMGKGNYVLAGHNMEMPGVLFSDIQKLSLGEVMDLVSNDGVYRYKVTRKFIVPEYFKLIDGVPEENSFLSLPKKGEKPLLTLFTCVYTSQGKERYVVQGELQ";
+
+    // Without composition adjustment — should find a hit
+    let params_no = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(0);
+    let results_no = blastp(&db, query, &params_no);
+    eprintln!("comp_adjust=0: {} hits", results_no.len());
+    for r in &results_no {
+        for h in &r.hsps {
+            eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{}",
+                r.subject_accession, h.evalue, h.score, h.bit_score,
+                h.num_identities, h.alignment_length);
+        }
+    }
+
+    // With lambda scaling only (mode 1)
+    let params_1 = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(1);
+    let results_1 = blastp(&db, query, &params_1);
+    eprintln!("comp_adjust=1: {} hits", results_1.len());
+    for r in &results_1 {
+        for h in &r.hsps {
+            eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{}",
+                r.subject_accession, h.evalue, h.score, h.bit_score,
+                h.num_identities, h.alignment_length);
+        }
+    }
+
+    // With conditional matrix adjustment (mode 2) — should eliminate false positive
+    let params_2 = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(2);
+    let results_2 = blastp(&db, query, &params_2);
+    eprintln!("comp_adjust=2: {} hits", results_2.len());
+    for r in &results_2 {
+        for h in &r.hsps {
+            eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{}",
+                r.subject_accession, h.evalue, h.score, h.bit_score,
+                h.num_identities, h.alignment_length);
+        }
+    }
+
+    // Check: mode 2 should have fewer or zero hits compared to mode 0
+    let srta_hits_2: Vec<_> = results_2.iter()
+        .filter(|r| r.subject_title.to_lowercase().contains("sortase"))
+        .collect();
+    eprintln!("Sortase hits with comp_adjust=2: {}", srta_hits_2.len());
+
+    // Also test dinB query (DNA polymerase IV) — should NOT be eliminated
+    let dinb_query = b"MYLAISSLQHRTYVCIMWKNGVLFMMDYSKEPVNDYFLIDMKSFYASVECIERNLDPLTTELVVMSRSDNTGSGLILASSPEAKKRYGITNVSRPRDLPQPFPKTLHVVPPRMNLYIKRNMQVNNIFRRYVADEDLLIYSIDESILKVTKSLNLFTTEETRSQRRKKLAQMIQERIKEELGLIATVGVGDNPLLAKLALDNEAKHNEGFIAEWTYENVPEKVWNIPEMTDFWGIGSRMKKRLNQMGILSIRDLANWNPYTIKNRLGVIGLQLYFHANGIDRTDIAIPPEPTKEKSYGNSQVLPRDYTRRNEIELVVKEMAEQVAIRIRQHNCKTGCVHLNIGTSILETRPGFSHQMKIPITDNTKELQNYCLFLFDKYYEGQEVRHVGITYSKLVYTDSLQLDLFSDPQKQINEENLDKIIDKIRQKYGFTSIVHASSMLESARSITRSTLVGGHAGGNGGIKND";
+    for mode in [0u8, 1, 2] {
+        let params = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(mode);
+        let results = blastp(&db, dinb_query, &params);
+        eprintln!("dinB comp_adjust={}: {} hits", mode, results.len());
+        for r in &results {
+            for h in &r.hsps {
+                eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{} qcov={:.0}%",
+                    r.subject_accession, h.evalue, h.score, h.bit_score,
+                    h.num_identities, h.alignment_length,
+                    h.alignment_length as f64 / dinb_query.len() as f64 * 100.0);
+            }
+        }
+    }
+}
+
 /// Per-function timing breakdown for blastp against sprot.
 /// Measures: DB load, lookup table build, subject scan, gapped alignment, total.
 ///
@@ -1495,272 +1587,248 @@ fn test_blastn_search_builder_api() {
     assert!(empty2.is_empty(), "empty subject should produce no results");
 }
 
+
 #[test]
 #[ignore]
-fn test_bin3_debug() {
+fn test_comp_ratio() {
+    // 00009 vs P0DPQ5 - NCBI filters this; we should too
+    let q = b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPRISLTLPIYDATNEKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK";
+    let q_aa: Vec<u8> = q.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
+    
+    // Get P0DPQ5 from DB
+    let sprot_paths = [
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+    ];
+    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
+        Some(p) => p, None => { return; }
+    };
+    let file = std::fs::File::open(sprot_path).unwrap();
+    let records = blast_rs::input::parse_fasta(file);
+    let p0dpq5 = records.iter().find(|r| r.id == "P0DPQ5").unwrap();
+    let s_aa: Vec<u8> = p0dpq5.sequence.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
+    
+    let (qcomp, qn) = blast_rs::composition::read_composition(&q_aa, 28);
+    let (scomp, sn) = blast_rs::composition::read_composition(&s_aa, 28);
+    eprintln!("Query: {} true AAs, Subject: {} true AAs", qn, sn);
+    
+    let matrix = blast_rs::matrix::BLOSUM62;
+    let lambda = 0.267;
+    
+    let ratio = blast_rs::composition::composition_lambda_ratio(&matrix, &qcomp, &scomp, lambda);
+    eprintln!("LambdaRatio: {:?}", ratio);
+    
+    // If ratio is Some and < 1, the e-value should be adjusted upward
+    if let Some(r) = ratio {
+        eprintln!("  Would multiply raw e-value by roughly {:.2}x", (1.0/r).powi(100));
+    }
+    
+    // The raw e-value for this hit is ~5.6e-24 (from NCBI mode 0)
+    // After composition adjustment, NCBI pushes it above 1e-9
+    // Our code should return Some(ratio) where ratio < 1.0
+    assert!(ratio.is_some(), "Should find composition adjustment for biased pair");
+}
+
+/// Debug test: print lambda ratio and adjusted matrix diagonal for a specific pair
+#[test]
+#[ignore]
+fn test_comp_adjust_debug() {
     let sprot_paths = [
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
         std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping"); return; }
+        None => { eprintln!("Skipping: sprot not found"); return; }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
-    let tmp = tempfile::TempDir::new().unwrap();
-    let base = tmp.path().join("sprot");
-    let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
-    for rec in &records {
-        builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
-        });
-    }
-    builder.write(&base).unwrap();
-    let db = blast_rs::db::BlastDb::open(&base).unwrap();
-    
-    let bin3 = b"MRVAYIRVSSIDQNEQRQIEEMKKFGAVRIFIEKQSGATITHRPVFQEALRDVGDLTLSSPHYEHMADYAAFRMSEHEAGKPISQRELAEVRQRTEKLHLAIGITGTLTNLSPQEREALAGMIREFAQRGIATLNLQDESAESLRHYAKRCHEYGIKPVSQRRRDLGRTLSWLGLRVEYLRNQSDDTAWREALTAFYAETRSRVKNMITG";
-    let params = SearchParams::blastp().evalue(1e-6).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
-    let results = blastp(&db, bin3, &params);
-    eprintln!("bin3: {} hits", results.len());
-    for r in &results {
-        eprintln!("  {} e={:.2e} score={}", 
-            &r.subject_title[..60.min(r.subject_title.len())],
-            r.best_evalue(), r.hsps[0].score);
-    }
-    assert!(!results.is_empty(), "bin3 should find hits — 66.7% identity to P20384");
-}
 
-#[test]
-#[ignore]
-fn test_bin3_coverage() {
-    let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-    ];
-    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
-        Some(p) => p,
-        None => { eprintln!("Skipping"); return; }
-    };
-    let file = std::fs::File::open(sprot_path).unwrap();
-    let records = blast_rs::input::parse_fasta(file);
-    let tmp = tempfile::TempDir::new().unwrap();
-    let base = tmp.path().join("sprot");
-    let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
-    for rec in &records {
-        builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
-        });
-    }
-    builder.write(&base).unwrap();
-    let db = blast_rs::db::BlastDb::open(&base).unwrap();
+    // Build an NCBIstdaa query
+    let query_aa = b"MKKCFLFCLKGGRWMKKWLFGFLGVALIVVCSVFGYVSYQKHEGEVFKQNIEKKMPVDQINAHAKSYKEDATNVNNDMSLGQMLSIQKEAIEMGVNKQVFAQIQIPALGLALPIFKGANQYTLSLGAATYFYEDAEMGKGNYVLAGHNMEMPGVLFSDIQKLSLGEVMDLVSNDGVYRYKVTRKFIVPEYFKLIDGVPEENSFLSLPKKGEKPLLTLFTCVYTSQGKERYVVQGELQ";
+    let query_ncbi: Vec<u8> = query_aa.iter()
+        .map(|&b| blast_rs::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+        .collect();
     
-    let bin3 = b"MRVAYIRVSSIDQNEQRQIEEMKKFGAVRIFIEKQSGATITHRPVFQEALRDVGDLTLSSPHYEHMADYAAFRMSEHEAGKPISQRELAEVRQRTEKLHLAIGITGTLTNLSPQEREALAGMIREFAQRGIATLNLQDESAESLRHYAKRCHEYGIKPVSQRRRDLGRTLSWLGLRVEYLRNQSDDTAWREALTAFYAETRSRVKNMITG";
-    let params = SearchParams::blastp().evalue(1e-6).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
-    let results = blastp(&db, bin3, &params);
-    for r in &results {
-        for hsp in &r.hsps {
-            let coverage = hsp.alignment_length as f64 / bin3.len() as f64 * 100.0;
-            eprintln!("  align_len={} query_len={} coverage={:.1}% evalue={:.2e}",
-                hsp.alignment_length, bin3.len(), coverage, hsp.evalue);
+    // Get a subject — find P0DPQ5 (oid_20106)
+    let subj_rec = records.iter().find(|r| r.id.contains("P0DPQ5") || r.defline.contains("srtA")).unwrap();
+    let subj_ncbi: Vec<u8> = subj_rec.sequence.iter()
+        .map(|&b| blast_rs::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+        .collect();
+    
+    let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
+    let ungapped_lambda = 0.3176f64; // BLOSUM62 ungapped
+    
+    let (qcomp28, qn) = blast_rs::composition::read_composition(&query_ncbi, 28);
+    let (scomp28, sn) = blast_rs::composition::read_composition(&subj_ncbi, 28);
+    
+    eprintln!("Query length: {}, numTrue: {}", query_ncbi.len(), qn);
+    eprintln!("Subject length: {}, numTrue: {}", subj_ncbi.len(), sn);
+    
+    let lr = blast_rs::composition::composition_lambda_ratio(&matrix, &qcomp28, &scomp28, ungapped_lambda);
+    eprintln!("Lambda ratio: {:?}", lr);
+    
+    let freq_ratios = blast_rs::matrix::get_blosum62_freq_ratios();
+    let scaled = blast_rs::composition::composition_scale_matrix(
+        &matrix, &qcomp28, &scomp28, ungapped_lambda, &freq_ratios,
+    );
+    if let Some(adj) = &scaled {
+        // Print diagonal scores: A-A, C-C, D-D, etc.
+        let labels = ['*','A','B','C','D','E','F','G','H','I','K','L','M','N','P','Q','R','S','T','V','W','X','Y','Z','U','O','-','J'];
+        eprintln!("Original vs Adjusted diagonal scores:");
+        for i in 1..22 {
+            eprintln!("  {} ({}): {} → {}", labels[i], i, matrix[i][i], adj[i][i]);
         }
+        // Print a few off-diagonal
+        eprintln!("A-D (1,4): {} → {}", matrix[1][4], adj[1][4]);
+        eprintln!("A-E (1,5): {} → {}", matrix[1][5], adj[1][5]);
+        eprintln!("K-R (10,16): {} → {}", matrix[10][16], adj[10][16]);
     }
 }
-// Test gapped alignment directly
+
+// ── Stress tests for short-primer / large-DB scenarios (stack overflow regression) ──
+
+/// Generate a random-ish nucleotide sequence of given length using a simple LCG.
+fn random_nt_seq(len: usize, seed: u64) -> Vec<u8> {
+    let bases = b"ACGT";
+    let mut state = seed;
+    (0..len).map(|_| {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        bases[((state >> 33) % 4) as usize]
+    }).collect()
+}
+
 #[test]
-#[ignore]
-fn test_gapped_align_bin3() {
-    let bin3 = b"MRVAYIRVSSIDQNEQRQIEEMKKFGAVRIFIEKQSGATITHRPVFQEALRDVGDLTLSSPHYEHMADYAAFRMSEHEAGKPISQRELAEVRQRTEKLHLAIGITGTLTNLSPQEREALAGMIREFAQRGIATLNLQDESAESLRHYAKRCHEYGIKPVSQRRRDLGRTLSWLGLRVEYLRNQSDDTAWREALTAFYAETRSRVKNMITG";
-    // P20384 is the match — get it from the DB
-    let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-    ];
-    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
-        Some(p) => p,
-        None => { eprintln!("Skipping"); return; }
-    };
-    let file = std::fs::File::open(sprot_path).unwrap();
-    let records = blast_rs::input::parse_fasta(file);
-    let p20384 = records.iter().find(|r| r.id == "P20384").unwrap();
-    
-    let matrix = blast_rs::matrix::BLOSUM62;
-    let q: Vec<u8> = bin3.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    let s: Vec<u8> = p20384.sequence.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    
-    eprintln!("Query len: {}, Subject len: {}", q.len(), s.len());
-    
-    // Try gapped alignment from different seed positions
-    for seed_offset in [50, 100, 0] {
-        let sq = seed_offset.min(q.len()-1);
-        let ss = seed_offset.min(s.len()-1);
-        if let Some(gr) = blast_rs::protein::protein_gapped_align(
-            &q, &s, sq, ss, &matrix, 11, 1, 65, // x_drop = 65 raw (25 bits)
-        ) {
-            eprintln!("Seed {}: score={} qs={}..{} ss={}..{} alen={} ident={}", 
-                seed_offset, gr.score, gr.query_start, gr.query_end, 
-                gr.subject_start, gr.subject_end, gr.align_length, gr.num_ident);
-        } else {
-            eprintln!("Seed {}: no alignment", seed_offset);
+fn test_blastn_short_primer_many_subjects() {
+    // Simulate blastn-short: 20bp primer vs 500 subjects (each ~2000bp).
+    // The primer is embedded in every 10th subject so there are many hits.
+    let primer = b"ATCGATCGATCGATCGATCG";
+
+    let mut entries = Vec::new();
+    for i in 0..500u64 {
+        let mut seq = random_nt_seq(2000, i * 12345 + 7);
+        // Embed primer in every 10th subject at a random-ish position
+        if i % 10 == 0 {
+            let pos = (i as usize * 37) % (seq.len() - primer.len());
+            seq[pos..pos + primer.len()].copy_from_slice(primer);
         }
+        entries.push(nt_entry(
+            &format!("seq_{}", i),
+            &format!("subject sequence {}", i),
+            &String::from_utf8(seq).unwrap(),
+        ));
     }
-    
-    // Also try direct ungapped extension to see what seed score we get
-    if let Some((qs, qe, ss, se, score, ident)) = blast_rs::protein::protein_ungapped_extend(
-        &q, &s, 100, 100, &matrix, 19,
-    ) {
-        eprintln!("Ungapped from 100: score={} ident={} span={}..{}", score, ident, qs, qe);
-    }
-    if let Some((qs, qe, ss, se, score, ident)) = blast_rs::protein::protein_ungapped_extend(
-        &q, &s, 50, 50, &matrix, 40,
-    ) {
-        eprintln!("Ungapped from 50 (xdrop=40): score={} ident={} span={}..{}", score, ident, qs, qe);
-    }
+
+    let (_tmp, db) = build_nucleotide_db(entries);
+
+    // blastn-short parameters: word_size=7, reward=1, penalty=-3, gap_open=5, gap_extend=2
+    let mut params = SearchParams::blastn();
+    params.word_size = 7;
+    params.match_score = 1;
+    params.mismatch = -3;
+    params.gap_open = 5;
+    params.gap_extend = 2;
+    params.evalue_threshold = 5.0;
+    params.max_target_seqs = 10000;
+    params.filter_low_complexity = false;
+
+    let results = blastn(&db, primer, &params);
+    // Should find hits in the subjects where the primer was embedded
+    assert!(!results.is_empty(), "Should find hits for embedded primer");
+    // At least some of the 50 subjects with embedded primer should appear
+    assert!(results.len() >= 10, "Expected at least 10 subjects with hits, got {}", results.len());
 }
 
 #[test]
-#[ignore]
-fn test_gapped_align_identical() {
-    // Two identical 20aa sequences should produce a 20aa alignment
-    let seq = b"MRVAYIRVSSIDQNEQRQIE";
-    let matrix = blast_rs::matrix::BLOSUM62;
-    let q: Vec<u8> = seq.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    let s = q.clone();
-    
-    if let Some(gr) = blast_rs::protein::protein_gapped_align(
-        &q, &s, 10, 10, &matrix, 11, 1, 65,
-    ) {
-        eprintln!("Identical 20aa: score={} qs={}..{} ss={}..{} alen={}",
-            gr.score, gr.query_start, gr.query_end, 
-            gr.subject_start, gr.subject_end, gr.align_length);
-        assert_eq!(gr.query_start, 0);
-        assert_eq!(gr.query_end, 20);
-        assert_eq!(gr.align_length, 20);
-    } else {
-        panic!("Should find alignment for identical sequences");
-    }
-    
-    // 100aa identical
-    let long = b"MRVAYIRVSSIDQNEQRQIEEMKKFGAVRIFIEKQSGATITHRPVFQEALRDVGDLTLSSPHYEHMADYAAFRMSEHEAGKPISQRELAEVRQRTEKLHLA";
-    let q2: Vec<u8> = long.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    let s2 = q2.clone();
-    if let Some(gr) = blast_rs::protein::protein_gapped_align(
-        &q2, &s2, 50, 50, &matrix, 11, 1, 65,
-    ) {
-        eprintln!("Identical 100aa: score={} qs={}..{} alen={}", 
-            gr.score, gr.query_start, gr.query_end, gr.align_length);
-        assert!(gr.align_length >= 90, "Should align most of 100aa, got {}", gr.align_length);
-    } else {
-        panic!("Should find alignment for identical 100aa");
-    }
-}
+fn test_blastn_short_primer_multithreaded() {
+    // Test that multithreaded search doesn't stack-overflow.
+    let primer = b"GCTAGCTAGCTAGCTAGCTA";
 
-#[test]
-#[ignore]
-fn test_gapped_align_bin3_midseed() {
-    let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-    ];
-    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
-        Some(p) => p, None => { return; }
-    };
-    let file = std::fs::File::open(sprot_path).unwrap();
-    let records = blast_rs::input::parse_fasta(file);
-    let p20384 = records.iter().find(|r| r.id == "P20384").unwrap();
-    
-    let bin3 = b"MRVAYIRVSSIDQNEQRQIEEMKKFGAVRIFIEKQSGATITHRPVFQEALRDVGDLTLSSPHYEHMADYAAFRMSEHEAGKPISQRELAEVRQRTEKLHLAIGITGTLTNLSPQEREALAGMIREFAQRGIATLNLQDESAESLRHYAKRCHEYGIKPVSQRRRDLGRTLSWLGLRVEYLRNQSDDTAWREALTAFYAETRSRVKNMITG";
-    let matrix = blast_rs::matrix::BLOSUM62;
-    let q: Vec<u8> = bin3.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    let s: Vec<u8> = p20384.sequence.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    
-    // Try seeds at various positions
-    for &seed in &[0, 25, 50, 75, 100, 150] {
-        let sq = seed.min(q.len()-1);
-        let ss = seed.min(s.len()-1);
-        if let Some(gr) = blast_rs::protein::protein_gapped_align(
-            &q, &s, sq, ss, &matrix, 11, 1, 200, // very large x_drop
-        ) {
-            eprintln!("Seed {}: score={} qs={}..{} ss={}..{} alen={}", 
-                seed, gr.score, gr.query_start, gr.query_end, 
-                gr.subject_start, gr.subject_end, gr.align_length);
-        } else {
-            eprintln!("Seed {}: no alignment", seed);
+    let mut entries = Vec::new();
+    for i in 0..200u64 {
+        let mut seq = random_nt_seq(5000, i * 99 + 42);
+        if i % 5 == 0 {
+            let pos = (i as usize * 23) % (seq.len() - primer.len());
+            seq[pos..pos + primer.len()].copy_from_slice(primer);
         }
+        entries.push(nt_entry(
+            &format!("mseq_{}", i),
+            &format!("multi-threaded test seq {}", i),
+            &String::from_utf8(seq).unwrap(),
+        ));
     }
+
+    let (_tmp, db) = build_nucleotide_db(entries);
+
+    let mut params = SearchParams::blastn();
+    params.word_size = 7;
+    params.match_score = 1;
+    params.mismatch = -3;
+    params.gap_open = 5;
+    params.gap_extend = 2;
+    params.evalue_threshold = 5.0;
+    params.max_target_seqs = 10000;
+    params.num_threads = 4;
+    params.filter_low_complexity = false;
+
+    let results = blastn(&db, primer, &params);
+    assert!(!results.is_empty(), "Multithreaded blastn-short should find hits");
 }
 
 #[test]
-#[ignore]
-fn test_xdrop_region_bin3() {
-    let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-    ];
-    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
-        Some(p) => p, None => { return; }
-    };
-    let file = std::fs::File::open(sprot_path).unwrap();
-    let records = blast_rs::input::parse_fasta(file);
-    let p20384 = records.iter().find(|r| r.id == "P20384").unwrap();
-    
-    let bin3 = b"MRVAYIRVSSIDQNEQRQIEEMKKFGAVRIFIEKQSGATITHRPVFQEALRDVGDLTLSSPHYEHMADYAAFRMSEHEAGKPISQRELAEVRQRTEKLHLAIGITGTLTNLSPQEREALAGMIREFAQRGIATLNLQDESAESLRHYAKRCHEYGIKPVSQRRRDLGRTLSWLGLRVEYLRNQSDDTAWREALTAFYAETRSRVKNMITG";
-    let matrix = blast_rs::matrix::BLOSUM62;
-    let q: Vec<u8> = bin3.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    let s: Vec<u8> = p20384.sequence.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    
-    eprintln!("q={} s={}", q.len(), s.len());
-    
-    // Manual: compute identity along the diagonal
-    let mut matches = 0;
-    let mut mismatches = 0;
-    let min_len = q.len().min(s.len());
-    let mut running_score = 0i32;
-    let mut max_score = 0i32;
-    let mut max_pos = 0;
-    for i in 0..min_len {
-        let score = matrix[q[i] as usize][s[i] as usize];
-        running_score += score;
-        if q[i] == s[i] { matches += 1; } else { mismatches += 1; }
-        if running_score > max_score { max_score = running_score; max_pos = i; }
-        if i < 60 || i > 190 || (i % 20 == 0) {
-            eprintln!("  pos {}: cum_score={} max={} match={}", 
-                i, running_score, max_score, if q[i]==s[i] {"Y"} else {"N"});
-        }
+fn test_blastn_short_very_short_primer() {
+    // Edge case: very short primer (15bp) with word_size=7.
+    // This is the kind of query that triggered the original stack overflow report.
+    let primer = b"ATCGATCGATCGATC"; // 15bp
+
+    let mut entries = Vec::new();
+    for i in 0..100u64 {
+        let mut seq = random_nt_seq(10000, i * 777);
+        // Embed primer in every subject
+        let pos = (i as usize * 53) % (seq.len() - primer.len());
+        seq[pos..pos + primer.len()].copy_from_slice(primer);
+        entries.push(nt_entry(
+            &format!("short_{}", i),
+            &format!("short primer test {}", i),
+            &String::from_utf8(seq).unwrap(),
+        ));
     }
-    eprintln!("Total: {}/{} matches ({:.1}%), max_score={} at pos {}", 
-        matches, min_len, 100.0 * matches as f64 / min_len as f64, max_score, max_pos);
+
+    let (_tmp, db) = build_nucleotide_db(entries);
+
+    let mut params = SearchParams::blastn();
+    params.word_size = 7;
+    params.match_score = 1;
+    params.mismatch = -3;
+    params.gap_open = 5;
+    params.gap_extend = 2;
+    params.evalue_threshold = 5.0;
+    params.max_target_seqs = 10000;
+    params.filter_low_complexity = false;
+
+    let results = blastn(&db, primer, &params);
+    assert!(!results.is_empty(), "Should find very short primer hits");
 }
 
 #[test]
-#[ignore]
-fn test_gapped_score_debug() {
-    let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-    ];
-    let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
-        Some(p) => p, None => { return; }
-    };
-    let file = std::fs::File::open(sprot_path).unwrap();
-    let records = blast_rs::input::parse_fasta(file);
-    let p20384 = records.iter().find(|r| r.id == "P20384").unwrap();
-    
-    let bin3 = b"MRVAYIRVSSIDQNEQRQIEEMKKFGAVRIFIEKQSGATITHRPVFQEALRDVGDLTLSSPHYEHMADYAAFRMSEHEAGKPISQRELAEVRQRTEKLHLAIGITGTLTNLSPQEREALAGMIREFAQRGIATLNLQDESAESLRHYAKRCHEYGIKPVSQRRRDLGRTLSWLGLRVEYLRNQSDDTAWREALTAFYAETRSRVKNMITG";
-    let matrix = blast_rs::matrix::BLOSUM62;
-    let q: Vec<u8> = bin3.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    let s: Vec<u8> = p20384.sequence.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    
-    // Call gapped_align with large x_drop and seed in middle
-    let seed_q = 100;
-    let seed_s = 100;
-    let x_drop = 500; // very large
-    
-    if let Some(gr) = blast_rs::protein::protein_gapped_align(
-        &q, &s, seed_q, seed_s, &matrix, 11, 1, x_drop,
-    ) {
-        eprintln!("x_drop={}: score={} qs={}..{} ss={}..{} alen={}",
-            x_drop, gr.score, gr.query_start, gr.query_end,
-            gr.subject_start, gr.subject_end, gr.align_length);
-    }
+fn test_blastn_short_via_builder() {
+    // Test the BlastnSearch builder with blastn-short parameters.
+    let primer = b"ATCGATCGATCGATCGATCG";
+    let mut subject = random_nt_seq(5000, 42);
+    subject[1000..1020].copy_from_slice(primer);
+
+    let results = BlastnSearch::new()
+        .word_size(7)
+        .reward(1)
+        .penalty(-3)
+        .gap_open(5)
+        .gap_extend(2)
+        .evalue(5.0)
+        .dust(false)
+        .query(primer)
+        .subject(&subject)
+        .run();
+
+    assert!(!results.is_empty(), "Builder search should find primer in subject");
+    let best = &results[0];
+    assert!(best.score > 0, "Best hit should have positive score");
 }

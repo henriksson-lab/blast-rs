@@ -159,7 +159,7 @@ impl SearchParams {
             mismatch: -2,
             num_threads: 1,
             filter_low_complexity: true,
-            comp_adjust: 0,
+            comp_adjust: 2,       // NCBI default: conditional compositional matrix adjust
             strand: "both".to_string(),
             query_gencode: 1,
             db_gencode: 1,
@@ -537,17 +537,138 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         if phits.is_empty() { phits = ungapped_hits; }
         if phits.is_empty() { return None; }
 
-        let best_ev = phits.iter()
+        // Pre-filter: check raw e-value first (comp-adjust can only increase e-value)
+        let best_raw_ev = phits.iter()
             .map(|ph| prot_kbp.raw_to_evalue(ph.score, search_space))
             .fold(f64::MAX, f64::min);
-        if best_ev > evalue_threshold { return None; }
+        if best_raw_ev > evalue_threshold { return None; }
 
         let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
         let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
         let sl = subj_aa.len();
 
-        let hsps: Vec<Hsp> = phits.iter().filter_map(|ph| {
-            let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+        // Composition-based e-value adjustment (NCBI comp_based_stats).
+        // Verbatim port of Blast_AdjustScores + s_AdjustEvaluesForComposition.
+        let comp_mode = params.comp_adjust;
+
+        // Determine adjustment rule and optionally build adjusted matrix.
+        // adj_result: None = no adjustment, Some((adjusted_matrix_opt, lambda_ratio_opt))
+        let adj_result: Option<(Option<[[i32; AA_SIZE]; AA_SIZE]>, Option<f64>)> = if comp_mode > 0 {
+            let (qcomp28, qn) = crate::composition::read_composition(&query_aa, AA_SIZE);
+            let (scomp28, sn) = crate::composition::read_composition(subj_aa, AA_SIZE);
+            if qn == 0 || sn == 0 {
+                None
+            } else {
+                let mut qp20 = [0.0f64; 20];
+                let mut sp20 = [0.0f64; 20];
+                crate::compo_mode_condition::gather_letter_probs(&qcomp28, &mut qp20);
+                crate::compo_mode_condition::gather_letter_probs(&scomp28, &mut sp20);
+
+                let rule = crate::compo_mode_condition::choose_matrix_adjust_rule(
+                    query_aa.len(), subj_aa.len(), &qp20, &sp20, comp_mode,
+                );
+
+                use crate::compo_mode_condition::MatrixAdjustRule;
+                match rule {
+                    MatrixAdjustRule::DontAdjust => None,
+                    MatrixAdjustRule::ScaleOldMatrix => {
+                        // Port of NCBI Blast_CompositionBasedStats: rescale matrix
+                        // using composition-specific lambda ratio, then re-align.
+                        let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda;
+                        // Build the frequency ratio matrix from the standard BLOSUM62
+                        // joint probs (used as freq_ratios in s_ScaleSquareMatrix).
+                        // For non-position-based, startFreqRatios is initialized from
+                        // the standard matrix frequency ratios.
+                        let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+                        match crate::composition::composition_scale_matrix(
+                            &matrix, &qcomp28, &scomp28, ungapped_lambda, &freq_ratios,
+                        ) {
+                            Some(adj_mat) => Some((Some(adj_mat), None)),
+                            None => None,
+                        }
+                    }
+                    MatrixAdjustRule::UserSpecifiedRelEntropy
+                    | MatrixAdjustRule::UnconstrainedRelEntropy
+                    | MatrixAdjustRule::RelEntropyOldMatrixNewContext
+                    | MatrixAdjustRule::RelEntropyOldMatrixOldContext => {
+                        // Full matrix optimization (Blast_CompositionMatrixAdj)
+                        let (joint_probs, first_std, second_std) =
+                            crate::composition::blosum62_workspace();
+                        let mut adj_matrix = matrix;
+                        // NCBI uses ungappedLambda (0.3176 for BLOSUM62) for matrix scaling,
+                        // NOT the gapped lambda. See matrixInfo->ungappedLambda.
+                        let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda;
+                        let status = crate::composition::composition_matrix_adj(
+                            &mut adj_matrix, AA_SIZE, rule,
+                            qn, sn, &qcomp28, &scomp28,
+                            20, // RE_pseudocounts
+                            0.44, // kFixedReBlosum62
+                            &joint_probs, &first_std, &second_std,
+                            ungapped_lambda, &matrix,
+                        );
+                        if status == 0 {
+                            // Optimization succeeded — use adjusted matrix
+                            Some((Some(adj_matrix), None))
+                        } else {
+                            // Fall back to lambda ratio scaling
+                            let lr = crate::composition::composition_lambda_ratio(
+                                &matrix, &qcomp28, &scomp28, prot_kbp.lambda,
+                            );
+                            Some((None, lr))
+                        }
+                    }
+                }
+            }
+        } else { None };
+
+        // If we have an adjusted matrix, re-align and recompute scores
+        let (final_phits, use_adj_matrix) = if let Some((Some(ref adj_mat), _)) = adj_result {
+            // Re-do gapped alignment with adjusted matrix
+            let mut new_phits = Vec::new();
+            for ph in &phits {
+                let seed_q = (ph.query_start + ph.query_end) / 2;
+                let seed_s = (ph.subject_start + ph.subject_end) / 2;
+                if let Some(gr) = crate::protein::protein_gapped_align(
+                    &query_aa, subj_aa, seed_q, seed_s,
+                    adj_mat, gap_open, gap_extend, x_drop_final,
+                ) {
+                    let q_slice = &query_aa[gr.query_start..gr.query_end];
+                    let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
+                    let (qs, ss) = gr.edit_script.render_alignment(
+                        q_slice, s_slice, crate::protein::ncbistdaa_to_char,
+                    );
+                    new_phits.push(crate::protein_lookup::ProteinHit {
+                        query_start: gr.query_start, query_end: gr.query_end,
+                        subject_start: gr.subject_start, subject_end: gr.subject_end,
+                        score: gr.score, num_ident: gr.num_ident,
+                        align_length: gr.align_length, mismatches: gr.mismatches,
+                        gap_opens: gr.gap_opens, qseq: Some(qs), sseq: Some(ss),
+                    });
+                }
+            }
+            if new_phits.is_empty() {
+                (phits.clone(), false)
+            } else {
+                (new_phits, true)
+            }
+        } else {
+            (phits.clone(), false)
+        };
+
+        let lambda_ratio_opt = adj_result.as_ref().and_then(|(_, lr)| *lr);
+
+        let hsps: Vec<Hsp> = final_phits.iter().filter_map(|ph| {
+            let raw_evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+            let evalue = if use_adj_matrix {
+                // With adjusted matrix, the score already reflects composition;
+                // use standard lambda for e-value (ratio = 1.0)
+                raw_evalue
+            } else if let Some(lr) = lambda_ratio_opt {
+                let scaled_lambda = prot_kbp.lambda / lr;
+                search_space * prot_kbp.k * (-scaled_lambda * ph.score as f64).exp()
+            } else {
+                raw_evalue
+            };
             if evalue > evalue_threshold { return None; }
             let (q_aln, s_aln) = if let (Some(ref qs), Some(ref ss)) = (&ph.qseq, &ph.sseq) {
                 (qs.as_bytes().to_vec(), ss.as_bytes().to_vec())
@@ -591,6 +712,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         use rayon::prelude::*;
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
+            .stack_size(64 * 1024 * 1024)
             .build()
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
         pool.install(|| {
@@ -782,6 +904,7 @@ pub fn blastp_batch(
         use rayon::prelude::*;
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
+            .stack_size(64 * 1024 * 1024)
             .build()
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
         pool.install(|| {

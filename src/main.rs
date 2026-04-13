@@ -1053,7 +1053,13 @@ fn run_blastn_rust(
 
         // Gapped search across all subjects using packed NCBI2na (fast, no full decode)
         let gapped_x_dropoff = (args.xdrop_gap_final * std::f64::consts::LN_2 / kbp.lambda) as i32;
-        let oid_hits: Vec<(u32, Vec<blast_rs::search::SearchHsp>)> =
+        let num_threads = if args.num_threads <= 0 { rayon::current_num_threads() } else { args.num_threads as usize };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .stack_size(64 * 1024 * 1024) // 64 MB per thread to avoid stack overflow on large DBs
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        let oid_hits: Vec<(u32, Vec<blast_rs::search::SearchHsp>)> = pool.install(|| {
             (0..db.num_oids).into_par_iter().filter_map(|oid| {
                 let packed = db.get_sequence(oid);
                 let seq_len = db.get_seq_len(oid) as usize;
@@ -1066,7 +1072,8 @@ fn run_blastn_rust(
                 // Apply cutoff score filter (matches C engine's preliminary cutoff)
                 hsps.retain(|h| h.score >= cutoff_score);
                 if hsps.is_empty() { None } else { Some((oid, hsps)) }
-            }).collect();
+            }).collect()
+        });
 
         // Sort by OID to match C engine's deterministic database scan order
         let mut oid_hits = oid_hits;

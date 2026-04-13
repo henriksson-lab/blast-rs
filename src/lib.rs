@@ -19,6 +19,11 @@
 
 // Public API modules
 pub mod api;
+pub mod composition;
+pub mod compo_mode_condition;
+pub mod nlm_linear_algebra;
+pub mod optimize_target_freq;
+pub mod semi_gapped_align;
 
 // Re-export high-level API at crate root for convenience
 pub use api::{

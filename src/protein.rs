@@ -386,19 +386,19 @@ pub fn protein_gapped_align(
 ) -> Option<ProteinGappedResult> {
     let gap_oe = gap_open + gap_extend;
 
-    // Left extension
-    let (score_l, ext_q_l, ext_s_l) = protein_gapped_score_one_dir(
+    // Left extension (NCBI: Blast_SemiGappedAlign with reversed=TRUE)
+    let (score_l, ext_q_l, ext_s_l) = crate::semi_gapped_align::semi_gapped_align(
         &query[..seed_q + 1], &subject[..seed_s + 1],
         seed_q + 1, seed_s + 1,
-        matrix, gap_oe, gap_extend, x_dropoff, true,
+        matrix, gap_open, gap_extend, x_dropoff, true,
     );
 
-    // Right extension
+    // Right extension (NCBI: Blast_SemiGappedAlign with reversed=FALSE)
     let (score_r, ext_q_r, ext_s_r) = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
-        protein_gapped_score_one_dir(
+        crate::semi_gapped_align::semi_gapped_align(
             &query[seed_q..], &subject[seed_s..],
             query.len() - seed_q - 1, subject.len() - seed_s - 1,
-            matrix, gap_oe, gap_extend, x_dropoff, false,
+            matrix, gap_open, gap_extend, x_dropoff, false,
         )
     } else { (0, 0, 0) };
 

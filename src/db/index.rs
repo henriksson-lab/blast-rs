@@ -72,37 +72,74 @@ struct TaxIdLookup {
 }
 
 impl TaxIdLookup {
-    /// Parse a .nto file. Format (native-endian / little-endian on x86):
+    /// Parse a .nto file. Supports two formats:
+    ///
+    /// **V4 format** (older databases):
     ///   u64         num_oids
-    ///   u64[n+1]    index (cumulative end offsets into taxid data)
-    ///   i32[]       taxid data
+    ///   u64[n+1]    cumulative end offsets into taxid data
+    ///   i32[]       flat taxid array
+    ///
+    /// **V5 format** (BLAST+ v5 databases):
+    ///   Flat per-OID records: for each OID: u32_LE count, then count × i32_LE taxids.
+    ///   No header — the file is just a concatenation of per-OID records.
     fn from_file(path: &Path) -> io::Result<Self> {
+        Self::from_file_with_hint(path, None)
+    }
+
+    fn from_file_with_hint(path: &Path, expected_oids: Option<u32>) -> io::Result<Self> {
         let data = std::fs::read(path)?;
         if data.len() < 8 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "nto file too small"));
         }
+
+        // Try V4 format first: starts with u64 num_oids.
+        // Validate: num_oids must be reasonable (file must be large enough).
         let mut cur = Cursor::new(&data);
-        let num_oids = cur.read_u64::<LittleEndian>()? as usize;
+        let candidate_num_oids = cur.read_u64::<LittleEndian>()? as usize;
+        let v4_index_bytes = (candidate_num_oids + 1) * 8;
+        let v4_valid = candidate_num_oids > 0
+            && candidate_num_oids < 1_000_000_000
+            && data.len() >= 8 + v4_index_bytes
+            && (expected_oids.is_none() || candidate_num_oids == expected_oids.unwrap() as usize);
 
-        // Need (num_oids+1) u64 index entries
-        let index_bytes = (num_oids + 1) * 8;
-        if data.len() < 8 + index_bytes {
-            // File too small for full index — no taxonomy data
-            return Ok(TaxIdLookup { index: vec![0; num_oids + 1], taxids: Vec::new() });
+        if v4_valid {
+            // V4 format
+            let num_oids = candidate_num_oids;
+            let mut index = Vec::with_capacity(num_oids + 1);
+            for _ in 0..=num_oids {
+                index.push(cur.read_u64::<LittleEndian>()?);
+            }
+            let data_offset = 8 + v4_index_bytes;
+            let remaining = data.len() - data_offset;
+            let num_taxids = remaining / 4;
+            let mut taxids = Vec::with_capacity(num_taxids);
+            for _ in 0..num_taxids {
+                taxids.push(cur.read_i32::<LittleEndian>()?);
+            }
+            return Ok(TaxIdLookup { index, taxids });
         }
 
-        let mut index = Vec::with_capacity(num_oids + 1);
-        for _ in 0..=num_oids {
-            index.push(cur.read_u64::<LittleEndian>()?);
-        }
+        // V5 format: flat per-OID records (u32_LE count, then count × i32_LE taxids).
+        Self::parse_v5_nto(&data)
+    }
 
-        // Remaining bytes are i32 taxids
-        let data_offset = 8 + index_bytes;
-        let remaining = data.len() - data_offset;
-        let num_taxids = remaining / 4;
-        let mut taxids = Vec::with_capacity(num_taxids);
-        for _ in 0..num_taxids {
-            taxids.push(cur.read_i32::<LittleEndian>()?);
+    /// Parse V5 .nto format: flat per-OID records.
+    /// Each record: u32_LE count, then count × i32_LE taxids.
+    fn parse_v5_nto(data: &[u8]) -> io::Result<Self> {
+        let mut cur = Cursor::new(data);
+        let mut index: Vec<u64> = Vec::new();
+        let mut taxids: Vec<i32> = Vec::new();
+
+        while (cur.position() as usize) + 4 <= data.len() {
+            let count = cur.read_u32::<LittleEndian>()? as usize;
+            // Sanity check: count should be small and data must have enough bytes
+            if count > 1000 || (cur.position() as usize) + count * 4 > data.len() {
+                break;
+            }
+            for _ in 0..count {
+                taxids.push(cur.read_i32::<LittleEndian>()?);
+            }
+            index.push(taxids.len() as u64);
         }
 
         Ok(TaxIdLookup { index, taxids })
@@ -308,7 +345,7 @@ impl BlastDb {
         let nto_path = base_path.with_extension(
             if db_type == DbType::Nucleotide { "nto" } else { "pto" }
         );
-        let tax_lookup = TaxIdLookup::from_file(&nto_path).ok();
+        let tax_lookup = TaxIdLookup::from_file_with_hint(&nto_path, Some(num_oids)).ok();
 
         Ok(BlastDb {
             db_type,
