@@ -373,6 +373,67 @@ fn protein_nw_traceback(
     (esp, nw_score, sw_q_start, sw_s_start, sw_q_end, sw_s_end)
 }
 
+/// HSP_MAX_WINDOW — size of the sliding window used to find the best
+/// starting position for gapped alignment.
+/// Port of NCBI HSP_MAX_WINDOW from blast_gapalign.c.
+const HSP_MAX_WINDOW: usize = 11;
+
+/// Find the best starting position for gapped alignment within an ungapped
+/// hit region. Uses a sliding window of size HSP_MAX_WINDOW to find the
+/// highest-scoring region, then returns its midpoint.
+///
+/// Port of NCBI BlastGetStartForGappedAlignment.
+pub fn get_start_for_gapped_alignment(
+    query: &[u8], subject: &[u8],
+    q_start: usize, q_length: usize,
+    s_start: usize, s_length: usize,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+) -> (usize, usize) {
+    if q_length <= HSP_MAX_WINDOW {
+        let q_mid = q_start + q_length / 2;
+        let s_mid = s_start + q_length / 2; // same offset
+        return (q_mid, s_mid);
+    }
+
+    let hsp_end_init = q_start + HSP_MAX_WINDOW;
+    let mut score = 0i32;
+    for i in 0..HSP_MAX_WINDOW {
+        let qi = q_start + i;
+        let si = s_start + i;
+        if qi < query.len() && si < subject.len() {
+            score += matrix[query[qi] as usize][subject[si] as usize];
+        }
+    }
+    let mut max_score = score;
+    let mut max_offset = hsp_end_init - 1;
+
+    let hsp_end = q_start + q_length.min(s_length);
+    for index1 in (q_start + HSP_MAX_WINDOW)..hsp_end {
+        let qi_old = index1 - HSP_MAX_WINDOW;
+        let si_old = s_start + (qi_old - q_start);
+        let qi_new = index1;
+        let si_new = s_start + (qi_new - q_start);
+        if qi_old < query.len() && si_old < subject.len() {
+            score -= matrix[query[qi_old] as usize][subject[si_old] as usize];
+        }
+        if qi_new < query.len() && si_new < subject.len() {
+            score += matrix[query[qi_new] as usize][subject[si_new] as usize];
+        }
+        if score > max_score {
+            max_score = score;
+            max_offset = index1;
+        }
+    }
+
+    let q_seed = if max_score > 0 {
+        max_offset - HSP_MAX_WINDOW / 2
+    } else {
+        q_start
+    };
+    let s_seed = s_start + (q_seed - q_start);
+    (q_seed, s_seed)
+}
+
 /// Perform gapped protein alignment from a seed position using X-dropoff DP.
 ///
 /// This is the protein equivalent of `blast_gapped_score_only` from traceback.rs,
@@ -385,6 +446,10 @@ pub fn protein_gapped_align(
     x_dropoff: i32,
 ) -> Option<ProteinGappedResult> {
     let gap_oe = gap_open + gap_extend;
+
+    // Clamp seed points to valid range
+    let seed_q = seed_q.min(query.len().saturating_sub(1));
+    let seed_s = seed_s.min(subject.len().saturating_sub(1));
 
     // Left extension (NCBI: Blast_SemiGappedAlign with reversed=TRUE)
     let (score_l, ext_q_l, ext_s_l) = crate::semi_gapped_align::semi_gapped_align(

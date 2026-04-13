@@ -215,76 +215,329 @@ pub fn blastn_ungapped_search_packed(
         let diag_mask = diag_array_len - 1;
         let mut last_hit: Vec<i32> = vec![-1; diag_array_len];
 
-        if lut_word == 8 {
-            // Fast path: 8-mer = 16 bits. Use per-base scanning with packed_base_at
-            // but with the efficient hash update (shift by 2 bits per base).
-            // This is simpler and correct — checks every position.
-            let mut hash: u32 = 0;
-            for i in 0..7 {
-                hash = (hash << 2) | packed_base_at(subject_packed, i) as u32;
-            }
-            let mut s_pos = 0;
-            while s_pos < end {
-                hash = ((hash << 2) | packed_base_at(subject_packed, s_pos + 7) as u32) & lut_mask;
-                let h = hash as usize;
-                if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
-                    process_hit(query, subject_packed, subject_len, word_size,
-                        &lut, &next, &mut last_hit, diag_mask,
-                        h, s_pos, reward, penalty, x_dropoff,
-                        kbp, search_space, evalue_threshold, context, &mut hsps);
-                }
-                s_pos += 1;
+        if lut_word == 8 && word_size >= 8 {
+            // Fast path: step-4 scanning, port of C engine's
+            // s_BlastSmallNaScanSubject_8_4 from blast_nascan.c.
+            // Processes whole packed bytes (4 bases at a time), unrolled 8x.
+            let scan_step = word_size - lut_word + 1; // typically 4 for word_size=11
+            if scan_step == 4 {
+                scan_step4_unrolled(
+                    subject_packed, subject_len, word_size,
+                    query, &lut, &next, &pv, &mut last_hit, diag_mask,
+                    reward, penalty, x_dropoff,
+                    kbp, search_space, evalue_threshold, context, &mut hsps,
+                );
+            } else {
+                // Non-step-4 case: fall back to per-base scanning
+                scan_step1(
+                    subject_packed, subject_len, end, lut_word, lut_mask,
+                    query, word_size, &lut, &next, &pv, &mut last_hit, diag_mask,
+                    reward, penalty, x_dropoff,
+                    kbp, search_space, evalue_threshold, context, &mut hsps,
+                );
             }
         } else {
-            // Generic path: per-base scanning using packed_base_at
-            let mut hash: u32 = 0;
-            for i in 0..lut_word - 1 {
-                hash = (hash << 2) | packed_base_at(subject_packed, i) as u32;
-            }
-            let mut s_pos = 0;
-            while s_pos < end {
-                hash = ((hash << 2) | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32) & lut_mask;
-                let h = hash as usize;
-                if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
-                    let mut q_pos = lut[h];
-                    while q_pos >= 0 {
-                        let qp = q_pos as usize;
-                        let diag = (s_pos + query.len() - qp) & diag_mask;
-                        if last_hit[diag] >= 0 && (last_hit[diag] as usize) > s_pos {
-                            q_pos = next[qp];
-                            continue;
-                        }
-                        let mut ok = true;
-                        if word_size > lut_word {
-                            for k in lut_word..word_size {
-                                if query[qp + k] != packed_base_at(subject_packed, s_pos + k) {
-                                    ok = false; break;
-                                }
-                            }
-                        }
-                        if ok {
-                            if let Some(hsp) = extend_seed_packed(
-                                query, subject_packed, subject_len, qp, s_pos,
-                                reward, penalty, x_dropoff,
-                                kbp, search_space, evalue_threshold, context,
-                            ) {
-                                last_hit[diag] = hsp.subject_end;
-                                hsps.push(hsp);
-                            } else {
-                                last_hit[diag] = (s_pos + word_size) as i32;
-                            }
-                        }
-                        q_pos = next[qp];
-                    }
-                }
-                s_pos += 1;
-            }
+            // Byte-oriented step-1 scanning for lut_word < 8.
+            // Port of C engine's s_BlastSmallNaScanSubject_7_1 / _6_1 / _5_1 etc.
+            // Reads 2-3 packed bytes and extracts 4 hash values by shifting,
+            // processing 4 subject positions per byte advance.
+            scan_byte_oriented_step1(
+                subject_packed, subject_len, end, lut_word, lut_mask,
+                query, word_size, &lut, &next, &pv, &mut last_hit, diag_mask,
+                reward, penalty, x_dropoff,
+                kbp, search_space, evalue_threshold, context, &mut hsps,
+            );
         }
     }
 
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
     dedup_hsps(&mut hsps);
     hsps
+}
+
+/// Step-4 unrolled scanner — port of C engine's s_BlastSmallNaScanSubject_8_4.
+/// Processes whole packed bytes (4 bases at a time), 8 bytes (32 bases) per loop iteration.
+/// Only checks every 4th subject position; the process_hit function handles
+/// extending to verify the remaining bases of the full word.
+#[allow(clippy::too_many_arguments)]
+fn scan_step4_unrolled(
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: usize,
+    query: &[u8],
+    lut: &[i32],
+    next: &[i32],
+    pv: &[u64],
+    last_hit: &mut [i32],
+    diag_mask: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    context: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    if subject_len < word_size { return; }
+    let end = subject_len - word_size + 1;
+    // scan_range in subject positions (base coordinates)
+    let scan_start: usize = 0;
+    let scan_end = end.saturating_sub(1); // inclusive end
+
+    // We need at least 2 packed bytes to form the initial 8-mer hash
+    if subject_packed.len() < 2 { return; }
+
+    let lut_mask: u32 = 0xFFFF; // 2 * 8 = 16 bits
+
+    // Macro-like inline: check PV and process hits for a scan position
+    // s_pos is the subject position (in base coordinates) of the 8-mer start
+    macro_rules! check_and_process {
+        ($hash:expr, $s_pos:expr) => {
+            let h = ($hash & lut_mask) as usize;
+            if unsafe { *pv.get_unchecked(h >> 6) } & (1u64 << (h & 63)) != 0 {
+                process_hit(query, subject_packed, subject_len, word_size,
+                    lut, next, last_hit, diag_mask,
+                    h, $s_pos, reward, penalty, x_dropoff,
+                    kbp, search_space, evalue_threshold, context, hsps);
+            }
+        };
+    }
+
+    // The hash covers 8 bases = 2 packed bytes. With step-4 (= 1 byte), each
+    // iteration shifts in one new byte and checks the resulting 16-bit index.
+    //
+    // Port of C's Duff's device unrolled loop from s_BlastSmallNaScanSubject_8_4.
+    // Each packed byte encodes 4 bases. Advancing by 1 byte = 4 bases = step 4.
+    //
+    // s_pos = base position = byte_index * 4
+    // hash  = (prev_hash << 8) | new_byte, masked to 16 bits
+
+    let s_ptr = subject_packed.as_ptr();
+    let s_len_bytes = subject_packed.len();
+
+    // Number of step-4 positions to scan
+    let num_steps = if scan_end >= scan_start { (scan_end - scan_start) / 4 + 1 } else { 0 };
+    if num_steps == 0 { return; }
+
+    // Starting byte index (subject position / 4)
+    let start_byte = scan_start / 4;
+
+    // Initialize hash from first byte
+    let mut init_index: u32 = if start_byte < s_len_bytes {
+        unsafe { *s_ptr.add(start_byte) as u32 }
+    } else { return; };
+
+    // Process in groups of 8 bytes (32 bases) with Duff's device unrolling
+    let full_groups = num_steps / 8;
+    let remainder = num_steps % 8;
+
+    // Handle remainder first (like C's Duff's device switch entry)
+    let mut byte_idx = start_byte;
+    let mut s_pos = scan_start;
+
+    // Process remainder positions (0..remainder)
+    for _ in 0..remainder {
+        byte_idx += 1;
+        if byte_idx >= s_len_bytes { break; }
+        init_index = (init_index << 8) | unsafe { *s_ptr.add(byte_idx) as u32 };
+        if s_pos < end {
+            check_and_process!(init_index, s_pos);
+        }
+        s_pos += 4;
+    }
+
+    // Process full groups of 8
+    for _ in 0..full_groups {
+        if byte_idx + 8 >= s_len_bytes || s_pos + 28 >= subject_len { break; }
+
+        // Unrolled 8 iterations: each shifts in one packed byte (4 bases)
+        unsafe {
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 1) as u32;
+            check_and_process!(init_index, s_pos);
+
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 2) as u32;
+            check_and_process!(init_index, s_pos + 4);
+
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 3) as u32;
+            check_and_process!(init_index, s_pos + 8);
+
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 4) as u32;
+            check_and_process!(init_index, s_pos + 12);
+
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 5) as u32;
+            check_and_process!(init_index, s_pos + 16);
+
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 6) as u32;
+            check_and_process!(init_index, s_pos + 20);
+
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 7) as u32;
+            check_and_process!(init_index, s_pos + 24);
+
+            init_index = (init_index << 8) | *s_ptr.add(byte_idx + 8) as u32;
+            check_and_process!(init_index, s_pos + 28);
+        }
+        byte_idx += 8;
+        s_pos += 32;
+    }
+}
+
+/// Byte-oriented step-1 scanner for lut_word < 8.
+/// Port of C engine's s_BlastSmallNaScanSubject_7_1.
+/// Reads packed bytes and extracts multiple hash values by shifting,
+/// processing 4 subject positions per byte advance.
+#[allow(clippy::too_many_arguments)]
+fn scan_byte_oriented_step1(
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    lut_word: usize,
+    lut_mask: u32,
+    query: &[u8],
+    word_size: usize,
+    lut: &[i32],
+    next: &[i32],
+    pv: &[u64],
+    last_hit: &mut [i32],
+    diag_mask: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    context: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    if end == 0 || subject_packed.is_empty() { return; }
+
+    let s_ptr = subject_packed.as_ptr();
+    let s_len = subject_packed.len();
+
+    // Number of bits in lut_word (= 2 * lut_word)
+    let lut_bits = 2 * lut_word;
+
+    // We process 4 positions per byte. For each group of 4 positions
+    // (aligned to packed byte boundary), we read 2-3 bytes and extract
+    // 4 different hash values by shifting.
+    //
+    // For lut_word=7 (14 bits): need ceil(14/8)=2 bytes to cover the hash.
+    // Position 0 in a byte-group: hash = (byte0 << 8 | byte1) >> 2  (bits 16..2)
+    // Position 1: hash = (byte0 << 8 | byte1) & mask                (bits 14..0)
+    // Position 2: hash = (byte0 << 16 | byte1 << 8 | byte2) >> 6    (bits 22..8, masked)
+    // Position 3: hash = (above >> 4) & mask                        (bits 18..4, shifted)
+    //
+    // General: bytes_needed = ceil((lut_bits + 6) / 8) to cover all 4 shifts
+
+    let mut s_pos: usize = 0;
+    let mut byte_idx: usize = 0;
+
+    // Process 4 positions per iteration (one packed byte advance)
+    while s_pos + 3 < end && byte_idx + 2 < s_len {
+        // Read 3 bytes (enough for any lut_word <= 8)
+        let b0: u32;
+        let b1: u32;
+        let b2: u32;
+        unsafe {
+            b0 = *s_ptr.add(byte_idx) as u32;
+            b1 = *s_ptr.add(byte_idx + 1) as u32;
+            b2 = if byte_idx + 2 < s_len { *s_ptr.add(byte_idx + 2) as u32 } else { 0 };
+        }
+        let combined = (b0 << 16) | (b1 << 8) | b2;
+
+        // Extract 4 hash values for positions s_pos, s_pos+1, s_pos+2, s_pos+3
+        // Position within byte: hash shifts by 2 bits per position
+        // Base shift for position 0 = 24 - lut_bits (since combined is 24 bits)
+        let base_shift = 24 - lut_bits;
+
+        macro_rules! check_pos {
+            ($shift:expr, $off:expr) => {
+                let pos = s_pos + $off;
+                if pos < end {
+                    let h = ((combined >> $shift) & lut_mask) as usize;
+                    if unsafe { *pv.get_unchecked(h >> 6) } & (1u64 << (h & 63)) != 0 {
+                        process_hit(query, subject_packed, subject_len, word_size,
+                            lut, next, last_hit, diag_mask,
+                            h, pos, reward, penalty, x_dropoff,
+                            kbp, search_space, evalue_threshold, context, hsps);
+                    }
+                }
+            };
+        }
+
+        check_pos!(base_shift, 0);       // Position 0: shift by base_shift
+        check_pos!(base_shift - 2, 1);   // Position 1: shift by base_shift - 2
+        check_pos!(base_shift - 4, 2);   // Position 2: shift by base_shift - 4
+        check_pos!(base_shift - 6, 3);   // Position 3: shift by base_shift - 6
+
+        s_pos += 4;
+        byte_idx += 1;
+    }
+
+    // Handle remaining positions (less than 4)
+    while s_pos < end {
+        let h = packed_hash_at(subject_packed, s_pos, lut_word, lut_mask);
+        if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
+            process_hit(query, subject_packed, subject_len, word_size,
+                lut, next, last_hit, diag_mask,
+                h, s_pos, reward, penalty, x_dropoff,
+                kbp, search_space, evalue_threshold, context, hsps);
+        }
+        s_pos += 1;
+    }
+}
+
+/// Compute hash for a word starting at position `pos` in packed data.
+#[inline(always)]
+fn packed_hash_at(packed: &[u8], pos: usize, lut_word: usize, lut_mask: u32) -> usize {
+    let mut h: u32 = 0;
+    for i in 0..lut_word {
+        h = (h << 2) | packed_base_at(packed, pos + i) as u32;
+    }
+    (h & lut_mask) as usize
+}
+
+/// Fallback step-1 scanning (every position). Used when scan_step != 4.
+#[allow(clippy::too_many_arguments)]
+fn scan_step1(
+    subject_packed: &[u8],
+    _subject_len: usize,
+    end: usize,
+    lut_word: usize,
+    lut_mask: u32,
+    query: &[u8],
+    word_size: usize,
+    lut: &[i32],
+    next: &[i32],
+    pv: &[u64],
+    last_hit: &mut [i32],
+    diag_mask: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    context: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    let subject_len = _subject_len;
+    let mut hash: u32 = 0;
+    for i in 0..(lut_word - 1).min(7) {
+        hash = (hash << 2) | packed_base_at(subject_packed, i) as u32;
+    }
+    let mut s_pos = 0;
+    while s_pos < end {
+        hash = ((hash << 2) | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32) & lut_mask;
+        let h = hash as usize;
+        if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
+            process_hit(query, subject_packed, subject_len, word_size,
+                lut, next, last_hit, diag_mask,
+                h, s_pos, reward, penalty, x_dropoff,
+                kbp, search_space, evalue_threshold, context, hsps);
+        }
+        s_pos += 1;
+    }
 }
 
 /// Extract a single base from packed NCBI2na data (4 bases per byte).

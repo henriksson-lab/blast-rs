@@ -296,9 +296,80 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a
 }
 
+/// Debug: dump lambda ratio computation details for a query/subject pair.
+pub fn debug_lambda_ratio(
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    query_prob: &[f64],
+    subject_prob: &[f64],
+    standard_lambda: f64,
+) {
+    let (score_probs, obs_min, obs_max) = get_matrix_score_probs(
+        matrix, AA_SIZE, query_prob, subject_prob,
+    );
+    let range = (obs_max - obs_min + 1) as usize;
+    let mut avg = 0.0f64;
+    let mut total_prob = 0.0f64;
+    for i in 0..range {
+        avg += (obs_min + i as i32) as f64 * score_probs[i];
+        total_prob += score_probs[i];
+    }
+    eprintln!("  obs_min={} obs_max={} range={} total_prob={:.6} avg_score={:.6}",
+        obs_min, obs_max, range, total_prob, avg);
+
+    // Show nonzero score probs
+    let mut nonzero = 0;
+    for i in 0..range {
+        if score_probs[i] > 0.0 {
+            nonzero += 1;
+        }
+    }
+    eprintln!("  nonzero score probs: {}", nonzero);
+
+    // GCD computation
+    let mut d = (-obs_min) as i32;
+    for i in 1..=(obs_max - obs_min) {
+        if d <= 1 { break; }
+        if score_probs[i as usize] != 0.0 {
+            d = gcd(d, i);
+        }
+    }
+    eprintln!("  GCD d={}", d);
+
+    let adjusted_lambda = karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda);
+    let ratio = adjusted_lambda / standard_lambda;
+    eprintln!("  adjusted_lambda={:.8} standard_lambda={:.8} ratio={:.8}",
+        adjusted_lambda, standard_lambda, ratio);
+}
+
+/// Compute the ungapped lambda for an integer scoring matrix with given
+/// background frequencies. Port of NCBI kbp_ideal computation.
+pub fn compute_ungapped_lambda(
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+) -> f64 {
+    let mut bg_prob = [0.0f64; AA_SIZE];
+    for (k, &idx) in TRUE_CHAR_POSITIONS.iter().enumerate() {
+        bg_prob[idx] = BLOSUM62_BG[k];
+    }
+    compute_ungapped_lambda_with_bg(matrix, &bg_prob)
+}
+
+/// Compute the ungapped lambda for an integer scoring matrix with
+/// specified background frequencies (in NCBIstdaa format).
+pub fn compute_ungapped_lambda_with_bg(
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    bg_prob: &[f64],
+) -> f64 {
+    let (score_probs, obs_min, obs_max) = get_matrix_score_probs(
+        matrix, AA_SIZE, bg_prob, bg_prob,
+    );
+    karlin_lambda_nr(&score_probs, obs_min, obs_max, 0.5) // BLAST_KARLIN_LAMBDA0_DEFAULT
+}
+
 /// Compute composition-based LambdaRatio.
 /// Port of NCBI Blast_CompositionBasedStats (score-only mode).
 /// Uses s_GetMatrixScoreProbs + Blast_KarlinLambdaNR (1D score distribution).
+/// `standard_lambda` should be the ungapped lambda of the integer matrix
+/// (from compute_ungapped_lambda), NOT the continuous frequency-ratio lambda.
 pub fn composition_lambda_ratio(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     query_prob: &[f64],

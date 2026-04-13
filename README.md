@@ -10,12 +10,19 @@ equal output to the original. Please report any deviations.
 The aim of this project is to increase performance, especially by providing this code through a type-safe library interface.
 The code can also be compiled to be used for webassembly.
 
+**Remaining open issues in ported code:**
+
+  Remaining:
+  1. Composition-based statistics performance — comp_adjust=2 (NCBI default) is extremely slow, had to disable it. Needs profiling/optimization
+  2. Multi-volume database support — only opens first volume of .nal/.pal alias files. Core_nt needs this
+  3. Combined multi-query lookup table — scan subject truly once for all queries (would close the remaining multi-query gap: 0.68s vs NCBI's 0.41s)
+  4. blastp finds extra hits — our ungapped extension scores differ by 1-2 points from NCBI, catching slightly more seeds 
 
 ## Features
 
 - **Pure Rust** -- zero C/C++ FFI calls, no unsafe dependencies
 - **Byte-identical output** to NCBI BLAST+ for blastn searches
-- **Faster than C** -- 1.1-5.8x speedup on real genomes (see benchmarks)
+- **Low startup overhead** -- near-zero startup vs ~400ms for NCBI BLAST+ (see benchmarks)
 - **All major programs**: blastn, blastp, blastx, tblastn, tblastx, psiblast
 - **High-level library API**: `blastp()`, `blastn_search()`, `blastx()`, `tblastn()`, `tblastx()` with builder-pattern `SearchParams`
 - **Database creation**: `BlastDbBuilder` for creating protein and nucleotide databases programmatically
@@ -28,7 +35,7 @@ The code can also be compiled to be used for webassembly.
 - **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
-- **393 tests**: 336 unit tests + 55 integration tests + doc tests
+- **404 tests**: 338 unit tests + 60 integration tests + 4 stress tests + doc tests
 
 ## Installation
 
@@ -254,27 +261,39 @@ Single crate `blast-rs` with modules:
 
 ## Benchmarks
 
-500bp query, word_size=11, single-threaded, DUST off, BLAST database mode (`-db`).
-Average of 10 runs. Wall-clock time including process startup and database loading.
+Single-threaded, BLAST database mode (`--db`). Median of 3 runs.
+Wall-clock time including process startup and database loading.
+Measured on Linux x86-64.
 
-### blastn (single-threaded)
+### blastn — single query
 
-| Database | Size | NCBI BLAST+ 2.12.0 | blast-rs 0.9.1 | Speedup |
-|----------|------|--------------------:|---------------:|--------:|
-| C. elegans | 100 MB | 653 ms | **444 ms** | **1.5x** |
-| S. cerevisiae | 12 MB | 83 ms | **54 ms** | **1.5x** |
-| S. pombe | 2.5 MB | 74 ms | **67 ms** | **1.1x** |
-| seqn test DB | 0.9 MB | 57 ms | **35 ms** | **1.6x** |
+| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs 0.10.0 |
+|------|----------|--------------------:|----------------:|
+| 200bp query | C. elegans (100 MB) | 411 ms | 786 ms |
+| 200bp query | S. cerevisiae (12 MB) | 394 ms | 126 ms |
+| 200bp query | S. pombe (2.5 MB) | 390 ms | 49 ms |
+| 200bp query | seqn (1 MB, 2K seqs) | 392 ms | 68 ms |
+| 1000bp query | C. elegans (100 MB) | 413 ms | 943 ms |
 
-### blastp (single-threaded, seqp test DB, 2K entries)
+### blastn-short — primer search
 
-| Query | NCBI BLAST+ 2.12.0 | blast-rs 0.9.1 | Speedup |
-|-------|--------------------:|---------------:|--------:|
-| 1 query (25 aa) | 58 ms | **10 ms** | **5.8x** |
+| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs 0.10.0 |
+|------|----------|--------------------:|----------------:|
+| 30bp primer | C. elegans (100 MB) | 493 ms | 723 ms |
+| 19bp primer | 16S rRNA (10 MB, 27K seqs) | 1254 ms | 923 ms |
 
-The speedup comes from efficient Rust implementations of the same BLAST
-algorithms (packed byte scanning, PV array, diagonal tracking, X-dropoff DP).
-Multi-threaded search parallelizes across database sequences using rayon.
+### blastn — multi-query
+
+| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs 0.10.0 |
+|------|----------|--------------------:|----------------:|
+| 10x 200bp queries | C. elegans (100 MB) | 420 ms | 8000 ms |
+| 20 primers | 16S rRNA (10 MB, 27K seqs) | 598 ms | 7226 ms |
+
+**Notes:**
+- NCBI BLAST+ has ~390 ms fixed startup overhead (shared library loading, ASN.1 initialization). On small databases, NCBI wall-clock time is dominated by startup, not search.
+- blast-rs has near-zero startup (<10 ms), so it is faster on wall-clock for small-to-medium databases with single queries.
+- For large databases (C. elegans 100 MB) and multi-query workloads, NCBI BLAST+ is faster at raw search throughput. The inner scanning loop needs further optimization.
+- Multi-threaded search (`--num_threads`) parallelizes across database sequences using rayon.
 
 ## Algorithms
 
@@ -318,7 +337,6 @@ This is a faithful port of the NCBI BLAST+ C engine algorithms:
 
 The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (~140MB source). The following are **not** yet included in blast-rs:
 
-- **Composition-based statistics** -- `composition_adjustment/` used by blastp/blastx for compositional score correction
 - **IgBLAST** -- immunoglobulin/T-cell receptor analysis (`igblast/`)
 - **Remote BLAST** -- network search against NCBI servers (`connect/`)
 - **SRA/VDB integration** -- searching against Sequence Read Archive data (`vdb/`, `sra/`)
@@ -331,6 +349,14 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
 - **blast_formatter** -- standalone tool for reformatting archived BLAST results
 
 ## Changelog
+
+### 0.10.0
+
+- **BLAST database v5 support**: Fixed `.nto` taxonomy file parser for v5 databases (used by all modern NCBI databases including core_nt, 16S_ribosomal_RNA, etc.)
+- **Composition-based statistics**: Ported `composition_adjustment/` for blastp/blastx compositional score correction (matrix scaling, relative entropy optimization, lambda ratio adjustment)
+- **Stack overflow fix**: Rayon thread pools now use 64 MB stack size and respect `--num_threads`, fixing crashes on large databases with many threads
+- **Stress tests**: Added 4 new stress tests for blastn-short primer search scenarios (2000 subjects, long subjects, 15bp primers, real V5 database)
+- Updated benchmarks against NCBI BLAST+ 2.17.0
 
 ### 0.9.1
 

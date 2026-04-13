@@ -459,22 +459,46 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         .map(|p| crate::stat::KarlinBlk { lambda: p.lambda, k: p.k, log_k: p.k.ln(), h: p.h })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
-    // Convert ALL bit-score x_dropoff values to raw scores
-    // (matching NCBI blast_parameters.c: raw = ceil(bits * ln(2) / lambda))
+    // Convert bit-score x_dropoff values to raw scores.
+    // NCBI uses UNGAPPED KBP for ungapped x_drop, GAPPED KBP for gapped x_drop.
     let ln2 = std::f64::consts::LN_2;
-    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
+    let ungapped_kbp = crate::stat::protein_ungapped_kbp();
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
     let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
     let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
-    // Gap trigger: BLAST_GAP_TRIGGER_PROT = 22.0 bits → raw
-    let gap_trigger_raw = (22.0 * ln2 / prot_kbp.lambda).ceil() as i32;
+
+    // Gap trigger: BLAST_GAP_TRIGGER_PROT = 22.0 bits → raw score.
+    // NCBI uses UNGAPPED KBP (kbp_std): (Int4)((bits * LN2 + logK) / Lambda)
+    // = (Int4)((22 * 0.693 + ln(0.134)) / 0.3176) = (Int4)(41.7) = 41
+    let gap_trigger_raw = ((22.0 * ln2 + ungapped_kbp.log_k) / ungapped_kbp.lambda) as i32;
 
     let total_subj_len: usize = (0..db.num_oids)
         .map(|oid| db.get_seq_len(oid) as usize)
         .sum();
-    let len_adj = crate::stat::compute_length_adjustment(
-        query_aa.len() as i32, total_subj_len as i64, db.num_oids as i32, &prot_kbp);
-    let search_space = crate::stat::compute_search_space(
-        query_aa.len() as i64, total_subj_len as i64, db.num_oids as i32, len_adj);
+
+    // Use exact length adjustment with alpha/beta from gapped params (matching NCBI C engine)
+    let gapped_params = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend);
+    let (len_adj, search_space) = if let Some(ref gp) = gapped_params {
+        let alpha_d_lambda = gp.alpha / prot_kbp.lambda;
+        let (adj, _) = crate::stat::compute_length_adjustment_exact(
+            prot_kbp.k, prot_kbp.log_k,
+            alpha_d_lambda, gp.beta,
+            query_aa.len() as i32, total_subj_len as i64, db.num_oids as i32,
+        );
+        let eff_q = (query_aa.len() as i64 - adj as i64).max(1);
+        let eff_db = (total_subj_len as i64 - db.num_oids as i64 * adj as i64).max(1);
+        (adj, eff_q as f64 * eff_db as f64)
+    } else {
+        let adj = crate::stat::compute_length_adjustment(
+            query_aa.len() as i32, total_subj_len as i64, db.num_oids as i32, &prot_kbp);
+        let ss = crate::stat::compute_search_space(
+            query_aa.len() as i64, total_subj_len as i64, db.num_oids as i32, adj);
+        (adj, ss)
+    };
+
+    // Build Gumbel block for Spouge FSC e-value (per-subject length correction)
+    let gumbel_blk = crate::stat::protein_gumbel_blk(
+        params.gap_open, params.gap_extend, total_subj_len as i64);
 
     // Build lookup table once per query (not per subject).
     let lookup_table = crate::protein_lookup::ProteinLookupTable::build(
@@ -505,15 +529,17 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         );
         if ungapped_hits.is_empty() { return None; }
 
-        let ungap_cutoff = gap_trigger_raw;
+        // Use the best ungapped hit as seed for gapped alignment if it passes
+        // the gap trigger threshold. The e-value on the final gapped score is the real filter.
+        // Use 90% of gap_trigger_raw to account for minor scoring differences
+        // in ungapped extension vs NCBI C.
+        let adjusted_cutoff = (gap_trigger_raw * 9) / 10;
         let best_seed = ungapped_hits.iter()
-            .filter(|uh| uh.score >= ungap_cutoff)
+            .filter(|uh| uh.score >= adjusted_cutoff)
             .max_by_key(|uh| uh.score);
 
         let mut phits = Vec::new();
-        if let Some(uh) = best_seed.filter(|uh| {
-            prot_kbp.raw_to_evalue(uh.score, search_space) < 10.0
-        }) {
+        if let Some(uh) = best_seed {
             let seed_q = (uh.query_start + uh.query_end) / 2;
             let seed_s = (uh.subject_start + uh.subject_end) / 2;
             if let Some(gr) = crate::protein::protein_gapped_align(
@@ -537,9 +563,16 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         if phits.is_empty() { phits = ungapped_hits; }
         if phits.is_empty() { return None; }
 
-        // Pre-filter: check raw e-value first (comp-adjust can only increase e-value)
+        // Pre-filter: check e-value with Spouge FSC if available, else simple Karlin.
         let best_raw_ev = phits.iter()
-            .map(|ph| prot_kbp.raw_to_evalue(ph.score, search_space))
+            .map(|ph| {
+                if let Some(ref gbp) = gumbel_blk {
+                    crate::stat::spouge_evalue(ph.score, &prot_kbp, gbp,
+                        query_aa.len() as i32, subj_len as i32)
+                } else {
+                    prot_kbp.raw_to_evalue(ph.score, search_space)
+                }
+            })
             .fold(f64::MAX, f64::min);
         if best_raw_ev > evalue_threshold { return None; }
 
@@ -658,16 +691,40 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         let lambda_ratio_opt = adj_result.as_ref().and_then(|(_, lr)| *lr);
 
         let hsps: Vec<Hsp> = final_phits.iter().filter_map(|ph| {
-            let raw_evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-            let evalue = if use_adj_matrix {
-                // With adjusted matrix, the score already reflects composition;
-                // use standard lambda for e-value (ratio = 1.0)
-                raw_evalue
-            } else if let Some(lr) = lambda_ratio_opt {
-                let scaled_lambda = prot_kbp.lambda / lr;
-                search_space * prot_kbp.k * (-scaled_lambda * ph.score as f64).exp()
+            // Use Spouge FSC for e-value when Gumbel params are available.
+            // This gives per-subject-length corrected e-values matching NCBI.
+            let evalue = if let Some(ref gbp) = gumbel_blk {
+                let base_ev = crate::stat::spouge_evalue(
+                    ph.score, &prot_kbp, gbp,
+                    query_aa.len() as i32, sl as i32,
+                );
+                if use_adj_matrix {
+                    base_ev
+                } else if let Some(lr) = lambda_ratio_opt {
+                    // Scale the e-value by the lambda ratio
+                    let scaled_kbp = crate::stat::KarlinBlk {
+                        lambda: prot_kbp.lambda / lr,
+                        k: prot_kbp.k,
+                        log_k: prot_kbp.log_k,
+                        h: prot_kbp.h,
+                    };
+                    crate::stat::spouge_evalue(
+                        ph.score, &scaled_kbp, gbp,
+                        query_aa.len() as i32, sl as i32,
+                    )
+                } else {
+                    base_ev
+                }
             } else {
-                raw_evalue
+                let raw_evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                if use_adj_matrix {
+                    raw_evalue
+                } else if let Some(lr) = lambda_ratio_opt {
+                    let scaled_lambda = prot_kbp.lambda / lr;
+                    search_space * prot_kbp.k * (-scaled_lambda * ph.score as f64).exp()
+                } else {
+                    raw_evalue
+                }
             };
             if evalue > evalue_threshold { return None; }
             let (q_aln, s_aln) = if let (Some(ref qs), Some(ref ss)) = (&ph.qseq, &ph.sseq) {

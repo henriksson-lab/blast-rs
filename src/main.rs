@@ -508,7 +508,82 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    Err("blastp requires --subject (database search not yet implemented for protein)".into())
+    // Database mode
+    let db_path = args.db.as_ref().ok_or("blastp requires --db or --subject")?;
+    let db = BlastDb::open(db_path)?;
+    if db.db_type != DbType::Protein {
+        return Err("blastp requires a protein database".into());
+    }
+
+    let mut params = blast_rs::api::SearchParams::blastp()
+        .evalue(args.evalue)
+        .num_threads(if args.num_threads <= 0 { 1 } else { args.num_threads as usize });
+    // Don't override gap costs with blastn defaults (5/2).
+    // SearchParams::blastp() already sets the correct protein defaults (11/1).
+    // Only override if user explicitly set non-default values on the command line.
+    if args.gapopen() != 5 || args.gapextend() != 2 {
+        params.gap_open = args.gapopen();
+        params.gap_extend = args.gapextend();
+    }
+    if let Some(ws) = args.word_size { params.word_size = ws as usize; }
+    params.max_target_seqs = args.max_target_seqs as usize;
+    params.max_hsps = if args.max_hsps > 0 { Some(args.max_hsps as usize) } else { None };
+    // TODO: composition adjustment is very slow, disable for now
+    params.comp_adjust = 0;
+
+    let mut all_hits = Vec::new();
+    for qrec in &queries {
+        eprintln!("DEBUG run_blastp: query='{}' len={} gap_open={} gap_extend={}", qrec.id, qrec.sequence.len(), params.gap_open, params.gap_extend);
+        let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
+        eprintln!("DEBUG run_blastp: got {} results", results.len());
+        for sr in results {
+            for hsp in sr.hsps {
+                all_hits.push(TabularHit {
+                    query_id: qrec.id.clone(),
+                    subject_id: sr.subject_accession.clone(),
+                    pct_identity: hsp.percent_identity(),
+                    align_len: hsp.alignment_length as i32,
+                    mismatches: (hsp.alignment_length - hsp.num_identities - hsp.num_gaps) as i32,
+                    gap_opens: hsp.num_gaps as i32,
+                    query_start: hsp.query_start as i32 + 1,
+                    query_end: hsp.query_end as i32,
+                    subject_start: hsp.subject_start as i32 + 1,
+                    subject_end: hsp.subject_end as i32,
+                    evalue: hsp.evalue,
+                    bit_score: hsp.bit_score,
+                    query_len: qrec.sequence.len() as i32,
+                    subject_len: sr.subject_len as i32,
+                    raw_score: hsp.score,
+                    qseq: if hsp.query_aln.is_empty() { None } else { Some(String::from_utf8_lossy(&hsp.query_aln).into_owned()) },
+                    sseq: if hsp.subject_aln.is_empty() { None } else { Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned()) },
+                    qframe: 0,
+                    sframe: 0,
+                    subject_taxids: sr.taxids.clone(),
+                    subject_sci_name: String::new(), subject_common_name: String::new(),
+                    subject_blast_name: String::new(), subject_kingdom: String::new(),
+                    num_ident: hsp.num_identities as i32,
+                });
+            }
+        }
+    }
+
+    all_hits.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
+
+    let stdout = io::stdout();
+    let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
+        Box::new(BufWriter::new(File::create(path)?))
+    } else {
+        Box::new(BufWriter::new(stdout.lock()))
+    };
+    let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
+    if outfmt_parts.len() > 1 {
+        let cols = outfmt_parts[1..].join(" ");
+        blast_rs::format::format_tabular_custom(&mut writer, &all_hits, &cols)?;
+    } else {
+        format_tabular(&mut writer, &all_hits)?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1022,78 +1097,103 @@ fn run_blastn_rust(
 
     let apply_dust = args.dust != "no";
 
-    for rec in records {
-        // Keep unmasked query for gapped alignment (matches C engine's sequence_nomask)
-        let query_plus_nomask: Vec<u8> = rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
-        let query_minus_nomask: Vec<u8> = query_plus_nomask.iter().rev()
-            .map(|&b| complement_blastna(b)).collect();
+    // Pre-compute invariant values outside the per-query loop
+    let cutoff_score = {
+        let e = evalue.max(1.0e-297);
+        ((kbp.k * search_space / e).ln() / kbp.lambda).ceil() as i32
+    };
+    let gapped_x_dropoff = (args.xdrop_gap_final * std::f64::consts::LN_2 / kbp.lambda) as i32;
+    let num_threads = if args.num_threads <= 0 { rayon::current_num_threads() } else { args.num_threads as usize };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .stack_size(64 * 1024 * 1024) // 64 MB per thread to avoid stack overflow on large DBs
+        .build()
+        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
-        // Masked query for seed finding (lookup table uses masked version)
-        let mut query_plus_masked = query_plus_nomask.clone();
+    let search_plus = args.strand != "minus";
+    let search_minus = args.strand != "plus";
+
+    // Pre-encode all queries (masked + unmasked, plus + minus strands)
+    struct EncodedQuery {
+        id: String,
+        seq_len: i32,
+        plus_masked: Vec<u8>,
+        minus_masked: Vec<u8>,
+        plus_nomask: Vec<u8>,
+        minus_nomask: Vec<u8>,
+    }
+    let encoded_queries: Vec<EncodedQuery> = records.iter().map(|rec| {
+        let plus_nomask: Vec<u8> = rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
+        let minus_nomask: Vec<u8> = plus_nomask.iter().rev().map(|&b| complement_blastna(b)).collect();
+        let mut plus_masked = plus_nomask.clone();
         if apply_dust {
-            let mask = blast_rs::filter::dust_filter(&query_plus_masked, 64, 2.0);
-            mask.apply(&mut query_plus_masked, 14);
+            let mask = blast_rs::filter::dust_filter(&plus_masked, 64, 2.0);
+            mask.apply(&mut plus_masked, 14);
         }
-        let query_minus_masked: Vec<u8> = query_plus_masked.iter().rev()
-            .map(|&b| complement_blastna(b)).collect();
+        let minus_masked: Vec<u8> = plus_masked.iter().rev().map(|&b| complement_blastna(b)).collect();
+        EncodedQuery {
+            id: rec.id.clone(),
+            seq_len: rec.sequence.len() as i32,
+            plus_masked: if search_plus { plus_masked } else { Vec::new() },
+            minus_masked: if search_minus { minus_masked } else { Vec::new() },
+            plus_nomask: if search_plus { plus_nomask } else { Vec::new() },
+            minus_nomask: if search_minus { minus_nomask } else { Vec::new() },
+        }
+    }).collect();
 
-        // Apply strand filter
-        let search_plus = args.strand != "minus";
-        let search_minus = args.strand != "plus";
-        let qp = if search_plus { &query_plus_masked[..] } else { &[] };
-        let qm = if search_minus { &query_minus_masked[..] } else { &[] };
-        let qp_nomask = if search_plus { &query_plus_nomask[..] } else { &[] };
-        let qm_nomask = if search_minus { &query_minus_nomask[..] } else { &[] };
+    // Scan subjects in parallel. For each subject, check ALL queries.
+    // This keeps subject data in cache across queries (subject-major order).
+    let hitlist_size = args.max_target_seqs;
+    let prelim_hitlist_size = std::cmp::min(
+        std::cmp::max(2 * hitlist_size, 10), hitlist_size + 50) as usize;
 
-        // Compute cutoff score from e-value (matches C engine's BLAST_Cutoffs)
-        let cutoff_score = {
-            let e = evalue.max(1.0e-297);
-            ((kbp.k * search_space / e).ln() / kbp.lambda).ceil() as i32
-        };
-
-        // Gapped search across all subjects using packed NCBI2na (fast, no full decode)
-        let gapped_x_dropoff = (args.xdrop_gap_final * std::f64::consts::LN_2 / kbp.lambda) as i32;
-        let num_threads = if args.num_threads <= 0 { rayon::current_num_threads() } else { args.num_threads as usize };
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .stack_size(64 * 1024 * 1024) // 64 MB per thread to avoid stack overflow on large DBs
-            .build()
-            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-        let oid_hits: Vec<(u32, Vec<blast_rs::search::SearchHsp>)> = pool.install(|| {
-            (0..db.num_oids).into_par_iter().filter_map(|oid| {
-                let packed = db.get_sequence(oid);
-                let seq_len = db.get_seq_len(oid) as usize;
+    // Collect hits: (query_idx, oid, hsps)
+    let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> = pool.install(|| {
+        (0..db.num_oids).into_par_iter().filter_map(|oid| {
+            let packed = db.get_sequence(oid);
+            let seq_len = db.get_seq_len(oid) as usize;
+            let mut results = Vec::new();
+            for (qi, eq) in encoded_queries.iter().enumerate() {
                 let mut hsps = blast_rs::search::blastn_gapped_search_packed(
-                    qp, qm, qp_nomask, qm_nomask,
+                    &eq.plus_masked, &eq.minus_masked,
+                    &eq.plus_nomask, &eq.minus_nomask,
                     packed, seq_len,
                     word_size, reward, penalty, gapopen, gapextend,
                     gapped_x_dropoff, &kbp, search_space, evalue,
                 );
-                // Apply cutoff score filter (matches C engine's preliminary cutoff)
                 hsps.retain(|h| h.score >= cutoff_score);
-                if hsps.is_empty() { None } else { Some((oid, hsps)) }
-            }).collect()
-        });
+                if !hsps.is_empty() {
+                    results.push((qi, oid, hsps));
+                }
+            }
+            if results.is_empty() { None } else { Some(results) }
+        }).collect()
+    });
 
-        // Sort by OID to match C engine's deterministic database scan order
-        let mut oid_hits = oid_hits;
+    // Flatten and group by query
+    let mut per_query_oid_hits: Vec<Vec<(u32, Vec<blast_rs::search::SearchHsp>)>> =
+        vec![Vec::new(); encoded_queries.len()];
+    for subject_results in per_subject_hits {
+        for (qi, oid, hsps) in subject_results {
+            per_query_oid_hits[qi].push((oid, hsps));
+        }
+    }
+
+    // Process each query's results
+    for (qi, mut oid_hits) in per_query_oid_hits.into_iter().enumerate() {
+        let eq = &encoded_queries[qi];
+
+        // Sort by OID for deterministic output
         oid_hits.sort_by_key(|&(oid, _)| oid);
 
-        // Apply hitlist pruning to match C engine behavior:
-        // Keep only the best prelim_hitlist_size subjects (by best e-value per subject).
-        // This matches the C engine's BlastHitList heap which limits tracked subjects.
-        let hitlist_size = args.max_target_seqs;
-        let prelim_hitlist_size = std::cmp::min(
-            std::cmp::max(2 * hitlist_size, 10), hitlist_size + 50) as usize;
+        // Hitlist pruning
         if oid_hits.len() > prelim_hitlist_size {
-            // Sort subjects by best (lowest) e-value, keep top prelim_hitlist_size
             oid_hits.sort_by(|(_, a_hsps), (_, b_hsps)| {
                 let a_best = a_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
                 let b_best = b_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
                 a_best.partial_cmp(&b_best).unwrap_or(std::cmp::Ordering::Equal)
             });
             oid_hits.truncate(prelim_hitlist_size);
-            // Re-sort by OID for deterministic output
             oid_hits.sort_by_key(|&(oid, _)| oid);
         }
 
@@ -1101,7 +1201,7 @@ fn run_blastn_rust(
             for hsp in hsps {
                 let subject_id = db.get_accession(oid)
                     .unwrap_or_else(|| format!("gnl|BL_ORD_ID|{}", oid));
-                let query_len = rec.sequence.len() as i32;
+                let query_len = eq.seq_len;
 
                 let (q_start, q_end) = if hsp.context == 1 {
                     (query_len - hsp.query_end + 1, query_len - hsp.query_start)
@@ -1115,7 +1215,7 @@ fn run_blastn_rust(
                 };
 
                 all_hits.push((oid, TabularHit {
-                    query_id: rec.id.clone(),
+                    query_id: eq.id.clone(),
                     subject_id,
                     pct_identity: if hsp.align_length > 0 {
                         100.0 * hsp.num_ident as f64 / hsp.align_length as f64
@@ -1127,7 +1227,6 @@ fn run_blastn_rust(
                     query_end: q_end,
                     subject_start: s_start,
                     subject_end: s_end,
-                    // Use per-context KBP for exact e-value matching with C engine
                     evalue: if hsp.context == 1 {
                         kbp_minus.raw_to_evalue(hsp.score, searchsp_minus)
                     } else {

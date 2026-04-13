@@ -60,6 +60,140 @@ pub struct GappedParams {
     pub beta: f64,
 }
 
+/// Gumbel block parameters for Spouge finite-size correction (FSC) e-value.
+/// Port of NCBI Blast_GumbelBlk from blast_stat.h.
+#[derive(Debug, Clone)]
+pub struct GumbelBlk {
+    pub lambda: f64,    // gbp->Lambda (gapped lambda from table)
+    pub a: f64,         // gbp->a (alpha from array[6])
+    pub b: f64,         // gbp->b = 2*G*(a_un - a)
+    pub alpha: f64,     // gbp->Alpha (alpha_v from array[9])
+    pub beta: f64,      // gbp->Beta = 2*G*(Alpha_un - Alpha)
+    pub sigma: f64,     // gbp->Sigma (from array[10])
+    pub tau: f64,       // gbp->Tau = 2*G*(Alpha_un - Sigma)
+    pub db_length: i64, // total database length
+}
+
+/// Compute Spouge finite-size correction e-value.
+/// Port of BLAST_SpougeStoE from blast_stat.c:5176.
+/// Uses per-subject lengths for more accurate e-values than simple Karlin formula.
+pub fn spouge_evalue(
+    score: i32,
+    kbp: &KarlinBlk,
+    gbp: &GumbelBlk,
+    query_length: i32,
+    subject_length: i32,
+) -> f64 {
+    let scale_factor = kbp.lambda / gbp.lambda;
+    let db_scale_factor = if gbp.db_length > 0 {
+        gbp.db_length as f64 / subject_length as f64
+    } else {
+        1.0
+    };
+
+    let ai_hat = gbp.a * scale_factor;
+    let bi_hat = gbp.b;
+    let alphai_hat = gbp.alpha * scale_factor;
+    let betai_hat = gbp.beta;
+    let sigma_hat = gbp.sigma * scale_factor;
+    let tau_hat = gbp.tau;
+
+    let aj_hat = ai_hat;
+    let bj_hat = bi_hat;
+    let alphaj_hat = alphai_hat;
+    let betaj_hat = betai_hat;
+
+    const CONST_VAL: f64 = 0.39894228040143267793994605993438; // 1/sqrt(2*PI)
+
+    let y = score as f64;
+    let m = query_length as f64;
+    let n = subject_length as f64;
+
+    let m_li_y = m - (ai_hat * y + bi_hat);
+    let vi_y = (2.0 * alphai_hat / kbp.lambda).max(alphai_hat * y + betai_hat);
+    let sqrt_vi_y = vi_y.sqrt();
+    let m_f = m_li_y / sqrt_vi_y;
+    let p_m_f = erfc_approx(-m_f / std::f64::consts::SQRT_2) / 2.0;
+    let p1 = m_li_y * p_m_f + sqrt_vi_y * CONST_VAL * (-0.5 * m_f * m_f).exp();
+
+    let n_lj_y = n - (aj_hat * y + bj_hat);
+    let vj_y = (2.0 * alphaj_hat / kbp.lambda).max(alphaj_hat * y + betaj_hat);
+    let sqrt_vj_y = vj_y.sqrt();
+    let n_f = n_lj_y / sqrt_vj_y;
+    let p_n_f = erfc_approx(-n_f / std::f64::consts::SQRT_2) / 2.0;
+    let p2 = n_lj_y * p_n_f + sqrt_vj_y * CONST_VAL * (-0.5 * n_f * n_f).exp();
+
+    let c_y = (2.0 * sigma_hat / kbp.lambda).max(sigma_hat * y + tau_hat);
+    let area = p1 * p2 + c_y * p_m_f * p_n_f;
+
+    (area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor).max(0.0)
+}
+
+/// Complementary error function approximation (Abramowitz & Stegun 7.1.26).
+/// Accurate to ~1.5e-7 relative error.
+fn erfc_approx(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
+        + t * (-1.453152027 + t * 1.061405429))));
+    let result = poly * (-x * x).exp();
+    if x >= 0.0 { result } else { 2.0 - result }
+}
+
+/// Build Gumbel block for protein BLOSUM62 with given gap costs.
+/// Port of Blast_GumbelBlkLoadFromTables from blast_stat.c:3696.
+pub fn protein_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Option<GumbelBlk> {
+    // Ungapped params (index 0 in BLOSUM62 table)
+    let a_un = 0.7916;
+    let alpha_un = 4.964660;
+
+    // Find gapped params
+    let gp = lookup_protein_params(gap_open, gap_extend)?;
+
+    // Gapped params from table
+    // Format: (go, ge, lambda, K, H, alpha, beta)
+    // But we also need alpha_v and sigma from the extended table
+    // These are stored in BLOSUM62_EXTENDED_PARAMS
+    let (alpha_v, sigma) = lookup_blosum62_extended(gap_open, gap_extend)?;
+
+    let g = (gap_open + gap_extend) as f64;
+
+    Some(GumbelBlk {
+        lambda: gp.lambda,
+        a: gp.alpha,  // 'a' = alpha from the basic table (position 6 in C array)
+        b: 2.0 * g * (a_un - gp.alpha),
+        alpha: alpha_v,
+        beta: 2.0 * g * (alpha_un - alpha_v),
+        sigma,
+        tau: 2.0 * g * (alpha_un - sigma),
+        db_length,
+    })
+}
+
+/// Extended BLOSUM62 params: (gap_open, gap_extend, alpha_v, sigma)
+/// From NCBI blast_stat.c blosum62_values positions [9] and [10].
+const BLOSUM62_EXTENDED: &[(i32, i32, f64, f64)] = &[
+    (11, 2, 12.6738, 12.7576),
+    (10, 2, 16.4740, 16.6026),
+    ( 9, 2, 22.7519, 22.9500),
+    ( 8, 2, 35.4838, 35.8213),
+    ( 7, 2, 61.2383, 61.8860),
+    ( 6, 2, 140.417, 141.882),
+    (13, 1, 19.5063, 19.8931),
+    (12, 1, 27.8562, 28.4699),
+    (11, 1, 42.6028, 43.6362),
+    (10, 1, 83.1787, 85.0656),
+    ( 9, 1, 210.333, 214.842),
+];
+
+fn lookup_blosum62_extended(gap_open: i32, gap_extend: i32) -> Option<(f64, f64)> {
+    for &(go, ge, alpha_v, sigma) in BLOSUM62_EXTENDED {
+        if go == gap_open && ge == gap_extend {
+            return Some((alpha_v, sigma));
+        }
+    }
+    None
+}
+
 /// Precomputed gap parameter tables for nucleotide scoring.
 /// Format: (gap_open, gap_extend, lambda, K, H, alpha, beta)
 pub const BLASTN_PARAMS_1_3: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
@@ -227,17 +361,20 @@ pub fn compute_length_adjustment(
 }
 
 /// Precomputed Karlin-Altschul parameters for BLOSUM62 with various gap costs.
+/// Values from NCBI blast_stat.c blosum62_values[].
 /// Format: (gap_open, gap_extend, lambda, K, H, alpha, beta)
 pub const BLOSUM62_PARAMS: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
-    (11, 1, 0.267, 0.041, 0.14, 1.24, -0.70),
-    (10, 1, 0.291, 0.075, 0.23, 1.00, -0.55),
-    (9, 1, 0.305, 0.10, 0.30, 0.89, -0.46),
-    (8, 2, 0.270, 0.047, 0.15, 1.18, -0.67),
-    (7, 2, 0.290, 0.070, 0.22, 1.02, -0.57),
-    (6, 2, 0.305, 0.097, 0.29, 0.90, -0.48),
-    (11, 2, 0.235, 0.020, 0.073, 1.55, -0.91),
-    (10, 2, 0.256, 0.032, 0.11, 1.30, -0.76),
-    (9, 2, 0.271, 0.044, 0.15, 1.16, -0.67),
+    (11, 2, 0.297, 0.082, 0.27, 1.1, -10.0),
+    (10, 2, 0.291, 0.075, 0.23, 1.3, -15.0),
+    ( 9, 2, 0.279, 0.058, 0.19, 1.5, -19.0),
+    ( 8, 2, 0.264, 0.045, 0.15, 1.8, -26.0),
+    ( 7, 2, 0.239, 0.027, 0.10, 2.5, -46.0),
+    ( 6, 2, 0.201, 0.012, 0.061, 3.3, -58.0),
+    (13, 1, 0.292, 0.071, 0.23, 1.2, -11.0),
+    (12, 1, 0.283, 0.059, 0.19, 1.5, -19.0),
+    (11, 1, 0.267, 0.041, 0.14, 1.9, -30.0),
+    (10, 1, 0.243, 0.024, 0.10, 2.5, -44.0),
+    ( 9, 1, 0.206, 0.010, 0.052, 4.0, -87.0),
 ];
 
 /// Look up gapped KBP for protein scoring (BLOSUM62).
