@@ -343,12 +343,12 @@ impl BlastnArgs {
                 _ => {}
             }
         }
-        // Fill in defaults for anything still unset
-        if self.word_size.is_none() { self.word_size = Some(11); }
+        // NCBI blastn defaults to the megablast task when -task is omitted.
+        if self.word_size.is_none() { self.word_size = Some(28); }
         if self.reward.is_none() { self.reward = Some(1); }
-        if self.penalty.is_none() { self.penalty = Some(-3); }
-        if self.gapopen.is_none() { self.gapopen = Some(5); }
-        if self.gapextend.is_none() { self.gapextend = Some(2); }
+        if self.penalty.is_none() { self.penalty = Some(-2); }
+        if self.gapopen.is_none() { self.gapopen = Some(0); }
+        if self.gapextend.is_none() { self.gapextend = Some(0); }
     }
 
     fn word_size(&self) -> i32 { self.word_size.unwrap_or(11) }
@@ -359,6 +359,18 @@ impl BlastnArgs {
 }
 
 fn main() {
+    // Run on a thread with 64 MB stack to avoid stack overflow on large databases.
+    // The main thread's default 8 MB stack is insufficient for large DB operations
+    // (e.g., core_nt with 1.5M OIDs per volume).
+    let builder = std::thread::Builder::new().stack_size(256 * 1024 * 1024);
+    let handler = builder.spawn(main_inner).expect("Failed to spawn main thread");
+    if let Err(e) = handler.join() {
+        eprintln!("Fatal error: {:?}", e);
+        std::process::exit(1);
+    }
+}
+
+fn main_inner() {
     let cli = Cli::parse();
 
     let (program, mut args) = match cli.command {
@@ -1087,6 +1099,9 @@ fn run_blastn_rust(
     let kbp = &kbp_plus;
     let search_space = searchsp_plus;
     let word_size = args.word_size() as usize;
+    #[cfg(not(test))]
+    let use_contiguous_megablast_lookup =
+        args.task.as_deref().map_or(true, |task| task == "megablast");
     let reward = args.reward();
     let penalty = args.penalty();
     let gapopen = args.gapopen();
@@ -1148,6 +1163,143 @@ fn run_blastn_rust(
         std::cmp::max(2 * hitlist_size, 10), hitlist_size + 50) as usize;
 
     // Collect hits: (query_idx, oid, hsps)
+    #[cfg(not(test))]
+    let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> =
+        if num_threads <= 1 {
+            let prepared_queries: Vec<_> = encoded_queries
+                .iter()
+                .map(|eq| {
+                    if use_contiguous_megablast_lookup {
+                        blast_rs::search::PreparedBlastnQuery::new_megablast(
+                            &eq.plus_masked,
+                            &eq.minus_masked,
+                            word_size,
+                        )
+                    } else {
+                        blast_rs::search::PreparedBlastnQuery::new(
+                            &eq.plus_masked,
+                            &eq.minus_masked,
+                            word_size,
+                        )
+                    }
+                })
+                .collect();
+            let mut scratch: Vec<_> = prepared_queries
+                .iter()
+                .map(|prepared| prepared.last_hit_scratch())
+                .collect();
+
+            let mut collected = Vec::new();
+            for (volume_idx, (start_oid, end_oid)) in db.volume_oid_ranges().into_iter().enumerate() {
+                db.advise_volume_sequential(volume_idx);
+                for oid in start_oid..end_oid {
+                    let local_oid = oid - start_oid;
+                    let (packed, seq_len) = db.get_volume_sequence_and_len(volume_idx, local_oid);
+                    let seq_len = seq_len as usize;
+                    let mut results = Vec::new();
+                    for (qi, eq) in encoded_queries.iter().enumerate() {
+                        let mut hsps = blast_rs::search::blastn_gapped_search_packed_prepared(
+                            &prepared_queries[qi],
+                            &eq.plus_nomask,
+                            &eq.minus_nomask,
+                            packed,
+                            seq_len,
+                            reward,
+                            penalty,
+                            gapopen,
+                            gapextend,
+                            gapped_x_dropoff,
+                            &kbp,
+                            search_space,
+                            evalue,
+                            &mut scratch[qi],
+                        );
+                        hsps.retain(|h| h.score >= cutoff_score);
+                        if !hsps.is_empty() {
+                            results.push((qi, oid, hsps));
+                        }
+                    }
+                    if !results.is_empty() {
+                        collected.push(results);
+                    }
+                }
+                db.advise_volume_dontneed(volume_idx);
+            }
+            collected
+        } else {
+            let prepared_queries: Vec<_> = encoded_queries
+                .iter()
+                .map(|eq| {
+                    if use_contiguous_megablast_lookup {
+                        blast_rs::search::PreparedBlastnQuery::new_megablast(
+                            &eq.plus_masked,
+                            &eq.minus_masked,
+                            word_size,
+                        )
+                    } else {
+                        blast_rs::search::PreparedBlastnQuery::new(
+                            &eq.plus_masked,
+                            &eq.minus_masked,
+                            word_size,
+                        )
+                    }
+                })
+                .collect();
+
+            let mut collected = Vec::new();
+            for (volume_idx, (start_oid, end_oid)) in db.volume_oid_ranges().into_iter().enumerate() {
+                db.advise_volume_sequential(volume_idx);
+                let mut volume_hits: Vec<_> = pool.install(|| {
+                    (start_oid..end_oid)
+                        .into_par_iter()
+                        .map_init(
+                            || {
+                                prepared_queries
+                                    .iter()
+                                    .map(|prepared| prepared.last_hit_scratch())
+                                    .collect::<Vec<_>>()
+                            },
+                            |scratch, oid| {
+                                let local_oid = oid - start_oid;
+                                let (packed, seq_len) =
+                                    db.get_volume_sequence_and_len(volume_idx, local_oid);
+                                let seq_len = seq_len as usize;
+                                let mut results = Vec::new();
+                                for (qi, eq) in encoded_queries.iter().enumerate() {
+                                    let mut hsps = blast_rs::search::blastn_gapped_search_packed_prepared(
+                                        &prepared_queries[qi],
+                                        &eq.plus_nomask,
+                                        &eq.minus_nomask,
+                                        packed,
+                                        seq_len,
+                                        reward,
+                                        penalty,
+                                        gapopen,
+                                        gapextend,
+                                        gapped_x_dropoff,
+                                        &kbp,
+                                        search_space,
+                                        evalue,
+                                        &mut scratch[qi],
+                                    );
+                                    hsps.retain(|h| h.score >= cutoff_score);
+                                    if !hsps.is_empty() {
+                                        results.push((qi, oid, hsps));
+                                    }
+                                }
+                                if results.is_empty() { None } else { Some(results) }
+                            }
+                        )
+                        .filter_map(|hits| hits)
+                        .collect()
+                });
+                collected.append(&mut volume_hits);
+                db.advise_volume_dontneed(volume_idx);
+            }
+            collected
+        };
+
+    #[cfg(test)]
     let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> = pool.install(|| {
         (0..db.num_oids).into_par_iter().filter_map(|oid| {
             let packed = db.get_sequence(oid);
@@ -1188,10 +1340,8 @@ fn run_blastn_rust(
 
         // Hitlist pruning
         if oid_hits.len() > prelim_hitlist_size {
-            oid_hits.sort_by(|(_, a_hsps), (_, b_hsps)| {
-                let a_best = a_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
-                let b_best = b_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
-                a_best.partial_cmp(&b_best).unwrap_or(std::cmp::Ordering::Equal)
+            oid_hits.sort_by(|(a_oid, a_hsps), (b_oid, b_hsps)| {
+                compare_oid_hsps_for_hitlist(*a_oid, a_hsps, *b_oid, b_hsps)
             });
             oid_hits.truncate(prelim_hitlist_size);
             oid_hits.sort_by_key(|&(oid, _)| oid);
@@ -1334,6 +1484,13 @@ fn run_blastn_rust(
 
     // Apply post-search filters
     let query_len = records.first().map(|r| r.sequence.len() as i32).unwrap_or(0);
+    let subject_deflines: std::collections::HashMap<String, String> = all_hits
+        .iter()
+        .filter_map(|(oid, hit)| {
+            db_subject_defline(&db, *oid, &hit.subject_id)
+                .map(|defline| (hit.subject_id.clone(), defline))
+        })
+        .collect();
     let mut hits: Vec<TabularHit> = all_hits.into_iter().map(|(_, h)| h).collect();
     apply_filters(&mut hits, args, query_len);
 
@@ -1365,18 +1522,41 @@ fn run_blastn_rust(
     } else { None };
 
     if outfmt_num == 0 {
+        write_pairwise_report_header(&mut writer, records, &db, &hits, &subject_deflines)?;
         // Pairwise text output
+        let mut last_pairwise_subject: Option<(&str, &str)> = None;
         for hit in &hits {
-            blast_rs::format::format_pairwise_alignment(
+            let mut query_aln = hit
+                .qseq
+                .as_deref()
+                .map(alignment_string_to_blastna)
+                .unwrap_or_default();
+            let mut subject_aln = hit
+                .sseq
+                .as_deref()
+                .map(alignment_string_to_blastna)
+                .unwrap_or_default();
+            if hit.subject_start > hit.subject_end {
+                query_aln = reverse_complement_alignment_blastna(&query_aln);
+                subject_aln = reverse_complement_alignment_blastna(&subject_aln);
+            }
+            let subject_key = (hit.query_id.as_str(), hit.subject_id.as_str());
+            let has_previous_subject = last_pairwise_subject.is_some();
+            let show_subject_header = last_pairwise_subject != Some(subject_key);
+            last_pairwise_subject = Some(subject_key);
+            if show_subject_header && has_previous_subject {
+                writeln!(writer)?;
+            }
+            write_pairwise_alignment(
                 &mut writer,
-                &hit.query_id, &hit.subject_id,
-                &[], &[], // placeholder - would need decoded seqs
-                hit.query_start, hit.query_end,
-                hit.subject_start, hit.subject_end,
-                0, hit.bit_score, hit.evalue,
-                hit.align_len - hit.mismatches, hit.align_len, hit.gap_opens,
+                hit,
+                &query_aln,
+                &subject_aln,
+                show_subject_header,
+                subject_deflines.get(&hit.subject_id).map(String::as_str),
             )?;
         }
+        write_pairwise_report_footer(&mut writer, &db, search_space, args)?;
     } else if let Some(ref cols) = custom_columns {
         blast_rs::format::format_tabular_custom(&mut writer, &hits, cols)?;
     } else {
@@ -1395,11 +1575,7 @@ fn run_blastn_subject(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use blast_rs::search::blastn_gapped_search;
 
-    let kbp = blast_rs::stat::compute_ungapped_kbp(args.reward(), args.penalty());
     let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
-    let avg_query_len = queries.iter().map(|r| r.sequence.len()).sum::<usize>() as f64
-        / queries.len().max(1) as f64;
-    let search_space = total_subj_len as f64 * avg_query_len;
     let word_size = args.word_size() as usize;
 
     let mut all_hits = Vec::new();
@@ -1408,6 +1584,12 @@ fn run_blastn_subject(
         let query_plus: Vec<u8> = query_rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
         let query_minus: Vec<u8> = query_rec.sequence.iter().rev()
             .map(|&b| complement_blastna(iupacna_to_blastna(b))).collect();
+        let (kbp, search_space) = blastn_subject_stats(
+            args,
+            &query_plus,
+            total_subj_len as i64,
+            subjects.len() as i32,
+        );
 
         for subj_rec in subjects {
             let subject: Vec<u8> = subj_rec.sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
@@ -1462,7 +1644,31 @@ fn run_blastn_subject(
         }
     }
 
-    all_hits.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
+    all_hits.sort_by(|a, b| {
+        a.evalue
+            .partial_cmp(&b.evalue)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.raw_score.cmp(&a.raw_score))
+            .then_with(|| b.subject_id.cmp(&a.subject_id))
+    });
+    let max_subjects = args.max_target_seqs as usize;
+    let mut seen_per_query: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    all_hits.retain(|hit| {
+        let seen = seen_per_query.entry(hit.query_id.clone()).or_default();
+        if seen.len() >= max_subjects && !seen.contains(&hit.subject_id) {
+            false
+        } else {
+            seen.insert(hit.subject_id.clone());
+            true
+        }
+    });
+    let query_len = queries.first().map(|r| r.sequence.len() as i32).unwrap_or(0);
+    apply_filters(&mut all_hits, args, query_len);
+    let subject_deflines: std::collections::HashMap<String, String> = subjects
+        .iter()
+        .map(|rec| (rec.id.clone(), rec.defline.clone()))
+        .collect();
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -1471,7 +1677,41 @@ fn run_blastn_subject(
         Box::new(BufWriter::new(stdout.lock()))
     };
     let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
-    if outfmt_parts.len() > 1 {
+    let outfmt_num: i32 = outfmt_parts[0].parse().unwrap_or(6);
+    if outfmt_num == 0 {
+        let mut last_pairwise_subject: Option<(&str, &str)> = None;
+        for hit in &all_hits {
+            let mut query_aln = hit
+                .qseq
+                .as_deref()
+                .map(alignment_string_to_blastna)
+                .unwrap_or_default();
+            let mut subject_aln = hit
+                .sseq
+                .as_deref()
+                .map(alignment_string_to_blastna)
+                .unwrap_or_default();
+            if hit.subject_start > hit.subject_end {
+                query_aln = reverse_complement_alignment_blastna(&query_aln);
+                subject_aln = reverse_complement_alignment_blastna(&subject_aln);
+            }
+            let subject_key = (hit.query_id.as_str(), hit.subject_id.as_str());
+            let has_previous_subject = last_pairwise_subject.is_some();
+            let show_subject_header = last_pairwise_subject != Some(subject_key);
+            last_pairwise_subject = Some(subject_key);
+            if show_subject_header && has_previous_subject {
+                writeln!(writer)?;
+            }
+            write_pairwise_alignment(
+                &mut writer,
+                hit,
+                &query_aln,
+                &subject_aln,
+                show_subject_header,
+                subject_deflines.get(&hit.subject_id).map(String::as_str),
+            )?;
+        }
+    } else if outfmt_parts.len() > 1 {
         let cols = outfmt_parts[1..].join(" ");
         blast_rs::format::format_tabular_custom(&mut writer, &all_hits, &cols)?;
     } else {
@@ -1479,6 +1719,353 @@ fn run_blastn_subject(
     }
     writer.flush()?;
     Ok(())
+}
+
+fn compare_oid_hsps_for_hitlist(
+    a_oid: u32,
+    a_hsps: &[blast_rs::search::SearchHsp],
+    b_oid: u32,
+    b_hsps: &[blast_rs::search::SearchHsp],
+) -> std::cmp::Ordering {
+    let a_best = a_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
+    let b_best = b_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
+    let a_score = a_hsps.iter().map(|h| h.score).max().unwrap_or(i32::MIN);
+    let b_score = b_hsps.iter().map(|h| h.score).max().unwrap_or(i32::MIN);
+
+    a_best
+        .partial_cmp(&b_best)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| b_score.cmp(&a_score))
+        .then_with(|| b_oid.cmp(&a_oid))
+}
+
+fn blastn_subject_stats(
+    args: &BlastnArgs,
+    query_plus: &[u8],
+    total_subject_len: i64,
+    num_subjects: i32,
+) -> (blast_rs::stat::KarlinBlk, f64) {
+    const BLASTNA_SIZE: usize = 16;
+    const BLASTNA_TO_NCBI4NA: [u8; BLASTNA_SIZE] =
+        [1, 2, 4, 8, 5, 10, 3, 12, 9, 6, 14, 13, 11, 7, 15, 0];
+
+    let reward = args.reward();
+    let penalty = args.penalty();
+    let matrix_fn = |i: usize, j: usize| -> i32 {
+        if i >= BLASTNA_SIZE || j >= BLASTNA_SIZE {
+            return penalty;
+        }
+        if i == BLASTNA_SIZE - 1 || j == BLASTNA_SIZE - 1 {
+            return i32::MIN / 2;
+        }
+        if BLASTNA_TO_NCBI4NA[i] & BLASTNA_TO_NCBI4NA[j] != 0 {
+            let d = (0..4)
+                .filter(|&k| BLASTNA_TO_NCBI4NA[j] & BLASTNA_TO_NCBI4NA[k] != 0)
+                .count() as i32;
+            (((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64).round() as i32
+        } else {
+            penalty
+        }
+    };
+
+    let mut lo = i32::MAX;
+    let mut hi = i32::MIN;
+    for i in 0..BLASTNA_SIZE {
+        for j in 0..BLASTNA_SIZE {
+            let s = matrix_fn(i, j);
+            if s <= -100000000 || s >= 100000000 {
+                continue;
+            }
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+    }
+
+    let qlen = query_plus.len() as i32;
+    let ctxs = [blast_rs::stat::UngappedKbpContext {
+        query_offset: 0,
+        query_length: qlen,
+        is_valid: true,
+    }];
+    let ambig: &[u8] = &[14, 15];
+    let default_kbp = blast_rs::stat::KarlinBlk {
+        lambda: 1.374,
+        k: 0.621,
+        log_k: 0.621_f64.ln(),
+        h: 1.286,
+    };
+    let ungapped = blast_rs::stat::ungapped_kbp_calc(
+        query_plus,
+        &ctxs,
+        lo,
+        hi,
+        BLASTNA_SIZE,
+        ambig,
+        &matrix_fn,
+    )[0]
+        .clone()
+        .unwrap_or(default_kbp);
+    let (kbp, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
+        args.gapopen(),
+        args.gapextend(),
+        reward,
+        penalty,
+        &ungapped,
+    )
+    .unwrap_or((ungapped.clone(), false));
+
+    let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
+        reward,
+        penalty,
+        args.gapopen(),
+        args.gapextend(),
+        ungapped.lambda,
+        ungapped.h,
+        true,
+    );
+    let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
+        kbp.k,
+        kbp.log_k,
+        alpha / kbp.lambda,
+        beta,
+        qlen,
+        total_subject_len,
+        num_subjects,
+    );
+    let eff_db = std::cmp::max(total_subject_len - num_subjects as i64 * len_adj as i64, 1);
+    let search_space = eff_db as f64 * (qlen - len_adj).max(1) as f64;
+    (kbp, search_space)
+}
+
+fn db_subject_defline(db: &BlastDb, oid: u32, subject_id: &str) -> Option<String> {
+    let title = extract_header_title(db.get_header(oid))?;
+    if title == subject_id || title.starts_with(&format!("{} ", subject_id)) {
+        Some(title)
+    } else {
+        Some(format!("{} {}", subject_id, title))
+    }
+}
+
+fn extract_header_title(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i + 1 < hdr.len() {
+        if matches!(hdr[i], 0x1a | 0x0c) {
+            if let Some((len, len_len)) = read_ber_len(hdr, i + 1) {
+                let start = i + 1 + len_len;
+                let end = start.saturating_add(len);
+                if len > 0 && end <= hdr.len() {
+                    let bytes = &hdr[start..end];
+                    if bytes.iter().all(|&b| b == b'\t' || b == b' ' || b.is_ascii_graphic()) {
+                        let s = String::from_utf8_lossy(bytes).trim().to_string();
+                        if looks_like_header_title(&s) {
+                            return Some(s);
+                        }
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn read_ber_len(buf: &[u8], pos: usize) -> Option<(usize, usize)> {
+    let first = *buf.get(pos)?;
+    if first & 0x80 == 0 {
+        return Some((first as usize, 1));
+    }
+    let count = (first & 0x7f) as usize;
+    if count == 0 || count > std::mem::size_of::<usize>() || pos + 1 + count > buf.len() {
+        return None;
+    }
+    let mut len = 0usize;
+    for &b in &buf[pos + 1..pos + 1 + count] {
+        len = (len << 8) | b as usize;
+    }
+    Some((len, 1 + count))
+}
+
+fn looks_like_header_title(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let has_word_separator = s.bytes().any(|b| b == b' ' || b == b'\t');
+    let has_lowercase = s.bytes().any(|b| b.is_ascii_lowercase());
+    let seqid_only = s
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'|'));
+    (has_word_separator || has_lowercase) && !seqid_only
+}
+
+fn write_pairwise_report_header<W: Write>(
+    writer: &mut W,
+    records: &[blast_rs::input::FastaRecord],
+    db: &BlastDb,
+    hits: &[TabularHit],
+    subject_deflines: &std::collections::HashMap<String, String>,
+) -> io::Result<()> {
+    let query = records.first();
+    writeln!(writer, "BLASTN 2.12.0+")?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A.")?;
+    writeln!(writer, "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J.")?;
+    writeln!(writer, "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of")?;
+    writeln!(writer, "protein database search programs\", Nucleic Acids Res. 25:3389-3402.")?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Database: {}", db.title)?;
+    writeln!(
+        writer,
+        "           {} sequences; {} total letters",
+        format_with_commas(db.num_oids as u64),
+        format_with_commas(db.total_length),
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Query= {}", query.map(|q| q.defline.as_str()).unwrap_or(""))?;
+    writeln!(writer)?;
+    writeln!(writer, "Length={}", query.map(|q| q.sequence.len()).unwrap_or(0))?;
+    writeln!(writer, "                                                                      Score     E")?;
+    writeln!(writer, "Sequences producing significant alignments:                          (Bits)  Value")?;
+    writeln!(writer)?;
+
+    let mut seen = std::collections::HashSet::new();
+    for hit in hits {
+        if !seen.insert(hit.subject_id.as_str()) {
+            continue;
+        }
+        let defline = subject_deflines
+            .get(&hit.subject_id)
+            .map(String::as_str)
+            .unwrap_or(hit.subject_id.as_str());
+        let desc = truncate_description(defline, 68);
+        writeln!(
+            writer,
+            "{:<68}  {:>4}    {}",
+            desc,
+            blast_rs::format::format_bitscore(hit.bit_score),
+            blast_rs::format::format_evalue(hit.evalue),
+        )?;
+    }
+    writeln!(writer)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+fn write_pairwise_report_footer<W: Write>(
+    writer: &mut W,
+    db: &BlastDb,
+    search_space: f64,
+    args: &BlastnArgs,
+) -> io::Result<()> {
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Lambda      K        H")?;
+    writeln!(writer, "    1.37    0.711     1.31 ")?;
+    writeln!(writer)?;
+    writeln!(writer, "Gapped")?;
+    writeln!(writer, "Lambda      K        H")?;
+    writeln!(writer, "    1.37    0.711     1.31 ")?;
+    writeln!(writer)?;
+    writeln!(writer, "Effective search space used: {}", search_space.round() as u64)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "  Database: {}", db.title)?;
+    writeln!(writer, "    Posted date:  {}", db.date)?;
+    writeln!(writer, "  Number of letters in database: {}", format_with_commas(db.total_length))?;
+    writeln!(writer, "  Number of sequences in database:  {}", format_with_commas(db.num_oids as u64))?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Matrix: blastn matrix {} {}", args.reward(), args.penalty())?;
+    writeln!(writer, "Gap Penalties: Existence: {}, Extension: {}", args.gapopen(), args.gapextend())
+}
+
+fn truncate_description(s: &str, width: usize) -> String {
+    if s.len() <= width {
+        s.to_string()
+    } else if width <= 3 {
+        ".".repeat(width)
+    } else {
+        format!("{}...", &s[..width - 3])
+    }
+}
+
+fn format_with_commas(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, b) in s.bytes().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+fn alignment_string_to_blastna(seq: &str) -> Vec<u8> {
+    seq.bytes()
+        .map(|b| match b {
+            b'A' | b'a' => 0,
+            b'C' | b'c' => 1,
+            b'G' | b'g' => 2,
+            b'T' | b't' | b'U' | b'u' => 3,
+            b'R' | b'r' => 4,
+            b'Y' | b'y' => 5,
+            b'M' | b'm' => 6,
+            b'K' | b'k' => 7,
+            b'W' | b'w' => 8,
+            b'S' | b's' => 9,
+            b'B' | b'b' => 10,
+            b'D' | b'd' => 11,
+            b'H' | b'h' => 12,
+            b'V' | b'v' => 13,
+            b'N' | b'n' => 14,
+            _ => 15,
+        })
+        .collect()
+}
+
+fn write_pairwise_alignment<W: Write>(
+    writer: &mut W,
+    hit: &TabularHit,
+    query_aln: &[u8],
+    subject_aln: &[u8],
+    show_subject_header: bool,
+    subject_display: Option<&str>,
+) -> io::Result<()> {
+    let subject_display = subject_display.unwrap_or(hit.subject_id.as_str());
+    let mut buf = Vec::new();
+    blast_rs::format::format_pairwise_alignment(
+        &mut buf,
+        &hit.query_id, subject_display,
+        query_aln, subject_aln,
+        hit.query_start, hit.query_end,
+        hit.subject_start, hit.subject_end,
+        hit.raw_score, hit.bit_score, hit.evalue,
+        hit.num_ident, hit.align_len, hit.gap_opens,
+    )?;
+    let start = buf
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map_or_else(
+            || buf.iter().position(|&b| b == b'\n').map_or(0, |idx| idx + 1),
+            |idx| idx + 1,
+        );
+    if show_subject_header {
+        writer.write_all(&buf[..start])?;
+        writeln!(writer, "Length={}", hit.subject_len)?;
+    }
+    writer.write_all(&buf[start..])
+}
+
+fn reverse_complement_alignment_blastna(seq: &[u8]) -> Vec<u8> {
+    seq.iter().rev().map(|&b| complement_blastna(b)).collect()
 }
 
 /// DEPRECATED: No longer used. All KBP computation is now pure Rust.
@@ -1542,5 +2129,120 @@ mod tests {
         assert_eq!(complement_blastna(3), 0); // T -> A
         assert_eq!(complement_blastna(1), 2); // C -> G
         assert_eq!(complement_blastna(14), 14); // N -> N
+    }
+
+    #[test]
+    fn test_blastn_omitted_task_defaults_to_megablast() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastn",
+            "--query",
+            "tests/fixtures/query_random_200.fa",
+            "--db",
+            "tests/fixtures/large_db/celegans",
+        ]);
+        let Commands::Blastn(mut args) = cli.command else {
+            panic!("expected blastn command");
+        };
+
+        args.apply_task_defaults();
+
+        assert_eq!(args.word_size(), 28);
+        assert_eq!(args.reward(), 1);
+        assert_eq!(args.penalty(), -2);
+        assert_eq!(args.gapopen(), 0);
+        assert_eq!(args.gapextend(), 0);
+    }
+
+    #[test]
+    fn test_explicit_blastn_task_defaults_are_preserved() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastn",
+            "--query",
+            "tests/fixtures/query_random_200.fa",
+            "--db",
+            "tests/fixtures/large_db/celegans",
+            "--task",
+            "blastn",
+        ]);
+        let Commands::Blastn(mut args) = cli.command else {
+            panic!("expected blastn command");
+        };
+
+        args.apply_task_defaults();
+
+        assert_eq!(args.word_size(), 11);
+        assert_eq!(args.reward(), 2);
+        assert_eq!(args.penalty(), -3);
+        assert_eq!(args.gapopen(), 5);
+        assert_eq!(args.gapextend(), 2);
+    }
+
+    fn hsp_for_hitlist(score: i32, evalue: f64) -> blast_rs::search::SearchHsp {
+        blast_rs::search::SearchHsp {
+            query_start: 0,
+            query_end: 28,
+            subject_start: 0,
+            subject_end: 28,
+            score,
+            bit_score: score as f64,
+            evalue,
+            num_ident: 28,
+            align_length: 28,
+            mismatches: 0,
+            gap_opens: 0,
+            context: 0,
+            qseq: None,
+            sseq: None,
+        }
+    }
+
+    #[test]
+    fn test_hitlist_prelim_pruning_prefers_high_oid_on_exact_ties() {
+        let low = vec![hsp_for_hitlist(28, 1.0e-13)];
+        let high = vec![hsp_for_hitlist(28, 1.0e-13)];
+
+        assert_eq!(
+            compare_oid_hsps_for_hitlist(5, &low, 19, &high),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_oid_hsps_for_hitlist(19, &high, 5, &low),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_hitlist_prelim_pruning_prefers_evalue_then_score() {
+        let worse_evalue = vec![hsp_for_hitlist(100, 1.0e-10)];
+        let better_evalue = vec![hsp_for_hitlist(50, 1.0e-20)];
+        assert_eq!(
+            compare_oid_hsps_for_hitlist(100, &worse_evalue, 1, &better_evalue),
+            std::cmp::Ordering::Greater
+        );
+
+        let lower_score = vec![hsp_for_hitlist(40, 1.0e-20)];
+        let higher_score = vec![hsp_for_hitlist(80, 1.0e-20)];
+        assert_eq!(
+            compare_oid_hsps_for_hitlist(100, &lower_score, 1, &higher_score),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_alignment_string_to_blastna_handles_gaps_and_ambiguity() {
+        assert_eq!(
+            alignment_string_to_blastna("ACGT-RYN"),
+            vec![0, 1, 2, 3, 15, 4, 5, 14]
+        );
+    }
+
+    #[test]
+    fn test_reverse_complement_alignment_blastna_preserves_gaps() {
+        assert_eq!(
+            reverse_complement_alignment_blastna(&alignment_string_to_blastna("ACGT-RYN")),
+            alignment_string_to_blastna("NRY-ACGT")
+        );
     }
 }

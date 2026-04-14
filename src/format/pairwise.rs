@@ -3,8 +3,49 @@
 
 use std::io::Write;
 
+use crate::format::tabular::format_evalue;
+
 /// Format a single alignment in pairwise text format.
 pub fn format_pairwise_alignment<W: Write>(
+    writer: &mut W,
+    query_id: &str,
+    subject_id: &str,
+    query_seq: &[u8],   // BLASTNA encoded
+    subject_seq: &[u8], // BLASTNA encoded
+    q_start: i32,
+    q_end: i32,
+    s_start: i32,
+    s_end: i32,
+    score: i32,
+    bit_score: f64,
+    evalue: f64,
+    num_ident: i32,
+    align_len: i32,
+    gap_opens: i32,
+) -> std::io::Result<()> {
+    format_pairwise_alignment_with_header(
+        writer,
+        query_id,
+        subject_id,
+        query_seq,
+        subject_seq,
+        q_start,
+        q_end,
+        s_start,
+        s_end,
+        score,
+        bit_score,
+        evalue,
+        num_ident,
+        align_len,
+        gap_opens,
+        true,
+    )
+}
+
+/// Format one HSP in pairwise text format, optionally suppressing the subject
+/// header when another HSP for the same subject has already introduced it.
+pub fn format_pairwise_alignment_with_header<W: Write>(
     writer: &mut W,
     _query_id: &str,
     subject_id: &str,
@@ -20,6 +61,7 @@ pub fn format_pairwise_alignment<W: Write>(
     num_ident: i32,
     align_len: i32,
     gap_opens: i32,
+    show_subject_header: bool,
 ) -> std::io::Result<()> {
     let pident = if align_len > 0 {
         100.0 * num_ident as f64 / align_len as f64
@@ -27,11 +69,13 @@ pub fn format_pairwise_alignment<W: Write>(
         0.0
     };
 
-    writeln!(writer, "> {}", subject_id)?;
+    if show_subject_header {
+        write_wrapped_subject_header(writer, subject_id)?;
+    }
     writeln!(writer, "")?;
-    writeln!(writer, " Score = {:.1} bits ({}),  Expect = {:.2e}",
-        bit_score, score, evalue)?;
-    writeln!(writer, " Identities = {}/{} ({}%),  Gaps = {}/{} ({}%)",
+    writeln!(writer, " Score = {:.1} bits ({}),  Expect = {}",
+        bit_score, score, format_evalue(evalue))?;
+    writeln!(writer, " Identities = {}/{} ({}%), Gaps = {}/{} ({}%)",
         num_ident, align_len,
         (pident + 0.5) as i32,
         gap_opens, align_len,
@@ -50,7 +94,19 @@ pub fn format_pairwise_alignment<W: Write>(
     };
 
     let line_width = 60;
-    let q_len = (q_end - q_start) as usize;
+    let coord_width = q_start
+        .abs()
+        .max(q_end.abs())
+        .max(s_start.abs())
+        .max(s_end.abs())
+        .to_string()
+        .len();
+    let sequence_column = 5 + 2 + coord_width + 2;
+    let q_len = if query_seq.is_empty() || subject_seq.is_empty() {
+        (q_end - q_start).unsigned_abs() as usize + 1
+    } else {
+        query_seq.len().max(subject_seq.len())
+    };
     let mut pos = 0;
     let mut qi = q_start;
     let mut si = s_start;
@@ -60,7 +116,7 @@ pub fn format_pairwise_alignment<W: Write>(
         let chunk = line_width.min(q_len - pos);
 
         // Query line
-        write!(writer, "Query  {:<6} ", qi)?;
+        write!(writer, "Query  {:<width$}  ", qi, width = coord_width)?;
         for i in 0..chunk {
             if pos + i < query_seq.len() {
                 write!(writer, "{}", blastna_to_char(query_seq[pos + i]))?;
@@ -69,7 +125,9 @@ pub fn format_pairwise_alignment<W: Write>(
         writeln!(writer, "  {}", qi + chunk as i32 - 1)?;
 
         // Match line
-        write!(writer, "              ")?;
+        for _ in 0..sequence_column {
+            write!(writer, " ")?;
+        }
         for i in 0..chunk {
             if pos + i < query_seq.len() && pos + i < subject_seq.len()
                 && query_seq[pos + i] == subject_seq[pos + i] {
@@ -81,7 +139,7 @@ pub fn format_pairwise_alignment<W: Write>(
         writeln!(writer)?;
 
         // Subject line
-        write!(writer, "Sbjct  {:<6} ", si)?;
+        write!(writer, "Sbjct  {:<width$}  ", si, width = coord_width)?;
         for i in 0..chunk {
             if pos + i < subject_seq.len() {
                 write!(writer, "{}", blastna_to_char(subject_seq[pos + i]))?;
@@ -97,6 +155,20 @@ pub fn format_pairwise_alignment<W: Write>(
     }
 
     Ok(())
+}
+
+fn write_wrapped_subject_header<W: Write>(writer: &mut W, subject_id: &str) -> std::io::Result<()> {
+    const MAX_HEADER_WIDTH: usize = 80;
+    let mut line = format!(">{}", subject_id);
+    while line.len() > MAX_HEADER_WIDTH {
+        let split = line[..MAX_HEADER_WIDTH]
+            .rfind(' ')
+            .filter(|&idx| idx > 0)
+            .unwrap_or(MAX_HEADER_WIDTH);
+        writeln!(writer, "{}", &line[..split + 1])?;
+        line = line[split + 1..].to_string();
+    }
+    writeln!(writer, "{}", line)
 }
 
 #[cfg(test)]
@@ -115,10 +187,48 @@ mod tests {
             16, 30.0, 1e-5, 8, 8, 0,
         ).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("> subject1"));
+        assert!(output.contains(">subject1"));
         assert!(output.contains("Score"));
         assert!(output.contains("Query"));
         assert!(output.contains("Sbjct"));
+    }
+
+    #[test]
+    fn test_pairwise_coordinate_width_matches_blast_columns() {
+        let mut buf = Vec::new();
+        let query = vec![0u8, 1, 2, 3];
+        let subject = query.clone();
+        format_pairwise_alignment(
+            &mut buf, "query1", "subject1",
+            &query, &subject,
+            1, 4, 10861758, 10861761,
+            8, 16.0, 1.0, 4, 4, 0,
+        ).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let query_line = output.lines().find(|line| line.starts_with("Query")).unwrap();
+        let match_line = output.lines().find(|line| line.contains("||||")).unwrap();
+        let sbjct_line = output.lines().find(|line| line.starts_with("Sbjct")).unwrap();
+        assert_eq!(query_line.find("ACGT"), Some(17));
+        assert_eq!(match_line.find("||||"), Some(17));
+        assert_eq!(sbjct_line.find("ACGT"), Some(17));
+    }
+
+    #[test]
+    fn test_pairwise_wraps_long_subject_header() {
+        let mut buf = Vec::new();
+        write_wrapped_subject_header(
+            &mut buf,
+            "JQ990143.1 Caretta caretta glyceraldehyde-3-phosphate dehydrogenase mRNA, partial cds",
+        ).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                ">JQ990143.1 Caretta caretta glyceraldehyde-3-phosphate dehydrogenase mRNA, ",
+                "partial cds",
+            ]
+        );
     }
 
     #[test]

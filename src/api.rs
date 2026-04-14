@@ -1006,7 +1006,7 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         params.gap_open, params.gap_extend, reward, penalty, &ungapped_kbp
     ).map(|(k, _)| k).unwrap_or(ungapped_kbp);
 
-    let total_subj_len: u64 = (0..db.num_oids).map(|oid| db.get_seq_len(oid) as u64).sum();
+    let total_subj_len = db.total_length;
     let len_adj = crate::stat::compute_length_adjustment(
         query.len() as i32, total_subj_len as i64, db.num_oids as i32, &kbp);
     let search_space = crate::stat::compute_search_space(
@@ -1019,6 +1019,9 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         "minus" => (&[] as &[u8], query_minus.as_slice()),
         _ => (query_plus.as_slice(), query_minus.as_slice()),
     };
+    let prepared_query =
+        crate::search::PreparedBlastnQuery::new(q_plus, q_minus, params.word_size);
+    let mut last_hit_scratch = prepared_query.last_hit_scratch();
 
     let mut results = Vec::new();
     for oid in 0..db.num_oids {
@@ -1026,12 +1029,13 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         let subject_len = db.get_seq_len(oid) as usize;
         if subject_len < params.word_size { continue; }
 
-        let hsps = crate::search::blastn_ungapped_search_packed(
-            q_plus, q_minus,
-            subject_packed, subject_len,
-            params.word_size,
+        let hsps = crate::search::blastn_ungapped_search_packed_prepared_with_scratch(
+            &prepared_query,
+            subject_packed,
+            subject_len,
             reward, penalty, x_dropoff,
             &kbp, search_space, params.evalue_threshold,
+            &mut last_hit_scratch,
         );
 
         if hsps.is_empty() { continue; }

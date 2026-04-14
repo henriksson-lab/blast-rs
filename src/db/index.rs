@@ -3,12 +3,10 @@
 //! Reads .nin/.pin index files, .nsq/.psq sequence files, and .nhr/.phr header files.
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-use memmap2::Mmap;
+use memmap2::{Advice, Mmap, UncheckedAdvice};
 use std::fs::File;
 use std::io::{self, Cursor, Read};
-use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Database type: nucleotide or protein.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +36,15 @@ impl DbType {
     }
 }
 
-/// A single volume of a BLAST database.
+fn db_path_with_ext(base_path: &Path, ext: &str) -> PathBuf {
+    let mut path = base_path.as_os_str().to_os_string();
+    path.push(".");
+    path.push(ext);
+    PathBuf::from(path)
+}
+
+/// A BLAST database, which may be a single physical volume or a multi-volume
+/// alias database.
 pub struct BlastDb {
     pub db_type: DbType,
     pub title: String,
@@ -47,6 +53,22 @@ pub struct BlastDb {
     pub total_length: u64,
     pub max_seq_len: u32,
     pub version: u32,
+
+    volumes: Vec<BlastDbVolume>,
+    volume_starts: Vec<u32>,
+    /// Optional global OID-to-taxid lookup (from alias-level .nto files).
+    tax_lookup: Option<TaxIdLookup>,
+}
+
+/// A single physical volume of a BLAST database.
+struct BlastDbVolume {
+    db_type: DbType,
+    title: String,
+    date: String,
+    num_oids: u32,
+    total_length: u64,
+    max_seq_len: u32,
+    version: u32,
 
     /// Header offsets: num_oids + 1 entries.
     hdr_offsets: Vec<u32>,
@@ -69,6 +91,65 @@ struct TaxIdLookup {
     index: Vec<u64>,
     /// Flat array of i32 taxids, indexed by the `index` array.
     taxids: Vec<i32>,
+}
+
+impl BlastDbVolume {
+    fn advise(&self, advice: Advice) -> io::Result<()> {
+        self.seq_mmap.advise(advice)?;
+        self.hdr_mmap.advise(advice)?;
+        Ok(())
+    }
+
+    fn advise_dontneed(&self) -> io::Result<()> {
+        // SAFETY: these are read-only file-backed mappings, and callers only
+        // use this after completing the scan for the current volume. Future
+        // reads remain valid and will fault pages back from the database file.
+        unsafe {
+            self.seq_mmap.unchecked_advise(UncheckedAdvice::DontNeed)?;
+            self.hdr_mmap.unchecked_advise(UncheckedAdvice::DontNeed)?;
+        }
+        Ok(())
+    }
+
+    fn get_sequence(&self, local_oid: u32) -> &[u8] {
+        assert!(
+            (local_oid as usize) < self.seq_offsets.len().saturating_sub(1),
+            "local OID {} out of range (num_oids={})",
+            local_oid,
+            self.num_oids
+        );
+        let start = self.seq_offsets[local_oid as usize] as usize;
+        let end = if self.db_type == DbType::Nucleotide {
+            self.amb_offsets.as_ref().unwrap()[local_oid as usize] as usize
+        } else {
+            self.seq_offsets[local_oid as usize + 1] as usize
+        };
+        &self.seq_mmap[start..end]
+    }
+
+    fn get_seq_len(&self, local_oid: u32) -> u32 {
+        assert!(
+            (local_oid as usize) < self.seq_offsets.len().saturating_sub(1),
+            "local OID {} out of range (num_oids={})",
+            local_oid,
+            self.num_oids
+        );
+        let start = self.seq_offsets[local_oid as usize] as usize;
+        if self.db_type == DbType::Nucleotide {
+            let end = self.amb_offsets.as_ref().unwrap()[local_oid as usize] as usize;
+            let byte_len = end - start;
+            if byte_len == 0 {
+                return 0;
+            }
+            let whole_bytes = (byte_len - 1) as u32;
+            let last_byte = self.seq_mmap[start + whole_bytes as usize];
+            let remainder = (last_byte & 0x03) as u32;
+            whole_bytes * 4 + remainder
+        } else {
+            let end = self.seq_offsets[local_oid as usize + 1] as usize;
+            (end - start) as u32
+        }
+    }
 }
 
 impl TaxIdLookup {
@@ -238,22 +319,50 @@ impl TaxNameDb {
 }
 
 impl BlastDb {
+    /// Global OID ranges for each physical volume in database order.
+    pub fn volume_oid_ranges(&self) -> Vec<(u32, u32)> {
+        self.volumes
+            .iter()
+            .enumerate()
+            .map(|(idx, vol)| {
+                let start = self.volume_starts[idx];
+                (start, start + vol.num_oids)
+            })
+            .collect()
+    }
+
+    /// Get sequence bytes and residue length by physical volume and local OID.
+    ///
+    /// This is intended for sequential volume scans that already know the
+    /// active volume and need to avoid resolving every global OID in the hot
+    /// loop.
+    pub fn get_volume_sequence_and_len(&self, volume_idx: usize, local_oid: u32) -> (&[u8], u32) {
+        let vol = &self.volumes[volume_idx];
+        (vol.get_sequence(local_oid), vol.get_seq_len(local_oid))
+    }
+
+    /// Hint that a volume is about to be scanned sequentially.
+    pub fn advise_volume_sequential(&self, volume_idx: usize) {
+        let _ = self.volumes[volume_idx].advise(Advice::Sequential);
+    }
+
+    /// Hint that pages for a scanned volume can be dropped from resident memory.
+    pub fn advise_volume_dontneed(&self, volume_idx: usize) {
+        let _ = self.volumes[volume_idx].advise_dontneed();
+    }
+
     /// Open a BLAST database from the given base path (without extension).
     /// Automatically detects nucleotide vs protein.
     pub fn open(base_path: &Path) -> io::Result<Self> {
         // Try nucleotide first, then protein
-        let db_type = if base_path.with_extension("nin").exists() {
+        let db_type = if db_path_with_ext(base_path, "nin").exists() {
             DbType::Nucleotide
-        } else if base_path.with_extension("pin").exists() {
+        } else if db_path_with_ext(base_path, "pin").exists() {
             DbType::Protein
         } else if base_path.with_extension("nal").exists() || base_path.with_extension("pal").exists() {
-            // Alias file — open first volume (multi-volume merge is TODO)
             let alias_ext = if base_path.with_extension("nal").exists() { "nal" } else { "pal" };
             let alias = crate::db::alias::parse_alias_file(&base_path.with_extension(alias_ext))?;
-            if let Some(first_vol) = alias.dblist.first() {
-                return Self::open(first_vol);
-            }
-            return Err(io::Error::new(io::ErrorKind::NotFound, "Empty alias file"));
+            return Self::open_alias(base_path, alias);
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -266,11 +375,53 @@ impl BlastDb {
         Self::open_typed(base_path, db_type)
     }
 
+    fn open_alias(base_path: &Path, alias: crate::db::alias::AliasFile) -> io::Result<Self> {
+        if alias.dblist.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "Empty alias file"));
+        }
+
+        let mut volumes = Vec::with_capacity(alias.dblist.len());
+        for vol_path in &alias.dblist {
+            volumes.push(Self::open_volume_auto(vol_path)?);
+        }
+
+        let db_type = volumes[0].db_type;
+        for vol in &volumes {
+            if vol.db_type != db_type {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Alias file references mixed nucleotide/protein volumes",
+                ));
+            }
+        }
+
+        Self::from_volumes(base_path, alias.title, volumes)
+    }
+
     /// Open a BLAST database of known type.
     pub fn open_typed(base_path: &Path, db_type: DbType) -> io::Result<Self> {
-        let idx_path = base_path.with_extension(db_type.index_ext());
-        let seq_path = base_path.with_extension(db_type.seq_ext());
-        let hdr_path = base_path.with_extension(db_type.hdr_ext());
+        let volume = Self::open_volume_typed(base_path, db_type)?;
+        Self::from_volumes(base_path, None, vec![volume])
+    }
+
+    fn open_volume_auto(base_path: &Path) -> io::Result<BlastDbVolume> {
+        let db_type = if db_path_with_ext(base_path, "nin").exists() {
+            DbType::Nucleotide
+        } else if db_path_with_ext(base_path, "pin").exists() {
+            DbType::Protein
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("No BLAST database volume found at {}", base_path.display()),
+            ));
+        };
+        Self::open_volume_typed(base_path, db_type)
+    }
+
+    fn open_volume_typed(base_path: &Path, db_type: DbType) -> io::Result<BlastDbVolume> {
+        let idx_path = db_path_with_ext(base_path, db_type.index_ext());
+        let seq_path = db_path_with_ext(base_path, db_type.seq_ext());
+        let hdr_path = db_path_with_ext(base_path, db_type.hdr_ext());
 
         // Read index file
         let idx_data = std::fs::read(&idx_path)?;
@@ -342,12 +493,12 @@ impl BlastDb {
         let hdr_mmap = unsafe { Mmap::map(&hdr_file)? };
 
         // Try to load taxonomy data from .nto file (v5 databases)
-        let nto_path = base_path.with_extension(
+        let nto_path = db_path_with_ext(base_path,
             if db_type == DbType::Nucleotide { "nto" } else { "pto" }
         );
         let tax_lookup = TaxIdLookup::from_file_with_hint(&nto_path, Some(num_oids)).ok();
 
-        Ok(BlastDb {
+        Ok(BlastDbVolume {
             db_type,
             title,
             date,
@@ -364,61 +515,169 @@ impl BlastDb {
         })
     }
 
+    fn from_volumes(
+        base_path: &Path,
+        alias_title: Option<String>,
+        volumes: Vec<BlastDbVolume>,
+    ) -> io::Result<Self> {
+        if volumes.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "No database volumes"));
+        }
+
+        let db_type = volumes[0].db_type;
+        let version = volumes.iter().map(|v| v.version).max().unwrap_or(volumes[0].version);
+        let title = alias_title.unwrap_or_else(|| volumes[0].title.clone());
+        let date = volumes[0].date.clone();
+        let max_seq_len = volumes.iter().map(|v| v.max_seq_len).max().unwrap_or(0);
+        let total_length = volumes.iter().map(|v| v.total_length).sum();
+
+        let mut num_oids_u64 = 0u64;
+        let mut volume_starts = Vec::with_capacity(volumes.len());
+        for vol in &volumes {
+            volume_starts.push(u32::try_from(num_oids_u64).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Database has more than u32::MAX OIDs")
+            })?);
+            num_oids_u64 += vol.num_oids as u64;
+        }
+        let num_oids = u32::try_from(num_oids_u64).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "Database has more than u32::MAX OIDs")
+        })?;
+
+        // Single-volume databases commonly have small per-volume taxid files.
+        // Large alias databases such as core_nt have a global .nto that can be
+        // hundreds of MB; loading it eagerly makes opening the DB expensive even
+        // when taxonomy fields are not requested. Multi-volume taxid lookup
+        // should be made lazy before enabling alias-level .nto parsing here.
+        let tax_lookup = if volumes.len() == 1 {
+            let nto_path = db_path_with_ext(base_path,
+                if db_type == DbType::Nucleotide { "nto" } else { "pto" }
+            );
+            TaxIdLookup::from_file_with_hint(&nto_path, Some(num_oids)).ok()
+        } else {
+            None
+        };
+
+        Ok(BlastDb {
+            db_type,
+            title,
+            date,
+            num_oids,
+            total_length,
+            max_seq_len,
+            version,
+            volumes,
+            volume_starts,
+            tax_lookup,
+        })
+    }
+
+    fn resolve_oid(&self, oid: u32) -> (&BlastDbVolume, u32) {
+        assert!(oid < self.num_oids, "OID {} out of range (num_oids={})", oid, self.num_oids);
+        let idx = match self.volume_starts.binary_search(&oid) {
+            Ok(i) => i,
+            Err(0) => 0,
+            Err(i) => i - 1,
+        };
+        let local_oid = oid - self.volume_starts[idx];
+        (&self.volumes[idx], local_oid)
+    }
+
     /// Get the raw sequence bytes for the given OID.
     /// For nucleotide: returns packed 2-bit data from seq_start to amb_start.
     /// For protein: returns raw amino acid codes.
     pub fn get_sequence(&self, oid: u32) -> &[u8] {
-        assert!((oid as usize) < self.seq_offsets.len().saturating_sub(1),
-            "OID {} out of range (num_oids={})", oid, self.num_oids);
-        let start = self.seq_offsets[oid as usize] as usize;
-        let end = if self.db_type == DbType::Nucleotide {
-            // For nucleotide, sequence data ends at the ambiguity offset
-            self.amb_offsets.as_ref().unwrap()[oid as usize] as usize
-        } else {
-            self.seq_offsets[oid as usize + 1] as usize
-        };
-        &self.seq_mmap[start..end]
+        let (vol, local_oid) = self.resolve_oid(oid);
+        vol.get_sequence(local_oid)
     }
 
     /// Get the sequence length in residues for the given OID.
     pub fn get_seq_len(&self, oid: u32) -> u32 {
-        assert!((oid as usize) < self.seq_offsets.len().saturating_sub(1),
-            "OID {} out of range (num_oids={})", oid, self.num_oids);
-        let start = self.seq_offsets[oid as usize] as usize;
-        if self.db_type == DbType::Nucleotide {
-            // For nucleotide: sequence ends at amb_offset
-            // Length = (whole_bytes * 4) + remainder
-            // where whole_bytes = amb_off - seq_off - 1, remainder = last_byte & 3
-            let end = self.amb_offsets.as_ref().unwrap()[oid as usize] as usize;
-            let byte_len = end - start;
-            if byte_len == 0 {
-                return 0;
-            }
-            let whole_bytes = (byte_len - 1) as u32;
-            let last_byte = self.seq_mmap[start + whole_bytes as usize];
-            let remainder = (last_byte & 0x03) as u32;
-            whole_bytes * 4 + remainder
-        } else {
-            let end = self.seq_offsets[oid as usize + 1] as usize;
-            (end - start) as u32
-        }
+        let (vol, local_oid) = self.resolve_oid(oid);
+        vol.get_seq_len(local_oid)
     }
 
     /// Get the raw header bytes (ASN.1) for the given OID.
     pub fn get_header(&self, oid: u32) -> &[u8] {
-        assert!((oid as usize) < self.hdr_offsets.len().saturating_sub(1),
+        let (vol, local_oid) = self.resolve_oid(oid);
+        assert!((local_oid as usize) < vol.hdr_offsets.len().saturating_sub(1),
             "OID {} out of range (num_oids={})", oid, self.num_oids);
-        let start = self.hdr_offsets[oid as usize] as usize;
-        let end = self.hdr_offsets[oid as usize + 1] as usize;
-        &self.hdr_mmap[start..end]
+        let start = vol.hdr_offsets[local_oid as usize] as usize;
+        let end = vol.hdr_offsets[local_oid as usize + 1] as usize;
+        &vol.hdr_mmap[start..end]
     }
 
-    /// Extract the first accession-like string from the ASN.1 header.
-    /// Matches patterns like BP722512, NC_003421, NM_001234, etc.
+    /// Extract the best accession-like string from the ASN.1 header.
+    /// Prefer versioned Seq-id candidates over title text, because deflines
+    /// often contain gene/locus names before the real accession object.
     pub fn get_accession(&self, oid: u32) -> Option<String> {
         let hdr = self.get_header(oid);
+        extract_accession_from_header(hdr)
+    }
+
+    /// Extract a BLAST-style subject defline from the ASN.1 header.
+    /// This keeps the accession used by tabular output as the leading token,
+    /// followed by the human-readable title when one is present.
+    pub fn get_defline(&self, oid: u32) -> Option<String> {
+        let hdr = self.get_header(oid);
+        let accession = extract_accession_from_header(hdr);
+        let title = extract_title_from_header(hdr);
+        match (accession, title) {
+            (Some(acc), Some(title)) if title == acc || title.starts_with(&format!("{} ", acc)) => {
+                Some(title)
+            }
+            (Some(acc), Some(title)) => Some(format!("{} {}", acc, title)),
+            (Some(acc), None) => Some(acc),
+            (None, Some(title)) => Some(title),
+            (None, None) => None,
+        }
+    }
+
+    /// Get the taxid(s) for a given OID. Returns empty vec if no taxonomy data.
+    pub fn get_taxids(&self, oid: u32) -> Vec<i32> {
+        if let Some(tax_lookup) = &self.tax_lookup {
+            return tax_lookup.get_taxids(oid);
+        }
+        let (vol, local_oid) = self.resolve_oid(oid);
+        vol.tax_lookup.as_ref().map(|t| t.get_taxids(local_oid)).unwrap_or_default()
+    }
+
+    /// Get the ambiguity data for a nucleotide OID.
+    /// Ambiguity data is stored between amb_offset and the next sequence's start.
+    pub fn get_ambiguity_data(&self, oid: u32) -> Option<&[u8]> {
+        let (vol, local_oid) = self.resolve_oid(oid);
+        let amb_offsets = vol.amb_offsets.as_ref()?;
+        let start = amb_offsets[local_oid as usize] as usize;
+        // Ambiguity data ends at the next sequence's start offset
+        let end = vol.seq_offsets[local_oid as usize + 1] as usize;
+        if start == end {
+            None
+        } else {
+            Some(&vol.seq_mmap[start..end])
+        }
+    }
+}
+
+fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
         let mut i = 0;
+        let mut first_text_versioned = None;
+        let mut first_unversioned = None;
+        let mut first_local = None;
         while i < hdr.len() {
+            if hdr[i] == 0x1a && i + 1 < hdr.len() {
+                let len = hdr[i + 1] as usize;
+                let start = i + 2;
+                let end = start.saturating_add(len);
+                if len > 0
+                    && end <= hdr.len()
+                    && hdr[start..end]
+                        .iter()
+                        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'|'))
+                    && first_local.is_none()
+                {
+                    first_local = Some(String::from_utf8_lossy(&hdr[start..end]).to_string());
+                }
+            }
+
             if hdr[i].is_ascii_uppercase() {
                 let start = i;
                 // Match: [A-Z]+[_]?[0-9]+
@@ -439,10 +698,29 @@ impl BlastDb {
                     if total >= 6 {
                         // Check for text-format version: ".N" right after accession
                         if i + 1 < hdr.len() && hdr[i] == b'.' && hdr[i + 1].is_ascii_digit() {
-                            let _dot_start = i;
+                            let dot_start = i;
                             i += 1;
                             while i < hdr.len() && hdr[i].is_ascii_digit() { i += 1; }
-                            return Some(String::from_utf8_lossy(&hdr[start..i]).to_string());
+                            if first_text_versioned.is_none() {
+                                first_text_versioned =
+                                    Some(String::from_utf8_lossy(&hdr[start..i]).to_string());
+                            }
+                            let mut vi = i;
+                            while vi < hdr.len() && hdr[vi] == 0 { vi += 1; }
+                            if vi + 4 < hdr.len()
+                                && hdr[vi] == 0xa3
+                                && hdr[vi + 1] == 0x80
+                                && hdr[vi + 2] == 0x02
+                                && hdr[vi + 3] == 0x01
+                            {
+                                let version = hdr[vi + 4];
+                                return Some(format!(
+                                    "{}.{}",
+                                    String::from_utf8_lossy(&hdr[start..dot_start]),
+                                    version
+                                ));
+                            }
+                            continue;
                         }
                         let acc = String::from_utf8_lossy(&hdr[start..i]).to_string();
                         // Look for ASN.1 version: \x00+\xa3\x80\x02\x01\xNN
@@ -457,34 +735,69 @@ impl BlastDb {
                             let version = hdr[vi + 4];
                             return Some(format!("{}.{}", acc, version));
                         }
-                        return Some(acc);
+                        if first_unversioned.is_none() {
+                            first_unversioned = Some(acc);
+                        }
                     }
                 }
             } else {
                 i += 1;
             }
         }
-        None
-    }
+        first_text_versioned.or(first_unversioned).or(first_local)
+}
 
-    /// Get the taxid(s) for a given OID. Returns empty vec if no taxonomy data.
-    pub fn get_taxids(&self, oid: u32) -> Vec<i32> {
-        self.tax_lookup.as_ref().map(|t| t.get_taxids(oid)).unwrap_or_default()
-    }
-
-    /// Get the ambiguity data for a nucleotide OID.
-    /// Ambiguity data is stored between amb_offset and the next sequence's start.
-    pub fn get_ambiguity_data(&self, oid: u32) -> Option<&[u8]> {
-        let amb_offsets = self.amb_offsets.as_ref()?;
-        let start = amb_offsets[oid as usize] as usize;
-        // Ambiguity data ends at the next sequence's start offset
-        let end = self.seq_offsets[oid as usize + 1] as usize;
-        if start == end {
-            None
-        } else {
-            Some(&self.seq_mmap[start..end])
+fn extract_title_from_header(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i + 1 < hdr.len() {
+        if matches!(hdr[i], 0x1a | 0x0c) {
+            if let Some((len, len_len)) = read_ber_len(hdr, i + 1) {
+                let start = i + 1 + len_len;
+                let end = start.saturating_add(len);
+                if len > 0 && end <= hdr.len() {
+                    let bytes = &hdr[start..end];
+                    if bytes.iter().all(|&b| b == b'\t' || b == b' ' || b.is_ascii_graphic()) {
+                        let s = String::from_utf8_lossy(bytes).trim().to_string();
+                        if looks_like_title(&s) {
+                            return Some(s);
+                        }
+                    }
+                    i = end;
+                    continue;
+                }
+            }
         }
+        i += 1;
     }
+    None
+}
+
+fn read_ber_len(buf: &[u8], pos: usize) -> Option<(usize, usize)> {
+    let first = *buf.get(pos)?;
+    if first & 0x80 == 0 {
+        return Some((first as usize, 1));
+    }
+    let count = (first & 0x7f) as usize;
+    if count == 0 || count > std::mem::size_of::<usize>() || pos + 1 + count > buf.len() {
+        return None;
+    }
+    let mut len = 0usize;
+    for &b in &buf[pos + 1..pos + 1 + count] {
+        len = (len << 8) | b as usize;
+    }
+    Some((len, 1 + count))
+}
+
+fn looks_like_title(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let has_word_separator = s.bytes().any(|b| b == b' ' || b == b'\t');
+    let has_lowercase = s.bytes().any(|b| b.is_ascii_lowercase());
+    let not_seqid_text = s
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'|'));
+    (has_word_separator || has_lowercase) && !not_seqid_text
 }
 
 fn read_string<R: Read>(cur: &mut R) -> io::Result<String> {
@@ -562,6 +875,138 @@ mod tests {
         if !pombe.with_extension("nin").exists() { return; }
         let db = BlastDb::open(&pombe).unwrap();
         assert_eq!(db.get_accession(0).as_deref(), Some("NC_003421.2"));
+    }
+
+    #[test]
+    fn test_accession_local_id_fallback() {
+        let hdr = [
+            0x30, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x1a, 0x00,
+            0xa1, 0x80, 0x30, 0x80, 0xa0, 0x80, 0xa1, 0x80,
+            0x1a, 0x03, b's', b'1', b'9', 0x00,
+        ];
+        assert_eq!(extract_accession_from_header(&hdr).as_deref(), Some("s19"));
+    }
+
+    #[test]
+    fn test_accession_prefers_versioned_refseq_over_local_id() {
+        let hdr = [
+            0x1a, 0x03, b's', b'1', b'9',
+            b'X', b'R', b'_', b'1', b'5', b'4', b'0', b'5', b'2',
+            0x00, 0x00, 0xa3, 0x80, 0x02, 0x01, 0x02,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("XR_154052.2")
+        );
+    }
+
+    #[test]
+    fn test_accession_prefers_asn_version_over_title_token() {
+        let hdr = [
+            b'F', b'L', b'H', b'1', b'7', b'8', b'0', b'3', b'7', b'.', b'0', b'1', b'X',
+            b';', b' ', b'c', b'l', b'o', b'n', b'e', b' ',
+            b'D', b'Q', b'8', b'9', b'1', b'5', b'5', b'7',
+            0x00, 0x00, 0xa3, 0x80, 0x02, 0x01, 0x02,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("DQ891557.2")
+        );
+    }
+
+    #[test]
+    fn test_extract_title_from_visible_string_header() {
+        let title = b"Eukaryotic synthetic construct chromosome 13";
+        let mut hdr = vec![0x30, 0x80, 0xa0, title.len() as u8 + 2, 0x1a, title.len() as u8];
+        hdr.extend_from_slice(title);
+        hdr.extend_from_slice(b"CP034491");
+
+        assert_eq!(
+            extract_title_from_header(&hdr).as_deref(),
+            Some("Eukaryotic synthetic construct chromosome 13")
+        );
+    }
+
+    #[test]
+    fn test_extract_title_skips_seqid_visible_string() {
+        let hdr = [0x1a, 0x08, b'C', b'P', b'0', b'3', b'4', b'4', b'9', b'1'];
+        assert_eq!(extract_title_from_header(&hdr), None);
+    }
+
+    #[test]
+    fn test_open_multi_volume_alias() {
+        let seqn = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/seqn/seqn");
+        let pombe = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pombe/pombe");
+        if !seqn.with_extension("nin").exists() || !pombe.with_extension("nin").exists() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let alias_path = tmp.path().join("multi.nal");
+        std::fs::write(
+            &alias_path,
+            format!(
+                "TITLE multi fixture\nDBLIST {} {}\n",
+                seqn.display(),
+                pombe.display(),
+            ),
+        ).unwrap();
+
+        let seqn_db = BlastDb::open(&seqn).unwrap();
+        let pombe_db = BlastDb::open(&pombe).unwrap();
+        let db = BlastDb::open(&tmp.path().join("multi")).unwrap();
+
+        assert_eq!(db.db_type, DbType::Nucleotide);
+        assert_eq!(db.title, "multi fixture");
+        assert_eq!(db.num_oids, seqn_db.num_oids + pombe_db.num_oids);
+        assert_eq!(db.total_length, seqn_db.total_length + pombe_db.total_length);
+        assert_eq!(db.get_seq_len(0), seqn_db.get_seq_len(0));
+
+        let first_pombe_oid = seqn_db.num_oids;
+        assert_eq!(db.get_seq_len(first_pombe_oid), pombe_db.get_seq_len(0));
+        assert_eq!(db.get_accession(first_pombe_oid), pombe_db.get_accession(0));
+        assert_eq!(
+            db.volume_oid_ranges(),
+            vec![(0, seqn_db.num_oids), (seqn_db.num_oids, db.num_oids)]
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_core_nt_multivolume_metadata_if_available() {
+        let core_nt = PathBuf::from("/husky/henriksson/for_claude/blast/core_nt/core_nt");
+        if !core_nt.with_extension("nal").exists() {
+            eprintln!("Skipping: core_nt alias not found at {:?}", core_nt);
+            return;
+        }
+
+        let db = BlastDb::open(&core_nt).expect("core_nt multi-volume alias should open");
+        assert_eq!(db.db_type, DbType::Nucleotide);
+        assert_eq!(db.version, 5);
+        assert_eq!(db.num_oids, 124_278_414);
+        assert_eq!(db.total_length, 991_049_906_671);
+        assert_eq!(db.max_seq_len, 99_993_016);
+        assert_eq!(db.get_seq_len(0), 2440);
+        assert!(!db.get_header(0).is_empty());
+
+        let last_oid = db.num_oids - 1;
+        assert!(db.get_seq_len(last_oid) > 0);
+        assert!(!db.get_sequence(last_oid).is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn test_core_nt_refseq_accession_preferred_over_locus_title_if_available() {
+        let core_nt_00 = PathBuf::from("/husky/henriksson/for_claude/blast/core_nt/core_nt.00");
+        if !db_path_with_ext(&core_nt_00, "nin").exists() {
+            eprintln!("Skipping: core_nt.00 volume not found at {:?}", core_nt_00);
+            return;
+        }
+
+        let db = BlastDb::open(&core_nt_00).expect("core_nt.00 should open");
+        assert_eq!(db.get_accession(761_984).as_deref(), Some("XR_154052.2"));
     }
 
     // ---- Validation / error handling tests ----

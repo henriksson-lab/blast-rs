@@ -2390,3 +2390,131 @@ fn test_karlin_lambda_standard() {
     assert!((lambda - 0.3176).abs() < 0.01, 
         "Lambda with R&R freqs should be ~0.3176, got {:.6}", lambda);
 }
+
+// ── Real core_nt parity tests ────────────────────────────────────────────────
+
+const CORE_NT_PRIMER_ID: &str = "realistic_primer";
+const CORE_NT_PRIMER_SEQ: &str = "GTCTCCTCTGACTTCAACAGCG";
+const CORE_NT_BASE: &str = "/husky/henriksson/for_claude/blast/core_nt/core_nt";
+
+fn blast_cli_bin() -> std::path::PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_blast-cli")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join(profile)
+                .join("blast-cli")
+        })
+}
+
+fn write_core_nt_primer(tmp: &TempDir) -> std::path::PathBuf {
+    let query = tmp.path().join("core_nt_realistic_primer.fa");
+    std::fs::write(
+        &query,
+        format!(">{}\n{}\n", CORE_NT_PRIMER_ID, CORE_NT_PRIMER_SEQ),
+    )
+    .expect("write primer query");
+    query
+}
+
+fn run_core_nt_rust(query: &std::path::Path, db: &std::path::Path, out: &std::path::Path) {
+    let status = std::process::Command::new(blast_cli_bin())
+        .arg("blastn")
+        .arg("--query").arg(query)
+        .arg("--db").arg(db)
+        .arg("--task").arg("blastn-short")
+        .arg("--outfmt").arg("6")
+        .arg("--max_target_seqs").arg("500")
+        .arg("--num_threads").arg("8")
+        .arg("--out").arg(out)
+        .status()
+        .expect("run blast-cli");
+    assert!(status.success(), "blast-cli exited with {}", status);
+}
+
+fn run_core_nt_ncbi(query: &std::path::Path, db: &std::path::Path, out: &std::path::Path) {
+    let status = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query").arg(query)
+        .arg("-db").arg(db)
+        .arg("-task").arg("blastn-short")
+        .arg("-outfmt").arg("6")
+        .arg("-max_target_seqs").arg("500")
+        .arg("-num_threads").arg("8")
+        .arg("-out").arg(out)
+        .status()
+        .expect("run /usr/bin/blastn");
+    assert!(status.success(), "NCBI blastn exited with {}", status);
+}
+
+fn assert_core_nt_outfmt6_matches_ncbi(db_suffix: &str) {
+    let db = std::path::PathBuf::from(format!("{}{}", CORE_NT_BASE, db_suffix));
+    let db_index = {
+        let mut p = db.as_os_str().to_os_string();
+        p.push(".nin");
+        std::path::PathBuf::from(p)
+    };
+    if !db_index.exists() && !db.with_extension("nal").exists() {
+        eprintln!("Skipping: core_nt database not found at {:?}", db);
+        return;
+    }
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = write_core_nt_primer(&tmp);
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+
+    run_core_nt_rust(&query, &db, &rust_out);
+    run_core_nt_ncbi(&query, &db, &ncbi_out);
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust,
+        ncbi,
+        "Rust outfmt 6 output differs from NCBI for {:?}\nRust: {:?}\nNCBI: {:?}",
+        db,
+        rust_out,
+        ncbi_out
+    );
+}
+
+/// Real core_nt parity check for the first volume.
+///
+/// Run with: cargo test --release -- --ignored test_core_nt00_primer_outfmt6_matches_ncbi
+#[test]
+#[ignore]
+fn test_core_nt00_primer_outfmt6_matches_ncbi() {
+    assert_core_nt_outfmt6_matches_ncbi(".00");
+}
+
+/// Regression test for accession extraction where title text contains a
+/// version-like clone token before the real GenBank accession.
+///
+/// Run with: cargo test --release -- --ignored test_core_nt_accession_regression_volumes_match_ncbi
+#[test]
+#[ignore]
+fn test_core_nt_accession_regression_volumes_match_ncbi() {
+    assert_core_nt_outfmt6_matches_ncbi(".12");
+    assert_core_nt_outfmt6_matches_ncbi(".28");
+}
+
+/// Full 84-volume core_nt alias parity test. This is intentionally gated by an
+/// environment variable because it scans the full local 272 GB database.
+///
+/// Run with:
+/// BLAST_RS_RUN_FULL_CORE_NT=1 cargo test --release -- --ignored test_core_nt_alias_primer_outfmt6_matches_ncbi
+#[test]
+#[ignore]
+fn test_core_nt_alias_primer_outfmt6_matches_ncbi() {
+    if std::env::var_os("BLAST_RS_RUN_FULL_CORE_NT").is_none() {
+        eprintln!("Skipping: set BLAST_RS_RUN_FULL_CORE_NT=1 to scan full core_nt alias");
+        return;
+    }
+    assert_core_nt_outfmt6_matches_ncbi("");
+}
