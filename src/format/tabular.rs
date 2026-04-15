@@ -1,13 +1,37 @@
 //! BLAST tabular output format (-outfmt 6/7).
 //!
-//! Default columns: qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore
+//! Default columns: qaccver saccver pident length mismatch gapopen qstart qend sstart send evalue bitscore
 
+use std::collections::HashMap;
 use std::io::Write;
 
+pub const DEFAULT_TABULAR_COLUMNS: &str =
+    "qaccver saccver pident length mismatch gapopen qstart qend sstart send evalue bitscore";
+
+fn expand_column_token<'a>(token: &'a str, columns: &mut Vec<&'a str>) {
+    if token == "std" {
+        columns.extend(DEFAULT_TABULAR_COLUMNS.split_whitespace());
+    } else {
+        columns.push(token);
+    }
+}
+
+pub fn expanded_column_tokens(columns: &str) -> Vec<&str> {
+    let mut cols = Vec::new();
+    for col in columns.split_whitespace() {
+        if !col.starts_with("delim=") {
+            expand_column_token(col, &mut cols);
+        }
+    }
+    cols
+}
+
 /// A single alignment hit for tabular output.
+#[derive(Clone)]
 pub struct TabularHit {
     pub query_id: String,
     pub subject_id: String,
+    pub subject_title: String,
     pub pct_identity: f64,
     pub align_len: i32,
     pub mismatches: i32,
@@ -55,7 +79,12 @@ pub fn format_evalue(val: f64) -> String {
                 ("", exp_str)
             };
             if digits.len() < 2 {
-                format!("{}e{}{:02}", mantissa, sign, digits.parse::<u32>().unwrap_or(0))
+                format!(
+                    "{}e{}{:02}",
+                    mantissa,
+                    sign,
+                    digits.parse::<u32>().unwrap_or(0)
+                )
             } else {
                 s
             }
@@ -91,12 +120,87 @@ pub fn format_bitscore(val: f64) -> String {
 
 /// Get a field value by column name for custom tabular output.
 pub fn get_field(hit: &TabularHit, column: &str) -> String {
+    get_field_with_qcovs(hit, column, None)
+}
+
+pub fn field_display_name(column: &str) -> &'static str {
+    match column {
+        "qseqid" => "query id",
+        "qgi" => "query gi",
+        "qacc" => "query acc.",
+        "qaccver" => "query acc.ver",
+        "sseqid" => "subject id",
+        "sgi" => "subject gi",
+        "sallgi" => "all subject gis",
+        "sacc" => "subject acc.",
+        "saccver" => "subject acc.ver",
+        "sallseqid" => "all subject ids",
+        "sallacc" => "all subject acc.",
+        "stitle" => "subject title",
+        "salltitles" => "all subject title(s)",
+        "pident" => "% identity",
+        "length" => "alignment length",
+        "mismatch" => "mismatches",
+        "gapopen" => "gap opens",
+        "qstart" => "q. start",
+        "qend" => "q. end",
+        "sstart" => "s. start",
+        "send" => "s. end",
+        "evalue" => "evalue",
+        "bitscore" => "bit score",
+        "score" => "score",
+        "nident" => "identical",
+        "positive" => "positives",
+        "gaps" => "gaps",
+        "ppos" => "% positives",
+        "qlen" => "query length",
+        "slen" => "subject length",
+        "qcovs" => "% query coverage per subject",
+        "qcovhsp" => "% query coverage per hsp",
+        "qcovus" => "% query coverage per unique subject",
+        "staxid" => "subject tax id",
+        "staxids" => "unique subject tax ids",
+        "ssciname" | "sscinames" => "subject sci name",
+        "scomname" | "scomnames" => "subject common name",
+        "sblastname" | "sblastnames" => "subject blast name",
+        "sskingdom" | "sskingdoms" => "subject super kingdom",
+        "qseq" => "aligned part of query sequence",
+        "sseq" => "aligned part of subject sequence",
+        "btop" => "BTOP",
+        "sstrand" => "subject strand",
+        "qframe" => "query frame",
+        "sframe" => "subject frame",
+        "frames" => "query/sbjct frames",
+        _ => "unknown field",
+    }
+}
+
+fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> String {
     match column {
         "qseqid" | "qacc" | "qaccver" => hit.query_id.clone(),
-        "sseqid" | "sacc" | "saccver" => hit.subject_id.clone(),
+        "qgi" => "0".to_string(),
+        "sseqid" | "sacc" | "saccver" | "sallseqid" | "sallacc" => hit.subject_id.clone(),
+        "sgi" | "sallgi" => "0".to_string(),
+        "stitle" | "salltitles" => {
+            if hit.subject_title.is_empty() {
+                "N/A".to_string()
+            } else {
+                hit.subject_title.clone()
+            }
+        }
         "pident" => format!("{:.3}", hit.pct_identity),
         "length" => hit.align_len.to_string(),
-        "mismatch" => hit.mismatches.to_string(),
+        "mismatch" => {
+            if let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) {
+                qseq.bytes()
+                    .zip(sseq.bytes())
+                    .filter(|&(q, s)| q != b'-' && s != b'-' && q != s)
+                    .count()
+                    .to_string()
+            } else {
+                hit.mismatches.to_string()
+            }
+        }
         "gapopen" => hit.gap_opens.to_string(),
         "qstart" => hit.query_start.to_string(),
         "qend" => hit.query_end.to_string(),
@@ -106,39 +210,173 @@ pub fn get_field(hit: &TabularHit, column: &str) -> String {
         "bitscore" => format_bitscore(hit.bit_score),
         "score" => hit.raw_score.to_string(),
         "nident" => hit.num_ident.to_string(),
-        "gaps" => (hit.align_len - hit.num_ident - hit.mismatches).max(0).to_string(),
+        "positive" => hit.num_ident.to_string(),
+        "gaps" => {
+            if let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) {
+                qseq.bytes()
+                    .chain(sseq.bytes())
+                    .filter(|&base| base == b'-')
+                    .count()
+                    .to_string()
+            } else {
+                (hit.align_len - hit.num_ident - hit.mismatches)
+                    .max(0)
+                    .to_string()
+            }
+        }
+        "ppos" => {
+            if hit.align_len > 0 {
+                format!("{:.2}", 100.0 * hit.num_ident as f64 / hit.align_len as f64)
+            } else {
+                "0.00".to_string()
+            }
+        }
         "qlen" => hit.query_len.to_string(),
         "slen" => hit.subject_len.to_string(),
-        "qcovs" => {
-            if hit.query_len > 0 {
-                let cov = 100.0 * (hit.query_end - hit.query_start + 1).abs() as f64 / hit.query_len as f64;
+        "qcovs" | "qcovus" => {
+            if let Some(qcovs) = qcovs {
+                qcovs.to_string()
+            } else if hit.query_len > 0 {
+                let cov = 100.0 * (hit.query_end - hit.query_start + 1).abs() as f64
+                    / hit.query_len as f64;
                 format!("{:.0}", cov.min(100.0))
-            } else { "0".to_string() }
+            } else {
+                "0".to_string()
+            }
         }
         "qcovhsp" => {
             if hit.query_len > 0 {
-                let cov = 100.0 * hit.align_len as f64 / hit.query_len as f64;
+                let query_span = (hit.query_end - hit.query_start).abs() + 1;
+                let cov = 100.0 * query_span as f64 / hit.query_len as f64;
                 format!("{:.0}", cov.min(100.0))
-            } else { "0".to_string() }
+            } else {
+                "0".to_string()
+            }
         }
         // Taxonomy ID fields — from .nto database file
-        "staxid" => hit.subject_taxids.first().map(|t| t.to_string()).unwrap_or_else(|| "N/A".to_string()),
-        "staxids" => if hit.subject_taxids.is_empty() { "N/A".to_string() }
-            else { hit.subject_taxids.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(";") },
+        "staxid" => hit
+            .subject_taxids
+            .first()
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "N/A".to_string()),
+        "staxids" => {
+            if hit.subject_taxids.is_empty() {
+                "N/A".to_string()
+            } else {
+                hit.subject_taxids
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(";")
+            }
+        }
         // Taxonomy name fields — from taxdb.bti/taxdb.btd
-        "ssciname" | "sscinames" => if hit.subject_sci_name.is_empty() { "N/A".to_string() } else { hit.subject_sci_name.clone() },
-        "scomname" | "scomnames" => if hit.subject_common_name.is_empty() { "N/A".to_string() } else { hit.subject_common_name.clone() },
-        "sblastname" | "sblastnames" => if hit.subject_blast_name.is_empty() { "N/A".to_string() } else { hit.subject_blast_name.clone() },
-        "sskingdom" | "sskingdoms" => if hit.subject_kingdom.is_empty() { "N/A".to_string() } else { hit.subject_kingdom.clone() },
+        "ssciname" | "sscinames" => {
+            if hit.subject_sci_name.is_empty() {
+                "N/A".to_string()
+            } else {
+                hit.subject_sci_name.clone()
+            }
+        }
+        "scomname" | "scomnames" => {
+            if hit.subject_common_name.is_empty() {
+                "N/A".to_string()
+            } else {
+                hit.subject_common_name.clone()
+            }
+        }
+        "sblastname" | "sblastnames" => {
+            if hit.subject_blast_name.is_empty() {
+                "N/A".to_string()
+            } else {
+                hit.subject_blast_name.clone()
+            }
+        }
+        "sskingdom" | "sskingdoms" => {
+            if hit.subject_kingdom.is_empty() {
+                "N/A".to_string()
+            } else {
+                hit.subject_kingdom.clone()
+            }
+        }
         // Sequence hash
         "qseq" => hit.qseq.as_deref().unwrap_or("N/A").to_string(),
         "sseq" => hit.sseq.as_deref().unwrap_or("N/A").to_string(),
+        "btop" => format_btop(hit),
+        "sstrand" => {
+            if hit.subject_start <= hit.subject_end {
+                "plus".to_string()
+            } else {
+                "minus".to_string()
+            }
+        }
         // Frame fields
         "qframe" => hit.qframe.to_string(),
         "sframe" => hit.sframe.to_string(),
         "frames" => format!("{}/{}", hit.qframe, hit.sframe),
         _ => "N/A".to_string(),
     }
+}
+
+fn format_btop(hit: &TabularHit) -> String {
+    let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) else {
+        return "N/A".to_string();
+    };
+
+    let mut out = String::new();
+    let mut matches = 0;
+    for (q, s) in qseq.bytes().zip(sseq.bytes()) {
+        if q == s && q != b'-' {
+            matches += 1;
+        } else {
+            if matches > 0 {
+                out.push_str(&matches.to_string());
+                matches = 0;
+            }
+            out.push(q as char);
+            out.push(s as char);
+        }
+    }
+    if matches > 0 {
+        out.push_str(&matches.to_string());
+    }
+    out
+}
+
+fn compute_qcovs_by_query_subject(hits: &[TabularHit]) -> HashMap<(&str, &str), i32> {
+    let mut intervals: HashMap<(&str, &str), (i32, Vec<(i32, i32)>)> = HashMap::new();
+    for hit in hits {
+        let start = hit.query_start.min(hit.query_end);
+        let end = hit.query_start.max(hit.query_end);
+        intervals
+            .entry((hit.query_id.as_str(), hit.subject_id.as_str()))
+            .or_insert_with(|| (hit.query_len, Vec::new()))
+            .1
+            .push((start, end));
+    }
+
+    let mut out = HashMap::new();
+    for (key, (query_len, mut ranges)) in intervals {
+        if query_len <= 0 || ranges.is_empty() {
+            out.insert(key, 0);
+            continue;
+        }
+        ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+        let mut covered = 0;
+        let mut cur = ranges[0];
+        for &(start, end) in &ranges[1..] {
+            if start <= cur.1 + 1 {
+                cur.1 = cur.1.max(end);
+            } else {
+                covered += cur.1 - cur.0 + 1;
+                cur = (start, end);
+            }
+        }
+        covered += cur.1 - cur.0 + 1;
+        let cov = (100.0 * covered as f64 / query_len as f64).round() as i32;
+        out.insert(key, cov.min(100));
+    }
+    out
 }
 
 /// Write tabular output with custom columns.
@@ -148,35 +386,50 @@ pub fn format_tabular_custom<W: Write>(
     hits: &[TabularHit],
     columns: &str,
 ) -> std::io::Result<()> {
-    let cols: Vec<&str> = columns.split_whitespace().collect();
+    format_tabular_custom_with_delimiter(writer, hits, columns, "\t")
+}
+
+pub fn format_tabular_custom_with_delimiter<W: Write>(
+    writer: &mut W,
+    hits: &[TabularHit],
+    columns: &str,
+    default_delimiter: &str,
+) -> std::io::Result<()> {
+    let mut delimiter = default_delimiter;
+    let mut cols = Vec::new();
+    for col in columns.split_whitespace() {
+        if let Some(value) = col.strip_prefix("delim=") {
+            delimiter = match value {
+                r"\t" | "tab" => "\t",
+                "space" => " ",
+                "" => default_delimiter,
+                value => value,
+            };
+        } else {
+            expand_column_token(col, &mut cols);
+        }
+    }
+    let qcovs_by_subject = if cols.iter().any(|&c| c == "qcovs" || c == "qcovus") {
+        compute_qcovs_by_query_subject(hits)
+    } else {
+        HashMap::new()
+    };
     for hit in hits {
-        let fields: Vec<String> = cols.iter().map(|c| get_field(hit, c)).collect();
-        writeln!(writer, "{}", fields.join("\t"))?;
+        let qcovs = qcovs_by_subject
+            .get(&(hit.query_id.as_str(), hit.subject_id.as_str()))
+            .copied();
+        let fields: Vec<String> = cols
+            .iter()
+            .map(|c| get_field_with_qcovs(hit, c, qcovs))
+            .collect();
+        writeln!(writer, "{}", fields.join(delimiter))?;
     }
     Ok(())
 }
 
 /// Write tabular output (outfmt 6) for a set of hits.
 pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io::Result<()> {
-    for hit in hits {
-        writeln!(
-            writer,
-            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            hit.query_id,
-            hit.subject_id,
-            hit.pct_identity,
-            hit.align_len,
-            hit.mismatches,
-            hit.gap_opens,
-            hit.query_start,
-            hit.query_end,
-            hit.subject_start,
-            hit.subject_end,
-            format_evalue(hit.evalue),
-            format_bitscore(hit.bit_score),
-        )?;
-    }
-    Ok(())
+    format_tabular_custom_with_delimiter(writer, hits, DEFAULT_TABULAR_COLUMNS, "\t")
 }
 
 #[cfg(test)]
@@ -187,6 +440,7 @@ mod tests {
         TabularHit {
             query_id: "q1".to_string(),
             subject_id: "s1".to_string(),
+            subject_title: "s1 synthetic title".to_string(),
             pct_identity: 95.0,
             align_len: 50,
             mismatches: 2,
@@ -225,6 +479,16 @@ mod tests {
         let hit = make_hit(None, None);
         assert_eq!(get_field(&hit, "qseq"), "N/A");
         assert_eq!(get_field(&hit, "sseq"), "N/A");
+    }
+
+    #[test]
+    fn test_subject_title_fields() {
+        let mut hit = make_hit(None, None);
+        assert_eq!(get_field(&hit, "stitle"), "s1 synthetic title");
+        assert_eq!(get_field(&hit, "salltitles"), "s1 synthetic title");
+        hit.subject_title.clear();
+        assert_eq!(get_field(&hit, "stitle"), "N/A");
+        assert_eq!(get_field(&hit, "salltitles"), "N/A");
     }
 
     #[test]
@@ -298,18 +562,22 @@ mod tests {
         format_tabular(&mut buf, &hits).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let fields: Vec<&str> = output.trim().split('\t').collect();
-        assert_eq!(fields.len(), 12, "standard tabular format must have 12 fields");
-        assert_eq!(fields[0], "q1");       // qseqid
-        assert_eq!(fields[1], "s1");       // sseqid
-        assert_eq!(fields[2], "95.000");   // pident
-        assert_eq!(fields[3], "50");       // length
-        assert_eq!(fields[4], "2");        // mismatch
-        assert_eq!(fields[5], "1");        // gapopen
-        assert_eq!(fields[6], "1");        // qstart
-        assert_eq!(fields[7], "50");       // qend
-        assert_eq!(fields[8], "10");       // sstart
-        assert_eq!(fields[9], "59");       // send
-        // evalue and bitscore are formatted strings
+        assert_eq!(
+            fields.len(),
+            12,
+            "standard tabular format must have 12 fields"
+        );
+        assert_eq!(fields[0], "q1"); // qseqid
+        assert_eq!(fields[1], "s1"); // sseqid
+        assert_eq!(fields[2], "95.000"); // pident
+        assert_eq!(fields[3], "50"); // length
+        assert_eq!(fields[4], "2"); // mismatch
+        assert_eq!(fields[5], "1"); // gapopen
+        assert_eq!(fields[6], "1"); // qstart
+        assert_eq!(fields[7], "50"); // qend
+        assert_eq!(fields[8], "10"); // sstart
+        assert_eq!(fields[9], "59"); // send
+                                     // evalue and bitscore are formatted strings
         assert!(!fields[10].is_empty(), "evalue field must be present");
         assert!(!fields[11].is_empty(), "bitscore field must be present");
     }
@@ -325,10 +593,10 @@ mod tests {
         assert_eq!(fields.len(), 6);
         assert_eq!(fields[0], "ACGTACGT"); // qseq
         assert_eq!(fields[1], "ACGT-CGT"); // sseq
-        assert_eq!(fields[2], "1");        // qframe
-        assert_eq!(fields[3], "0");        // sframe
-        assert_eq!(fields[4], "120");      // score
-        assert_eq!(fields[5], "9606");     // staxid
+        assert_eq!(fields[2], "1"); // qframe
+        assert_eq!(fields[3], "0"); // sframe
+        assert_eq!(fields[4], "120"); // score
+        assert_eq!(fields[5], "9606"); // staxid
     }
 
     #[test]

@@ -3,12 +3,25 @@
 use std::io::Write;
 
 /// Write BLAST XML header.
-pub fn write_xml_header<W: Write>(writer: &mut W, program: &str, version: &str, db: &str) -> std::io::Result<()> {
+pub fn write_xml_header<W: Write>(
+    writer: &mut W,
+    program: &str,
+    version: &str,
+    db: &str,
+) -> std::io::Result<()> {
     writeln!(writer, "<?xml version=\"1.0\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
-    writeln!(writer, "  <BlastOutput_program>{}</BlastOutput_program>", program)?;
-    writeln!(writer, "  <BlastOutput_version>{} {}</BlastOutput_version>", program, version)?;
+    writeln!(
+        writer,
+        "  <BlastOutput_program>{}</BlastOutput_program>",
+        program
+    )?;
+    writeln!(
+        writer,
+        "  <BlastOutput_version>{} {}</BlastOutput_version>",
+        program, version
+    )?;
     writeln!(writer, "  <BlastOutput_db>{}</BlastOutput_db>", db)?;
     writeln!(writer, "  <BlastOutput_iterations>")?;
     Ok(())
@@ -40,7 +53,11 @@ pub fn write_xml_hit<W: Write>(
     for (i, &(qs, qe, ss, se, eval, bit, ident, alen, gaps)) in hsps.iter().enumerate() {
         writeln!(writer, "        <Hsp>")?;
         writeln!(writer, "          <Hsp_num>{}</Hsp_num>", i + 1)?;
-        writeln!(writer, "          <Hsp_bit-score>{:.4}</Hsp_bit-score>", bit)?;
+        writeln!(
+            writer,
+            "          <Hsp_bit-score>{:.4}</Hsp_bit-score>",
+            bit
+        )?;
         writeln!(writer, "          <Hsp_evalue>{:.2e}</Hsp_evalue>", eval)?;
         writeln!(writer, "          <Hsp_query-from>{}</Hsp_query-from>", qs)?;
         writeln!(writer, "          <Hsp_query-to>{}</Hsp_query-to>", qe)?;
@@ -65,8 +82,15 @@ mod tests {
     fn test_xml_output() {
         let mut buf = Vec::new();
         write_xml_header(&mut buf, "blastn", "0.1.0", "testdb").unwrap();
-        write_xml_hit(&mut buf, 1, "subj1", "test subject", 1000,
-            &[(1, 50, 100, 149, 1e-10, 56.0, 50, 50, 0)]).unwrap();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "subj1",
+            "test subject",
+            1000,
+            &[(1, 50, 100, 149, 1e-10, 56.0, 50, 50, 0)],
+        )
+        .unwrap();
         write_xml_footer(&mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("<BlastOutput>"));
@@ -78,15 +102,32 @@ mod tests {
     fn test_xml_well_formed() {
         let mut buf = Vec::new();
         write_xml_header(&mut buf, "blastn", "0.1.0", "mydb").unwrap();
-        write_xml_hit(&mut buf, 1, "hit1", "first hit", 500,
-            &[(10, 60, 200, 250, 1e-20, 100.0, 48, 51, 0)]).unwrap();
-        write_xml_hit(&mut buf, 2, "hit2", "second hit", 800,
-            &[(1, 30, 50, 80, 5e-5, 45.0, 28, 31, 1)]).unwrap();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "hit1",
+            "first hit",
+            500,
+            &[(10, 60, 200, 250, 1e-20, 100.0, 48, 51, 0)],
+        )
+        .unwrap();
+        write_xml_hit(
+            &mut buf,
+            2,
+            "hit2",
+            "second hit",
+            800,
+            &[(1, 30, 50, 80, 5e-5, 45.0, 28, 31, 1)],
+        )
+        .unwrap();
         write_xml_footer(&mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // Verify XML declaration
-        assert!(output.starts_with("<?xml version=\"1.0\"?>"), "should start with XML declaration");
+        assert!(
+            output.starts_with("<?xml version=\"1.0\"?>"),
+            "should start with XML declaration"
+        );
         // Verify matching open/close tags for key elements
         assert!(output.contains("<BlastOutput>"));
         assert!(output.contains("</BlastOutput>"));
@@ -109,8 +150,15 @@ mod tests {
     fn test_xml_contains_hit_data() {
         let mut buf = Vec::new();
         write_xml_header(&mut buf, "blastn", "0.1.0", "testdb").unwrap();
-        write_xml_hit(&mut buf, 1, "gi|12345|ref|NM_001.1|", "Homo sapiens gene", 2500,
-            &[(1, 100, 500, 599, 3.5e-40, 156.3, 95, 100, 2)]).unwrap();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "gi|12345|ref|NM_001.1|",
+            "Homo sapiens gene",
+            2500,
+            &[(1, 100, 500, 599, 3.5e-40, 156.3, 95, 100, 2)],
+        )
+        .unwrap();
         write_xml_footer(&mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 

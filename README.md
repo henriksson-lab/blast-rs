@@ -14,9 +14,32 @@ The code can also be compiled to be used for webassembly.
 
   Remaining:
   1. Composition-based statistics performance — comp_adjust=2 (NCBI default) is extremely slow, had to disable it. Needs profiling/optimization
-  2. Multi-volume database support — only opens first volume of .nal/.pal alias files. Core_nt needs this
-  3. Combined multi-query lookup table — scan subject truly once for all queries (would close the remaining multi-query gap: 0.68s vs NCBI's 0.41s)
-  4. blastp finds extra hits — our ungapped extension scores differ by 1-2 points from NCBI, catching slightly more seeds 
+  2. Combined multi-query lookup table — scan subject truly once for all queries (would close the remaining multi-query gap: 0.68s vs NCBI's 0.41s)
+  3. blastp finds extra hits — our ungapped extension scores differ by 1-2 points from NCBI, catching slightly more seeds 
+
+
+## This is an LLM-mediated faithful (hopefully) translation, not the original code!
+
+Most users should probably first see if the existing original code works for them, unless they have reason otherwise. The original source
+may have newer features and it has had more love in terms of fixing bugs. In fact, we aim to replicate bugs if they are present, for the
+sake of reproducibility! (but then we might have added a few more in the process)
+
+There are however cases when you might prefer this Rust version. We generally agree with [this page](https://rewrites.bio/)
+but more specifically:
+* We have had many issues with ensuring that our software works using existing containers (Docker, PodMan, Singularity). One size does not fit all and it eats our resources trying to keep up with every way of delivering software
+* Common package managers do not work well. It was great when we had a few Linux distributions with stable procedures, but now there are just too many ecosystems (Homebrew, Conda). Conda has an NP-complete resolver which does not scale. Homebrew is only so-stable. And our dependencies in Python still break. These can no longer be considered professional serious options. Meanwhile, Cargo enables multiple versions of packages to be available, even within the same program(!)
+* The future is the web. We deploy software in the web browser, and until now that has meant Javascript. This is a language where even the == operator is broken. Typescript is one step up, but a game changer is the ability to compile Rust code into webassembly, enabling performance and sharing of code with the backend. Translating code to Rust enables new ways of deployment and running code in the browser has especial benefits for science - researchers do not have deep pockets to run servers, so pushing compute to the user enables deployment that otherwise would be impossible
+* Old CLI-based utilities are bad for the environment(!). A large amount of compute resources are spent creating and communicating via small files, which we can bypass by using code as libraries. Even better, we can avoid frequent reloading of databases by hoisting this stage, with up to 100x speedups in some cases. Less compute means faster compute and less electricity wasted
+* LLM-mediated translations may actually be safer to use than the original code. This article shows that [running the same code on different operating systems can give somewhat different answers](https://doi.org/10.1038/nbt.3820). This is a gap that Rust+Cargo can reduce. Typesafe interfaces also reduce coding mistakes and error handling, as opposed to typical command-line scripting
+
+But:
+
+* **This approach should still be considered experimental**. The LLM technology is immature and has sharp corners. But there are opportunities to reap, and the genie is not going back to the bottle. This translation is as much aimed to learn how to improve the technology and get feedback on the results.
+* Translations are not endorsed by the original authors unless otherwise noted. **Do not send bug reports to the original developers**. Use our Github issues page instead.
+* **Do not trust the benchmarks on this page**. They are used to help evaluate the translation. If you want improved performance, you generally have to use this code as a library, and use the additional tricks it offers. We generally accept performance losses in order to reduce our dependency issues
+* **Check the original Github pages for information about the package**. This README is kept sparse on purpose. It is not meant to be the primary source of information
+
+
 
 ## Features
 
@@ -32,10 +55,10 @@ The code can also be compiled to be used for webassembly.
 - PSI-BLAST with Henikoff position-based weighting and proper PSSM computation
 - Six-frame translation with correct nucleotide coordinate mapping
 - Reads standard BLAST database files (v4/v5 `.nin/.nsq/.nhr`) with taxonomy support (`.nto`, `taxdb.bti`/`taxdb.btd`)
-- **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, and all standard columns
+- **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `sstrand`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, BTOP, commented tabular, CSV, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
-- **404 tests**: 338 unit tests + 60 integration tests + 4 stress tests + doc tests
+- **494 passing release tests**: 353 library unit tests + 13 CLI unit tests + 123 integration tests + 4 stress tests + doc tests, plus ignored real-database parity tests
 
 ## Installation
 
@@ -261,9 +284,68 @@ Single crate `blast-rs` with modules:
 
 ## Benchmarks
 
-Single-threaded, BLAST database mode (`--db`). Median of 3 runs.
-Wall-clock time including process startup and database loading.
-Measured on Linux x86-64.
+Wall-clock time including process startup and database loading, measured on Linux x86-64.
+
+### Current core_nt primer benchmark
+
+Measured 2026-04-14/15 on Linux x86-64 with a native CPU release build:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+target/release/blast-cli blastn \
+    --query /tmp/core_nt_realistic_primer.fa \
+    --db /husky/henriksson/for_claude/blast/core_nt/core_nt.00 \
+    --task blastn-short \
+    --outfmt 6 \
+    --max_target_seqs 500 \
+    --num_threads 8
+```
+
+Taxonomy benchmark command:
+
+```bash
+target/release/blast-cli blastn \
+    --task blastn-short \
+    --evalue 5 \
+    --max_target_seqs 10000 \
+    --max_hsps 1 \
+    --num_threads 8 \
+    --perc_identity 90 \
+    --db /husky/henriksson/for_claude/blast/core_nt/core_nt.00 \
+    --outfmt '6 qseqid qlen qstart qend saccver slen sstart send bitscore staxid ssciname sskingdom length pident' \
+    --query /tmp/core_nt_realistic_primer.fa \
+    --out /tmp/primer.vsCore_nt.rsblastn
+```
+
+Query sequence:
+
+```text
+GTCTCCTCTGACTTCAACAGCG
+```
+
+| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs native release | Output |
+|------|----------|--------------------:|------------------------:|--------|
+| 23bp primer, `blastn-short`, 8 threads, `outfmt 6` | `core_nt.00` | 2.04-2.05 s warm | 1.98-1.99 s warm | byte-identical |
+| Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | `core_nt.00` | 4.60 s with `BLASTDB` taxdb, ~5.59 s without | 2.01 s with `BLASTDB` taxdb, 2.00 s without | byte-identical |
+| Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | standalone `core_nt.12` and `core_nt.28` | matched in release ignored regression | matched in release ignored regression | byte-identical |
+| Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | full `core_nt` alias | 1217.89 s | 455.80 s | byte-identical |
+
+On the first large real database volume, blast-rs is now roughly at parity to slightly faster than NCBI BLAST+ for the tested plain primer scan while producing byte-for-byte identical tabular output. This plain `outfmt 6` case is the better comparison for raw search-path speed.
+
+The much larger taxonomy-output speedup should not be interpreted as Rust being intrinsically several times faster at BLAST alignment. That command also measures database metadata and taxonomy lookup behavior. For taxonomy-heavy output, blast-rs uses mmap-backed `.not/.pot` OID-to-taxid lookup, loads it only when taxonomy fields are requested, and touches only the OID index entries and taxid/name records needed by the returned hits. In the measured full `core_nt` alias run, NCBI BLAST+ used about 182 GB RSS versus about 4.4 GB for blast-rs, so the 455.80 s vs 1217.89 s gap is likely dominated by taxonomy/metadata working-set behavior rather than by the alignment scanner alone.
+
+Standalone nonzero volumes use the alias DBLIST to translate local OIDs into the global OID namespace before indexing the alias-level `.not` file.
+
+Ignored real-database parity tests for these cases:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt00_primer_taxonomy_outfmt_matches_ncbi
+RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt_nonzero_volume_taxonomy_outfmt_matches_ncbi
+RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt00_primer_taxonomy_names_with_blastdb_match_ncbi
+BLAST_RS_RUN_FULL_CORE_NT=1 RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt_alias_primer_taxonomy_outfmt_matches_ncbi
+```
+
+The following older benchmark tables are single-threaded BLAST database mode (`--db`), median of 3 runs.
 
 ### blastn — single query
 

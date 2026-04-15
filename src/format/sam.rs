@@ -6,11 +6,22 @@ use std::io::Write;
 pub fn write_sam_header<W: Write>(writer: &mut W, db_name: &str) -> std::io::Result<()> {
     writeln!(writer, "@HD\tVN:1.0\tSO:queryname")?;
     // Sanitize db_name: tabs/newlines would corrupt SAM format
-    let safe_name: String = db_name.chars()
-        .map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c })
+    let safe_name: String = db_name
+        .chars()
+        .map(|c| {
+            if c == '\t' || c == '\n' || c == '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     if !safe_name.is_empty() {
-        writeln!(writer, "@PG\tID:blast\tPN:blastn\tCL:blast\tDS:{}", safe_name)?;
+        writeln!(
+            writer,
+            "@PG\tID:blast\tPN:blastn\tCL:blast\tDS:{}",
+            safe_name
+        )?;
     } else {
         writeln!(writer, "@PG\tID:blast\tPN:blastn\tCL:blast")?;
     }
@@ -48,17 +59,10 @@ pub fn write_sam_record<W: Write>(
 
     let edit_distance = align_len - num_ident;
 
-    writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t*\t*\tAS:i:{}\tNM:i:{}\tXQ:i:{}\tXR:i:{}",
-        query_id,
-        flag,
-        subject_id,
-        pos,
-        mapq,
-        cigar,
-        score,
-        edit_distance,
-        query_start,
-        query_end,
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t*\t*\tAS:i:{}\tNM:i:{}\tXQ:i:{}\tXR:i:{}",
+        query_id, flag, subject_id, pos, mapq, cigar, score, edit_distance, query_start, query_end,
     )?;
     Ok(())
 }
@@ -94,9 +98,10 @@ pub fn write_sam_record_gapped<W: Write>(
     let pos = subject_start.min(subject_end);
     let edit_distance = align_len - num_ident;
 
-    writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t*\t*\tAS:i:{}\tNM:i:{}\tXQ:i:{}\tXR:i:{}",
-        query_id, flag, subject_id, pos, mapq, cigar,
-        score, edit_distance, query_start, query_end,
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t*\t*\tAS:i:{}\tNM:i:{}\tXQ:i:{}\tXR:i:{}",
+        query_id, flag, subject_id, pos, mapq, cigar, score, edit_distance, query_start, query_end,
     )?;
     Ok(())
 }
@@ -145,7 +150,10 @@ mod tests {
     #[test]
     fn test_sam_record_forward() {
         let mut buf = Vec::new();
-        write_sam_record(&mut buf, "query1", "chr1", 1, 50, 100, 149, 100, 50, 50, false).unwrap();
+        write_sam_record(
+            &mut buf, "query1", "chr1", 1, 50, 100, 149, 100, 50, 50, false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("query1"));
         assert!(output.contains("chr1"));
@@ -173,9 +181,16 @@ mod tests {
         // Subject: ACGTTTACGT
         let qaln = b"ACGT--ACGT";
         let saln = b"ACGTTTACGT";
-        write_sam_record_gapped(&mut buf, "q1", "s1", 1, 8, 1, 10, 50, 10, 8, false, qaln, saln).unwrap();
+        write_sam_record_gapped(
+            &mut buf, "q1", "s1", 1, 8, 1, 10, 50, 10, 8, false, qaln, saln,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("4M2D4M"), "CIGAR should be 4M2D4M, got: {}", output);
+        assert!(
+            output.contains("4M2D4M"),
+            "CIGAR should be 4M2D4M, got: {}",
+            output
+        );
     }
 
     #[test]
@@ -185,9 +200,16 @@ mod tests {
         // Subject: ACGT--ACGT
         let qaln = b"ACGTTTACGT";
         let saln = b"ACGT--ACGT";
-        write_sam_record_gapped(&mut buf, "q1", "s1", 1, 10, 1, 8, 50, 10, 8, false, qaln, saln).unwrap();
+        write_sam_record_gapped(
+            &mut buf, "q1", "s1", 1, 10, 1, 8, 50, 10, 8, false, qaln, saln,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("4M2I4M"), "CIGAR should be 4M2I4M, got: {}", output);
+        assert!(
+            output.contains("4M2I4M"),
+            "CIGAR should be 4M2I4M, got: {}",
+            output
+        );
     }
 
     #[test]
@@ -207,15 +229,22 @@ mod tests {
         let qaln = b"ACGT--TTACGT";
         let saln = b"ACGTGGTT--GT";
         let cigar = build_cigar(qaln, saln);
-        assert_eq!(cigar, "4M2D2M2I2M", "CIGAR should encode both insertions and deletions");
+        assert_eq!(
+            cigar, "4M2D2M2I2M",
+            "CIGAR should encode both insertions and deletions"
+        );
 
         // Verify it also works through write_sam_record_gapped
         let mut buf = Vec::new();
         write_sam_record_gapped(
             &mut buf, "q1", "s1", 1, 10, 1, 10, 50, 12, 8, false, qaln, saln,
-        ).unwrap();
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("4M2D2M2I2M"), "SAM record should contain correct CIGAR");
+        assert!(
+            output.contains("4M2D2M2I2M"),
+            "SAM record should contain correct CIGAR"
+        );
     }
 
     #[test]
@@ -223,14 +252,21 @@ mod tests {
         let mut buf = Vec::new();
         write_sam_header(&mut buf, "testdb").unwrap();
         // Write 3 records
-        write_sam_record(&mut buf, "query1", "chr1", 1, 50, 100, 149, 100, 50, 48, false).unwrap();
-        write_sam_record(&mut buf, "query1", "chr2", 1, 50, 200, 249, 90, 50, 45, false).unwrap();
-        write_sam_record(&mut buf, "query1", "chr3", 1, 50, 300, 349, 80, 50, 42, false).unwrap();
+        write_sam_record(
+            &mut buf, "query1", "chr1", 1, 50, 100, 149, 100, 50, 48, false,
+        )
+        .unwrap();
+        write_sam_record(
+            &mut buf, "query1", "chr2", 1, 50, 200, 249, 90, 50, 45, false,
+        )
+        .unwrap();
+        write_sam_record(
+            &mut buf, "query1", "chr3", 1, 50, 300, 349, 80, 50, 42, false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
         // Count non-header lines (those not starting with @)
-        let records: Vec<&str> = output.lines()
-            .filter(|l| !l.starts_with('@'))
-            .collect();
+        let records: Vec<&str> = output.lines().filter(|l| !l.starts_with('@')).collect();
         assert_eq!(records.len(), 3, "should have 3 SAM alignment records");
         // Verify each record references the correct subject
         assert!(records[0].contains("chr1"));
@@ -246,10 +282,12 @@ mod tests {
         write_sam_header(&mut buf, "testdb").unwrap();
         // Do NOT write any records (no hits found)
         let output = String::from_utf8(buf).unwrap();
-        let records: Vec<&str> = output.lines()
-            .filter(|l| !l.starts_with('@'))
-            .collect();
-        assert_eq!(records.len(), 0, "query with no hits should produce no alignment records");
+        let records: Vec<&str> = output.lines().filter(|l| !l.starts_with('@')).collect();
+        assert_eq!(
+            records.len(),
+            0,
+            "query with no hits should produce no alignment records"
+        );
         // Header should still be present
         assert!(output.contains("@HD"));
         assert!(output.contains("@PG"));

@@ -6,10 +6,8 @@ use tempfile::TempDir;
 
 use blast_rs::db::DbType;
 use blast_rs::{
-    BlastDbBuilder, SequenceEntry, SearchParams,
-    blastp, blastn, blastx, tblastn, tblastx,
-    parse_fasta, reverse_complement, six_frame_translate,
-    BlastnSearch, Strand,
+    blastn, blastp, blastx, parse_fasta, reverse_complement, six_frame_translate, tblastn, tblastx,
+    BlastDbBuilder, BlastnSearch, SearchParams, SequenceEntry, Strand,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -18,7 +16,9 @@ fn build_protein_db(entries: Vec<SequenceEntry>) -> (TempDir, blast_rs::db::Blas
     let tmp = TempDir::new().unwrap();
     let base = tmp.path().join("testdb");
     let mut builder = BlastDbBuilder::new(DbType::Protein, "test protein db");
-    for e in entries { builder.add(e); }
+    for e in entries {
+        builder.add(e);
+    }
     builder.write(&base).unwrap();
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
     (tmp, db)
@@ -28,7 +28,9 @@ fn build_nucleotide_db(entries: Vec<SequenceEntry>) -> (TempDir, blast_rs::db::B
     let tmp = TempDir::new().unwrap();
     let base = tmp.path().join("testdb");
     let mut builder = BlastDbBuilder::new(DbType::Nucleotide, "test nt db");
-    for e in entries { builder.add(e); }
+    for e in entries {
+        builder.add(e);
+    }
     builder.write(&base).unwrap();
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
     (tmp, db)
@@ -52,6 +54,1932 @@ fn nt_entry(acc: &str, title: &str, seq: &str) -> SequenceEntry {
     }
 }
 
+fn assert_blastn_subject_matches_ncbi(
+    query_fasta: &str,
+    subject_fasta: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        query_fasta,
+        subject_fasta,
+        "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen",
+        rust_extra_args,
+        ncbi_extra_args,
+    );
+}
+
+fn assert_blastn_subject_outfmt_matches_ncbi(
+    query_fasta: &str,
+    subject_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        query_fasta,
+        subject_fasta,
+        "blastn-short",
+        outfmt,
+        rust_extra_args,
+        ncbi_extra_args,
+    );
+}
+
+fn assert_blastn_subject_task_outfmt_matches_ncbi(
+    query_fasta: &str,
+    subject_fasta: &str,
+    task: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&subject, subject_fasta).expect("write subject FASTA");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--task")
+        .arg(task)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli subject parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-task")
+        .arg(task)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastn subject parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust --subject output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+fn normalize_sam_for_cli_parity(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(|line| {
+            if line.starts_with("@PG\t") {
+                "@PG\tID:0\tVN:2.12.0+\tCL:<normalized>\tPN:blastn".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn assert_blastn_subject_sam_matches_ncbi(
+    query_fasta: &str,
+    subject_fasta: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.sam");
+    let ncbi_out = tmp.path().join("ncbi.sam");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&subject, subject_fasta).expect("write subject FASTA");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("17")
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli SAM parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("17")
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastn SAM parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust SAM output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi SAM output");
+    assert_eq!(
+        normalize_sam_for_cli_parity(&rust),
+        normalize_sam_for_cli_parity(&ncbi),
+        "Rust --subject SAM output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out,
+        ncbi_out
+    );
+}
+
+fn assert_blastn_db_sam_matches_ncbi(
+    query_fasta: &str,
+    db_fasta: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.sam");
+    let ncbi_out = tmp.path().join("ncbi.sam");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("17")
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli DB SAM parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("17")
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastn DB SAM parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust SAM output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi SAM output");
+    assert_eq!(
+        normalize_sam_for_cli_parity(&rust),
+        normalize_sam_for_cli_parity(&ncbi),
+        "Rust DB SAM output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out,
+        ncbi_out
+    );
+}
+
+fn assert_blastn_db_xml_matches_ncbi(
+    query_fasta: &str,
+    db_fasta: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.xml");
+    let ncbi_out = tmp.path().join("ncbi.xml");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("5")
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli DB XML parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("5")
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastn DB XML parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust XML output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi XML output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust DB XML output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+fn assert_blastn_db_outfmt_matches_ncbi(
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    makeblastdb_extra_args: &[&str],
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    let taxids_file = tmp.path().join("taxids.txt");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+    std::fs::write(&taxids_file, "9606\n").expect("write taxid list");
+
+    let mut make_cmd = std::process::Command::new("/usr/bin/makeblastdb");
+    make_cmd
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null());
+    for arg in makeblastdb_extra_args {
+        make_cmd.arg(arg);
+    }
+    let make_status = make_cmd.status().expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        if *arg == "{taxids_file}" {
+            rust_cmd.arg(&taxids_file);
+        } else {
+            rust_cmd.arg(arg);
+        }
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli DB parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        if *arg == "{taxids_file}" {
+            ncbi_cmd.arg(&taxids_file);
+        } else {
+            ncbi_cmd.arg(arg);
+        }
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastn DB parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust DB output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_dust_no_exact_hits() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nTTTTACGTACGTACGTACGTACGTACGTAAAA\n>s2\nACGTACGTACGTACGTACGTACGT\n>s3\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
+        &["--dust", "no", "--max_target_seqs", "10", "--max_hsps", "2"],
+        &["-dust", "no", "-max_target_seqs", "10", "-max_hsps", "2"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_strand_plus_minus() {
+    let query = ">q1\nGGGTTTAAACCCGGGTTTAAACCC\n";
+    let subject = ">s1\nGGGTTTAAACCCGGGTTTAAACCC\n>s2\nGGGTTTAAACCCGGGTTTAAACCCGGGTTTAAACCC\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCC\n";
+    for strand in ["plus", "minus"] {
+        assert_blastn_subject_matches_ncbi(
+            query,
+            subject,
+            &[
+                "--dust",
+                "no",
+                "--strand",
+                strand,
+                "--max_target_seqs",
+                "10",
+                "--max_hsps",
+                "2",
+            ],
+            &[
+                "-dust",
+                "no",
+                "-strand",
+                strand,
+                "-max_target_seqs",
+                "10",
+                "-max_hsps",
+                "2",
+            ],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_dc_megablast_defaults() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nTTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAAAA\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "dc-megablast",
+        "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_blastn_task_defaults() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nTTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAAAA\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_megablast_contained_diagonals() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nTTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAAAA\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "megablast",
+        "6 qstart qend sstart send length bitscore sframe btop",
+        &["--dust", "no", "--max_target_seqs", "100"],
+        &["-dust", "no", "-max_target_seqs", "100"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_both_strands_hsp_order() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nGGGTTTAAACCCGGGTTTAAACCC\n",
+        ">s1\nGGGTTTAAACCCGGGTTTAAACCC\n>s2\nGGGTTTAAACCCGGGTTTAAACCCGGGTTTAAACCC\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        &["--dust", "no", "--max_target_seqs", "10", "--max_hsps", "2"],
+        &["-dust", "no", "-max_target_seqs", "10", "-max_hsps", "2"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_same_interval_hsp_order() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        "blastn-short",
+        "6 sseqid qstart qend sstart send length bitscore",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_max_hsps_per_query() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n>q2\nGGGTTTAAACCCGGGTTTAAACCC\n",
+        ">s1\nACGTACGTACGTACGTACGTACGTNNNNGGGTTTAAACCCGGGTTTAAACCC\n",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_culling_limit() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_full\nACGTACGTACGTACGTACGTACGTACGTACGT\n>s_part\nACGTACGTACGTACGTACGT\n>s_shift\nTTTTACGTACGTACGTACGTACGTAAAA\n",
+        "blastn",
+        "6 sseqid qstart qend sstart send length bitscore",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--culling_limit",
+            "1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-culling_limit",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_best_hit_filter() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_full\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n>s_bad\nACGTACGTACATACGTACATACGTAC\n>s_bad2\nACGTACGTACGTTCGTACGTTCGTACGTACGT\n",
+        "blastn",
+        "6 sseqid qstart qend sstart send length pident score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--max_target_seqs",
+            "20",
+            "--best_hit_overhang",
+            "0.1",
+            "--best_hit_score_edge",
+            "0.1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-max_target_seqs",
+            "20",
+            "-best_hit_overhang",
+            "0.1",
+            "-best_hit_score_edge",
+            "0.1",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_subject_besthit() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n>s2\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        "blastn",
+        "6 sseqid qstart qend sstart send length score bitscore",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "20",
+            "--subject_besthit",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "20",
+            "-subject_besthit",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_qcov_hsp_per_query() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n>q2\nGGGTTTAAACCCGGGTTTAAACCCAAAAAAAAAAAA\n",
+        ">s1\nACGTACGTACGTACGTACGTACGTNNNNGGGTTTAAACCCGGGTTTAAACCC\n",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--max_target_seqs",
+            "10",
+            "--qcov_hsp_perc",
+            "80",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-max_target_seqs",
+            "10",
+            "-qcov_hsp_perc",
+            "80",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_perc_identity_filter() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">perfect\nACGTACGTACGTACGTACGTACGT\n>one_mismatch\nACGTACGTACGTACGTACGTACGA\n",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--max_target_seqs",
+            "10",
+            "--perc_identity",
+            "99",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-max_target_seqs",
+            "10",
+            "-perc_identity",
+            "99",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_min_raw_gapped_score() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">perfect\nACGTACGTACGTACGTACGTACGT\n>shorter\nACGTACGTACGTACGTACGTACGA\n",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--max_target_seqs",
+            "10",
+            "--min_raw_gapped_score",
+            "47",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-max_target_seqs",
+            "10",
+            "-min_raw_gapped_score",
+            "47",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_default_dust_masking() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nTTTTACGTACGTACGTACGTACGTACGTAAAA\n>s2\nACGTACGTACGTACGTACGTACGT\n",
+        &["--max_target_seqs", "10", "--max_hsps", "2"],
+        &["-max_target_seqs", "10", "-max_hsps", "2"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_lcase_masking() {
+    assert_blastn_subject_matches_ncbi(
+        ">q1\nacgtacgtacgtacgtacgtacgt\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n",
+        &["--dust", "no", "--lcase_masking", "--max_target_seqs", "10"],
+        &["-dust", "no", "-lcase_masking", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_query_loc() {
+    let query = ">q1\nTTTTACGTACGTACGTACGTACGTAAAA\n";
+    let subject = ">s1\nACGTACGTACGTACGTACGT\n";
+    for strand in ["plus", "minus"] {
+        assert_blastn_subject_matches_ncbi(
+            query,
+            subject,
+            &[
+                "--dust",
+                "no",
+                "--strand",
+                strand,
+                "--query_loc",
+                "5-24",
+                "--max_target_seqs",
+                "10",
+            ],
+            &[
+                "-dust",
+                "no",
+                "-strand",
+                strand,
+                "-query_loc",
+                "5-24",
+                "-max_target_seqs",
+                "10",
+            ],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_subject_loc() {
+    let query = ">q1\nACGTACGTACGTACGTACGT\n";
+    let subject = ">s1\nTTTTACGTACGTACGTACGTACGTAAAA\n";
+    for strand in ["plus", "minus"] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            "6 qseqid sseqid qlen slen qstart qend sstart send evalue bitscore qframe sframe",
+            &[
+                "--dust",
+                "no",
+                "--strand",
+                strand,
+                "--subject_loc",
+                "5-24",
+                "--max_target_seqs",
+                "10",
+            ],
+            &[
+                "-dust",
+                "no",
+                "-strand",
+                strand,
+                "-subject_loc",
+                "5-24",
+                "-max_target_seqs",
+                "10",
+            ],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_qcovs_union() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTGGGTTTAAACCCGGGTTTA\n",
+        ">s1\nACGTACGTACGTACGTACGTNNNNNNNNNNGGGTTTAAACCCGGGTTTA\n",
+        "6 qseqid sseqid qstart qend length qcovs qcovhsp bitscore",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--max_target_seqs",
+            "10",
+        ],
+        &["-dust", "no", "-strand", "plus", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_outfmt6_delim() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n",
+        "6 delim=, qseqid sseqid qstart qend",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_outfmt6_std_keyword() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        "6 std qlen",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_outfmt7_std_keyword() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        "7 std qlen",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_outfmt10_std_keyword() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        "10 std qlen",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_sort_options_warn_when_ignored_by_outfmt() {
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI warning parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&subject, ">s1\nACGTACGTACGTACGTACGTACGT\n").expect("write subject FASTA");
+
+    let output = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .arg("--sorthits")
+        .arg("1")
+        .arg("--sorthsps")
+        .arg("1")
+        .arg("--max_target_seqs")
+        .arg("4")
+        .arg("--line_length")
+        .arg("80")
+        .output()
+        .expect("run blast-cli sort warning check");
+
+    assert!(
+        output.status.success(),
+        "blast-cli exited with {}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "Warning: [blastn] The parameter -sorthits is ignored for output formats > 4."
+        ),
+        "missing sorthits ignored warning, stderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "Warning: [blastn] The parameter -sorthsps is ignored for output formats != 0."
+        ),
+        "missing sorthsps ignored warning, stderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Warning: [blastn] Examining 5 or more matches is recommended"),
+        "missing hitlist-size warning, stderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "Warning: [blastn] The parameter -line_length is not applicable for output formats > 4 ."
+        ),
+        "missing line_length ignored warning, stderr was:\n{stderr}"
+    );
+}
+
+#[test]
+fn blastn_formatting_options_match_ncbi_tabular_behavior() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n>s2\nACGTACGTACGTACGTACGTACGT\n>s3\nACGTACGTACGTACGTACGTACGT\n",
+        "6 sseqid bitscore",
+        &["--dust", "no", "--num_alignments", "1"],
+        &["-dust", "no", "-num_alignments", "1"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_outfmt10_default_and_custom() {
+    let query = ">q1\nACGTACGTACGTACGTACGT\n";
+    let subject = ">s1 subject title, with comma\nACGTACGTACGTACGTACGT\n";
+    for outfmt in [
+        "10",
+        "10 qseqid sseqid pident qstart qend sstart send stitle bitscore",
+    ] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            outfmt,
+            &["--dust", "no", "--max_target_seqs", "10"],
+            &["-dust", "no", "-max_target_seqs", "10"],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_outfmt7_default_and_custom() {
+    let query = ">q1 first query\nACGTACGTACGTACGTACGT\n>q2 nohit\nTTTTTTTTTTTTTTTTTTTT\n";
+    let subject = ">s1 first subject\nACGTACGTACGTACGTACGT\n";
+    for outfmt in ["7", "7 qseqid sseqid pident length bitscore"] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            outfmt,
+            &["--dust", "no", "--max_target_seqs", "10"],
+            &["-dust", "no", "-max_target_seqs", "10"],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_exact_hit() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n",
+        "0",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_no_hit() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nAAAAAAAAAAAAAAAAAAAA\n",
+        ">s1 subject one\nCCCCCCCCCCCCCCCCCCCC\n",
+        "0",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_multi_query() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n>q2 nohit\nAAAAAAAAAAAAAAAAAAAA\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n",
+        "0",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthsps_query_start() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_full\nACGTACGTACGTACGTACGTACGTACGTACGT\n>s_short\nACGTACGTACGTACGTACGTACGT\n>s_mismatch\nACGTACGTACGTACGTACGTACGTACGTACGA\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthsps",
+            "2",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthsps",
+            "2",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthsps_score() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_full\nACGTACGTACGTACGTACGTACGTACGTACGT\n>s_short\nACGTACGTACGTACGTACGTACGT\n>s_mismatch\nACGTACGTACGTACGTACGTACGTACGTACGA\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthsps",
+            "1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthsps",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthsps_percent_identity() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_full\nACGTACGTACGTACGTACGTACGTACGTACGT\n>s_short\nACGTACGTACGTACGTACGTACGT\n>s_mismatch\nACGTACGTACGTACGTACGTACGTACGTACGA\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthsps",
+            "3",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthsps",
+            "3",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthsps_subject_start() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_full\nACGTACGTACGTACGTACGTACGTACGTACGT\n>s_short\nACGTACGTACGTACGTACGTACGT\n>s_mismatch\nACGTACGTACGTACGTACGTACGTACGTACGA\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthsps",
+            "4",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthsps",
+            "4",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthits_best_score() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTTGCAAGTCCTGATCGATGCTAGCTTACG\n",
+        ">s_full_imperfect\nACGTTGCAAGTCCTGATCGATGCTAGCTTTCG\n>s_short_exact\nACGTTGCAAGTCCTGATCGATGCT\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthits",
+            "1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthits",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthits_total_score() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_long_mismatch\nACGTACGTACGTACGTACGTACGTACGTACGA\n>s_short_exact\nACGTACGTACGTACGTACGTACGT\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthits",
+            "2",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthits",
+            "2",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthits_percent_identity() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s_full_imperfect\nACGTACGTACGTACGTTCGTACGTACGTACGT\n>s_short_exact\nACGTACGTACGTACGTACGTACGT\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthits",
+            "3",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthits",
+            "3",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_sorthits_query_coverage() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTTGCAAGTCCTGATCGATGCTAGCTTACG\n",
+        ">s_full_imperfect\nACGTTGCAAGTCCTGATCGATGCTAGCTTTCG\n>s_short_exact\nACGTTGCAAGTCCTGATCGATGCT\n",
+        "blastn-short",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--sorthits",
+            "4",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-sorthits",
+            "4",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_outfmt7_delim() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        "7 delim=, qseqid sseqid qstart qend",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_btop() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTTCGTACGTACGTACGT\n",
+        "6 qseqid sseqid qstart qend sstart send length pident btop qseq sseq",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--max_target_seqs",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-max_target_seqs",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_btop_with_gaps() {
+    for (query, subject) in [
+        (
+            ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+            ">s1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGTACGTACGT\n",
+        ),
+        (
+            ">q1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGTACGTACGT\n",
+            ">s1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ),
+    ] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            "6 qstart qend sstart send length pident gapopen btop qseq sseq bitscore",
+            &[
+                "--dust",
+                "no",
+                "--strand",
+                "plus",
+                "--word_size",
+                "7",
+                "--gapopen",
+                "5",
+                "--gapextend",
+                "2",
+                "--max_target_seqs",
+                "10",
+                "--max_hsps",
+                "10",
+            ],
+            &[
+                "-dust",
+                "no",
+                "-strand",
+                "plus",
+                "-word_size",
+                "7",
+                "-gapopen",
+                "5",
+                "-gapextend",
+                "2",
+                "-max_target_seqs",
+                "10",
+                "-max_hsps",
+                "10",
+            ],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_strand_frame_fields() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        "6 qseqid sseqid sstrand qframe sframe frames",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_positive_gi_qcovus_fields() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTTCGTACGTACGTACGT\n",
+        "6 nident positive pident ppos qcovhsp qcovus qcovs qgi sgi sallgi",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--max_target_seqs",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-max_target_seqs",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_qcovhsp_with_query_gap() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n",
+        ">s1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGT\n",
+        "6 qstart qend nident mismatch gaps gapopen pident length qcovhsp qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--gapopen",
+            "5",
+            "--gapextend",
+            "2",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-gapopen",
+            "5",
+            "-gapextend",
+            "2",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_qcov_hsp_filter_with_query_gap() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n",
+        ">s1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGT\n",
+        "6 qstart qend length qcovhsp qseq sseq",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--gapopen",
+            "5",
+            "--gapextend",
+            "2",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+            "--qcov_hsp_perc",
+            "42",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-gapopen",
+            "5",
+            "-gapextend",
+            "2",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+            "-qcov_hsp_perc",
+            "42",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_default_outfmt_with_query_gap() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n",
+        ">s1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGT\n",
+        "6",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--gapopen",
+            "5",
+            "--gapextend",
+            "2",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-gapopen",
+            "5",
+            "-gapextend",
+            "2",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_sam_exact_hit() {
+    assert_blastn_subject_sam_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_sam_query_gap() {
+    assert_blastn_subject_sam_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTTTTTTTTTTTTTTTTTT\n",
+        ">s1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGT\n",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--gapopen",
+            "5",
+            "--gapextend",
+            "2",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-gapopen",
+            "5",
+            "-gapextend",
+            "2",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_sam_subject_gap() {
+    assert_blastn_subject_sam_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--gapopen",
+            "5",
+            "--gapextend",
+            "2",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-gapopen",
+            "5",
+            "-gapextend",
+            "2",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_sam_no_hit() {
+    assert_blastn_subject_sam_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nTTTTTTTTTTTTTTTTTTTT\n",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_xml_exact_hit() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n",
+        "5",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_sam_exact_hit() {
+    assert_blastn_db_sam_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGT\n",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_xml_exact_hit() {
+    assert_blastn_db_xml_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_pairwise_exact_hit() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n",
+        "0",
+        &[],
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_pairwise_no_hit() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nAAAAAAAAAAAAAAAAAAAA\n",
+        ">s1 subject one\nCCCCCCCCCCCCCCCCCCCC\n",
+        "0",
+        &[],
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_pairwise_multi_query() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n>q2 nohit\nAAAAAAAAAAAAAAAAAAAA\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n",
+        "0",
+        &[],
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_positive_taxids_filter() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 tax one\nACGTACGTACGTACGTACGT\n",
+        "6 staxid",
+        &["-taxid", "9606"],
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--taxids",
+            "9606",
+        ],
+        &["-dust", "no", "-max_target_seqs", "10", "-taxids", "9606"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_negative_taxids_filter() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 tax one\nACGTACGTACGTACGTACGT\n",
+        "6 staxid",
+        &["-taxid", "9606"],
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--negative_taxids",
+            "9606",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-negative_taxids",
+            "9606",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_taxidlist_filter() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 tax one\nACGTACGTACGTACGTACGT\n",
+        "6 staxid",
+        &["-taxid", "9606"],
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--taxidlist",
+            "{taxids_file}",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-taxidlist",
+            "{taxids_file}",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_negative_taxidlist_filter() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 tax one\nACGTACGTACGTACGTACGT\n",
+        "6 staxid",
+        &["-taxid", "9606"],
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--negative_taxidlist",
+            "{taxids_file}",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-negative_taxidlist",
+            "{taxids_file}",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_traceback_field_matrix_exact() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n",
+        "6 qseq sseq sstrand qframe sframe frames btop",
+        &[],
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_traceback_field_matrix_gapped() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTAAAACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        "6 qseq sseq btop qcovhsp gaps mismatch gapopen length",
+        &[],
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--gapopen",
+            "5",
+            "--gapextend",
+            "2",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-gapopen",
+            "5",
+            "-gapextend",
+            "2",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_sall_fields() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1 desc query\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1 first subject title here\nACGTACGTACGTACGTACGTACGT\n",
+        "6 qseqid sseqid sacc saccver sallseqid sallacc stitle salltitles",
+        &["--dust", "no", "--max_target_seqs", "10"],
+        &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
 // ── BLASTP tests ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -72,16 +2000,21 @@ fn blastp_exact_match() {
     assert!(!results.is_empty(), "should find at least one hit");
     let best = &results[0];
     let hsp = &best.hsps[0];
-    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
-        "exact match should be 100% identity, got {:.1}%", hsp.percent_identity());
+    assert!(
+        (hsp.percent_identity() - 100.0).abs() < 0.01,
+        "exact match should be 100% identity, got {:.1}%",
+        hsp.percent_identity()
+    );
     assert_eq!(hsp.alignment_length, seq.len());
 }
 
 #[test]
 fn blastp_no_hit_for_unrelated() {
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "all alanine", "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry(
+        "P001",
+        "all alanine",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )]);
     let params = SearchParams::blastp()
         .evalue(1e-10)
         .num_threads(1)
@@ -89,12 +2022,15 @@ fn blastp_no_hit_for_unrelated() {
         .comp_adjust(0);
 
     let results = blastp(&db, b"WWWWWWWWWWWWWWWWWWWWWWWWWWWW", &params);
-    assert!(results.is_empty(), "unrelated sequences should not produce hits at strict evalue");
+    assert!(
+        results.is_empty(),
+        "unrelated sequences should not produce hits at strict evalue"
+    );
 }
 
 #[test]
 fn blastp_finds_similar_sequence() {
-    let query   = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
+    let query = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
     let subject = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
     let mutated = "MKFLILLFNILCLFPVLAAENHGVSMNAS"; // D→E
     let (_tmp, db) = build_protein_db(vec![
@@ -108,7 +2044,11 @@ fn blastp_finds_similar_sequence() {
         .comp_adjust(0);
 
     let results = blastp(&db, query.as_bytes(), &params);
-    assert!(results.len() >= 2, "should find both similar sequences, got {}", results.len());
+    assert!(
+        results.len() >= 2,
+        "should find both similar sequences, got {}",
+        results.len()
+    );
 }
 
 #[test]
@@ -126,15 +2066,20 @@ fn blastp_max_target_seqs_limits_results() {
         .comp_adjust(0);
 
     let results = blastp(&db, query.as_bytes(), &params);
-    assert!(results.len() <= 3,
-        "max_target_seqs=3 should limit results to at most 3, got {}", results.len());
+    assert!(
+        results.len() <= 3,
+        "max_target_seqs=3 should limit results to at most 3, got {}",
+        results.len()
+    );
 }
 
 #[test]
 fn blastp_empty_query() {
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "target", "MKFLILLFNILCLFPVLAADNHGVSMNAS"),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry(
+        "P001",
+        "target",
+        "MKFLILLFNILCLFPVLAADNHGVSMNAS",
+    )]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -147,9 +2092,11 @@ fn blastp_empty_query() {
 
 #[test]
 fn blastp_short_query_below_word_size() {
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "target", "MKFLILLFNILCLFPVLAADNHGVSMNAS"),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry(
+        "P001",
+        "target",
+        "MKFLILLFNILCLFPVLAADNHGVSMNAS",
+    )]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -162,9 +2109,11 @@ fn blastp_short_query_below_word_size() {
 
 #[test]
 fn blastp_single_residue_query() {
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "target", "MKFLILLFNILCLFPVLAADNHGVSMNAS"),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry(
+        "P001",
+        "target",
+        "MKFLILLFNILCLFPVLAADNHGVSMNAS",
+    )]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -178,9 +2127,7 @@ fn blastp_single_residue_query() {
 #[test]
 fn blastp_all_twenty_amino_acids() {
     let query = "ACDEFGHIKLMNPQRSTVWY";
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "all aa", query),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "all aa", query)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -199,9 +2146,7 @@ fn blastp_all_twenty_amino_acids() {
 #[test]
 fn blastn_exact_match() {
     let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "exact nt", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "exact nt", seq)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -217,9 +2162,7 @@ fn blastn_exact_match() {
 fn blastn_reverse_complement_hit() {
     let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
     let rc = String::from_utf8(reverse_complement(seq.as_bytes())).unwrap();
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "forward strand", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "forward strand", seq)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -227,7 +2170,10 @@ fn blastn_reverse_complement_hit() {
         .strand("both");
 
     let results = blastn(&db, rc.as_bytes(), &params);
-    assert!(!results.is_empty(), "should find hit on reverse complement strand");
+    assert!(
+        !results.is_empty(),
+        "should find hit on reverse complement strand"
+    );
 }
 
 #[test]
@@ -241,16 +2187,17 @@ fn blastn_no_hit_unrelated() {
         .filter_low_complexity(false);
 
     let results = blastn(&db, b"TTTGGGCCCAAATTTGGGCCCAAATTTGGGCCCAAATTTGGGCCCAAATTTGGGCCCAAATTTGGGCCCAAATTTGGGCCCAAATTTGGGCCCAAATTTGGGC", &params);
-    assert!(results.is_empty(), "unrelated nucleotide sequences should not match");
+    assert!(
+        results.is_empty(),
+        "unrelated nucleotide sequences should not match"
+    );
 }
 
 #[test]
 fn blastn_mismatch_scoring() {
     let seq     = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
     let mutated = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACAATCGTAAGGCCTTAGCAGTCAATGC"; // G→A at pos 76
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "original", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "original", seq)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -259,8 +2206,14 @@ fn blastn_mismatch_scoring() {
     let results = blastn(&db, mutated.as_bytes(), &params);
     assert!(!results.is_empty());
     let hsp = &results[0].hsps[0];
-    assert!(hsp.percent_identity() > 90.0, "one mismatch in ~100bp should be >90% identity");
-    assert!(hsp.percent_identity() < 100.0, "should not be 100% with mismatch");
+    assert!(
+        hsp.percent_identity() > 90.0,
+        "one mismatch in ~100bp should be >90% identity"
+    );
+    assert!(
+        hsp.percent_identity() < 100.0,
+        "should not be 100% with mismatch"
+    );
 }
 
 #[test]
@@ -295,9 +2248,7 @@ fn blastn_short_query_below_word_size() {
 fn blastn_plus_strand_only() {
     let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
     let rc = String::from_utf8(reverse_complement(seq.as_bytes())).unwrap();
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "forward only", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "forward only", seq)]);
 
     let params = SearchParams::blastn()
         .evalue(10.0)
@@ -306,15 +2257,16 @@ fn blastn_plus_strand_only() {
         .strand("plus");
 
     let results = blastn(&db, rc.as_bytes(), &params);
-    assert!(results.is_empty(), "plus-strand-only should not find reverse complement hit");
+    assert!(
+        results.is_empty(),
+        "plus-strand-only should not find reverse complement hit"
+    );
 }
 
 #[test]
 fn blastn_alignment_strings_are_ascii() {
     let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "target", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "target", seq)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -324,12 +2276,18 @@ fn blastn_alignment_strings_are_ascii() {
     assert!(!results.is_empty());
     let hsp = &results[0].hsps[0];
     for &b in &hsp.query_aln {
-        assert!(b == b'-' || b.is_ascii_alphabetic(),
-            "query_aln byte {} is not ASCII letter or gap", b);
+        assert!(
+            b == b'-' || b.is_ascii_alphabetic(),
+            "query_aln byte {} is not ASCII letter or gap",
+            b
+        );
     }
     for &b in &hsp.subject_aln {
-        assert!(b == b'-' || b.is_ascii_alphabetic(),
-            "subject_aln byte {} is not ASCII letter or gap", b);
+        assert!(
+            b == b'-' || b.is_ascii_alphabetic(),
+            "subject_aln byte {} is not ASCII letter or gap",
+            b
+        );
     }
 }
 
@@ -340,9 +2298,7 @@ fn blastx_finds_translated_hit() {
     let nt_query = "ATGAAATTTCTGATTCTGCTGTTT";
     let protein = "MKFLILLF";
 
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "target protein", protein),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "target protein", protein)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -350,17 +2306,25 @@ fn blastx_finds_translated_hit() {
         .comp_adjust(0);
 
     let results = blastx(&db, nt_query.as_bytes(), &params);
-    assert!(!results.is_empty(), "blastx should find the translated protein");
+    assert!(
+        !results.is_empty(),
+        "blastx should find the translated protein"
+    );
     let hsp = &results[0].hsps[0];
     assert!(hsp.percent_identity() > 80.0);
-    assert!(hsp.query_frame != 0, "blastx HSP should have a non-zero query frame");
+    assert!(
+        hsp.query_frame != 0,
+        "blastx HSP should have a non-zero query frame"
+    );
 }
 
 #[test]
 fn blastx_empty_nt_query() {
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "target", "MKFLILLFNILCLFPVLAAD"),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry(
+        "P001",
+        "target",
+        "MKFLILLFNILCLFPVLAAD",
+    )]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -378,9 +2342,7 @@ fn tblastn_finds_protein_in_nt_db() {
     let protein_query = "MKFLILLF";
     let nt_subject = "ATGAAATTTCTGATTCTGCTGTTT";
 
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "coding region", nt_subject),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "coding region", nt_subject)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -388,16 +2350,21 @@ fn tblastn_finds_protein_in_nt_db() {
         .comp_adjust(0);
 
     let results = tblastn(&db, protein_query.as_bytes(), &params);
-    assert!(!results.is_empty(), "tblastn should find protein in translated nucleotide db");
+    assert!(
+        !results.is_empty(),
+        "tblastn should find protein in translated nucleotide db"
+    );
     let hsp = &results[0].hsps[0];
-    assert!(hsp.subject_frame != 0, "tblastn HSP should have non-zero subject frame");
+    assert!(
+        hsp.subject_frame != 0,
+        "tblastn HSP should have non-zero subject frame"
+    );
 }
 
 #[test]
 fn tblastn_empty_protein_query() {
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "coding", "ATGAAATTTCTGATTCTGCTGTTT"),
-    ]);
+    let (_tmp, db) =
+        build_nucleotide_db(vec![nt_entry("N001", "coding", "ATGAAATTTCTGATTCTGCTGTTT")]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -413,9 +2380,7 @@ fn tblastn_empty_protein_query() {
 #[test]
 fn tblastx_translated_vs_translated() {
     let nt_seq = "ATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "coding nt", nt_seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "coding nt", nt_seq)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -423,7 +2388,10 @@ fn tblastx_translated_vs_translated() {
         .comp_adjust(0);
 
     let results = tblastx(&db, nt_seq.as_bytes(), &params);
-    assert!(!results.is_empty(), "tblastx should find self-hit in translated mode");
+    assert!(
+        !results.is_empty(),
+        "tblastx should find self-hit in translated mode"
+    );
     let hsp = &results[0].hsps[0];
     assert!(hsp.query_frame != 0, "tblastx should set query frame");
     assert!(hsp.subject_frame != 0, "tblastx should set subject frame");
@@ -434,18 +2402,14 @@ fn tblastx_translated_vs_translated() {
 #[test]
 fn protein_db_roundtrip() {
     let seq = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "test seq", seq),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "test seq", seq)]);
     assert_eq!(db.num_oids, 1);
 }
 
 #[test]
 fn nucleotide_db_roundtrip() {
     let seq = "ATGGCTAGCGATCGATCGATCGATCG";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "test nt", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "test nt", seq)]);
     assert_eq!(db.num_oids, 1);
     assert_eq!(db.get_seq_len(0), seq.len() as u32);
 }
@@ -468,7 +2432,10 @@ fn reverse_complement_roundtrip() {
     let seq = b"ATGGCTAGCGATCG";
     let rc = reverse_complement(seq);
     let rc2 = reverse_complement(&rc);
-    assert_eq!(&rc2, seq, "double reverse complement should return original");
+    assert_eq!(
+        &rc2, seq,
+        "double reverse complement should return original"
+    );
 }
 
 // ── Six-frame translation test ──────────────────────────────────────────────
@@ -515,8 +2482,11 @@ fn multi_query_fasta() {
         protein_entry("P001", "match1", "MKFLILLFNILCLFPVLAAD"),
         protein_entry("P002", "match2", "NHGVSMNASQRDHFKLAEV"),
     ]);
-    let params = SearchParams::blastp().evalue(10.0).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
 
     for (title, seq) in &queries {
         let results = blastp(&db, seq, &params);
@@ -528,9 +2498,7 @@ fn multi_query_fasta() {
 
 #[test]
 fn blastp_short_subject_in_db() {
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "tiny", "MK"),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "tiny", "MK")]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -543,11 +2511,9 @@ fn blastp_short_subject_in_db() {
 
 #[test]
 fn blastp_stop_codon_in_sequence() {
-    let query   = "MKFLILLFNILCLFPVLAAD";
+    let query = "MKFLILLFNILCLFPVLAAD";
     let subject = "MKFLILLF*ILCLFPVLAAD";
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "with stop", subject),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "with stop", subject)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -562,9 +2528,7 @@ fn blastp_stop_codon_in_sequence() {
 fn blastn_query_with_ambiguous_bases() {
     let query   = "ATGCGTACCTGAAAGCTTCAGNACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
     let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "target", subject),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "target", subject)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -576,17 +2540,13 @@ fn blastn_query_with_ambiguous_bases() {
 
 #[test]
 fn db_single_base_nucleotide() {
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "single", "A"),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "single", "A")]);
     assert_eq!(db.num_oids, 1);
 }
 
 #[test]
 fn db_single_residue_protein() {
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "single", "M"),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "single", "M")]);
     assert_eq!(db.num_oids, 1);
 }
 
@@ -600,10 +2560,16 @@ fn blastp_large_query_1000aa() {
         protein_entry("P001", "target", std::str::from_utf8(&query).unwrap()),
         protein_entry("P002", "unrelated", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWW"),
     ]);
-    let params = SearchParams::blastp().evalue(10.0).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
     let results = blastp(&db, &query, &params);
-    assert!(!results.is_empty(), "should find self-match for 1000aa query");
+    assert!(
+        !results.is_empty(),
+        "should find self-match for 1000aa query"
+    );
 }
 
 // ── Blastn with multiple mismatches ─────────────────────────────────────────
@@ -620,16 +2586,26 @@ fn blastn_multiple_mismatches() {
     subj_bytes[90] = b'T';
     let subj_str = String::from_utf8(subj_bytes).unwrap();
 
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "5 mismatches", &subj_str),
-    ]);
-    let params = SearchParams::blastn().evalue(10.0).num_threads(1)
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "5 mismatches", &subj_str)]);
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
         .filter_low_complexity(false);
     let results = blastn(&db, query.as_bytes(), &params);
-    assert!(!results.is_empty(), "should find hit with 5 mismatches in 100bp");
+    assert!(
+        !results.is_empty(),
+        "should find hit with 5 mismatches in 100bp"
+    );
     let hsp = &results[0].hsps[0];
-    assert!(hsp.percent_identity() > 90.0, "95% identity expected, got {:.1}%", hsp.percent_identity());
-    assert!(hsp.percent_identity() < 100.0, "should not be 100% with mismatches");
+    assert!(
+        hsp.percent_identity() > 90.0,
+        "95% identity expected, got {:.1}%",
+        hsp.percent_identity()
+    );
+    assert!(
+        hsp.percent_identity() < 100.0,
+        "should not be 100% with mismatches"
+    );
 }
 
 // ── Multi-subject index tests ───────────────────────────────────────────────
@@ -644,8 +2620,11 @@ fn blastp_multi_subject_finds_correct_hit() {
         protein_entry("P004", "unrelated3", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
         protein_entry("P005", "unrelated4", "GGGGGGGGGGGGGGGGGGGGGGGGGGGG"),
     ]);
-    let params = SearchParams::blastp().evalue(10.0).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
 
     let results = blastp(&db, b"MKFLILLFNILCLFPVLAADNHGVSMNAS", &params);
     assert!(!results.is_empty(), "should find the matching subject");
@@ -662,11 +2641,18 @@ fn blastp_multi_subject_finds_multiple_hits() {
         protein_entry("P003", "match similar", "MKFLILLFNILCLFPVLAAENHGVSMNAS"), // one mismatch
         protein_entry("P004", "unrelated", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
     ]);
-    let params = SearchParams::blastp().evalue(10.0).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
 
     let results = blastp(&db, b"MKFLILLFNILCLFPVLAADNHGVSMNAS", &params);
-    assert!(results.len() >= 2, "should find at least 2 hits, got {}", results.len());
+    assert!(
+        results.len() >= 2,
+        "should find at least 2 hits, got {}",
+        results.len()
+    );
 
     let oids: Vec<u32> = results.iter().map(|r| r.subject_oid).collect();
     assert!(oids.contains(&0), "should find OID 0 (exact match)");
@@ -682,11 +2668,16 @@ fn blastn_multi_subject_finds_correct_hit() {
         nt_entry("N003", "target", target),
         nt_entry("N004", "decoy3", "GGGAAATTTCCCGGGAAATTTCCCGGGAAATTTCCCGGGAAATTTCCCGGGAAATTTCCCGGGAAATTTCCCGGGAAATTTCCCGGGAAATTTCCCGGGAAATT"),
     ]);
-    let params = SearchParams::blastn().evalue(10.0).num_threads(1)
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
         .filter_low_complexity(false);
 
     let results = blastn(&db, target.as_bytes(), &params);
-    assert!(!results.is_empty(), "should find the target in multi-subject DB");
+    assert!(
+        !results.is_empty(),
+        "should find the target in multi-subject DB"
+    );
     assert_eq!(results[0].subject_oid, 2, "should match OID 2 (the target)");
     assert!((results[0].hsps[0].percent_identity() - 100.0).abs() < 0.01);
 }
@@ -704,7 +2695,9 @@ fn blastn_multi_subject_many_sequences() {
     let (_tmp, db) = build_nucleotide_db(entries);
     assert_eq!(db.num_oids, 20);
 
-    let params = SearchParams::blastn().evalue(10.0).num_threads(1)
+    let params = SearchParams::blastn()
+        .evalue(10.0)
+        .num_threads(1)
         .filter_low_complexity(false);
     let results = blastn(&db, target.as_bytes(), &params);
     assert!(!results.is_empty(), "should find target in 20-sequence DB");
@@ -721,11 +2714,18 @@ fn blastp_multi_subject_20_sequences() {
     let (_tmp, db) = build_protein_db(entries);
     assert_eq!(db.num_oids, 20);
 
-    let params = SearchParams::blastp().evalue(10.0).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
     let results = blastp(&db, query.as_bytes(), &params);
     // Should find hits in many of the 20 identical subjects
-    assert!(results.len() >= 10, "should find many hits in 20-sequence DB, got {}", results.len());
+    assert!(
+        results.len() >= 10,
+        "should find many hits in 20-sequence DB, got {}",
+        results.len()
+    );
 }
 
 #[test]
@@ -736,12 +2736,21 @@ fn blastx_multi_subject_protein_db() {
         protein_entry("P002", "target", "MKFLILLF"),
         protein_entry("P003", "decoy", "AAAAAAAAAAAAAAAAAAA"),
     ]);
-    let params = SearchParams::blastp().evalue(10.0).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
 
     let results = blastx(&db, nt_query.as_bytes(), &params);
-    assert!(!results.is_empty(), "blastx should find target in multi-subject protein DB");
-    assert_eq!(results[0].subject_oid, 1, "should match OID 1 (the target protein)");
+    assert!(
+        !results.is_empty(),
+        "blastx should find target in multi-subject protein DB"
+    );
+    assert_eq!(
+        results[0].subject_oid, 1,
+        "should match OID 1 (the target protein)"
+    );
 }
 
 #[test]
@@ -755,12 +2764,21 @@ fn tblastn_multi_subject_nt_db() {
         nt_entry("N002", "decoy2", nt_decoy),
         nt_entry("N003", "target", nt_target),
     ]);
-    let params = SearchParams::blastp().evalue(10.0).num_threads(1)
-        .filter_low_complexity(false).comp_adjust(0);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
 
     let results = tblastn(&db, protein_query.as_bytes(), &params);
-    assert!(!results.is_empty(), "tblastn should find protein in multi-subject nt DB");
-    assert_eq!(results[0].subject_oid, 2, "should match OID 2 (the coding sequence)");
+    assert!(
+        !results.is_empty(),
+        "tblastn should find protein in multi-subject nt DB"
+    );
+    assert_eq!(
+        results[0].subject_oid, 2,
+        "should match OID 2 (the coding sequence)"
+    );
 }
 
 // ── Prokka-style annotation performance test ─────────────────────────────────
@@ -776,8 +2794,11 @@ fn tblastn_multi_subject_nt_db() {
 fn test_blastp_prokka_sprot() {
     // Paths relative to the blast-rs repo — prokka db may be at a sibling path
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = sprot_paths.iter().find(|p| p.exists());
     let sprot_path = match sprot_path {
@@ -810,7 +2831,11 @@ fn test_blastp_prokka_sprot() {
     builder.write(&base).unwrap();
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
     let db_build_time = t0.elapsed();
-    eprintln!("DB build: {:.2}s ({} entries)", db_build_time.as_secs_f64(), records.len());
+    eprintln!(
+        "DB build: {:.2}s ({} entries)",
+        db_build_time.as_secs_f64(),
+        records.len()
+    );
 
     // 5 representative bacterial protein queries (real CDS translations)
     let queries: Vec<&[u8]> = vec![
@@ -840,14 +2865,18 @@ fn test_blastp_prokka_sprot() {
         let q_time = t_q.elapsed();
         eprintln!(
             "Query {} ({} aa): {} hits in {:.2}s",
-            i + 1, query.len(), results.len(), q_time.as_secs_f64()
+            i + 1,
+            query.len(),
+            results.len(),
+            q_time.as_secs_f64()
         );
         total_hits += results.len();
     }
     let search_time = t1.elapsed();
     eprintln!(
         "Total: {} queries, {} hits, {:.2}s ({:.2}s/query)",
-        queries.len(), total_hits,
+        queries.len(),
+        total_hits,
         search_time.as_secs_f64(),
         search_time.as_secs_f64() / queries.len() as f64
     );
@@ -857,7 +2886,9 @@ fn test_blastp_prokka_sprot() {
     let ncbi_per_query = 12.0 / 63.0; // NCBI BLAST+ reference: 63 queries in 12s
     eprintln!(
         "\nPerformance: {:.2}s/query (NCBI BLAST+ reference: {:.3}s/query, {:.0}x slower)",
-        per_query, ncbi_per_query, per_query / ncbi_per_query
+        per_query,
+        ncbi_per_query,
+        per_query / ncbi_per_query
     );
 
     // Performance assertion: 5 queries should complete in under 60 seconds
@@ -865,7 +2896,8 @@ fn test_blastp_prokka_sprot() {
     assert!(
         search_time.as_secs() < 60,
         "blastp search too slow: {:.1}s for {} queries (target: <60s)",
-        search_time.as_secs_f64(), queries.len()
+        search_time.as_secs_f64(),
+        queries.len()
     );
 
     // Now test with all available threads
@@ -886,11 +2918,16 @@ fn test_blastp_prokka_sprot() {
     let speedup = search_time.as_secs_f64() / mt_time.as_secs_f64();
     eprintln!(
         "\nMulti-threaded: {:.2}s/query ({:.1}x speedup over single-threaded, {:.0}x vs NCBI)",
-        mt_per_query, speedup, mt_per_query / ncbi_per_query
+        mt_per_query,
+        speedup,
+        mt_per_query / ncbi_per_query
     );
 
     // Verify same hit count
-    assert_eq!(total_hits, total_hits_mt, "Multi-threaded should find same hits as single-threaded");
+    assert_eq!(
+        total_hits, total_hits_mt,
+        "Multi-threaded should find same hits as single-threaded"
+    );
 }
 
 /// Sensitivity test: verify that blastp finds the same hits as NCBI BLAST+.
@@ -904,12 +2941,18 @@ fn test_blastp_prokka_sprot() {
 #[ignore]
 fn test_blastp_sensitivity() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+        None => {
+            eprintln!("Skipping: prokka sprot database not found");
+            return;
+        }
     };
 
     // Build DB
@@ -957,10 +3000,14 @@ fn test_blastp_sensitivity() {
             eprintln!("MISS: {} ({}) — 0 hits", name, expected);
             missed.push(*name);
         } else {
-            eprintln!("HIT:  {} ({}) — {} hits, best e-value: {:.2e}, title: {}",
-                name, expected, results.len(),
+            eprintln!(
+                "HIT:  {} ({}) — {} hits, best e-value: {:.2e}, title: {}",
+                name,
+                expected,
+                results.len(),
                 results[0].best_evalue(),
-                &results[0].subject_title[..80.min(results[0].subject_title.len())]);
+                &results[0].subject_title[..80.min(results[0].subject_title.len())]
+            );
         }
     }
 
@@ -968,7 +3015,8 @@ fn test_blastp_sensitivity() {
         missed.is_empty(),
         "blastp failed to find hits for {} proteins that NCBI BLAST+ finds: {:?}. \
          This indicates a sensitivity gap in the search algorithm.",
-        missed.len(), missed
+        missed.len(),
+        missed
     );
 }
 
@@ -981,12 +3029,18 @@ fn test_blastp_sensitivity() {
 #[ignore]
 fn test_comp_adjust_srta() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+        None => {
+            eprintln!("Skipping: prokka sprot database not found");
+            return;
+        }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
@@ -995,8 +3049,10 @@ fn test_comp_adjust_srta() {
     let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
     for rec in &records {
         builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
         });
     }
     builder.write(&base).unwrap();
@@ -1006,43 +3062,71 @@ fn test_comp_adjust_srta() {
     let query = b"MKKCFLFCLKGGRWMKKWLFGFLGVALIVVCSVFGYVSYQKHEGEVFKQNIEKKMPVDQINAHAKSYKEDATNVNNDMSLGQMLSIQKEAIEMGVNKQVFAQIQIPALGLALPIFKGANQYTLSLGAATYFYEDAEMGKGNYVLAGHNMEMPGVLFSDIQKLSLGEVMDLVSNDGVYRYKVTRKFIVPEYFKLIDGVPEENSFLSLPKKGEKPLLTLFTCVYTSQGKERYVVQGELQ";
 
     // Without composition adjustment — should find a hit
-    let params_no = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(0);
+    let params_no = SearchParams::blastp()
+        .evalue(1e-6)
+        .num_threads(1)
+        .comp_adjust(0);
     let results_no = blastp(&db, query, &params_no);
     eprintln!("comp_adjust=0: {} hits", results_no.len());
     for r in &results_no {
         for h in &r.hsps {
-            eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{}",
-                r.subject_accession, h.evalue, h.score, h.bit_score,
-                h.num_identities, h.alignment_length);
+            eprintln!(
+                "  {} e={:.2e} score={} bits={:.1} ident={}/{}",
+                r.subject_accession,
+                h.evalue,
+                h.score,
+                h.bit_score,
+                h.num_identities,
+                h.alignment_length
+            );
         }
     }
 
     // With lambda scaling only (mode 1)
-    let params_1 = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(1);
+    let params_1 = SearchParams::blastp()
+        .evalue(1e-6)
+        .num_threads(1)
+        .comp_adjust(1);
     let results_1 = blastp(&db, query, &params_1);
     eprintln!("comp_adjust=1: {} hits", results_1.len());
     for r in &results_1 {
         for h in &r.hsps {
-            eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{}",
-                r.subject_accession, h.evalue, h.score, h.bit_score,
-                h.num_identities, h.alignment_length);
+            eprintln!(
+                "  {} e={:.2e} score={} bits={:.1} ident={}/{}",
+                r.subject_accession,
+                h.evalue,
+                h.score,
+                h.bit_score,
+                h.num_identities,
+                h.alignment_length
+            );
         }
     }
 
     // With conditional matrix adjustment (mode 2) — should eliminate false positive
-    let params_2 = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(2);
+    let params_2 = SearchParams::blastp()
+        .evalue(1e-6)
+        .num_threads(1)
+        .comp_adjust(2);
     let results_2 = blastp(&db, query, &params_2);
     eprintln!("comp_adjust=2: {} hits", results_2.len());
     for r in &results_2 {
         for h in &r.hsps {
-            eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{}",
-                r.subject_accession, h.evalue, h.score, h.bit_score,
-                h.num_identities, h.alignment_length);
+            eprintln!(
+                "  {} e={:.2e} score={} bits={:.1} ident={}/{}",
+                r.subject_accession,
+                h.evalue,
+                h.score,
+                h.bit_score,
+                h.num_identities,
+                h.alignment_length
+            );
         }
     }
 
     // Check: mode 2 should have fewer or zero hits compared to mode 0
-    let srta_hits_2: Vec<_> = results_2.iter()
+    let srta_hits_2: Vec<_> = results_2
+        .iter()
         .filter(|r| r.subject_title.to_lowercase().contains("sortase"))
         .collect();
     eprintln!("Sortase hits with comp_adjust=2: {}", srta_hits_2.len());
@@ -1050,15 +3134,24 @@ fn test_comp_adjust_srta() {
     // Also test dinB query (DNA polymerase IV) — should NOT be eliminated
     let dinb_query = b"MYLAISSLQHRTYVCIMWKNGVLFMMDYSKEPVNDYFLIDMKSFYASVECIERNLDPLTTELVVMSRSDNTGSGLILASSPEAKKRYGITNVSRPRDLPQPFPKTLHVVPPRMNLYIKRNMQVNNIFRRYVADEDLLIYSIDESILKVTKSLNLFTTEETRSQRRKKLAQMIQERIKEELGLIATVGVGDNPLLAKLALDNEAKHNEGFIAEWTYENVPEKVWNIPEMTDFWGIGSRMKKRLNQMGILSIRDLANWNPYTIKNRLGVIGLQLYFHANGIDRTDIAIPPEPTKEKSYGNSQVLPRDYTRRNEIELVVKEMAEQVAIRIRQHNCKTGCVHLNIGTSILETRPGFSHQMKIPITDNTKELQNYCLFLFDKYYEGQEVRHVGITYSKLVYTDSLQLDLFSDPQKQINEENLDKIIDKIRQKYGFTSIVHASSMLESARSITRSTLVGGHAGGNGGIKND";
     for mode in [0u8, 1, 2] {
-        let params = SearchParams::blastp().evalue(1e-6).num_threads(1).comp_adjust(mode);
+        let params = SearchParams::blastp()
+            .evalue(1e-6)
+            .num_threads(1)
+            .comp_adjust(mode);
         let results = blastp(&db, dinb_query, &params);
         eprintln!("dinB comp_adjust={}: {} hits", mode, results.len());
         for r in &results {
             for h in &r.hsps {
-                eprintln!("  {} e={:.2e} score={} bits={:.1} ident={}/{} qcov={:.0}%",
-                    r.subject_accession, h.evalue, h.score, h.bit_score,
-                    h.num_identities, h.alignment_length,
-                    h.alignment_length as f64 / dinb_query.len() as f64 * 100.0);
+                eprintln!(
+                    "  {} e={:.2e} score={} bits={:.1} ident={}/{} qcov={:.0}%",
+                    r.subject_accession,
+                    h.evalue,
+                    h.score,
+                    h.bit_score,
+                    h.num_identities,
+                    h.alignment_length,
+                    h.alignment_length as f64 / dinb_query.len() as f64 * 100.0
+                );
             }
         }
     }
@@ -1074,12 +3167,18 @@ fn test_comp_adjust_srta() {
 #[ignore]
 fn test_blastp_vs_ncbi() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+        None => {
+            eprintln!("Skipping: prokka sprot database not found");
+            return;
+        }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
@@ -1088,8 +3187,10 @@ fn test_blastp_vs_ncbi() {
     let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
     for rec in &records {
         builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
         });
     }
     builder.write(&base).unwrap();
@@ -1136,7 +3237,10 @@ fn test_blastp_vs_ncbi() {
         let results = blastp(&db, query, &params);
 
         if results.is_empty() {
-            failures.push(format!("{}: no hits (NCBI finds {} at e={:.2e})", name, expected_acc, ncbi_evalue));
+            failures.push(format!(
+                "{}: no hits (NCBI finds {} at e={:.2e})",
+                name, expected_acc, ncbi_evalue
+            ));
             continue;
         }
 
@@ -1155,15 +3259,30 @@ fn test_blastp_vs_ncbi() {
         let len_diff = (best_hsp.alignment_length as i32 - *ncbi_length as i32).abs();
         let len_pct = len_diff as f64 / *ncbi_length as f64 * 100.0;
 
-        eprintln!("{}: acc={} score={} (NCBI:{}, diff:{:.1}%) len={} (NCBI:{}, diff:{:.1}%) e={:.2e}",
-            name, best.subject_accession, best_hsp.score, ncbi_score, score_pct,
-            best_hsp.alignment_length, ncbi_length, len_pct, best_hsp.evalue);
+        eprintln!(
+            "{}: acc={} score={} (NCBI:{}, diff:{:.1}%) len={} (NCBI:{}, diff:{:.1}%) e={:.2e}",
+            name,
+            best.subject_accession,
+            best_hsp.score,
+            ncbi_score,
+            score_pct,
+            best_hsp.alignment_length,
+            ncbi_length,
+            len_pct,
+            best_hsp.evalue
+        );
 
         if !acc_match {
-            failures.push(format!("{}: wrong top hit {} (expected {})", name, best.subject_accession, expected_acc));
+            failures.push(format!(
+                "{}: wrong top hit {} (expected {})",
+                name, best.subject_accession, expected_acc
+            ));
         }
         if score_pct > 5.0 {
-            failures.push(format!("{}: score {} differs by {:.1}% from NCBI {}", name, best_hsp.score, score_pct, ncbi_score));
+            failures.push(format!(
+                "{}: score {} differs by {:.1}% from NCBI {}",
+                name, best_hsp.score, score_pct, ncbi_score
+            ));
         }
     }
 
@@ -1183,12 +3302,18 @@ fn test_blastp_plasmid_annotation_count() {
     use blast_rs::encoding::AMINOACID_TO_NCBISTDAA;
 
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+        None => {
+            eprintln!("Skipping: prokka sprot database not found");
+            return;
+        }
     };
 
     // Build BLAST DB
@@ -1199,17 +3324,18 @@ fn test_blastp_plasmid_annotation_count() {
     let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
     for rec in &records {
         builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
         });
     }
     builder.write(&base).unwrap();
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
 
     // Load plasmid CDS proteins from the .faa file if available, or skip
-    let faa_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/tests/data/plasmid_cds.faa"),
-    ];
+    let faa_paths = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../prokka-rs/tests/data/plasmid_cds.faa")];
     // If no .faa file, generate proteins by running prodigal on the plasmid
     // For now, use hardcoded test proteins from known CDS
     let test_proteins: Vec<(&str, &[u8])> = vec![
@@ -1236,8 +3362,10 @@ fn test_blastp_plasmid_annotation_count() {
         if !results.is_empty() {
             hits += 1;
             let best = &results[0];
-            eprintln!("HIT: {} → {} e={:.2e} score={}",
-                name, best.subject_accession, best.hsps[0].evalue, best.hsps[0].score);
+            eprintln!(
+                "HIT: {} → {} e={:.2e} score={}",
+                name, best.subject_accession, best.hsps[0].evalue, best.hsps[0].score
+            );
         } else {
             eprintln!("MISS: {}", name);
         }
@@ -1267,12 +3395,18 @@ fn test_blastp_plasmid_annotation_count() {
 #[ignore]
 fn test_lambda_ratio_stress() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+        None => {
+            eprintln!("Skipping: prokka sprot database not found");
+            return;
+        }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
@@ -1281,8 +3415,10 @@ fn test_lambda_ratio_stress() {
     let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
     for rec in &records {
         builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
         });
     }
     builder.write(&base).unwrap();
@@ -1318,34 +3454,60 @@ fn test_lambda_ratio_stress() {
     for (name, query, ncbi_m0_score, ncbi_m1_score, ncbi_m0_acc, ncbi_m1_acc) in &biased_queries {
         // Run with comp_adjust=0
         let params_0 = SearchParams::blastp()
-            .evalue(1.0).num_threads(1).filter_low_complexity(false).comp_adjust(0);
+            .evalue(1.0)
+            .num_threads(1)
+            .filter_low_complexity(false)
+            .comp_adjust(0);
         let results_0 = blastp(&db, query, &params_0);
 
         // Run with comp_adjust=1 (ScaleOldMatrix — lambda ratio rescaling)
         let params_1 = SearchParams::blastp()
-            .evalue(1.0).num_threads(1).filter_low_complexity(false).comp_adjust(1);
+            .evalue(1.0)
+            .num_threads(1)
+            .filter_low_complexity(false)
+            .comp_adjust(1);
         let results_1 = blastp(&db, query, &params_1);
 
         let score_0 = results_0.first().map(|r| r.hsps[0].score).unwrap_or(0);
         let score_1 = results_1.first().map(|r| r.hsps[0].score).unwrap_or(0);
-        let acc_0 = results_0.first().map(|r| r.subject_accession.as_str()).unwrap_or("none");
-        let acc_1 = results_1.first().map(|r| r.subject_accession.as_str()).unwrap_or("none");
+        let acc_0 = results_0
+            .first()
+            .map(|r| r.subject_accession.as_str())
+            .unwrap_or("none");
+        let acc_1 = results_1
+            .first()
+            .map(|r| r.subject_accession.as_str())
+            .unwrap_or("none");
 
         let ncbi_delta = *ncbi_m1_score as f64 / *ncbi_m0_score as f64;
-        let our_delta = if score_0 > 0 { score_1 as f64 / score_0 as f64 } else { 1.0 };
+        let our_delta = if score_0 > 0 {
+            score_1 as f64 / score_0 as f64
+        } else {
+            1.0
+        };
 
-        eprintln!("{}: mode0 score={} (NCBI:{}) mode1 score={} (NCBI:{})",
-            name, score_0, ncbi_m0_score, score_1, ncbi_m1_score);
-        eprintln!("  mode0 acc={} (NCBI:{}) mode1 acc={} (NCBI:{})",
-            acc_0, ncbi_m0_acc, acc_1, ncbi_m1_acc);
-        eprintln!("  score ratio: ours={:.3} NCBI={:.3}", our_delta, ncbi_delta);
+        eprintln!(
+            "{}: mode0 score={} (NCBI:{}) mode1 score={} (NCBI:{})",
+            name, score_0, ncbi_m0_score, score_1, ncbi_m1_score
+        );
+        eprintln!(
+            "  mode0 acc={} (NCBI:{}) mode1 acc={} (NCBI:{})",
+            acc_0, ncbi_m0_acc, acc_1, ncbi_m1_acc
+        );
+        eprintln!(
+            "  score ratio: ours={:.3} NCBI={:.3}",
+            our_delta, ncbi_delta
+        );
 
         // Check mode 0 score matches NCBI (±5%)
         if score_0 > 0 {
-            let m0_diff_pct = (score_0 - ncbi_m0_score).abs() as f64 / *ncbi_m0_score as f64 * 100.0;
+            let m0_diff_pct =
+                (score_0 - ncbi_m0_score).abs() as f64 / *ncbi_m0_score as f64 * 100.0;
             if m0_diff_pct > 5.0 {
-                failures.push(format!("{}: mode0 score {} differs by {:.1}% from NCBI {}",
-                    name, score_0, m0_diff_pct, ncbi_m0_score));
+                failures.push(format!(
+                    "{}: mode0 score {} differs by {:.1}% from NCBI {}",
+                    name, score_0, m0_diff_pct, ncbi_m0_score
+                ));
             }
         }
 
@@ -1356,7 +3518,8 @@ fn test_lambda_ratio_stress() {
                 failures.push(format!(
                     "{}: mode1 score INCREASED ({} → {}) but NCBI DECREASED ({} → {}). \
                      Lambda ratio is likely wrong.",
-                    name, score_0, score_1, ncbi_m0_score, ncbi_m1_score));
+                    name, score_0, score_1, ncbi_m0_score, ncbi_m1_score
+                ));
             }
         }
     }
@@ -1380,12 +3543,18 @@ fn test_lambda_ratio_stress() {
 #[ignore]
 fn test_blastp_timing_breakdown() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: prokka sprot database not found"); return; }
+        None => {
+            eprintln!("Skipping: prokka sprot database not found");
+            return;
+        }
     };
 
     // Build DB
@@ -1396,8 +3565,10 @@ fn test_blastp_timing_breakdown() {
     let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
     for rec in &records {
         builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
         });
     }
     builder.write(&base).unwrap();
@@ -1424,7 +3595,8 @@ fn test_blastp_timing_breakdown() {
     let total = t.elapsed();
 
     // Time just lookup table build
-    let query_aa: Vec<u8> = query.iter()
+    let query_aa: Vec<u8> = query
+        .iter()
         .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
         .collect();
     let matrix = blast_rs::matrix::BLOSUM62;
@@ -1443,9 +3615,15 @@ fn test_blastp_timing_breakdown() {
         for oid in 0..db.num_oids {
             let subj = db.get_sequence(oid);
             let len = db.get_seq_len(oid) as usize;
-            if len < 3 { continue; }
+            if len < 3 {
+                continue;
+            }
             let _ = blast_rs::protein_lookup::protein_scan_with_table(
-                &query_aa, &subj[..len], &matrix, &table, 40,
+                &query_aa,
+                &subj[..len],
+                &matrix,
+                &table,
+                40,
             );
         }
     }
@@ -1464,15 +3642,40 @@ fn test_blastp_timing_breakdown() {
     }
     let db_iter = t.elapsed();
 
-    eprintln!("\n=== BLASTP TIMING BREAKDOWN ({} iterations, 260aa query vs {} subjects) ===", n, db.num_oids);
-    eprintln!("  Full blastp():        {:>8.3}s  ({:.4}s/query)", total.as_secs_f64(), total.as_secs_f64() / n as f64);
-    eprintln!("  Lookup table build:   {:>8.3}s  ({:.4}s/query)", table_build.as_secs_f64(), table_build.as_secs_f64() / n as f64);
-    eprintln!("  Scan + extend:        {:>8.3}s  ({:.4}s/query)", scan_total.as_secs_f64(), scan_total.as_secs_f64() / n as f64);
-    eprintln!("  DB iteration only:    {:>8.3}s  ({:.4}s/query)", db_iter.as_secs_f64(), db_iter.as_secs_f64() / n as f64);
-    eprintln!("  Overhead (gapped etc): {:>7.3}s  ({:.4}s/query)",
+    eprintln!(
+        "\n=== BLASTP TIMING BREAKDOWN ({} iterations, 260aa query vs {} subjects) ===",
+        n, db.num_oids
+    );
+    eprintln!(
+        "  Full blastp():        {:>8.3}s  ({:.4}s/query)",
+        total.as_secs_f64(),
+        total.as_secs_f64() / n as f64
+    );
+    eprintln!(
+        "  Lookup table build:   {:>8.3}s  ({:.4}s/query)",
+        table_build.as_secs_f64(),
+        table_build.as_secs_f64() / n as f64
+    );
+    eprintln!(
+        "  Scan + extend:        {:>8.3}s  ({:.4}s/query)",
+        scan_total.as_secs_f64(),
+        scan_total.as_secs_f64() / n as f64
+    );
+    eprintln!(
+        "  DB iteration only:    {:>8.3}s  ({:.4}s/query)",
+        db_iter.as_secs_f64(),
+        db_iter.as_secs_f64() / n as f64
+    );
+    eprintln!(
+        "  Overhead (gapped etc): {:>7.3}s  ({:.4}s/query)",
         (total.as_secs_f64() - scan_total.as_secs_f64()).max(0.0),
-        ((total.as_secs_f64() - scan_total.as_secs_f64()) / n as f64).max(0.0));
-    eprintln!("  Total subject bytes:  {} ({}/iter)", total_len, total_len / n);
+        ((total.as_secs_f64() - scan_total.as_secs_f64()) / n as f64).max(0.0)
+    );
+    eprintln!(
+        "  Total subject bytes:  {} ({}/iter)",
+        total_len,
+        total_len / n
+    );
     eprintln!();
 
     // Also time different query sizes
@@ -1494,12 +3697,18 @@ fn test_blastp_timing_breakdown() {
 #[ignore]
 fn debug_srta_seeds() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: sprot not found"); return; }
+        None => {
+            eprintln!("Skipping: sprot not found");
+            return;
+        }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
@@ -1534,24 +3743,48 @@ fn debug_srta_seeds() {
     let srta = b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPSISLKLPIYDGTSDKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK";
     let results_e10 = blastp(&db, srta, &params);
     let results_strict = blastp(&db, srta, &params_strict);
-    eprintln!("srtA: {} hits (evalue=10), {} hits (evalue=1e-6)", results_e10.len(), results_strict.len());
+    eprintln!(
+        "srtA: {} hits (evalue=10), {} hits (evalue=1e-6)",
+        results_e10.len(),
+        results_strict.len()
+    );
     for r in results_e10.iter().take(5) {
         let title = &r.subject_title[..80.min(r.subject_title.len())];
         for h in &r.hsps {
-            eprintln!("  evalue={:.2e} score={} bits={:.1} alen={} ident={} gaps={} title={}",
-                h.evalue, h.score, h.bit_score, h.alignment_length, h.num_identities, h.num_gaps, title);
+            eprintln!(
+                "  evalue={:.2e} score={} bits={:.1} alen={} ident={} gaps={} title={}",
+                h.evalue,
+                h.score,
+                h.bit_score,
+                h.alignment_length,
+                h.num_identities,
+                h.num_gaps,
+                title
+            );
         }
     }
 
     let umuc = b"MNSDLILAGESPSYNAAFIAMKEQHPAVFYAQHNAFGLKKIRSGFISDEQAKEYYPLICEALQKDITHFVDEIVASITGYSIDNIRFAKENKNKTIINSFEGWYNLSQQLLDTIMNEQNKSHPQFSYYSKLNSSHQLSHKEKAEAYIAGINIQITIDKQGKFFQKHFDIIQSIIKEESVNIPVLFINTSRNLKYSTGIEFNELFKRSNSNSLLAKRRVFYSLPYQPAKYREYFDSFKKISEKWIEAYKCNELDKNIGISFHDFYDSRFRTKDAKKQFSFINNIMSKIRDLYEVPEKIVRELKTRFKWFWEKKVKK";
     let results_e10 = blastp(&db, umuc, &params);
     let results_strict = blastp(&db, umuc, &params_strict);
-    eprintln!("umuC: {} hits (evalue=10), {} hits (evalue=1e-6)", results_e10.len(), results_strict.len());
+    eprintln!(
+        "umuC: {} hits (evalue=10), {} hits (evalue=1e-6)",
+        results_e10.len(),
+        results_strict.len()
+    );
     for r in results_e10.iter().take(5) {
         let title = &r.subject_title[..80.min(r.subject_title.len())];
         for h in &r.hsps {
-            eprintln!("  evalue={:.2e} score={} bits={:.1} alen={} ident={} gaps={} title={}",
-                h.evalue, h.score, h.bit_score, h.alignment_length, h.num_identities, h.num_gaps, title);
+            eprintln!(
+                "  evalue={:.2e} score={} bits={:.1} alen={} ident={} gaps={} title={}",
+                h.evalue,
+                h.score,
+                h.bit_score,
+                h.alignment_length,
+                h.num_identities,
+                h.num_gaps,
+                title
+            );
         }
     }
 }
@@ -1563,9 +3796,7 @@ fn debug_srta_seeds() {
 #[test]
 fn test_blastn_self_search() {
     let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "self target", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "self target", seq)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -1574,12 +3805,22 @@ fn test_blastn_self_search() {
     let results = blastn(&db, seq.as_bytes(), &params);
     assert!(!results.is_empty(), "self search must find a hit");
     let best = &results[0];
-    assert_eq!(best.hsps.len(), 1, "self search should yield exactly one HSP");
+    assert_eq!(
+        best.hsps.len(),
+        1,
+        "self search should yield exactly one HSP"
+    );
     let hsp = &best.hsps[0];
-    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
-        "self search identity should be 100%, got {:.2}%", hsp.percent_identity());
-    assert_eq!(hsp.alignment_length, seq.len(),
-        "alignment should span entire sequence");
+    assert!(
+        (hsp.percent_identity() - 100.0).abs() < 0.01,
+        "self search identity should be 100%, got {:.2}%",
+        hsp.percent_identity()
+    );
+    assert_eq!(
+        hsp.alignment_length,
+        seq.len(),
+        "alignment should span entire sequence"
+    );
     assert_eq!(hsp.num_gaps, 0, "perfect self alignment has no gaps");
 }
 
@@ -1589,17 +3830,17 @@ fn test_blastn_no_hit() {
     // Poly-A query vs poly-C subject -- no significant similarity.
     let query   = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let subject = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "unrelated", subject),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "unrelated", subject)]);
     let params = SearchParams::blastn()
         .evalue(1e-10)
         .num_threads(1)
         .filter_low_complexity(false);
 
     let results = blastn(&db, query.as_bytes(), &params);
-    assert!(results.is_empty(),
-        "completely unrelated sequences should produce no hits at evalue 1e-10");
+    assert!(
+        results.is_empty(),
+        "completely unrelated sequences should produce no hits at evalue 1e-10"
+    );
 }
 
 /// Subject contains two separate regions matching the query. Verify multiple
@@ -1609,12 +3850,10 @@ fn test_blastn_multiple_hsps() {
     // Two distinct 40bp matching regions separated by 60bp of unrelated sequence.
     let region_a = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTT";
     let region_b = "GCTTAACGATCGTAAGGCCTTAGCAGTCAATGCTTGAAGT";
-    let spacer   = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
+    let spacer = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
     let query = format!("{}{}", region_a, region_b);
     let subject = format!("{}{}{}", region_a, spacer, region_b);
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "multi region", &subject),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "multi region", &subject)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -1624,17 +3863,18 @@ fn test_blastn_multiple_hsps() {
     assert!(!results.is_empty(), "should find hits");
     // Count total HSPs across all results for subject N001
     let total_hsps: usize = results.iter().map(|r| r.hsps.len()).sum();
-    assert!(total_hsps >= 1,
-        "subject with two matching regions should produce at least 1 HSP, got {}", total_hsps);
+    assert!(
+        total_hsps >= 1,
+        "subject with two matching regions should produce at least 1 HSP, got {}",
+        total_hsps
+    );
 }
 
 /// Protein self-search: search a protein against itself and verify perfect alignment.
 #[test]
 fn test_blastp_self_search() {
     let seq = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "self protein", seq),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "self protein", seq)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -1644,8 +3884,11 @@ fn test_blastp_self_search() {
     let results = blastp(&db, seq.as_bytes(), &params);
     assert!(!results.is_empty(), "protein self search must find a hit");
     let hsp = &results[0].hsps[0];
-    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
-        "protein self search should be 100% identity, got {:.2}%", hsp.percent_identity());
+    assert!(
+        (hsp.percent_identity() - 100.0).abs() < 0.01,
+        "protein self search should be 100% identity, got {:.2}%",
+        hsp.percent_identity()
+    );
     assert_eq!(hsp.alignment_length, seq.len());
     assert_eq!(hsp.num_gaps, 0);
     assert!(hsp.score > 0, "self-hit score should be positive");
@@ -1656,11 +3899,9 @@ fn test_blastp_self_search() {
 #[test]
 fn test_blastp_known_pair() {
     // Query and subject differ at a few positions (conservative substitutions).
-    let query   = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
+    let query = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
     let subject = "MKFLILLFNILCLFPVLAADNHGVSINAS"; // M→I near the end (conservative in BLOSUM62)
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "related protein", subject),
-    ]);
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "related protein", subject)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -1670,10 +3911,20 @@ fn test_blastp_known_pair() {
     let results = blastp(&db, query.as_bytes(), &params);
     assert!(!results.is_empty(), "related proteins should produce a hit");
     let hsp = &results[0].hsps[0];
-    assert!(hsp.score > 0, "related protein hit should have positive score");
-    assert!(hsp.evalue < 1.0, "related protein hit should have reasonable evalue, got {:.2e}", hsp.evalue);
-    assert!(hsp.percent_identity() > 90.0,
-        "one substitution should give >90% identity, got {:.1}%", hsp.percent_identity());
+    assert!(
+        hsp.score > 0,
+        "related protein hit should have positive score"
+    );
+    assert!(
+        hsp.evalue < 1.0,
+        "related protein hit should have reasonable evalue, got {:.2e}",
+        hsp.evalue
+    );
+    assert!(
+        hsp.percent_identity() > 90.0,
+        "one substitution should give >90% identity, got {:.1}%",
+        hsp.percent_identity()
+    );
 }
 
 /// BLASTX: nucleotide query encoding a known protein searched against a protein
@@ -1683,10 +3934,8 @@ fn test_blastx_finds_protein_match() {
     // ATG AAA TTT CTG ATT CTG CTG TTT AAC ATT CTG TGC CTG TTC
     // encodes: M   K   F   L   I   L   L   F   N   I   L   C   L   F
     let nt_query = "ATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTC";
-    let protein  = "MKFLILLFNILCLF";
-    let (_tmp, db) = build_protein_db(vec![
-        protein_entry("P001", "target protein", protein),
-    ]);
+    let protein = "MKFLILLFNILCLF";
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "target protein", protein)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -1694,11 +3943,20 @@ fn test_blastx_finds_protein_match() {
         .comp_adjust(0);
 
     let results = blastx(&db, nt_query.as_bytes(), &params);
-    assert!(!results.is_empty(), "blastx should find the translated protein match");
+    assert!(
+        !results.is_empty(),
+        "blastx should find the translated protein match"
+    );
     let hsp = &results[0].hsps[0];
-    assert!(hsp.percent_identity() > 80.0,
-        "translated match should have high identity, got {:.1}%", hsp.percent_identity());
-    assert!(hsp.query_frame != 0, "blastx HSP should have non-zero query frame");
+    assert!(
+        hsp.percent_identity() > 80.0,
+        "translated match should have high identity, got {:.1}%",
+        hsp.percent_identity()
+    );
+    assert!(
+        hsp.query_frame != 0,
+        "blastx HSP should have non-zero query frame"
+    );
     assert!(hsp.score > 0);
 }
 
@@ -1707,10 +3965,8 @@ fn test_blastx_finds_protein_match() {
 #[test]
 fn test_tblastn_finds_nucleotide_match() {
     let protein_query = "MKFLILLFNILCLF";
-    let nt_subject    = "ATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "coding region", nt_subject),
-    ]);
+    let nt_subject = "ATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTC";
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "coding region", nt_subject)]);
     let params = SearchParams::blastp()
         .evalue(10.0)
         .num_threads(1)
@@ -1718,11 +3974,20 @@ fn test_tblastn_finds_nucleotide_match() {
         .comp_adjust(0);
 
     let results = tblastn(&db, protein_query.as_bytes(), &params);
-    assert!(!results.is_empty(), "tblastn should find protein in translated nucleotide db");
+    assert!(
+        !results.is_empty(),
+        "tblastn should find protein in translated nucleotide db"
+    );
     let hsp = &results[0].hsps[0];
-    assert!(hsp.subject_frame != 0, "tblastn HSP should have non-zero subject frame");
-    assert!(hsp.percent_identity() > 80.0,
-        "translated match should have high identity, got {:.1}%", hsp.percent_identity());
+    assert!(
+        hsp.subject_frame != 0,
+        "tblastn HSP should have non-zero subject frame"
+    );
+    assert!(
+        hsp.percent_identity() > 80.0,
+        "translated match should have high identity, got {:.1}%",
+        hsp.percent_identity()
+    );
     assert!(hsp.score > 0);
 }
 
@@ -1731,9 +3996,7 @@ fn test_tblastn_finds_nucleotide_match() {
 fn test_blastn_both_strands() {
     let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
     let query_rc = String::from_utf8(reverse_complement(subject.as_bytes())).unwrap();
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "forward strand subject", subject),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "forward strand subject", subject)]);
 
     // With strand=both, should find the reverse-complement hit.
     let params = SearchParams::blastn()
@@ -1745,8 +4008,11 @@ fn test_blastn_both_strands() {
     let results = blastn(&db, query_rc.as_bytes(), &params);
     assert!(!results.is_empty(), "should find RC hit when strand=both");
     let hsp = &results[0].hsps[0];
-    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
-        "RC of subject should be 100% identity, got {:.2}%", hsp.percent_identity());
+    assert!(
+        (hsp.percent_identity() - 100.0).abs() < 0.01,
+        "RC of subject should be 100% identity, got {:.2}%",
+        hsp.percent_identity()
+    );
 
     // With strand=plus only, should NOT find it (query is RC of subject).
     let params_plus = SearchParams::blastn()
@@ -1756,8 +4022,10 @@ fn test_blastn_both_strands() {
         .strand("plus");
 
     let results_plus = blastn(&db, query_rc.as_bytes(), &params_plus);
-    assert!(results_plus.is_empty(),
-        "plus-strand-only should not find hit when query is RC of subject");
+    assert!(
+        results_plus.is_empty(),
+        "plus-strand-only should not find hit when query is RC of subject"
+    );
 }
 
 /// Very short query (15bp) with word_size=7. Should still find a match.
@@ -1765,9 +4033,7 @@ fn test_blastn_both_strands() {
 fn test_blastn_short_query() {
     let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
     let query = "ATGCGTACCTGAAAG"; // first 15bp of subject
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "target", subject),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "target", subject)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .word_size(7)
@@ -1775,19 +4041,22 @@ fn test_blastn_short_query() {
         .filter_low_complexity(false);
 
     let results = blastn(&db, query.as_bytes(), &params);
-    assert!(!results.is_empty(), "short 15bp query with word_size=7 should find a match");
+    assert!(
+        !results.is_empty(),
+        "short 15bp query with word_size=7 should find a match"
+    );
     let hsp = &results[0].hsps[0];
-    assert!((hsp.percent_identity() - 100.0).abs() < 0.01,
-        "exact substring should be 100% identity");
+    assert!(
+        (hsp.percent_identity() - 100.0).abs() < 0.01,
+        "exact substring should be 100% identity"
+    );
 }
 
 /// Set a strict evalue threshold and verify only significant hits pass.
 #[test]
 fn test_blastn_evalue_filter() {
     let seq = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "target", seq),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "target", seq)]);
 
     // Relaxed evalue -- should find hits
     let params_relaxed = SearchParams::blastn()
@@ -1795,7 +4064,10 @@ fn test_blastn_evalue_filter() {
         .num_threads(1)
         .filter_low_complexity(false);
     let results_relaxed = blastn(&db, seq.as_bytes(), &params_relaxed);
-    assert!(!results_relaxed.is_empty(), "relaxed evalue should find self hit");
+    assert!(
+        !results_relaxed.is_empty(),
+        "relaxed evalue should find self hit"
+    );
 
     // Very strict evalue for self-hit of 100bp should still pass (self hit is highly significant)
     let params_strict = SearchParams::blastn()
@@ -1803,14 +4075,19 @@ fn test_blastn_evalue_filter() {
         .num_threads(1)
         .filter_low_complexity(false);
     let results_strict = blastn(&db, seq.as_bytes(), &params_strict);
-    assert!(!results_strict.is_empty(),
-        "100bp self-hit should still pass evalue 1e-30");
+    assert!(
+        !results_strict.is_empty(),
+        "100bp self-hit should still pass evalue 1e-30"
+    );
 
     // All returned HSPs must satisfy the evalue threshold
     for r in &results_strict {
         for hsp in &r.hsps {
-            assert!(hsp.evalue <= 1e-30,
-                "HSP evalue {:.2e} exceeds threshold 1e-30", hsp.evalue);
+            assert!(
+                hsp.evalue <= 1e-30,
+                "HSP evalue {:.2e} exceeds threshold 1e-30",
+                hsp.evalue
+            );
         }
     }
 }
@@ -1823,9 +4100,7 @@ fn test_db_search_vs_subject_search() {
     let subject = "ATGCGTACCTGAAAGCTTCAGTACGGTAATCCTGAACGTTAGCCAATGCTTGAAGTCAACGTATCGCAAGCTTAACGATCGTAAGGCCTTAGCAGTCAATGC";
 
     // Database-based search
-    let (_tmp, db) = build_nucleotide_db(vec![
-        nt_entry("N001", "target", subject),
-    ]);
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "target", subject)]);
     let params = SearchParams::blastn()
         .evalue(10.0)
         .num_threads(1)
@@ -1842,14 +4117,20 @@ fn test_db_search_vs_subject_search() {
 
     // Both should find hits
     assert!(!db_results.is_empty(), "DB search should find hit");
-    assert!(!builder_results.is_empty(), "subject search should find hit");
+    assert!(
+        !builder_results.is_empty(),
+        "subject search should find hit"
+    );
 
     // The best HSP scores should be comparable (both are self-hits)
     let db_best_score = db_results[0].hsps[0].score;
     let subj_best_score = builder_results[0].score;
     // Scores may differ slightly due to different code paths, but both should be positive
     assert!(db_best_score > 0, "DB search score should be positive");
-    assert!(subj_best_score > 0, "subject search score should be positive");
+    assert!(
+        subj_best_score > 0,
+        "subject search score should be positive"
+    );
 }
 
 /// Use BlastnSearch builder API directly for a seq-vs-seq search.
@@ -1871,14 +4152,26 @@ fn test_blastn_search_builder_api() {
         .strand(Strand::Both)
         .run();
 
-    assert!(!results.is_empty(), "builder API self-search should find hits");
+    assert!(
+        !results.is_empty(),
+        "builder API self-search should find hits"
+    );
     let best = &results[0];
     assert!(best.score > 0, "best HSP score should be positive");
-    assert!(best.evalue < 1e-10, "100bp self-hit should have very significant evalue");
-    assert_eq!(best.align_length as usize, query.len(),
-        "self-hit alignment should span full query length");
-    assert_eq!(best.num_ident as usize, query.len(),
-        "self-hit should have 100% identity");
+    assert!(
+        best.evalue < 1e-10,
+        "100bp self-hit should have very significant evalue"
+    );
+    assert_eq!(
+        best.align_length as usize,
+        query.len(),
+        "self-hit alignment should span full query length"
+    );
+    assert_eq!(
+        best.num_ident as usize,
+        query.len(),
+        "self-hit should have 100% identity"
+    );
 
     // Test with empty query -- should return empty
     let empty = BlastnSearch::new()
@@ -1895,45 +4188,59 @@ fn test_blastn_search_builder_api() {
     assert!(empty2.is_empty(), "empty subject should produce no results");
 }
 
-
 #[test]
 #[ignore]
 fn test_comp_ratio() {
     // 00009 vs P0DPQ5 - NCBI filters this; we should too
     let q = b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPRISLTLPIYDATNEKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK";
-    let q_aa: Vec<u8> = q.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    
+    let q_aa: Vec<u8> = q
+        .iter()
+        .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
+        .collect();
+
     // Get P0DPQ5 from DB
-    let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-    ];
+    let sprot_paths = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot")];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
-        Some(p) => p, None => { return; }
+        Some(p) => p,
+        None => {
+            return;
+        }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
     let p0dpq5 = records.iter().find(|r| r.id == "P0DPQ5").unwrap();
-    let s_aa: Vec<u8> = p0dpq5.sequence.iter().map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b)).collect();
-    
+    let s_aa: Vec<u8> = p0dpq5
+        .sequence
+        .iter()
+        .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
+        .collect();
+
     let (qcomp, qn) = blast_rs::composition::read_composition(&q_aa, 28);
     let (scomp, sn) = blast_rs::composition::read_composition(&s_aa, 28);
     eprintln!("Query: {} true AAs, Subject: {} true AAs", qn, sn);
-    
+
     let matrix = blast_rs::matrix::BLOSUM62;
     let lambda = 0.267;
-    
+
     let ratio = blast_rs::composition::composition_lambda_ratio(&matrix, &qcomp, &scomp, lambda);
     eprintln!("LambdaRatio: {:?}", ratio);
-    
+
     // If ratio is Some and < 1, the e-value should be adjusted upward
     if let Some(r) = ratio {
-        eprintln!("  Would multiply raw e-value by roughly {:.2}x", (1.0/r).powi(100));
+        eprintln!(
+            "  Would multiply raw e-value by roughly {:.2}x",
+            (1.0 / r).powi(100)
+        );
     }
-    
+
     // The raw e-value for this hit is ~5.6e-24 (from NCBI mode 0)
     // After composition adjustment, NCBI pushes it above 1e-9
     // Our code should return Some(ratio) where ratio < 1.0
-    assert!(ratio.is_some(), "Should find composition adjustment for biased pair");
+    assert!(
+        ratio.is_some(),
+        "Should find composition adjustment for biased pair"
+    );
 }
 
 /// Debug test: print lambda ratio and adjusted matrix diagonal for a specific pair
@@ -1941,47 +4248,71 @@ fn test_comp_ratio() {
 #[ignore]
 fn test_comp_adjust_debug() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: sprot not found"); return; }
+        None => {
+            eprintln!("Skipping: sprot not found");
+            return;
+        }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
 
     // Build an NCBIstdaa query
     let query_aa = b"MKKCFLFCLKGGRWMKKWLFGFLGVALIVVCSVFGYVSYQKHEGEVFKQNIEKKMPVDQINAHAKSYKEDATNVNNDMSLGQMLSIQKEAIEMGVNKQVFAQIQIPALGLALPIFKGANQYTLSLGAATYFYEDAEMGKGNYVLAGHNMEMPGVLFSDIQKLSLGEVMDLVSNDGVYRYKVTRKFIVPEYFKLIDGVPEENSFLSLPKKGEKPLLTLFTCVYTSQGKERYVVQGELQ";
-    let query_ncbi: Vec<u8> = query_aa.iter()
+    let query_ncbi: Vec<u8> = query_aa
+        .iter()
         .map(|&b| blast_rs::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
         .collect();
-    
+
     // Get a subject — find P0DPQ5 (oid_20106)
-    let subj_rec = records.iter().find(|r| r.id.contains("P0DPQ5") || r.defline.contains("srtA")).unwrap();
-    let subj_ncbi: Vec<u8> = subj_rec.sequence.iter()
+    let subj_rec = records
+        .iter()
+        .find(|r| r.id.contains("P0DPQ5") || r.defline.contains("srtA"))
+        .unwrap();
+    let subj_ncbi: Vec<u8> = subj_rec
+        .sequence
+        .iter()
         .map(|&b| blast_rs::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
         .collect();
-    
+
     let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
     let ungapped_lambda = 0.3176f64; // BLOSUM62 ungapped
-    
+
     let (qcomp28, qn) = blast_rs::composition::read_composition(&query_ncbi, 28);
     let (scomp28, sn) = blast_rs::composition::read_composition(&subj_ncbi, 28);
-    
+
     eprintln!("Query length: {}, numTrue: {}", query_ncbi.len(), qn);
     eprintln!("Subject length: {}, numTrue: {}", subj_ncbi.len(), sn);
-    
-    let lr = blast_rs::composition::composition_lambda_ratio(&matrix, &qcomp28, &scomp28, ungapped_lambda);
+
+    let lr = blast_rs::composition::composition_lambda_ratio(
+        &matrix,
+        &qcomp28,
+        &scomp28,
+        ungapped_lambda,
+    );
     eprintln!("Lambda ratio: {:?}", lr);
-    
+
     let freq_ratios = blast_rs::matrix::get_blosum62_freq_ratios();
     let scaled = blast_rs::composition::composition_scale_matrix(
-        &matrix, &qcomp28, &scomp28, ungapped_lambda, &freq_ratios,
+        &matrix,
+        &qcomp28,
+        &scomp28,
+        ungapped_lambda,
+        &freq_ratios,
     );
     if let Some(adj) = &scaled {
         // Print diagonal scores: A-A, C-C, D-D, etc.
-        let labels = ['*','A','B','C','D','E','F','G','H','I','K','L','M','N','P','Q','R','S','T','V','W','X','Y','Z','U','O','-','J'];
+        let labels = [
+            '*', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R',
+            'S', 'T', 'V', 'W', 'X', 'Y', 'Z', 'U', 'O', '-', 'J',
+        ];
         eprintln!("Original vs Adjusted diagonal scores:");
         for i in 1..22 {
             eprintln!("  {} ({}): {} → {}", labels[i], i, matrix[i][i], adj[i][i]);
@@ -1999,10 +4330,14 @@ fn test_comp_adjust_debug() {
 fn random_nt_seq(len: usize, seed: u64) -> Vec<u8> {
     let bases = b"ACGT";
     let mut state = seed;
-    (0..len).map(|_| {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        bases[((state >> 33) % 4) as usize]
-    }).collect()
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            bases[((state >> 33) % 4) as usize]
+        })
+        .collect()
 }
 
 #[test]
@@ -2043,7 +4378,11 @@ fn test_blastn_short_primer_many_subjects() {
     // Should find hits in the subjects where the primer was embedded
     assert!(!results.is_empty(), "Should find hits for embedded primer");
     // At least some of the 50 subjects with embedded primer should appear
-    assert!(results.len() >= 10, "Expected at least 10 subjects with hits, got {}", results.len());
+    assert!(
+        results.len() >= 10,
+        "Expected at least 10 subjects with hits, got {}",
+        results.len()
+    );
 }
 
 #[test]
@@ -2079,7 +4418,10 @@ fn test_blastn_short_primer_multithreaded() {
     params.filter_low_complexity = false;
 
     let results = blastn(&db, primer, &params);
-    assert!(!results.is_empty(), "Multithreaded blastn-short should find hits");
+    assert!(
+        !results.is_empty(),
+        "Multithreaded blastn-short should find hits"
+    );
 }
 
 #[test]
@@ -2136,7 +4478,10 @@ fn test_blastn_short_via_builder() {
         .subject(&subject)
         .run();
 
-    assert!(!results.is_empty(), "Builder search should find primer in subject");
+    assert!(
+        !results.is_empty(),
+        "Builder search should find primer in subject"
+    );
     let best = &results[0];
     assert!(best.score > 0, "Best hit should have positive score");
 }
@@ -2150,8 +4495,10 @@ fn test_blastn_short_via_builder() {
 #[ignore]
 fn test_blastp_swissprot() {
     // Try plain FASTA first, then decompress .gz if needed
-    let plain_path = std::path::PathBuf::from("/husky/henriksson/for_claude/diamond/uniprot_sprot.fasta");
-    let gz_path = std::path::PathBuf::from("/husky/henriksson/for_claude/diamond/uniprot_sprot.fasta.gz");
+    let plain_path =
+        std::path::PathBuf::from("/husky/henriksson/for_claude/diamond/uniprot_sprot.fasta");
+    let gz_path =
+        std::path::PathBuf::from("/husky/henriksson/for_claude/diamond/uniprot_sprot.fasta.gz");
 
     if !plain_path.exists() && gz_path.exists() {
         eprintln!("Decompressing {} ...", gz_path.display());
@@ -2164,7 +4511,10 @@ fn test_blastp_swissprot() {
     }
 
     if !plain_path.exists() {
-        eprintln!("Skipping: Swiss-Prot FASTA not found at {}", plain_path.display());
+        eprintln!(
+            "Skipping: Swiss-Prot FASTA not found at {}",
+            plain_path.display()
+        );
         return;
     }
     eprintln!("Using Swiss-Prot FASTA: {}", plain_path.display());
@@ -2172,7 +4522,11 @@ fn test_blastp_swissprot() {
     let file = std::fs::File::open(&plain_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
     eprintln!("Loaded {} Swiss-Prot records", records.len());
-    assert!(records.len() > 100_000, "Swiss-Prot should have >100K entries, got {}", records.len());
+    assert!(
+        records.len() > 100_000,
+        "Swiss-Prot should have >100K entries, got {}",
+        records.len()
+    );
 
     // Extract first 100 sequences as queries
     let num_queries = 100;
@@ -2194,7 +4548,11 @@ fn test_blastp_swissprot() {
     builder.write(&base).unwrap();
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
     let db_time = t0.elapsed();
-    eprintln!("DB build: {:.2}s ({} entries)", db_time.as_secs_f64(), records.len());
+    eprintln!(
+        "DB build: {:.2}s ({} entries)",
+        db_time.as_secs_f64(),
+        records.len()
+    );
 
     // Search with single thread first
     let params = SearchParams::blastp()
@@ -2209,8 +4567,10 @@ fn test_blastp_swissprot() {
         if i < 5 || (i + 1) % 20 == 0 {
             eprintln!(
                 "  Query {:>3} ({}, {} aa): {} hits",
-                i + 1, &qrec.id[..qrec.id.len().min(20)],
-                qrec.sequence.len(), results.len()
+                i + 1,
+                &qrec.id[..qrec.id.len().min(20)],
+                qrec.sequence.len(),
+                results.len()
             );
         }
         total_hits += results.len();
@@ -2218,7 +4578,8 @@ fn test_blastp_swissprot() {
     let st_time = t1.elapsed();
     eprintln!(
         "Single-threaded: {} queries, {} hits, {:.2}s ({:.3}s/query)",
-        num_queries, total_hits,
+        num_queries,
+        total_hits,
         st_time.as_secs_f64(),
         st_time.as_secs_f64() / num_queries as f64
     );
@@ -2239,7 +4600,8 @@ fn test_blastp_swissprot() {
     let speedup = st_time.as_secs_f64() / mt_time.as_secs_f64();
     eprintln!(
         "Multi-threaded:  {} queries, {} hits, {:.2}s ({:.3}s/query, {:.1}x speedup)",
-        num_queries, total_hits_mt,
+        num_queries,
+        total_hits_mt,
         mt_time.as_secs_f64(),
         mt_time.as_secs_f64() / num_queries as f64,
         speedup
@@ -2255,15 +4617,24 @@ fn test_blastp_swissprot() {
     assert!(
         total_hits >= num_queries as usize,
         "Expected at least {} hits (one self-hit per query), got {}",
-        num_queries, total_hits
+        num_queries,
+        total_hits
     );
 
     eprintln!("\n=== Swiss-Prot Benchmark Summary ===");
     eprintln!("Database:     {} sequences", records.len());
     eprintln!("Queries:      {}", num_queries);
     eprintln!("DB build:     {:.2}s", db_time.as_secs_f64());
-    eprintln!("Search (1T):  {:.2}s ({:.3}s/query)", st_time.as_secs_f64(), st_time.as_secs_f64() / num_queries as f64);
-    eprintln!("Search (MT):  {:.2}s ({:.3}s/query)", mt_time.as_secs_f64(), mt_time.as_secs_f64() / num_queries as f64);
+    eprintln!(
+        "Search (1T):  {:.2}s ({:.3}s/query)",
+        st_time.as_secs_f64(),
+        st_time.as_secs_f64() / num_queries as f64
+    );
+    eprintln!(
+        "Search (MT):  {:.2}s ({:.3}s/query)",
+        mt_time.as_secs_f64(),
+        mt_time.as_secs_f64() / num_queries as f64
+    );
     eprintln!("Total hits:   {}", total_hits);
 }
 
@@ -2273,12 +4644,18 @@ fn test_blastp_swissprot() {
 #[ignore]
 fn test_lambda_ratio_debug() {
     let sprot_paths = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
-        std::path::PathBuf::from("/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
+        std::path::PathBuf::from(
+            "/data/henriksson/github/claude/prokka-rs/prokka/db/kingdom/Bacteria/sprot",
+        ),
     ];
     let sprot_path = match sprot_paths.iter().find(|p| p.exists()) {
         Some(p) => p,
-        None => { eprintln!("Skipping: sprot not found"); return; }
+        None => {
+            eprintln!("Skipping: sprot not found");
+            return;
+        }
     };
     let file = std::fs::File::open(sprot_path).unwrap();
     let records = blast_rs::input::parse_fasta(file);
@@ -2287,8 +4664,10 @@ fn test_lambda_ratio_debug() {
     let mut builder = BlastDbBuilder::new(DbType::Protein, "sprot");
     for rec in &records {
         builder.add(SequenceEntry {
-            title: rec.defline.clone(), accession: rec.id.clone(),
-            sequence: rec.sequence.clone(), taxid: None,
+            title: rec.defline.clone(),
+            accession: rec.id.clone(),
+            sequence: rec.sequence.clone(),
+            taxid: None,
         });
     }
     builder.write(&base).unwrap();
@@ -2299,7 +4678,8 @@ fn test_lambda_ratio_debug() {
 
     // Glu-rich query (biggest divergence: our 0.938 vs NCBI 0.577)
     let glu_query = b"MEEEEKELEQEKKKLEEEKAEELEEELKKLEQEEVKEEIKELEEKLEEEQKEELKNELEEE";
-    let glu_ncbi: Vec<u8> = glu_query.iter()
+    let glu_ncbi: Vec<u8> = glu_query
+        .iter()
         .map(|&b| blast_rs::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
         .collect();
     let (qcomp, qn) = blast_rs::composition::read_composition(&glu_ncbi, 28);
@@ -2309,13 +4689,21 @@ fn test_lambda_ratio_debug() {
     let labels = "*ABCDEFGHIKLMNPQRSTVWXYZU.~J";
     for i in 0..28 {
         if qcomp[i] > 0.001 {
-            eprintln!("  {} ({}): {:.4}", labels.as_bytes()[i] as char, i, qcomp[i]);
+            eprintln!(
+                "  {} ({}): {:.4}",
+                labels.as_bytes()[i] as char,
+                i,
+                qcomp[i]
+            );
         }
     }
 
     // Find the top hit subject for mode 0
     let params_0 = SearchParams::blastp()
-        .evalue(1.0).num_threads(1).filter_low_complexity(false).comp_adjust(0);
+        .evalue(1.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
     let results_0 = blastp(&db, glu_query, &params_0);
     if results_0.is_empty() {
         eprintln!("No hits for glu_rich with mode 0");
@@ -2331,7 +4719,12 @@ fn test_lambda_ratio_debug() {
     eprintln!("  numTrue={} acc={}", sn, results_0[0].subject_accession);
     for i in 0..28 {
         if scomp[i] > 0.001 {
-            eprintln!("  {} ({}): {:.4}", labels.as_bytes()[i] as char, i, scomp[i]);
+            eprintln!(
+                "  {} ({}): {:.4}",
+                labels.as_bytes()[i] as char,
+                i,
+                scomp[i]
+            );
         }
     }
 
@@ -2340,7 +4733,10 @@ fn test_lambda_ratio_debug() {
 
     // Also test with standard BLOSUM62 background as "subject" (should give ratio ≈ 1.0)
     let mut bg_prob = [0.0f64; 28];
-    for (k, &idx) in blast_rs::composition::TRUE_CHAR_POSITIONS.iter().enumerate() {
+    for (k, &idx) in blast_rs::composition::TRUE_CHAR_POSITIONS
+        .iter()
+        .enumerate()
+    {
         bg_prob[idx] = blast_rs::composition::BLOSUM62_BG[k];
     }
     eprintln!("\n=== Lambda ratio with standard background as subject ===");
@@ -2359,14 +4755,14 @@ fn test_karlin_lambda_standard() {
     let mut rr_prob = [0.0f64; 28];
     // A=1, C=3, D=4, E=5, F=6, G=7, H=8, I=9, K=10, L=11, M=12, N=13,
     // P=14, Q=15, R=16, S=17, T=18, V=19, W=20, Y=22
-    rr_prob[1]  = 0.07805; // A
-    rr_prob[3]  = 0.01925; // C  
-    rr_prob[4]  = 0.05364; // D
-    rr_prob[5]  = 0.06295; // E
-    rr_prob[6]  = 0.03856; // F
-    rr_prob[7]  = 0.07377; // G
-    rr_prob[8]  = 0.02199; // H
-    rr_prob[9]  = 0.05142; // I
+    rr_prob[1] = 0.07805; // A
+    rr_prob[3] = 0.01925; // C
+    rr_prob[4] = 0.05364; // D
+    rr_prob[5] = 0.06295; // E
+    rr_prob[6] = 0.03856; // F
+    rr_prob[7] = 0.07377; // G
+    rr_prob[8] = 0.02199; // H
+    rr_prob[9] = 0.05142; // I
     rr_prob[10] = 0.05744; // K
     rr_prob[11] = 0.09019; // L
     rr_prob[12] = 0.02243; // M
@@ -2381,14 +4777,17 @@ fn test_karlin_lambda_standard() {
     rr_prob[22] = 0.03216; // Y
 
     let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
-    
+
     let lambda = blast_rs::composition::compute_ungapped_lambda_with_bg(&matrix, &rr_prob);
     eprintln!("Lambda with Robinson&Robinson: {:.8}", lambda);
     eprintln!("Expected kbp_ideal lambda: 0.3176");
-    
+
     // Should be close to 0.3176
-    assert!((lambda - 0.3176).abs() < 0.01, 
-        "Lambda with R&R freqs should be ~0.3176, got {:.6}", lambda);
+    assert!(
+        (lambda - 0.3176).abs() < 0.01,
+        "Lambda with R&R freqs should be ~0.3176, got {:.6}",
+        lambda
+    );
 }
 
 // ── Real core_nt parity tests ────────────────────────────────────────────────
@@ -2401,7 +4800,11 @@ fn blast_cli_bin() -> std::path::PathBuf {
     std::env::var_os("CARGO_BIN_EXE_blast-cli")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+            let profile = if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            };
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("target")
                 .join(profile)
@@ -2422,13 +4825,20 @@ fn write_core_nt_primer(tmp: &TempDir) -> std::path::PathBuf {
 fn run_core_nt_rust(query: &std::path::Path, db: &std::path::Path, out: &std::path::Path) {
     let status = std::process::Command::new(blast_cli_bin())
         .arg("blastn")
-        .arg("--query").arg(query)
-        .arg("--db").arg(db)
-        .arg("--task").arg("blastn-short")
-        .arg("--outfmt").arg("6")
-        .arg("--max_target_seqs").arg("500")
-        .arg("--num_threads").arg("8")
-        .arg("--out").arg(out)
+        .arg("--query")
+        .arg(query)
+        .arg("--db")
+        .arg(db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--max_target_seqs")
+        .arg("500")
+        .arg("--num_threads")
+        .arg("8")
+        .arg("--out")
+        .arg(out)
         .status()
         .expect("run blast-cli");
     assert!(status.success(), "blast-cli exited with {}", status);
@@ -2436,13 +4846,20 @@ fn run_core_nt_rust(query: &std::path::Path, db: &std::path::Path, out: &std::pa
 
 fn run_core_nt_ncbi(query: &std::path::Path, db: &std::path::Path, out: &std::path::Path) {
     let status = std::process::Command::new("/usr/bin/blastn")
-        .arg("-query").arg(query)
-        .arg("-db").arg(db)
-        .arg("-task").arg("blastn-short")
-        .arg("-outfmt").arg("6")
-        .arg("-max_target_seqs").arg("500")
-        .arg("-num_threads").arg("8")
-        .arg("-out").arg(out)
+        .arg("-query")
+        .arg(query)
+        .arg("-db")
+        .arg(db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-max_target_seqs")
+        .arg("500")
+        .arg("-num_threads")
+        .arg("8")
+        .arg("-out")
+        .arg(out)
         .status()
         .expect("run /usr/bin/blastn");
     assert!(status.success(), "NCBI blastn exited with {}", status);
@@ -2475,12 +4892,9 @@ fn assert_core_nt_outfmt6_matches_ncbi(db_suffix: &str) {
     let rust = std::fs::read(&rust_out).expect("read rust output");
     let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
     assert_eq!(
-        rust,
-        ncbi,
+        rust, ncbi,
         "Rust outfmt 6 output differs from NCBI for {:?}\nRust: {:?}\nNCBI: {:?}",
-        db,
-        rust_out,
-        ncbi_out
+        db, rust_out, ncbi_out
     );
 }
 
@@ -2491,6 +4905,314 @@ fn assert_core_nt_outfmt6_matches_ncbi(db_suffix: &str) {
 #[ignore]
 fn test_core_nt00_primer_outfmt6_matches_ncbi() {
     assert_core_nt_outfmt6_matches_ncbi(".00");
+}
+
+fn assert_core_nt_taxonomy_outfmt_matches_ncbi(db_suffix: &str) {
+    assert_core_nt_taxonomy_outfmt_matches_ncbi_with_blastdb(db_suffix, None);
+}
+
+fn assert_core_nt_taxonomy_outfmt_matches_ncbi_with_blastdb(
+    db_suffix: &str,
+    blastdb: Option<&std::path::Path>,
+) {
+    let db = std::path::PathBuf::from(format!("{}{}", CORE_NT_BASE, db_suffix));
+    let db_index = {
+        let mut p = db.as_os_str().to_os_string();
+        p.push(".nin");
+        std::path::PathBuf::from(p)
+    };
+    if !db_index.exists() && !db.with_extension("nal").exists() {
+        eprintln!("Skipping: core_nt database not found at {:?}", db);
+        return;
+    }
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = write_core_nt_primer(&tmp);
+    let rust_out = tmp.path().join("rust_tax.tsv");
+    let ncbi_out = tmp.path().join("ncbi_tax.tsv");
+    let outfmt = "6 qseqid qlen qstart qend saccver slen sstart send bitscore staxid ssciname sskingdom length pident";
+
+    let mut rust_cmd = std::process::Command::new(blast_cli_bin());
+    if let Some(blastdb) = blastdb {
+        rust_cmd.env("BLASTDB", blastdb);
+    }
+    let rust_status = rust_cmd
+        .arg("blastn")
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--evalue")
+        .arg("5")
+        .arg("--max_target_seqs")
+        .arg("10000")
+        .arg("--max_hsps")
+        .arg("1")
+        .arg("--num_threads")
+        .arg("8")
+        .arg("--perc_identity")
+        .arg("90")
+        .arg("--db")
+        .arg(&db)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--query")
+        .arg(&query)
+        .arg("--out")
+        .arg(&rust_out)
+        .status()
+        .expect("run blast-cli taxonomy regression");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    if let Some(blastdb) = blastdb {
+        ncbi_cmd.env("BLASTDB", blastdb);
+    }
+    let ncbi_status = ncbi_cmd
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-evalue")
+        .arg("5")
+        .arg("-max_target_seqs")
+        .arg("10000")
+        .arg("-max_hsps")
+        .arg("1")
+        .arg("-num_threads")
+        .arg("8")
+        .arg("-perc_identity")
+        .arg("90")
+        .arg("-db")
+        .arg(&db)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-query")
+        .arg(&query)
+        .arg("-out")
+        .arg(&ncbi_out)
+        .status()
+        .expect("run NCBI blastn taxonomy regression");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust taxonomy output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi taxonomy output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust taxonomy outfmt output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+/// Regression test for the user-reported taxonomy-heavy primer command.
+///
+/// Run with: cargo test --release -- --ignored test_core_nt00_primer_taxonomy_outfmt_matches_ncbi
+#[test]
+#[ignore]
+fn test_core_nt00_primer_taxonomy_outfmt_matches_ncbi() {
+    assert_core_nt_taxonomy_outfmt_matches_ncbi(".00");
+}
+
+fn assert_core_nt_title_outfmt_matches_ncbi(db_suffix: &str) {
+    let db = std::path::PathBuf::from(format!("{}{}", CORE_NT_BASE, db_suffix));
+    let db_index = {
+        let mut p = db.as_os_str().to_os_string();
+        p.push(".nin");
+        std::path::PathBuf::from(p)
+    };
+    if !db_index.exists() && !db.with_extension("nal").exists() {
+        eprintln!("Skipping: core_nt database not found at {:?}", db);
+        return;
+    }
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = write_core_nt_primer(&tmp);
+    let rust_out = tmp.path().join("rust_title.tsv");
+    let ncbi_out = tmp.path().join("ncbi_title.tsv");
+    let outfmt = "6 qseqid saccver stitle salltitles bitscore";
+
+    let rust_status = std::process::Command::new(blast_cli_bin())
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--max_target_seqs")
+        .arg("20")
+        .arg("--num_threads")
+        .arg("8")
+        .arg("--out")
+        .arg(&rust_out)
+        .status()
+        .expect("run blast-cli title parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-max_target_seqs")
+        .arg("20")
+        .arg("-num_threads")
+        .arg("8")
+        .arg("-out")
+        .arg(&ncbi_out)
+        .status()
+        .expect("run /usr/bin/blastn title parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust title output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi title output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust title outfmt output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+/// Real core_nt title-field parity check for the first volume.
+///
+/// Run with: cargo test --release -- --ignored test_core_nt00_primer_title_outfmt_matches_ncbi
+#[test]
+#[ignore]
+fn test_core_nt00_primer_title_outfmt_matches_ncbi() {
+    assert_core_nt_title_outfmt_matches_ncbi(".00");
+}
+
+fn assert_core_nt_outfmt7_matches_ncbi(db_suffix: &str) {
+    let db = std::path::PathBuf::from(format!("{}{}", CORE_NT_BASE, db_suffix));
+    let db_index = {
+        let mut p = db.as_os_str().to_os_string();
+        p.push(".nin");
+        std::path::PathBuf::from(p)
+    };
+    if !db_index.exists() && !db.with_extension("nal").exists() {
+        eprintln!("Skipping: core_nt database not found at {:?}", db);
+        return;
+    }
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = write_core_nt_primer(&tmp);
+    let rust_out = tmp.path().join("rust_outfmt7.tsv");
+    let ncbi_out = tmp.path().join("ncbi_outfmt7.tsv");
+
+    let rust_status = std::process::Command::new(blast_cli_bin())
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("7")
+        .arg("--max_target_seqs")
+        .arg("5")
+        .arg("--num_threads")
+        .arg("8")
+        .arg("--out")
+        .arg(&rust_out)
+        .status()
+        .expect("run blast-cli outfmt7 parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("7")
+        .arg("-max_target_seqs")
+        .arg("5")
+        .arg("-num_threads")
+        .arg("8")
+        .arg("-out")
+        .arg(&ncbi_out)
+        .status()
+        .expect("run /usr/bin/blastn outfmt7 parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust outfmt7 output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi outfmt7 output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust outfmt 7 output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+/// Real core_nt commented-tabular parity check for the first volume.
+///
+/// Run with: cargo test --release -- --ignored test_core_nt00_primer_outfmt7_matches_ncbi
+#[test]
+#[ignore]
+fn test_core_nt00_primer_outfmt7_matches_ncbi() {
+    assert_core_nt_outfmt7_matches_ncbi(".00");
+}
+
+/// Regression test for taxonomy names when BLASTDB points at taxdb.bti/btd.
+///
+/// Run with: cargo test --release -- --ignored test_core_nt00_primer_taxonomy_names_with_blastdb_match_ncbi
+#[test]
+#[ignore]
+fn test_core_nt00_primer_taxonomy_names_with_blastdb_match_ncbi() {
+    let blastdb = std::path::Path::new(CORE_NT_BASE).parent().unwrap();
+    assert_core_nt_taxonomy_outfmt_matches_ncbi_with_blastdb(".00", Some(blastdb));
+}
+
+/// Regression test that standalone nonzero core_nt volumes use global OIDs for
+/// alias-level .not taxonomy lookup.
+///
+/// Run with: cargo test --release -- --ignored test_core_nt_nonzero_volume_taxonomy_outfmt_matches_ncbi
+#[test]
+#[ignore]
+fn test_core_nt_nonzero_volume_taxonomy_outfmt_matches_ncbi() {
+    assert_core_nt_taxonomy_outfmt_matches_ncbi(".12");
+    assert_core_nt_taxonomy_outfmt_matches_ncbi(".28");
 }
 
 /// Regression test for accession extraction where title text contains a
@@ -2517,4 +5239,19 @@ fn test_core_nt_alias_primer_outfmt6_matches_ncbi() {
         return;
     }
     assert_core_nt_outfmt6_matches_ncbi("");
+}
+
+/// Full 84-volume core_nt alias taxonomy parity test. This is intentionally
+/// gated because it scans the full local 272 GB database twice.
+///
+/// Run with:
+/// BLAST_RS_RUN_FULL_CORE_NT=1 cargo test --release -- --ignored test_core_nt_alias_primer_taxonomy_outfmt_matches_ncbi
+#[test]
+#[ignore]
+fn test_core_nt_alias_primer_taxonomy_outfmt_matches_ncbi() {
+    if std::env::var_os("BLAST_RS_RUN_FULL_CORE_NT").is_none() {
+        eprintln!("Skipping: set BLAST_RS_RUN_FULL_CORE_NT=1 to scan full core_nt alias");
+        return;
+    }
+    assert_core_nt_taxonomy_outfmt_matches_ncbi("");
 }

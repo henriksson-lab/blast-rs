@@ -1,12 +1,10 @@
 //! Pure Rust BLAST search engine — no FFI.
 //! This module implements the complete blastn search pipeline in Rust.
 
-
-use crate::itree::{IntervalTree, Interval};
+use crate::itree::{Interval, IntervalTree};
 use crate::sequence::blastna_to_iupac;
 use crate::stat::KarlinBlk;
 use crate::traceback::{blast_gapped_align, blast_gapped_score_only};
-
 
 /// Result of a single HSP (High-Scoring Pair).
 #[derive(Debug, Clone)]
@@ -64,7 +62,12 @@ impl<'a> PreparedBlastnQuery<'a> {
     }
 
     pub fn new_megablast(query_plus: &'a [u8], query_minus: &'a [u8], word_size: usize) -> Self {
-        Self::new_with_selector(query_plus, query_minus, word_size, choose_contiguous_mb_lut_word)
+        Self::new_with_selector(
+            query_plus,
+            query_minus,
+            word_size,
+            choose_contiguous_mb_lut_word,
+        )
     }
 
     fn new_with_selector(
@@ -74,18 +77,19 @@ impl<'a> PreparedBlastnQuery<'a> {
         choose_lut_word: fn(usize, usize) -> usize,
     ) -> Self {
         let mut lookups = Vec::with_capacity(2);
-        let approx_entries = query_plus
-            .len()
-            .saturating_sub(word_size)
-            .saturating_add(1)
+        let approx_entries = query_plus.len().saturating_sub(word_size).saturating_add(1)
             + query_minus
                 .len()
                 .saturating_sub(word_size)
                 .saturating_add(1);
-        if let Some(lookup) = NaLookup::new(0, query_plus, word_size, approx_entries, choose_lut_word) {
+        if let Some(lookup) =
+            NaLookup::new(0, query_plus, word_size, approx_entries, choose_lut_word)
+        {
             lookups.push(lookup);
         }
-        if let Some(lookup) = NaLookup::new(1, query_minus, word_size, approx_entries, choose_lut_word) {
+        if let Some(lookup) =
+            NaLookup::new(1, query_minus, word_size, approx_entries, choose_lut_word)
+        {
             lookups.push(lookup);
         }
         let paired_pv = if lookups.len() == 2
@@ -104,7 +108,11 @@ impl<'a> PreparedBlastnQuery<'a> {
         } else {
             None
         };
-        PreparedBlastnQuery { word_size, lookups, paired_pv }
+        PreparedBlastnQuery {
+            word_size,
+            lookups,
+            paired_pv,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -172,16 +180,32 @@ fn choose_small_na_lut_word(word_size: usize, approx_entries: usize) -> usize {
     match word_size {
         4..=6 => word_size,
         7 => {
-            if approx_entries < 250 { 6 } else { 7 }
+            if approx_entries < 250 {
+                6
+            } else {
+                7
+            }
         }
         8 => {
-            if approx_entries < 8500 { 7 } else { 8 }
+            if approx_entries < 8500 {
+                7
+            } else {
+                8
+            }
         }
         9 => {
-            if approx_entries < 1250 { 7 } else { 8 }
+            if approx_entries < 1250 {
+                7
+            } else {
+                8
+            }
         }
         10 => {
-            if approx_entries < 1250 { 7 } else { 8 }
+            if approx_entries < 1250 {
+                7
+            } else {
+                8
+            }
         }
         11 | 12 => 8,
         _ => 8,
@@ -192,10 +216,18 @@ fn choose_contiguous_mb_lut_word(word_size: usize, approx_entries: usize) -> usi
     match word_size {
         0..=8 => word_size,
         9 | 10 => {
-            if approx_entries < 18_000 { 9 } else { 10 }
+            if approx_entries < 18_000 {
+                9
+            } else {
+                10
+            }
         }
         11 => {
-            if approx_entries < 180_000 { 10 } else { 11 }
+            if approx_entries < 180_000 {
+                10
+            } else {
+                11
+            }
         }
         12 => {
             if approx_entries < 18_000 {
@@ -209,7 +241,11 @@ fn choose_contiguous_mb_lut_word(word_size: usize, approx_entries: usize) -> usi
             }
         }
         _ => {
-            if approx_entries < 300_000 { 11 } else { 12 }
+            if approx_entries < 300_000 {
+                11
+            } else {
+                12
+            }
         }
     }
 }
@@ -218,9 +254,9 @@ fn choose_contiguous_mb_lut_word(word_size: usize, approx_entries: usize) -> usi
 /// Finds exact word matches between query and subject, extends them,
 /// and returns significant HSPs.
 pub fn blastn_ungapped_search(
-    query_plus: &[u8],     // BLASTNA encoded, plus strand
-    query_minus: &[u8],    // BLASTNA encoded, minus strand (RC)
-    subject: &[u8],        // BLASTNA decoded subject
+    query_plus: &[u8],  // BLASTNA encoded, plus strand
+    query_minus: &[u8], // BLASTNA encoded, minus strand (RC)
+    subject: &[u8],     // BLASTNA decoded subject
     word_size: usize,
     reward: i32,
     penalty: i32,
@@ -271,9 +307,17 @@ pub fn blastn_ungapped_search(
                 }
                 if matches {
                     if let Some(hsp) = extend_seed(
-                        query, subject, qp, s_pos,
-                        reward, penalty, x_dropoff,
-                        kbp, search_space, evalue_threshold, context,
+                        query,
+                        subject,
+                        qp,
+                        s_pos,
+                        reward,
+                        penalty,
+                        x_dropoff,
+                        kbp,
+                        search_space,
+                        evalue_threshold,
+                        context,
                     ) {
                         hsps.push(hsp);
                     }
@@ -285,19 +329,35 @@ pub fn blastn_ungapped_search(
     }
 
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    dedup_hsps(&mut hsps);
+    dedup_hsps_with_min_diag_separation(
+        &mut hsps,
+        min_diag_separation_for_ungapped(word_size, reward, penalty),
+    );
     hsps
 }
 
 /// Process a seed hit from the scan loop (verify word, diagonal check, extend).
 #[inline]
 fn process_hit(
-    query: &[u8], subject_packed: &[u8], subject_len: usize, word_size: usize,
-    lut_word: usize, lut: &[i32], next: &[i32], last_hit: &mut [i32], diag_mask: usize,
-    h: usize, base_pos: usize,
-    reward: i32, penalty: i32, x_dropoff: i32,
-    kbp: &KarlinBlk, search_space: f64, evalue_threshold: f64,
-    context: i32, hsps: &mut Vec<SearchHsp>,
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: usize,
+    lut_word: usize,
+    lut: &[i32],
+    next: &[i32],
+    last_hit: &mut [i32],
+    diag_mask: usize,
+    h: usize,
+    base_pos: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    context: i32,
+    hsps: &mut Vec<SearchHsp>,
 ) {
     let sp = base_pos;
     let mut q_pos = lut[h];
@@ -324,6 +384,20 @@ fn process_hit(
         );
         q_pos = next[qp];
     }
+}
+
+#[inline(always)]
+fn pv_has_hash(pv: &[u64], h: usize) -> bool {
+    let bucket = h >> 6;
+    debug_assert!(bucket < pv.len());
+    let value = unsafe { *pv.get_unchecked(bucket) };
+    value & (1u64 << (h & 63)) != 0
+}
+
+#[inline(always)]
+fn pv_bucket_unchecked(pv: &[u64], bucket: usize) -> u64 {
+    debug_assert!(bucket < pv.len());
+    unsafe { *pv.get_unchecked(bucket) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -380,12 +454,21 @@ fn process_offset_pair(
         let wq = qp - ext_left;
         let ws = sp - ext_left;
         let diag = (ws + query.len() - wq) & diag_mask;
-            if !(last_hit[diag] >= 0 && (last_hit[diag] as usize) > ws) {
-                if let Some(hsp) = extend_seed_packed(
-                    query, subject_packed, subject_len, wq, ws,
-                    reward, penalty, x_dropoff,
-                    kbp, search_space, evalue_threshold, context,
-                ) {
+        if !(last_hit[diag] >= 0 && (last_hit[diag] as usize) > ws) {
+            if let Some(hsp) = extend_seed_packed(
+                query,
+                subject_packed,
+                subject_len,
+                wq,
+                ws,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                context,
+            ) {
                 last_hit[diag] = hsp.subject_end;
                 hsps.push(hsp);
             } else {
@@ -511,7 +594,10 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch(
             last_hit0,
             lookup1,
             last_hit1,
-            prepared.paired_pv.as_deref().expect("paired PV required for paired lookup scan"),
+            prepared
+                .paired_pv
+                .as_deref()
+                .expect("paired PV required for paired lookup scan"),
             prepared.word_size,
             reward,
             penalty,
@@ -523,7 +609,10 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch(
         );
 
         hsps.sort_by(|a, b| b.score.cmp(&a.score));
-        dedup_hsps(&mut hsps);
+        dedup_hsps_with_min_diag_separation(
+            &mut hsps,
+            min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
+        );
         return hsps;
     }
 
@@ -614,7 +703,10 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch(
     }
 
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    dedup_hsps(&mut hsps);
+    dedup_hsps_with_min_diag_separation(
+        &mut hsps,
+        min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
+    );
     hsps
 }
 
@@ -642,14 +734,18 @@ fn scan_step4_unrolled(
     context: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    if subject_len < word_size { return; }
+    if subject_len < word_size {
+        return;
+    }
     let end = subject_len - word_size + 1;
     // scan_range in subject positions (base coordinates)
     let scan_start: usize = 0;
     let scan_end = end.saturating_sub(1); // inclusive end
 
     // We need at least 2 packed bytes to form the initial 8-mer hash
-    if subject_packed.len() < 2 { return; }
+    if subject_packed.len() < 2 {
+        return;
+    }
 
     let lut_mask: u32 = 0xFFFF; // 2 * 8 = 16 bits
 
@@ -658,11 +754,28 @@ fn scan_step4_unrolled(
     macro_rules! check_and_process {
         ($hash:expr, $s_pos:expr) => {
             let h = ($hash & lut_mask) as usize;
-            if unsafe { *pv.get_unchecked(h >> 6) } & (1u64 << (h & 63)) != 0 {
-                process_hit(query, subject_packed, subject_len, word_size,
-                    8, lut, next, last_hit, diag_mask,
-                    h, $s_pos, reward, penalty, x_dropoff,
-                    kbp, search_space, evalue_threshold, context, hsps);
+            if pv_has_hash(pv, h) {
+                process_hit(
+                    query,
+                    subject_packed,
+                    subject_len,
+                    word_size,
+                    8,
+                    lut,
+                    next,
+                    last_hit,
+                    diag_mask,
+                    h,
+                    $s_pos,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    context,
+                    hsps,
+                );
             }
         };
     }
@@ -680,8 +793,14 @@ fn scan_step4_unrolled(
     let s_len_bytes = subject_packed.len();
 
     // Number of step-4 positions to scan
-    let num_steps = if scan_end >= scan_start { (scan_end - scan_start) / 4 + 1 } else { 0 };
-    if num_steps == 0 { return; }
+    let num_steps = if scan_end >= scan_start {
+        (scan_end - scan_start) / 4 + 1
+    } else {
+        0
+    };
+    if num_steps == 0 {
+        return;
+    }
 
     // Starting byte index (subject position / 4)
     let start_byte = scan_start / 4;
@@ -689,7 +808,9 @@ fn scan_step4_unrolled(
     // Initialize hash from first byte
     let mut init_index: u32 = if start_byte < s_len_bytes {
         unsafe { *s_ptr.add(start_byte) as u32 }
-    } else { return; };
+    } else {
+        return;
+    };
 
     // Process in groups of 8 bytes (32 bases) with Duff's device unrolling
     let full_groups = num_steps / 8;
@@ -702,7 +823,9 @@ fn scan_step4_unrolled(
     // Process remainder positions (0..remainder)
     for _ in 0..remainder {
         byte_idx += 1;
-        if byte_idx >= s_len_bytes { break; }
+        if byte_idx >= s_len_bytes {
+            break;
+        }
         init_index = (init_index << 8) | unsafe { *s_ptr.add(byte_idx) as u32 };
         if s_pos < end {
             check_and_process!(init_index, s_pos);
@@ -712,7 +835,9 @@ fn scan_step4_unrolled(
 
     // Process full groups of 8
     for _ in 0..full_groups {
-        if byte_idx + 8 >= s_len_bytes || s_pos + 28 >= subject_len { break; }
+        if byte_idx + 8 >= s_len_bytes || s_pos + 28 >= subject_len {
+            break;
+        }
 
         // Unrolled 8 iterations: each shifts in one packed byte (4 bases)
         unsafe {
@@ -774,7 +899,9 @@ fn scan_byte_oriented_step1(
     context: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    if end == 0 || subject_packed.is_empty() { return; }
+    if end == 0 || subject_packed.is_empty() {
+        return;
+    }
 
     if lut_word == 6 && scan_start == 1 && scan_step == 2 {
         scan_byte_oriented_lut6_step2(
@@ -806,10 +933,27 @@ fn scan_byte_oriented_step1(
         while s_pos < end {
             let h = packed_hash_at(subject_packed, s_pos, lut_word, lut_mask);
             if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
-                process_hit(query, subject_packed, subject_len, word_size,
-                    lut_word, lut, next, last_hit, diag_mask,
-                    h, s_pos, reward, penalty, x_dropoff,
-                    kbp, search_space, evalue_threshold, context, hsps);
+                process_hit(
+                    query,
+                    subject_packed,
+                    subject_len,
+                    word_size,
+                    lut_word,
+                    lut,
+                    next,
+                    last_hit,
+                    diag_mask,
+                    h,
+                    s_pos,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    context,
+                    hsps,
+                );
             }
             s_pos += scan_step;
         }
@@ -846,7 +990,11 @@ fn scan_byte_oriented_step1(
         unsafe {
             b0 = *s_ptr.add(byte_idx) as u32;
             b1 = *s_ptr.add(byte_idx + 1) as u32;
-            b2 = if byte_idx + 2 < s_len { *s_ptr.add(byte_idx + 2) as u32 } else { 0 };
+            b2 = if byte_idx + 2 < s_len {
+                *s_ptr.add(byte_idx + 2) as u32
+            } else {
+                0
+            };
         }
         let combined = (b0 << 16) | (b1 << 8) | b2;
 
@@ -860,20 +1008,37 @@ fn scan_byte_oriented_step1(
                 let pos = s_pos + $off;
                 if pos < end {
                     let h = ((combined >> $shift) & lut_mask) as usize;
-                    if unsafe { *pv.get_unchecked(h >> 6) } & (1u64 << (h & 63)) != 0 {
-                        process_hit(query, subject_packed, subject_len, word_size,
-                            lut_word, lut, next, last_hit, diag_mask,
-                            h, pos, reward, penalty, x_dropoff,
-                            kbp, search_space, evalue_threshold, context, hsps);
+                    if pv_has_hash(pv, h) {
+                        process_hit(
+                            query,
+                            subject_packed,
+                            subject_len,
+                            word_size,
+                            lut_word,
+                            lut,
+                            next,
+                            last_hit,
+                            diag_mask,
+                            h,
+                            pos,
+                            reward,
+                            penalty,
+                            x_dropoff,
+                            kbp,
+                            search_space,
+                            evalue_threshold,
+                            context,
+                            hsps,
+                        );
                     }
                 }
             };
         }
 
-        check_pos!(base_shift, 0);       // Position 0: shift by base_shift
-        check_pos!(base_shift - 2, 1);   // Position 1: shift by base_shift - 2
-        check_pos!(base_shift - 4, 2);   // Position 2: shift by base_shift - 4
-        check_pos!(base_shift - 6, 3);   // Position 3: shift by base_shift - 6
+        check_pos!(base_shift, 0); // Position 0: shift by base_shift
+        check_pos!(base_shift - 2, 1); // Position 1: shift by base_shift - 2
+        check_pos!(base_shift - 4, 2); // Position 2: shift by base_shift - 4
+        check_pos!(base_shift - 6, 3); // Position 3: shift by base_shift - 6
 
         s_pos += 4;
         byte_idx += 1;
@@ -883,10 +1048,27 @@ fn scan_byte_oriented_step1(
     while s_pos < end {
         let h = packed_hash_at(subject_packed, s_pos, lut_word, lut_mask);
         if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
-            process_hit(query, subject_packed, subject_len, word_size,
-                lut_word, lut, next, last_hit, diag_mask,
-                h, s_pos, reward, penalty, x_dropoff,
-                kbp, search_space, evalue_threshold, context, hsps);
+            process_hit(
+                query,
+                subject_packed,
+                subject_len,
+                word_size,
+                lut_word,
+                lut,
+                next,
+                last_hit,
+                diag_mask,
+                h,
+                s_pos,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                context,
+                hsps,
+            );
         }
         s_pos += 1;
     }
@@ -923,11 +1105,28 @@ fn scan_byte_oriented_lut6_step2(
         ($combined:expr, $shift:expr, $pos:expr) => {
             if $pos < end {
                 let h = (($combined >> $shift) & lut_mask) as usize;
-                if unsafe { *pv.get_unchecked(h >> 6) } & (1u64 << (h & 63)) != 0 {
-                    process_hit(query, subject_packed, subject_len, word_size,
-                        6, lut, next, last_hit, diag_mask,
-                        h, $pos, reward, penalty, x_dropoff,
-                        kbp, search_space, evalue_threshold, context, hsps);
+                if pv_has_hash(pv, h) {
+                    process_hit(
+                        query,
+                        subject_packed,
+                        subject_len,
+                        word_size,
+                        6,
+                        lut,
+                        next,
+                        last_hit,
+                        diag_mask,
+                        h,
+                        $pos,
+                        reward,
+                        penalty,
+                        x_dropoff,
+                        kbp,
+                        search_space,
+                        evalue_threshold,
+                        context,
+                        hsps,
+                    );
                 }
             }
         };
@@ -950,10 +1149,27 @@ fn scan_byte_oriented_lut6_step2(
     while s_pos < end {
         let h = packed_hash_at(subject_packed, s_pos, 6, lut_mask);
         if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
-            process_hit(query, subject_packed, subject_len, word_size,
-                6, lut, next, last_hit, diag_mask,
-                h, s_pos, reward, penalty, x_dropoff,
-                kbp, search_space, evalue_threshold, context, hsps);
+            process_hit(
+                query,
+                subject_packed,
+                subject_len,
+                word_size,
+                6,
+                lut,
+                next,
+                last_hit,
+                diag_mask,
+                h,
+                s_pos,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                context,
+                hsps,
+            );
         }
         s_pos += 2;
     }
@@ -994,8 +1210,8 @@ fn scan_byte_oriented_lut6_step2_pair(
                 let h = (($combined >> $shift) & lut_mask) as usize;
                 let pv_bucket = h >> 6;
                 let pv_bit = 1u64 << (h & 63);
-                if unsafe { *paired_pv.get_unchecked(pv_bucket) } & pv_bit != 0 {
-                    if unsafe { *lookup0.pv.get_unchecked(pv_bucket) } & pv_bit != 0 {
+                if pv_bucket_unchecked(paired_pv, pv_bucket) & pv_bit != 0 {
+                    if pv_bucket_unchecked(&lookup0.pv, pv_bucket) & pv_bit != 0 {
                         process_hit(
                             lookup0.query,
                             subject_packed,
@@ -1018,7 +1234,7 @@ fn scan_byte_oriented_lut6_step2_pair(
                             hsps,
                         );
                     }
-                    if unsafe { *lookup1.pv.get_unchecked(pv_bucket) } & pv_bit != 0 {
+                    if pv_bucket_unchecked(&lookup1.pv, pv_bucket) & pv_bit != 0 {
                         process_hit(
                             lookup1.query,
                             subject_packed,
@@ -1166,10 +1382,27 @@ fn scan_step1(
         while s_pos < end {
             let h = packed_hash_at(subject_packed, s_pos, lut_word, lut_mask);
             if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
-                process_hit(query, subject_packed, subject_len, word_size,
-                    lut_word, lut, next, last_hit, diag_mask,
-                    h, s_pos, reward, penalty, x_dropoff,
-                    kbp, search_space, evalue_threshold, context, hsps);
+                process_hit(
+                    query,
+                    subject_packed,
+                    subject_len,
+                    word_size,
+                    lut_word,
+                    lut,
+                    next,
+                    last_hit,
+                    diag_mask,
+                    h,
+                    s_pos,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    context,
+                    hsps,
+                );
             }
             s_pos += scan_step;
         }
@@ -1182,13 +1415,31 @@ fn scan_step1(
     }
     let mut s_pos = 0;
     while s_pos < end {
-        hash = ((hash << 2) | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32) & lut_mask;
+        hash =
+            ((hash << 2) | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32) & lut_mask;
         let h = hash as usize;
         if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
-            process_hit(query, subject_packed, subject_len, word_size,
-                lut_word, lut, next, last_hit, diag_mask,
-                h, s_pos, reward, penalty, x_dropoff,
-                kbp, search_space, evalue_threshold, context, hsps);
+            process_hit(
+                query,
+                subject_packed,
+                subject_len,
+                word_size,
+                lut_word,
+                lut,
+                next,
+                last_hit,
+                diag_mask,
+                h,
+                s_pos,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                context,
+                hsps,
+            );
         }
         s_pos += 1;
     }
@@ -1241,7 +1492,9 @@ fn extend_seed_packed(
             best_score = score;
             best_right = qi - q_seed + 1;
         }
-        if best_score - score > x_dropoff { break; }
+        if best_score - score > x_dropoff {
+            break;
+        }
         qi += 1;
         si += 1;
     }
@@ -1260,18 +1513,26 @@ fn extend_seed_packed(
                 best_left_score = left_score;
                 best_left = q_seed - qi;
             }
-            if best_left_score - left_score > x_dropoff { break; }
-            if qi == 0 || si == 0 { break; }
+            if best_left_score - left_score > x_dropoff {
+                break;
+            }
+            if qi == 0 || si == 0 {
+                break;
+            }
             qi -= 1;
             si -= 1;
         }
     }
 
     let total_score = best_score + best_left_score;
-    if total_score <= 0 { return None; }
+    if total_score <= 0 {
+        return None;
+    }
 
     let evalue = kbp.raw_to_evalue(total_score, search_space);
-    if evalue > evalue_threshold { return None; }
+    if evalue > evalue_threshold {
+        return None;
+    }
 
     let q_start = (q_seed - best_left) as i32;
     let q_end = (q_seed + best_right) as i32;
@@ -1286,7 +1547,9 @@ fn extend_seed_packed(
     for i in 0..align_len as usize {
         let qb = query[q_start as usize + i];
         let sb = packed_base_at(subject_packed, s_start as usize + i);
-        if qb == sb { num_ident += 1; }
+        if qb == sb {
+            num_ident += 1;
+        }
         qseq.push(blastna_to_iupac_byte(qb));
         sseq.push(blastna_to_iupac_byte(sb));
     }
@@ -1344,7 +1607,11 @@ fn extend_seed(
     let mut qi = q_seed;
     let mut si = s_seed;
     while qi < query.len() && si < subject.len() {
-        score += if query[qi] == subject[si] { reward } else { penalty };
+        score += if query[qi] == subject[si] {
+            reward
+        } else {
+            penalty
+        };
         if score > best_score {
             best_score = score;
             best_right = qi - q_seed + 1;
@@ -1364,7 +1631,11 @@ fn extend_seed(
         qi = q_seed - 1;
         si = s_seed - 1;
         loop {
-            score_l += if query[qi] == subject[si] { reward } else { penalty };
+            score_l += if query[qi] == subject[si] {
+                reward
+            } else {
+                penalty
+            };
             if score_l > best_score_l {
                 best_score_l = score_l;
                 best_left = q_seed - qi;
@@ -1405,7 +1676,9 @@ fn extend_seed(
     for i in 0..align_len as usize {
         let qb = query[q_start as usize + i];
         let sb = subject[s_start as usize + i];
-        if qb == sb { num_ident += 1; }
+        if qb == sb {
+            num_ident += 1;
+        }
         qseq.push(blastna_to_iupac_byte(qb));
         sseq.push(blastna_to_iupac_byte(sb));
     }
@@ -1434,6 +1707,10 @@ fn extend_seed(
 /// Remove HSPs that are contained within or significantly overlap higher-scoring ones.
 /// Uses an interval tree for efficient containment checking.
 fn dedup_hsps(hsps: &mut Vec<SearchHsp>) {
+    dedup_hsps_with_min_diag_separation(hsps, 0);
+}
+
+fn dedup_hsps_with_min_diag_separation(hsps: &mut Vec<SearchHsp>, min_diag_separation: i32) {
     if hsps.len() <= 1 {
         return;
     }
@@ -1446,16 +1723,51 @@ fn dedup_hsps(hsps: &mut Vec<SearchHsp>) {
 
     let mut keep = vec![false; hsps.len()];
     for (i, hsp) in hsps.iter().enumerate() {
-        let tree = trees.entry(hsp.context).or_insert_with(|| IntervalTree::new(q_max, s_max));
+        let tree = trees
+            .entry(hsp.context)
+            .or_insert_with(|| IntervalTree::new(q_max, s_max));
         let qi = Interval::new(hsp.query_start, hsp.query_end);
         let si = Interval::new(hsp.subject_start, hsp.subject_end);
-        if !tree.is_contained(qi, si) && !tree.has_significant_overlap(qi, si, 0.5) {
+        if !tree.is_contained_with_min_diag_separation(qi, si, min_diag_separation)
+            && !tree.has_significant_overlap_with_min_diag_separation(
+                qi,
+                si,
+                0.99,
+                min_diag_separation,
+            )
+        {
             keep[i] = true;
             tree.insert(qi, si, hsp.score);
         }
     }
     let mut idx = 0;
-    hsps.retain(|_| { let k = keep[idx]; idx += 1; k });
+    hsps.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
+}
+
+fn min_diag_separation_for_ungapped(word_size: usize, reward: i32, penalty: i32) -> i32 {
+    if word_size >= 28 && reward == 1 && penalty == -2 {
+        6
+    } else {
+        0
+    }
+}
+
+fn min_diag_separation_for_gapped(
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+) -> i32 {
+    if word_size >= 28 && reward == 1 && penalty == -2 && gap_open == 0 && gap_extend == 0 {
+        6
+    } else {
+        0
+    }
 }
 
 /// Perform gapped blastn search with traceback.
@@ -1477,18 +1789,29 @@ pub fn blastn_gapped_search(
 ) -> Vec<SearchHsp> {
     // Delegate to extended version with nomask = same as query (no separate masking)
     blastn_gapped_search_nomask(
-        query_plus, query_minus, query_plus, query_minus,
-        subject, word_size, reward, penalty, _gap_open, _gap_extend,
-        x_dropoff, kbp, search_space, evalue_threshold,
+        query_plus,
+        query_minus,
+        query_plus,
+        query_minus,
+        subject,
+        word_size,
+        reward,
+        penalty,
+        _gap_open,
+        _gap_extend,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
     )
 }
 
 /// Gapped search with separate masked (for seeds) and unmasked (for gapped alignment) queries.
 pub fn blastn_gapped_search_nomask(
-    query_plus: &[u8],        // masked, for seed finding
-    query_minus: &[u8],       // masked, for seed finding
-    query_plus_nomask: &[u8], // unmasked, for gapped alignment
-    query_minus_nomask: &[u8],// unmasked, for gapped alignment
+    query_plus: &[u8],         // masked, for seed finding
+    query_minus: &[u8],        // masked, for seed finding
+    query_plus_nomask: &[u8],  // unmasked, for gapped alignment
+    query_minus_nomask: &[u8], // unmasked, for gapped alignment
     subject: &[u8],
     word_size: usize,
     reward: i32,
@@ -1502,36 +1825,62 @@ pub fn blastn_gapped_search_nomask(
 ) -> Vec<SearchHsp> {
     // First do ungapped search to find seeds (uses masked query)
     let ungapped = blastn_ungapped_search(
-        query_plus, query_minus, subject,
-        word_size, reward, penalty, x_dropoff,
-        kbp, search_space, evalue_threshold * 100.0, // permissive threshold for seeds
+        query_plus,
+        query_minus,
+        subject,
+        word_size,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold * 100.0, // permissive threshold for seeds
     );
 
     let mut hsps = Vec::new();
+    let min_diag_separation =
+        min_diag_separation_for_gapped(word_size, reward, penalty, _gap_open, _gap_extend);
 
     for seed in &ungapped {
         // Use UNMASKED query for gapped alignment (matches C engine's sequence_nomask)
-        let query = if seed.context == 0 { query_plus_nomask } else { query_minus_nomask };
+        let query = if seed.context == 0 {
+            query_plus_nomask
+        } else {
+            query_minus_nomask
+        };
+
+        if min_diag_separation != 0 && is_perfect_ungapped_hsp(seed, reward) {
+            hsps.push(seed.clone());
+            continue;
+        }
 
         // BLAST-style gapped alignment: bidirectional X-dropoff extension from seed
         let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
         let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
 
         if let Some(tb) = blast_gapped_align(
-            query, subject, seed_q, seed_s,
-            reward, penalty, _gap_open, _gap_extend, x_dropoff,
+            query,
+            subject,
+            seed_q,
+            seed_s,
+            reward,
+            penalty,
+            _gap_open,
+            _gap_extend,
+            x_dropoff,
         ) {
             let evalue = kbp.raw_to_evalue(tb.score, search_space);
-            if evalue > evalue_threshold { continue; }
+            if evalue > evalue_threshold {
+                continue;
+            }
 
             let q_slice = &query[tb.query_start..tb.query_end];
             let s_slice = &subject[tb.subject_start..tb.subject_end];
-            let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(
-                q_slice, s_slice,
-            );
-            let (qseq, sseq) = tb.edit_script.render_alignment(
-                q_slice, s_slice, blastna_to_iupac,
-            );
+            let (align_len, num_ident, gap_opens) =
+                tb.edit_script.count_identities(q_slice, s_slice);
+            let (qseq, sseq) = tb
+                .edit_script
+                .render_alignment(q_slice, s_slice, blastna_to_iupac);
 
             hsps.push(SearchHsp {
                 query_start: tb.query_start as i32,
@@ -1556,7 +1905,7 @@ pub fn blastn_gapped_search_nomask(
     }
 
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    dedup_hsps(&mut hsps);
+    dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
     hsps
 }
 
@@ -1583,12 +1932,24 @@ pub fn blastn_gapped_search_packed(
     // 1. Fast packed scan to find seeds (no decode needed for scanning)
     // 2. Decode subject only if seeds found (for verify + gapped alignment)
     let ungapped = blastn_ungapped_search_packed(
-        query_plus, query_minus, subject_packed, subject_len,
-        word_size, reward, penalty, x_dropoff,
-        kbp, search_space, evalue_threshold * 100.0,
+        query_plus,
+        query_minus,
+        subject_packed,
+        subject_len,
+        word_size,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold * 100.0,
     );
     let mut hsps = Vec::new();
-    if ungapped.is_empty() { return hsps; }
+    if ungapped.is_empty() {
+        return hsps;
+    }
+    let min_diag_separation =
+        min_diag_separation_for_gapped(word_size, reward, penalty, gap_open, gap_extend);
 
     let cutoff_score = {
         let e = evalue_threshold.max(1.0e-297);
@@ -1596,42 +1957,71 @@ pub fn blastn_gapped_search_packed(
     };
 
     // Filter seeds by ungapped cutoff first (cheap, no decode needed)
-    let passing_seeds: Vec<&SearchHsp> = ungapped.iter()
+    let passing_seeds: Vec<&SearchHsp> = ungapped
+        .iter()
         .filter(|s| s.score >= cutoff_score)
         .collect();
-    if passing_seeds.is_empty() { return hsps; }
+    if passing_seeds.is_empty() {
+        return hsps;
+    }
 
     // Decode subject only once, only if needed
     let subject_decoded = decode_packed_ncbi2na(subject_packed, subject_len);
 
     for seed in &passing_seeds {
-        let query = if seed.context == 0 { query_plus_nomask } else { query_minus_nomask };
+        let query = if seed.context == 0 {
+            query_plus_nomask
+        } else {
+            query_minus_nomask
+        };
+
+        if min_diag_separation != 0 && is_perfect_ungapped_hsp(seed, reward) {
+            hsps.push((*seed).clone());
+            continue;
+        }
         let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
         let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
 
         // Score-only preliminary gapped extension
         let prelim_score = blast_gapped_score_only(
-            query, &subject_decoded, seed_q, seed_s,
-            reward, penalty, gap_open, gap_extend, x_dropoff,
+            query,
+            &subject_decoded,
+            seed_q,
+            seed_s,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            x_dropoff,
         );
-        if prelim_score < cutoff_score { continue; }
+        if prelim_score < cutoff_score {
+            continue;
+        }
 
         // Full traceback only for seeds that pass the score cutoff
         if let Some(tb) = blast_gapped_align(
-            query, &subject_decoded, seed_q, seed_s,
-            reward, penalty, gap_open, gap_extend, x_dropoff,
+            query,
+            &subject_decoded,
+            seed_q,
+            seed_s,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            x_dropoff,
         ) {
             let evalue = kbp.raw_to_evalue(tb.score, search_space);
-            if evalue > evalue_threshold { continue; }
+            if evalue > evalue_threshold {
+                continue;
+            }
 
             let q_slice = &query[tb.query_start..tb.query_end];
             let s_slice = &subject_decoded[tb.subject_start..tb.subject_end];
-            let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(
-                q_slice, s_slice,
-            );
-            let (qseq, sseq) = tb.edit_script.render_alignment(
-                q_slice, s_slice, blastna_to_iupac,
-            );
+            let (align_len, num_ident, gap_opens) =
+                tb.edit_script.count_identities(q_slice, s_slice);
+            let (qseq, sseq) = tb
+                .edit_script
+                .render_alignment(q_slice, s_slice, blastna_to_iupac);
 
             hsps.push(SearchHsp {
                 query_start: tb.query_start as i32,
@@ -1655,7 +2045,7 @@ pub fn blastn_gapped_search_packed(
     }
 
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    dedup_hsps(&mut hsps);
+    dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
     hsps
 }
 
@@ -1698,6 +2088,8 @@ pub fn blastn_gapped_search_packed_prepared(
     };
 
     let mut subject_decoded = None;
+    let min_diag_separation =
+        min_diag_separation_for_gapped(prepared.word_size, reward, penalty, gap_open, gap_extend);
 
     for seed in ungapped.iter().filter(|s| s.score >= cutoff_score) {
         let query = if seed.context == 0 {
@@ -1706,7 +2098,7 @@ pub fn blastn_gapped_search_packed_prepared(
             query_minus_nomask
         };
 
-        if is_full_query_perfect_hsp(seed, query.len(), reward) {
+        if min_diag_separation != 0 && is_perfect_ungapped_hsp(seed, reward) {
             hsps.push(seed.clone());
             continue;
         }
@@ -1749,8 +2141,11 @@ pub fn blastn_gapped_search_packed_prepared(
 
             let q_slice = &query[tb.query_start..tb.query_end];
             let s_slice = &subject_decoded[tb.subject_start..tb.subject_end];
-            let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(q_slice, s_slice);
-            let (qseq, sseq) = tb.edit_script.render_alignment(q_slice, s_slice, blastna_to_iupac);
+            let (align_len, num_ident, gap_opens) =
+                tb.edit_script.count_identities(q_slice, s_slice);
+            let (qseq, sseq) = tb
+                .edit_script
+                .render_alignment(q_slice, s_slice, blastna_to_iupac);
 
             hsps.push(SearchHsp {
                 query_start: tb.query_start as i32,
@@ -1774,22 +2169,18 @@ pub fn blastn_gapped_search_packed_prepared(
     }
 
     hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    dedup_hsps(&mut hsps);
+    dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
     hsps
 }
 
 #[inline]
-fn is_full_query_perfect_hsp(seed: &SearchHsp, query_len: usize, reward: i32) -> bool {
-    if query_len == 0 || reward <= 0 {
-        return false;
-    }
-    seed.query_start == 0
-        && seed.query_end as usize == query_len
-        && seed.align_length as usize == query_len
-        && seed.num_ident as usize == query_len
+fn is_perfect_ungapped_hsp(seed: &SearchHsp, reward: i32) -> bool {
+    reward > 0
+        && seed.align_length > 0
+        && seed.num_ident == seed.align_length
         && seed.mismatches == 0
         && seed.gap_opens == 0
-        && seed.score as i64 == reward as i64 * query_len as i64
+        && seed.score as i64 == reward as i64 * seed.align_length as i64
 }
 
 /// Decode packed NCBI2na to per-base (0=A, 1=C, 2=G, 3=T).
@@ -1828,16 +2219,16 @@ fn decode_packed_ncbi2na_scalar(packed: &[u8], len: usize) -> Vec<u8> {
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
-    __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set_epi8, _mm_set1_epi8, _mm_shuffle_epi8,
-    _mm_srli_epi16, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
-    _mm_unpacklo_epi16, _mm_unpacklo_epi8,
+    __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set1_epi8, _mm_set_epi8, _mm_shuffle_epi8,
+    _mm_srli_epi16, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8, _mm_unpacklo_epi16,
+    _mm_unpacklo_epi8,
 };
 
 #[cfg(target_arch = "x86")]
 use std::arch::x86::{
-    __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set_epi8, _mm_set1_epi8, _mm_shuffle_epi8,
-    _mm_srli_epi16, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
-    _mm_unpacklo_epi16, _mm_unpacklo_epi8,
+    __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set1_epi8, _mm_set_epi8, _mm_shuffle_epi8,
+    _mm_srli_epi16, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8, _mm_unpacklo_epi16,
+    _mm_unpacklo_epi8,
 };
 
 /// SSSE3 decoder for packed NCBI2na.
@@ -1852,14 +2243,8 @@ unsafe fn decode_packed_ncbi2na_ssse3(packed: &[u8], len: usize) -> Vec<u8> {
     let full_bytes = len / 4;
     let simd_bytes = full_bytes & !15;
 
-    let first_base_lut = _mm_set_epi8(
-        3, 3, 3, 3, 2, 2, 2, 2,
-        1, 1, 1, 1, 0, 0, 0, 0,
-    );
-    let second_base_lut = _mm_set_epi8(
-        3, 2, 1, 0, 3, 2, 1, 0,
-        3, 2, 1, 0, 3, 2, 1, 0,
-    );
+    let first_base_lut = _mm_set_epi8(3, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0);
+    let second_base_lut = _mm_set_epi8(3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0);
     let low_nibble_mask = _mm_set1_epi8(0x0f);
 
     let mut i = 0usize;
@@ -1947,7 +2332,9 @@ mod tests {
             .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
             .collect();
 
-        for len in [0usize, 1, 2, 3, 4, 5, 15, 16, 31, 32, 63, 64, 65, 127, 255, 319] {
+        for len in [
+            0usize, 1, 2, 3, 4, 5, 15, 16, 31, 32, 63, 64, 65, 127, 255, 319,
+        ] {
             let decoded = decode_packed_ncbi2na(&packed, len);
             let scalar = decode_packed_ncbi2na_scalar(&packed, len);
             assert_eq!(decoded, scalar, "length {}", len);
@@ -1968,8 +2355,8 @@ mod tests {
 
         let kbp = test_kbp();
         let results = blastn_ungapped_search(
-            &query, &rc, &subject, 7, 2, -3, 20,
-            &kbp, 1e6, 1e10, // very permissive e-value for testing
+            &query, &rc, &subject, 7, 2, -3, 20, &kbp, 1e6,
+            1e10, // very permissive e-value for testing
         );
 
         assert!(!results.is_empty(), "Should find at least one hit");
@@ -1992,11 +2379,11 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results = blastn_ungapped_search(
-            &query, &rc, &subject, 4, 2, -3, 20,
-            &kbp, 1e6, 1e10,
+        let results = blastn_ungapped_search(&query, &rc, &subject, 4, 2, -3, 20, &kbp, 1e6, 1e10);
+        assert!(
+            !results.is_empty(),
+            "Should find hit despite mismatches (word_size=4)"
         );
-        assert!(!results.is_empty(), "Should find hit despite mismatches (word_size=4)");
         // The hit may be partial (avoiding the mismatch region)
         assert!(results[0].score > 0);
     }
@@ -2018,12 +2405,23 @@ mod tests {
 
         let kbp = test_kbp();
         let results = blastn_ungapped_search(
-            &query_plus, &query_minus, &subject, 7, 2, -3, 20,
-            &kbp, 1e6, 1e10,
+            &query_plus,
+            &query_minus,
+            &subject,
+            7,
+            2,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
         );
         assert!(!results.is_empty(), "Should find hit on minus strand");
         // The hit should be found via the minus strand query (context=1)
-        assert!(results.iter().any(|h| h.context == 1), "Should have a minus-strand hit");
+        assert!(
+            results.iter().any(|h| h.context == 1),
+            "Should have a minus-strand hit"
+        );
     }
 
     #[test]
@@ -2036,10 +2434,8 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results = blastn_gapped_search(
-            &query, &rc, &subject, 7, 2, -3, 5, 2, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results =
+            blastn_gapped_search(&query, &rc, &subject, 7, 2, -3, 5, 2, 20, &kbp, 1e6, 1e10);
         assert!(!results.is_empty(), "Gapped search should find hit");
         assert_eq!(results[0].gap_opens, 0, "Perfect match should have no gaps");
     }
@@ -2047,14 +2443,11 @@ mod tests {
     #[test]
     fn test_no_match() {
         let query = vec![0u8; 20]; // AAAAAAA...
-        let rc = vec![3u8; 20];    // TTTTTTT...
+        let rc = vec![3u8; 20]; // TTTTTTT...
         let subject = vec![1u8; 50]; // CCCCCCC...
 
         let kbp = test_kbp();
-        let results = blastn_ungapped_search(
-            &query, &rc, &subject, 11, 1, -3, 20,
-            &kbp, 1e6, 10.0,
-        );
+        let results = blastn_ungapped_search(&query, &rc, &subject, 11, 1, -3, 20, &kbp, 1e6, 10.0);
         assert!(results.is_empty(), "Should find no hits");
     }
 
@@ -2111,17 +2504,23 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results = blastn_ungapped_search(
-            &query, &rc, &subject, 11, 2, -3, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results = blastn_ungapped_search(&query, &rc, &subject, 11, 2, -3, 20, &kbp, 1e6, 1e10);
 
         // Should find hits at all 3 positions
         let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
-        assert!(plus_hits.len() >= 3, "Should find hits at all 3 positions, got {}", plus_hits.len());
+        assert!(
+            plus_hits.len() >= 3,
+            "Should find hits at all 3 positions, got {}",
+            plus_hits.len()
+        );
         let starts: Vec<i32> = plus_hits.iter().map(|h| h.subject_start).collect();
         for &pos in &[0i32, 20, 40] {
-            assert!(starts.contains(&pos), "Should find hit at position {}, got starts {:?}", pos, starts);
+            assert!(
+                starts.contains(&pos),
+                "Should find hit at position {}, got starts {:?}",
+                pos,
+                starts
+            );
         }
     }
 
@@ -2133,11 +2532,11 @@ mod tests {
         let subject = vec![1u8; 50]; // all C's
 
         let kbp = test_kbp();
-        let results = blastn_ungapped_search(
-            &query, &rc, &subject, 11, 2, -3, 20,
-            &kbp, 1e6, 1e10,
+        let results = blastn_ungapped_search(&query, &rc, &subject, 11, 2, -3, 20, &kbp, 1e6, 1e10);
+        assert!(
+            results.is_empty(),
+            "All-A query vs all-C subject should produce no hits"
         );
-        assert!(results.is_empty(), "All-A query vs all-C subject should produce no hits");
     }
 
     #[test]
@@ -2159,19 +2558,26 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results = blastn_ungapped_search(
-            &query, &rc, &subject, 11, 2, -3, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results = blastn_ungapped_search(&query, &rc, &subject, 11, 2, -3, 20, &kbp, 1e6, 1e10);
 
         let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
-        assert!(!plus_hits.is_empty(), "Should find at least one hit covering the overlapping region");
+        assert!(
+            !plus_hits.is_empty(),
+            "Should find at least one hit covering the overlapping region"
+        );
         // The overlapping patterns at 5 and 6 create a merged region 5..17.
         // The diagonal tracker may deduplicate, so we should get exactly one plus-strand hit.
-        assert_eq!(plus_hits.len(), 1,
-            "Diagonal tracker should merge overlapping seeds into one hit, got {}", plus_hits.len());
+        assert_eq!(
+            plus_hits.len(),
+            1,
+            "Diagonal tracker should merge overlapping seeds into one hit, got {}",
+            plus_hits.len()
+        );
         // The hit should cover the overlapping region (starts at 5 or 6)
-        assert!(plus_hits[0].subject_start <= 6, "Hit should start at or near position 5");
+        assert!(
+            plus_hits[0].subject_start <= 6,
+            "Hit should start at or near position 5"
+        );
     }
 
     #[test]
@@ -2192,21 +2598,18 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results_7 = blastn_ungapped_search(
-            &query, &rc, &subject, 7, 2, -3, 20,
-            &kbp, 1e6, 1e10,
-        );
-        let results_11 = blastn_ungapped_search(
-            &query, &rc, &subject, 11, 2, -3, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results_7 =
+            blastn_ungapped_search(&query, &rc, &subject, 7, 2, -3, 20, &kbp, 1e6, 1e10);
+        let results_11 =
+            blastn_ungapped_search(&query, &rc, &subject, 11, 2, -3, 20, &kbp, 1e6, 1e10);
 
         let plus_7: Vec<&SearchHsp> = results_7.iter().filter(|h| h.context == 0).collect();
         let plus_11: Vec<&SearchHsp> = results_11.iter().filter(|h| h.context == 0).collect();
         assert!(
             plus_7.len() >= plus_11.len(),
             "word_size=7 should find >= as many plus-strand hits as word_size=11 ({} vs {})",
-            plus_7.len(), plus_11.len()
+            plus_7.len(),
+            plus_11.len()
         );
     }
 
@@ -2228,17 +2631,21 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results = blastn_gapped_search(
-            &query, &rc, &subject, 7, 2, -3, 5, 2, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results =
+            blastn_gapped_search(&query, &rc, &subject, 7, 2, -3, 5, 2, 20, &kbp, 1e6, 1e10);
 
-        assert!(!results.is_empty(), "Gapped search should find hit with 1-base insertion");
+        assert!(
+            !results.is_empty(),
+            "Gapped search should find hit with 1-base insertion"
+        );
         let best = &results[0];
         // With a 24-base query and 1 insertion, we expect high identity
-        assert!(best.num_ident >= 20,
+        assert!(
+            best.num_ident >= 20,
             "Should have high identity (got {} ident out of {} align_len)",
-            best.num_ident, best.align_length);
+            best.num_ident,
+            best.align_length
+        );
     }
 
     #[test]
@@ -2258,17 +2665,21 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results = blastn_gapped_search(
-            &query, &rc, &subject, 7, 2, -3, 5, 2, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results =
+            blastn_gapped_search(&query, &rc, &subject, 7, 2, -3, 5, 2, 20, &kbp, 1e6, 1e10);
 
-        assert!(!results.is_empty(), "Gapped search should handle 1-base deletion");
+        assert!(
+            !results.is_empty(),
+            "Gapped search should handle 1-base deletion"
+        );
         let best = &results[0];
         // With a 24-base query and 1 deletion, we expect high identity
-        assert!(best.num_ident >= 19,
+        assert!(
+            best.num_ident >= 19,
             "Should have high identity (got {} ident out of {} align_len)",
-            best.num_ident, best.align_length);
+            best.num_ident,
+            best.align_length
+        );
     }
 
     #[test]
@@ -2284,27 +2695,43 @@ mod tests {
         let kbp = test_kbp();
         let subject_packed = pack_ncbi2na(&subject);
 
-        let unpacked_results = blastn_ungapped_search(
-            &query, &rc, &subject, 7, 2, -3, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let unpacked_results =
+            blastn_ungapped_search(&query, &rc, &subject, 7, 2, -3, 20, &kbp, 1e6, 1e10);
         let packed_results = blastn_ungapped_search_packed(
-            &query, &rc, &subject_packed, subject.len(), 7, 2, -3, 20,
-            &kbp, 1e6, 1e10,
+            &query,
+            &rc,
+            &subject_packed,
+            subject.len(),
+            7,
+            2,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
         );
 
-        assert!(!unpacked_results.is_empty(), "Unpacked search should find hits");
+        assert!(
+            !unpacked_results.is_empty(),
+            "Unpacked search should find hits"
+        );
         assert!(!packed_results.is_empty(), "Packed search should find hits");
 
         // Both should find the same best hit
         let u = &unpacked_results[0];
         let p = &packed_results[0];
-        assert_eq!(u.subject_start, p.subject_start,
-            "Packed and unpacked should agree on subject_start");
-        assert_eq!(u.subject_end, p.subject_end,
-            "Packed and unpacked should agree on subject_end");
-        assert_eq!(u.score, p.score,
-            "Packed and unpacked should agree on score");
+        assert_eq!(
+            u.subject_start, p.subject_start,
+            "Packed and unpacked should agree on subject_start"
+        );
+        assert_eq!(
+            u.subject_end, p.subject_end,
+            "Packed and unpacked should agree on subject_end"
+        );
+        assert_eq!(
+            u.score, p.score,
+            "Packed and unpacked should agree on score"
+        );
     }
 
     #[test]
@@ -2329,16 +2756,21 @@ mod tests {
         }
 
         let kbp = test_kbp();
-        let results = blastn_ungapped_search(
-            &query, &rc, &subject, 11, 2, -3, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results = blastn_ungapped_search(&query, &rc, &subject, 11, 2, -3, 20, &kbp, 1e6, 1e10);
 
         let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
-        assert!(plus_hits.len() >= 2, "Should find hits at both boundaries, got {}", plus_hits.len());
+        assert!(
+            plus_hits.len() >= 2,
+            "Should find hits at both boundaries, got {}",
+            plus_hits.len()
+        );
         let starts: Vec<i32> = plus_hits.iter().map(|h| h.subject_start).collect();
         assert!(starts.contains(&0), "Should find hit at position 0");
-        assert!(starts.contains(&(end_start as i32)), "Should find hit at end position {}", end_start);
+        assert!(
+            starts.contains(&(end_start as i32)),
+            "Should find hit at end position {}",
+            end_start
+        );
     }
 
     #[test]
@@ -2351,29 +2783,38 @@ mod tests {
 
         // Fill subject with a pseudo-random-ish pattern that avoids matching the query
         // Use alternating C,G (1,2) which won't match ACGTACGT...
-        let mut subject: Vec<u8> = (0..subject_len).map(|i| if i % 2 == 0 { 1u8 } else { 2u8 }).collect();
+        let mut subject: Vec<u8> = (0..subject_len)
+            .map(|i| if i % 2 == 0 { 1u8 } else { 2u8 })
+            .collect();
         // Embed the query
         for (i, &b) in query.iter().enumerate() {
             subject[embed_pos + i] = b;
         }
 
         let kbp = test_kbp();
-        let results = blastn_ungapped_search(
-            &query, &rc, &subject, 11, 2, -3, 20,
-            &kbp, 1e6, 1e10,
-        );
+        let results = blastn_ungapped_search(&query, &rc, &subject, 11, 2, -3, 20, &kbp, 1e6, 1e10);
 
-        assert!(!results.is_empty(), "Should find the embedded query in large subject");
+        assert!(
+            !results.is_empty(),
+            "Should find the embedded query in large subject"
+        );
         let plus_hits: Vec<&SearchHsp> = results.iter().filter(|h| h.context == 0).collect();
         assert!(!plus_hits.is_empty(), "Should find plus-strand hit");
-        assert_eq!(plus_hits[0].subject_start, embed_pos as i32,
-            "Hit should be at the embedded position {}", embed_pos);
-        assert_eq!(plus_hits[0].num_ident, query.len() as i32,
-            "Should be a perfect match of {} bases", query.len());
+        assert_eq!(
+            plus_hits[0].subject_start, embed_pos as i32,
+            "Hit should be at the embedded position {}",
+            embed_pos
+        );
+        assert_eq!(
+            plus_hits[0].num_ident,
+            query.len() as i32,
+            "Should be a perfect match of {} bases",
+            query.len()
+        );
     }
 
     #[test]
-    fn test_full_query_perfect_hsp_fast_path_guard() {
+    fn test_perfect_ungapped_hsp_fast_path_guard() {
         let perfect = SearchHsp {
             query_start: 0,
             query_end: 22,
@@ -2390,15 +2831,19 @@ mod tests {
             qseq: Some("ACGTACGTACGTACGTACGTAC".to_string()),
             sseq: Some("ACGTACGTACGTACGTACGTAC".to_string()),
         };
-        assert!(is_full_query_perfect_hsp(&perfect, 22, 1));
+        assert!(is_perfect_ungapped_hsp(&perfect, 1));
 
         let mut partial = perfect.clone();
         partial.query_start = 1;
-        assert!(!is_full_query_perfect_hsp(&partial, 22, 1));
+        partial.query_end = 21;
+        partial.align_length = 20;
+        partial.num_ident = 20;
+        partial.score = 20;
+        assert!(is_perfect_ungapped_hsp(&partial, 1));
 
         let mut mismatch = perfect.clone();
         mismatch.num_ident = 21;
         mismatch.mismatches = 1;
-        assert!(!is_full_query_perfect_hsp(&mismatch, 22, 1));
+        assert!(!is_perfect_ungapped_hsp(&mismatch, 1));
     }
 }
