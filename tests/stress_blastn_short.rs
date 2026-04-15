@@ -2,10 +2,10 @@
 //! These tests verify that the search doesn't stack-overflow with many sequences
 //! and multithreaded execution.
 
-use tempfile::TempDir;
 use blast_rs::db::DbType;
-use blast_rs::{BlastDbBuilder, SequenceEntry, SearchParams, blastn};
+use blast_rs::{blastn, BlastDbBuilder, SearchParams, SequenceEntry};
 use std::path::Path;
+use tempfile::TempDir;
 
 fn nt_entry(acc: &str, title: &str, seq: &str) -> SequenceEntry {
     SequenceEntry {
@@ -20,7 +20,9 @@ fn build_nucleotide_db(entries: Vec<SequenceEntry>) -> (TempDir, blast_rs::db::B
     let tmp = TempDir::new().unwrap();
     let base = tmp.path().join("testdb");
     let mut builder = BlastDbBuilder::new(DbType::Nucleotide, "stress test db");
-    for e in entries { builder.add(e); }
+    for e in entries {
+        builder.add(e);
+    }
     builder.write(&base).unwrap();
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
     (tmp, db)
@@ -30,10 +32,14 @@ fn build_nucleotide_db(entries: Vec<SequenceEntry>) -> (TempDir, blast_rs::db::B
 fn random_nt_seq(len: usize, seed: u64) -> Vec<u8> {
     let bases = b"ACGT";
     let mut state = seed;
-    (0..len).map(|_| {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        bases[((state >> 33) % 4) as usize]
-    }).collect()
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            bases[((state >> 33) % 4) as usize]
+        })
+        .collect()
 }
 
 fn blastn_short_params() -> SearchParams {
@@ -104,8 +110,14 @@ fn stress_blastn_short_long_subjects() {
     params.num_threads = 4;
 
     let results = blastn(&db, primer, &params);
-    assert!(!results.is_empty(), "Should find hits in long-subject stress test");
-    eprintln!("Long-subject stress test found {} subject hits", results.len());
+    assert!(
+        !results.is_empty(),
+        "Should find hits in long-subject stress test"
+    );
+    eprintln!(
+        "Long-subject stress test found {} subject hits",
+        results.len()
+    );
 }
 
 /// Stress test: very short primer (15bp) which is common for PCR primers.
@@ -133,7 +145,10 @@ fn stress_blastn_short_15bp_primer() {
 
     let results = blastn(&db, primer, &params);
     assert!(!results.is_empty(), "Should find 15bp primer hits");
-    eprintln!("15bp primer stress test found {} subject hits", results.len());
+    eprintln!(
+        "15bp primer stress test found {} subject hits",
+        results.len()
+    );
 }
 
 /// Test with real V5 NCBI database (16S_ribosomal_RNA) if available.
@@ -142,13 +157,20 @@ fn stress_blastn_short_15bp_primer() {
 fn stress_real_v5_database_if_available() {
     let db_path = Path::new("/husky/henriksson/for_claude/blast/16S_ribosomal_RNA");
     if !db_path.with_extension("nin").exists() {
-        eprintln!("Skipping: 16S_ribosomal_RNA database not found at {:?}", db_path);
+        eprintln!(
+            "Skipping: 16S_ribosomal_RNA database not found at {:?}",
+            db_path
+        );
         return;
     }
 
     let db = blast_rs::db::BlastDb::open(db_path).expect("Failed to open 16S database");
     assert_eq!(db.db_type, DbType::Nucleotide);
-    assert!(db.num_oids > 1000, "16S DB should have thousands of sequences, got {}", db.num_oids);
+    assert!(
+        db.num_oids > 1000,
+        "16S DB should have thousands of sequences, got {}",
+        db.num_oids
+    );
     eprintln!("16S DB: {} OIDs, version {}", db.num_oids, db.version);
 
     // 19bp primer that matches many 16S sequences
@@ -159,8 +181,14 @@ fn stress_real_v5_database_if_available() {
     params.max_hsps = Some(1);
 
     let results = blastn(&db, primer, &params);
-    assert!(!results.is_empty(), "Should find primer hits in 16S database");
-    eprintln!("Real V5 DB stress test found {} subject hits", results.len());
+    assert!(
+        !results.is_empty(),
+        "Should find primer hits in 16S database"
+    );
+    eprintln!(
+        "Real V5 DB stress test found {} subject hits",
+        results.len()
+    );
 
     // Verify taxonomy data is populated
     let with_taxids: usize = results.iter().filter(|r| !r.taxids.is_empty()).count();

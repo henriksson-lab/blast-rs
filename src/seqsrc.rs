@@ -41,7 +41,9 @@ pub trait BlastSeqSource: Send + Sync {
     fn avg_seq_len(&self) -> i32;
 
     /// Minimum sequence length.
-    fn min_seq_len(&self) -> i32 { 1 }
+    fn min_seq_len(&self) -> i32 {
+        1
+    }
 
     /// Database name.
     fn name(&self) -> &str;
@@ -71,18 +73,37 @@ mod tests {
     }
 
     impl BlastSeqSource for MockSeqSrc {
-        fn num_seqs(&self) -> i32 { self.seqs.len() as i32 }
-        fn total_length(&self) -> i64 { self.seqs.iter().map(|s| s.len() as i64).sum() }
-        fn max_seq_len(&self) -> i32 { self.seqs.iter().map(|s| s.len() as i32).max().unwrap_or(0) }
-        fn avg_seq_len(&self) -> i32 {
-            if self.seqs.is_empty() { 0 } else { (self.total_length() / self.num_seqs() as i64) as i32 }
+        fn num_seqs(&self) -> i32 {
+            self.seqs.len() as i32
         }
-        fn name(&self) -> &str { "mock" }
-        fn is_protein(&self) -> bool { false }
-        fn seq_len(&self, oid: i32) -> i32 { self.seqs[oid as usize].len() as i32 }
+        fn total_length(&self) -> i64 {
+            self.seqs.iter().map(|s| s.len() as i64).sum()
+        }
+        fn max_seq_len(&self) -> i32 {
+            self.seqs.iter().map(|s| s.len() as i32).max().unwrap_or(0)
+        }
+        fn avg_seq_len(&self) -> i32 {
+            if self.seqs.is_empty() {
+                0
+            } else {
+                (self.total_length() / self.num_seqs() as i64) as i32
+            }
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn is_protein(&self) -> bool {
+            false
+        }
+        fn seq_len(&self, oid: i32) -> i32 {
+            self.seqs[oid as usize].len() as i32
+        }
         fn get_sequence(&self, arg: &GetSeqArg) -> Option<SeqData> {
             let seq = self.seqs.get(arg.oid as usize)?;
-            Some(SeqData { sequence: seq.clone(), length: seq.len() as i32 })
+            Some(SeqData {
+                sequence: seq.clone(),
+                length: seq.len() as i32,
+            })
         }
         fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
             Box::new(0..self.num_seqs())
@@ -100,7 +121,12 @@ mod tests {
         assert_eq!(src.seq_len(0), 4);
         assert_eq!(src.seq_len(1), 2);
 
-        let data = src.get_sequence(&GetSeqArg { oid: 0, encoding: SeqEncoding::Protein }).unwrap();
+        let data = src
+            .get_sequence(&GetSeqArg {
+                oid: 0,
+                encoding: SeqEncoding::Protein,
+            })
+            .unwrap();
         assert_eq!(data.length, 4);
     }
 
@@ -121,7 +147,10 @@ mod tests {
 
         // Verify each OID yields valid sequence data
         for oid in &oids {
-            let data = src.get_sequence(&GetSeqArg { oid: *oid, encoding: SeqEncoding::Nucleotide });
+            let data = src.get_sequence(&GetSeqArg {
+                oid: *oid,
+                encoding: SeqEncoding::Nucleotide,
+            });
             assert!(data.is_some(), "Failed to get sequence for OID {}", oid);
         }
 
@@ -162,25 +191,45 @@ mod tests {
             seqs: vec![vec![0, 1, 2], vec![3, 4]],
         };
         // Valid OIDs
-        assert!(src.get_sequence(&GetSeqArg { oid: 0, encoding: SeqEncoding::Nucleotide }).is_some());
-        assert!(src.get_sequence(&GetSeqArg { oid: 1, encoding: SeqEncoding::Nucleotide }).is_some());
+        assert!(src
+            .get_sequence(&GetSeqArg {
+                oid: 0,
+                encoding: SeqEncoding::Nucleotide
+            })
+            .is_some());
+        assert!(src
+            .get_sequence(&GetSeqArg {
+                oid: 1,
+                encoding: SeqEncoding::Nucleotide
+            })
+            .is_some());
         // Out of bounds
-        assert!(src.get_sequence(&GetSeqArg { oid: 2, encoding: SeqEncoding::Nucleotide }).is_none());
-        assert!(src.get_sequence(&GetSeqArg { oid: 99, encoding: SeqEncoding::Nucleotide }).is_none());
+        assert!(src
+            .get_sequence(&GetSeqArg {
+                oid: 2,
+                encoding: SeqEncoding::Nucleotide
+            })
+            .is_none());
+        assert!(src
+            .get_sequence(&GetSeqArg {
+                oid: 99,
+                encoding: SeqEncoding::Nucleotide
+            })
+            .is_none());
         // Negative OID (wraps to large usize, so should be None)
-        assert!(src.get_sequence(&GetSeqArg { oid: -1, encoding: SeqEncoding::Nucleotide }).is_none());
+        assert!(src
+            .get_sequence(&GetSeqArg {
+                oid: -1,
+                encoding: SeqEncoding::Nucleotide
+            })
+            .is_none());
     }
 
     /// Sum of all sequence lengths should match total_length.
     #[test]
     fn test_seqsrc_total_length() {
         let src = MockSeqSrc {
-            seqs: vec![
-                vec![0; 10],
-                vec![0; 20],
-                vec![0; 30],
-                vec![0; 40],
-            ],
+            seqs: vec![vec![0; 10], vec![0; 20], vec![0; 30], vec![0; 40]],
         };
         // Total should be 10 + 20 + 30 + 40 = 100
         assert_eq!(src.total_length(), 100);

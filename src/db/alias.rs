@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub struct AliasFile {
     pub title: Option<String>,
     pub dblist: Vec<PathBuf>,
+    pub raw_dblist: Vec<String>,
     pub nseq: Option<u64>,
     pub length: Option<u64>,
 }
@@ -22,6 +23,7 @@ pub fn parse_alias_file(path: &Path) -> io::Result<AliasFile> {
     let mut alias = AliasFile {
         title: None,
         dblist: Vec::new(),
+        raw_dblist: Vec::new(),
         nseq: None,
         length: None,
     };
@@ -36,9 +38,8 @@ pub fn parse_alias_file(path: &Path) -> io::Result<AliasFile> {
         if let Some(rest) = line.strip_prefix("TITLE ") {
             alias.title = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("DBLIST ") {
-            alias.dblist = rest.split_whitespace()
-                .map(|name| dir.join(name))
-                .collect();
+            alias.raw_dblist = rest.split_whitespace().map(str::to_string).collect();
+            alias.dblist = alias.raw_dblist.iter().map(|name| dir.join(name)).collect();
         } else if let Some(rest) = line.strip_prefix("NSEQ ") {
             alias.nseq = rest.trim().parse().ok();
         } else if let Some(rest) = line.strip_prefix("LENGTH ") {
@@ -57,9 +58,13 @@ pub fn has_alias(base_path: &Path) -> bool {
 /// Get the alias file path if it exists.
 pub fn alias_path(base_path: &Path) -> Option<PathBuf> {
     let nal = base_path.with_extension("nal");
-    if nal.exists() { return Some(nal); }
+    if nal.exists() {
+        return Some(nal);
+    }
     let pal = base_path.with_extension("pal");
-    if pal.exists() { return Some(pal); }
+    if pal.exists() {
+        return Some(pal);
+    }
     None
 }
 
@@ -84,6 +89,7 @@ mod tests {
         let alias = parse_alias_file(&alias_file).unwrap();
         assert_eq!(alias.title.as_deref(), Some("Multi-volume test"));
         assert_eq!(alias.dblist.len(), 3);
+        assert_eq!(alias.raw_dblist, vec!["vol1", "vol2", "vol3"]);
         assert_eq!(alias.nseq, Some(10000));
         assert_eq!(alias.length, Some(5000000));
 

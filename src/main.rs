@@ -20,17 +20,6 @@ struct Cli {
     command: Commands,
 }
 
-fn parse_percent_0_to_100(value: &str) -> Result<f64, String> {
-    let parsed = value
-        .parse::<f64>()
-        .map_err(|_| format!("invalid floating-point value: `{value}`"))?;
-    if (0.0..=100.0).contains(&parsed) {
-        Ok(parsed)
-    } else {
-        Err(format!("value must be between 0 and 100: `{value}`"))
-    }
-}
-
 fn parse_best_hit_fraction(value: &str) -> Result<f64, String> {
     let parsed = value
         .parse::<f64>()
@@ -38,7 +27,9 @@ fn parse_best_hit_fraction(value: &str) -> Result<f64, String> {
     if parsed > 0.0 && parsed < 0.5 {
         Ok(parsed)
     } else {
-        Err(format!("value must be greater than 0 and less than 0.5: `{value}`"))
+        Err(format!(
+            "value must be greater than 0 and less than 0.5: `{value}`"
+        ))
     }
 }
 
@@ -96,10 +87,10 @@ struct BlastnArgs {
 
     /// Expectation value threshold
     #[arg(short, long, default_value = "10.0")]
-    evalue: f64,
+    evalue: String,
 
     /// Number of threads
-    #[arg(long = "num_threads", default_value = "1", value_parser = clap::value_parser!(i32).range(1..))]
+    #[arg(long = "num_threads", default_value = "1")]
     num_threads: i32,
 
     /// Output format: 0=pairwise, 5=XML, 6=tabular, 17=SAM, or '6 col1 col2...'
@@ -145,43 +136,47 @@ struct BlastnArgs {
 
     /// X-dropoff for ungapped extensions
     #[arg(long = "xdrop_ungap", default_value = "20.0")]
-    xdrop_ungap: f64,
+    xdrop_ungap: String,
 
     /// X-dropoff for preliminary gapped extensions
     #[arg(long = "xdrop_gap", default_value = "30.0")]
-    xdrop_gap: f64,
+    xdrop_gap: String,
 
     /// X-dropoff for final gapped extensions
     #[arg(long = "xdrop_gap_final", default_value = "100.0")]
-    xdrop_gap_final: f64,
+    xdrop_gap_final: String,
 
     /// Perform ungapped alignment only
     #[arg(long, default_value = "false")]
     ungapped: bool,
 
     /// Minimum percent identity to report
-    #[arg(long = "perc_identity", default_value = "0.0", value_parser = parse_percent_0_to_100)]
-    perc_identity: f64,
+    #[arg(long = "perc_identity", default_value = "0.0")]
+    perc_identity: String,
 
     /// Minimum query coverage per HSP (percent)
-    #[arg(long = "qcov_hsp_perc", default_value = "0.0", value_parser = parse_percent_0_to_100)]
-    qcov_hsp_perc: f64,
+    #[arg(long = "qcov_hsp_perc", default_value = "0.0")]
+    qcov_hsp_perc: String,
 
     /// Maximum number of HSPs per subject
-    #[arg(long = "max_hsps", alias = "max-hsps", value_parser = clap::value_parser!(i32).range(1..))]
+    #[arg(long = "max_hsps", alias = "max-hsps")]
     max_hsps: Option<i32>,
 
     /// Culling limit: delete hits enveloped by higher-scoring hits
-    #[arg(long = "culling_limit", default_value = "0", value_parser = clap::value_parser!(i32).range(0..))]
+    #[arg(long = "culling_limit", default_value = "0")]
     culling_limit: i32,
 
     /// Window size for multiple hit algorithm
-    #[arg(long = "window_size", default_value = "0", value_parser = clap::value_parser!(i32).range(0..))]
+    #[arg(long = "window_size", default_value = "0")]
     window_size: i32,
 
     /// Soft masking (filter query but use for lookup)
     #[arg(long = "soft_masking", default_value = "true")]
     soft_masking: String,
+
+    /// Use sum statistics
+    #[arg(long = "sum_stats", alias = "sum-stats")]
+    sum_stats: Option<String>,
 
     /// Use lowercase masking in query
     #[arg(long = "lcase_masking", default_value = "false")]
@@ -196,7 +191,7 @@ struct BlastnArgs {
     dbsize: i64,
 
     /// Effective search space
-    #[arg(long = "searchsp", default_value = "0", value_parser = clap::value_parser!(i64).range(0..))]
+    #[arg(long = "searchsp", default_value = "0")]
     searchsp: i64,
 
     /// Task: megablast, blastn, blastn-short, dc-megablast
@@ -252,15 +247,15 @@ struct BlastnArgs {
     show_gis: bool,
 
     /// Number of descriptions to show (pairwise output)
-    #[arg(long = "num_descriptions", alias = "num-descriptions", value_parser = clap::value_parser!(i32).range(0..))]
+    #[arg(long = "num_descriptions", alias = "num-descriptions")]
     num_descriptions: Option<i32>,
 
     /// Number of alignments to show (pairwise output)
-    #[arg(long = "num_alignments", alias = "num-alignments", value_parser = clap::value_parser!(i32).range(0..))]
+    #[arg(long = "num_alignments", alias = "num-alignments")]
     num_alignments: Option<i32>,
 
     /// Line length for pairwise output
-    #[arg(long = "line_length", alias = "line-length", value_parser = clap::value_parser!(i32).range(1..))]
+    #[arg(long = "line_length", alias = "line-length")]
     line_length: Option<i32>,
 
     /// Produce HTML output
@@ -276,23 +271,23 @@ struct BlastnArgs {
     sorthsps: i32,
 
     /// Database for filtering (e.g. repeats)
-    #[arg(long)]
+    #[arg(long = "filtering_db", alias = "filtering-db")]
     filtering_db: Option<PathBuf>,
 
     /// WindowMasker database
-    #[arg(long)]
+    #[arg(long = "window_masker_db", alias = "window-masker-db")]
     window_masker_db: Option<PathBuf>,
 
     /// WindowMasker TaxID
-    #[arg(long)]
+    #[arg(long = "window_masker_taxid", alias = "window-masker-taxid")]
     window_masker_taxid: Option<i32>,
 
     /// Database soft mask algorithm ID
-    #[arg(long)]
+    #[arg(long = "db_soft_mask", alias = "db-soft-mask")]
     db_soft_mask: Option<i32>,
 
     /// Database hard mask algorithm ID
-    #[arg(long)]
+    #[arg(long = "db_hard_mask", alias = "db-hard-mask")]
     db_hard_mask: Option<i32>,
 
     /// Subject best hit
@@ -352,15 +347,14 @@ struct BlastnArgs {
     index_name: Option<String>,
 
     /// Multithreading mode: 0=split by DB, 1=split by query
-    #[arg(long = "mt_mode", alias = "mt-mode", default_value = "0", value_parser = clap::value_parser!(i32).range(0..=1))]
+    #[arg(long = "mt_mode", alias = "mt-mode", default_value = "0")]
     mt_mode: i32,
 
     /// Off-diagonal range for multi-hit extension
     #[arg(
         long = "off_diagonal_range",
         alias = "off-diagonal-range",
-        default_value = "0",
-        value_parser = clap::value_parser!(i32).range(0..)
+        default_value = "0"
     )]
     off_diagonal_range: i32,
 
@@ -374,9 +368,35 @@ struct BlastnArgs {
 }
 
 impl BlastnArgs {
+    fn evalue(&self) -> f64 {
+        parse_validated_f64("evalue", &self.evalue)
+    }
+
+    fn xdrop_ungap(&self) -> f64 {
+        parse_validated_f64("xdrop_ungap", &self.xdrop_ungap)
+    }
+
+    fn xdrop_gap(&self) -> f64 {
+        parse_validated_f64("xdrop_gap", &self.xdrop_gap)
+    }
+
+    fn xdrop_gap_final(&self) -> f64 {
+        parse_validated_f64("xdrop_gap_final", &self.xdrop_gap_final)
+    }
+
+    fn perc_identity(&self) -> f64 {
+        parse_validated_f64("perc_identity", &self.perc_identity)
+    }
+
+    fn qcov_hsp_perc(&self) -> f64 {
+        parse_validated_f64("qcov_hsp_perc", &self.qcov_hsp_perc)
+    }
+
     fn effective_max_target_seqs(&self) -> i32 {
         self.max_target_seqs
-            .or(self.num_alignments.filter(|_| outfmt_number(&self.outfmt) > 4))
+            .or(self
+                .num_alignments
+                .filter(|_| outfmt_number(&self.outfmt) > 4))
             .unwrap_or(500)
     }
 
@@ -521,26 +541,39 @@ fn main_inner() {
     };
 
     args.apply_task_defaults();
+    validate_subject_db_options(&args);
+    validate_subject_filter_options(&args);
+    validate_taxid_filters(&args);
+    validate_id_list_filters(&args);
+    validate_search_strategy_options(&args);
+    validate_db_mask_options(&args);
+    validate_filtering_options(&args);
+    validate_query_masking_options(program, &args);
+    validate_entrez_query_options(&args);
+    validate_boolean_options(&args);
+    validate_numeric_constraint_options(&args);
+    validate_evalue_options(&args);
+    validate_gap_cost_options(&args);
 
     // Warn about unsupported options that are silently ignored
     if args.gilist.is_some() {
         eprintln!("Warning: --gilist is not yet supported, ignoring");
     }
-    if args.seqidlist.is_some() {
-        eprintln!("Warning: --seqidlist is not yet supported, ignoring");
-    }
     if args.negative_gilist.is_some() {
         eprintln!("Warning: --negative-gilist is not yet supported, ignoring");
-    }
-    if args.negative_seqidlist.is_some() {
-        eprintln!("Warning: --negative-seqidlist is not yet supported, ignoring");
     }
     if args.remote {
         eprintln!("Warning: --remote is not supported, ignoring");
     }
+    emit_seqidlist_performance_warnings(program, &args);
     emit_sort_option_warnings(program, &args);
     emit_hitlist_size_warnings(program, &args);
     emit_formatting_option_warnings(program, &args);
+    if outfmt_number(&args.outfmt) == 0 && pairwise_output_suppressed(&args) {
+        eprintln!("BLAST query/options error: No hits are being saved");
+        eprintln!("Please refer to the BLAST+ user manual.");
+        std::process::exit(1);
+    }
 
     if args.db.is_none() && args.subject.is_none() {
         eprintln!("Error: Either --db or --subject is required");
@@ -561,9 +594,53 @@ fn main_inner() {
     };
 
     if let Err(e) = result {
+        if e.to_string() == "Empty alias file" {
+            if let Some(db_path) = args.db.as_ref() {
+                emit_empty_alias_file_error(db_path);
+            }
+        }
+        if let Some(io_error) = e.downcast_ref::<io::Error>() {
+            if io_error.kind() == io::ErrorKind::NotFound {
+                let message = io_error.to_string();
+                if let Some(db_path) = message.strip_prefix("No BLAST database found at ") {
+                    emit_missing_database_error(program, db_path);
+                }
+                if message.starts_with("Could not find volume or alias file ") {
+                    emit_database_error(&message);
+                }
+            }
+        }
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
+}
+
+fn emit_missing_database_error(program: &str, db_path: &str) -> ! {
+    let db_type = match program {
+        "blastn" | "tblastn" | "tblastx" => "nucleotide",
+        _ => "protein",
+    };
+    let search_path = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    eprintln!(
+        "BLAST Database error: No alias or index file found for {} database [{}] in search path [{}::]",
+        db_type, db_path, search_path
+    );
+    std::process::exit(2);
+}
+
+fn emit_database_error(message: &str) -> ! {
+    eprintln!("BLAST Database error: {}", message);
+    std::process::exit(2);
+}
+
+fn emit_empty_alias_file_error(db_path: &PathBuf) -> ! {
+    eprintln!(
+        "BLAST Database error: No database names were found in alias file [{}].",
+        db_path.display()
+    );
+    std::process::exit(2);
 }
 
 fn outfmt_number(outfmt: &str) -> i32 {
@@ -591,7 +668,12 @@ fn emit_sort_option_warnings(program: &str, args: &BlastnArgs) {
 }
 
 fn emit_hitlist_size_warnings(program: &str, args: &BlastnArgs) {
-    if args.effective_max_target_seqs() < 5 {
+    let hitlist_size = if outfmt_number(&args.outfmt) == 0 {
+        pairwise_num_descriptions(args).max(pairwise_num_alignments(args)) as i32
+    } else {
+        args.effective_max_target_seqs()
+    };
+    if hitlist_size < 5 {
         eprintln!(
             "Warning: [{}] Examining 5 or more matches is recommended",
             program
@@ -616,6 +698,591 @@ fn emit_formatting_option_warnings(program: &str, args: &BlastnArgs) {
             program
         );
     }
+}
+
+fn emit_seqidlist_performance_warnings(program: &str, args: &BlastnArgs) {
+    if args.seqidlist.is_some() || args.negative_seqidlist.is_some() {
+        eprintln!(
+            "Warning: [{}] To obtain better run time performance, please run blastdb_aliastool -seqid_file_in <INPUT_FILE_NAME> -seqid_file_out <OUT_FILE_NAME> and use <OUT_FILE_NAME> as the argument to -seqidlist",
+            program
+        );
+    }
+}
+
+fn validate_taxid_filters(args: &BlastnArgs) {
+    validate_taxid_value(args.taxids.as_deref());
+    validate_taxid_value(args.negative_taxids.as_deref());
+    validate_taxid_list_file(args.taxidlist.as_ref());
+    validate_taxid_list_file(args.negative_taxidlist.as_ref());
+}
+
+fn validate_taxid_value(value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    if value
+        .split(',')
+        .map(str::trim)
+        .any(|token| !token.is_empty() && token.parse::<i32>().is_err())
+    {
+        emit_invalid_taxidlist_error();
+    }
+}
+
+fn validate_taxid_list_file(path: Option<&PathBuf>) {
+    let Some(path) = path else {
+        return;
+    };
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => {
+            eprintln!(
+                "BLAST query/options error: File is not acessible: {}",
+                path.display()
+            );
+            eprintln!("Please refer to the BLAST+ user manual.");
+            std::process::exit(1);
+        }
+    };
+    if contents
+        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+        .map(str::trim)
+        .any(|token| !token.is_empty() && token.parse::<i32>().is_err())
+    {
+        emit_invalid_taxidlist_error();
+    }
+}
+
+fn emit_invalid_taxidlist_error() -> ! {
+    eprintln!("BLAST query/options error: Invalid taxidlist file ");
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
+fn validate_id_list_filters(args: &BlastnArgs) {
+    validate_mmap_list_file(args.gilist.as_ref());
+    validate_mmap_list_file(args.seqidlist.as_ref());
+    validate_mmap_list_file(args.negative_gilist.as_ref());
+    validate_mmap_list_file(args.negative_seqidlist.as_ref());
+}
+
+fn validate_mmap_list_file(path: Option<&PathBuf>) {
+    let Some(path) = path else {
+        return;
+    };
+    if !path.exists() {
+        eprintln!("Error: NCBI C++ Exception:");
+        eprintln!(
+            "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 5694: Error: (CFileException::eMemoryMap) ncbi::CMemoryFileMap::CMemoryFileMap() - To be memory mapped the file must exist: ''"
+        );
+        eprintln!();
+        std::process::exit(255);
+    }
+}
+
+fn validate_search_strategy_options(args: &BlastnArgs) {
+    if let Some(path) = args.import_search_strategy.as_ref() {
+        if !path.exists() {
+            eprintln!(
+                "Command line argument error: Argument \"import_search_strategy\". File is not accessible:  `{}'",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+    }
+    if let Some(path) = args.export_search_strategy.as_ref() {
+        let parent_exists = path
+            .parent()
+            .map(|parent| parent.as_os_str().is_empty() || parent.exists())
+            .unwrap_or(false);
+        if !parent_exists {
+            eprintln!(
+                "Command line argument error: Argument \"export_search_strategy\". File is not accessible:  `{}'",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn validate_db_mask_options(args: &BlastnArgs) {
+    let Some(mask_id) = args.db_soft_mask.or(args.db_hard_mask) else {
+        return;
+    };
+    let Some(db_path) = args.db.as_ref() else {
+        return;
+    };
+    eprintln!(
+        "BLAST options error: Masking algorithm ID {} is not supported in nucleotide '{}' BLAST database",
+        mask_id,
+        db_path.display()
+    );
+    std::process::exit(1);
+}
+
+fn validate_filtering_options(args: &BlastnArgs) {
+    if is_valid_dust_option(&args.dust) {
+        return;
+    }
+    let message = if args.dust.split_whitespace().count() == 3 {
+        "Invalid input for filtering parameters"
+    } else {
+        "Invalid number of arguments to filtering option"
+    };
+    eprintln!("BLAST query/options error: {message}");
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
+fn is_valid_dust_option(value: &str) -> bool {
+    if value == "yes" || value == "no" {
+        return true;
+    }
+    let mut parts = value.split_whitespace();
+    let (Some(level), Some(window), Some(linker), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    level.parse::<f64>().is_ok()
+        && window.parse::<usize>().is_ok()
+        && linker.parse::<usize>().is_ok()
+}
+
+fn validate_query_masking_options(program: &str, args: &BlastnArgs) {
+    if let Some(path) = args.filtering_db.as_ref() {
+        if !path.exists() {
+            let db_type = match program {
+                "blastn" | "tblastn" | "tblastx" => "nucleotide",
+                _ => "protein",
+            };
+            let search_path = std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| ".".to_string());
+            eprintln!(
+                "BLAST engine error: Warning: No alias or index file found for {} database [{}] in search path [{}::] ",
+                db_type,
+                path.display(),
+                search_path
+            );
+            std::process::exit(3);
+        }
+    }
+
+    if let Some(path) = args.window_masker_db.as_ref() {
+        if !path.exists() {
+            eprintln!("Error: NCBI C++ Exception:");
+            eprintln!(
+                "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 170: Error: (Exception::open failed) ncbi::CSeqMaskerIstatFactory::DiscoverStatType() - could not open {}",
+                path.display()
+            );
+            eprintln!();
+            std::process::exit(255);
+        }
+    }
+
+    if args.window_masker_taxid.is_some() {
+        eprintln!("BLAST engine error: Warning: NCBI C++ Exception:");
+        eprintln!(
+            "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 170: Error: (Exception::open failed) ncbi::CSeqMaskerIstatFactory::DiscoverStatType() - could not open "
+        );
+        eprintln!(
+            "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 270: Error: (Exception::creation failure) ncbi::CSeqMaskerIstatFactory::create() - could not create a unit counts container"
+        );
+        eprintln!(" ");
+        std::process::exit(3);
+    }
+}
+
+fn validate_entrez_query_options(args: &BlastnArgs) {
+    if args.entrez_query.is_some() && !args.remote {
+        emit_blastn_usage_constraint_error(
+            "Argument \"remote\". Must be specified, as it is required by argument:  `entrez_query'",
+            "(CArgException::eConstraint) Argument \"remote\". Must be specified, as it is required by argument:  `entrez_query'",
+        );
+    }
+}
+
+fn validate_boolean_options(args: &BlastnArgs) {
+    if !is_ncbi_bool(&args.soft_masking) {
+        emit_blastn_usage_conversion_error("soft_masking", &args.soft_masking);
+    }
+    if let Some(value) = args.sum_stats.as_deref() {
+        if !is_ncbi_bool(value) {
+            emit_blastn_usage_conversion_error("sum_stats", value);
+        }
+    }
+}
+
+fn is_ncbi_bool(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "true" | "false" | "t" | "f" | "1" | "0" | "yes" | "no"
+    )
+}
+
+fn parse_validated_f64(argument: &str, value: &str) -> f64 {
+    match value.parse::<f64>() {
+        Ok(parsed) if parsed.is_finite() => parsed,
+        Ok(_) => emit_blastn_usage_float_conversion_error(argument, value, 0),
+        Err(_) => {
+            if let Some(prefix) = value.strip_suffix(['e', 'E']) {
+                if let Ok(parsed) = prefix.parse::<f64>() {
+                    if parsed.is_finite() {
+                        return parsed;
+                    }
+                }
+            }
+            emit_blastn_usage_float_conversion_error(argument, value, ncbi_float_error_pos(value))
+        }
+    }
+}
+
+fn ncbi_float_error_pos(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    if matches!(bytes.get(i), Some(b'+') | Some(b'-')) {
+        i += 1;
+    }
+    let mut saw_digit = false;
+    while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+        saw_digit = true;
+        i += 1;
+    }
+    if matches!(bytes.get(i), Some(b'.')) {
+        i += 1;
+        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            saw_digit = true;
+            i += 1;
+        }
+    }
+    if !saw_digit {
+        return 0;
+    }
+    if matches!(bytes.get(i), Some(b'e') | Some(b'E')) {
+        let exp_start = i;
+        i += 1;
+        if matches!(bytes.get(i), Some(b'+') | Some(b'-')) {
+            i += 1;
+        }
+        let digits_start = i;
+        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            i += 1;
+        }
+        if i == digits_start {
+            return exp_start;
+        }
+    }
+    i
+}
+
+fn validate_numeric_constraint_options(args: &BlastnArgs) {
+    if args.num_threads < 1 {
+        emit_integer_constraint_error("num_threads", ">=1", args.num_threads);
+    }
+    let perc_identity = args.perc_identity();
+    let qcov_hsp_perc = args.qcov_hsp_perc();
+    let _ = args.xdrop_ungap();
+    let _ = args.xdrop_gap();
+    let _ = args.xdrop_gap_final();
+    if args.searchsp < 0 {
+        emit_integer_constraint_error("searchsp", ">=0", args.searchsp);
+    }
+    if let Some(word_size) = args.word_size {
+        if word_size < 4 {
+            emit_integer_constraint_error("word_size", ">=4", word_size);
+        }
+    }
+    if !(0.0..=100.0).contains(&perc_identity) {
+        let error = format!(
+            "Argument \"perc_identity\". Illegal value, expected 0..100:  `{}'",
+            perc_identity
+        );
+        let detail = format!("(CArgException::eConstraint) {error}");
+        emit_blastn_usage_constraint_error(&error, &detail);
+    }
+    if !(0.0..=100.0).contains(&qcov_hsp_perc) {
+        let error = format!(
+            "Argument \"qcov_hsp_perc\". Illegal value, expected 0..100:  `{}'",
+            qcov_hsp_perc
+        );
+        let detail = format!("(CArgException::eConstraint) {error}");
+        emit_blastn_usage_constraint_error(&error, &detail);
+    }
+    if let Some(max_hsps) = args.max_hsps {
+        if max_hsps < 1 {
+            emit_integer_constraint_error("max_hsps", ">=1", max_hsps);
+        }
+    }
+    if args.culling_limit < 0 {
+        emit_integer_constraint_error("culling_limit", ">=0", args.culling_limit);
+    }
+    if args.window_size < 0 {
+        emit_integer_constraint_error("window_size", ">=0", args.window_size);
+    }
+    if args.off_diagonal_range < 0 {
+        emit_integer_constraint_error("off_diagonal_range", ">=0", args.off_diagonal_range);
+    }
+    if args.mt_mode < 0 || args.mt_mode > 1 {
+        emit_integer_constraint_error("mt_mode", "(>=0 and =<1)", args.mt_mode);
+    }
+    if let Some(num_descriptions) = args.num_descriptions {
+        if num_descriptions < 0 {
+            emit_integer_constraint_error("num_descriptions", ">=0", num_descriptions);
+        }
+    }
+    if let Some(num_alignments) = args.num_alignments {
+        if num_alignments < 0 {
+            emit_integer_constraint_error("num_alignments", ">=0", num_alignments);
+        }
+    }
+    if let Some(line_length) = args.line_length {
+        if line_length < 1 {
+            emit_integer_constraint_error("line_length", ">=1", line_length);
+        }
+    }
+}
+
+fn emit_integer_constraint_error<T: std::fmt::Display>(
+    argument: &str,
+    expected: &str,
+    value: T,
+) -> ! {
+    let error = format!("Argument \"{argument}\". Illegal value, expected {expected}:  `{value}'");
+    let detail = format!("(CArgException::eConstraint) {error}");
+    emit_blastn_usage_constraint_error(&error, &detail);
+}
+
+fn validate_gap_cost_options(args: &BlastnArgs) {
+    if args.gapopen() >= 0 && args.gapextend() >= 0 {
+        return;
+    }
+    eprintln!(
+        "BLAST engine error: Error: Gap existence and extension values {} and {} are not supported for substitution scores {} and {}",
+        args.gapopen(),
+        args.gapextend(),
+        args.reward(),
+        args.penalty()
+    );
+    eprintln!("2 and 2 are supported existence and extension values");
+    eprintln!("1 and 2 are supported existence and extension values");
+    eprintln!("0 and 2 are supported existence and extension values");
+    eprintln!("2 and 1 are supported existence and extension values");
+    eprintln!("1 and 1 are supported existence and extension values");
+    eprintln!("2 and 2 are supported existence and extension values");
+    eprintln!("Any values more stringent than 2 and 2 are supported");
+    eprintln!(" ");
+    std::process::exit(3);
+}
+
+fn validate_evalue_options(args: &BlastnArgs) {
+    if args.evalue() > 0.0 {
+        return;
+    }
+    eprintln!("BLAST query/options error: expect value or cutoff score must be greater than zero");
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
+fn validate_subject_db_options(args: &BlastnArgs) {
+    if args.subject.is_some() && args.db.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"subject\". Incompatible with argument:  `db'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `db'",
+        );
+    }
+}
+
+fn validate_subject_filter_options(args: &BlastnArgs) {
+    if args.subject.is_none() {
+        return;
+    }
+
+    if args.gilist.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"subject\". Incompatible with argument:  `gilist'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `gilist'",
+        );
+    }
+    if args.seqidlist.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"subject\". Incompatible with argument:  `seqidlist'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `seqidlist'",
+        );
+    }
+    if args.negative_gilist.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"subject\". Incompatible with argument:  `negative_gilist'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_gilist'",
+        );
+    }
+    if args.negative_seqidlist.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"subject\". Incompatible with argument:  `negative_seqidlist'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_seqidlist'",
+        );
+    }
+    if args.taxids.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"taxids\". Incompatible with argument:  `subject'",
+            "(CArgException::eConstraint) Argument \"taxids\". Incompatible with argument:  `subject'",
+        );
+    }
+    if args.negative_taxids.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"subject\". Incompatible with argument:  `negative_taxids'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_taxids'",
+        );
+    }
+    if args.taxidlist.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"taxidlist\". Incompatible with argument:  `subject'",
+            "(CArgException::eConstraint) Argument \"taxidlist\". Incompatible with argument:  `subject'",
+        );
+    }
+    if args.negative_taxidlist.is_some() {
+        emit_blastn_usage_constraint_error(
+            "Argument \"subject\". Incompatible with argument:  `negative_taxidlist'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_taxidlist'",
+        );
+    }
+}
+
+fn emit_blastn_usage_constraint_error(error: &str, detail: &str) -> ! {
+    eprint!(
+        r#"USAGE
+  blastn [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-perc_identity float_value] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
+    [-min_raw_gapped_score int_value] [-template_type type]
+    [-template_length int_value] [-dust DUST_options]
+    [-filtering_db filtering_database]
+    [-window_masker_taxid window_masker_taxid]
+    [-window_masker_db window_masker_db] [-soft_masking soft_masking]
+    [-ungapped] [-culling_limit int_value] [-best_hit_overhang float_value]
+    [-best_hit_score_edge float_value] [-subject_besthit]
+    [-window_size int_value] [-off_diagonal_range int_value]
+    [-use_index boolean] [-index_name string] [-lcase_masking]
+    [-query_loc range] [-strand strand] [-parse_deflines] [-outfmt format]
+    [-show_gis] [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
+
+DESCRIPTION
+   Nucleotide-Nucleotide BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+========================================================================
+
+Error: {error}
+Error:  {detail}
+"#
+    );
+    std::process::exit(1);
+}
+
+fn emit_blastn_usage_conversion_error(argument: &str, value: &str) -> ! {
+    eprint!(
+        r#"USAGE
+  blastn [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-perc_identity float_value] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
+    [-min_raw_gapped_score int_value] [-template_type type]
+    [-template_length int_value] [-dust DUST_options]
+    [-filtering_db filtering_database]
+    [-window_masker_taxid window_masker_taxid]
+    [-window_masker_db window_masker_db] [-soft_masking soft_masking]
+    [-ungapped] [-culling_limit int_value] [-best_hit_overhang float_value]
+    [-best_hit_score_edge float_value] [-subject_besthit]
+    [-window_size int_value] [-off_diagonal_range int_value]
+    [-use_index boolean] [-index_name string] [-lcase_masking]
+    [-query_loc range] [-strand strand] [-parse_deflines] [-outfmt format]
+    [-show_gis] [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
+
+DESCRIPTION
+   Nucleotide-Nucleotide BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+========================================================================
+
+Error: String cannot be converted to bool (m_Pos = 0)
+Error: Argument "{argument}". Argument cannot be converted:  `{value}'
+Error:  (CArgException::eConvert) Argument "{argument}". Argument cannot be converted:  `{value}'
+"#
+    );
+    std::process::exit(1);
+}
+
+fn emit_blastn_usage_float_conversion_error(argument: &str, value: &str, error_pos: usize) -> ! {
+    eprint!(
+        r#"USAGE
+  blastn [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-perc_identity float_value] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
+    [-min_raw_gapped_score int_value] [-template_type type]
+    [-template_length int_value] [-dust DUST_options]
+    [-filtering_db filtering_database]
+    [-window_masker_taxid window_masker_taxid]
+    [-window_masker_db window_masker_db] [-soft_masking soft_masking]
+    [-ungapped] [-culling_limit int_value] [-best_hit_overhang float_value]
+    [-best_hit_score_edge float_value] [-subject_besthit]
+    [-window_size int_value] [-off_diagonal_range int_value]
+    [-use_index boolean] [-index_name string] [-lcase_masking]
+    [-query_loc range] [-strand strand] [-parse_deflines] [-outfmt format]
+    [-show_gis] [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
+
+DESCRIPTION
+   Nucleotide-Nucleotide BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+========================================================================
+
+Error: Cannot convert string '{value}' to double (m_Pos = {error_pos})
+Error: Argument "{argument}". Argument cannot be converted:  `{value}'
+Error:  (CArgException::eConvert) Argument "{argument}". Argument cannot be converted:  `{value}'
+"#
+    );
+    std::process::exit(1);
 }
 
 fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -693,12 +1360,18 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 for ph in phits {
                     let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                    if evalue > args.evalue {
+                    if evalue > args.evalue() {
                         continue;
                     }
                     hits.push(TabularHit {
                         query_id: qrec.id.clone(),
+                        query_gi: None,
+                        query_acc: None,
+                        query_accver: None,
                         subject_id: srec.id.clone(),
+                        subject_gi: None,
+                        subject_acc: None,
+                        subject_accver: None,
                         subject_title: String::new(),
                         pct_identity: if ph.align_length > 0 {
                             100.0 * ph.num_ident as f64 / ph.align_length as f64
@@ -769,7 +1442,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut params = blast_rs::api::SearchParams::blastp()
-        .evalue(args.evalue)
+        .evalue(args.evalue())
         .num_threads(if args.num_threads <= 0 {
             1
         } else {
@@ -805,7 +1478,13 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             for hsp in sr.hsps {
                 all_hits.push(TabularHit {
                     query_id: qrec.id.clone(),
+                    query_gi: None,
+                    query_acc: None,
+                    query_accver: None,
                     subject_id: sr.subject_accession.clone(),
+                    subject_gi: None,
+                    subject_acc: None,
+                    subject_accver: None,
                     subject_title: String::new(),
                     pct_identity: hsp.percent_identity(),
                     align_len: hsp.alignment_length as i32,
@@ -935,7 +1614,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                 for ph in phits {
                     let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                    if evalue > args.evalue {
+                    if evalue > args.evalue() {
                         continue;
                     }
 
@@ -948,7 +1627,13 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                     all_hits.push(TabularHit {
                         query_id: qrec.id.clone(),
+                        query_gi: None,
+                        query_acc: None,
+                        query_accver: None,
                         subject_id: srec.id.clone(),
+                        subject_gi: None,
+                        subject_acc: None,
+                        subject_accver: None,
                         subject_title: String::new(),
                         pct_identity: if ph.align_length > 0 {
                             100.0 * ph.num_ident as f64 / ph.align_length as f64
@@ -1062,7 +1747,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                 for ph in phits {
                     let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                    if evalue > args.evalue {
+                    if evalue > args.evalue() {
                         continue;
                     }
 
@@ -1075,7 +1760,13 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                     all_hits.push(TabularHit {
                         query_id: qrec.id.clone(),
+                        query_gi: None,
+                        query_acc: None,
+                        query_accver: None,
                         subject_id: srec.id.clone(),
+                        subject_gi: None,
+                        subject_acc: None,
+                        subject_accver: None,
                         subject_title: String::new(),
                         pct_identity: if ph.align_length > 0 {
                             100.0 * ph.num_ident as f64 / ph.align_length as f64
@@ -1182,7 +1873,7 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let results = blast_rs::pssm::psi_blast_iteration(
             &pssm,
             &subj_pairs,
-            args.evalue,
+            args.evalue(),
             search_space,
             prot_kbp.lambda,
             prot_kbp.k,
@@ -1229,7 +1920,13 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
             all_hits.push(TabularHit {
                 query_id: queries[0].id.clone(),
+                query_gi: None,
+                query_acc: None,
+                query_accver: None,
                 subject_id: hit.subject_id.clone(),
+                subject_gi: None,
+                subject_acc: None,
+                subject_accver: None,
                 subject_title: String::new(),
                 pct_identity,
                 align_len: hit.align_len as i32,
@@ -1369,12 +2066,18 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                     for ph in phits {
                         let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                        if evalue > args.evalue {
+                        if evalue > args.evalue() {
                             continue;
                         }
                         all_hits.push(TabularHit {
                             query_id: qrec.id.clone(),
+                            query_gi: None,
+                            query_acc: None,
+                            query_accver: None,
                             subject_id: srec.id.clone(),
+                            subject_gi: None,
+                            subject_acc: None,
+                            subject_accver: None,
                             subject_title: String::new(),
                             pct_identity: if ph.align_length > 0 {
                                 100.0 * ph.num_ident as f64 / ph.align_length as f64
@@ -1438,13 +2141,23 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = File::open(&args.query)?;
     let records = parse_fasta(query_file);
-    if records.is_empty() {
-        return Err("No query sequences found".into());
+    if records.is_empty() || records.iter().any(|record| record.sequence.is_empty()) {
+        eprintln!("BLAST engine error: Warning: Sequence contains no data ");
+        std::process::exit(3);
     }
 
     // Subject mode (FASTA vs FASTA)
     if let Some(ref subject_path) = args.subject {
         let subject_records = parse_fasta(File::open(subject_path)?);
+        for (idx, subject) in subject_records.iter().enumerate() {
+            if subject.sequence.is_empty() {
+                eprintln!(
+                    "Warning: [blastn] Subject_{} {}: Subject sequence contains no data",
+                    idx + 1,
+                    subject.id
+                );
+            }
+        }
         return run_blastn_subject(args, &records, &subject_records);
     }
 
@@ -1615,8 +2328,12 @@ fn run_blastn_rust(
         .unwrap_or((ungapped_minus.clone(), false));
 
         // Per-context search space
+        let database_length = effective_db_length(args, db.total_length as i64);
         let compute_searchsp =
             |kbp: &blast_rs::stat::KarlinBlk, ukbp: &blast_rs::stat::KarlinBlk| -> f64 {
+                if args.searchsp > 0 {
+                    return args.searchsp as f64;
+                }
                 let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
                     reward,
                     penalty,
@@ -1632,11 +2349,11 @@ fn run_blastn_rust(
                     alpha / kbp.lambda,
                     beta,
                     qlen,
-                    db.total_length as i64,
+                    database_length,
                     db.num_oids as i32,
                 );
                 let eff_db = std::cmp::max(
-                    db.total_length as i64 - db.num_oids as i64 * len_adj as i64,
+                    database_length - db.num_oids as i64 * len_adj as i64,
                     1,
                 );
                 eff_db as f64 * (qlen - len_adj).max(1) as f64
@@ -1659,7 +2376,7 @@ fn run_blastn_rust(
     let penalty = args.penalty();
     let gapopen = args.gapopen();
     let gapextend = args.gapextend();
-    let evalue = args.evalue;
+    let evalue = args.evalue();
 
     let mut all_hits: Vec<(u32, TabularHit)> = Vec::new();
 
@@ -1670,7 +2387,7 @@ fn run_blastn_rust(
         let e = evalue.max(1.0e-297);
         ((kbp.k * search_space / e).ln() / kbp.lambda).ceil() as i32
     };
-    let gapped_x_dropoff = (args.xdrop_gap_final * std::f64::consts::LN_2 / kbp.lambda) as i32;
+    let gapped_x_dropoff = (args.xdrop_gap_final() * std::f64::consts::LN_2 / kbp.lambda) as i32;
     let num_threads = if args.num_threads <= 0 {
         rayon::current_num_threads()
     } else {
@@ -1982,7 +2699,13 @@ fn run_blastn_rust(
                     oid,
                     TabularHit {
                         query_id: eq.id.clone(),
+                        query_gi: None,
+                        query_acc: None,
+                        query_accver: None,
                         subject_id,
+                        subject_gi: None,
+                        subject_acc: None,
+                        subject_accver: None,
                         subject_title: String::new(),
                         pct_identity: if hsp.align_length > 0 {
                             100.0 * hsp.num_ident as f64 / hsp.align_length as f64
@@ -2208,6 +2931,10 @@ fn run_blastn_rust(
     let outfmt_num: i32 = outfmt_parts[0].parse().unwrap_or(6);
 
     if outfmt_num == 0 {
+        if pairwise_output_suppressed(args) {
+            writer.flush()?;
+            return Ok(());
+        }
         write_pairwise_db_report_preamble(&mut writer, &db)?;
         for query in records {
             let query_hits = pairwise_query_hits(&hits, &query.id, args.sorthits, args.sorthsps);
@@ -2218,6 +2945,8 @@ fn run_blastn_rust(
                 &subject_deflines,
                 args,
             )?;
+            let query_hits =
+                limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
             let mut last_pairwise_subject: Option<&str> = None;
             for hit in query_hits {
                 let mut query_aln = hit
@@ -2247,6 +2976,7 @@ fn run_blastn_rust(
                     &subject_aln,
                     show_subject_header,
                     subject_deflines.get(&hit.subject_id).map(String::as_str),
+                    pairwise_line_length(args),
                 )?;
             }
             write_pairwise_db_query_stats(&mut writer, search_space)?;
@@ -2398,23 +3128,170 @@ fn loc_bounds(
     seq_len: usize,
     arg_name: &str,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-    let Some((start, end)) = loc.split_once('-') else {
-        return Err(format!("Invalid {} {:?}: expected start-end", arg_name, loc).into());
+    let location_name = match arg_name {
+        "query_loc" => "query location",
+        "subject_loc" => "subject location",
+        _ => arg_name,
     };
-    let start: usize = start
-        .parse()
-        .map_err(|_| format!("Invalid {} {:?}: bad start", arg_name, loc))?;
-    let end: usize = end
-        .parse()
-        .map_err(|_| format!("Invalid {} {:?}: bad end", arg_name, loc))?;
-    if start == 0 || end < start || end > seq_len {
-        return Err(format!(
-            "Invalid {} {:?} for sequence length {}",
-            arg_name, loc, seq_len
-        )
-        .into());
+    let Some((start, end)) = loc.split_once('-') else {
+        eprintln!(
+            "BLAST engine error: Invalid specification of {} (Format: start-stop)",
+            location_name
+        );
+        std::process::exit(3);
+    };
+    let start: i64 = parse_loc_i64_or_exit(start);
+    let end: i64 = parse_loc_i64_or_exit(end);
+    if start <= 0 || end <= 0 {
+        eprintln!(
+            "BLAST engine error: Invalid specification of {} (range elements cannot be less than or equal to 0)",
+            location_name
+        );
+        std::process::exit(3);
     }
+    if end < start {
+        eprintln!(
+            "BLAST engine error: Invalid specification of {} (start cannot be larger than stop)",
+            location_name
+        );
+        std::process::exit(3);
+    }
+    let start = start as usize;
+    if start > seq_len {
+        if arg_name == "query_loc" {
+            eprintln!("BLAST engine error: Empty CBlastQueryVector");
+            std::process::exit(3);
+        }
+        eprintln!(
+            "BLAST query/options error: Invalid from coordinate (greater than sequence length)"
+        );
+        eprintln!("Please refer to the BLAST+ user manual.");
+        std::process::exit(1);
+    }
+    let end = (end as usize).min(seq_len);
     Ok((start - 1, end))
+}
+
+fn parse_loc_i64_or_exit(token: &str) -> i64 {
+    match token.parse::<i64>() {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("Error: NCBI C++ Exception:");
+            eprintln!(
+                "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 862: Error: (CStringException::eConvert) ncbi::NStr::StringToInt8() - Cannot convert string '{}' to Int8 (m_Pos = 0)",
+                token
+            );
+            eprintln!();
+            std::process::exit(255);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FastaDisplayIds {
+    id: String,
+    gi: Option<String>,
+    acc: Option<String>,
+    accver: Option<String>,
+}
+
+fn fasta_record_ids(
+    record: &blast_rs::input::FastaRecord,
+    parse_deflines: bool,
+) -> FastaDisplayIds {
+    if !parse_deflines {
+        return FastaDisplayIds {
+            id: record.id.clone(),
+            gi: None,
+            acc: None,
+            accver: None,
+        };
+    }
+    parsed_fasta_id(&record.id)
+}
+
+fn parsed_fasta_id(raw_id: &str) -> FastaDisplayIds {
+    if let Some(local_id) = raw_id.strip_prefix("lcl|") {
+        return FastaDisplayIds {
+            id: local_id.to_string(),
+            gi: None,
+            acc: Some(local_id.to_string()),
+            accver: Some(local_id.to_string()),
+        };
+    }
+
+    let parts: Vec<&str> = raw_id.split('|').collect();
+    let gi = if parts.len() >= 2 && parts[0] == "gi" && !parts[1].is_empty() {
+        Some(parts[1].to_string())
+    } else {
+        None
+    };
+    let accver = if parts.len() >= 4 && parts[2] != "gi" && !parts[3].is_empty() {
+        Some(parts[3].to_string())
+    } else if parts.len() >= 2
+        && matches!(parts[0], "ref" | "gb" | "emb" | "dbj" | "sp" | "pdb")
+        && !parts[1].is_empty()
+    {
+        Some(parts[1].to_string())
+    } else {
+        None
+    };
+    let acc = accver
+        .as_ref()
+        .map(|value| accession_without_version(value));
+    FastaDisplayIds {
+        id: raw_id.to_string(),
+        gi,
+        acc,
+        accver,
+    }
+}
+
+fn fasta_pairwise_display_defline(
+    record: &blast_rs::input::FastaRecord,
+    parse_deflines: bool,
+) -> String {
+    if !parse_deflines {
+        return record.defline.clone();
+    }
+    let ids = fasta_record_ids(record, true);
+    let display_id = ids
+        .accver
+        .as_deref()
+        .unwrap_or(ids.id.as_str());
+    let rest = record
+        .defline
+        .strip_prefix(record.id.as_str())
+        .unwrap_or("")
+        .trim_start();
+    if rest.is_empty() {
+        display_id.to_string()
+    } else {
+        format!("{display_id} {rest}")
+    }
+}
+
+fn fasta_display_label(record: &blast_rs::input::FastaRecord, parse_deflines: bool) -> String {
+    let ids = fasta_record_ids(record, parse_deflines);
+    ids.accver.unwrap_or(ids.id)
+}
+
+fn fasta_defline_title(record: &blast_rs::input::FastaRecord) -> String {
+    record
+        .defline
+        .strip_prefix(record.id.as_str())
+        .unwrap_or("")
+        .trim_start()
+        .to_string()
+}
+
+fn accession_without_version(accver: &str) -> String {
+    if let Some((acc, version)) = accver.rsplit_once('.') {
+        if !acc.is_empty() && version.chars().all(|ch| ch.is_ascii_digit()) {
+            return acc.to_string();
+        }
+    }
+    accver.to_string()
 }
 
 /// Search query against subject FASTA sequences (no database needed).
@@ -2438,6 +3315,7 @@ fn run_blastn_subject(
     let mut all_hits = Vec::new();
 
     for query_rec in queries {
+        let query_ids = fasta_record_ids(query_rec, args.parse_deflines);
         let (loc_start, loc_end) = query_loc_bounds(args, query_rec.sequence.len())?;
         let raw_query = &query_rec.sequence[loc_start..loc_end];
         let query_plus_nomask: Vec<u8> = raw_query.iter().map(|&b| iupacna_to_blastna(b)).collect();
@@ -2466,6 +3344,7 @@ fn run_blastn_subject(
         );
 
         for subj_rec in subjects {
+            let subject_ids = fasta_record_ids(subj_rec, args.parse_deflines);
             let (subj_loc_start, subj_loc_end) = subject_loc_bounds(args, subj_rec.sequence.len())?;
             let raw_subject = &subj_rec.sequence[subj_loc_start..subj_loc_end];
             let subject_offset = subj_loc_start as i32;
@@ -2485,7 +3364,7 @@ fn run_blastn_subject(
                 20,
                 &kbp,
                 search_space,
-                args.evalue,
+                args.evalue(),
             );
 
             for hsp in hsps {
@@ -2518,8 +3397,14 @@ fn run_blastn_subject(
                 };
 
                 all_hits.push(TabularHit {
-                    query_id: query_rec.id.clone(),
-                    subject_id: subj_rec.id.clone(),
+                    query_id: query_ids.id.clone(),
+                    query_gi: query_ids.gi.clone(),
+                    query_acc: query_ids.acc.clone(),
+                    query_accver: query_ids.accver.clone(),
+                    subject_id: subject_ids.id.clone(),
+                    subject_gi: subject_ids.gi.clone(),
+                    subject_acc: subject_ids.acc.clone(),
+                    subject_accver: subject_ids.accver.clone(),
                     subject_title: String::new(),
                     pct_identity: if hsp.align_length > 0 {
                         100.0 * hsp.num_ident as f64 / hsp.align_length as f64
@@ -2588,7 +3473,12 @@ fn run_blastn_subject(
     apply_filters(&mut all_hits, args, query_len);
     let subject_deflines: std::collections::HashMap<String, String> = subjects
         .iter()
-        .map(|rec| (rec.id.clone(), rec.defline.clone()))
+        .map(|rec| {
+            (
+                fasta_record_ids(rec, args.parse_deflines).id,
+                fasta_pairwise_display_defline(rec, args.parse_deflines),
+            )
+        })
         .collect();
 
     let stdout = io::stdout();
@@ -2600,11 +3490,18 @@ fn run_blastn_subject(
     let outfmt_parts: Vec<&str> = args.outfmt.split_whitespace().collect();
     let outfmt_num: i32 = outfmt_parts[0].parse().unwrap_or(6);
     if outfmt_num == 0 {
+        if pairwise_output_suppressed(args) {
+            writer.flush()?;
+            return Ok(());
+        }
         write_pairwise_subject_report_preamble(&mut writer, subjects, args, total_subj_len as i64)?;
         for query in queries {
+            let query_display_ids = fasta_record_ids(query, args.parse_deflines);
             let query_hits =
-                pairwise_query_hits(&all_hits, &query.id, args.sorthits, args.sorthsps);
+                pairwise_query_hits(&all_hits, &query_display_ids.id, args.sorthits, args.sorthsps);
             write_pairwise_subject_query_header(&mut writer, query, subjects, &query_hits, args)?;
+            let query_hits =
+                limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
             let mut last_pairwise_subject: Option<&str> = None;
             for hit in query_hits {
                 let mut query_aln = hit
@@ -2627,9 +3524,13 @@ fn run_blastn_subject(
                 if show_subject_header && has_previous_subject {
                     writeln!(writer)?;
                 }
-                let subject_display = subject_deflines
-                    .get(&hit.subject_id)
-                    .map(|defline| format!(" {}", defline));
+                let subject_display = subject_deflines.get(&hit.subject_id).map(|defline| {
+                    if args.parse_deflines {
+                        defline.clone()
+                    } else {
+                        format!(" {}", defline)
+                    }
+                });
                 write_pairwise_alignment(
                     &mut writer,
                     hit,
@@ -2637,6 +3538,7 @@ fn run_blastn_subject(
                     &subject_aln,
                     show_subject_header,
                     subject_display.as_deref(),
+                    pairwise_line_length(args),
                 )?;
             }
             write_pairwise_subject_query_stats(
@@ -2658,7 +3560,7 @@ fn run_blastn_subject(
             total_subj_len as i64,
         )?;
     } else if outfmt_num == 17 {
-        write_blastn_subject_sam_output(&mut writer, &all_hits, queries, subjects)?;
+        write_blastn_subject_sam_output(&mut writer, &all_hits, queries, subjects, args)?;
     } else {
         let database_label = args
             .subject
@@ -2793,10 +3695,11 @@ fn pairwise_query_hits<'a>(
 
 fn compare_pairwise_hsps(a: &TabularHit, b: &TabularHit, sorthsps: i32) -> std::cmp::Ordering {
     let ord = match sorthsps {
-        1 => b
-            .raw_score
-            .cmp(&a.raw_score)
-            .then_with(|| b.bit_score.partial_cmp(&a.bit_score).unwrap_or(std::cmp::Ordering::Equal)),
+        1 => b.raw_score.cmp(&a.raw_score).then_with(|| {
+            b.bit_score
+                .partial_cmp(&a.bit_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
         2 => a
             .query_start
             .min(a.query_end)
@@ -2815,11 +3718,19 @@ fn compare_pairwise_hsps(a: &TabularHit, b: &TabularHit, sorthsps: i32) -> std::
             .unwrap_or(std::cmp::Ordering::Equal),
     };
 
-    ord.then_with(|| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal))
-        .then_with(|| b.raw_score.cmp(&a.raw_score))
-        .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
-        .then_with(|| a.subject_start.min(a.subject_end).cmp(&b.subject_start.min(b.subject_end)))
-        .then_with(|| b.sframe.cmp(&a.sframe))
+    ord.then_with(|| {
+        a.evalue
+            .partial_cmp(&b.evalue)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+    .then_with(|| b.raw_score.cmp(&a.raw_score))
+    .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
+    .then_with(|| {
+        a.subject_start
+            .min(a.subject_end)
+            .cmp(&b.subject_start.min(b.subject_end))
+    })
+    .then_with(|| b.sframe.cmp(&a.sframe))
 }
 
 fn pairwise_best_hit<'a>(hits: &'a [&'a TabularHit]) -> &'a TabularHit {
@@ -2922,6 +3833,45 @@ fn compare_pairwise_hit_groups(
     .then_with(|| a_best.subject_id.cmp(&b_best.subject_id))
 }
 
+fn pairwise_num_descriptions(args: &BlastnArgs) -> usize {
+    args.num_descriptions.unwrap_or(500) as usize
+}
+
+fn pairwise_num_alignments(args: &BlastnArgs) -> usize {
+    args.num_alignments.unwrap_or(250) as usize
+}
+
+fn pairwise_line_length(args: &BlastnArgs) -> usize {
+    args.line_length.unwrap_or(60) as usize
+}
+
+fn pairwise_output_suppressed(args: &BlastnArgs) -> bool {
+    args.num_descriptions == Some(0) && args.num_alignments == Some(0)
+}
+
+fn limit_pairwise_hits_by_subject<'a>(
+    hits: Vec<&'a TabularHit>,
+    subject_limit: usize,
+) -> Vec<&'a TabularHit> {
+    if subject_limit == 0 || hits.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = std::collections::HashSet::new();
+    for hit in &hits {
+        if seen.insert(hit.subject_id.as_str()) {
+            if seen.len() <= subject_limit {
+                kept.insert(hit.subject_id.as_str());
+            } else {
+                break;
+            }
+        }
+    }
+    hits.into_iter()
+        .filter(|hit| kept.contains(hit.subject_id.as_str()))
+        .collect()
+}
+
 fn write_pairwise_hit_summary_header<W: Write>(writer: &mut W, sorthits: i32) -> io::Result<()> {
     if sorthits == 0 {
         writeln!(
@@ -2995,14 +3945,30 @@ fn write_blastn_subject_xml_output<W: Write>(
     args: &BlastnArgs,
     total_subject_len: i64,
 ) -> std::io::Result<()> {
-    let subject_deflines: std::collections::HashMap<&str, &str> = subjects
+    let subject_deflines: std::collections::HashMap<String, String> = subjects
         .iter()
-        .map(|rec| (rec.id.as_str(), rec.defline.as_str()))
+        .map(|rec| {
+            let ids = fasta_record_ids(rec, args.parse_deflines);
+            let defline = if args.parse_deflines {
+                fasta_defline_title(rec)
+            } else {
+                rec.defline.clone()
+            };
+            (ids.id, defline)
+        })
         .collect();
-    let subject_accessions: std::collections::HashMap<&str, String> = subjects
+    let subject_accessions: std::collections::HashMap<String, String> = subjects
         .iter()
         .enumerate()
-        .map(|(i, rec)| (rec.id.as_str(), format!("Subject_{}", i + 1)))
+        .map(|(i, rec)| {
+            let ids = fasta_record_ids(rec, args.parse_deflines);
+            let accession = if args.parse_deflines {
+                ids.acc.unwrap_or_else(|| ids.id.clone())
+            } else {
+                format!("Subject_{}", i + 1)
+            };
+            (ids.id, accession)
+        })
         .collect();
 
     writeln!(writer, "<?xml version=\"1.0\"?>")?;
@@ -3019,14 +3985,25 @@ fn write_blastn_subject_xml_output<W: Write>(
     writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
     writeln!(writer, "  <BlastOutput_db></BlastOutput_db>")?;
     if let Some(query) = queries.first() {
+        let query_id = if args.parse_deflines {
+            fasta_display_label(query, true)
+        } else {
+            "Query_1".to_string()
+        };
+        let query_def = if args.parse_deflines {
+            fasta_defline_title(query)
+        } else {
+            query.defline.clone()
+        };
         writeln!(
             writer,
-            "  <BlastOutput_query-ID>Query_1</BlastOutput_query-ID>"
+            "  <BlastOutput_query-ID>{}</BlastOutput_query-ID>",
+            xml_escape(&query_id)
         )?;
         writeln!(
             writer,
             "  <BlastOutput_query-def>{}</BlastOutput_query-def>",
-            xml_escape(&query.defline)
+            xml_escape(&query_def)
         )?;
         writeln!(
             writer,
@@ -3039,7 +4016,7 @@ fn write_blastn_subject_xml_output<W: Write>(
     writeln!(
         writer,
         "      <Parameters_expect>{}</Parameters_expect>",
-        format_sam_float(args.evalue)
+        format_sam_float(args.evalue())
     )?;
     writeln!(
         writer,
@@ -3067,6 +4044,17 @@ fn write_blastn_subject_xml_output<W: Write>(
     writeln!(writer, "<BlastOutput_iterations>")?;
 
     for (query_index, query) in queries.iter().enumerate() {
+        let query_ids = fasta_record_ids(query, args.parse_deflines);
+        let query_display = if args.parse_deflines {
+            fasta_display_label(query, true)
+        } else {
+            format!("Query_{}", query_index + 1)
+        };
+        let query_def = if args.parse_deflines {
+            fasta_defline_title(query)
+        } else {
+            query.defline.clone()
+        };
         let (loc_start, loc_end) = query_loc_bounds(args, query.sequence.len())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
         let query_plus_nomask: Vec<u8> = query.sequence[loc_start..loc_end]
@@ -3088,13 +4076,13 @@ fn write_blastn_subject_xml_output<W: Write>(
         )?;
         writeln!(
             writer,
-            "  <Iteration_query-ID>Query_{}</Iteration_query-ID>",
-            query_index + 1
+            "  <Iteration_query-ID>{}</Iteration_query-ID>",
+            xml_escape(&query_display)
         )?;
         writeln!(
             writer,
             "  <Iteration_query-def>{}</Iteration_query-def>",
-            xml_escape(&query.defline)
+            xml_escape(&query_def)
         )?;
         writeln!(
             writer,
@@ -3104,7 +4092,7 @@ fn write_blastn_subject_xml_output<W: Write>(
         writeln!(writer, "<Iteration_hits>")?;
 
         let mut subject_ord = std::collections::BTreeMap::<&str, Vec<&TabularHit>>::new();
-        for hit in hits.iter().filter(|hit| hit.query_id == query.id) {
+        for hit in hits.iter().filter(|hit| hit.query_id == query_ids.id) {
             subject_ord
                 .entry(hit.subject_id.as_str())
                 .or_default()
@@ -3122,8 +4110,8 @@ fn write_blastn_subject_xml_output<W: Write>(
                 "  <Hit_def>{}</Hit_def>",
                 xml_escape(
                     subject_deflines
-                        .get(subject_id)
-                        .copied()
+                        .get(*subject_id)
+                        .map(String::as_str)
                         .unwrap_or(subject_id)
                 )
             )?;
@@ -3131,7 +4119,7 @@ fn write_blastn_subject_xml_output<W: Write>(
                 writer,
                 "  <Hit_accession>{}</Hit_accession>",
                 subject_accessions
-                    .get(subject_id)
+                    .get(*subject_id)
                     .map(String::as_str)
                     .unwrap_or(subject_id)
             )?;
@@ -3302,7 +4290,7 @@ fn write_blastn_db_xml_output<W: Write>(
     writeln!(
         writer,
         "      <Parameters_expect>{}</Parameters_expect>",
-        format_sam_float(args.evalue)
+        format_sam_float(args.evalue())
     )?;
     writeln!(
         writer,
@@ -3640,22 +4628,62 @@ fn write_blastn_subject_sam_output<W: Write>(
     hits: &[TabularHit],
     queries: &[blast_rs::input::FastaRecord],
     subjects: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
 ) -> std::io::Result<()> {
-    let subject_labels: std::collections::HashMap<&str, String> = subjects
+    let subject_labels: std::collections::HashMap<String, String> = subjects
         .iter()
         .enumerate()
-        .map(|(i, rec)| (rec.id.as_str(), format!("Subject_{}", i + 1)))
+        .map(|(i, rec)| {
+            let ids = fasta_record_ids(rec, args.parse_deflines);
+            let label = if args.parse_deflines {
+                ids.accver.unwrap_or_else(|| ids.id.clone())
+            } else {
+                format!("Subject_{}", i + 1)
+            };
+            (ids.id, label)
+        })
+        .collect();
+    let query_labels: std::collections::HashMap<String, String> = queries
+        .iter()
+        .enumerate()
+        .map(|(i, rec)| {
+            let ids = fasta_record_ids(rec, args.parse_deflines);
+            let label = if args.parse_deflines {
+                ids.accver.unwrap_or_else(|| ids.id.clone())
+            } else {
+                format!("Query_{}", i + 1)
+            };
+            (ids.id, label)
+        })
+        .collect();
+    let query_sq_labels: Vec<String> = queries
+        .iter()
+        .enumerate()
+        .map(|(i, rec)| {
+            if args.parse_deflines {
+                fasta_display_label(rec, true)
+            } else {
+                format!("Query_{}", i + 1)
+            }
+        })
         .collect();
     let hit_labels: std::collections::HashMap<String, String> = hits
         .iter()
         .filter_map(|hit| {
             subject_labels
-                .get(hit.subject_id.as_str())
+                .get(&hit.subject_id)
                 .map(|label| (sam_hit_label_key(hit), label.clone()))
         })
         .collect();
 
-    write_blastn_sam_output(writer, hits, queries, &hit_labels)
+    write_blastn_sam_output_with_query_labels(
+        writer,
+        hits,
+        queries,
+        &hit_labels,
+        &query_labels,
+        Some(&query_sq_labels),
+    )
 }
 
 fn write_blastn_sam_output<W: Write>(
@@ -3664,22 +4692,41 @@ fn write_blastn_sam_output<W: Write>(
     queries: &[blast_rs::input::FastaRecord],
     hit_labels: &std::collections::HashMap<String, String>,
 ) -> std::io::Result<()> {
+    let query_labels: std::collections::HashMap<String, String> = queries
+        .iter()
+        .enumerate()
+        .map(|(i, rec)| (rec.id.clone(), format!("Query_{}", i + 1)))
+        .collect();
+    write_blastn_sam_output_with_query_labels(writer, hits, queries, hit_labels, &query_labels, None)
+}
+
+fn write_blastn_sam_output_with_query_labels<W: Write>(
+    writer: &mut W,
+    hits: &[TabularHit],
+    queries: &[blast_rs::input::FastaRecord],
+    hit_labels: &std::collections::HashMap<String, String>,
+    query_labels: &std::collections::HashMap<String, String>,
+    query_sq_labels: Option<&[String]>,
+) -> std::io::Result<()> {
     if hits.is_empty() {
         return Ok(());
     }
 
-    let query_labels: std::collections::HashMap<&str, String> = queries
-        .iter()
-        .enumerate()
-        .map(|(i, rec)| (rec.id.as_str(), format!("Query_{}", i + 1)))
-        .collect();
-
     writeln!(writer, "@HD\tVN:1.2\tSO:coordinate\tGO:reference")?;
     for (i, query) in queries.iter().enumerate() {
+        let query_label = query_sq_labels
+            .and_then(|labels| labels.get(i))
+            .map(String::as_str)
+            .unwrap_or_else(|| {
+                query_labels
+                    .get(&query.id)
+                    .map(String::as_str)
+                    .unwrap_or(query.id.as_str())
+            });
         writeln!(
             writer,
-            "@SQ\tSN:Query_{}\tLN:{}",
-            i + 1,
+            "@SQ\tSN:{}\tLN:{}",
+            query_label,
             query.sequence.len()
         )?;
     }
@@ -3694,7 +4741,7 @@ fn write_blastn_sam_output<W: Write>(
             .map(String::as_str)
             .unwrap_or(hit.subject_id.as_str());
         let query_label = query_labels
-            .get(hit.query_id.as_str())
+            .get(&hit.query_id)
             .map(String::as_str)
             .unwrap_or(hit.query_id.as_str());
         let flag = if hit.subject_start > hit.subject_end {
@@ -3825,18 +4872,31 @@ fn blastn_subject_stats(
         ungapped.h,
         true,
     );
+    if args.searchsp > 0 {
+        return (kbp, args.searchsp as f64, 0);
+    }
+
+    let database_length = effective_db_length(args, total_subject_len);
     let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
         kbp.k,
         kbp.log_k,
         alpha / kbp.lambda,
         beta,
         qlen,
-        total_subject_len,
+        database_length,
         num_subjects,
     );
-    let eff_db = std::cmp::max(total_subject_len - num_subjects as i64 * len_adj as i64, 1);
+    let eff_db = std::cmp::max(database_length - num_subjects as i64 * len_adj as i64, 1);
     let search_space = eff_db as f64 * (qlen - len_adj).max(1) as f64;
     (kbp, search_space, len_adj)
+}
+
+fn effective_db_length(args: &BlastnArgs, actual_db_length: i64) -> i64 {
+    if args.dbsize > 0 {
+        args.dbsize
+    } else {
+        actual_db_length
+    }
 }
 
 fn db_subject_defline(db: &BlastDb, oid: u32, subject_id: &str) -> Option<String> {
@@ -3977,7 +5037,20 @@ fn write_pairwise_subject_query_header<W: Write>(
         .iter()
         .map(|rec| (rec.id.as_str(), rec.defline.as_str()))
         .collect();
-    writeln!(writer, "Query= {}", query.defline.as_str())?;
+    let subject_display_deflines: std::collections::HashMap<String, String> = subjects
+        .iter()
+        .map(|rec| {
+            (
+                fasta_record_ids(rec, args.parse_deflines).id,
+                fasta_pairwise_display_defline(rec, args.parse_deflines),
+            )
+        })
+        .collect();
+    writeln!(
+        writer,
+        "Query= {}",
+        fasta_pairwise_display_defline(query, args.parse_deflines)
+    )?;
     writeln!(writer)?;
     writeln!(writer, "Length={}", query.sequence.len())?;
     if hits.is_empty() {
@@ -3987,18 +5060,29 @@ fn write_pairwise_subject_query_header<W: Write>(
         writeln!(writer)?;
         return Ok(());
     }
+    let description_limit = pairwise_num_descriptions(args);
+    if description_limit == 0 {
+        writeln!(writer)?;
+        writeln!(writer)?;
+        return Ok(());
+    }
     write_pairwise_hit_summary_header(writer, args.sorthits)?;
     writeln!(writer)?;
 
     let mut seen = std::collections::HashSet::new();
+    let mut written = 0usize;
     for hit in hits {
         if !seen.insert(hit.subject_id.as_str()) {
             continue;
         }
+        if written >= description_limit {
+            break;
+        }
         let desc = truncate_description(
-            subject_deflines
+            subject_display_deflines
                 .get(hit.subject_id.as_str())
-                .copied()
+                .map(String::as_str)
+                .or_else(|| subject_deflines.get(hit.subject_id.as_str()).copied())
                 .unwrap_or(hit.subject_id.as_str()),
             68,
         );
@@ -4008,6 +5092,7 @@ fn write_pairwise_subject_query_header<W: Write>(
             .filter(|h| h.subject_id == hit.subject_id)
             .collect();
         write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits)?;
+        written += 1;
     }
     writeln!(writer)?;
     writeln!(writer)?;
@@ -4171,13 +5256,23 @@ fn write_pairwise_db_query_header<W: Write>(
         writeln!(writer)?;
         return Ok(());
     }
+    let description_limit = pairwise_num_descriptions(args);
+    if description_limit == 0 {
+        writeln!(writer)?;
+        writeln!(writer)?;
+        return Ok(());
+    }
     write_pairwise_hit_summary_header(writer, args.sorthits)?;
     writeln!(writer)?;
 
     let mut seen = std::collections::HashSet::new();
+    let mut written = 0usize;
     for hit in hits {
         if !seen.insert(hit.subject_id.as_str()) {
             continue;
+        }
+        if written >= description_limit {
+            break;
         }
         let defline = subject_deflines
             .get(&hit.subject_id)
@@ -4190,6 +5285,7 @@ fn write_pairwise_db_query_header<W: Write>(
             .filter(|h| h.subject_id == hit.subject_id)
             .collect();
         write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits)?;
+        written += 1;
     }
     writeln!(writer)?;
     writeln!(writer)?;
@@ -4302,10 +5398,11 @@ fn write_pairwise_alignment<W: Write>(
     subject_aln: &[u8],
     show_subject_header: bool,
     subject_display: Option<&str>,
+    line_width: usize,
 ) -> io::Result<()> {
     let subject_display = subject_display.unwrap_or(hit.subject_id.as_str());
     let mut buf = Vec::new();
-    blast_rs::format::format_pairwise_alignment(
+    blast_rs::format::format_pairwise_alignment_with_line_width(
         &mut buf,
         &hit.query_id,
         subject_display,
@@ -4321,6 +5418,8 @@ fn write_pairwise_alignment<W: Write>(
         hit.num_ident,
         hit.align_len,
         hit.gap_opens,
+        true,
+        line_width,
     )?;
     let start = buf.windows(2).position(|w| w == b"\n\n").map_or_else(
         || {
@@ -4361,22 +5460,32 @@ fn apply_filters(hits: &mut Vec<TabularHit>, args: &BlastnArgs, _query_len: i32)
                 .any(|taxid| negative_taxids.contains(taxid))
         });
     }
+    let seqids = parse_text_list_filter(args.seqidlist.as_ref());
+    if !seqids.is_empty() {
+        hits.retain(|h| subject_id_matches_filter(&h.subject_id, &seqids));
+    }
+    let negative_seqids = parse_text_list_filter(args.negative_seqidlist.as_ref());
+    if !negative_seqids.is_empty() {
+        hits.retain(|h| !subject_id_matches_filter(&h.subject_id, &negative_seqids));
+    }
     // Filter by percent identity
-    if args.perc_identity > 0.0 {
-        hits.retain(|h| h.pct_identity >= args.perc_identity);
+    let perc_identity = args.perc_identity();
+    if perc_identity > 0.0 {
+        hits.retain(|h| h.pct_identity >= perc_identity);
     }
     if let Some(min_score) = args.min_raw_gapped_score {
         hits.retain(|h| h.raw_score >= min_score);
     }
     // Filter by query coverage
-    if args.qcov_hsp_perc > 0.0 {
+    let qcov_hsp_perc = args.qcov_hsp_perc();
+    if qcov_hsp_perc > 0.0 {
         hits.retain(|h| {
             if h.query_len <= 0 {
                 return false;
             }
             let query_span = (h.query_end - h.query_start).abs() + 1;
             let cov = 100.0 * query_span as f64 / h.query_len as f64;
-            cov >= args.qcov_hsp_perc
+            cov >= qcov_hsp_perc
         });
     }
     if args.culling_limit > 0 {
@@ -4617,6 +5726,35 @@ fn parse_taxid_filters(
     taxids
 }
 
+fn parse_text_list_filter(path: Option<&PathBuf>) -> std::collections::HashSet<String> {
+    let Some(path) = path else {
+        return std::collections::HashSet::new();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .into_iter()
+        .flat_map(|contents| {
+            contents
+                .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn subject_id_matches_filter(
+    subject_id: &str,
+    filters: &std::collections::HashSet<String>,
+) -> bool {
+    filters.contains(subject_id)
+        || subject_id
+            .split('|')
+            .filter(|token| !token.is_empty())
+            .any(|token| filters.contains(token))
+}
+
 /// Complement a BLASTNA-encoded nucleotide.
 fn complement_blastna(b: u8) -> u8 {
     match b {
@@ -4846,7 +5984,7 @@ mod tests {
             "10",
         ])
         .is_err());
-        assert!(Cli::try_parse_from([
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4856,8 +5994,12 @@ mod tests {
             "--num_threads",
             "0",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range num_threads should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.num_threads, 0);
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4867,8 +6009,12 @@ mod tests {
             "--max_hsps",
             "0",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range max_hsps should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.max_hsps, Some(0));
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4878,8 +6024,12 @@ mod tests {
             "--perc_identity",
             "101",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range perc_identity should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.perc_identity(), 101.0);
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4889,8 +6039,12 @@ mod tests {
             "--qcov_hsp_perc",
             "-1",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range qcov_hsp_perc should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.qcov_hsp_perc(), -1.0);
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4900,8 +6054,12 @@ mod tests {
             "--culling_limit",
             "-1",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range culling_limit should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.culling_limit, -1);
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4911,8 +6069,12 @@ mod tests {
             "--num_descriptions",
             "-1",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range num_descriptions should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.num_descriptions, Some(-1));
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4922,8 +6084,12 @@ mod tests {
             "--num_alignments",
             "-1",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range num_alignments should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.num_alignments, Some(-1));
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4933,8 +6099,12 @@ mod tests {
             "--line_length",
             "0",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range line_length should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.line_length, Some(0));
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4944,8 +6114,12 @@ mod tests {
             "--window_size",
             "-1",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range window_size should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.window_size, -1);
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4955,8 +6129,12 @@ mod tests {
             "--off_diagonal_range",
             "-1",
         ])
-        .is_err());
-        assert!(Cli::try_parse_from([
+        .expect("out-of-range off_diagonal_range should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.off_diagonal_range, -1);
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -4966,7 +6144,11 @@ mod tests {
             "--mt_mode",
             "2",
         ])
-        .is_err());
+        .expect("out-of-range mt_mode should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.mt_mode, 2);
         assert!(Cli::try_parse_from([
             "blast-cli",
             "blastn",
@@ -5055,7 +6237,7 @@ mod tests {
             "1",
         ])
         .is_err());
-        assert!(Cli::try_parse_from([
+        let cli = Cli::try_parse_from([
             "blast-cli",
             "blastn",
             "--query",
@@ -5065,7 +6247,11 @@ mod tests {
             "--searchsp",
             "-1",
         ])
-        .is_err());
+        .expect("negative searchsp should parse for NCBI-compatible validation");
+        let Commands::Blastn(args) = cli.command else {
+            panic!("expected blastn command");
+        };
+        assert_eq!(args.searchsp, -1);
     }
 
     fn tabular_hit_for_best_hit_filter(
@@ -5078,7 +6264,13 @@ mod tests {
         let align_len = (query_end - query_start).abs() + 1;
         TabularHit {
             query_id: "q1".to_string(),
+            query_gi: None,
+            query_acc: None,
+            query_accver: None,
             subject_id: subject_id.to_string(),
+            subject_gi: None,
+            subject_acc: None,
+            subject_accver: None,
             subject_title: String::new(),
             pct_identity: 100.0,
             align_len,

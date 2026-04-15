@@ -1,6 +1,5 @@
 //! Rust equivalent of blast_query_info.c — query information management.
 
-
 /// Information about a single query context (strand/frame).
 #[derive(Debug, Clone)]
 pub struct ContextInfo {
@@ -234,7 +233,11 @@ mod tests {
             assert!(
                 curr.query_offset >= prev.query_offset + prev.query_length,
                 "Context {} overlaps with context {}: offset {} < {} + {}",
-                i, i - 1, curr.query_offset, prev.query_offset, prev.query_length
+                i,
+                i - 1,
+                curr.query_offset,
+                prev.query_offset,
+                prev.query_length
             );
         }
     }

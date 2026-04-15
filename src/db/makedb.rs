@@ -1,7 +1,7 @@
 //! makeblastdb equivalent — create BLAST databases from FASTA files.
 
-use std::io::{self, Write, BufWriter};
 use std::fs::File;
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 /// Create a BLAST v4 nucleotide database from a FASTA file.
@@ -9,7 +9,8 @@ pub fn make_nucleotide_db(
     fasta_path: &Path,
     output_base: &Path,
     title: &str,
-) -> io::Result<(u32, u64)> { // returns (num_seqs, total_length)
+) -> io::Result<(u32, u64)> {
+    // returns (num_seqs, total_length)
     let fasta_data = std::fs::read_to_string(fasta_path)?;
     let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
 
@@ -51,18 +52,21 @@ pub fn make_nucleotide_db(
         let mut packed = Vec::new();
         let iupac_to_2na = |b: u8| -> u8 {
             match b {
-                b'A' | b'a' => 0, b'C' | b'c' => 1,
-                b'G' | b'g' => 2, b'T' | b't' => 3, _ => 0,
+                b'A' | b'a' => 0,
+                b'C' | b'c' => 1,
+                b'G' | b'g' => 2,
+                b'T' | b't' => 3,
+                _ => 0,
             }
         };
 
         let full_bytes = seq.len() / 4;
         let remainder = seq.len() % 4;
         for i in 0..full_bytes {
-            let b = (iupac_to_2na(seq[i*4]) << 6)
-                | (iupac_to_2na(seq[i*4+1]) << 4)
-                | (iupac_to_2na(seq[i*4+2]) << 2)
-                | iupac_to_2na(seq[i*4+3]);
+            let b = (iupac_to_2na(seq[i * 4]) << 6)
+                | (iupac_to_2na(seq[i * 4 + 1]) << 4)
+                | (iupac_to_2na(seq[i * 4 + 2]) << 2)
+                | iupac_to_2na(seq[i * 4 + 3]);
             packed.push(b);
         }
         // Last byte: pack remaining bases + remainder count in low 2 bits
@@ -117,7 +121,11 @@ pub fn make_nucleotide_db(
     // Total length (little-endian!)
     nin.write_all(&total_length.to_le_bytes())?;
     // Max length
-    let max_len = sequences.iter().map(|(_, s)| s.len() as u32).max().unwrap_or(0);
+    let max_len = sequences
+        .iter()
+        .map(|(_, s)| s.len() as u32)
+        .max()
+        .unwrap_or(0);
     nin.write_all(&max_len.to_be_bytes())?;
 
     // Header offsets (num_seqs + 1)
@@ -221,10 +229,18 @@ fn encode_asn1_integer(val: i32) -> Vec<u8> {
     } else if val > 0 && val < 128 {
         vec![val as u8]
     } else if val > 0 && val < 32768 {
-        if val < 256 { vec![0, val as u8] }
-        else { vec![(val >> 8) as u8, val as u8] }
+        if val < 256 {
+            vec![0, val as u8]
+        } else {
+            vec![(val >> 8) as u8, val as u8]
+        }
     } else {
-        vec![(val >> 24) as u8, (val >> 16) as u8, (val >> 8) as u8, val as u8]
+        vec![
+            (val >> 24) as u8,
+            (val >> 16) as u8,
+            (val >> 8) as u8,
+            val as u8,
+        ]
     }
 }
 
@@ -326,7 +342,8 @@ mod tests {
             let got_len = db.get_seq_len(oid as u32);
             assert_eq!(
                 got_len, exp_len as u32,
-                "OID {} length mismatch: got {} expected {}", oid, got_len, exp_len
+                "OID {} length mismatch: got {} expected {}",
+                oid, got_len, exp_len
             );
         }
 

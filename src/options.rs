@@ -1,7 +1,6 @@
 //! Rust equivalent of blast_options.c — BLAST search options.
 //! Contains all the option types and their default values.
 
-
 // ---- Default constants ----
 
 // Window sizes
@@ -229,7 +228,10 @@ mod tests {
         assert_eq!(scoring.gap_open, 5);
         assert_eq!(scoring.gap_extend, 2);
         assert!(scoring.gapped_calculation);
-        assert!(scoring.matrix_name.is_none(), "blastn should not use a named matrix");
+        assert!(
+            scoring.matrix_name.is_none(),
+            "blastn should not use a named matrix"
+        );
         assert!(!scoring.is_ooframe);
 
         let word = InitialWordOptions::new_blastn();

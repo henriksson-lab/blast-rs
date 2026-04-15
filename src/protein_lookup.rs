@@ -9,7 +9,7 @@
 //! and ungapped extensions triggered.
 
 use crate::matrix::AA_SIZE;
-use crate::protein::{protein_ungapped_extend, protein_gapped_align, ncbistdaa_to_char};
+use crate::protein::{ncbistdaa_to_char, protein_gapped_align, protein_ungapped_extend};
 
 /// Result of a protein hit after extension.
 #[derive(Debug, Clone)]
@@ -102,8 +102,7 @@ impl ProteinLookupTable {
                 // suffix_max[k] = sum of row_max for positions k..word_size-1
                 suffix_max[word_size] = 0;
                 for k in (0..word_size).rev() {
-                    suffix_max[k] =
-                        suffix_max[k + 1] + row_max[query_word[k] as usize];
+                    suffix_max[k] = suffix_max[k + 1] + row_max[query_word[k] as usize];
                 }
 
                 // Recursive enumeration with pruning.
@@ -134,7 +133,10 @@ impl ProteinLookupTable {
 
         // Convert to thick backbone (inline ≤3 hits, overflow for rest).
         // Matches NCBI BLAST+ AaLookupBackboneCell layout.
-        let empty_cell = BackboneCell { num_used: 0, entries: [0; HITS_PER_CELL] };
+        let empty_cell = BackboneCell {
+            num_used: 0,
+            entries: [0; HITS_PER_CELL],
+        };
         let mut thick: Vec<BackboneCell> = vec![empty_cell; table_size];
         let mut overflow: Vec<i32> = Vec::new();
 
@@ -314,7 +316,9 @@ pub fn batch_scan_subject(
             // Thick backbone lookup
             let cell = &table.backbone[hash];
             let num = cell.num_used as usize;
-            if num == 0 { continue; }
+            if num == 0 {
+                continue;
+            }
             let hit_slice: &[i32] = if num <= HITS_PER_CELL {
                 &cell.entries[..num]
             } else {
@@ -327,7 +331,9 @@ pub fn batch_scan_subject(
 
                 // Diagonal tracking
                 let diag = s_pos + query.len() - q_pos;
-                if diag >= diag_bufs[qi].len() { continue; }
+                if diag >= diag_bufs[qi].len() {
+                    continue;
+                }
                 let last = diag_bufs[qi][diag];
                 if last >= 0 && (s_pos as i32) < last + word_size as i32 {
                     continue;
@@ -340,11 +346,17 @@ pub fn batch_scan_subject(
                     diag_bufs[qi][diag] = se as i32;
                     let alen = (qe - qs) as i32;
                     results[qi].push(ProteinHit {
-                        query_start: qs, query_end: qe,
-                        subject_start: ss, subject_end: se,
-                        score, num_ident: ident,
-                        align_length: alen, mismatches: alen - ident,
-                        gap_opens: 0, qseq: None, sseq: None,
+                        query_start: qs,
+                        query_end: qe,
+                        subject_start: ss,
+                        subject_end: se,
+                        score,
+                        num_ident: ident,
+                        align_length: alen,
+                        mismatches: alen - ident,
+                        gap_opens: 0,
+                        qseq: None,
+                        sseq: None,
                     });
                 }
             }
@@ -352,7 +364,9 @@ pub fn batch_scan_subject(
     }
 
     // Collect non-empty results with query index
-    results.into_iter().enumerate()
+    results
+        .into_iter()
+        .enumerate()
         .filter(|(_, hits)| !hits.is_empty())
         .map(|(qi, mut hits)| {
             hits.sort_by(|a, b| b.score.cmp(&a.score));
@@ -400,9 +414,11 @@ const TWO_HIT_WINDOW: i32 = 40;
 /// Matches NCBI s_BlastAaExtendLeft.
 #[inline]
 fn extend_left(
-    query: &[u8], subject: &[u8],
+    query: &[u8],
+    subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
-    q_start: usize, s_start: usize,
+    q_start: usize,
+    s_start: usize,
     x_dropoff: i32,
 ) -> (i32, i32, i32) {
     let mut score = 0i32;
@@ -410,7 +426,9 @@ fn extend_left(
     let mut best_d = 0i32;
     let mut ident = 0i32;
     let mut best_ident = 0i32;
-    if q_start == 0 || s_start == 0 { return (0, 0, 0); }
+    if q_start == 0 || s_start == 0 {
+        return (0, 0, 0);
+    }
     let mut qi = q_start - 1;
     let mut si = s_start - 1;
     let mut d = 1i32;
@@ -419,11 +437,21 @@ fn extend_left(
             let q = *query.as_ptr().add(qi);
             let s = *subject.as_ptr().add(si);
             score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
-            if q == s { ident += 1; }
+            if q == s {
+                ident += 1;
+            }
         }
-        if score > best { best = score; best_d = d; best_ident = ident; }
-        if best - score > x_dropoff { break; }
-        if qi == 0 || si == 0 { break; }
+        if score > best {
+            best = score;
+            best_d = d;
+            best_ident = ident;
+        }
+        if best - score > x_dropoff {
+            break;
+        }
+        if qi == 0 || si == 0 {
+            break;
+        }
         qi -= 1;
         si -= 1;
         d += 1;
@@ -437,10 +465,13 @@ fn extend_left(
 /// Matches NCBI s_BlastAaExtendRight.
 #[inline]
 fn extend_right(
-    query: &[u8], subject: &[u8],
+    query: &[u8],
+    subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
-    q_start: usize, s_start: usize,
-    x_dropoff: i32, init_score: i32,
+    q_start: usize,
+    s_start: usize,
+    x_dropoff: i32,
+    init_score: i32,
 ) -> (i32, i32, i32) {
     let mut score = init_score;
     let mut best = init_score;
@@ -456,10 +487,18 @@ fn extend_right(
             let q = *query.as_ptr().add(qi);
             let s = *subject.as_ptr().add(si);
             score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
-            if q == s { ident += 1; }
+            if q == s {
+                ident += 1;
+            }
         }
-        if score > best { best = score; best_d = (qi - q_start + 1) as i32; best_ident = ident; }
-        if best - score > x_dropoff { break; }
+        if score > best {
+            best = score;
+            best_d = (qi - q_start + 1) as i32;
+            best_ident = ident;
+        }
+        if best - score > x_dropoff {
+            break;
+        }
         qi += 1;
         si += 1;
     }
@@ -524,7 +563,9 @@ pub fn protein_scan_with_table_reuse(
 
             let cell = &*backbone.add(hash);
             let num = cell.num_used as usize;
-            if num == 0 { continue; }
+            if num == 0 {
+                continue;
+            }
 
             let (hit_ptr, hit_len) = if num <= HITS_PER_CELL {
                 (cell.entries.as_ptr(), num)
@@ -545,13 +586,20 @@ pub fn protein_scan_with_table_reuse(
                     continue;
                 }
                 if last < 0 {
-                    if s_off < -(last + 1) { continue; }
+                    if s_off < -(last + 1) {
+                        continue;
+                    }
                     *diag_ptr.add(diag) = s_off;
                     continue;
                 }
                 let diff = s_off - last;
-                if diff >= TWO_HIT_WINDOW { *diag_ptr.add(diag) = s_off; continue; }
-                if diff < ws { continue; }
+                if diff >= TWO_HIT_WINDOW {
+                    *diag_ptr.add(diag) = s_off;
+                    continue;
+                }
+                if diff < ws {
+                    continue;
+                }
 
                 // NCBI two-hit extension (s_BlastAaExtendTwoHit):
                 // 1. Find best starting point within the word at s_pos
@@ -569,11 +617,9 @@ pub fn protein_scan_with_table_reuse(
                     let qi = q_right_off + k;
                     let si = s_right_off + k;
                     if qi < qlen && si < subject.len() {
-                        wscore += *matrix.get_unchecked(
-                            *query.as_ptr().add(qi) as usize
-                        ).get_unchecked(
-                            *subject.as_ptr().add(si) as usize
-                        );
+                        wscore += *matrix
+                            .get_unchecked(*query.as_ptr().add(qi) as usize)
+                            .get_unchecked(*subject.as_ptr().add(si) as usize);
                     }
                     if wscore > best_wscore {
                         best_wscore = wscore;
@@ -584,15 +630,15 @@ pub fn protein_scan_with_table_reuse(
                 let ext_s = s_right_off + right_d;
 
                 // Extend left from ext_s-1 — must reach s_left_off
-                let (left_score, left_d, left_ident) = extend_left(
-                    query, subject, matrix, ext_q, ext_s, x_dropoff);
+                let (left_score, left_d, left_ident) =
+                    extend_left(query, subject, matrix, ext_q, ext_s, x_dropoff);
 
                 let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
 
                 if reached_first {
                     // Extend right with cumulative score
-                    let (right_score, right_d_r, right_ident) = extend_right(
-                        query, subject, matrix, ext_q, ext_s, x_dropoff, left_score);
+                    let (right_score, right_d_r, right_ident) =
+                        extend_right(query, subject, matrix, ext_q, ext_s, x_dropoff, left_score);
 
                     let total_score = left_score.max(right_score);
                     if total_score > 0 {
@@ -604,11 +650,17 @@ pub fn protein_scan_with_table_reuse(
                         let alen = (qe - qs) as i32;
                         let ident = left_ident + right_ident;
                         hits.push(ProteinHit {
-                            query_start: qs, query_end: qe,
-                            subject_start: ss, subject_end: se,
-                            score: total_score, num_ident: ident,
-                            align_length: alen, mismatches: alen - ident,
-                            gap_opens: 0, qseq: None, sseq: None,
+                            query_start: qs,
+                            query_end: qe,
+                            subject_start: ss,
+                            subject_end: se,
+                            score: total_score,
+                            num_ident: ident,
+                            align_length: alen,
+                            mismatches: alen - ident,
+                            gap_opens: 0,
+                            qseq: None,
+                            sseq: None,
                         });
                         continue;
                     }
@@ -643,8 +695,15 @@ pub fn protein_gapped_scan(
 ) -> Vec<ProteinHit> {
     let table = ProteinLookupTable::build(query, word_size, matrix, threshold);
     protein_gapped_scan_with_table(
-        query, subject, matrix, &table, ungap_x_dropoff,
-        gap_open, gap_extend, gap_x_dropoff, ungap_cutoff,
+        query,
+        subject,
+        matrix,
+        &table,
+        ungap_x_dropoff,
+        gap_open,
+        gap_extend,
+        gap_x_dropoff,
+        ungap_cutoff,
     )
 }
 
@@ -670,24 +729,36 @@ pub fn protein_gapped_scan_with_table(
     let mut gapped_diag: Vec<bool> = vec![false; diag_count];
 
     for uh in &ungapped {
-        if uh.score < ungap_cutoff { continue; }
+        if uh.score < ungap_cutoff {
+            continue;
+        }
 
         // Use center of ungapped hit as seed
         let seed_q = (uh.query_start + uh.query_end) / 2;
         let seed_s = (uh.subject_start + uh.subject_end) / 2;
         let diag = seed_s + query.len() - seed_q;
-        if diag < diag_count && gapped_diag[diag] { continue; }
-        if diag < diag_count { gapped_diag[diag] = true; }
+        if diag < diag_count && gapped_diag[diag] {
+            continue;
+        }
+        if diag < diag_count {
+            gapped_diag[diag] = true;
+        }
 
         if let Some(gr) = protein_gapped_align(
-            query, subject, seed_q, seed_s,
-            matrix, gap_open, gap_extend, gap_x_dropoff,
+            query,
+            subject,
+            seed_q,
+            seed_s,
+            matrix,
+            gap_open,
+            gap_extend,
+            gap_x_dropoff,
         ) {
             let q_slice = &query[gr.query_start..gr.query_end];
             let s_slice = &subject[gr.subject_start..gr.subject_end];
-            let (qseq, sseq) = gr.edit_script.render_alignment(
-                q_slice, s_slice, ncbistdaa_to_char,
-            );
+            let (qseq, sseq) = gr
+                .edit_script
+                .render_alignment(q_slice, s_slice, ncbistdaa_to_char);
             gapped_hits.push(ProteinHit {
                 query_start: gr.query_start,
                 query_end: gr.query_end,
@@ -784,7 +855,10 @@ mod tests {
         let query = vec![1u8, 1, 1, 1, 1];
         let subject = vec![2u8, 2, 2, 2, 2];
         let hits = protein_scan(&query, &subject, &m, 3, 11.0, 20);
-        assert!(hits.is_empty(), "Should find no hits for unrelated sequences");
+        assert!(
+            hits.is_empty(),
+            "Should find no hits for unrelated sequences"
+        );
     }
 
     #[test]
@@ -793,7 +867,10 @@ mod tests {
         let query = vec![1u8, 2];
         let subject = vec![1u8, 2, 3];
         let hits = protein_scan(&query, &subject, &m, 3, 11.0, 20);
-        assert!(hits.is_empty(), "Sequences shorter than word_size yield no hits");
+        assert!(
+            hits.is_empty(),
+            "Sequences shorter than word_size yield no hits"
+        );
     }
 
     #[test]
@@ -810,18 +887,30 @@ mod tests {
         ];
         for (i, &hash) in hashes.iter().enumerate() {
             let cell = &table.backbone[hash];
-            assert!(cell.num_used > 0, "Word at position {} should have entries", i);
+            assert!(
+                cell.num_used > 0,
+                "Word at position {} should have entries",
+                i
+            );
             let hits: &[i32] = if (cell.num_used as usize) <= HITS_PER_CELL {
                 &cell.entries[..cell.num_used as usize]
             } else {
                 let c = cell.entries[0] as usize;
                 &table.overflow[c..c + cell.num_used as usize]
             };
-            assert!(hits.contains(&(i as i32)),
-                "Word at position {} should map to query offset {}", i, i);
+            assert!(
+                hits.contains(&(i as i32)),
+                "Word at position {} should map to query offset {}",
+                i,
+                i
+            );
             // PV bit should be set
-            assert_ne!(table.pv[hash >> 6] & (1u64 << (hash & 63)), 0,
-                "PV bit should be set for word at position {}", i);
+            assert_ne!(
+                table.pv[hash >> 6] & (1u64 << (hash & 63)),
+                0,
+                "PV bit should be set for word at position {}",
+                i
+            );
         }
     }
 
@@ -831,10 +920,11 @@ mod tests {
         // threshold=13 > max possible score (4*3=12), so NO words should match
         let query = vec![1u8, 2, 3, 4, 5];
         let table = ProteinLookupTable::build(&query, 3, &m, 13.0);
-        let total_entries: usize = table.backbone.iter()
-            .map(|c| c.num_used as usize)
-            .sum();
-        assert_eq!(total_entries, 0, "No words should meet threshold > max score");
+        let total_entries: usize = table.backbone.iter().map(|c| c.num_used as usize).sum();
+        assert_eq!(
+            total_entries, 0,
+            "No words should meet threshold > max score"
+        );
     }
 
     #[test]
@@ -843,11 +933,12 @@ mod tests {
         // threshold=7 allows words with 2 matches + 1 mismatch (4+4-1=7)
         let query = vec![1u8, 2, 3];
         let table = ProteinLookupTable::build(&query, 3, &m, 7.0);
-        let total_entries: usize = table.backbone.iter()
-            .map(|c| c.num_used as usize)
-            .sum();
-        assert!(total_entries > 1,
-            "Low threshold should produce neighboring words (got {})", total_entries);
+        let total_entries: usize = table.backbone.iter().map(|c| c.num_used as usize).sum();
+        assert!(
+            total_entries > 1,
+            "Low threshold should produce neighboring words (got {})",
+            total_entries
+        );
     }
 
     #[test]
@@ -860,7 +951,10 @@ mod tests {
         let subject2 = vec![2u8, 3, 4, 5, 6, 7]; // completely different
         let hits1 = protein_scan_with_table(&query, &subject1, &m, &table, 40);
         let hits2 = protein_scan_with_table(&query, &subject2, &m, &table, 40);
-        assert!(!hits1.is_empty(), "Should find hits for identical sequences");
+        assert!(
+            !hits1.is_empty(),
+            "Should find hits for identical sequences"
+        );
         // hits2 may or may not be empty depending on BLOSUM62 neighborhood
     }
 
@@ -883,7 +977,14 @@ mod tests {
             for b in 0..AA_SIZE {
                 for c in 0..AA_SIZE {
                     let h = word_hash(&[a as u8, b as u8, c as u8], AA_SIZE);
-                    assert!(h < max_hash, "Hash {} out of range for [{},{},{}]", h, a, b, c);
+                    assert!(
+                        h < max_hash,
+                        "Hash {} out of range for [{},{},{}]",
+                        h,
+                        a,
+                        b,
+                        c
+                    );
                 }
             }
         }
@@ -897,13 +998,15 @@ mod tests {
         let subject = query.clone();
         let table = ProteinLookupTable::build(&query, 3, &m, 11.0);
         let hits = protein_gapped_scan_with_table(
-            &query, &subject, &m, &table,
-            40,     // ungap_x_dropoff
-            11, 1,  // gap_open, gap_extend
-            260,    // gap_x_dropoff
-            40,     // ungap_cutoff
+            &query, &subject, &m, &table, 40, // ungap_x_dropoff
+            11, 1,   // gap_open, gap_extend
+            260, // gap_x_dropoff
+            40,  // ungap_cutoff
         );
-        assert!(!hits.is_empty(), "Gapped scan should find alignment for identical sequences");
+        assert!(
+            !hits.is_empty(),
+            "Gapped scan should find alignment for identical sequences"
+        );
         let best = &hits[0];
         assert!(best.score > 0);
         assert_eq!(best.query_start, 0);

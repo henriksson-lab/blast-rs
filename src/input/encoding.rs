@@ -10,12 +10,12 @@ pub fn iupacna_to_blastna(c: u8) -> u8 {
         b'C' | b'c' => 1,
         b'G' | b'g' => 2,
         b'T' | b't' => 3,
-        b'R' | b'r' => 4, // A or G
-        b'Y' | b'y' => 5, // C or T
-        b'M' | b'm' => 6, // A or C
-        b'K' | b'k' => 7, // G or T
-        b'W' | b'w' => 8, // A or T
-        b'S' | b's' => 9, // C or G
+        b'R' | b'r' => 4,  // A or G
+        b'Y' | b'y' => 5,  // C or T
+        b'M' | b'm' => 6,  // A or C
+        b'K' | b'k' => 7,  // G or T
+        b'W' | b'w' => 8,  // A or T
+        b'S' | b's' => 9,  // C or G
         b'B' | b'b' => 10, // C, G, or T
         b'D' | b'd' => 11, // A, G, or T
         b'H' | b'h' => 12, // A, C, or T
@@ -28,9 +28,9 @@ pub fn iupacna_to_blastna(c: u8) -> u8 {
 /// IUPAC amino acid character to NCBIstdaa encoding.
 pub fn aminoacid_to_ncbistdaa(c: u8) -> u8 {
     match c {
-        b'-' => 0,  // Gap
+        b'-' => 0, // Gap
         b'A' | b'a' => 1,
-        b'B' | b'b' => 2,  // Asp or Asn
+        b'B' | b'b' => 2, // Asp or Asn
         b'C' | b'c' => 3,
         b'D' | b'd' => 4,
         b'E' | b'e' => 5,
@@ -53,10 +53,10 @@ pub fn aminoacid_to_ncbistdaa(c: u8) -> u8 {
         b'Y' | b'y' => 22,
         b'Z' | b'z' => 23, // Glu or Gln
         b'U' | b'u' => 24, // Selenocysteine
-        b'*' => 25,         // Stop
-        b'O' | b'o' => 26,  // Pyrrolysine
-        b'J' | b'j' => 27,  // Leu or Ile
-        _ => 21,             // Unknown -> X
+        b'*' => 25,        // Stop
+        b'O' | b'o' => 26, // Pyrrolysine
+        b'J' | b'j' => 27, // Leu or Ile
+        _ => 21,           // Unknown -> X
     }
 }
 

@@ -48,7 +48,11 @@ pub fn gapped_align(
 
         for j in 1..=cols - 1 {
             // Match/mismatch
-            let match_score = if q[i - 1] == s[j - 1] { reward } else { penalty };
+            let match_score = if q[i - 1] == s[j - 1] {
+                reward
+            } else {
+                penalty
+            };
             let diag = h_prev[j - 1] + match_score;
 
             // Gap in query (deletion: advance subject)
@@ -93,7 +97,11 @@ pub fn gapped_align(
     for i in 1..=q_len {
         let mut fi = i32::MIN / 2;
         for j in 1..=cols - 1 {
-            let match_score = if q[i - 1] == s[j - 1] { reward } else { penalty };
+            let match_score = if q[i - 1] == s[j - 1] {
+                reward
+            } else {
+                penalty
+            };
             let diag = h_full[i - 1][j - 1] + match_score;
 
             e_full[i][j] = (h_full[i - 1][j] - gap_open_extend).max(e_full[i - 1][j] - gap_extend);
@@ -123,21 +131,39 @@ pub fn gapped_align(
         match trace[i][j] {
             0 => {
                 if let Some(last) = ops.last_mut() {
-                    if last.0 == GapAlignOpType::Sub { last.1 += 1; } else { ops.push((GapAlignOpType::Sub, 1)); }
-                } else { ops.push((GapAlignOpType::Sub, 1)); }
+                    if last.0 == GapAlignOpType::Sub {
+                        last.1 += 1;
+                    } else {
+                        ops.push((GapAlignOpType::Sub, 1));
+                    }
+                } else {
+                    ops.push((GapAlignOpType::Sub, 1));
+                }
                 i -= 1;
                 j -= 1;
             }
             1 => {
                 if let Some(last) = ops.last_mut() {
-                    if last.0 == GapAlignOpType::Ins { last.1 += 1; } else { ops.push((GapAlignOpType::Ins, 1)); }
-                } else { ops.push((GapAlignOpType::Ins, 1)); }
+                    if last.0 == GapAlignOpType::Ins {
+                        last.1 += 1;
+                    } else {
+                        ops.push((GapAlignOpType::Ins, 1));
+                    }
+                } else {
+                    ops.push((GapAlignOpType::Ins, 1));
+                }
                 j -= 1;
             }
             2 => {
                 if let Some(last) = ops.last_mut() {
-                    if last.0 == GapAlignOpType::Del { last.1 += 1; } else { ops.push((GapAlignOpType::Del, 1)); }
-                } else { ops.push((GapAlignOpType::Del, 1)); }
+                    if last.0 == GapAlignOpType::Del {
+                        last.1 += 1;
+                    } else {
+                        ops.push((GapAlignOpType::Del, 1));
+                    }
+                } else {
+                    ops.push((GapAlignOpType::Del, 1));
+                }
                 i -= 1;
             }
             _ => break,
@@ -185,7 +211,7 @@ mod tests {
     fn test_gapped_align_with_mismatch() {
         // Query:   ACGTACGT (0,1,2,3,0,1,2,3)
         // Subject: ACGAACGA (0,1,2,0,0,1,2,0) — mismatches at pos 3 and 7
-        let query   = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let subject = vec![0u8, 1, 2, 0, 0, 1, 2, 0];
         let result = gapped_align(&query, &subject, 0, 0, 2, -3, 5, 2, 100);
         assert!(result.is_some());
@@ -194,12 +220,20 @@ mod tests {
         assert!(score > 0, "score={}", score);
         // All operations should be Sub (no gaps)
         for (op, _) in &esp.ops {
-            assert_eq!(*op, GapAlignOpType::Sub,
-                "expected only Sub ops (no gaps), got {:?}", esp.ops);
+            assert_eq!(
+                *op,
+                GapAlignOpType::Sub,
+                "expected only Sub ops (no gaps), got {:?}",
+                esp.ops
+            );
         }
         let total: i32 = esp.ops.iter().map(|(_, n)| *n).sum();
         // Local alignment may trim terminal mismatches, so aligned length >= 6
-        assert!(total >= 6, "should align at least 6 positions, got {}", total);
+        assert!(
+            total >= 6,
+            "should align at least 6 positions, got {}",
+            total
+        );
     }
 
     /// Subject has an extra base relative to query (insertion in subject).
@@ -207,7 +241,7 @@ mod tests {
     fn test_gapped_align_with_insertion() {
         // Query:   ACGT-ACGT (8 bp)
         // Subject: ACGTAACGT (9 bp) — extra A at position 4
-        let query   = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let subject = vec![0u8, 1, 2, 3, 0, 0, 1, 2, 3];
         let result = gapped_align(&query, &subject, 0, 0, 2, -3, 3, 1, 100);
         assert!(result.is_some());
@@ -215,8 +249,10 @@ mod tests {
         // Best alignment: 8 matches (16) - gap_open+gap_extend (3+1=4) = 12
         assert!(score >= 12, "score={} should be >= 12", score);
         // Should contain a Del operation (gap in query = deletion)
-        let has_gap = esp.ops.iter().any(|(op, _)|
-            *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins);
+        let has_gap = esp
+            .ops
+            .iter()
+            .any(|(op, _)| *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins);
         assert!(has_gap, "expected a gap operation, ops={:?}", esp.ops);
     }
 
@@ -225,14 +261,16 @@ mod tests {
     fn test_gapped_align_with_deletion() {
         // Query:   ACGTAACGT (9 bp) — extra A at position 4
         // Subject: ACGT-ACGT (8 bp)
-        let query   = vec![0u8, 1, 2, 3, 0, 0, 1, 2, 3];
+        let query = vec![0u8, 1, 2, 3, 0, 0, 1, 2, 3];
         let subject = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let result = gapped_align(&query, &subject, 0, 0, 2, -3, 3, 1, 100);
         assert!(result.is_some());
         let (score, esp) = result.unwrap();
         assert!(score >= 12, "score={} should be >= 12", score);
-        let has_gap = esp.ops.iter().any(|(op, _)|
-            *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins);
+        let has_gap = esp
+            .ops
+            .iter()
+            .any(|(op, _)| *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins);
         assert!(has_gap, "expected a gap operation, ops={:?}", esp.ops);
     }
 
@@ -242,8 +280,8 @@ mod tests {
     fn test_gapped_align_xdrop_cutoff() {
         // 4 matches then 10 mismatches then 4 matches
         // With tight x_dropoff the second matching region should not be reached
-        let query   = vec![0u8, 1, 2, 3,  3, 3, 3, 3, 3, 3, 3, 3, 3, 3,  0, 1, 2, 3];
-        let subject = vec![0u8, 1, 2, 3,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  0, 1, 2, 3];
+        let query = vec![0u8, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 1, 2, 3];
+        let subject = vec![0u8, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3];
         // x_dropoff = 5: after 4 matches (score 8), mismatches bring score to 8-3=5, 5-3=2, 2-3=-1
         // When best-current > 5, we stop
         let result_tight = gapped_align(&query, &subject, 0, 0, 2, -3, 5, 2, 5);
@@ -255,9 +293,12 @@ mod tests {
         let (score_tight, _) = result_tight.unwrap();
         let (score_generous, _) = result_generous.unwrap();
         // Tight x_dropoff score should be <= generous score
-        assert!(score_tight <= score_generous,
+        assert!(
+            score_tight <= score_generous,
             "tight score {} should be <= generous score {}",
-            score_tight, score_generous);
+            score_tight,
+            score_generous
+        );
     }
 
     /// Alignment requiring a gap of length > 1.
@@ -266,19 +307,36 @@ mod tests {
         // Query:   ACGTACGTACGT------ACGTACGTACGT  (24 bp)
         // Subject: ACGTACGTACGTAAAAAACGTACGTACGT   (29 bp) — 5 extra A's
         // Long flanks make the gap worthwhile even with affine penalties.
-        let query: Vec<u8>   = [0,1,2,3,0,1,2,3,0,1,2,3, 0,1,2,3,0,1,2,3,0,1,2,3].to_vec();
-        let subject: Vec<u8> = [0,1,2,3,0,1,2,3,0,1,2,3, 0,0,0,0,0, 0,1,2,3,0,1,2,3,0,1,2,3].to_vec();
+        let query: Vec<u8> = [
+            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+        ]
+        .to_vec();
+        let subject: Vec<u8> = [
+            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+        ]
+        .to_vec();
         let result = gapped_align(&query, &subject, 0, 0, 2, -3, 3, 1, 100);
         assert!(result.is_some());
         let (score, esp) = result.unwrap();
         assert!(score > 0, "score={}", score);
         // Find the gap operation and verify its length > 1
-        let gap_ops: Vec<_> = esp.ops.iter()
+        let gap_ops: Vec<_> = esp
+            .ops
+            .iter()
             .filter(|(op, _)| *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins)
             .collect();
-        assert!(!gap_ops.is_empty(), "expected gap operations, ops={:?}", esp.ops);
+        assert!(
+            !gap_ops.is_empty(),
+            "expected gap operations, ops={:?}",
+            esp.ops
+        );
         let max_gap_len = gap_ops.iter().map(|(_, n)| *n).max().unwrap_or(0);
-        assert!(max_gap_len > 1, "expected gap length > 1, got {}, ops={:?}", max_gap_len, esp.ops);
+        assert!(
+            max_gap_len > 1,
+            "expected gap length > 1, got {}, ops={:?}",
+            max_gap_len,
+            esp.ops
+        );
     }
 
     #[test]

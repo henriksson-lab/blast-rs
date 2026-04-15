@@ -43,7 +43,11 @@ pub fn traceback_align(
 
     for i in 1..=m {
         for j in 1..=n {
-            let match_score = if q[i - 1] == s[j - 1] { reward } else { penalty };
+            let match_score = if q[i - 1] == s[j - 1] {
+                reward
+            } else {
+                penalty
+            };
             let diag = h[i - 1][j - 1] + match_score;
 
             e[i][j] = (h[i - 1][j] - gap_oe).max(e[i - 1][j] - gap_extend);
@@ -142,14 +146,21 @@ pub fn traceback_align(
     let align_q_end = best_i;
     let align_s_end = best_j;
 
-    (best_score, esp, align_q_start, align_q_end, align_s_start, align_s_end)
+    (
+        best_score,
+        esp,
+        align_q_start,
+        align_q_end,
+        align_s_start,
+        align_s_end,
+    )
 }
 
 /// Result of a traceback alignment.
 pub struct TracebackResult {
     pub score: i32,
     pub edit_script: GapEditScript,
-    pub query_start: usize,  // 0-based in original sequence
+    pub query_start: usize, // 0-based in original sequence
     pub query_end: usize,
     pub subject_start: usize,
     pub subject_end: usize,
@@ -177,8 +188,7 @@ pub fn traceback_align_abs(
     }
 
     let (score, esp, aq_start, aq_end, as_start, as_end) = traceback_align(
-        query, subject, q_start, q_end, s_start, s_end,
-        reward, penalty, gap_open, gap_extend,
+        query, subject, q_start, q_end, s_start, s_end, reward, penalty, gap_open, gap_extend,
     );
 
     if score <= 0 {
@@ -208,34 +218,66 @@ const SCRIPT_EXTEND_GAP_A: u8 = 0x10;
 const SCRIPT_EXTEND_GAP_B: u8 = 0x40;
 
 #[derive(Clone, Copy)]
-struct GapDP { best: i32, best_gap: i32 }
+struct GapDP {
+    best: i32,
+    best_gap: i32,
+}
 
 fn script_to_op(s: u8) -> GapAlignOpType {
-    match s { SCRIPT_GAP_IN_A => GapAlignOpType::Del, SCRIPT_GAP_IN_B => GapAlignOpType::Ins, _ => GapAlignOpType::Sub }
+    match s {
+        SCRIPT_GAP_IN_A => GapAlignOpType::Del,
+        SCRIPT_GAP_IN_B => GapAlignOpType::Ins,
+        _ => GapAlignOpType::Sub,
+    }
 }
 
 /// One-directional gapped extension with X-dropoff and traceback (port of ALIGN_EX).
 fn align_ex(
-    a: &[u8], b: &[u8], m: usize, n: usize,
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
     matrix: &[[i32; 16]; 16],
-    gap_open: i32, gap_extend: i32, mut x_dropoff: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    mut x_dropoff: i32,
     reverse: bool,
 ) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
     let gap_oe = gap_open + gap_extend;
-    if x_dropoff < gap_oe { x_dropoff = gap_oe; }
-    if m == 0 || n == 0 { return (0, 0, 0, Vec::new()); }
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return (0, 0, 0, Vec::new());
+    }
 
-    let extra = if gap_extend > 0 { (x_dropoff / gap_extend) as usize + 3 } else { n + 3 };
+    let extra = if gap_extend > 0 {
+        (x_dropoff / gap_extend) as usize + 3
+    } else {
+        n + 3
+    };
     // Cap allocation: band never exceeds extra width from diagonal
     let alloc = (extra * 2 + 20).min(n + extra + 10);
-    let mut sa = vec![GapDP { best: MININT, best_gap: MININT }; alloc];
+    let mut sa = vec![
+        GapDP {
+            best: MININT,
+            best_gap: MININT
+        };
+        alloc
+    ];
 
     // Row 0 initialization
-    sa[0] = GapDP { best: 0, best_gap: -gap_oe };
+    sa[0] = GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    };
     let mut score = -gap_oe;
     let mut b_size = 1usize;
     while b_size <= n && score >= -x_dropoff {
-        sa[b_size] = GapDP { best: score, best_gap: score - gap_oe };
+        sa[b_size] = GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        };
         score -= gap_extend;
         b_size += 1;
     }
@@ -268,23 +310,37 @@ fn align_ex(
             } else {
                 bi + 1
             };
-            if b_idx >= b.len() { break; }
+            if b_idx >= b.len() {
+                break;
+            }
             let b_letter = b[b_idx];
             let sgc = sa[bi].best_gap; // score_gap_col
             let next_sc = sa[bi].best + mrow[b_letter as usize & 0x0F];
 
             // Best predecessor
             let mut script = SCRIPT_SUB;
-            if sc < sgc { script = SCRIPT_GAP_IN_B; sc = sgc; }
-            if sc < sgr { script = SCRIPT_GAP_IN_A; sc = sgr; }
+            if sc < sgc {
+                script = SCRIPT_GAP_IN_B;
+                sc = sgc;
+            }
+            if sc < sgr {
+                script = SCRIPT_GAP_IN_A;
+                sc = sgr;
+            }
 
             if best_score - sc > x_dropoff {
-                if first_b == bi { first_b += 1; }
+                if first_b == bi {
+                    first_b += 1;
+                }
                 sa[bi].best = MININT;
                 // Note: C code does NOT reset best_gap here
             } else {
                 last_b = bi;
-                if sc > best_score { best_score = sc; a_off = ai; b_off = bi; }
+                if sc > best_score {
+                    best_score = sc;
+                    a_off = ai;
+                    b_off = bi;
+                }
 
                 // Update gap scores
                 if sgc - gap_extend < sc - gap_oe {
@@ -302,7 +358,9 @@ fn align_ex(
                 sa[bi].best = sc;
             }
             sc = next_sc;
-            if bi < row_script.len() { row_script[bi] = script; }
+            if bi < row_script.len() {
+                row_script[bi] = script;
+            }
         }
 
         // Handle the last diagonal value that extends one column past the loop bounds.
@@ -318,7 +376,9 @@ fn align_ex(
                 if bi_extra < row_script.len() {
                     row_script[bi_extra] = SCRIPT_SUB;
                 }
-                if bi_extra >= b_size { b_size = bi_extra + 1; }
+                if bi_extra >= b_size {
+                    b_size = bi_extra + 1;
+                }
                 last_b = bi_extra;
             }
         }
@@ -326,22 +386,46 @@ fn align_ex(
         scripts.push(row_script);
         row_starts.push(first_b);
 
-        if first_b >= b_size { break; }
+        if first_b >= b_size {
+            break;
+        }
 
         if last_b < b_size - 1 {
             b_size = last_b + 1;
         } else {
             // Extend band rightward
             while sgr >= best_score - x_dropoff && b_size <= n {
-                if b_size >= sa.len() { sa.resize(b_size + 10, GapDP { best: MININT, best_gap: MININT }); }
-                sa[b_size] = GapDP { best: sgr, best_gap: sgr - gap_oe };
+                if b_size >= sa.len() {
+                    sa.resize(
+                        b_size + 10,
+                        GapDP {
+                            best: MININT,
+                            best_gap: MININT,
+                        },
+                    );
+                }
+                sa[b_size] = GapDP {
+                    best: sgr,
+                    best_gap: sgr - gap_oe,
+                };
                 sgr -= gap_extend;
                 b_size += 1;
             }
         }
         if b_size <= n {
-            if b_size >= sa.len() { sa.resize(b_size + 10, GapDP { best: MININT, best_gap: MININT }); }
-            sa[b_size] = GapDP { best: MININT, best_gap: MININT };
+            if b_size >= sa.len() {
+                sa.resize(
+                    b_size + 10,
+                    GapDP {
+                        best: MININT,
+                        best_gap: MININT,
+                    },
+                );
+            }
+            sa[b_size] = GapDP {
+                best: MININT,
+                best_gap: MININT,
+            };
             b_size += 1;
         }
     }
@@ -353,25 +437,63 @@ fn align_ex(
     let mut cur_script = SCRIPT_SUB;
 
     while ai > 0 || bi > 0 {
-        if ai >= scripts.len() { break; }
-        if bi >= scripts[ai].len() { break; }
+        if ai >= scripts.len() {
+            break;
+        }
+        if bi >= scripts[ai].len() {
+            break;
+        }
         let s = scripts[ai][bi];
 
         cur_script = match cur_script & SCRIPT_OP_MASK {
-            SCRIPT_GAP_IN_A => if s & SCRIPT_EXTEND_GAP_A != 0 { SCRIPT_GAP_IN_A } else { s & SCRIPT_OP_MASK },
-            SCRIPT_GAP_IN_B => if s & SCRIPT_EXTEND_GAP_B != 0 { SCRIPT_GAP_IN_B } else { s & SCRIPT_OP_MASK },
+            SCRIPT_GAP_IN_A => {
+                if s & SCRIPT_EXTEND_GAP_A != 0 {
+                    SCRIPT_GAP_IN_A
+                } else {
+                    s & SCRIPT_OP_MASK
+                }
+            }
+            SCRIPT_GAP_IN_B => {
+                if s & SCRIPT_EXTEND_GAP_B != 0 {
+                    SCRIPT_GAP_IN_B
+                } else {
+                    s & SCRIPT_OP_MASK
+                }
+            }
             _ => s & SCRIPT_OP_MASK,
         };
 
         let op = script_to_op(cur_script);
         match cur_script & SCRIPT_OP_MASK {
-            SCRIPT_GAP_IN_A => { if bi == 0 { break; } bi -= 1; },
-            SCRIPT_GAP_IN_B => { if ai == 0 { break; } ai -= 1; },
-            _ => { if ai == 0 || bi == 0 { break; } ai -= 1; bi -= 1; },
+            SCRIPT_GAP_IN_A => {
+                if bi == 0 {
+                    break;
+                }
+                bi -= 1;
+            }
+            SCRIPT_GAP_IN_B => {
+                if ai == 0 {
+                    break;
+                }
+                ai -= 1;
+            }
+            _ => {
+                if ai == 0 || bi == 0 {
+                    break;
+                }
+                ai -= 1;
+                bi -= 1;
+            }
         }
         if let Some(last) = ops.last_mut() {
-            if last.0 == op { last.1 += 1; } else { ops.push((op, 1)); }
-        } else { ops.push((op, 1)); }
+            if last.0 == op {
+                last.1 += 1;
+            } else {
+                ops.push((op, 1));
+            }
+        } else {
+            ops.push((op, 1));
+        }
     }
 
     (best_score, a_off, b_off, ops)
@@ -379,26 +501,37 @@ fn align_ex(
 
 /// Build full BLASTNA 16x16 scoring matrix matching C engine's BlastScoreBlkNuclMatrixCreate.
 pub fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
-    const BLASTNA_TO_NCBI4NA: [u8; 16] = [1,2,4,8,5,10,3,12,9,6,14,13,11,7,15,0];
+    const BLASTNA_TO_NCBI4NA: [u8; 16] = [1, 2, 4, 8, 5, 10, 3, 12, 9, 6, 14, 13, 11, 7, 15, 0];
     let mut matrix = [[0i32; 16]; 16];
     // Compute degeneracy
     let mut deg = [0i32; 16];
-    for i in 0..4 { deg[i] = 1; }
+    for i in 0..4 {
+        deg[i] = 1;
+    }
     for i in 4..16 {
-        for j in 0..4 { if BLASTNA_TO_NCBI4NA[i] & BLASTNA_TO_NCBI4NA[j] != 0 { deg[i] += 1; } }
+        for j in 0..4 {
+            if BLASTNA_TO_NCBI4NA[i] & BLASTNA_TO_NCBI4NA[j] != 0 {
+                deg[i] += 1;
+            }
+        }
     }
     for i in 0..16 {
         for j in i..16 {
             let s = if BLASTNA_TO_NCBI4NA[i] & BLASTNA_TO_NCBI4NA[j] != 0 {
                 let d = deg[j] as f64;
                 (((d - 1.0) * penalty as f64 + reward as f64) / d).round() as i32
-            } else { penalty };
+            } else {
+                penalty
+            };
             matrix[i][j] = s;
             matrix[j][i] = s;
         }
     }
     // Sentinel row/col (gap = index 15)
-    for i in 0..16 { matrix[15][i] = i32::MIN / 2; matrix[i][15] = i32::MIN / 2; }
+    for i in 0..16 {
+        matrix[15][i] = i32::MIN / 2;
+        matrix[i][15] = i32::MIN / 2;
+    }
     matrix
 }
 
@@ -406,10 +539,14 @@ pub fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
 /// Fast score-only gapped extension (no traceback).
 /// Port of C engine's Blast_SemiGappedAlign — computes only the score.
 pub fn blast_gapped_score_only(
-    query: &[u8], subject: &[u8],
-    seed_q: usize, seed_s: usize,
-    reward: i32, penalty: i32,
-    gap_open: i32, gap_extend: i32,
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
     x_dropoff: i32,
 ) -> i32 {
     let gap_oe = gap_open + gap_extend;
@@ -417,16 +554,33 @@ pub fn blast_gapped_score_only(
 
     // Left extension (score only)
     let score_l = gapped_score_one_dir(
-        &query[..seed_q + 1], &subject[..seed_s + 1],
-        seed_q + 1, seed_s + 1, &matrix, gap_oe, gap_extend, x_dropoff, true);
+        &query[..seed_q + 1],
+        &subject[..seed_s + 1],
+        seed_q + 1,
+        seed_s + 1,
+        &matrix,
+        gap_oe,
+        gap_extend,
+        x_dropoff,
+        true,
+    );
 
     // Right extension (score only)
     let score_r = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
         gapped_score_one_dir(
-            &query[seed_q..], &subject[seed_s..],
-            query.len() - seed_q - 1, subject.len() - seed_s - 1,
-            &matrix, gap_oe, gap_extend, x_dropoff, false)
-    } else { 0 };
+            &query[seed_q..],
+            &subject[seed_s..],
+            query.len() - seed_q - 1,
+            subject.len() - seed_s - 1,
+            &matrix,
+            gap_oe,
+            gap_extend,
+            x_dropoff,
+            false,
+        )
+    } else {
+        0
+    };
 
     score_l + score_r
 }
@@ -434,24 +588,45 @@ pub fn blast_gapped_score_only(
 /// One-directional score-only gapped extension with X-dropoff.
 /// Much faster than align_ex because no traceback storage/recording.
 fn gapped_score_one_dir(
-    a: &[u8], b: &[u8], m: usize, n: usize,
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
     matrix: &[[i32; 16]; 16],
-    gap_oe: i32, gap_extend: i32, mut x_dropoff: i32,
+    gap_oe: i32,
+    gap_extend: i32,
+    mut x_dropoff: i32,
     reverse: bool,
 ) -> i32 {
-    if x_dropoff < gap_oe { x_dropoff = gap_oe; }
-    if m == 0 || n == 0 { return 0; }
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return 0;
+    }
 
     // Cap allocation to x_dropoff band width (like C engine's dp_mem_alloc = 1000)
     // The band never grows wider than x_dropoff/gap_extend + some margin
     let max_band = ((x_dropoff / gap_extend.max(1)) as usize + 10).min(n + 1);
-    let mut sa = vec![GapDP { best: MININT, best_gap: MININT }; max_band];
+    let mut sa = vec![
+        GapDP {
+            best: MININT,
+            best_gap: MININT
+        };
+        max_band
+    ];
 
-    sa[0] = GapDP { best: 0, best_gap: -gap_oe };
+    sa[0] = GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    };
     let mut score = -gap_oe;
     let mut b_size = 1usize;
     while b_size <= n && b_size < sa.len() && score >= -x_dropoff {
-        sa[b_size] = GapDP { best: score, best_gap: score - gap_oe };
+        sa[b_size] = GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        };
         score -= gap_extend;
         b_size += 1;
     }
@@ -469,27 +644,45 @@ fn gapped_score_one_dir(
         for bi in first_b..b_size {
             let b_idx = if reverse {
                 n.checked_sub(1 + bi).unwrap_or(usize::MAX)
-            } else { bi + 1 };
-            if b_idx >= b.len() { break; }
+            } else {
+                bi + 1
+            };
+            if b_idx >= b.len() {
+                break;
+            }
             let b_letter = b[b_idx];
 
             let sgc = sa[bi].best_gap;
             let next_sc = sa[bi].best + mrow[b_letter as usize & 0x0F];
 
             // Three-way max
-            if sc < sgc { sc = sgc; }
-            if sc < sgr { sc = sgr; }
+            if sc < sgc {
+                sc = sgc;
+            }
+            if sc < sgr {
+                sc = sgr;
+            }
 
             if best_score - sc > x_dropoff {
-                if first_b == bi { first_b += 1; }
+                if first_b == bi {
+                    first_b += 1;
+                }
                 sa[bi].best = MININT;
             } else {
                 last_b = bi;
-                if sc > best_score { best_score = sc; }
-                if sgc - gap_extend < sc - gap_oe { sa[bi].best_gap = sc - gap_oe; }
-                else { sa[bi].best_gap = sgc - gap_extend; }
-                if sgr - gap_extend < sc - gap_oe { sgr = sc - gap_oe; }
-                else { sgr -= gap_extend; }
+                if sc > best_score {
+                    best_score = sc;
+                }
+                if sgc - gap_extend < sc - gap_oe {
+                    sa[bi].best_gap = sc - gap_oe;
+                } else {
+                    sa[bi].best_gap = sgc - gap_extend;
+                }
+                if sgr - gap_extend < sc - gap_oe {
+                    sgr = sc - gap_oe;
+                } else {
+                    sgr -= gap_extend;
+                }
                 sa[bi].best = sc;
             }
             sc = next_sc;
@@ -500,17 +693,26 @@ fn gapped_score_one_dir(
             best_score = sc;
         }
 
-        if first_b >= b_size { break; }
-        if last_b < b_size - 1 { b_size = last_b + 1; }
-        else {
+        if first_b >= b_size {
+            break;
+        }
+        if last_b < b_size - 1 {
+            b_size = last_b + 1;
+        } else {
             while sgr >= best_score - x_dropoff && b_size <= n && b_size < sa.len() {
-                sa[b_size] = GapDP { best: sgr, best_gap: sgr - gap_oe };
+                sa[b_size] = GapDP {
+                    best: sgr,
+                    best_gap: sgr - gap_oe,
+                };
                 sgr -= gap_extend;
                 b_size += 1;
             }
         }
         if b_size <= n && b_size < sa.len() {
-            sa[b_size] = GapDP { best: MININT, best_gap: MININT };
+            sa[b_size] = GapDP {
+                best: MININT,
+                best_gap: MININT,
+            };
             b_size += 1;
         }
     }
@@ -518,10 +720,14 @@ fn gapped_score_one_dir(
 }
 
 pub fn blast_gapped_align(
-    query: &[u8], subject: &[u8],
-    seed_q: usize, seed_s: usize,
-    reward: i32, penalty: i32,
-    gap_open: i32, gap_extend: i32,
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<TracebackResult> {
     // Build full BLASTNA scoring matrix matching C engine (handles ambiguous bases)
@@ -529,9 +735,15 @@ pub fn blast_gapped_align(
 
     // Left extension (reverse)
     let (score_l, ql, sl, left_ops) = align_ex(
-        &query[..seed_q + 1], &subject[..seed_s + 1],
-        seed_q + 1, seed_s + 1,
-        &matrix, gap_open, gap_extend, x_dropoff, true,
+        &query[..seed_q + 1],
+        &subject[..seed_s + 1],
+        seed_q + 1,
+        seed_s + 1,
+        &matrix,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+        true,
     );
     let q_start = seed_q + 1 - ql;
     let s_start = seed_s + 1 - sl;
@@ -539,23 +751,41 @@ pub fn blast_gapped_align(
     // Right extension (forward)
     let (score_r, qr, sr, right_ops) = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
         align_ex(
-            &query[seed_q..], &subject[seed_s..],
-            query.len() - seed_q - 1, subject.len() - seed_s - 1,
-            &matrix, gap_open, gap_extend, x_dropoff, false,
+            &query[seed_q..],
+            &subject[seed_s..],
+            query.len() - seed_q - 1,
+            subject.len() - seed_s - 1,
+            &matrix,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            false,
         )
-    } else { (0, 0, 0, Vec::new()) };
+    } else {
+        (0, 0, 0, Vec::new())
+    };
 
     let total_score = score_l + score_r;
-    if total_score <= 0 { return None; }
+    if total_score <= 0 {
+        return None;
+    }
 
     // Build edit script: left ops (already in forward order) + right ops (reversed)
     let mut esp = GapEditScript::new();
-    for &(op, cnt) in &left_ops { esp.push(op, cnt); }
-    for &(op, cnt) in right_ops.iter().rev() { esp.push(op, cnt); }
+    for &(op, cnt) in &left_ops {
+        esp.push(op, cnt);
+    }
+    for &(op, cnt) in right_ops.iter().rev() {
+        esp.push(op, cnt);
+    }
 
     // Prune terminal gaps
-    while !esp.ops.is_empty() && esp.ops[0].0 != GapAlignOpType::Sub { esp.ops.remove(0); }
-    while !esp.ops.is_empty() && esp.ops.last().unwrap().0 != GapAlignOpType::Sub { esp.ops.pop(); }
+    while !esp.ops.is_empty() && esp.ops[0].0 != GapAlignOpType::Sub {
+        esp.ops.remove(0);
+    }
+    while !esp.ops.is_empty() && esp.ops.last().unwrap().0 != GapAlignOpType::Sub {
+        esp.ops.pop();
+    }
 
     Some(TracebackResult {
         score: total_score,
@@ -604,10 +834,16 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(r.score > 0);
-        assert!(r.subject_start >= 100 && r.subject_start <= 104,
-            "Subject start should be near 100, got {}", r.subject_start);
-        assert!(r.subject_end >= 104 && r.subject_end <= 108,
-            "Subject end should be near 108, got {}", r.subject_end);
+        assert!(
+            r.subject_start >= 100 && r.subject_start <= 104,
+            "Subject start should be near 100, got {}",
+            r.subject_start
+        );
+        assert!(
+            r.subject_end >= 104 && r.subject_end <= 108,
+            "Subject end should be near 108, got {}",
+            r.subject_end
+        );
     }
 
     #[test]
@@ -617,17 +853,26 @@ mod tests {
         let r = blast_gapped_align(&q, &s, 4, 4, 1, -3, 5, 2, 30);
         assert!(r.is_some(), "Should find alignment");
         let r = r.unwrap();
-        eprintln!("blast_gapped: score={} q={}..{} s={}..{} ops={:?}", r.score, r.query_start, r.query_end, r.subject_start, r.subject_end, r.edit_script.ops);
+        eprintln!(
+            "blast_gapped: score={} q={}..{} s={}..{} ops={:?}",
+            r.score, r.query_start, r.query_end, r.subject_start, r.subject_end, r.edit_script.ops
+        );
         assert!(r.score > 0, "score={}", r.score);
         // Check edit script has content
-        let total_ops: i32 = r.edit_script.ops.iter().map(|(_,n)| *n).sum();
-        assert!(total_ops > 0, "edit script should have operations, got {:?}", r.edit_script.ops);
+        let total_ops: i32 = r.edit_script.ops.iter().map(|(_, n)| *n).sum();
+        assert!(
+            total_ops > 0,
+            "edit script should have operations, got {:?}",
+            r.edit_script.ops
+        );
     }
 
     #[test]
     fn test_align_ex_forward() {
         let mut matrix = [[-3i32; 16]; 16];
-        for i in 0..4 { matrix[i][i] = 1; }
+        for i in 0..4 {
+            matrix[i][i] = 1;
+        }
         let a = vec![255u8, 0, 1, 2, 3]; // pad + ACGT
         let b = vec![255u8, 0, 1, 2, 3, 255]; // pad + ACGT + pad
         let (score, ao, bo, ops) = align_ex(&a, &b, 4, 4, &matrix, 5, 2, 30, false);
@@ -644,10 +889,15 @@ mod tests {
     #[test]
     fn test_traceback_with_gap_in_query() {
         // 12 matching bases + 4 extra in subject + 12 matching bases
-        let q: Vec<u8> = [0,1,2,3,0,1,2,3,0,1,2,3,  0,1,2,3,0,1,2,3,0,1,2,3].to_vec(); // 24 bp
-        let s: Vec<u8> = [0,1,2,3,0,1,2,3,0,1,2,3,  0,0,0,0,  0,1,2,3,0,1,2,3,0,1,2,3].to_vec(); // 28 bp
-        let (score, esp, _, _, _, _) =
-            traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
+        let q: Vec<u8> = [
+            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+        ]
+        .to_vec(); // 24 bp
+        let s: Vec<u8> = [
+            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+        ]
+        .to_vec(); // 28 bp
+        let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
         assert!(score > 0, "should find alignment, score={}", score);
         // The edit script should contain an Ins operation (extra subject bases => gap in query)
         // In gapinfo convention: Ins = "insertion in query" = advancing subject without query
@@ -660,10 +910,15 @@ mod tests {
     /// Subject: ACGTACGTACGT----ACGTACGTACGT  (24 bp)
     #[test]
     fn test_traceback_with_gap_in_subject() {
-        let q: Vec<u8> = [0,1,2,3,0,1,2,3,0,1,2,3,  0,0,0,0,  0,1,2,3,0,1,2,3,0,1,2,3].to_vec(); // 28 bp
-        let s: Vec<u8> = [0,1,2,3,0,1,2,3,0,1,2,3,  0,1,2,3,0,1,2,3,0,1,2,3].to_vec(); // 24 bp
-        let (score, esp, _, _, _, _) =
-            traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
+        let q: Vec<u8> = [
+            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+        ]
+        .to_vec(); // 28 bp
+        let s: Vec<u8> = [
+            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+        ]
+        .to_vec(); // 24 bp
+        let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
         assert!(score > 0, "should find alignment, score={}", score);
         // The edit script should contain a Del operation (extra query bases => gap in subject)
         // In gapinfo convention: Del = "deletion in query" = advancing query without subject
@@ -677,16 +932,21 @@ mod tests {
     #[test]
     fn test_traceback_multiple_gaps() {
         // Query is shorter; subject has extra bases in two places
-        let q = vec![0u8, 1, 2, 3, 3, 0, 1, 2, 3];           // ACGTTACGT (9 bp)
-        let s = vec![0u8, 1, 2, 0, 0, 3, 3, 0, 1, 1, 2, 3];  // ACGAATTACCGT (12 bp)
-        let (score, esp, _, _, _, _) =
-            traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
+        let q = vec![0u8, 1, 2, 3, 3, 0, 1, 2, 3]; // ACGTTACGT (9 bp)
+        let s = vec![0u8, 1, 2, 0, 0, 3, 3, 0, 1, 1, 2, 3]; // ACGAATTACCGT (12 bp)
+        let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
         assert!(score > 0, "should find alignment, score={}", score);
         // Count gap operations (Del = gap in query)
-        let gap_ops: Vec<_> = esp.ops.iter()
+        let gap_ops: Vec<_> = esp
+            .ops
+            .iter()
             .filter(|(op, _)| *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins)
             .collect();
-        assert!(!gap_ops.is_empty(), "expected at least one gap operation, ops={:?}", esp.ops);
+        assert!(
+            !gap_ops.is_empty(),
+            "expected at least one gap operation, ops={:?}",
+            esp.ops
+        );
     }
 
     /// Verify start/end coordinates are correct for a known alignment.
@@ -695,7 +955,7 @@ mod tests {
         // Embed a match region at positions 5..13 in both sequences, surrounded by mismatches
         let mut q = vec![3u8; 20]; // all T
         let mut s = vec![2u8; 20]; // all G (mismatches with T)
-        // Place ACGTACGT at q[5..13] and s[5..13]
+                                   // Place ACGTACGT at q[5..13] and s[5..13]
         for (i, &b) in [0u8, 1, 2, 3, 0, 1, 2, 3].iter().enumerate() {
             q[5 + i] = b;
             s[5 + i] = b;
@@ -718,13 +978,23 @@ mod tests {
     #[test]
     fn test_traceback_score_matches_dp() {
         let q = vec![0u8, 1, 2, 3, 3, 0, 1, 2, 3]; // ACGTTACGT
-        let s = vec![0u8, 1, 2, 0, 3, 0, 1, 2, 3];  // ACGATACGT
+        let s = vec![0u8, 1, 2, 0, 3, 0, 1, 2, 3]; // ACGATACGT
         let reward = 2i32;
         let penalty = -3i32;
         let gap_open = 5i32;
         let gap_ext = 2i32;
-        let (score, esp, aq_start, _, as_start, _) =
-            traceback_align(&q, &s, 0, q.len(), 0, s.len(), reward, penalty, gap_open, gap_ext);
+        let (score, esp, aq_start, _, as_start, _) = traceback_align(
+            &q,
+            &s,
+            0,
+            q.len(),
+            0,
+            s.len(),
+            reward,
+            penalty,
+            gap_open,
+            gap_ext,
+        );
         assert!(score > 0);
         // Recompute score from edit script
         let mut computed_score = 0i32;
@@ -752,15 +1022,19 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(score, computed_score,
+        assert_eq!(
+            score, computed_score,
             "DP score {} should match recomputed score {} from edit script {:?}",
-            score, computed_score, esp.ops);
+            score, computed_score, esp.ops
+        );
     }
 
     #[test]
     fn test_align_ex_reverse() {
         let mut matrix = [[-3i32; 16]; 16];
-        for i in 0..4 { matrix[i][i] = 2; } // reward=2 for stronger diagonal signal
+        for i in 0..4 {
+            matrix[i][i] = 2;
+        } // reward=2 for stronger diagonal signal
         let a = vec![0u8, 1, 2, 3, 0];
         let b = vec![0u8, 1, 2, 3, 0];
         let (score, ao, _bo, ops) = align_ex(&a, &b, 5, 5, &matrix, 5, 2, 30, true);

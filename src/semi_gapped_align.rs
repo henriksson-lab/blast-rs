@@ -19,17 +19,19 @@ pub struct GapDP {
 /// Returns (best_score, a_offset, b_offset) where offsets are how far
 /// the extension reached in A and B respectively.
 pub fn semi_gapped_align(
-    a: &[u8],          // query (or reversed query)
-    b: &[u8],          // subject (or reversed subject)
-    m: usize,           // length of A to consider
-    n: usize,           // length of B to consider
+    a: &[u8], // query (or reversed query)
+    b: &[u8], // subject (or reversed subject)
+    m: usize, // length of A to consider
+    n: usize, // length of B to consider
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     gap_open: i32,
     gap_extend: i32,
     x_dropoff: i32,
     reverse: bool,
 ) -> (i32, usize, usize) {
-    if m == 0 || n == 0 { return (0, 0, 0); }
+    if m == 0 || n == 0 {
+        return (0, 0, 0);
+    }
 
     let gap_open_extend = gap_open + gap_extend;
     let mut x_dropoff = x_dropoff;
@@ -45,12 +47,18 @@ pub fn semi_gapped_align(
     };
 
     let mut score_array: Vec<GapDP> = Vec::with_capacity(num_extra_cells + 100);
-    score_array.push(GapDP { best: 0, best_gap: -gap_open_extend });
+    score_array.push(GapDP {
+        best: 0,
+        best_gap: -gap_open_extend,
+    });
 
     let mut score = -gap_open_extend;
     let mut i = 1;
     while i <= n && score >= -x_dropoff {
-        score_array.push(GapDP { best: score, best_gap: score - gap_open_extend });
+        score_array.push(GapDP {
+            best: score,
+            best_gap: score - gap_open_extend,
+        });
         score -= gap_extend;
         i += 1;
     }
@@ -68,12 +76,14 @@ pub fn semi_gapped_align(
         } else {
             a[a_index] as usize
         };
-        if a_letter >= AA_SIZE { continue; }
+        if a_letter >= AA_SIZE {
+            continue;
+        }
         let matrix_row = &matrix[a_letter];
 
         // Initialize running-score variables
-        let mut sc = MININT;        // score
-        let mut score_gap_row = MININT;  // best score with gap in A (horizontal)
+        let mut sc = MININT; // score
+        let mut score_gap_row = MININT; // best score with gap in A (horizontal)
         let mut last_b_index = first_b_index;
 
         for b_index in first_b_index..b_size {
@@ -84,17 +94,25 @@ pub fn semi_gapped_align(
                 }
             } else {
                 let idx = b_index + 1;
-                if idx >= b.len() { break; }
+                if idx >= b.len() {
+                    break;
+                }
                 b[idx] as usize
             };
-            if b_letter >= AA_SIZE { continue; }
+            if b_letter >= AA_SIZE {
+                continue;
+            }
 
             let score_gap_col = score_array[b_index].best_gap;
             let next_score = score_array[b_index].best + matrix_row[b_letter];
 
             // sc = max(sc, score_gap_col, score_gap_row)
-            if sc < score_gap_col { sc = score_gap_col; }
-            if sc < score_gap_row { sc = score_gap_row; }
+            if sc < score_gap_col {
+                sc = score_gap_col;
+            }
+            if sc < score_gap_row {
+                sc = score_gap_row;
+            }
 
             if best_score - sc > x_dropoff {
                 // Failed x-dropoff
@@ -123,7 +141,9 @@ pub fn semi_gapped_align(
         }
 
         // Check if all positions failed x-dropoff
-        if first_b_index >= b_size { break; }
+        if first_b_index >= b_size {
+            break;
+        }
 
         if last_b_index < b_size - 1 {
             // This row ended early — shrink band
@@ -132,7 +152,10 @@ pub fn semi_gapped_align(
             // Expand band: NCBI grows b_size while score_gap_row is viable
             while score_gap_row >= (best_score - x_dropoff) && b_size <= n {
                 if b_size >= score_array.len() {
-                    score_array.push(GapDP { best: MININT, best_gap: MININT });
+                    score_array.push(GapDP {
+                        best: MININT,
+                        best_gap: MININT,
+                    });
                 }
                 score_array[b_size].best = score_gap_row;
                 score_array[b_size].best_gap = score_gap_row - gap_open_extend;

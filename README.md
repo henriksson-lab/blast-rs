@@ -58,7 +58,7 @@ But:
 - **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `sstrand`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, BTOP, commented tabular, CSV, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
-- **494 passing release tests**: 353 library unit tests + 13 CLI unit tests + 123 integration tests + 4 stress tests + doc tests, plus ignored real-database parity tests
+- **537 passing release tests**: 353 library unit tests + 13 CLI unit tests + 166 integration tests + 4 stress tests + doc tests, plus ignored real-database parity tests
 
 ## Installation
 

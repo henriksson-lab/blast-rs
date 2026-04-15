@@ -4,7 +4,8 @@ mod tabular;
 pub mod xml;
 
 pub use pairwise::{
-    format_pairwise_alignment, format_pairwise_alignment_with_header, format_pairwise_evalue,
+    format_pairwise_alignment, format_pairwise_alignment_with_header,
+    format_pairwise_alignment_with_line_width, format_pairwise_evalue,
 };
 pub use tabular::{
     expanded_column_tokens, field_display_name, format_bitscore, format_evalue, format_tabular,

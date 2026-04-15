@@ -1,6 +1,5 @@
 //! Sequence encoding, complement, and manipulation utilities.
 
-
 /// Encode an IUPAC nucleotide string to BLASTNA.
 pub fn encode_nucleotide(iupac: &[u8]) -> Vec<u8> {
     iupac.iter().map(|&b| iupac_to_blastna(b)).collect()
@@ -32,8 +31,12 @@ pub fn iupac_to_blastna(c: u8) -> u8 {
 /// Complement a BLASTNA-encoded nucleotide.
 #[inline]
 pub fn complement_blastna(b: u8) -> u8 {
-    const TABLE: [u8; 16] = [3,2,1,0, 5,4,7,6, 8,9,13,12,11,10,14,15];
-    if b < 16 { TABLE[b as usize] } else { 15 }
+    const TABLE: [u8; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 13, 12, 11, 10, 14, 15];
+    if b < 16 {
+        TABLE[b as usize]
+    } else {
+        15
+    }
 }
 
 /// Reverse complement a BLASTNA sequence.
@@ -79,10 +82,22 @@ pub fn build_query_block(queries: &[&[u8]]) -> (Vec<u8>, Vec<(i32, i32)>) {
 /// BLASTNA to IUPAC character for display.
 pub fn blastna_to_iupac(b: u8) -> char {
     match b {
-        0 => 'A', 1 => 'C', 2 => 'G', 3 => 'T',
-        4 => 'R', 5 => 'Y', 6 => 'M', 7 => 'K',
-        8 => 'W', 9 => 'S', 10 => 'B', 11 => 'D',
-        12 => 'H', 13 => 'V', 14 => 'N', _ => '-',
+        0 => 'A',
+        1 => 'C',
+        2 => 'G',
+        3 => 'T',
+        4 => 'R',
+        5 => 'Y',
+        6 => 'M',
+        7 => 'K',
+        8 => 'W',
+        9 => 'S',
+        10 => 'B',
+        11 => 'D',
+        12 => 'H',
+        13 => 'V',
+        14 => 'N',
+        _ => '-',
     }
 }
 
@@ -219,7 +234,7 @@ mod tests {
     fn test_build_query_block_two_queries() {
         let (block, offsets) = build_query_block(&[b"AC", b"GT"]);
         assert_eq!(offsets.len(), 4); // 2 queries * 2 contexts
-        // Count sentinels: for 2 queries, each has leading+middle, plus final trailing = 5 sentinels
+                                      // Count sentinels: for 2 queries, each has leading+middle, plus final trailing = 5 sentinels
         let sentinel_count = block.iter().filter(|&&b| b == 15).count();
         assert_eq!(sentinel_count, 5);
     }

@@ -34,7 +34,8 @@ const fn make_code(changes: &[(usize, u8)]) -> [u8; 64] {
 /// Code 2: Vertebrate Mitochondrial (AGA=*, AGG=*, ATA=M, TGA=W)
 pub static GENETIC_CODE_2: [u8; 64] = make_code(&[(8, 25), (10, 25), (12, 12), (56, 20)]);
 /// Code 3: Yeast Mitochondrial (ATA=M, CTN=T, TGA=W)
-pub static GENETIC_CODE_3: [u8; 64] = make_code(&[(12, 12), (28, 18), (29, 18), (30, 18), (31, 18), (56, 20)]);
+pub static GENETIC_CODE_3: [u8; 64] =
+    make_code(&[(12, 12), (28, 18), (29, 18), (30, 18), (31, 18), (56, 20)]);
 /// Code 4: Mold/Protozoan Mitochondrial (TGA=W)
 pub static GENETIC_CODE_4: [u8; 64] = make_code(&[(56, 20)]);
 /// Code 5: Invertebrate Mitochondrial (AGA=S, AGG=S, ATA=M, TGA=W)
@@ -82,12 +83,12 @@ pub static GENETIC_CODE_33: [u8; 64] = make_code(&[(8, 17), (10, 10), (48, 22), 
 pub fn lookup_genetic_code(code: u8) -> &'static [u8; 64] {
     match code {
         1 | 11 => &STANDARD_GENETIC_CODE,
-        2  => &GENETIC_CODE_2,
-        3  => &GENETIC_CODE_3,
-        4  => &GENETIC_CODE_4,
-        5  => &GENETIC_CODE_5,
-        6  => &GENETIC_CODE_6,
-        9  => &GENETIC_CODE_9,
+        2 => &GENETIC_CODE_2,
+        3 => &GENETIC_CODE_3,
+        4 => &GENETIC_CODE_4,
+        5 => &GENETIC_CODE_5,
+        6 => &GENETIC_CODE_6,
+        9 => &GENETIC_CODE_9,
         10 => &GENETIC_CODE_10,
         12 => &GENETIC_CODE_12,
         13 => &GENETIC_CODE_13,
@@ -120,7 +121,12 @@ pub fn six_frame_translation(nuc_seq: &[u8], genetic_code: &[u8; 64]) -> Vec<(i3
         let mut protein = Vec::new();
         let mut i = frame_offset;
         while i + 2 < len {
-            protein.push(translate_codon(nuc_seq[i], nuc_seq[i + 1], nuc_seq[i + 2], genetic_code));
+            protein.push(translate_codon(
+                nuc_seq[i],
+                nuc_seq[i + 1],
+                nuc_seq[i + 2],
+                genetic_code,
+            ));
             i += 3;
         }
         results.push((frame_offset as i32 + 1, protein));
@@ -151,7 +157,12 @@ pub fn six_frame_translation(nuc_seq: &[u8], genetic_code: &[u8; 64]) -> Vec<(i3
 /// - `nuc_len`: total nucleotide sequence length
 ///
 /// Returns 1-based nucleotide coordinates (start, end) as BLAST reports them.
-pub fn protein_to_nuc_coords(prot_start: i32, prot_end: i32, frame: i32, nuc_len: i32) -> (i32, i32) {
+pub fn protein_to_nuc_coords(
+    prot_start: i32,
+    prot_end: i32,
+    frame: i32,
+    nuc_len: i32,
+) -> (i32, i32) {
     if frame > 0 {
         let offset = frame - 1;
         (prot_start * 3 + offset + 1, prot_end * 3 + offset)
@@ -191,7 +202,7 @@ mod tests {
         assert_eq!(frames.len(), 6);
         assert_eq!(frames[0].0, 1); // frame +1
         assert_eq!(frames[3].0, -1); // frame -1
-        // Frame +1: ACG TAC GTA → 3 codons
+                                     // Frame +1: ACG TAC GTA → 3 codons
         assert_eq!(frames[0].1.len(), 3);
     }
 
@@ -257,15 +268,15 @@ mod tests {
         // Verify a selection of codons from the standard genetic code
         // GCN = Ala (1): GCA = idx 2*16+1*4+0 = 36
         assert_eq!(translate_codon(2, 1, 0, &STANDARD_GENETIC_CODE), 1); // GCA -> A
-        // TGC = Cys (3): idx = 3*16+2*4+1 = 57
+                                                                         // TGC = Cys (3): idx = 3*16+2*4+1 = 57
         assert_eq!(translate_codon(3, 2, 1, &STANDARD_GENETIC_CODE), 3); // TGC -> C
-        // GAT = Asp (4): idx = 2*16+0*4+3 = 35
+                                                                         // GAT = Asp (4): idx = 2*16+0*4+3 = 35
         assert_eq!(translate_codon(2, 0, 3, &STANDARD_GENETIC_CODE), 4); // GAT -> D
-        // TTT = Phe (6): idx = 3*16+3*4+3 = 63
+                                                                         // TTT = Phe (6): idx = 3*16+3*4+3 = 63
         assert_eq!(translate_codon(3, 3, 3, &STANDARD_GENETIC_CODE), 6); // TTT -> F
-        // GGT = Gly (7): idx = 2*16+2*4+3 = 43
+                                                                         // GGT = Gly (7): idx = 2*16+2*4+3 = 43
         assert_eq!(translate_codon(2, 2, 3, &STANDARD_GENETIC_CODE), 7); // GGT -> G
-        // TGG = Trp (20): idx = 3*16+2*4+2 = 58
+                                                                         // TGG = Trp (20): idx = 3*16+2*4+2 = 58
         assert_eq!(translate_codon(3, 2, 2, &STANDARD_GENETIC_CODE), 20); // TGG -> W
     }
 
@@ -333,7 +344,7 @@ mod tests {
         let seq = vec![0u8, 3, 2]; // ATG = Met
         let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
         assert_eq!(frames[0].1.len(), 1); // frame +1
-        assert_eq!(frames[0].1[0], 12);   // Met = 12
+        assert_eq!(frames[0].1[0], 12); // Met = 12
         assert_eq!(frames[1].1.len(), 0); // frame +2
         assert_eq!(frames[2].1.len(), 0); // frame +3
     }

@@ -1,9 +1,8 @@
 //! Rust equivalent of blast_hits.c — HSP list management and filtering.
 
-use crate::hspstream::HspList;
 #[cfg(test)]
 use crate::hspstream::Hsp;
-
+use crate::hspstream::HspList;
 
 /// Compute identities and alignment length from query/subject sequences
 /// and a gap edit script. Used after traceback to populate HSP stats.
@@ -28,7 +27,8 @@ pub fn compute_identities(
             3 => {
                 // Substitution
                 for _ in 0..count {
-                    if q_pos < query.len() && s_pos < subject.len()
+                    if q_pos < query.len()
+                        && s_pos < subject.len()
                         && query[q_pos] == subject[s_pos]
                     {
                         num_ident += 1;
@@ -77,9 +77,13 @@ pub fn remove_contained(list: &mut HspList) {
 
     let mut keep = vec![true; list.hsps.len()];
     for i in 0..list.hsps.len() {
-        if !keep[i] { continue; }
+        if !keep[i] {
+            continue;
+        }
         for j in (i + 1)..list.hsps.len() {
-            if !keep[j] { continue; }
+            if !keep[j] {
+                continue;
+            }
             // Check if j is contained within i on both query and subject
             if list.hsps[j].query_offset >= list.hsps[i].query_offset
                 && list.hsps[j].query_end <= list.hsps[i].query_end
@@ -129,14 +133,28 @@ mod tests {
     fn test_filter_by_evalue() {
         let mut list = HspList::new(0);
         list.add_hsp(Hsp {
-            score: 100, num_ident: 50, bit_score: 91.5, evalue: 1e-20,
-            query_offset: 0, query_end: 50, subject_offset: 0, subject_end: 50,
-            context: 0, num_gaps: 0,
+            score: 100,
+            num_ident: 50,
+            bit_score: 91.5,
+            evalue: 1e-20,
+            query_offset: 0,
+            query_end: 50,
+            subject_offset: 0,
+            subject_end: 50,
+            context: 0,
+            num_gaps: 0,
         });
         list.add_hsp(Hsp {
-            score: 20, num_ident: 10, bit_score: 22.3, evalue: 5.0,
-            query_offset: 0, query_end: 10, subject_offset: 0, subject_end: 10,
-            context: 0, num_gaps: 0,
+            score: 20,
+            num_ident: 10,
+            bit_score: 22.3,
+            evalue: 5.0,
+            query_offset: 0,
+            query_end: 10,
+            subject_offset: 0,
+            subject_end: 10,
+            context: 0,
+            num_gaps: 0,
         });
         filter_by_evalue(&mut list, 0.001);
         assert_eq!(list.hsps.len(), 1);
@@ -196,23 +214,33 @@ mod tests {
         // Two HSPs on the same diagonal (query_offset - subject_offset is the same)
         // that overlap in coordinate space.
         let hsp_a = make_hsp(80, 1e-15, 10, 60, 10, 60); // diagonal = 0
-        let hsp_b = make_hsp(50, 1e-8, 40, 80, 40, 80);  // diagonal = 0, overlaps 40..60
+        let hsp_b = make_hsp(50, 1e-8, 40, 80, 40, 80); // diagonal = 0, overlaps 40..60
 
         // Check overlap: ranges [10,60) and [40,80) overlap on both query and subject
-        let q_overlap = hsp_a.query_end > hsp_b.query_offset && hsp_b.query_end > hsp_a.query_offset;
-        let s_overlap = hsp_a.subject_end > hsp_b.subject_offset && hsp_b.subject_end > hsp_a.subject_offset;
-        assert!(q_overlap && s_overlap, "HSPs on the same diagonal should overlap");
+        let q_overlap =
+            hsp_a.query_end > hsp_b.query_offset && hsp_b.query_end > hsp_a.query_offset;
+        let s_overlap =
+            hsp_a.subject_end > hsp_b.subject_offset && hsp_b.subject_end > hsp_a.subject_offset;
+        assert!(
+            q_overlap && s_overlap,
+            "HSPs on the same diagonal should overlap"
+        );
     }
 
     #[test]
     fn test_hsp_no_overlap() {
         // Two HSPs on different diagonals with non-overlapping coordinates.
-        let hsp_a = make_hsp(80, 1e-15, 0, 50, 100, 150);   // diagonal = -100
-        let hsp_b = make_hsp(50, 1e-8, 200, 250, 0, 50);    // diagonal = 200
+        let hsp_a = make_hsp(80, 1e-15, 0, 50, 100, 150); // diagonal = -100
+        let hsp_b = make_hsp(50, 1e-8, 200, 250, 0, 50); // diagonal = 200
 
-        let q_overlap = hsp_a.query_end > hsp_b.query_offset && hsp_b.query_end > hsp_a.query_offset;
-        let s_overlap = hsp_a.subject_end > hsp_b.subject_offset && hsp_b.subject_end > hsp_a.subject_offset;
-        assert!(!q_overlap || !s_overlap, "HSPs on different diagonals should not overlap");
+        let q_overlap =
+            hsp_a.query_end > hsp_b.query_offset && hsp_b.query_end > hsp_a.query_offset;
+        let s_overlap =
+            hsp_a.subject_end > hsp_b.subject_offset && hsp_b.subject_end > hsp_a.subject_offset;
+        assert!(
+            !q_overlap || !s_overlap,
+            "HSPs on different diagonals should not overlap"
+        );
     }
 
     #[test]
@@ -220,8 +248,8 @@ mod tests {
         // One HSP fully contained within another; remove_contained should drop it.
         let mut list = HspList::new(0);
         list.add_hsp(make_hsp(100, 1e-25, 10, 100, 10, 100)); // outer, higher score
-        list.add_hsp(make_hsp(40, 1e-5, 30, 70, 30, 70));     // inner, fully contained
-        list.add_hsp(make_hsp(60, 1e-10, 80, 130, 80, 130));   // separate, not contained
+        list.add_hsp(make_hsp(40, 1e-5, 30, 70, 30, 70)); // inner, fully contained
+        list.add_hsp(make_hsp(60, 1e-10, 80, 130, 80, 130)); // separate, not contained
 
         remove_contained(&mut list);
 
@@ -271,7 +299,11 @@ mod tests {
         assert_eq!(list.hsps.len(), 3);
         // Only HSPs with evalue <= 1e-5 should remain
         for hsp in &list.hsps {
-            assert!(hsp.evalue <= 1e-5, "HSP with evalue {} should have been filtered", hsp.evalue);
+            assert!(
+                hsp.evalue <= 1e-5,
+                "HSP with evalue {} should have been filtered",
+                hsp.evalue
+            );
         }
         let scores: Vec<i32> = list.hsps.iter().map(|h| h.score).collect();
         assert!(scores.contains(&100));
@@ -287,7 +319,14 @@ mod tests {
         let mut hitlist = HitList::new();
         for i in 0..10 {
             let mut hsp_list = HspList::new(i);
-            hsp_list.add_hsp(make_hsp(100 - i * 10, 1e-5 * (i as f64 + 1.0), 0, 50, 0, 50));
+            hsp_list.add_hsp(make_hsp(
+                100 - i * 10,
+                1e-5 * (i as f64 + 1.0),
+                0,
+                50,
+                0,
+                50,
+            ));
             hitlist.add_hsp_list(hsp_list);
         }
         assert_eq!(hitlist.hsp_lists.len(), 10);

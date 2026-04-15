@@ -82,7 +82,8 @@ mod tests {
     /// Parse multi-sequence FASTA, verify count and individual sequences.
     #[test]
     fn test_parse_fasta_multi_sequence() {
-        let input = b">seq1 first\nAAAA\n>seq2 second\nCCCC\n>seq3 third\nGGGG\n>seq4 fourth\nTTTT\n";
+        let input =
+            b">seq1 first\nAAAA\n>seq2 second\nCCCC\n>seq3 third\nGGGG\n>seq4 fourth\nTTTT\n";
         let records = parse_fasta(&input[..]);
         assert_eq!(records.len(), 4);
         assert_eq!(records[0].id, "seq1");
@@ -161,7 +162,11 @@ mod tests {
         let records = parse_fasta(&input[..]);
         assert_eq!(records.len(), 1);
 
-        let encoded: Vec<u8> = records[0].sequence.iter().map(|&b| iupacna_to_blastna(b)).collect();
+        let encoded: Vec<u8> = records[0]
+            .sequence
+            .iter()
+            .map(|&b| iupacna_to_blastna(b))
+            .collect();
         // A=0, C=1, G=2, T=3, N=14, R=4, Y=5
         assert_eq!(encoded, vec![0, 1, 2, 3, 14, 4, 5]);
     }
@@ -175,7 +180,11 @@ mod tests {
         let records = parse_fasta(&input[..]);
         assert_eq!(records.len(), 1);
 
-        let encoded: Vec<u8> = records[0].sequence.iter().map(|&b| aminoacid_to_ncbistdaa(b)).collect();
+        let encoded: Vec<u8> = records[0]
+            .sequence
+            .iter()
+            .map(|&b| aminoacid_to_ncbistdaa(b))
+            .collect();
         // M=12, K=10, F=6, L=11, A=1, G=7
         assert_eq!(encoded, vec![12, 10, 6, 11, 1, 7]);
     }

@@ -59,8 +59,10 @@ impl Diagnostics {
         format!(
             "Lookup hits: {}, Ungapped extensions: {}/{}, Gapped extensions: {}/{}",
             self.ungapped.lookup_hits,
-            self.ungapped.good_init_extends, self.ungapped.init_extends,
-            self.gapped.good_extensions, self.gapped.extensions,
+            self.ungapped.good_init_extends,
+            self.ungapped.init_extends,
+            self.gapped.good_extensions,
+            self.gapped.extensions,
         )
     }
 }

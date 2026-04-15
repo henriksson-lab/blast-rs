@@ -30,7 +30,13 @@ pub fn expanded_column_tokens(columns: &str) -> Vec<&str> {
 #[derive(Clone)]
 pub struct TabularHit {
     pub query_id: String,
+    pub query_gi: Option<String>,
+    pub query_acc: Option<String>,
+    pub query_accver: Option<String>,
     pub subject_id: String,
+    pub subject_gi: Option<String>,
+    pub subject_acc: Option<String>,
+    pub subject_accver: Option<String>,
     pub subject_title: String,
     pub pct_identity: f64,
     pub align_len: i32,
@@ -177,10 +183,24 @@ pub fn field_display_name(column: &str) -> &'static str {
 
 fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> String {
     match column {
-        "qseqid" | "qacc" | "qaccver" => hit.query_id.clone(),
-        "qgi" => "0".to_string(),
-        "sseqid" | "sacc" | "saccver" | "sallseqid" | "sallacc" => hit.subject_id.clone(),
-        "sgi" | "sallgi" => "0".to_string(),
+        "qseqid" => hit.query_id.clone(),
+        "qacc" => hit.query_acc.as_ref().unwrap_or(&hit.query_id).clone(),
+        "qaccver" => hit
+            .query_accver
+            .as_ref()
+            .or(hit.query_acc.as_ref())
+            .unwrap_or(&hit.query_id)
+            .clone(),
+        "qgi" => hit.query_gi.as_deref().unwrap_or("0").to_string(),
+        "sseqid" | "sallseqid" => hit.subject_id.clone(),
+        "sacc" | "sallacc" => hit.subject_acc.as_ref().unwrap_or(&hit.subject_id).clone(),
+        "saccver" => hit
+            .subject_accver
+            .as_ref()
+            .or(hit.subject_acc.as_ref())
+            .unwrap_or(&hit.subject_id)
+            .clone(),
+        "sgi" | "sallgi" => hit.subject_gi.as_deref().unwrap_or("0").to_string(),
         "stitle" | "salltitles" => {
             if hit.subject_title.is_empty() {
                 "N/A".to_string()
@@ -439,7 +459,13 @@ mod tests {
     fn make_hit(qseq: Option<&str>, sseq: Option<&str>) -> TabularHit {
         TabularHit {
             query_id: "q1".to_string(),
+            query_gi: None,
+            query_acc: None,
+            query_accver: None,
             subject_id: "s1".to_string(),
+            subject_gi: None,
+            subject_acc: None,
+            subject_accver: None,
             subject_title: "s1 synthetic title".to_string(),
             pct_identity: 95.0,
             align_len: 50,

@@ -2,7 +2,7 @@
 //! Implements scoring matrices and protein word finding.
 
 use crate::encoding::NCBISTDAA_TO_AMINOACID;
-use crate::gapinfo::{GapEditScript, GapAlignOpType};
+use crate::gapinfo::{GapAlignOpType, GapEditScript};
 use crate::matrix::AA_SIZE;
 
 /// Convert an NCBIstdaa-encoded amino acid to its single-letter IUPAC character.
@@ -27,8 +27,8 @@ pub fn score_aa(matrix: &[[i32; AA_SIZE]; AA_SIZE], aa1: u8, aa2: u8) -> i32 {
 /// Perform ungapped protein extension from a seed position.
 /// Ungapped extension result: (query_start, query_end, subject_start, subject_end, score, num_identities)
 pub fn protein_ungapped_extend(
-    query: &[u8],    // NCBIstdaa encoded
-    subject: &[u8],  // NCBIstdaa encoded
+    query: &[u8],   // NCBIstdaa encoded
+    subject: &[u8], // NCBIstdaa encoded
     q_seed: usize,
     s_seed: usize,
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -54,10 +54,18 @@ pub fn protein_ungapped_extend(
             let q = *qptr.add(qi);
             let s = *sptr.add(si);
             score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
-            if q == s { ident_r += 1; }
+            if q == s {
+                ident_r += 1;
+            }
         }
-        if score > best { best = score; best_r = qi - q_seed + 1; best_ident_r = ident_r; }
-        if best - score > x_dropoff { break; }
+        if score > best {
+            best = score;
+            best_r = qi - q_seed + 1;
+            best_ident_r = ident_r;
+        }
+        if best - score > x_dropoff {
+            break;
+        }
         qi += 1;
         si += 1;
     }
@@ -76,18 +84,30 @@ pub fn protein_ungapped_extend(
                 let q = *qptr.add(qi);
                 let s = *sptr.add(si);
                 sl += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
-                if q == s { ident_l += 1; }
+                if q == s {
+                    ident_l += 1;
+                }
             }
-            if sl > best_l { best_l = sl; best_left = q_seed - qi; best_ident_l = ident_l; }
-            if best_l - sl > x_dropoff { break; }
-            if qi == 0 || si == 0 { break; }
+            if sl > best_l {
+                best_l = sl;
+                best_left = q_seed - qi;
+                best_ident_l = ident_l;
+            }
+            if best_l - sl > x_dropoff {
+                break;
+            }
+            if qi == 0 || si == 0 {
+                break;
+            }
             qi -= 1;
             si -= 1;
         }
     }
 
     let total = best + best_l;
-    if total <= 0 { return None; }
+    if total <= 0 {
+        return None;
+    }
 
     Some((
         q_seed - best_left,
@@ -156,24 +176,37 @@ struct GapDP {
 /// Score-only gapped extension in one direction, matching NCBI Blast_SemiGappedAlign.
 /// Band dynamically expands as needed (no fixed max_band).
 fn protein_gapped_score_one_dir(
-    query: &[u8], subject: &[u8],
-    m: usize, n: usize,
+    query: &[u8],
+    subject: &[u8],
+    m: usize,
+    n: usize,
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
-    gap_oe: i32, gap_extend: i32,
+    gap_oe: i32,
+    gap_extend: i32,
     mut x_dropoff: i32,
     reverse: bool,
 ) -> (i32, usize, usize) {
-    if x_dropoff < gap_oe { x_dropoff = gap_oe; }
-    if m == 0 || n == 0 { return (0, 0, 0); }
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return (0, 0, 0);
+    }
 
     // Initial band size: enough cells to fail x-dropoff (NCBI: num_extra_cells)
     let num_extra_cells = (x_dropoff / gap_extend.max(1)) as usize + 3;
     let mut sa = Vec::with_capacity(num_extra_cells + 100);
-    sa.push(GapDP { best: 0, best_gap: -gap_oe });
+    sa.push(GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    });
 
     let mut score = -gap_oe;
     while sa.len() <= n && score >= -x_dropoff {
-        sa.push(GapDP { best: score, best_gap: score - gap_oe });
+        sa.push(GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        });
         score -= gap_extend;
     }
     let mut b_size = sa.len();
@@ -185,7 +218,9 @@ fn protein_gapped_score_one_dir(
 
     for ai in 1..=m {
         let a_idx = if reverse { m - ai } else { ai };
-        if a_idx >= query.len() { break; }
+        if a_idx >= query.len() {
+            break;
+        }
         let a_letter = query[a_idx] as usize;
 
         let mut sc = MININT;
@@ -195,21 +230,33 @@ fn protein_gapped_score_one_dir(
         for bi in first_b..b_size {
             let b_idx = if reverse {
                 n.checked_sub(1 + bi).unwrap_or(usize::MAX)
-            } else { bi + 1 };
-            if b_idx >= subject.len() { break; }
+            } else {
+                bi + 1
+            };
+            if b_idx >= subject.len() {
+                break;
+            }
             let b_letter = subject[b_idx] as usize;
 
             let sgc = sa[bi].best_gap;
             let mat_score = if a_letter < AA_SIZE && b_letter < AA_SIZE {
                 matrix[a_letter][b_letter]
-            } else { -4 };
+            } else {
+                -4
+            };
             let next_sc = sa[bi].best + mat_score;
 
-            if sc < sgc { sc = sgc; }
-            if sc < sgr { sc = sgr; }
+            if sc < sgc {
+                sc = sgc;
+            }
+            if sc < sgr {
+                sc = sgr;
+            }
 
             if best_score - sc > x_dropoff {
-                if first_b == bi { first_b += 1; }
+                if first_b == bi {
+                    first_b += 1;
+                }
                 sa[bi].best = MININT;
             } else {
                 last_b = bi;
@@ -234,7 +281,9 @@ fn protein_gapped_score_one_dir(
 
         // NCBI band expansion: if the last column's score is still viable,
         // extend the band for the next row (matching Blast_SemiGappedAlign).
-        if first_b >= b_size { break; } // all columns failed x-dropoff
+        if first_b >= b_size {
+            break;
+        } // all columns failed x-dropoff
 
         if last_b < b_size - 1 {
             // Row ended early — shrink band
@@ -244,7 +293,10 @@ fn protein_gapped_score_one_dir(
             // (NCBI: "while score_gap_row >= best_score - x_dropoff")
             while sgr >= best_score - x_dropoff && b_size <= n {
                 if b_size >= sa.len() {
-                    sa.push(GapDP { best: MININT, best_gap: MININT });
+                    sa.push(GapDP {
+                        best: MININT,
+                        best_gap: MININT,
+                    });
                 }
                 sa[b_size].best = sgr;
                 sa[b_size].best_gap = sgr - gap_oe;
@@ -272,8 +324,12 @@ fn protein_nw_traceback(
     let n = subject.len();
     if m == 0 || n == 0 {
         let mut esp = GapEditScript::new();
-        if m > 0 { esp.push(GapAlignOpType::Ins, m as i32); }
-        if n > 0 { esp.push(GapAlignOpType::Del, n as i32); }
+        if m > 0 {
+            esp.push(GapAlignOpType::Ins, m as i32);
+        }
+        if n > 0 {
+            esp.push(GapAlignOpType::Del, n as i32);
+        }
         return (esp, 0, 0, 0, 0, 0);
     }
 
@@ -313,7 +369,11 @@ fn protein_nw_traceback(
             f[idx(i, j)] = f1.max(f2);
 
             // Sub: aligned pair
-            let mat = if qi < AA_SIZE && sj < AA_SIZE { matrix[qi][sj] } else { -4 };
+            let mat = if qi < AA_SIZE && sj < AA_SIZE {
+                matrix[qi][sj]
+            } else {
+                -4
+            };
             let diag = h[idx(i - 1, j - 1)] + mat;
 
             // Local alignment (Smith-Waterman) within x-drop region.
@@ -346,9 +406,19 @@ fn protein_nw_traceback(
     let mut j = best_j;
     while i > 0 && j > 0 && tb[idx(i, j)] != 3 {
         let op = match tb[idx(i, j)] {
-            0 => { i -= 1; j -= 1; GapAlignOpType::Sub }
-            1 => { j -= 1; GapAlignOpType::Del }
-            _ => { i -= 1; GapAlignOpType::Ins }
+            0 => {
+                i -= 1;
+                j -= 1;
+                GapAlignOpType::Sub
+            }
+            1 => {
+                j -= 1;
+                GapAlignOpType::Del
+            }
+            _ => {
+                i -= 1;
+                GapAlignOpType::Ins
+            }
         };
         if let Some(last) = ops.last_mut() {
             if last.0 == op {
@@ -363,7 +433,7 @@ fn protein_nw_traceback(
     // i, j are now the start of the local alignment (0-based in the slice)
     let sw_q_start = i;
     let sw_s_start = j;
-    let sw_q_end = best_i;  // 1-based → end exclusive
+    let sw_q_end = best_i; // 1-based → end exclusive
     let sw_s_end = best_j;
 
     let mut esp = GapEditScript::new();
@@ -384,9 +454,12 @@ const HSP_MAX_WINDOW: usize = 11;
 ///
 /// Port of NCBI BlastGetStartForGappedAlignment.
 pub fn get_start_for_gapped_alignment(
-    query: &[u8], subject: &[u8],
-    q_start: usize, q_length: usize,
-    s_start: usize, s_length: usize,
+    query: &[u8],
+    subject: &[u8],
+    q_start: usize,
+    q_length: usize,
+    s_start: usize,
+    s_length: usize,
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
 ) -> (usize, usize) {
     if q_length <= HSP_MAX_WINDOW {
@@ -439,10 +512,13 @@ pub fn get_start_for_gapped_alignment(
 /// This is the protein equivalent of `blast_gapped_score_only` from traceback.rs,
 /// using a substitution matrix (e.g., BLOSUM62) instead of match/mismatch rewards.
 pub fn protein_gapped_align(
-    query: &[u8], subject: &[u8],
-    seed_q: usize, seed_s: usize,
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
-    gap_open: i32, gap_extend: i32,
+    gap_open: i32,
+    gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<ProteinGappedResult> {
     let gap_oe = gap_open + gap_extend;
@@ -453,22 +529,38 @@ pub fn protein_gapped_align(
 
     // Left extension (NCBI: Blast_SemiGappedAlign with reversed=TRUE)
     let (score_l, ext_q_l, ext_s_l) = crate::semi_gapped_align::semi_gapped_align(
-        &query[..seed_q + 1], &subject[..seed_s + 1],
-        seed_q + 1, seed_s + 1,
-        matrix, gap_open, gap_extend, x_dropoff, true,
+        &query[..seed_q + 1],
+        &subject[..seed_s + 1],
+        seed_q + 1,
+        seed_s + 1,
+        matrix,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+        true,
     );
 
     // Right extension (NCBI: Blast_SemiGappedAlign with reversed=FALSE)
     let (score_r, ext_q_r, ext_s_r) = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
         crate::semi_gapped_align::semi_gapped_align(
-            &query[seed_q..], &subject[seed_s..],
-            query.len() - seed_q - 1, subject.len() - seed_s - 1,
-            matrix, gap_open, gap_extend, x_dropoff, false,
+            &query[seed_q..],
+            &subject[seed_s..],
+            query.len() - seed_q - 1,
+            subject.len() - seed_s - 1,
+            matrix,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            false,
         )
-    } else { (0, 0, 0) };
+    } else {
+        (0, 0, 0)
+    };
 
     let total_score = score_l + score_r;
-    if total_score <= 0 { return None; }
+    if total_score <= 0 {
+        return None;
+    }
 
     // X-drop boundaries with a small margin to let SW find the optimal local
     // alignment. Keep margin small to avoid O(m*n) blowup on long sequences.
@@ -477,7 +569,9 @@ pub fn protein_gapped_align(
     let q_end = (seed_q + ext_q_r + margin).min(query.len());
     let s_start = (seed_s + 1).saturating_sub(ext_s_l).saturating_sub(margin);
     let s_end = (seed_s + ext_s_r + margin).min(subject.len());
-    if q_start >= q_end || s_start >= s_end { return None; }
+    if q_start >= q_end || s_start >= s_end {
+        return None;
+    }
 
     // Smith-Waterman local alignment on the x-drop region — produces the
     // optimal local score regardless of seed position.
@@ -486,14 +580,18 @@ pub fn protein_gapped_align(
     let (edit_script, sw_score, sw_qs, sw_ss, sw_qe, sw_se) =
         protein_nw_traceback(q_slice, s_slice, matrix, gap_open, gap_extend);
     let final_score = total_score.max(sw_score);
-    if final_score <= 0 { return None; }
+    if final_score <= 0 {
+        return None;
+    }
 
     // Adjust boundaries to the SW local alignment region
     let final_q_start = q_start + sw_qs;
     let final_q_end = q_start + sw_qe;
     let final_s_start = s_start + sw_ss;
     let final_s_end = s_start + sw_se;
-    if final_q_start >= final_q_end || final_s_start >= final_s_end { return None; }
+    if final_q_start >= final_q_end || final_s_start >= final_s_end {
+        return None;
+    }
 
     let local_q = &query[final_q_start..final_q_end];
     let local_s = &subject[final_s_start..final_s_end];
@@ -517,10 +615,13 @@ pub fn protein_gapped_align(
 /// Combined ungapped extend + gapped alignment for a seed hit.
 /// Returns a ProteinGappedResult if the hit passes extension.
 pub fn protein_search_hit(
-    query: &[u8], subject: &[u8],
-    q_seed: usize, s_seed: usize,
+    query: &[u8],
+    subject: &[u8],
+    q_seed: usize,
+    s_seed: usize,
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
-    gap_open: i32, gap_extend: i32,
+    gap_open: i32,
+    gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<ProteinGappedResult> {
     // First do ungapped extension to filter
@@ -528,7 +629,9 @@ pub fn protein_search_hit(
     // If ungapped score is reasonable, do full gapped alignment
     let mid_q = (ug.0 + ug.1) / 2;
     let mid_s = (ug.2 + ug.3) / 2;
-    protein_gapped_align(query, subject, mid_q, mid_s, matrix, gap_open, gap_extend, x_dropoff)
+    protein_gapped_align(
+        query, subject, mid_q, mid_s, matrix, gap_open, gap_extend, x_dropoff,
+    )
 }
 
 #[cfg(test)]
@@ -544,7 +647,9 @@ mod tests {
         // Fill off-diagonal with negative (mismatch)
         for i in 1..21 {
             for j in 1..21 {
-                if i != j { m[i][j] = -1; }
+                if i != j {
+                    m[i][j] = -1;
+                }
             }
         }
         m
@@ -575,14 +680,16 @@ mod tests {
         let word = vec![1u8, 2, 3]; // A, B, C
         let neighbors = find_neighboring_words(&word, 3, &m, 11.0);
         // The exact match (1,2,3) scores 4+4+4=12 >= 11, so it should be included
-        assert!(neighbors.iter().any(|w| w == &vec![1u8, 2, 3]),
-            "Exact match should be a neighbor");
+        assert!(
+            neighbors.iter().any(|w| w == &vec![1u8, 2, 3]),
+            "Exact match should be a neighbor"
+        );
     }
 
     #[test]
     fn test_protein_gapped_align_produces_edit_script() {
         let m = simple_blosum62();
-        let query   = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         let result = protein_gapped_align(&query, &subject, 4, 4, &m, 11, 1, 50);
         assert!(result.is_some());
@@ -596,8 +703,13 @@ mod tests {
         assert!(!qseq.is_empty());
         assert!(!sseq.is_empty());
         // Aligned strings should have the same length (alignment property)
-        assert_eq!(qseq.len(), sseq.len(),
-            "aligned strings must have equal length: qseq={}, sseq={}", qseq, sseq);
+        assert_eq!(
+            qseq.len(),
+            sseq.len(),
+            "aligned strings must have equal length: qseq={}, sseq={}",
+            qseq,
+            sseq
+        );
     }
 
     #[test]
@@ -605,7 +717,7 @@ mod tests {
         let m = simple_blosum62();
         // Test that NW traceback correctly handles different-length regions
         // (which naturally arise from X-dropoff boundary asymmetry)
-        let query   = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let result = protein_gapped_align(&query, &subject, 5, 5, &m, 11, 1, 50);
         assert!(result.is_some());
@@ -615,8 +727,13 @@ mod tests {
             &subject[r.subject_start..r.subject_end],
             ncbistdaa_to_char,
         );
-        assert_eq!(qseq.len(), sseq.len(),
-            "aligned strings must have equal length: qseq={}, sseq={}", qseq, sseq);
+        assert_eq!(
+            qseq.len(),
+            sseq.len(),
+            "aligned strings must have equal length: qseq={}, sseq={}",
+            qseq,
+            sseq
+        );
         assert!(!qseq.is_empty());
     }
 
@@ -634,14 +751,19 @@ mod tests {
     fn test_sw_traceback_local_alignment() {
         let m = simple_blosum62();
         // Short sequences: SW finds best local alignment
-        let query   = vec![1u8, 2, 3, 4, 5, 6];
+        let query = vec![1u8, 2, 3, 4, 5, 6];
         let subject = vec![1u8, 2, 4, 5, 6]; // missing 3
         let (esp, score, qs, ss, qe, se) = protein_nw_traceback(&query, &subject, &m, 11, 1);
         assert!(score > 0, "Should have positive score");
         let q_slice = &query[qs..qe];
         let s_slice = &subject[ss..se];
         let (qseq, sseq) = esp.render_alignment(q_slice, s_slice, ncbistdaa_to_char);
-        assert!(!qseq.is_empty(), "alignment should not be empty: qseq={}, sseq={}", qseq, sseq);
+        assert!(
+            !qseq.is_empty(),
+            "alignment should not be empty: qseq={}, sseq={}",
+            qseq,
+            sseq
+        );
     }
 
     #[test]
@@ -651,7 +773,7 @@ mod tests {
         let matrix = crate::matrix::BLOSUM62;
         // NCBIstdaa: A=1, R=2, N=3, D=4, C=5
         // Query:   ARNDCARND (9 residues, all match subject for first 5, then differ)
-        let query   = vec![1u8, 2, 3, 4, 5, 1, 2, 3, 4];
+        let query = vec![1u8, 2, 3, 4, 5, 1, 2, 3, 4];
         // Subject: ARNDC + XXXXX (first 5 match, last 4 are very different: W=17)
         let subject = vec![1u8, 2, 3, 4, 5, 17, 17, 17, 17];
 
@@ -669,7 +791,7 @@ mod tests {
     fn test_protein_ungapped_extend_short_sequence() {
         let matrix = crate::matrix::BLOSUM62;
         // Single residue sequences — should not crash.
-        let query   = vec![1u8]; // A
+        let query = vec![1u8]; // A
         let subject = vec![1u8]; // A
         let result = protein_ungapped_extend(&query, &subject, 0, 0, &matrix, 20);
         assert!(result.is_some());
@@ -700,7 +822,10 @@ mod tests {
         let r = result.unwrap();
         assert!(r.score > 0);
         assert_eq!(r.gap_opens, 0, "Identical sequences should have no gaps");
-        assert_eq!(r.mismatches, 0, "Identical sequences should have no mismatches");
+        assert_eq!(
+            r.mismatches, 0,
+            "Identical sequences should have no mismatches"
+        );
         // All residues should be identities.
         assert!(r.num_ident > 0);
     }
@@ -715,15 +840,24 @@ mod tests {
         // We encode so that alignment requires two gaps.
         let q_raw = b"ARNDCQEGHIKLMNQRST";
         let s_raw = b"ARNDCQWWEGHIKLMPPNQRST";
-        let query: Vec<u8> = q_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
-        let subject: Vec<u8> = s_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+        let query: Vec<u8> = q_raw
+            .iter()
+            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+            .collect();
+        let subject: Vec<u8> = s_raw
+            .iter()
+            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+            .collect();
 
         let result = protein_gapped_align(&query, &subject, 3, 3, &matrix, 11, 1, 100);
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(r.score > 0);
-        assert!(r.gap_opens >= 1,
-            "Alignment with inserted residues should have gaps, got gap_opens={}", r.gap_opens);
+        assert!(
+            r.gap_opens >= 1,
+            "Alignment with inserted residues should have gaps, got gap_opens={}",
+            r.gap_opens
+        );
     }
 
     #[test]
@@ -734,20 +868,30 @@ mod tests {
         // Gapped alignment should score >= ungapped for the same pair.
         let q_raw = b"ARNDCQEGHIKLMNPQRSTVWY";
         let s_raw = b"ARNDCQXXEGHIKLMNPQRSTVWY"; // two insertions after Q
-        let query: Vec<u8> = q_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
-        let subject: Vec<u8> = s_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+        let query: Vec<u8> = q_raw
+            .iter()
+            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+            .collect();
+        let subject: Vec<u8> = s_raw
+            .iter()
+            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+            .collect();
 
         // Ungapped extension
         let ug = protein_ungapped_extend(&query, &subject, 3, 3, &matrix, 100);
-        let ug_score = ug.map_or(0, |(_,_,_,_,s,_)| s);
+        let ug_score = ug.map_or(0, |(_, _, _, _, s, _)| s);
 
         // Gapped alignment
         let gapped = protein_gapped_align(&query, &subject, 3, 3, &matrix, 11, 1, 100);
         assert!(gapped.is_some());
         let g_score = gapped.unwrap().score;
 
-        assert!(g_score >= ug_score,
-            "Gapped score ({}) should be >= ungapped score ({})", g_score, ug_score);
+        assert!(
+            g_score >= ug_score,
+            "Gapped score ({}) should be >= ungapped score ({})",
+            g_score,
+            ug_score
+        );
     }
 
     #[test]
@@ -758,14 +902,23 @@ mod tests {
         // srtA query vs P0DPQ5 sortase A (NCBI BLAST+ gets score 183)
         let q_raw = b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPSISLKLPIYDGTSDKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK";
         let s_raw = b"MNKQRIYSIVAILLFVVGGVLIGKPFYDGYQAEKKQTENVQAVQKMDYEKHETEFVDASKIDQPDLAEVANASLDKKQVIGRISIPSVSLELPVLKSSTEKNLLSGAATVKENQVMGKGNYALAGHNMSKKGVLFSDIASLKKGDKIYLYDNENEYEYAVTGVSEVTPDKWEVVEDHGKDEITLITCVSVKDNSKRYVVAGDLVGTKAKK";
-        let query: Vec<u8> = q_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
-        let subject: Vec<u8> = s_raw.iter().map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F]).collect();
+        let query: Vec<u8> = q_raw
+            .iter()
+            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+            .collect();
+        let subject: Vec<u8> = s_raw
+            .iter()
+            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+            .collect();
 
         // Gapped alignment from a seed in the middle of the alignment
         let result = protein_gapped_align(&query, &subject, 50, 45, &matrix, 11, 1, 260);
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(r.score >= 150,
-            "Gapped alignment should get score >= 150, got {}", r.score);
+        assert!(
+            r.score >= 150,
+            "Gapped alignment should get score >= 150, got {}",
+            r.score
+        );
     }
 }

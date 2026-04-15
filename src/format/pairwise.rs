@@ -100,6 +100,48 @@ pub fn format_pairwise_alignment_with_header<W: Write>(
     gap_opens: i32,
     show_subject_header: bool,
 ) -> std::io::Result<()> {
+    format_pairwise_alignment_with_line_width(
+        writer,
+        _query_id,
+        subject_id,
+        query_seq,
+        subject_seq,
+        q_start,
+        q_end,
+        s_start,
+        s_end,
+        score,
+        bit_score,
+        evalue,
+        num_ident,
+        align_len,
+        gap_opens,
+        show_subject_header,
+        60,
+    )
+}
+
+/// Format one HSP in pairwise text format with a caller-selected alignment
+/// line width. NCBI BLAST exposes this as `-line_length` for pairwise output.
+pub fn format_pairwise_alignment_with_line_width<W: Write>(
+    writer: &mut W,
+    _query_id: &str,
+    subject_id: &str,
+    query_seq: &[u8],   // BLASTNA encoded
+    subject_seq: &[u8], // BLASTNA encoded
+    q_start: i32,
+    q_end: i32,
+    s_start: i32,
+    s_end: i32,
+    score: i32,
+    bit_score: f64,
+    evalue: f64,
+    num_ident: i32,
+    align_len: i32,
+    gap_opens: i32,
+    show_subject_header: bool,
+    line_width: usize,
+) -> std::io::Result<()> {
     let pident = if align_len > 0 {
         100.0 * num_ident as f64 / align_len as f64
     } else {
@@ -138,7 +180,6 @@ pub fn format_pairwise_alignment_with_header<W: Write>(
     )?;
     writeln!(writer, "")?;
 
-    // Display alignment in 60-character lines
     let blastna_to_char = |b: u8| -> char {
         match b {
             0 => 'A',
@@ -160,7 +201,7 @@ pub fn format_pairwise_alignment_with_header<W: Write>(
         }
     };
 
-    let line_width = 60;
+    let line_width = line_width.max(1);
     let coord_width = q_start
         .abs()
         .max(q_end.abs())

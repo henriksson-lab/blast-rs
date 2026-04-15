@@ -66,7 +66,9 @@ impl HitList {
 
     pub fn sort_by_evalue(&mut self) {
         self.hsp_lists.sort_by(|a, b| {
-            a.best_evalue.partial_cmp(&b.best_evalue).unwrap_or(std::cmp::Ordering::Equal)
+            a.best_evalue
+                .partial_cmp(&b.best_evalue)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 }
@@ -129,17 +131,31 @@ mod tests {
 
         let mut list1 = HspList::new(0);
         list1.add_hsp(Hsp {
-            score: 100, num_ident: 50, bit_score: 91.5, evalue: 1e-20,
-            query_offset: 0, query_end: 50, subject_offset: 76, subject_end: 126,
-            context: 0, num_gaps: 0,
+            score: 100,
+            num_ident: 50,
+            bit_score: 91.5,
+            evalue: 1e-20,
+            query_offset: 0,
+            query_end: 50,
+            subject_offset: 76,
+            subject_end: 126,
+            context: 0,
+            num_gaps: 0,
         });
         stream.write(0, list1);
 
         let mut list2 = HspList::new(5);
         list2.add_hsp(Hsp {
-            score: 30, num_ident: 12, bit_score: 24.3, evalue: 1.7,
-            query_offset: 10, query_end: 22, subject_offset: 100, subject_end: 112,
-            context: 0, num_gaps: 0,
+            score: 30,
+            num_ident: 12,
+            bit_score: 24.3,
+            evalue: 1.7,
+            query_offset: 10,
+            query_end: 22,
+            subject_offset: 100,
+            subject_end: 112,
+            context: 0,
+            num_gaps: 0,
         });
         stream.write(0, list2);
 
@@ -175,13 +191,7 @@ mod tests {
         let stream = HspStream::new(1);
 
         // Add subjects out of OID order with varying evalues
-        let oids_and_evalues = vec![
-            (7, 1e-5),
-            (2, 1e-20),
-            (5, 1e-10),
-            (0, 1e-2),
-            (9, 1e-30),
-        ];
+        let oids_and_evalues = vec![(7, 1e-5), (2, 1e-20), (5, 1e-10), (0, 1e-2), (9, 1e-30)];
 
         for &(oid, evalue) in &oids_and_evalues {
             let mut list = HspList::new(oid);

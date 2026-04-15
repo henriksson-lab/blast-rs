@@ -18,12 +18,14 @@ pub fn greedy_align(
     x_dropoff: i32,
 ) -> Option<(i32, usize, usize, usize, usize, GapEditScript)> {
     // Extend right from seed
-    let (r_score, r_q_end, r_s_end, r_ops) =
-        extend_greedy(query, subject, q_seed, s_seed, reward, penalty, x_dropoff, true);
+    let (r_score, r_q_end, r_s_end, r_ops) = extend_greedy(
+        query, subject, q_seed, s_seed, reward, penalty, x_dropoff, true,
+    );
 
     // Extend left from seed
-    let (l_score, l_q_start, l_s_start, mut l_ops) =
-        extend_greedy(query, subject, q_seed, s_seed, reward, penalty, x_dropoff, false);
+    let (l_score, l_q_start, l_s_start, mut l_ops) = extend_greedy(
+        query, subject, q_seed, s_seed, reward, penalty, x_dropoff, false,
+    );
 
     let total_score = r_score + l_score;
     if total_score <= 0 {
@@ -70,13 +72,11 @@ fn extend_greedy(
         } else {
             (qi > 0, si > 0)
         };
-        if !q_ok || !s_ok { break; }
+        if !q_ok || !s_ok {
+            break;
+        }
 
-        let (q_idx, s_idx) = if forward {
-            (qi, si)
-        } else {
-            (qi - 1, si - 1)
-        };
+        let (q_idx, s_idx) = if forward { (qi, si) } else { (qi - 1, si - 1) };
 
         if query[q_idx] == subject[s_idx] {
             score += reward;
@@ -101,7 +101,13 @@ fn extend_greedy(
             break;
         }
 
-        if forward { qi += 1; si += 1; } else { qi -= 1; si -= 1; }
+        if forward {
+            qi += 1;
+            si += 1;
+        } else {
+            qi -= 1;
+            si -= 1;
+        }
     }
 
     // Flush remaining match run

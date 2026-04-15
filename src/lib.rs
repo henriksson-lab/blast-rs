@@ -19,41 +19,72 @@
 
 // Public API modules
 pub mod api;
-pub mod composition;
 pub mod compo_mode_condition;
+pub mod composition;
 pub mod nlm_linear_algebra;
 pub mod optimize_target_freq;
 pub mod semi_gapped_align;
 
 // Re-export high-level API at crate root for convenience
 pub use api::{
-    // Search functions (high-level)
-    blastp, blastp_batch, blastn, blastn_search, blastx, tblastn, tblastx, psiblast,
-    // Search functions (low-level aliases)
-    blast_search, blastx_search, tblastn_search, tblastx_search, psiblast_search,
-    // PSSM functions
-    build_pssm, search_with_pssm,
-    // Types
-    SearchParams, SearchResult, Hsp, MatrixType, ScoringMatrix,
-    BlastDbBuilder, SequenceEntry, PsiblastParams, TranslatedFrame,
-    BlastDefLine, BlastnSearch, Strand,
-    // Utility functions
-    parse_fasta, reverse_complement, six_frame_translate, six_frame_translate_with_code,
-    get_codon_table, get_matrix,
+    adjust_evalue,
+    adjust_evalue_with_mode,
     // Masking
-    apply_dust, apply_seg, apply_seg_ncbistdaa,
-    apply_lowercase_mask_nucleotide, apply_lowercase_mask_protein,
-    lowercase_mask, apply_repeat_mask, repeat_mask,
+    apply_dust,
+    apply_lowercase_mask_nucleotide,
+    apply_lowercase_mask_protein,
+    apply_repeat_mask,
+    apply_seg,
+    apply_seg_ncbistdaa,
+    // Search functions (low-level aliases)
+    blast_search,
+    blastn,
+    blastn_search,
+    // Search functions (high-level)
+    blastp,
+    blastp_batch,
+    blastx,
+    blastx_search,
+    // PSSM functions
+    build_pssm,
     // Composition
     composition_ncbistdaa,
-    adjust_evalue, adjust_evalue_with_mode,
+    get_codon_table,
+    get_matrix,
+    lowercase_mask,
+    // Utility functions
+    parse_fasta,
+    psiblast,
+    psiblast_search,
+    repeat_mask,
+    reverse_complement,
+    search_with_pssm,
+    six_frame_translate,
+    six_frame_translate_with_code,
+    tblastn,
+    tblastn_search,
+    tblastx,
+    tblastx_search,
+    BlastDbBuilder,
+    BlastDefLine,
+    BlastnSearch,
+    Hsp,
+    MatrixType,
+    PsiblastParams,
+    ScoringMatrix,
+    // Types
+    SearchParams,
+    SearchResult,
+    SequenceEntry,
+    Strand,
+    TranslatedFrame,
 };
 
 // Re-export core types at crate root (matching old API)
 pub use db::BlastDb;
+pub use matrix::AA_FREQUENCIES as BACKGROUND_FREQ;
 pub use pssm::Pssm;
 pub use stat::KarlinBlk as KarlinAltschul;
-pub use matrix::AA_FREQUENCIES as BACKGROUND_FREQ;
 // blastn builder (BlastnSearch) is now in the api module.
 pub mod db;
 pub mod filter;
@@ -70,26 +101,46 @@ pub mod util;
 
 // Internal modules used by the search engine (partially used — allow dead items
 // within them since they're ported from C and not all paths are active yet)
-#[allow(dead_code)] pub mod gapinfo;
-#[allow(dead_code)] pub(crate) mod hspstream;
-#[allow(dead_code)] pub(crate) mod itree;
-#[allow(dead_code)] pub(crate) mod options;
+#[allow(dead_code)]
+pub mod gapinfo;
+#[allow(dead_code)]
+pub(crate) mod hspstream;
+#[allow(dead_code)]
+pub(crate) mod itree;
+#[allow(dead_code)]
+pub(crate) mod options;
 
 // Internal modules — ported from C engine, not yet fully wired up.
 // Kept for completeness and future use (e.g. full protein search, engine orchestration).
-#[allow(dead_code)] pub(crate) mod diagnostics;
-#[allow(dead_code)] pub mod encoding;
-#[allow(dead_code)] pub(crate) mod engine;
-#[allow(dead_code)] pub(crate) mod extend;
-#[allow(dead_code)] pub(crate) mod gapalign;
-#[allow(dead_code)] pub(crate) mod greedy;
-#[allow(dead_code)] pub(crate) mod hits;
-#[allow(dead_code)] pub(crate) mod listnode;
-#[allow(dead_code)] pub(crate) mod lookup;
-#[allow(dead_code)] pub(crate) mod math;
-#[allow(dead_code)] pub(crate) mod parameters;
-#[allow(dead_code)] pub(crate) mod program;
-#[allow(dead_code)] pub(crate) mod queryinfo;
-#[allow(dead_code)] pub(crate) mod rps;
-#[allow(dead_code)] pub(crate) mod sequence;
-#[allow(dead_code)] pub(crate) mod seqsrc;
+#[allow(dead_code)]
+pub(crate) mod diagnostics;
+#[allow(dead_code)]
+pub mod encoding;
+#[allow(dead_code)]
+pub(crate) mod engine;
+#[allow(dead_code)]
+pub(crate) mod extend;
+#[allow(dead_code)]
+pub(crate) mod gapalign;
+#[allow(dead_code)]
+pub(crate) mod greedy;
+#[allow(dead_code)]
+pub(crate) mod hits;
+#[allow(dead_code)]
+pub(crate) mod listnode;
+#[allow(dead_code)]
+pub(crate) mod lookup;
+#[allow(dead_code)]
+pub(crate) mod math;
+#[allow(dead_code)]
+pub(crate) mod parameters;
+#[allow(dead_code)]
+pub(crate) mod program;
+#[allow(dead_code)]
+pub(crate) mod queryinfo;
+#[allow(dead_code)]
+pub(crate) mod rps;
+#[allow(dead_code)]
+pub(crate) mod seqsrc;
+#[allow(dead_code)]
+pub(crate) mod sequence;

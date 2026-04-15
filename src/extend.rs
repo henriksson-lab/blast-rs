@@ -47,15 +47,24 @@ impl InitHitList {
 /// Extends a seed hit in both directions until the score drops below
 /// the x-dropoff threshold. Returns the ungapped alignment data.
 pub fn na_ungapped_extend(
-    query: &[u8],       // BLASTNA encoded
-    subject: &[u8],     // NCBI2na packed (4 bases/byte)
-    q_offset: i32,      // seed position in query
-    s_offset: i32,      // seed position in subject
+    query: &[u8],   // BLASTNA encoded
+    subject: &[u8], // NCBI2na packed (4 bases/byte)
+    q_offset: i32,  // seed position in query
+    s_offset: i32,  // seed position in subject
     reward: i32,
     penalty: i32,
     x_dropoff: i32,
 ) -> Option<UngappedData> {
-    na_ungapped_extend_len(query, subject, subject.len() * 4, q_offset, s_offset, reward, penalty, x_dropoff)
+    na_ungapped_extend_len(
+        query,
+        subject,
+        subject.len() * 4,
+        q_offset,
+        s_offset,
+        reward,
+        penalty,
+        x_dropoff,
+    )
 }
 
 /// Ungapped extension with explicit subject length in bases.
@@ -183,7 +192,7 @@ mod tests {
         // Subject: A C G T  C C C C  (NCBI2na: 0,1,2,3,1,1,1,1)
         // First 4 positions match (+2 each = +8), then 4 mismatches (-3 each).
         // With x_dropoff=5 the extension should stop before consuming all mismatches.
-        let query   = vec![0u8, 1, 2, 3, 0, 0, 0, 0];
+        let query = vec![0u8, 1, 2, 3, 0, 0, 0, 0];
         let subject = pack_ncbi2na(&[0, 1, 2, 3, 1, 1, 1, 1]);
 
         let result = na_ungapped_extend(&query, &subject, 0, 0, 2, -3, 5);
@@ -199,7 +208,7 @@ mod tests {
     fn test_ungapped_extend_at_boundary() {
         // Seed at position 0 — left extension has nothing to extend into.
         // Query and subject: ACGT (4 bases, all match)
-        let query   = vec![0u8, 1, 2, 3];
+        let query = vec![0u8, 1, 2, 3];
         let subject = pack_ncbi2na(&[0, 1, 2, 3]);
 
         let result = na_ungapped_extend(&query, &subject, 0, 0, 2, -3, 20);
@@ -222,7 +231,7 @@ mod tests {
     #[test]
     fn test_ungapped_extend_all_matches() {
         // 16 bases, all A, perfect match — extension should cover full length.
-        let query   = vec![0u8; 16];
+        let query = vec![0u8; 16];
         let subject = pack_ncbi2na(&vec![0u8; 16]);
 
         let result = na_ungapped_extend_len(&query, &subject, 16, 8, 8, 2, -3, 100);
@@ -241,7 +250,7 @@ mod tests {
         // Subject: A C G C  G  (NCBI2na: 0,1,2,1,2)
         // Position: 0:match(+2) 1:match(+2) 2:mismatch(-3) 3:match(+2) 4:match(+2)
         // Total = 2+2-3+2+2 = 5
-        let query   = vec![0u8, 1, 0, 1, 2];
+        let query = vec![0u8, 1, 0, 1, 2];
         let subject = pack_ncbi2na(&[0, 1, 2, 1, 2]);
 
         let result = na_ungapped_extend_len(&query, &subject, 5, 0, 0, 2, -3, 20);

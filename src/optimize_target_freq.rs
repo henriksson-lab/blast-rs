@@ -6,7 +6,7 @@
 //! optionally a relative entropy constraint.
 
 use crate::nlm_linear_algebra::{
-    factor_ltriag_pos_def, solve_ltriag_pos_def, euclidean_norm, add_vectors, step_bound,
+    add_vectors, euclidean_norm, factor_ltriag_pos_def, solve_ltriag_pos_def, step_bound,
 };
 
 /// Port of NCBI ScaledSymmetricProductA.
@@ -79,8 +79,11 @@ fn multiply_by_a_transpose(beta: f64, y: &mut [f64], alphsize: usize, alpha: f64
 
 /// Port of NCBI ResidualsLinearConstraints.
 fn residuals_linear_constraints(
-    r_a: &mut [f64], alphsize: usize, x: &[f64],
-    row_sums: &[f64], col_sums: &[f64],
+    r_a: &mut [f64],
+    alphsize: usize,
+    x: &[f64],
+    row_sums: &[f64],
+    col_sums: &[f64],
 ) {
     for i in 0..alphsize {
         r_a[i] = col_sums[i];
@@ -93,8 +96,11 @@ fn residuals_linear_constraints(
 
 /// Port of NCBI DualResiduals.
 fn dual_residuals(
-    resids_x: &mut [f64], alphsize: usize, grads: &[Vec<f64>],
-    z: &[f64], constrain_rel_entropy: bool,
+    resids_x: &mut [f64],
+    alphsize: usize,
+    grads: &[Vec<f64>],
+    z: &[f64],
+    constrain_rel_entropy: bool,
 ) {
     let n = alphsize * alphsize;
     if constrain_rel_entropy {
@@ -112,11 +118,17 @@ fn dual_residuals(
 
 /// Port of NCBI CalculateResiduals.
 fn calculate_residuals(
-    resids_x: &mut [f64], alphsize: usize, resids_z: &mut [f64],
-    values: &[f64], grads: &[Vec<f64>],
-    row_sums: &[f64], col_sums: &[f64],
-    x: &[f64], z: &[f64],
-    constrain_rel_entropy: bool, relative_entropy: f64,
+    resids_x: &mut [f64],
+    alphsize: usize,
+    resids_z: &mut [f64],
+    values: &[f64],
+    grads: &[Vec<f64>],
+    row_sums: &[f64],
+    col_sums: &[f64],
+    x: &[f64],
+    z: &[f64],
+    constrain_rel_entropy: bool,
+    relative_entropy: f64,
 ) -> f64 {
     dual_residuals(resids_x, alphsize, grads, z, constrain_rel_entropy);
     let norm_resids_x = euclidean_norm(resids_x, alphsize * alphsize);
@@ -135,8 +147,13 @@ fn calculate_residuals(
 
 /// Port of NCBI EvaluateReFunctions.
 fn evaluate_re_functions(
-    values: &mut [f64], grads: &mut [Vec<f64>], alphsize: usize,
-    x: &[f64], q: &[f64], scores: &[f64], constrain_rel_entropy: bool,
+    values: &mut [f64],
+    grads: &mut [Vec<f64>],
+    alphsize: usize,
+    x: &[f64],
+    q: &[f64],
+    scores: &[f64],
+    constrain_rel_entropy: bool,
 ) {
     values[0] = 0.0;
     values[1] = 0.0;
@@ -155,8 +172,11 @@ fn evaluate_re_functions(
 
 /// Port of NCBI ComputeScoresFromProbs.
 fn compute_scores_from_probs(
-    scores: &mut [f64], alphsize: usize, target_freqs: &[f64],
-    row_freqs: &[f64], col_freqs: &[f64],
+    scores: &mut [f64],
+    alphsize: usize,
+    target_freqs: &[f64],
+    row_freqs: &[f64],
+    col_freqs: &[f64],
 ) {
     for i in 0..alphsize {
         for j in 0..alphsize {
@@ -171,9 +191,9 @@ fn compute_scores_from_probs(
 struct ReNewtonSystem {
     alphsize: usize,
     constrain_rel_entropy: bool,
-    w: Vec<Vec<f64>>,      // lower-triangular factor
-    dinv: Vec<f64>,        // diagonal inverse
-    grad_re: Vec<f64>,     // gradient of RE constraint
+    w: Vec<Vec<f64>>,  // lower-triangular factor
+    dinv: Vec<f64>,    // diagonal inverse
+    grad_re: Vec<f64>, // gradient of RE constraint
 }
 
 impl ReNewtonSystem {
@@ -197,12 +217,20 @@ impl ReNewtonSystem {
 
     /// Port of NCBI FactorReNewtonSystem.
     fn factor(
-        &mut self, x: &[f64], z: &[f64], grads: &[Vec<f64>],
-        constrain_rel_entropy: bool, workspace: &mut [f64],
+        &mut self,
+        x: &[f64],
+        z: &[f64],
+        grads: &[Vec<f64>],
+        constrain_rel_entropy: bool,
+        workspace: &mut [f64],
     ) {
         let alphsize = self.alphsize;
         let n = alphsize * alphsize;
-        let m = if constrain_rel_entropy { 2 * alphsize } else { 2 * alphsize - 1 };
+        let m = if constrain_rel_entropy {
+            2 * alphsize
+        } else {
+            2 * alphsize - 1
+        };
         self.constrain_rel_entropy = constrain_rel_entropy;
 
         // Find D^{-1}
@@ -254,7 +282,11 @@ impl ReNewtonSystem {
         let alphsize = self.alphsize;
         let n = alphsize * alphsize;
         let m_a = 2 * alphsize - 1;
-        let m = if self.constrain_rel_entropy { m_a + 1 } else { m_a };
+        let m = if self.constrain_rel_entropy {
+            m_a + 1
+        } else {
+            m_a
+        };
 
         // rzhat = rz - J D^{-1} rx
         for i in 0..n {
@@ -291,11 +323,11 @@ impl ReNewtonSystem {
 ///
 /// Returns 0 on success (converged to minimizer), 1 on convergence failure.
 pub fn optimize_target_frequencies(
-    x: &mut [f64],         // output: optimal target freqs (n = alphsize^2)
+    x: &mut [f64], // output: optimal target freqs (n = alphsize^2)
     alphsize: usize,
-    q: &[f64],             // standard matrix target freqs
-    row_sums: &[f64],      // desired row marginals
-    col_sums: &[f64],      // desired column marginals
+    q: &[f64],        // standard matrix target freqs
+    row_sums: &[f64], // desired row marginals
+    col_sums: &[f64], // desired column marginals
     constrain_rel_entropy: bool,
     relative_entropy: f64,
     tol: f64,
@@ -324,12 +356,26 @@ pub fn optimize_target_frequencies(
 
     while its <= maxits {
         evaluate_re_functions(
-            &mut values, &mut grads, alphsize, x, q, &old_scores,
+            &mut values,
+            &mut grads,
+            alphsize,
+            x,
+            q,
+            &old_scores,
             constrain_rel_entropy,
         );
         rnorm = calculate_residuals(
-            &mut resids_x, alphsize, &mut resids_z, &values, &grads,
-            row_sums, col_sums, x, &z, constrain_rel_entropy, relative_entropy,
+            &mut resids_x,
+            alphsize,
+            &mut resids_z,
+            &values,
+            &grads,
+            row_sums,
+            col_sums,
+            x,
+            &z,
+            constrain_rel_entropy,
+            relative_entropy,
         );
 
         if !(rnorm > tol) {
@@ -366,7 +412,7 @@ pub fn optimize_target_frequencies(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composition::{BLOSUM62_JOINT_PROBS, BLOSUM62_BG};
+    use crate::composition::{BLOSUM62_BG, BLOSUM62_JOINT_PROBS};
 
     #[test]
     fn test_optimize_target_frequencies_unconstrained() {
@@ -387,12 +433,15 @@ mod tests {
 
         let mut x = vec![0.0f64; n];
         let (status, iterations) = optimize_target_frequencies(
-            &mut x, alphsize, &q, &row_sums, &col_sums,
-            false, 0.0, 1e-8, 2000,
+            &mut x, alphsize, &q, &row_sums, &col_sums, false, 0.0, 1e-8, 2000,
         );
 
         assert_eq!(status, 0, "Optimizer should converge");
-        assert!(iterations < 100, "Should converge quickly with standard freqs, got {} iterations", iterations);
+        assert!(
+            iterations < 100,
+            "Should converge quickly with standard freqs, got {} iterations",
+            iterations
+        );
 
         // Verify marginal sums are correct
         let mut actual_col_sums = vec![0.0f64; alphsize];
@@ -402,12 +451,22 @@ mod tests {
                 row_sum += x[i * alphsize + j];
                 actual_col_sums[j] += x[i * alphsize + j];
             }
-            assert!((row_sum - row_sums[i]).abs() < 1e-6,
-                "Row sum {} should be {}, got {}", i, row_sums[i], row_sum);
+            assert!(
+                (row_sum - row_sums[i]).abs() < 1e-6,
+                "Row sum {} should be {}, got {}",
+                i,
+                row_sums[i],
+                row_sum
+            );
         }
         for j in 0..alphsize {
-            assert!((actual_col_sums[j] - col_sums[j]).abs() < 1e-6,
-                "Col sum {} should be {}, got {}", j, col_sums[j], actual_col_sums[j]);
+            assert!(
+                (actual_col_sums[j] - col_sums[j]).abs() < 1e-6,
+                "Col sum {} should be {}, got {}",
+                j,
+                col_sums[j],
+                actual_col_sums[j]
+            );
         }
     }
 
@@ -428,21 +487,31 @@ mod tests {
         let mut row_sums = BLOSUM62_BG;
         let mut col_sums = BLOSUM62_BG;
         // Perturb slightly
-        row_sums[0] += 0.01; row_sums[1] -= 0.01;
-        col_sums[0] += 0.02; col_sums[2] -= 0.02;
+        row_sums[0] += 0.01;
+        row_sums[1] -= 0.01;
+        col_sums[0] += 0.02;
+        col_sums[2] -= 0.02;
 
         let mut x = vec![0.0f64; n];
         let (status, iterations) = optimize_target_frequencies(
-            &mut x, alphsize, &q, &row_sums, &col_sums,
-            true, 0.44, 1e-8, 2000,
+            &mut x, alphsize, &q, &row_sums, &col_sums, true, 0.44, 1e-8, 2000,
         );
 
         assert_eq!(status, 0, "Optimizer should converge with RE constraint");
-        assert!(iterations < 2000, "Should converge, got {} iterations", iterations);
+        assert!(
+            iterations < 2000,
+            "Should converge, got {} iterations",
+            iterations
+        );
 
         // All target frequencies should be positive
         for k in 0..n {
-            assert!(x[k] > 0.0, "Target frequency {} should be positive, got {}", k, x[k]);
+            assert!(
+                x[k] > 0.0,
+                "Target frequency {} should be positive, got {}",
+                k,
+                x[k]
+            );
         }
     }
 }

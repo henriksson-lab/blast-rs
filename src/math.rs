@@ -10,19 +10,19 @@ pub fn expm1(x: f64) -> f64 {
         return x;
     }
     // Taylor series: x + x^2/2! + x^3/3! + ...
-    x * (1.0 + x *
-        (1.0/2.0 + x *
-        (1.0/6.0 + x *
-        (1.0/24.0 + x *
-        (1.0/120.0 + x *
-        (1.0/720.0 + x *
-        (1.0/5040.0 + x *
-        (1.0/40320.0 + x *
-        (1.0/362880.0 + x *
-        (1.0/3628800.0 + x *
-        (1.0/39916800.0 + x *
-        (1.0/479001600.0 +
-         x/6227020800.0))))))))))))
+    x * (1.0
+        + x * (1.0 / 2.0
+            + x * (1.0 / 6.0
+                + x * (1.0 / 24.0
+                    + x * (1.0 / 120.0
+                        + x * (1.0 / 720.0
+                            + x * (1.0 / 5040.0
+                                + x * (1.0 / 40320.0
+                                    + x * (1.0 / 362880.0
+                                        + x * (1.0 / 3628800.0
+                                            + x * (1.0 / 39916800.0
+                                                + x * (1.0 / 479001600.0
+                                                    + x / 6227020800.0))))))))))))
 }
 
 /// ln(1+x) for small x (avoids catastrophic cancellation).
@@ -69,9 +69,7 @@ pub fn ln_factorial(n: i32) -> f64 {
     let n = n as f64;
     // Stirling's approximation + correction terms
     let ln2pi_half = 0.5 * (2.0 * std::f64::consts::PI).ln();
-    ln2pi_half + (n + 0.5) * n.ln() - n
-        + 1.0 / (12.0 * n)
-        - 1.0 / (360.0 * n * n * n)
+    ln2pi_half + (n + 0.5) * n.ln() - n + 1.0 / (12.0 * n) - 1.0 / (360.0 * n * n * n)
 }
 
 /// Compute n choose k (binomial coefficient) in log space.
@@ -91,7 +89,13 @@ mod tests {
         let x = 1e-10;
         let result = expm1(x);
         let expected = x.exp_m1(); // Use Rust's built-in as reference
-        assert!((result - expected).abs() < 1e-22, "expm1({}) = {}, expected ~{}", x, result, expected);
+        assert!(
+            (result - expected).abs() < 1e-22,
+            "expm1({}) = {}, expected ~{}",
+            x,
+            result,
+            expected
+        );
     }
 
     #[test]
@@ -105,7 +109,13 @@ mod tests {
     fn test_log1p_small() {
         let x = 1e-10;
         let result = log1p(x);
-        assert!((result - x).abs() < 1e-19, "log1p({}) = {}, expected ~{}", x, result, x);
+        assert!(
+            (result - x).abs() < 1e-19,
+            "log1p({}) = {}, expected ~{}",
+            x,
+            result,
+            x
+        );
     }
 
     #[test]

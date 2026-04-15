@@ -507,9 +507,11 @@ fn assert_blastn_db_outfmt_matches_ncbi(
     let rust_out = tmp.path().join("rust.tsv");
     let ncbi_out = tmp.path().join("ncbi.tsv");
     let taxids_file = tmp.path().join("taxids.txt");
+    let seqids_file = tmp.path().join("seqids.txt");
     std::fs::write(&query, query_fasta).expect("write query FASTA");
     std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
     std::fs::write(&taxids_file, "9606\n").expect("write taxid list");
+    std::fs::write(&seqids_file, "s2\n").expect("write seqid list");
 
     let mut make_cmd = std::process::Command::new("/usr/bin/makeblastdb");
     make_cmd
@@ -547,6 +549,8 @@ fn assert_blastn_db_outfmt_matches_ncbi(
     for arg in rust_extra_args {
         if *arg == "{taxids_file}" {
             rust_cmd.arg(&taxids_file);
+        } else if *arg == "{seqids_file}" {
+            rust_cmd.arg(&seqids_file);
         } else {
             rust_cmd.arg(arg);
         }
@@ -575,6 +579,8 @@ fn assert_blastn_db_outfmt_matches_ncbi(
     for arg in ncbi_extra_args {
         if *arg == "{taxids_file}" {
             ncbi_cmd.arg(&taxids_file);
+        } else if *arg == "{seqids_file}" {
+            ncbi_cmd.arg(&seqids_file);
         } else {
             ncbi_cmd.arg(arg);
         }
@@ -603,6 +609,40 @@ fn blastn_subject_ncbi_parity_dust_no_exact_hits() {
         &["--dust", "no", "--max_target_seqs", "10", "--max_hsps", "2"],
         &["-dust", "no", "-max_target_seqs", "10", "-max_hsps", "2"],
     );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_dbsize_and_searchsp_statistics() {
+    let query = ">subseq_oid0\nTTAAGGAGGCTCATCTTTCAGAATCCATGCTGTGGGCCAGCAAGAGTTAA\n";
+    let subject = ">subj1\nTTAAGGAGGCTCATCTTTCAGAATCCATGCTGTGGGCCAGCAAGAGTTAA\n";
+    let outfmt = "6 qseqid sseqid evalue bitscore score length pident";
+
+    for (rust_args, ncbi_args) in [
+        (
+            vec!["--dust", "no", "--dbsize", "1000000"],
+            vec!["-dust", "no", "-dbsize", "1000000"],
+        ),
+        (
+            vec!["--dust", "no", "--searchsp", "1000000"],
+            vec!["-dust", "no", "-searchsp", "1000000"],
+        ),
+        (
+            vec!["--dust", "no", "--dbsize", "-1"],
+            vec!["-dust", "no", "-dbsize", "-1"],
+        ),
+        (
+            vec!["--dust", "no", "--searchsp", "0"],
+            vec!["-dust", "no", "-searchsp", "0"],
+        ),
+    ] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            outfmt,
+            &rust_args,
+            &ncbi_args,
+        );
+    }
 }
 
 #[test]
@@ -797,13 +837,7 @@ fn blastn_subject_ncbi_parity_subject_besthit() {
             "20",
             "--subject_besthit",
         ],
-        &[
-            "-dust",
-            "no",
-            "-max_target_seqs",
-            "20",
-            "-subject_besthit",
-        ],
+        &["-dust", "no", "-max_target_seqs", "20", "-subject_besthit"],
     );
 }
 
@@ -1044,7 +1078,9 @@ fn blastn_sort_options_warn_when_ignored_by_outfmt() {
         .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
         .map(std::path::PathBuf::from)
     else {
-        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI warning parity");
+        eprintln!(
+            "Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI warning parity"
+        );
         return;
     };
 
@@ -1119,6 +1155,132 @@ fn blastn_formatting_options_match_ncbi_tabular_behavior() {
 }
 
 #[test]
+fn blastn_subject_ncbi_parity_html_ignored_for_tabular_output() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n",
+        "6 qseqid sseqid pident length bitscore",
+        &["--dust", "no", "--html"],
+        &["-dust", "no", "-html"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_parse_deflines_ids_and_accessions() {
+    for (query, subject) in [
+        (
+            ">lcl|query1 query title\nACGTACGTACGTACGTACGT\n",
+            ">lcl|subject1 subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+        (
+            ">gi|123|ref|QACC.1| query title\nACGTACGTACGTACGTACGT\n",
+            ">gi|456|ref|SACC.1| subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+    ] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            "6 qseqid qgi qacc qaccver sseqid sgi sallgi sacc saccver sallseqid sallacc",
+            &["--dust", "no", "--parse_deflines"],
+            &["-dust", "no", "-parse_deflines"],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_parse_deflines() {
+    for (query, subject) in [
+        (
+            ">lcl|query1 query title\nACGTACGTACGTACGTACGT\n",
+            ">lcl|subject1 subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+        (
+            ">gi|123|ref|QACC.1| query title\nACGTACGTACGTACGTACGT\n",
+            ">gi|456|ref|SACC.1| subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+    ] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            "0",
+            &[
+                "--dust",
+                "no",
+                "--parse_deflines",
+                "--num_descriptions",
+                "1",
+                "--num_alignments",
+                "1",
+            ],
+            &[
+                "-dust",
+                "no",
+                "-parse_deflines",
+                "-num_descriptions",
+                "1",
+                "-num_alignments",
+                "1",
+            ],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_xml_parse_deflines() {
+    for (query, subject) in [
+        (
+            ">lcl|query1 query title\nACGTACGTACGTACGTACGT\n",
+            ">lcl|subject1 subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+        (
+            ">gi|123|ref|QACC.1| query title\nACGTACGTACGTACGTACGT\n",
+            ">gi|456|ref|SACC.1| subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+    ] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            "5",
+            &[
+                "--dust",
+                "no",
+                "--parse_deflines",
+                "--max_target_seqs",
+                "10",
+            ],
+            &[
+                "-dust",
+                "no",
+                "-parse_deflines",
+                "-max_target_seqs",
+                "10",
+            ],
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_sam_parse_deflines() {
+    for (query, subject) in [
+        (
+            ">lcl|query1 query title\nACGTACGTACGTACGTACGT\n",
+            ">lcl|subject1 subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+        (
+            ">gi|123|ref|QACC.1| query title\nACGTACGTACGTACGTACGT\n",
+            ">gi|456|ref|SACC.1| subject title\nACGTACGTACGTACGTACGT\n",
+        ),
+    ] {
+        assert_blastn_subject_sam_matches_ncbi(
+            query,
+            subject,
+            &["--dust", "no", "--parse_deflines", "--max_target_seqs", "10"],
+            &["-dust", "no", "-parse_deflines", "-max_target_seqs", "10"],
+        );
+    }
+}
+
+#[test]
 fn blastn_subject_ncbi_parity_outfmt10_default_and_custom() {
     let query = ">q1\nACGTACGTACGTACGTACGT\n";
     let subject = ">s1 subject title, with comma\nACGTACGTACGTACGTACGT\n";
@@ -1181,6 +1343,156 @@ fn blastn_subject_ncbi_parity_pairwise_multi_query() {
         "0",
         &["--dust", "no", "--max_target_seqs", "10"],
         &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_description_alignment_limits() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n>s2\nACGTACGTACGTACGTACGTACGT\n>s3\nACGTACGTACGTACGTACGTACGT\n",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--num_descriptions",
+            "2",
+            "--num_alignments",
+            "1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-num_descriptions",
+            "2",
+            "-num_alignments",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_line_length() {
+    assert_blastn_subject_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n",
+        "0",
+        &[
+            "--dust",
+            "no",
+            "--num_descriptions",
+            "1",
+            "--num_alignments",
+            "1",
+            "--line_length",
+            "12",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-num_descriptions",
+            "1",
+            "-num_alignments",
+            "1",
+            "-line_length",
+            "12",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_pairwise_zero_descriptions_zero_alignments() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.out");
+    let ncbi_out = tmp.path().join("ncbi.out");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&subject, ">s1\nACGTACGTACGTACGTACGTACGT\n").expect("write subject FASTA");
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("0")
+        .arg("--dust")
+        .arg("no")
+        .arg("--num_descriptions")
+        .arg("0")
+        .arg("--num_alignments")
+        .arg("0")
+        .arg("--out")
+        .arg(&rust_out)
+        .output()
+        .expect("run blast-cli zero pairwise limits");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("0")
+        .arg("-dust")
+        .arg("no")
+        .arg("-num_descriptions")
+        .arg("0")
+        .arg("-num_alignments")
+        .arg("0")
+        .arg("-out")
+        .arg(&ncbi_out)
+        .output()
+        .expect("run NCBI zero pairwise limits");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject zero pairwise limits"
+    );
+    assert!(
+        !ncbi.status.success(),
+        "NCBI should reject zero pairwise limits"
+    );
+    assert_eq!(
+        std::fs::read(&rust_out).unwrap_or_default(),
+        std::fs::read(&ncbi_out).unwrap_or_default(),
+        "zero pairwise limit outputs differ"
+    );
+    let rust_stderr = String::from_utf8_lossy(&rust.stderr);
+    let ncbi_stderr = String::from_utf8_lossy(&ncbi.stderr);
+    for expected in [
+        "BLAST query/options error: No hits are being saved",
+        "Please refer to the BLAST+ user manual.",
+    ] {
+        assert!(
+            rust_stderr.contains(expected),
+            "missing Rust stderr line {expected:?}, stderr was:\n{rust_stderr}"
+        );
+        assert!(
+            ncbi_stderr.contains(expected),
+            "missing NCBI stderr line {expected:?}, stderr was:\n{ncbi_stderr}"
+        );
+    }
+    assert_eq!(
+        rust_stderr, ncbi_stderr,
+        "zero pairwise limit stderr differs"
     );
 }
 
@@ -1807,6 +2119,34 @@ fn blastn_db_ncbi_parity_pairwise_no_hit() {
 }
 
 #[test]
+fn blastn_db_ncbi_parity_dbsize_and_searchsp_statistics() {
+    let query = ">subseq_oid0\nTTAAGGAGGCTCATCTTTCAGAATCCATGCTGTGGGCCAGCAAGAGTTAA\n";
+    let db = ">subj1\nTTAAGGAGGCTCATCTTTCAGAATCCATGCTGTGGGCCAGCAAGAGTTAA\n";
+    let outfmt = "6 qseqid sseqid evalue bitscore score length pident";
+
+    for (rust_args, ncbi_args) in [
+        (
+            vec!["--dust", "no", "--dbsize", "1000000"],
+            vec!["-dust", "no", "-dbsize", "1000000"],
+        ),
+        (
+            vec!["--dust", "no", "--searchsp", "1000000"],
+            vec!["-dust", "no", "-searchsp", "1000000"],
+        ),
+        (
+            vec!["--dust", "no", "--dbsize", "-1"],
+            vec!["-dust", "no", "-dbsize", "-1"],
+        ),
+        (
+            vec!["--dust", "no", "--searchsp", "0"],
+            vec!["-dust", "no", "-searchsp", "0"],
+        ),
+    ] {
+        assert_blastn_db_outfmt_matches_ncbi(query, db, outfmt, &[], &rust_args, &ncbi_args);
+    }
+}
+
+#[test]
 fn blastn_db_ncbi_parity_pairwise_multi_query() {
     assert_blastn_db_outfmt_matches_ncbi(
         ">q1\nACGTACGTACGTACGTACGT\n>q2 nohit\nAAAAAAAAAAAAAAAAAAAA\n",
@@ -1815,6 +2155,62 @@ fn blastn_db_ncbi_parity_pairwise_multi_query() {
         &[],
         &["--dust", "no", "--max_target_seqs", "10"],
         &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_pairwise_description_alignment_limits() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n>s2\nACGTACGTACGTACGTACGTACGT\n>s3\nACGTACGTACGTACGTACGTACGT\n",
+        "0",
+        &[],
+        &[
+            "--dust",
+            "no",
+            "--num_descriptions",
+            "2",
+            "--num_alignments",
+            "1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-num_descriptions",
+            "2",
+            "-num_alignments",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_pairwise_line_length() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGT\n",
+        ">s1\nACGTACGTACGTACGTACGTACGT\n",
+        "0",
+        &[],
+        &[
+            "--dust",
+            "no",
+            "--num_descriptions",
+            "1",
+            "--num_alignments",
+            "1",
+            "--line_length",
+            "12",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-num_descriptions",
+            "1",
+            "-num_alignments",
+            "1",
+            "-line_length",
+            "12",
+        ],
     );
 }
 
@@ -1913,6 +2309,2295 @@ fn blastn_db_ncbi_parity_negative_taxidlist_filter() {
             "{taxids_file}",
         ],
     );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_missing_taxidlist_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let missing = tmp.path().join("missing_taxids.txt");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .arg("-taxid")
+        .arg("9606")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .arg("--taxidlist")
+        .arg(&missing)
+        .arg("--out")
+        .arg(&rust_out)
+        .output()
+        .expect("run blast-cli missing taxidlist");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .arg("-taxidlist")
+        .arg(&missing)
+        .arg("-out")
+        .arg(&ncbi_out)
+        .output()
+        .expect("run NCBI missing taxidlist");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject missing taxidlist"
+    );
+    assert!(
+        !ncbi.status.success(),
+        "NCBI should reject missing taxidlist"
+    );
+    assert_eq!(
+        std::fs::read(&rust_out).unwrap_or_default(),
+        std::fs::read(&ncbi_out).unwrap_or_default(),
+        "missing taxidlist outputs differ"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "missing taxidlist stderr differs"
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_invalid_taxids_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .arg("-taxid")
+        .arg("9606")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .arg("--taxids")
+        .arg("abc")
+        .arg("--out")
+        .arg(&rust_out)
+        .output()
+        .expect("run blast-cli invalid taxids");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .arg("-taxids")
+        .arg("abc")
+        .arg("-out")
+        .arg(&ncbi_out)
+        .output()
+        .expect("run NCBI invalid taxids");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject invalid taxids"
+    );
+    assert!(!ncbi.status.success(), "NCBI should reject invalid taxids");
+    assert_eq!(
+        std::fs::read(&rust_out).unwrap_or_default(),
+        std::fs::read(&ncbi_out).unwrap_or_default(),
+        "invalid taxids outputs differ"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "invalid taxids stderr differs"
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_invalid_taxidlist_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let bad_taxids = tmp.path().join("bad_taxids.txt");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
+    std::fs::write(&bad_taxids, "9606\nabc\n").expect("write invalid taxid list");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .arg("-taxid")
+        .arg("9606")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .arg("--taxidlist")
+        .arg(&bad_taxids)
+        .arg("--out")
+        .arg(&rust_out)
+        .output()
+        .expect("run blast-cli invalid taxidlist");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .arg("-taxidlist")
+        .arg(&bad_taxids)
+        .arg("-out")
+        .arg(&ncbi_out)
+        .output()
+        .expect("run NCBI invalid taxidlist");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject invalid taxidlist"
+    );
+    assert!(
+        !ncbi.status.success(),
+        "NCBI should reject invalid taxidlist"
+    );
+    assert_eq!(
+        std::fs::read(&rust_out).unwrap_or_default(),
+        std::fs::read(&ncbi_out).unwrap_or_default(),
+        "invalid taxidlist outputs differ"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "invalid taxidlist stderr differs"
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_seqidlist_filter() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n>s2 subject two\nACGTACGTACGTACGTACGT\n",
+        "6 sacc",
+        &["-parse_seqids"],
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--seqidlist",
+            "{seqids_file}",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-seqidlist",
+            "{seqids_file}",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_negative_seqidlist_filter() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n>s2 subject two\nACGTACGTACGTACGTACGT\n",
+        "6 sacc",
+        &["-parse_seqids"],
+        &[
+            "--dust",
+            "no",
+            "--max_target_seqs",
+            "10",
+            "--negative_seqidlist",
+            "{seqids_file}",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-max_target_seqs",
+            "10",
+            "-negative_seqidlist",
+            "{seqids_file}",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_seqidlist_warnings() {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let seqids = tmp.path().join("seqids.txt");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(
+        &db_fasta,
+        ">s1 subject one\nACGTACGTACGTACGTACGT\n>s2 subject two\nACGTACGTACGTACGTACGT\n",
+    )
+    .expect("write db FASTA");
+    std::fs::write(&seqids, "s2\n").expect("write seqid list");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .arg("-parse_seqids")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    for (rust_option, ncbi_option) in [
+        ("--seqidlist", "-seqidlist"),
+        ("--negative_seqidlist", "-negative_seqidlist"),
+    ] {
+        let rust_out = tmp
+            .path()
+            .join(format!("rust_{}.tsv", rust_option.trim_start_matches("--")));
+        let ncbi_out = tmp
+            .path()
+            .join(format!("ncbi_{}.tsv", rust_option.trim_start_matches("--")));
+
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg(&query)
+            .arg("--db")
+            .arg(&db)
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6 sacc")
+            .arg("--dust")
+            .arg("no")
+            .arg("--max_target_seqs")
+            .arg("10")
+            .arg(rust_option)
+            .arg(&seqids)
+            .arg("--out")
+            .arg(&rust_out)
+            .output()
+            .expect("run blast-cli seqidlist warning parity");
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg(&query)
+            .arg("-db")
+            .arg(&db)
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6 sacc")
+            .arg("-dust")
+            .arg("no")
+            .arg("-max_target_seqs")
+            .arg("10")
+            .arg(ncbi_option)
+            .arg(&seqids)
+            .arg("-out")
+            .arg(&ncbi_out)
+            .output()
+            .expect("run NCBI seqidlist warning parity");
+
+        assert!(rust.status.success(), "blast-cli failed for {rust_option}");
+        assert!(ncbi.status.success(), "NCBI failed for {ncbi_option}");
+        assert_eq!(
+            std::fs::read(&rust_out).unwrap_or_default(),
+            std::fs::read(&ncbi_out).unwrap_or_default(),
+            "{rust_option} output differs"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_db_ncbi_parity_missing_database_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let missing_db = tmp.path().join("missing_db");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&missing_db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .output()
+        .expect("run blast-cli missing database");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&missing_db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .output()
+        .expect("run NCBI missing database");
+
+    assert!(!rust.status.success(), "blast-cli should reject missing DB");
+    assert!(!ncbi.status.success(), "NCBI should reject missing DB");
+    assert_eq!(
+        rust.status.code(),
+        ncbi.status.code(),
+        "missing database status differs"
+    );
+    assert_eq!(rust.stdout, ncbi.stdout, "missing database stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "missing database stderr differs"
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_empty_alias_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db = tmp.path().join("empty_alias");
+    let alias = db.with_extension("nal");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&alias, "TITLE empty alias\n").expect("write empty alias");
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .output()
+        .expect("run blast-cli empty alias");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .output()
+        .expect("run NCBI empty alias");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject empty alias"
+    );
+    assert!(!ncbi.status.success(), "NCBI should reject empty alias");
+    assert_eq!(
+        rust.status.code(),
+        ncbi.status.code(),
+        "empty alias status differs"
+    );
+    assert_eq!(rust.stdout, ncbi.stdout, "empty alias stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "empty alias stderr differs"
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_missing_alias_volume_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db = tmp.path().join("bad_alias");
+    let alias = db.with_extension("nal");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&alias, "TITLE bad alias\nDBLIST missing_volume\n").expect("write bad alias");
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .output()
+        .expect("run blast-cli missing alias volume");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .output()
+        .expect("run NCBI missing alias volume");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject missing alias volume"
+    );
+    assert!(
+        !ncbi.status.success(),
+        "NCBI should reject missing alias volume"
+    );
+    assert_eq!(
+        rust.status.code(),
+        ncbi.status.code(),
+        "missing alias volume status differs"
+    );
+    assert_eq!(
+        rust.stdout, ncbi.stdout,
+        "missing alias volume stdout differs"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "missing alias volume stderr differs"
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_missing_import_search_strategy_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let missing_strategy = tmp.path().join("missing_strategy.asn");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg("tests/fixtures/seqn/seqn")
+        .arg("--import_search_strategy")
+        .arg(&missing_strategy)
+        .output()
+        .expect("run blast-cli missing import search strategy");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg("tests/fixtures/seqn/seqn")
+        .arg("-import_search_strategy")
+        .arg(&missing_strategy)
+        .output()
+        .expect("run NCBI missing import search strategy");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject missing import strategy"
+    );
+    assert!(
+        !ncbi.status.success(),
+        "NCBI should reject missing import strategy"
+    );
+    assert_eq!(
+        rust.status.code(),
+        ncbi.status.code(),
+        "missing import strategy status differs"
+    );
+    assert_eq!(
+        rust.stdout, ncbi.stdout,
+        "missing import strategy stdout differs"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "missing import strategy stderr differs"
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_inaccessible_export_search_strategy_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let export_strategy = tmp.path().join("missing_dir").join("export.asn");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+
+    let rust = std::process::Command::new(blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg("tests/fixtures/seqn/seqn")
+        .arg("--export_search_strategy")
+        .arg(&export_strategy)
+        .output()
+        .expect("run blast-cli inaccessible export search strategy");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg("tests/fixtures/seqn/seqn")
+        .arg("-export_search_strategy")
+        .arg(&export_strategy)
+        .output()
+        .expect("run NCBI inaccessible export search strategy");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject inaccessible export strategy"
+    );
+    assert!(
+        !ncbi.status.success(),
+        "NCBI should reject inaccessible export strategy"
+    );
+    assert_eq!(
+        rust.status.code(),
+        ncbi.status.code(),
+        "inaccessible export strategy status differs"
+    );
+    assert_eq!(
+        rust.stdout, ncbi.stdout,
+        "inaccessible export strategy stdout differs"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "inaccessible export strategy stderr differs"
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_empty_query_and_subject_warnings() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let empty_query = tmp.path().join("empty_query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let empty_subject = tmp.path().join("empty_subject.fa");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&empty_query, ">empty\n").expect("write empty query FASTA");
+    std::fs::write(&subject, ">s1\nACGTACGTACGTACGTACGT\n").expect("write subject FASTA");
+    std::fs::write(&empty_subject, ">empty\n").expect("write empty subject FASTA");
+
+    for (query_path, subject_path, should_succeed, label) in [
+        (&empty_query, &subject, false, "empty query"),
+        (&query, &empty_subject, true, "empty subject"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg(query_path)
+            .arg("--subject")
+            .arg(subject_path)
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg(query_path)
+            .arg("-subject")
+            .arg(subject_path)
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI {label}: {err}"));
+
+        assert_eq!(
+            rust.status.success(),
+            should_succeed,
+            "blast-cli success state differs from expected for {label}"
+        );
+        assert_eq!(
+            ncbi.status.success(),
+            should_succeed,
+            "NCBI success state differs from expected for {label}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{label} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{label} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{label} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_location_error_handling() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option, value, label) in [
+        ("--query_loc", "-query_loc", "bad", "query bad format"),
+        ("--query_loc", "-query_loc", "a-10", "query bad start"),
+        ("--query_loc", "-query_loc", "1-b", "query bad stop"),
+        ("--query_loc", "-query_loc", "0-10", "query zero start"),
+        ("--query_loc", "-query_loc", "10-5", "query reversed range"),
+        ("--query_loc", "-query_loc", "999-1000", "query high start"),
+        ("--query_loc", "-query_loc", "1-999", "query high stop"),
+        ("--subject_loc", "-subject_loc", "bad", "subject bad format"),
+        ("--subject_loc", "-subject_loc", "a-10", "subject bad start"),
+        ("--subject_loc", "-subject_loc", "1-b", "subject bad stop"),
+        (
+            "--subject_loc",
+            "-subject_loc",
+            "0-10",
+            "subject zero start",
+        ),
+        (
+            "--subject_loc",
+            "-subject_loc",
+            "10-5",
+            "subject reversed range",
+        ),
+        (
+            "--subject_loc",
+            "-subject_loc",
+            "999-1000",
+            "subject high start",
+        ),
+        (
+            "--subject_loc",
+            "-subject_loc",
+            "1-999",
+            "subject high stop",
+        ),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI {label}: {err}"));
+
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{label} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{label} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{label} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_db_ncbi_parity_unsupported_db_mask_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option) in [
+        ("--db_soft_mask", "-db_soft_mask"),
+        ("--db_hard_mask", "-db_hard_mask"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--db")
+            .arg("tests/fixtures/seqn/seqn")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg("99999")
+            .output()
+            .expect("run blast-cli unsupported DB mask");
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-db")
+            .arg("tests/fixtures/seqn/seqn")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg("99999")
+            .output()
+            .expect("run NCBI unsupported DB mask");
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject unsupported {rust_option}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject unsupported {ncbi_option}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "unsupported {rust_option} status differs"
+        );
+        assert_eq!(
+            rust.stdout, ncbi.stdout,
+            "unsupported {rust_option} stdout differs"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "unsupported {rust_option} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_query_masking_resource_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let missing_filtering_db = tmp.path().join("missing_filtering_db");
+    let missing_window_masker_db = tmp.path().join("missing_window_masker_db");
+
+    for (rust_args, ncbi_args, label) in [
+        (
+            vec![
+                "--filtering_db".to_string(),
+                missing_filtering_db.display().to_string(),
+            ],
+            vec![
+                "-filtering_db".to_string(),
+                missing_filtering_db.display().to_string(),
+            ],
+            "missing filtering_db",
+        ),
+        (
+            vec![
+                "--window_masker_db".to_string(),
+                missing_window_masker_db.display().to_string(),
+            ],
+            vec![
+                "-window_masker_db".to_string(),
+                missing_window_masker_db.display().to_string(),
+            ],
+            "missing window_masker_db",
+        ),
+        (
+            vec!["--window_masker_taxid".to_string(), "999999999".to_string()],
+            vec!["-window_masker_taxid".to_string(), "999999999".to_string()],
+            "missing window_masker_taxid data",
+        ),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .args(&rust_args)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .args(&ncbi_args)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI {label}: {err}"));
+
+        assert!(!rust.status.success(), "blast-cli should reject {label}");
+        assert!(!ncbi.status.success(), "NCBI should reject {label}");
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{label} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{label} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{label} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_entrez_query_requires_remote_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let rust = std::process::Command::new(&blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg("tests/fixtures/query_short_match.fa")
+        .arg("--subject")
+        .arg("tests/fixtures/subject_test.fa")
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .arg("--entrez_query")
+        .arg("txid9606[orgn]")
+        .output()
+        .expect("run blast-cli entrez_query without remote");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg("tests/fixtures/query_short_match.fa")
+        .arg("-subject")
+        .arg("tests/fixtures/subject_test.fa")
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .arg("-entrez_query")
+        .arg("txid9606[orgn]")
+        .output()
+        .expect("run NCBI entrez_query without remote");
+
+    assert!(!rust.status.success(), "blast-cli should reject entrez_query");
+    assert!(!ncbi.status.success(), "NCBI should reject entrez_query");
+    assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
+    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "stderr differs"
+    );
+}
+
+#[test]
+fn blastn_ncbi_parity_subject_incompatible_with_db_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let missing_db = tmp.path().join("missingdb");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&subject, ">s1\nACGTACGTACGTACGTACGT\n").expect("write subject FASTA");
+
+    let rust = std::process::Command::new(&blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--db")
+        .arg(&missing_db)
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .output()
+        .expect("run blast-cli subject plus db");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-db")
+        .arg(&missing_db)
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .output()
+        .expect("run NCBI subject plus db");
+
+    assert!(!rust.status.success(), "blast-cli should reject subject plus db");
+    assert!(!ncbi.status.success(), "NCBI should reject subject plus db");
+    assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
+    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "stderr differs"
+    );
+}
+
+#[test]
+fn blastn_ncbi_parity_subject_incompatible_with_database_filters_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let id_list = tmp.path().join("ids.txt");
+    let taxid_list = tmp.path().join("taxids.txt");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&subject, ">s1\nACGTACGTACGTACGTACGT\n").expect("write subject FASTA");
+    std::fs::write(&id_list, "1\n").expect("write id list");
+    std::fs::write(&taxid_list, "9606\n").expect("write taxid list");
+
+    for (rust_args, ncbi_args, label) in [
+        (
+            vec!["--gilist".to_string(), id_list.display().to_string()],
+            vec!["-gilist".to_string(), id_list.display().to_string()],
+            "gilist",
+        ),
+        (
+            vec!["--seqidlist".to_string(), id_list.display().to_string()],
+            vec!["-seqidlist".to_string(), id_list.display().to_string()],
+            "seqidlist",
+        ),
+        (
+            vec![
+                "--negative_gilist".to_string(),
+                id_list.display().to_string(),
+            ],
+            vec![
+                "-negative_gilist".to_string(),
+                id_list.display().to_string(),
+            ],
+            "negative_gilist",
+        ),
+        (
+            vec![
+                "--negative_seqidlist".to_string(),
+                id_list.display().to_string(),
+            ],
+            vec![
+                "-negative_seqidlist".to_string(),
+                id_list.display().to_string(),
+            ],
+            "negative_seqidlist",
+        ),
+        (
+            vec!["--taxids".to_string(), "9606".to_string()],
+            vec!["-taxids".to_string(), "9606".to_string()],
+            "taxids",
+        ),
+        (
+            vec!["--negative_taxids".to_string(), "9606".to_string()],
+            vec!["-negative_taxids".to_string(), "9606".to_string()],
+            "negative_taxids",
+        ),
+        (
+            vec!["--taxidlist".to_string(), taxid_list.display().to_string()],
+            vec!["-taxidlist".to_string(), taxid_list.display().to_string()],
+            "taxidlist",
+        ),
+        (
+            vec![
+                "--negative_taxidlist".to_string(),
+                taxid_list.display().to_string(),
+            ],
+            vec![
+                "-negative_taxidlist".to_string(),
+                taxid_list.display().to_string(),
+            ],
+            "negative_taxidlist",
+        ),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg(&query)
+            .arg("--subject")
+            .arg(&subject)
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .args(&rust_args)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg(&query)
+            .arg("-subject")
+            .arg(&subject)
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .args(&ncbi_args)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI {label}: {err}"));
+
+        assert!(!rust.status.success(), "blast-cli should reject {label}");
+        assert!(!ncbi.status.success(), "NCBI should reject {label}");
+        assert_eq!(rust.status.code(), ncbi.status.code(), "{label} status differs");
+        assert_eq!(rust.stdout, ncbi.stdout, "{label} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{label} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_invalid_boolean_option_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option) in [
+        ("--soft_masking", "-soft_masking"),
+        ("--sum_stats", "-sum_stats"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg("maybe")
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg("maybe")
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid {ncbi_option}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject invalid {rust_option}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject invalid {ncbi_option}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{rust_option} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{rust_option} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_invalid_dust_option_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for dust in ["maybe", "1 2", "a b c"] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg(dust)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid dust {dust}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg(dust)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid dust {dust}: {err}"));
+
+        assert!(!rust.status.success(), "blast-cli should reject dust {dust}");
+        assert!(!ncbi.status.success(), "NCBI should reject dust {dust}");
+        assert_eq!(rust.status.code(), ncbi.status.code(), "{dust} status differs");
+        assert_eq!(rust.stdout, ncbi.stdout, "{dust} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{dust} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_negative_searchsp_error() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let rust = std::process::Command::new(&blast_cli)
+        .arg("blastn")
+        .arg("--query")
+        .arg("tests/fixtures/query_short_match.fa")
+        .arg("--subject")
+        .arg("tests/fixtures/subject_test.fa")
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--dust")
+        .arg("no")
+        .arg("--searchsp")
+        .arg("-1")
+        .output()
+        .expect("run blast-cli negative searchsp");
+    let ncbi = std::process::Command::new("/usr/bin/blastn")
+        .arg("-query")
+        .arg("tests/fixtures/query_short_match.fa")
+        .arg("-subject")
+        .arg("tests/fixtures/subject_test.fa")
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-dust")
+        .arg("no")
+        .arg("-searchsp")
+        .arg("-1")
+        .output()
+        .expect("run NCBI negative searchsp");
+
+    assert!(!rust.status.success(), "blast-cli should reject negative searchsp");
+    assert!(!ncbi.status.success(), "NCBI should reject negative searchsp");
+    assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
+    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "stderr differs"
+    );
+}
+
+#[test]
+fn blastn_ncbi_parity_invalid_word_size_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for word_size in ["0", "3", "-1"] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg("--word_size")
+            .arg(word_size)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid word_size {word_size}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg("-word_size")
+            .arg(word_size)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid word_size {word_size}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject word_size {word_size}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject word_size {word_size}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{word_size} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{word_size} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{word_size} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_nonpositive_evalue_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for evalue in ["0", "-1"] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg("--evalue")
+            .arg(evalue)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid evalue {evalue}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg("-evalue")
+            .arg(evalue)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid evalue {evalue}: {err}"));
+
+        assert!(!rust.status.success(), "blast-cli should reject evalue {evalue}");
+        assert!(!ncbi.status.success(), "NCBI should reject evalue {evalue}");
+        assert_eq!(rust.status.code(), ncbi.status.code(), "{evalue} status differs");
+        assert_eq!(rust.stdout, ncbi.stdout, "{evalue} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{evalue} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_percent_constraint_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option, value) in [
+        ("--perc_identity", "-perc_identity", "-1"),
+        ("--perc_identity", "-perc_identity", "101"),
+        ("--qcov_hsp_perc", "-qcov_hsp_perc", "-1"),
+        ("--qcov_hsp_perc", "-qcov_hsp_perc", "101"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid {ncbi_option} {value}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject {rust_option} {value}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject {ncbi_option} {value}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{rust_option} {value} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{rust_option} {value} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} {value} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_hsp_pruning_constraint_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option, value) in [
+        ("--max_hsps", "-max_hsps", "0"),
+        ("--culling_limit", "-culling_limit", "-1"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid {ncbi_option} {value}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject {rust_option} {value}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject {ncbi_option} {value}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{rust_option} {value} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{rust_option} {value} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} {value} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_remaining_integer_constraint_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option, value) in [
+        ("--num_threads", "-num_threads", "0"),
+        ("--window_size", "-window_size", "-1"),
+        ("--off_diagonal_range", "-off_diagonal_range", "-1"),
+        ("--mt_mode", "-mt_mode", "2"),
+        ("--num_descriptions", "-num_descriptions", "-1"),
+        ("--num_alignments", "-num_alignments", "-1"),
+        ("--line_length", "-line_length", "0"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid {ncbi_option} {value}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject {rust_option} {value}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject {ncbi_option} {value}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{rust_option} {value} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{rust_option} {value} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} {value} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_nonfinite_float_conversion_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option, value) in [
+        ("--evalue", "-evalue", "nan"),
+        ("--evalue", "-evalue", "inf"),
+        ("--perc_identity", "-perc_identity", "nan"),
+        ("--qcov_hsp_perc", "-qcov_hsp_perc", "nan"),
+        ("--xdrop_ungap", "-xdrop_ungap", "nan"),
+        ("--xdrop_gap", "-xdrop_gap", "nan"),
+        ("--xdrop_gap_final", "-xdrop_gap_final", "nan"),
+        ("--xdrop_ungap", "-xdrop_ungap", "inf"),
+        ("--xdrop_gap", "-xdrop_gap", "inf"),
+        ("--xdrop_gap_final", "-xdrop_gap_final", "inf"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid {ncbi_option} {value}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject {rust_option} {value}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject {ncbi_option} {value}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{rust_option} {value} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{rust_option} {value} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} {value} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_invalid_float_string_conversion_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option, value) in [
+        ("--evalue", "-evalue", "abc"),
+        ("--evalue", "-evalue", "1abc"),
+        ("--evalue", "-evalue", "1e+"),
+        ("--evalue", "-evalue", "1e+abc"),
+        ("--evalue", "-evalue", "1e-"),
+        ("--perc_identity", "-perc_identity", "abc"),
+        ("--perc_identity", "-perc_identity", "1e+"),
+        ("--qcov_hsp_perc", "-qcov_hsp_perc", "abc"),
+        ("--xdrop_ungap", "-xdrop_ungap", "abc"),
+        ("--xdrop_gap", "-xdrop_gap", "abc"),
+        ("--xdrop_gap", "-xdrop_gap", "1e+"),
+        ("--xdrop_gap_final", "-xdrop_gap_final", "abc"),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg(value)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid {ncbi_option} {value}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject {rust_option} {value}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject {ncbi_option} {value}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{rust_option} {value} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{rust_option} {value} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} {value} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_bare_exponent_float_values() {
+    let query = ">subseq_oid0\nTTAAGGAGGCTCATCTTTCAGAATCCATGCTGTGGGCCAGCAAGAGTTAA\n";
+    let subject = ">subj1\nTTAAGGAGGCTCATCTTTCAGAATCCATGCTGTGGGCCAGCAAGAGTTAA\n";
+    let outfmt = "6 qseqid sseqid evalue bitscore score length pident";
+
+    for (rust_args, ncbi_args) in [
+        (
+            vec!["--dust", "no", "--evalue", "1e"],
+            vec!["-dust", "no", "-evalue", "1e"],
+        ),
+        (
+            vec!["--dust", "no", "--evalue", "1E"],
+            vec!["-dust", "no", "-evalue", "1E"],
+        ),
+        (
+            vec!["--dust", "no", "--xdrop_gap", "1e"],
+            vec!["-dust", "no", "-xdrop_gap", "1e"],
+        ),
+    ] {
+        assert_blastn_subject_outfmt_matches_ncbi(
+            query,
+            subject,
+            outfmt,
+            &rust_args,
+            &ncbi_args,
+        );
+    }
+}
+
+#[test]
+fn blastn_ncbi_parity_negative_gap_cost_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    for (rust_option, ncbi_option) in [("--gapopen", "-gapopen"), ("--gapextend", "-gapextend")] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("--subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg("-1")
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg("tests/fixtures/query_short_match.fa")
+            .arg("-subject")
+            .arg("tests/fixtures/subject_test.fa")
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg("-1")
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI invalid {ncbi_option}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject invalid {rust_option}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject invalid {ncbi_option}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{rust_option} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{rust_option} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{rust_option} stderr differs"
+        );
+    }
+}
+
+#[test]
+fn blastn_db_ncbi_parity_missing_id_list_errors() {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
+    std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    for (rust_option, ncbi_option) in [
+        ("--gilist", "-gilist"),
+        ("--seqidlist", "-seqidlist"),
+        ("--negative_gilist", "-negative_gilist"),
+        ("--negative_seqidlist", "-negative_seqidlist"),
+    ] {
+        let missing = tmp.path().join(format!(
+            "missing_{}.txt",
+            rust_option.trim_start_matches("--")
+        ));
+        let rust_out = tmp
+            .path()
+            .join(format!("rust_{}.tsv", rust_option.trim_start_matches("--")));
+        let ncbi_out = tmp
+            .path()
+            .join(format!("ncbi_{}.tsv", rust_option.trim_start_matches("--")));
+
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("blastn")
+            .arg("--query")
+            .arg(&query)
+            .arg("--db")
+            .arg(&db)
+            .arg("--task")
+            .arg("blastn-short")
+            .arg("--outfmt")
+            .arg("6")
+            .arg("--dust")
+            .arg("no")
+            .arg(rust_option)
+            .arg(&missing)
+            .arg("--out")
+            .arg(&rust_out)
+            .output()
+            .expect("run blast-cli missing ID list");
+        let ncbi = std::process::Command::new("/usr/bin/blastn")
+            .arg("-query")
+            .arg(&query)
+            .arg("-db")
+            .arg(&db)
+            .arg("-task")
+            .arg("blastn-short")
+            .arg("-outfmt")
+            .arg("6")
+            .arg("-dust")
+            .arg("no")
+            .arg(ncbi_option)
+            .arg(&missing)
+            .arg("-out")
+            .arg(&ncbi_out)
+            .output()
+            .expect("run NCBI missing ID list");
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject missing {rust_option}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject missing {ncbi_option}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "missing {rust_option} status differs"
+        );
+        assert_eq!(
+            std::fs::read(&rust_out).unwrap_or_default(),
+            std::fs::read(&ncbi_out).unwrap_or_default(),
+            "missing {rust_option} outputs differ"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "missing {rust_option} stderr differs"
+        );
+    }
 }
 
 #[test]

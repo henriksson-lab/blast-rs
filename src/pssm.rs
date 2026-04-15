@@ -326,7 +326,9 @@ fn std_prob_ncbistdaa() -> [f64; AA_SIZE] {
     use crate::matrix::AA_FREQUENCIES;
     let mut prob = [0.0f64; AA_SIZE];
     // Map from AA_FREQUENCIES (alphabetical) to NCBIstdaa codes
-    let aa_to_stdaa: [usize; 20] = [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22];
+    let aa_to_stdaa: [usize; 20] = [
+        1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22,
+    ];
     for (i, &code) in aa_to_stdaa.iter().enumerate() {
         prob[code] = AA_FREQUENCIES[i];
     }
@@ -361,7 +363,11 @@ impl Pssm {
             }
         }
 
-        Pssm { scores, length, info_content }
+        Pssm {
+            scores,
+            length,
+            info_content,
+        }
     }
 
     /// Score a subject amino acid at a given position.
@@ -376,7 +382,9 @@ impl Pssm {
 
     /// Return the consensus residue (highest-scoring amino acid) at a given position.
     pub fn consensus_at(&self, position: usize) -> Option<u8> {
-        if position >= self.length { return None; }
+        if position >= self.length {
+            return None;
+        }
         let row = &self.scores[position];
         // Only consider standard amino acids (indices 1-20 in NCBIstdaa)
         let (best_aa, _) = (1u8..=20)
@@ -416,10 +424,7 @@ impl Pssm {
         let lambda = 0.3176; // BLOSUM62 ungapped lambda
 
         // Step 1: Compute Henikoff position-based sequence weights
-        let match_weights = compute_sequence_weights_and_match_weights(
-            aligned_seqs,
-            self.length,
-        );
+        let match_weights = compute_sequence_weights_and_match_weights(aligned_seqs, self.length);
 
         // Step 2: Compute effective observations and column-specific pseudocounts
         // Step 3: Blend observed frequencies with pseudocounts using frequency ratios
@@ -427,9 +432,7 @@ impl Pssm {
 
         for pos in 0..self.length {
             // Check if this position has any aligned residues
-            let total_weight: f64 = (0..AA_SIZE)
-                .map(|r| match_weights[pos][r])
-                .sum();
+            let total_weight: f64 = (0..AA_SIZE).map(|r| match_weights[pos][r]).sum();
 
             if total_weight < POS_EPSILON {
                 // No alignment data at this position, keep original scores
@@ -437,19 +440,12 @@ impl Pssm {
             }
 
             // Compute effective number of observations
-            let observations = compute_effective_observations(
-                aligned_seqs,
-                pos,
-                self.length,
-                &std_prob,
-            );
+            let observations =
+                compute_effective_observations(aligned_seqs, pos, self.length, &std_prob);
 
             // Compute column-specific pseudocounts
-            let pseudo_weight = compute_column_pseudocounts(
-                &match_weights[pos],
-                &std_prob,
-                observations,
-            );
+            let pseudo_weight =
+                compute_column_pseudocounts(&match_weights[pos], &std_prob, observations);
 
             // Compute frequency ratios with pseudocount blending
             for r in 0..AA_SIZE {
@@ -465,8 +461,7 @@ impl Pssm {
                 }
                 pseudo *= pseudo_weight;
 
-                let numerator =
-                    observations * match_weights[pos][r] / std_prob[r] + pseudo;
+                let numerator = observations * match_weights[pos][r] / std_prob[r] + pseudo;
                 let denominator = observations + pseudo_weight;
 
                 if denominator <= 0.0 {
@@ -488,7 +483,8 @@ impl Pssm {
         }
 
         // Compute information content
-        self.info_content = compute_information_content(&self.scores, &std_prob, self.length, lambda);
+        self.info_content =
+            compute_information_content(&self.scores, &std_prob, self.length, lambda);
     }
 }
 
@@ -636,8 +632,7 @@ fn compute_effective_observations(
                     prev_weighted_sum += ((j - 1) as f64 * (1.0 - bg20[k]).ln()).exp();
                 }
                 let prev_expected = EFFECTIVE_ALPHABET as f64 - prev_weighted_sum;
-                indep = j as f64
-                    - (expected - ave_distinct) / (expected - prev_expected);
+                indep = j as f64 - (expected - ave_distinct) / (expected - prev_expected);
             }
             break;
         }
@@ -788,7 +783,9 @@ pub fn psi_blast_iteration(
     let mut results = Vec::new();
 
     for (subj_id, subj_seq) in subjects {
-        if subj_seq.len() < 3 || pssm.length < 3 { continue; }
+        if subj_seq.len() < 3 || pssm.length < 3 {
+            continue;
+        }
 
         let mut best_score = 0i32;
         let mut best_start = 0usize;
@@ -821,7 +818,11 @@ pub fn psi_blast_iteration(
         }
     }
 
-    results.sort_by(|a, b| a.evalue.partial_cmp(&b.evalue).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        a.evalue
+            .partial_cmp(&b.evalue)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results
 }
 
@@ -831,8 +832,16 @@ mod tests {
 
     fn simple_matrix() -> [[i32; AA_SIZE]; AA_SIZE] {
         let mut m = [[0i32; AA_SIZE]; AA_SIZE];
-        for i in 1..21 { m[i][i] = 5; }
-        for i in 1..21 { for j in 1..21 { if i != j { m[i][j] = -2; } } }
+        for i in 1..21 {
+            m[i][i] = 5;
+        }
+        for i in 1..21 {
+            for j in 1..21 {
+                if i != j {
+                    m[i][j] = -2;
+                }
+            }
+        }
         m
     }
 
@@ -868,7 +877,7 @@ mod tests {
     fn test_henikoff_weights_identical_seqs() {
         // All identical sequences should produce uniform weights
         let seqs = vec![
-            vec![1u8, 4, 7, 10],  // A, D, G, K
+            vec![1u8, 4, 7, 10], // A, D, G, K
             vec![1u8, 4, 7, 10],
             vec![1u8, 4, 7, 10],
         ];
@@ -876,8 +885,12 @@ mod tests {
         // Each position should have weight 1.0 for the single residue present
         for pos in 0..4 {
             let total: f64 = mw[pos].iter().sum();
-            assert!((total - 1.0).abs() < 0.01,
-                    "Match weights should sum to ~1 at pos {}, got {}", pos, total);
+            assert!(
+                (total - 1.0).abs() < 0.01,
+                "Match weights should sum to ~1 at pos {}, got {}",
+                pos,
+                total
+            );
         }
     }
 
@@ -885,9 +898,9 @@ mod tests {
     fn test_henikoff_weights_diverse_seqs() {
         // Diverse sequences: rare residues should get more weight
         let seqs = vec![
-            vec![1u8, 4],  // A, D
-            vec![1u8, 4],  // A, D
-            vec![1u8, 5],  // A, E
+            vec![1u8, 4], // A, D
+            vec![1u8, 4], // A, D
+            vec![1u8, 5], // A, E
         ];
         let mw = compute_sequence_weights_and_match_weights(&seqs, 2);
         // At position 0: all have A, so weight should go to A=1
@@ -908,7 +921,11 @@ mod tests {
         mw[1] = 1.0; // All weight on Alanine
         let pseudo = compute_column_pseudocounts(&mw, &std_prob, 50.0);
         // Should be relatively small
-        assert!(pseudo < 100.0, "Conserved column pseudo should be small, got {}", pseudo);
+        assert!(
+            pseudo < 100.0,
+            "Conserved column pseudo should be small, got {}",
+            pseudo
+        );
     }
 
     #[test]
@@ -921,7 +938,11 @@ mod tests {
         }
         let pseudo = compute_column_pseudocounts(&mw, &std_prob, 50.0);
         // Should be larger than for conserved column
-        assert!(pseudo > 10.0, "Uniform column pseudo should be substantial, got {}", pseudo);
+        assert!(
+            pseudo > 10.0,
+            "Uniform column pseudo should be substantial, got {}",
+            pseudo
+        );
     }
 
     #[test]
@@ -933,18 +954,20 @@ mod tests {
 
         // Create aligned sequences that mostly match query but with some variation
         let aligned = vec![
-            vec![1u8, 4, 7, 10, 13],  // exact match
-            vec![1u8, 4, 7, 10, 13],  // exact match
-            vec![1u8, 5, 7, 10, 4],   // E at pos 1, D at pos 4
-            vec![1u8, 4, 8, 10, 13],  // H at pos 2
+            vec![1u8, 4, 7, 10, 13], // exact match
+            vec![1u8, 4, 7, 10, 13], // exact match
+            vec![1u8, 5, 7, 10, 4],  // E at pos 1, D at pos 4
+            vec![1u8, 4, 8, 10, 13], // H at pos 2
         ];
 
         let bg = crate::matrix::AA_FREQUENCIES;
         pssm.update_from_alignment(&aligned, &bg, 10.0);
 
         // Scores should have changed
-        assert_ne!(pssm.scores, original_scores,
-                   "PSSM scores should change after alignment update");
+        assert_ne!(
+            pssm.scores, original_scores,
+            "PSSM scores should change after alignment update"
+        );
     }
 
     #[test]
@@ -952,9 +975,7 @@ mod tests {
         let std_prob = std_prob_ncbistdaa();
 
         // With many diverse sequences, effective observations should be substantial
-        let seqs: Vec<Vec<u8>> = (0..20).map(|i| {
-            vec![STD_RESIDUES[i % 20]]
-        }).collect();
+        let seqs: Vec<Vec<u8>> = (0..20).map(|i| vec![STD_RESIDUES[i % 20]]).collect();
 
         let obs = compute_effective_observations(&seqs, 0, 1, &std_prob);
         assert!(obs > 0.0, "Should have positive effective observations");
@@ -967,23 +988,36 @@ mod tests {
         // Three sequences with completely different residues at each position.
         // Henikoff weighting should assign more uniform weights (~1/3 each).
         let seqs = vec![
-            vec![1u8, 4, 7, 10],   // A, D, G, K
-            vec![3u8, 5, 8, 11],   // C, E, H, L
-            vec![6u8, 9, 12, 13],  // F, I, M, N
+            vec![1u8, 4, 7, 10],  // A, D, G, K
+            vec![3u8, 5, 8, 11],  // C, E, H, L
+            vec![6u8, 9, 12, 13], // F, I, M, N
         ];
         let mw = compute_sequence_weights_and_match_weights(&seqs, 4);
 
         for pos in 0..4 {
             let total: f64 = mw[pos].iter().sum();
-            assert!((total - 1.0).abs() < 0.01,
-                    "Match weights should sum to ~1 at pos {}, got {}", pos, total);
+            assert!(
+                (total - 1.0).abs() < 0.01,
+                "Match weights should sum to ~1 at pos {}, got {}",
+                pos,
+                total
+            );
 
             // Each of the 3 residues should get weight ~1/3
             let nonzero: Vec<f64> = mw[pos].iter().copied().filter(|&v| v > 0.0).collect();
-            assert_eq!(nonzero.len(), 3, "Should have 3 non-zero weights at pos {}", pos);
+            assert_eq!(
+                nonzero.len(),
+                3,
+                "Should have 3 non-zero weights at pos {}",
+                pos
+            );
             for &w in &nonzero {
-                assert!((w - 1.0 / 3.0).abs() < 0.05,
-                        "Each weight should be ~0.333, got {} at pos {}", w, pos);
+                assert!(
+                    (w - 1.0 / 3.0).abs() < 0.05,
+                    "Each weight should be ~0.333, got {} at pos {}",
+                    w,
+                    pos
+                );
             }
         }
     }
@@ -996,30 +1030,36 @@ mod tests {
         // The key insight: the *per-sequence* weight for the rare residue's
         // sequence (0.5) is higher than each identical sequence's weight (0.25).
         let seqs = vec![
-            vec![1u8, 4],  // A, D
-            vec![1u8, 4],  // A, D  (duplicate)
-            vec![3u8, 5],  // C, E  (different)
+            vec![1u8, 4], // A, D
+            vec![1u8, 4], // A, D  (duplicate)
+            vec![3u8, 5], // C, E  (different)
         ];
         let mw = compute_sequence_weights_and_match_weights(&seqs, 2);
 
         // At each position, 2 distinct residues -> each residue type gets equal weight
         // Position 0: A (2 seqs) and C (1 seq) each get normalized weight 0.5
-        let weight_a = mw[0][1];  // A = NCBIstdaa 1
-        let weight_c = mw[0][3];  // C = NCBIstdaa 3
-        assert!((weight_a - 0.5).abs() < 0.01,
-                "A weight should be ~0.5, got {}", weight_a);
-        assert!((weight_c - 0.5).abs() < 0.01,
-                "C weight should be ~0.5, got {}", weight_c);
+        let weight_a = mw[0][1]; // A = NCBIstdaa 1
+        let weight_c = mw[0][3]; // C = NCBIstdaa 3
+        assert!(
+            (weight_a - 0.5).abs() < 0.01,
+            "A weight should be ~0.5, got {}",
+            weight_a
+        );
+        assert!(
+            (weight_c - 0.5).abs() < 0.01,
+            "C weight should be ~0.5, got {}",
+            weight_c
+        );
 
         // The per-sequence weights show the difference: the unique sequence
         // contributes its full 0.5 alone, while the two identical sequences
         // split their 0.5. Verify by checking a 4-sequence case where the
         // imbalance is more visible in a different way.
         let seqs2 = vec![
-            vec![1u8],  // A
-            vec![1u8],  // A
-            vec![1u8],  // A
-            vec![3u8],  // C (rare)
+            vec![1u8], // A
+            vec![1u8], // A
+            vec![1u8], // A
+            vec![3u8], // C (rare)
         ];
         let mw2 = compute_sequence_weights_and_match_weights(&seqs2, 1);
         // 2 distinct, A=3, C=1. Henikoff: A seqs each get 1/(2*3), C gets 1/(2*1)
@@ -1034,23 +1074,29 @@ mod tests {
         // Given known sequences, verify the match weight (frequency) matrix values.
         // 4 seqs, length 2. Position 0: all Ala. Position 1: 2x Asp, 1x Glu, 1x Ala.
         let seqs = vec![
-            vec![1u8, 4],  // A, D
-            vec![1u8, 4],  // A, D
-            vec![1u8, 5],  // A, E
-            vec![1u8, 1],  // A, A
+            vec![1u8, 4], // A, D
+            vec![1u8, 4], // A, D
+            vec![1u8, 5], // A, E
+            vec![1u8, 1], // A, A
         ];
         let mw = compute_sequence_weights_and_match_weights(&seqs, 2);
 
         // Position 0: only A present, weight should be 1.0
-        assert!((mw[0][1] - 1.0).abs() < 0.01, "All-A column should have weight 1.0 on A");
+        assert!(
+            (mw[0][1] - 1.0).abs() < 0.01,
+            "All-A column should have weight 1.0 on A"
+        );
 
         // Position 1: 3 distinct residues (D=2, E=1, A=1)
         // Henikoff: D seqs get 1/(3*2) each, E seq gets 1/(3*1), A seq gets 1/(3*1)
         // sum = 2/(3*2) + 1/3 + 1/3 = 1/3 + 1/3 + 1/3 = 1.0
         // After normalization: D = 1/3, E = 1/3, A = 1/3
         let total_pos1: f64 = mw[1].iter().sum();
-        assert!((total_pos1 - 1.0).abs() < 0.01,
-                "Position 1 weights should sum to 1.0, got {}", total_pos1);
+        assert!(
+            (total_pos1 - 1.0).abs() < 0.01,
+            "Position 1 weights should sum to 1.0, got {}",
+            total_pos1
+        );
         assert!(mw[1][4] > 0.0, "D should have nonzero weight");
         assert!(mw[1][5] > 0.0, "E should have nonzero weight");
         assert!(mw[1][1] > 0.0, "A should have nonzero weight");
@@ -1077,9 +1123,12 @@ mod tests {
 
         // Diverse column should get more pseudocounts (lower information content
         // leads to higher alpha and thus higher pseudocount weight)
-        assert!(pseudo_diverse > pseudo_conserved,
-                "Diverse column pseudo ({}) should exceed conserved ({})",
-                pseudo_diverse, pseudo_conserved);
+        assert!(
+            pseudo_diverse > pseudo_conserved,
+            "Diverse column pseudo ({}) should exceed conserved ({})",
+            pseudo_diverse,
+            pseudo_conserved
+        );
     }
 
     #[test]
@@ -1106,9 +1155,13 @@ mod tests {
         // For each position, the query residue score should be positive
         for (pos, &qr) in query.iter().enumerate() {
             let self_score = pssm.score_at(pos, qr);
-            assert!(self_score > 0,
-                    "Self-match score at pos {} for residue {} should be positive, got {}",
-                    pos, qr, self_score);
+            assert!(
+                self_score > 0,
+                "Self-match score at pos {} for residue {} should be positive, got {}",
+                pos,
+                qr,
+                self_score
+            );
         }
 
         // At least some mismatches should be negative
@@ -1120,7 +1173,10 @@ mod tests {
                 }
             }
         }
-        assert!(negative_count > 0, "Should have at least some negative mismatch scores");
+        assert!(
+            negative_count > 0,
+            "Should have at least some negative mismatch scores"
+        );
     }
 
     #[test]
@@ -1142,9 +1198,13 @@ mod tests {
         // to the query residues (BLOSUM62 self-scores are positive).
         for (pos, &qr) in query.iter().enumerate() {
             let score = pssm.score_at(pos, qr);
-            assert!(score > 0,
-                    "Single-seq PSSM should have positive self-score at pos {} (residue {}), got {}",
-                    pos, qr, score);
+            assert!(
+                score > 0,
+                "Single-seq PSSM should have positive self-score at pos {} (residue {}), got {}",
+                pos,
+                qr,
+                score
+            );
         }
 
         // The overall pattern should resemble BLOSUM62: self > mismatch on average
@@ -1162,9 +1222,12 @@ mod tests {
         }
         let avg_self = self_total as f64 / query.len() as f64;
         let avg_mismatch = mismatch_total as f64 / mismatch_count as f64;
-        assert!(avg_self > avg_mismatch,
-                "Average self-score ({}) should exceed average mismatch ({})",
-                avg_self, avg_mismatch);
+        assert!(
+            avg_self > avg_mismatch,
+            "Average self-score ({}) should exceed average mismatch ({})",
+            avg_self,
+            avg_mismatch
+        );
     }
 
     #[test]
@@ -1177,25 +1240,32 @@ mod tests {
         let obs_identical = compute_effective_observations(&seqs_identical, 0, 1, &std_prob);
 
         // All different residues: 10 distinct -> higher effective observations
-        let seqs_diverse: Vec<Vec<u8>> = (0..10).map(|i| {
-            vec![STD_RESIDUES[i % 20]]
-        }).collect();
+        let seqs_diverse: Vec<Vec<u8>> = (0..10).map(|i| vec![STD_RESIDUES[i % 20]]).collect();
         let obs_diverse = compute_effective_observations(&seqs_diverse, 0, 1, &std_prob);
 
-        assert!(obs_diverse > obs_identical,
-                "Diverse column ({}) should have more effective observations than identical ({})",
-                obs_diverse, obs_identical);
+        assert!(
+            obs_diverse > obs_identical,
+            "Diverse column ({}) should have more effective observations than identical ({})",
+            obs_diverse,
+            obs_identical
+        );
 
         // Identical seqs: 1 distinct residue among 10 seqs
         // The formula caps at num_participating and subtracts 1, minimum 0.
         // With 1 distinct residue, the expected value lookup finds j=1 quickly,
         // so effective obs should be small.
-        assert!(obs_identical < 5.0,
-                "Identical seqs should have low effective observations, got {}", obs_identical);
+        assert!(
+            obs_identical < 5.0,
+            "Identical seqs should have low effective observations, got {}",
+            obs_identical
+        );
 
         // 10 diverse residues should yield substantially more
-        assert!(obs_diverse > 5.0,
-                "10 diverse residues should yield substantial observations, got {}", obs_diverse);
+        assert!(
+            obs_diverse > 5.0,
+            "10 diverse residues should yield substantial observations, got {}",
+            obs_diverse
+        );
     }
 
     #[test]
@@ -1207,28 +1277,36 @@ mod tests {
         let std_prob = std_prob_ncbistdaa();
 
         // 20 identical sequences
-        let seqs_identical: Vec<Vec<u8>> = (0..20).map(|_| {
-            vec![1u8, 4, 7, 10] // A, D, G, K
-        }).collect();
+        let seqs_identical: Vec<Vec<u8>> = (0..20)
+            .map(|_| {
+                vec![1u8, 4, 7, 10] // A, D, G, K
+            })
+            .collect();
 
         // 20 sequences with variation at each position
-        let seqs_varied: Vec<Vec<u8>> = (0..20).map(|i| {
-            vec![
-                STD_RESIDUES[i % 20],
-                STD_RESIDUES[(i + 3) % 20],
-                STD_RESIDUES[(i + 7) % 20],
-                STD_RESIDUES[(i + 11) % 20],
-            ]
-        }).collect();
+        let seqs_varied: Vec<Vec<u8>> = (0..20)
+            .map(|i| {
+                vec![
+                    STD_RESIDUES[i % 20],
+                    STD_RESIDUES[(i + 3) % 20],
+                    STD_RESIDUES[(i + 7) % 20],
+                    STD_RESIDUES[(i + 11) % 20],
+                ]
+            })
+            .collect();
 
         // Check effective observations at each position
         for pos in 0..4 {
             let obs_ident = compute_effective_observations(&seqs_identical, pos, 4, &std_prob);
             let obs_varied = compute_effective_observations(&seqs_varied, pos, 4, &std_prob);
 
-            assert!(obs_varied > obs_ident,
-                    "At pos {}: varied obs ({}) should exceed identical obs ({})",
-                    pos, obs_varied, obs_ident);
+            assert!(
+                obs_varied > obs_ident,
+                "At pos {}: varied obs ({}) should exceed identical obs ({})",
+                pos,
+                obs_varied,
+                obs_ident
+            );
         }
 
         // Also verify via match weights: identical sequences produce less diversity
@@ -1239,9 +1317,13 @@ mod tests {
         for pos in 0..4 {
             let nonzero_ident = mw_ident[pos].iter().filter(|&&v| v > 0.0).count();
             let nonzero_varied = mw_varied[pos].iter().filter(|&&v| v > 0.0).count();
-            assert!(nonzero_varied > nonzero_ident,
-                    "Varied alignment should have more nonzero weights at pos {} ({} vs {})",
-                    pos, nonzero_varied, nonzero_ident);
+            assert!(
+                nonzero_varied > nonzero_ident,
+                "Varied alignment should have more nonzero weights at pos {} ({} vs {})",
+                pos,
+                nonzero_varied,
+                nonzero_ident
+            );
         }
     }
 }

@@ -1,14 +1,13 @@
 //! Rust equivalent of blast_stat.c — Karlin-Altschul statistics.
 //! This is the mathematical core for computing E-values and bit scores.
 
-
 /// Karlin-Altschul statistical parameters for one context.
 #[derive(Debug, Clone)]
 pub struct KarlinBlk {
-    pub lambda: f64,  // Lambda parameter
-    pub k: f64,       // K parameter
-    pub log_k: f64,   // ln(K)
-    pub h: f64,       // H (relative entropy)
+    pub lambda: f64, // Lambda parameter
+    pub k: f64,      // K parameter
+    pub log_k: f64,  // ln(K)
+    pub h: f64,      // H (relative entropy)
 }
 
 impl KarlinBlk {
@@ -133,10 +132,15 @@ pub fn spouge_evalue(
 /// Accurate to ~1.5e-7 relative error.
 fn erfc_approx(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
-        + t * (-1.453152027 + t * 1.061405429))));
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     let result = poly * (-x * x).exp();
-    if x >= 0.0 { result } else { 2.0 - result }
+    if x >= 0.0 {
+        result
+    } else {
+        2.0 - result
+    }
 }
 
 /// Build Gumbel block for protein BLOSUM62 with given gap costs.
@@ -159,7 +163,7 @@ pub fn protein_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Opt
 
     Some(GumbelBlk {
         lambda: gp.lambda,
-        a: gp.alpha,  // 'a' = alpha from the basic table (position 6 in C array)
+        a: gp.alpha, // 'a' = alpha from the basic table (position 6 in C array)
         b: 2.0 * g * (a_un - gp.alpha),
         alpha: alpha_v,
         beta: 2.0 * g * (alpha_un - alpha_v),
@@ -174,15 +178,15 @@ pub fn protein_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Opt
 const BLOSUM62_EXTENDED: &[(i32, i32, f64, f64)] = &[
     (11, 2, 12.6738, 12.7576),
     (10, 2, 16.4740, 16.6026),
-    ( 9, 2, 22.7519, 22.9500),
-    ( 8, 2, 35.4838, 35.8213),
-    ( 7, 2, 61.2383, 61.8860),
-    ( 6, 2, 140.417, 141.882),
+    (9, 2, 22.7519, 22.9500),
+    (8, 2, 35.4838, 35.8213),
+    (7, 2, 61.2383, 61.8860),
+    (6, 2, 140.417, 141.882),
     (13, 1, 19.5063, 19.8931),
     (12, 1, 27.8562, 28.4699),
     (11, 1, 42.6028, 43.6362),
     (10, 1, 83.1787, 85.0656),
-    ( 9, 1, 210.333, 214.842),
+    (9, 1, 210.333, 214.842),
 ];
 
 fn lookup_blosum62_extended(gap_open: i32, gap_extend: i32) -> Option<(f64, f64)> {
@@ -249,10 +253,14 @@ pub fn compute_ungapped_lambda(reward: i32, penalty: i32) -> f64 {
         let ep = (lambda * p).exp();
         let f = 0.25 * er + 0.75 * ep - 1.0;
         let fp = 0.25 * r * er + 0.75 * p * ep;
-        if fp.abs() < 1e-30 { break; }
+        if fp.abs() < 1e-30 {
+            break;
+        }
         let delta = f / fp;
         lambda -= delta;
-        if delta.abs() < 1e-12 { break; }
+        if delta.abs() < 1e-12 {
+            break;
+        }
     }
     lambda
 }
@@ -271,7 +279,9 @@ pub fn compute_ungapped_k(lambda: f64, reward: i32, penalty: i32) -> f64 {
     // K = H / (lambda * lambda * variance)
     // For nucleotide with uniform freqs, use the standard approximation
     let variance = 0.25 * r * r * er + 0.75 * p * p * ep;
-    if variance.abs() < 1e-30 { return 0.1; }
+    if variance.abs() < 1e-30 {
+        return 0.1;
+    }
     h / (lambda * variance)
 }
 
@@ -279,8 +289,9 @@ pub fn compute_ungapped_k(lambda: f64, reward: i32, penalty: i32) -> f64 {
 pub fn compute_ungapped_kbp(reward: i32, penalty: i32) -> KarlinBlk {
     let lambda = compute_ungapped_lambda(reward, penalty);
     let k = compute_ungapped_k(lambda, reward, penalty);
-    let h = lambda * (0.25 * (reward as f64) * (lambda * reward as f64).exp()
-        + 0.75 * (penalty as f64) * (lambda * penalty as f64).exp());
+    let h = lambda
+        * (0.25 * (reward as f64) * (lambda * reward as f64).exp()
+            + 0.75 * (penalty as f64) * (lambda * penalty as f64).exp());
     KarlinBlk {
         lambda,
         k,
@@ -366,22 +377,30 @@ pub fn compute_length_adjustment(
 pub const BLOSUM62_PARAMS: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
     (11, 2, 0.297, 0.082, 0.27, 1.1, -10.0),
     (10, 2, 0.291, 0.075, 0.23, 1.3, -15.0),
-    ( 9, 2, 0.279, 0.058, 0.19, 1.5, -19.0),
-    ( 8, 2, 0.264, 0.045, 0.15, 1.8, -26.0),
-    ( 7, 2, 0.239, 0.027, 0.10, 2.5, -46.0),
-    ( 6, 2, 0.201, 0.012, 0.061, 3.3, -58.0),
+    (9, 2, 0.279, 0.058, 0.19, 1.5, -19.0),
+    (8, 2, 0.264, 0.045, 0.15, 1.8, -26.0),
+    (7, 2, 0.239, 0.027, 0.10, 2.5, -46.0),
+    (6, 2, 0.201, 0.012, 0.061, 3.3, -58.0),
     (13, 1, 0.292, 0.071, 0.23, 1.2, -11.0),
     (12, 1, 0.283, 0.059, 0.19, 1.5, -19.0),
     (11, 1, 0.267, 0.041, 0.14, 1.9, -30.0),
     (10, 1, 0.243, 0.024, 0.10, 2.5, -44.0),
-    ( 9, 1, 0.206, 0.010, 0.052, 4.0, -87.0),
+    (9, 1, 0.206, 0.010, 0.052, 4.0, -87.0),
 ];
 
 /// Look up gapped KBP for protein scoring (BLOSUM62).
 pub fn lookup_protein_params(gap_open: i32, gap_extend: i32) -> Option<GappedParams> {
     for &(go, ge, lambda, k, h, alpha, beta) in BLOSUM62_PARAMS {
         if go == gap_open && ge == gap_extend {
-            return Some(GappedParams { gap_open: go, gap_extend: ge, lambda, k, h, alpha, beta });
+            return Some(GappedParams {
+                gap_open: go,
+                gap_extend: ge,
+                lambda,
+                k,
+                h,
+                alpha,
+                beta,
+            });
         }
     }
     None
@@ -498,9 +517,7 @@ const KBPT_4_5: &[KbpTableRow] = &[
     [4.0, 5.0, 0.25, 0.10, 0.31, 0.8, -10.0, 83.0],
     [3.0, 5.0, 0.23, 0.065, 0.25, 0.9, -11.0, 76.0],
 ];
-const KBPT_3_2: &[KbpTableRow] = &[
-    [5.0, 5.0, 0.208, 0.030, 0.072, 2.9, -47.0, 77.0],
-];
+const KBPT_3_2: &[KbpTableRow] = &[[5.0, 5.0, 0.208, 0.030, 0.072, 2.9, -47.0, 77.0]];
 const KBPT_5_4: &[KbpTableRow] = &[
     [10.0, 6.0, 0.163, 0.068, 0.16, 1.0, -19.0, 85.0],
     [8.0, 6.0, 0.146, 0.039, 0.11, 1.3, -29.0, 76.0],
@@ -515,25 +532,91 @@ struct KbpTableMeta {
 
 fn kbp_gcd(a: i32, b: i32) -> i32 {
     let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
-    if b > a { std::mem::swap(&mut a, &mut b); }
-    while b != 0 { let c = a % b; a = b; b = c; }
+    if b > a {
+        std::mem::swap(&mut a, &mut b);
+    }
+    while b != 0 {
+        let c = a % b;
+        a = b;
+        b = c;
+    }
     a as i32
 }
 
 fn get_kbp_table(reward: i32, penalty: i32) -> Option<KbpTableMeta> {
     match (reward, penalty) {
-        (1, -5) => Some(KbpTableMeta { table: KBPT_1_5, gap_open_max: 3, gap_extend_max: 3, round_down: false }),
-        (1, -4) => Some(KbpTableMeta { table: KBPT_1_4, gap_open_max: 2, gap_extend_max: 2, round_down: false }),
-        (2, -7) => Some(KbpTableMeta { table: KBPT_2_7, gap_open_max: 4, gap_extend_max: 4, round_down: true }),
-        (1, -3) => Some(KbpTableMeta { table: KBPT_1_3, gap_open_max: 2, gap_extend_max: 2, round_down: false }),
-        (2, -5) => Some(KbpTableMeta { table: KBPT_2_5, gap_open_max: 4, gap_extend_max: 4, round_down: true }),
-        (1, -2) => Some(KbpTableMeta { table: KBPT_1_2, gap_open_max: 2, gap_extend_max: 2, round_down: false }),
-        (2, -3) => Some(KbpTableMeta { table: KBPT_2_3, gap_open_max: 6, gap_extend_max: 4, round_down: true }),
-        (3, -4) => Some(KbpTableMeta { table: KBPT_3_4, gap_open_max: 6, gap_extend_max: 3, round_down: true }),
-        (1, -1) => Some(KbpTableMeta { table: KBPT_1_1, gap_open_max: 4, gap_extend_max: 2, round_down: false }),
-        (3, -2) => Some(KbpTableMeta { table: KBPT_3_2, gap_open_max: 5, gap_extend_max: 5, round_down: false }),
-        (4, -5) => Some(KbpTableMeta { table: KBPT_4_5, gap_open_max: 12, gap_extend_max: 8, round_down: false }),
-        (5, -4) => Some(KbpTableMeta { table: KBPT_5_4, gap_open_max: 25, gap_extend_max: 10, round_down: false }),
+        (1, -5) => Some(KbpTableMeta {
+            table: KBPT_1_5,
+            gap_open_max: 3,
+            gap_extend_max: 3,
+            round_down: false,
+        }),
+        (1, -4) => Some(KbpTableMeta {
+            table: KBPT_1_4,
+            gap_open_max: 2,
+            gap_extend_max: 2,
+            round_down: false,
+        }),
+        (2, -7) => Some(KbpTableMeta {
+            table: KBPT_2_7,
+            gap_open_max: 4,
+            gap_extend_max: 4,
+            round_down: true,
+        }),
+        (1, -3) => Some(KbpTableMeta {
+            table: KBPT_1_3,
+            gap_open_max: 2,
+            gap_extend_max: 2,
+            round_down: false,
+        }),
+        (2, -5) => Some(KbpTableMeta {
+            table: KBPT_2_5,
+            gap_open_max: 4,
+            gap_extend_max: 4,
+            round_down: true,
+        }),
+        (1, -2) => Some(KbpTableMeta {
+            table: KBPT_1_2,
+            gap_open_max: 2,
+            gap_extend_max: 2,
+            round_down: false,
+        }),
+        (2, -3) => Some(KbpTableMeta {
+            table: KBPT_2_3,
+            gap_open_max: 6,
+            gap_extend_max: 4,
+            round_down: true,
+        }),
+        (3, -4) => Some(KbpTableMeta {
+            table: KBPT_3_4,
+            gap_open_max: 6,
+            gap_extend_max: 3,
+            round_down: true,
+        }),
+        (1, -1) => Some(KbpTableMeta {
+            table: KBPT_1_1,
+            gap_open_max: 4,
+            gap_extend_max: 2,
+            round_down: false,
+        }),
+        (3, -2) => Some(KbpTableMeta {
+            table: KBPT_3_2,
+            gap_open_max: 5,
+            gap_extend_max: 5,
+            round_down: false,
+        }),
+        (4, -5) => Some(KbpTableMeta {
+            table: KBPT_4_5,
+            gap_open_max: 12,
+            gap_extend_max: 8,
+            round_down: false,
+        }),
+        (5, -4) => Some(KbpTableMeta {
+            table: KBPT_5_4,
+            gap_open_max: 25,
+            gap_extend_max: 10,
+            round_down: false,
+        }),
         _ => None,
     }
 }
@@ -541,8 +624,10 @@ fn get_kbp_table(reward: i32, penalty: i32) -> Option<KbpTableMeta> {
 /// Look up gapped KBP params for nucleotide, matching C's Blast_KarlinBlkNuclGappedCalc exactly.
 /// Returns Ok((lambda, k, log_k, h, round_down)) or Err message.
 pub fn nucl_gapped_kbp_lookup(
-    gap_open: i32, gap_extend: i32,
-    reward: i32, penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    reward: i32,
+    penalty: i32,
     ungapped: &KarlinBlk,
 ) -> Result<(KarlinBlk, bool), String> {
     let divisor = kbp_gcd(reward, penalty.abs());
@@ -554,12 +639,12 @@ pub fn nucl_gapped_kbp_lookup(
     let round_down = meta.round_down;
 
     // Split: first row with gap_open==0 && gap_extend==0 is the linear entry
-    let (affine, linear) = if !meta.table.is_empty()
-        && meta.table[0][0] == 0.0 && meta.table[0][1] == 0.0 {
-        (&meta.table[1..], Some(&meta.table[0]))
-    } else {
-        (meta.table, None)
-    };
+    let (affine, linear) =
+        if !meta.table.is_empty() && meta.table[0][0] == 0.0 && meta.table[0][1] == 0.0 {
+            (&meta.table[1..], Some(&meta.table[0]))
+        } else {
+            (meta.table, None)
+        };
 
     // GCD scaling
     let (mut go_max, mut ge_max) = (meta.gap_open_max, meta.gap_extend_max);
@@ -578,7 +663,15 @@ pub fn nucl_gapped_kbp_lookup(
     if gap_open == 0 && gap_extend == 0 {
         if let Some(lin) = linear {
             let (_, _, lam, k, h) = scale(lin, divisor);
-            return Ok((KarlinBlk { lambda: lam, k, log_k: k.ln(), h }, round_down));
+            return Ok((
+                KarlinBlk {
+                    lambda: lam,
+                    k,
+                    log_k: k.ln(),
+                    h,
+                },
+                round_down,
+            ));
         }
     }
 
@@ -586,7 +679,15 @@ pub fn nucl_gapped_kbp_lookup(
     for row in affine {
         let (go, ge, lam, k, h) = scale(row, divisor);
         if go as i32 == gap_open && ge as i32 == gap_extend {
-            return Ok((KarlinBlk { lambda: lam, k, log_k: k.ln(), h }, round_down));
+            return Ok((
+                KarlinBlk {
+                    lambda: lam,
+                    k,
+                    log_k: k.ln(),
+                    h,
+                },
+                round_down,
+            ));
         }
     }
 
@@ -595,16 +696,23 @@ pub fn nucl_gapped_kbp_lookup(
         return Ok((ungapped.clone(), round_down));
     }
 
-    Err(format!("Unsupported gap costs {} {} for scores {} {}", gap_open, gap_extend, reward, penalty))
+    Err(format!(
+        "Unsupported gap costs {} {} for scores {} {}",
+        gap_open, gap_extend, reward, penalty
+    ))
 }
 
 /// Compute the length adjustment for effective search space (exact C-compatible).
 /// Port of BLAST_ComputeLengthAdjustment from blast_stat.c.
 /// Returns (length_adjustment, converged).
 pub fn compute_length_adjustment_exact(
-    k: f64, log_k: f64,
-    alpha_d_lambda: f64, beta: f64,
-    query_length: i32, db_length: i64, db_num_seqs: i32,
+    k: f64,
+    log_k: f64,
+    alpha_d_lambda: f64,
+    beta: f64,
+    query_length: i32,
+    db_length: i64,
+    db_num_seqs: i32,
 ) -> (i32, bool) {
     let m = query_length as f64;
     let n = db_length as f64;
@@ -635,7 +743,9 @@ pub fn compute_length_adjustment_exact(
                 converged = true;
                 break;
             }
-            if ell_min == ell_max { break; }
+            if ell_min == ell_max {
+                break;
+            }
         } else {
             ell_max = ell;
         }
@@ -643,7 +753,11 @@ pub fn compute_length_adjustment_exact(
         if ell_min <= ell_bar && ell_bar <= ell_max {
             ell_next = ell_bar;
         } else {
-            ell_next = if i == 1 { ell_max } else { (ell_min + ell_max) / 2.0 };
+            ell_next = if i == 1 {
+                ell_max
+            } else {
+                (ell_min + ell_max) / 2.0
+            };
         }
     }
 
@@ -663,13 +777,20 @@ pub fn compute_length_adjustment_exact(
 /// Look up alpha and beta for nucleotide gapped alignment.
 /// Port of Blast_GetNuclAlphaBeta from blast_stat.c.
 pub fn nucl_alpha_beta(
-    reward: i32, penalty: i32,
-    gap_open: i32, gap_extend: i32,
-    ungapped_lambda: f64, ungapped_h: f64,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    ungapped_lambda: f64,
+    ungapped_h: f64,
     gapped: bool,
 ) -> (f64, f64) {
     if !gapped {
-        let beta = if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) { -2.0 } else { 0.0 };
+        let beta = if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) {
+            -2.0
+        } else {
+            0.0
+        };
         return (ungapped_lambda / ungapped_h, beta);
     }
 
@@ -677,12 +798,12 @@ pub fn nucl_alpha_beta(
     let (nr, np) = (reward / divisor, penalty / divisor);
 
     if let Some(meta) = get_kbp_table(nr, np) {
-        let (affine, linear) = if !meta.table.is_empty()
-            && meta.table[0][0] == 0.0 && meta.table[0][1] == 0.0 {
-            (&meta.table[1..], Some(&meta.table[0]))
-        } else {
-            (meta.table, None)
-        };
+        let (affine, linear) =
+            if !meta.table.is_empty() && meta.table[0][0] == 0.0 && meta.table[0][1] == 0.0 {
+                (&meta.table[1..], Some(&meta.table[0]))
+            } else {
+                (meta.table, None)
+            };
 
         if gap_open == 0 && gap_extend == 0 {
             if let Some(lin) = linear {
@@ -704,7 +825,11 @@ pub fn nucl_alpha_beta(
     }
 
     // Fallback: ungapped values
-    let beta = if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) { -2.0 } else { 0.0 };
+    let beta = if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) {
+        -2.0
+    } else {
+        0.0
+    };
     (ungapped_lambda / ungapped_h, beta)
 }
 
@@ -726,22 +851,47 @@ struct SfDist {
 impl SfDist {
     fn new(lo: i32, hi: i32) -> Self {
         let n = (hi - lo + 1) as usize;
-        SfDist { score_min: lo, score_max: hi, obs_min: 0, obs_max: 0, score_avg: 0.0, probs: vec![0.0; n] }
+        SfDist {
+            score_min: lo,
+            score_max: hi,
+            obs_min: 0,
+            obs_max: 0,
+            score_avg: 0.0,
+            probs: vec![0.0; n],
+        }
     }
-    #[inline] fn p(&self, s: i32) -> f64 { self.probs[(s - self.score_min) as usize] }
-    #[inline] fn p_mut(&mut self, s: i32) -> &mut f64 { &mut self.probs[(s - self.score_min) as usize] }
+    #[inline]
+    fn p(&self, s: i32) -> f64 {
+        self.probs[(s - self.score_min) as usize]
+    }
+    #[inline]
+    fn p_mut(&mut self, s: i32) -> &mut f64 {
+        &mut self.probs[(s - self.score_min) as usize]
+    }
 }
 
 fn expm1_stable(x: f64) -> f64 {
-    if x.abs() > 0.33 { x.exp() - 1.0 } else { x.exp_m1() }
+    if x.abs() > 0.33 {
+        x.exp() - 1.0
+    } else {
+        x.exp_m1()
+    }
 }
 
 fn powi(x: f64, n: i32) -> f64 {
-    if n == 0 { return 1.0; }
+    if n == 0 {
+        return 1.0;
+    }
     let mut x = if n < 0 { 1.0 / x } else { x };
     let mut n = n.unsigned_abs();
     let mut y = 1.0;
-    while n > 0 { if n & 1 != 0 { y *= x; } n /= 2; x *= x; }
+    while n > 0 {
+        if n & 1 != 0 {
+            y *= x;
+        }
+        n /= 2;
+        x *= x;
+    }
     y
 }
 
@@ -766,22 +916,46 @@ fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 
         let mut g = 0.0_f64;
         f = sfp.p(low);
         let mut i = low + d;
-        while i < 0 { g = x * g + f; f = f * x + sfp.p(i); i += d; }
+        while i < 0 {
+            g = x * g + f;
+            f = f * x + sfp.p(i);
+            i += d;
+        }
         g = x * g + f;
         f = f * x + sfp.p(0) - 1.0;
         i = d;
-        while i <= high { g = x * g + f; f = f * x + sfp.p(i); i += d; }
+        while i <= high {
+            g = x * g + f;
+            f = f * x + sfp.p(i);
+            i += d;
+        }
 
-        if f > 0.0 { a = x; } else if f < 0.0 { b = x; } else { break; }
-        if b - a < 2.0 * a * (1.0 - b) * tolx { x = (a + b) / 2.0; break; }
+        if f > 0.0 {
+            a = x;
+        } else if f < 0.0 {
+            b = x;
+        } else {
+            break;
+        }
+        if b - a < 2.0 * a * (1.0 - b) * tolx {
+            x = (a + b) / 2.0;
+            break;
+        }
 
         if k >= 20 || (was_newton && f.abs() > 0.9 * fold.abs()) || g >= 0.0 {
             x = (a + b) / 2.0;
         } else {
             let p = -f / g;
             let y = x + p;
-            if y <= a || y >= b { x = (a + b) / 2.0; }
-            else { is_newton = true; x = y; if p.abs() < tolx * x * (1.0 - x) { break; } }
+            if y <= a || y >= b {
+                x = (a + b) / 2.0;
+            } else {
+                is_newton = true;
+                x = y;
+                if p.abs() < tolx * x * (1.0 - x) {
+                    break;
+                }
+            }
         }
     }
     -x.ln() / d as f64
@@ -789,33 +963,57 @@ fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 
 
 /// Compute Lambda from score frequency distribution.
 fn compute_lambda(sfp: &SfDist) -> f64 {
-    if sfp.score_avg >= 0.0 { return -1.0; }
+    if sfp.score_avg >= 0.0 {
+        return -1.0;
+    }
     let low = sfp.obs_min;
     let high = sfp.obs_max;
     let mut d = -low;
-    for i in 1..=(high - low) { if d <= 1 { break; } if sfp.p(low + i) != 0.0 { d = kbp_gcd(d, i); } }
+    for i in 1..=(high - low) {
+        if d <= 1 {
+            break;
+        }
+        if sfp.p(low + i) != 0.0 {
+            d = kbp_gcd(d, i);
+        }
+    }
     solve_lambda(sfp, d, low, high, 0.5)
 }
 
 /// Compute H (relative entropy) from score frequencies and Lambda.
 fn compute_h(sfp: &SfDist, lambda: f64) -> f64 {
-    if lambda < 0.0 { return -1.0; }
+    if lambda < 0.0 {
+        return -1.0;
+    }
     let etonlam = (-lambda).exp();
     let mut sum = sfp.obs_min as f64 * sfp.p(sfp.obs_min);
     for s in (sfp.obs_min + 1)..=sfp.obs_max {
         sum = s as f64 * sfp.p(s) + etonlam * sum;
     }
     let scale = powi(etonlam, sfp.obs_max);
-    if scale > 0.0 { lambda * sum / scale } else { lambda * (lambda * sfp.obs_max as f64 + sum.ln()).exp() }
+    if scale > 0.0 {
+        lambda * sum / scale
+    } else {
+        lambda * (lambda * sfp.obs_max as f64 + sum.ln()).exp()
+    }
 }
 
 /// Compute K from Lambda and H using DP algorithm.
 fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
-    if lambda <= 0.0 || h <= 0.0 || sfp.score_avg >= 0.0 { return -1.0; }
+    if lambda <= 0.0 || h <= 0.0 || sfp.score_avg >= 0.0 {
+        return -1.0;
+    }
     let olow = sfp.obs_min;
     let ohigh = sfp.obs_max;
     let mut divisor = -olow;
-    for i in 1..=(ohigh - olow) { if divisor <= 1 { break; } if sfp.p(olow + i) != 0.0 { divisor = kbp_gcd(divisor, i); } }
+    for i in 1..=(ohigh - olow) {
+        if divisor <= 1 {
+            break;
+        }
+        if sfp.p(olow + i) != 0.0 {
+            divisor = kbp_gcd(divisor, i);
+        }
+    }
 
     let high = ohigh / divisor;
     let low = olow / divisor;
@@ -826,19 +1024,27 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
 
     // Special cases
     if low == -1 && high == 1 {
-        let pl = sfp.p(olow); let ph = sfp.p(ohigh);
+        let pl = sfp.p(olow);
+        let ph = sfp.p(ohigh);
         return (pl - ph) * (pl - ph) / pl;
     }
     if low == -1 || high == 1 {
         let mut f = ftcf;
-        if high != 1 { let sa = sfp.score_avg / divisor as f64; f = (sa * sa) / f; }
+        if high != 1 {
+            let sa = sfp.score_avg / divisor as f64;
+            f = (sa * sa) / f;
+        }
         return f * (1.0 - eml);
     }
 
     // DP
     let prob_at = |i: i32| -> f64 {
         let s = olow + i;
-        if s >= sfp.score_min && s <= sfp.score_max { sfp.p(s) } else { 0.0 }
+        if s >= sfp.score_min && s <= sfp.score_max {
+            sfp.p(s)
+        } else {
+            0.0
+        }
     };
     let ru = range as usize;
     let max_iter = 100usize;
@@ -851,10 +1057,13 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
     let mut oldsum;
 
     for iter in 0..max_iter {
-        if inner_sum <= 0.0001 { break; }
+        if inner_sum <= 0.0001 {
+            break;
+        }
         let mut first = range;
         let mut last = range;
-        low_as += low; high_as += high;
+        low_as += low;
+        high_as += high;
         let span = (high_as - low_as) as isize;
         let mut pp = span;
         while pp >= 0 {
@@ -864,20 +1073,35 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
             let mut p1 = p1s;
             let mut p2 = first;
             while p1 >= p1e {
-                if p1 >= 0 { isum += asp[p1 as usize] * prob_at(p2); }
-                p1 -= 1; p2 += 1;
+                if p1 >= 0 {
+                    isum += asp[p1 as usize] * prob_at(p2);
+                }
+                p1 -= 1;
+                p2 += 1;
             }
             asp[pp as usize] = isum;
-            if first > 0 { first -= 1; }
-            if pp <= range as isize { last -= 1; }
+            if first > 0 {
+                first -= 1;
+            }
+            if pp <= range as isize {
+                last -= 1;
+            }
             pp -= 1;
         }
         pp += 1;
         inner_sum = asp[pp as usize];
         let mut i = low_as + 1;
-        while i < 0 { pp += 1; inner_sum = asp[pp as usize] + inner_sum * eml; i += 1; }
+        while i < 0 {
+            pp += 1;
+            inner_sum = asp[pp as usize] + inner_sum * eml;
+            i += 1;
+        }
         inner_sum *= eml;
-        while i <= high_as { pp += 1; inner_sum += asp[pp as usize]; i += 1; }
+        while i <= high_as {
+            pp += 1;
+            inner_sum += asp[pp as usize];
+            i += 1;
+        }
         oldsum = inner_sum;
         let _ = oldsum;
         outer_sum += inner_sum / (iter + 1) as f64;
@@ -898,14 +1122,17 @@ pub struct UngappedKbpContext {
 pub fn ungapped_kbp_calc(
     query: &[u8],
     contexts: &[UngappedKbpContext],
-    loscore: i32, hiscore: i32,
+    loscore: i32,
+    hiscore: i32,
     alphabet_size: usize,
     ambiguous: &[u8],
     matrix: &dyn Fn(usize, usize) -> i32,
 ) -> Vec<Option<KarlinBlk>> {
     // Standard composition: 0.25 each for A/C/G/T (indices 0-3)
     let mut std_freq = vec![0.0f64; alphabet_size];
-    for i in 0..4.min(alphabet_size) { std_freq[i] = 0.25; }
+    for i in 0..4.min(alphabet_size) {
+        std_freq[i] = 0.25;
+    }
 
     let mut results = Vec::with_capacity(contexts.len());
     for ctx in contexts {
@@ -919,41 +1146,81 @@ pub fn ungapped_kbp_calc(
 
         // Count residue composition
         let mut counts = vec![0i32; alphabet_size];
-        for &b in buf { let idx = (b & 0x0F) as usize; if idx < alphabet_size { counts[idx] += 1; } }
-        for &a in ambiguous { if (a as usize) < alphabet_size { counts[a as usize] = 0; } }
+        for &b in buf {
+            let idx = (b & 0x0F) as usize;
+            if idx < alphabet_size {
+                counts[idx] += 1;
+            }
+        }
+        for &a in ambiguous {
+            if (a as usize) < alphabet_size {
+                counts[a as usize] = 0;
+            }
+        }
         let sum: f64 = counts.iter().map(|&c| c as f64).sum();
         let mut qfreq = vec![0.0f64; alphabet_size];
-        if sum > 0.0 { for i in 0..alphabet_size { qfreq[i] = counts[i] as f64 / sum; } }
+        if sum > 0.0 {
+            for i in 0..alphabet_size {
+                qfreq[i] = counts[i] as f64 / sum;
+            }
+        }
 
         // Compute score frequency
         let mut sfp = SfDist::new(loscore, hiscore);
         for i in 0..alphabet_size {
             for j in 0..alphabet_size {
                 let s = matrix(i, j);
-                if s >= loscore && s <= hiscore { *sfp.p_mut(s) += qfreq[i] * std_freq[j]; }
+                if s >= loscore && s <= hiscore {
+                    *sfp.p_mut(s) += qfreq[i] * std_freq[j];
+                }
             }
         }
         // Find obs range and normalize
-        let mut obs_min = i32::MAX; let mut obs_max = i32::MIN;
+        let mut obs_min = i32::MAX;
+        let mut obs_max = i32::MIN;
         let mut psum = 0.0;
         for s in loscore..=hiscore {
-            if sfp.p(s) > 0.0 { psum += sfp.p(s); if s < obs_min { obs_min = s; } obs_max = s; }
+            if sfp.p(s) > 0.0 {
+                psum += sfp.p(s);
+                if s < obs_min {
+                    obs_min = s;
+                }
+                obs_max = s;
+            }
         }
-        sfp.obs_min = obs_min; sfp.obs_max = obs_max;
+        sfp.obs_min = obs_min;
+        sfp.obs_max = obs_max;
         let mut savg = 0.0;
         if psum > 0.0 {
-            for s in obs_min..=obs_max { *sfp.p_mut(s) /= psum; savg += s as f64 * sfp.p(s); }
+            for s in obs_min..=obs_max {
+                *sfp.p_mut(s) /= psum;
+                savg += s as f64 * sfp.p(s);
+            }
         }
         sfp.score_avg = savg;
 
         // Compute Lambda, H, K
         let lambda = compute_lambda(&sfp);
-        if lambda < 0.0 { results.push(None); continue; }
+        if lambda < 0.0 {
+            results.push(None);
+            continue;
+        }
         let h = compute_h(&sfp, lambda);
-        if h < 0.0 { results.push(None); continue; }
+        if h < 0.0 {
+            results.push(None);
+            continue;
+        }
         let k = compute_k(&sfp, lambda, h);
-        if k < 0.0 { results.push(None); continue; }
-        results.push(Some(KarlinBlk { lambda, k, log_k: k.ln(), h }));
+        if k < 0.0 {
+            results.push(None);
+            continue;
+        }
+        results.push(Some(KarlinBlk {
+            lambda,
+            k,
+            log_k: k.ln(),
+            h,
+        }));
     }
     results
 }
@@ -1000,13 +1267,18 @@ mod tests {
     fn test_compute_ungapped_lambda() {
         // For reward=1, penalty=-3: known lambda ≈ 1.374
         let lambda = compute_ungapped_lambda(1, -3);
-        assert!((lambda - 1.374).abs() < 0.01,
-            "lambda for 1/-3 should be ~1.374, got {}", lambda);
+        assert!(
+            (lambda - 1.374).abs() < 0.01,
+            "lambda for 1/-3 should be ~1.374, got {}",
+            lambda
+        );
 
         // For reward=2, penalty=-3: different lambda
         let lambda2 = compute_ungapped_lambda(2, -3);
-        assert!(lambda2 > 0.0 && lambda2 < lambda,
-            "lambda for 2/-3 should be positive and < 1/-3 lambda");
+        assert!(
+            lambda2 > 0.0 && lambda2 < lambda,
+            "lambda for 2/-3 should be positive and < 1/-3 lambda"
+        );
     }
 
     #[test]
@@ -1038,8 +1310,12 @@ mod tests {
         let mut hi = i32::MIN;
         for i in 0..16 {
             for j in 0..16 {
-                if m[i][j] < lo { lo = m[i][j]; }
-                if m[i][j] > hi { hi = m[i][j]; }
+                if m[i][j] < lo {
+                    lo = m[i][j];
+                }
+                if m[i][j] > hi {
+                    hi = m[i][j];
+                }
             }
         }
         assert_eq!(lo, -3, "nucleotide loscore should be -3");
@@ -1055,8 +1331,12 @@ mod tests {
         let mut hi = i32::MIN;
         for i in 0..crate::matrix::AA_SIZE {
             for j in 0..crate::matrix::AA_SIZE {
-                if m[i][j] < lo { lo = m[i][j]; }
-                if m[i][j] > hi { hi = m[i][j]; }
+                if m[i][j] < lo {
+                    lo = m[i][j];
+                }
+                if m[i][j] > hi {
+                    hi = m[i][j];
+                }
             }
         }
         assert_eq!(lo, -4, "BLOSUM62 loscore should be -4");
@@ -1070,10 +1350,16 @@ mod tests {
         let ungapped = compute_ungapped_kbp(1, -2);
         let (kbp, round_down) = nucl_gapped_kbp_lookup(3, 1, 1, -2, &ungapped).unwrap();
         assert!(!round_down);
-        assert!((kbp.lambda - 1.32).abs() < 0.01,
-            "Lambda should be ~1.32, got {}", kbp.lambda);
-        assert!((kbp.k - 0.57).abs() < 0.01,
-            "K should be ~0.57, got {}", kbp.k);
+        assert!(
+            (kbp.lambda - 1.32).abs() < 0.01,
+            "Lambda should be ~1.32, got {}",
+            kbp.lambda
+        );
+        assert!(
+            (kbp.k - 0.57).abs() < 0.01,
+            "K should be ~0.57, got {}",
+            kbp.k
+        );
     }
 
     /// Port of NuclGappedCalc: verify alpha/beta for reward=1, penalty=-2, gap_open=3, gap_extend=1.
@@ -1082,10 +1368,16 @@ mod tests {
     fn test_nucl_alpha_beta_1_2_3_1() {
         let ungapped = compute_ungapped_kbp(1, -2);
         let (alpha, beta) = nucl_alpha_beta(1, -2, 3, 1, ungapped.lambda, ungapped.h, true);
-        assert!((alpha - 1.3).abs() < 0.01,
-            "alpha should be ~1.3, got {}", alpha);
-        assert!((beta - (-1.0)).abs() < 0.01,
-            "beta should be ~-1.0, got {}", beta);
+        assert!(
+            (alpha - 1.3).abs() < 0.01,
+            "alpha should be ~1.3, got {}",
+            alpha
+        );
+        assert!(
+            (beta - (-1.0)).abs() < 0.01,
+            "beta should be ~-1.0, got {}",
+            beta
+        );
     }
 
     /// Port of NuclGappedCalc: high gap costs fall back to ungapped params.
@@ -1095,10 +1387,14 @@ mod tests {
         let ungapped = compute_ungapped_kbp(1, -2);
         let (kbp, round_down) = nucl_gapped_kbp_lookup(4, 2, 1, -2, &ungapped).unwrap();
         assert!(!round_down);
-        assert_eq!(kbp.lambda, ungapped.lambda,
-            "High gap costs should fall back to ungapped Lambda");
-        assert_eq!(kbp.k, ungapped.k,
-            "High gap costs should fall back to ungapped K");
+        assert_eq!(
+            kbp.lambda, ungapped.lambda,
+            "High gap costs should fall back to ungapped Lambda"
+        );
+        assert_eq!(
+            kbp.k, ungapped.k,
+            "High gap costs should fall back to ungapped K"
+        );
     }
 
     /// Port of NuclGappedCalc: ungapped alpha/beta when gap costs exceed table maximum.
@@ -1107,8 +1403,10 @@ mod tests {
     fn test_nucl_alpha_beta_ungapped_fallback() {
         let ungapped = compute_ungapped_kbp(1, -2);
         let (alpha, beta) = nucl_alpha_beta(1, -2, 4, 2, ungapped.lambda, ungapped.h, true);
-        assert!((alpha - ungapped.lambda / ungapped.h).abs() < 1e-6,
-            "alpha should equal Lambda/H for unsupported gap costs");
+        assert!(
+            (alpha - ungapped.lambda / ungapped.h).abs() < 1e-6,
+            "alpha should equal Lambda/H for unsupported gap costs"
+        );
         assert_eq!(beta, 0.0);
     }
 
@@ -1119,10 +1417,16 @@ mod tests {
         let ungapped = compute_ungapped_kbp(10, -20);
         let (kbp, round_down) = nucl_gapped_kbp_lookup(30, 10, 10, -20, &ungapped).unwrap();
         assert!(!round_down);
-        assert!((kbp.lambda - 0.132).abs() < 0.01,
-            "Lambda for 10/-20/30/10 should be ~0.132 (scaled), got {}", kbp.lambda);
-        assert!((kbp.k - 0.57).abs() < 0.01,
-            "K for 10/-20/30/10 should be ~0.57 (unscaled), got {}", kbp.k);
+        assert!(
+            (kbp.lambda - 0.132).abs() < 0.01,
+            "Lambda for 10/-20/30/10 should be ~0.132 (scaled), got {}",
+            kbp.lambda
+        );
+        assert!(
+            (kbp.k - 0.57).abs() < 0.01,
+            "K for 10/-20/30/10 should be ~0.57 (unscaled), got {}",
+            kbp.k
+        );
     }
 
     /// Port of NuclGappedCalc: reward=2, penalty=-7, gap_open=4, gap_extend=2 should set round_down=true.
@@ -1132,10 +1436,16 @@ mod tests {
         let ungapped = compute_ungapped_kbp(2, -7);
         let (kbp, round_down) = nucl_gapped_kbp_lookup(4, 2, 2, -7, &ungapped).unwrap();
         assert!(round_down, "2/-7 should set round_down=true");
-        assert!((kbp.lambda - 0.675).abs() < 0.01,
-            "Lambda should be ~0.675, got {}", kbp.lambda);
-        assert!((kbp.k - 0.62).abs() < 0.01,
-            "K should be ~0.62, got {}", kbp.k);
+        assert!(
+            (kbp.lambda - 0.675).abs() < 0.01,
+            "Lambda should be ~0.675, got {}",
+            kbp.lambda
+        );
+        assert!(
+            (kbp.k - 0.62).abs() < 0.01,
+            "K should be ~0.62, got {}",
+            kbp.k
+        );
     }
 
     /// Port of NuclGappedCalc: invalid gap costs should return Err.
@@ -1144,7 +1454,10 @@ mod tests {
     fn test_nucl_gapped_invalid_gap_costs() {
         let ungapped = compute_ungapped_kbp(4, -5);
         let result = nucl_gapped_kbp_lookup(3, 2, 4, -5, &ungapped);
-        assert!(result.is_err(), "gap_open=3, gap_extend=2 for 4/-5 should fail");
+        assert!(
+            result.is_err(),
+            "gap_open=3, gap_extend=2 for 4/-5 should fail"
+        );
     }
 
     /// Port of NuclGappedCalc: invalid gap costs should return Err.
@@ -1153,7 +1466,10 @@ mod tests {
     fn test_nucl_gapped_invalid_gap_costs_2() {
         let ungapped = compute_ungapped_kbp(1, -2);
         let result = nucl_gapped_kbp_lookup(1, 3, 1, -2, &ungapped);
-        assert!(result.is_err(), "gap_open=1, gap_extend=3 for 1/-2 should fail");
+        assert!(
+            result.is_err(),
+            "gap_open=1, gap_extend=3 for 1/-2 should fail"
+        );
     }
 
     /// Port of NuclGappedCalc: unsupported reward/penalty pair returns Err.
@@ -1174,17 +1490,26 @@ mod tests {
         // Query: uniform ACGT, 1000 bases
         let query: Vec<u8> = (0..1000).map(|i| (i % 4) as u8).collect();
         let contexts = vec![UngappedKbpContext {
-            query_offset: 0, query_length: 1000, is_valid: true,
+            query_offset: 0,
+            query_length: 1000,
+            is_valid: true,
         }];
         let m = crate::matrix::nucleotide_matrix(2, -2);
         let results = ungapped_kbp_calc(
-            &query, &contexts, -2, 2, 16,
+            &query,
+            &contexts,
+            -2,
+            2,
+            16,
             &(4..16).collect::<Vec<u8>>(),
             &|i, j| m[i][j],
         );
         let kbp = results[0].as_ref().unwrap();
-        assert!((kbp.k - 1.0 / 3.0).abs() < 0.02,
-            "K for equal reward/penalty should be ~1/3, got {}", kbp.k);
+        assert!(
+            (kbp.k - 1.0 / 3.0).abs() < 0.02,
+            "K for equal reward/penalty should be ~1/3, got {}",
+            kbp.k
+        );
     }
 
     /// Port of BlastResFreqStdCompNucleotideTest: nucleotide base frequencies should be 0.25 each.
@@ -1193,13 +1518,21 @@ mod tests {
         let freqs = &crate::matrix::NT_FREQUENCIES;
         // First 4 bases (A, C, G, T) should each be 0.25
         for i in 0..4 {
-            assert!((freqs[i] - 0.25).abs() < 0.001,
-                "Base {} frequency should be 0.25, got {}", i, freqs[i]);
+            assert!(
+                (freqs[i] - 0.25).abs() < 0.001,
+                "Base {} frequency should be 0.25, got {}",
+                i,
+                freqs[i]
+            );
         }
         // Ambiguity codes should be 0
         for i in 4..freqs.len() {
-            assert!(freqs[i].abs() < 0.001,
-                "Ambiguity code {} frequency should be 0, got {}", i, freqs[i]);
+            assert!(
+                freqs[i].abs() < 0.001,
+                "Ambiguity code {} frequency should be 0, got {}",
+                i,
+                freqs[i]
+            );
         }
     }
 
@@ -1212,13 +1545,19 @@ mod tests {
         // Compact indices: A=0,C=1,D=2,E=3,F=4,G=5,H=6,I=7,K=8,L=9,M=10,N=11,P=12,Q=13,R=14,S=15,T=16,V=17,W=18,Y=19
         let check = |idx: usize, expected_x100k: i32, name: &str| {
             let got = (freqs[idx] * 100000.0).round() as i32;
-            assert!((got - expected_x100k).abs() <= 5,
+            assert!(
+                (got - expected_x100k).abs() <= 5,
                 "{} (idx {}) expected ~{}, got {} (raw: {})",
-                name, idx, expected_x100k, got, freqs[idx]);
+                name,
+                idx,
+                expected_x100k,
+                got,
+                freqs[idx]
+            );
         };
-        check(4, 4259, "F");   // Phe
-        check(10, 2243, "M");  // Met
-        check(19, 3216, "Y");  // Tyr
+        check(4, 4259, "F"); // Phe
+        check(10, 2243, "M"); // Met
+        check(19, 3216, "Y"); // Tyr
     }
 
     /// Port of EvalueForProteinFSC: E-values should never be negative.
@@ -1242,9 +1581,14 @@ mod tests {
         for &(score, len1, len2) in &cases {
             let ss = len1 as f64 * len2 as f64;
             let evalue = kbp.raw_to_evalue(score, ss);
-            assert!(evalue >= 0.0,
+            assert!(
+                evalue >= 0.0,
                 "E-value should be >= 0 for score={}, lens=({},{}), got {}",
-                score, len1, len2, evalue);
+                score,
+                len1,
+                len2,
+                evalue
+            );
         }
     }
 
@@ -1270,11 +1614,23 @@ mod tests {
         for &(reward, penalty, go, ge) in cases {
             let ungapped = compute_ungapped_kbp(reward, penalty);
             let result = nucl_gapped_kbp_lookup(go, ge, reward, penalty, &ungapped);
-            assert!(result.is_ok(),
-                "Gapped lookup should work for {}/{}/{}/{}", reward, penalty, go, ge);
+            assert!(
+                result.is_ok(),
+                "Gapped lookup should work for {}/{}/{}/{}",
+                reward,
+                penalty,
+                go,
+                ge
+            );
             let (kbp, _) = result.unwrap();
-            assert!(kbp.is_valid(),
-                "KBP should be valid for {}/{}/{}/{}", reward, penalty, go, ge);
+            assert!(
+                kbp.is_valid(),
+                "KBP should be valid for {}/{}/{}/{}",
+                reward,
+                penalty,
+                go,
+                ge
+            );
         }
     }
 
@@ -1292,14 +1648,29 @@ mod tests {
         ];
         for &(go, ge, expected_lambda, expected_k) in entries {
             let result = nucl_gapped_kbp_lookup(go, ge, 1, -3, &ungapped);
-            assert!(result.is_ok(), "1/-3 gap_open={} gap_extend={} should work", go, ge);
+            assert!(
+                result.is_ok(),
+                "1/-3 gap_open={} gap_extend={} should work",
+                go,
+                ge
+            );
             let (kbp, _) = result.unwrap();
-            assert!((kbp.lambda - expected_lambda).abs() < 0.01,
+            assert!(
+                (kbp.lambda - expected_lambda).abs() < 0.01,
                 "Lambda mismatch for 1/-3/{}/{}: expected {}, got {}",
-                go, ge, expected_lambda, kbp.lambda);
-            assert!((kbp.k - expected_k).abs() < 0.01,
+                go,
+                ge,
+                expected_lambda,
+                kbp.lambda
+            );
+            assert!(
+                (kbp.k - expected_k).abs() < 0.01,
                 "K mismatch for 1/-3/{}/{}: expected {}, got {}",
-                go, ge, expected_k, kbp.k);
+                go,
+                ge,
+                expected_k,
+                kbp.k
+            );
         }
     }
 
@@ -1308,8 +1679,12 @@ mod tests {
     fn test_protein_gapped_all_blosum62_entries() {
         for &(go, ge, expected_lambda, expected_k, expected_h, _alpha, _beta) in BLOSUM62_PARAMS {
             let params = lookup_protein_params(go, ge);
-            assert!(params.is_some(),
-                "BLOSUM62 gap_open={} gap_extend={} should be in table", go, ge);
+            assert!(
+                params.is_some(),
+                "BLOSUM62 gap_open={} gap_extend={} should be in table",
+                go,
+                ge
+            );
             let p = params.unwrap();
             assert!((p.lambda - expected_lambda).abs() < 1e-6);
             assert!((p.k - expected_k).abs() < 1e-6);
@@ -1322,9 +1697,13 @@ mod tests {
     fn test_length_adjustment_exact_convergence() {
         let kbp = lookup_protein_params(11, 1).unwrap();
         let (adj, converged) = compute_length_adjustment_exact(
-            kbp.k, kbp.k.ln(),
-            kbp.alpha / kbp.lambda, kbp.beta,
-            300, 1_000_000, 5000,
+            kbp.k,
+            kbp.k.ln(),
+            kbp.alpha / kbp.lambda,
+            kbp.beta,
+            300,
+            1_000_000,
+            5000,
         );
         assert!(converged, "Length adjustment should converge");
         assert!(adj > 0, "Length adjustment should be positive");
@@ -1345,9 +1724,13 @@ mod tests {
         for raw in [20, 50, 100, 200] {
             let evalue = kbp.raw_to_evalue(raw, search_space);
             let recovered = kbp.evalue_to_raw(evalue, search_space);
-            assert!((recovered - raw).abs() <= 1,
+            assert!(
+                (recovered - raw).abs() <= 1,
                 "Round-trip failed: raw={} -> evalue={:.2e} -> recovered={}",
-                raw, evalue, recovered);
+                raw,
+                evalue,
+                recovered
+            );
         }
     }
 
@@ -1373,7 +1756,11 @@ mod tests {
         }];
         let m = crate::matrix::nucleotide_matrix(1, -3);
         let results = ungapped_kbp_calc(
-            &query, &contexts, -3, 1, 16,
+            &query,
+            &contexts,
+            -3,
+            1,
+            16,
             &(4..16).collect::<Vec<u8>>(), // ambiguous codes 4-15
             &|i, j| m[i][j],
         );
@@ -1397,7 +1784,11 @@ mod tests {
         }];
         let m = crate::matrix::nucleotide_matrix(1, -3);
         let results = ungapped_kbp_calc(
-            &query, &contexts, -3, 1, 16,
+            &query,
+            &contexts,
+            -3,
+            1,
+            16,
             &(4..16).collect::<Vec<u8>>(),
             &|i, j| m[i][j],
         );
@@ -1423,7 +1814,12 @@ mod tests {
     /// Verify length adjustment is 0 for degenerate inputs.
     #[test]
     fn test_length_adjustment_degenerate() {
-        let kbp = KarlinBlk { lambda: 0.0, k: 0.0, log_k: f64::NEG_INFINITY, h: 0.0 };
+        let kbp = KarlinBlk {
+            lambda: 0.0,
+            k: 0.0,
+            log_k: f64::NEG_INFINITY,
+            h: 0.0,
+        };
         let adj = compute_length_adjustment(100, 1000000, 100, &kbp);
         assert_eq!(adj, 0);
     }

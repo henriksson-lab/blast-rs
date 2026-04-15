@@ -118,7 +118,11 @@ mod tests {
             scan_step: 4,
         };
         assert_eq!(table.word_length, 8);
-        assert_eq!(table.backbone.len(), 65536, "8-mer backbone should have 4^8=65536 entries");
+        assert_eq!(
+            table.backbone.len(),
+            65536,
+            "8-mer backbone should have 4^8=65536 entries"
+        );
         assert_eq!(table.scan_step, 4);
     }
 
@@ -148,7 +152,11 @@ mod tests {
         };
         assert_eq!(table.word_length, 28);
         assert_eq!(table.lut_word_length, 12);
-        assert_eq!(table.hashtable.len(), 4_194_304, "Megablast hash size should be 4^12");
+        assert_eq!(
+            table.hashtable.len(),
+            4_194_304,
+            "Megablast hash size should be 4^12"
+        );
     }
 
     #[test]
@@ -161,19 +169,30 @@ mod tests {
         };
         assert_eq!(table.word_length, 3);
         assert_eq!(table.threshold, 11.0);
-        assert_eq!(table.backbone.len(), 21952, "3-mer AA backbone should have 28^3=21952 entries");
+        assert_eq!(
+            table.backbone.len(),
+            21952,
+            "3-mer AA backbone should have 28^3=21952 entries"
+        );
     }
 
     #[test]
     fn test_lookup_table_wrap_variants() {
         let small = LookupTableWrap::SmallNa(SmallNaLookupTable {
-            word_length: 11, backbone: vec![], overflow: vec![], pv_array: vec![], scan_step: 4,
+            word_length: 11,
+            backbone: vec![],
+            overflow: vec![],
+            pv_array: vec![],
+            scan_step: 4,
         });
         assert_eq!(small.table_type(), LookupTableType::SmallNaLookup);
         assert_eq!(small.word_length(), 11);
 
         let aa = LookupTableWrap::Aa(AaLookupTable {
-            word_length: 3, threshold: 11.0, backbone: vec![], pv_array: vec![],
+            word_length: 3,
+            threshold: 11.0,
+            backbone: vec![],
+            pv_array: vec![],
         });
         assert_eq!(aa.table_type(), LookupTableType::AaLookup);
         assert_eq!(aa.word_length(), 3);

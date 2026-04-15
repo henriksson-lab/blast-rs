@@ -616,8 +616,26 @@ impl BlastDb {
         }
 
         let mut volumes = Vec::with_capacity(alias.dblist.len());
-        for vol_path in &alias.dblist {
-            volumes.push(Self::open_volume_auto(vol_path)?);
+        for (idx, vol_path) in alias.dblist.iter().enumerate() {
+            match Self::open_volume_auto(vol_path) {
+                Ok(volume) => volumes.push(volume),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    let volume_name = alias
+                        .raw_dblist
+                        .get(idx)
+                        .map(String::as_str)
+                        .unwrap_or_else(|| vol_path.to_str().unwrap_or_default());
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "Could not find volume or alias file ({}) referenced in alias file ({}).",
+                            volume_name,
+                            base_path.display()
+                        ),
+                    ));
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         let db_type = volumes[0].db_type;

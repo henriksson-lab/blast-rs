@@ -16,7 +16,9 @@ pub struct MaskLoc {
 
 impl MaskLoc {
     pub fn new() -> Self {
-        MaskLoc { regions: Vec::new() }
+        MaskLoc {
+            regions: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, start: i32, end: i32) {
