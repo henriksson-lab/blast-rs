@@ -17,6 +17,8 @@ The code can also be compiled to be used for webassembly.
   2. Combined multi-query lookup table — scan subject truly once for all queries (would close the remaining multi-query gap: 0.68s vs NCBI's 0.41s)
   3. blastp finds extra hits — our ungapped extension scores differ by 1-2 points from NCBI, catching slightly more seeds 
 
+**There are many more gaps. Don't use this code for production yet!**
+
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
 
