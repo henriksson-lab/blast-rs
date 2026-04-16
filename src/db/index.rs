@@ -739,10 +739,28 @@ impl BlastDb {
         };
 
         // Memory-map sequence and header files
-        let seq_file = File::open(&seq_path)?;
+        let seq_file = File::open(&seq_path).map_err(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("BLAST database component missing: {}", seq_path.display()),
+                )
+            } else {
+                err
+            }
+        })?;
         let seq_mmap = unsafe { Mmap::map(&seq_file)? };
 
-        let hdr_file = File::open(&hdr_path)?;
+        let hdr_file = File::open(&hdr_path).map_err(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("BLAST database component missing: {}", hdr_path.display()),
+                )
+            } else {
+                err
+            }
+        })?;
         let hdr_mmap = unsafe { Mmap::map(&hdr_file)? };
 
         // Try to load direct OID-to-taxid data. Modern v5 databases use

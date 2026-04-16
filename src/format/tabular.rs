@@ -259,7 +259,7 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             } else if hit.query_len > 0 {
                 let cov = 100.0 * (hit.query_end - hit.query_start + 1).abs() as f64
                     / hit.query_len as f64;
-                format!("{:.0}", cov.min(100.0))
+                format_query_coverage(cov)
             } else {
                 "0".to_string()
             }
@@ -268,7 +268,7 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             if hit.query_len > 0 {
                 let query_span = (hit.query_end - hit.query_start).abs() + 1;
                 let cov = 100.0 * query_span as f64 / hit.query_len as f64;
-                format!("{:.0}", cov.min(100.0))
+                format_query_coverage(cov)
             } else {
                 "0".to_string()
             }
@@ -393,8 +393,8 @@ fn compute_qcovs_by_query_subject(hits: &[TabularHit]) -> HashMap<(&str, &str), 
             }
         }
         covered += cur.1 - cur.0 + 1;
-        let cov = (100.0 * covered as f64 / query_len as f64).round() as i32;
-        out.insert(key, cov.min(100));
+        let cov = rounded_query_coverage(100.0 * covered as f64 / query_len as f64);
+        out.insert(key, cov);
     }
     out
 }
@@ -450,6 +450,14 @@ pub fn format_tabular_custom_with_delimiter<W: Write>(
 /// Write tabular output (outfmt 6) for a set of hits.
 pub fn format_tabular<W: Write>(writer: &mut W, hits: &[TabularHit]) -> std::io::Result<()> {
     format_tabular_custom_with_delimiter(writer, hits, DEFAULT_TABULAR_COLUMNS, "\t")
+}
+
+fn format_query_coverage(cov: f64) -> String {
+    rounded_query_coverage(cov).to_string()
+}
+
+fn rounded_query_coverage(cov: f64) -> i32 {
+    ((cov.min(100.0) + 0.5).floor() as i32).min(100)
 }
 
 #[cfg(test)]
@@ -623,6 +631,15 @@ mod tests {
         assert_eq!(fields[3], "0"); // sframe
         assert_eq!(fields[4], "120"); // score
         assert_eq!(fields[5], "9606"); // staxid
+    }
+
+    #[test]
+    fn test_query_coverage_rounds_half_up() {
+        let mut hit = make_hit(None, None);
+        hit.query_len = 32;
+        hit.query_start = 1;
+        hit.query_end = 20;
+        assert_eq!(get_field(&hit, "qcovhsp"), "63");
     }
 
     #[test]

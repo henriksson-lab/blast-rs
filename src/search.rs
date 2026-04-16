@@ -265,6 +265,65 @@ pub fn blastn_ungapped_search(
     search_space: f64,
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
+    blastn_ungapped_search_inner(
+        query_plus,
+        query_minus,
+        subject,
+        word_size,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        true,
+    )
+}
+
+/// Ungapped nucleotide word search without final HSP containment filtering.
+/// This is used for `blastn -ungapped`, where NCBI reports overlapping
+/// ungapped HSPs that are later controlled by hit-list limits.
+pub fn blastn_ungapped_search_no_dedup(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    blastn_ungapped_search_inner(
+        query_plus,
+        query_minus,
+        subject,
+        word_size,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blastn_ungapped_search_inner(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    dedup: bool,
+) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
 
     let lut_word = word_size.min(8);
@@ -274,6 +333,7 @@ pub fn blastn_ungapped_search(
         if query.len() < word_size || subject.len() < word_size {
             continue;
         }
+        let mut last_hit = vec![-1i32; subject.len() + query.len() + 1];
 
         // Build lookup table from query
         let mut lut: Vec<i32> = vec![-1; lut_size];
@@ -306,6 +366,11 @@ pub fn blastn_ungapped_search(
                     }
                 }
                 if matches {
+                    let diag = s_pos + query.len() - qp;
+                    if last_hit[diag] >= 0 && (last_hit[diag] as usize) > s_pos {
+                        q_pos = next[qp];
+                        continue;
+                    }
                     if let Some(hsp) = extend_seed(
                         query,
                         subject,
@@ -319,7 +384,10 @@ pub fn blastn_ungapped_search(
                         evalue_threshold,
                         context,
                     ) {
+                        last_hit[diag] = hsp.subject_end;
                         hsps.push(hsp);
+                    } else {
+                        last_hit[diag] = (s_pos + word_size) as i32;
                     }
                 }
                 q_pos = next[qp];
@@ -328,11 +396,15 @@ pub fn blastn_ungapped_search(
         }
     }
 
-    hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    dedup_hsps_with_min_diag_separation(
-        &mut hsps,
-        min_diag_separation_for_ungapped(word_size, reward, penalty),
-    );
+    if dedup {
+        hsps.sort_by(|a, b| b.score.cmp(&a.score));
+        dedup_hsps_with_min_diag_separation(
+            &mut hsps,
+            min_diag_separation_for_ungapped(word_size, reward, penalty),
+        );
+    } else {
+        sort_ungapped_hsps_ncbi_no_dedup(&mut hsps);
+    }
     hsps
 }
 
@@ -546,6 +618,62 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch(
     evalue_threshold: f64,
     last_hit_scratch: &mut [Vec<i32>],
 ) -> Vec<SearchHsp> {
+    blastn_ungapped_search_packed_prepared_with_scratch_inner(
+        prepared,
+        subject_packed,
+        subject_len,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        last_hit_scratch,
+        true,
+    )
+}
+
+pub fn blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
+    prepared: &PreparedBlastnQuery<'_>,
+    subject_packed: &[u8],
+    subject_len: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    last_hit_scratch: &mut [Vec<i32>],
+) -> Vec<SearchHsp> {
+    blastn_ungapped_search_packed_prepared_with_scratch_inner(
+        prepared,
+        subject_packed,
+        subject_len,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        last_hit_scratch,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
+    prepared: &PreparedBlastnQuery<'_>,
+    subject_packed: &[u8],
+    subject_len: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    last_hit_scratch: &mut [Vec<i32>],
+    dedup: bool,
+) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
 
     if prepared.is_empty() || subject_len < prepared.word_size {
@@ -608,11 +736,15 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch(
             &mut hsps,
         );
 
-        hsps.sort_by(|a, b| b.score.cmp(&a.score));
-        dedup_hsps_with_min_diag_separation(
-            &mut hsps,
-            min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
-        );
+        if dedup {
+            hsps.sort_by(|a, b| b.score.cmp(&a.score));
+            dedup_hsps_with_min_diag_separation(
+                &mut hsps,
+                min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
+            );
+        } else {
+            sort_ungapped_hsps_ncbi_no_dedup(&mut hsps);
+        }
         return hsps;
     }
 
@@ -702,12 +834,27 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch(
         }
     }
 
-    hsps.sort_by(|a, b| b.score.cmp(&a.score));
-    dedup_hsps_with_min_diag_separation(
-        &mut hsps,
-        min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
-    );
+    if dedup {
+        hsps.sort_by(|a, b| b.score.cmp(&a.score));
+        dedup_hsps_with_min_diag_separation(
+            &mut hsps,
+            min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
+        );
+    } else {
+        sort_ungapped_hsps_ncbi_no_dedup(&mut hsps);
+    }
     hsps
+}
+
+fn sort_ungapped_hsps_ncbi_no_dedup(hsps: &mut [SearchHsp]) {
+    hsps.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.subject_start.cmp(&b.subject_start))
+            .then_with(|| a.query_start.cmp(&b.query_start))
+            .then_with(|| a.subject_end.cmp(&b.subject_end))
+            .then_with(|| a.query_end.cmp(&b.query_end))
+    });
 }
 
 /// Step-4 unrolled scanner — port of C engine's s_BlastSmallNaScanSubject_8_4.
@@ -1479,20 +1626,25 @@ fn extend_seed_packed(
     evalue_threshold: f64,
     context: i32,
 ) -> Option<SearchHsp> {
-    // Extend right
+    // Extend right using NCBI's exact nucleotide ungapped algorithm:
+    // accumulate a temporary run score, fold positive runs into the HSP score,
+    // and stop once the current run drops below max(-xdrop, -score).
     let mut score = 0i32;
-    let mut best_score = 0i32;
+    let mut sum = 0i32;
     let mut best_right = 0usize;
     let mut qi = q_seed;
     let mut si = s_seed;
+    let x_dropoff_neg = -x_dropoff;
+    let mut x_current = x_dropoff_neg;
     while qi < query.len() && si < subject_len {
         let sb = packed_base_at(subject_packed, si);
-        score += if query[qi] == sb { reward } else { penalty };
-        if score > best_score {
-            best_score = score;
+        sum += if query[qi] == sb { reward } else { penalty };
+        if sum > 0 {
+            score += sum;
             best_right = qi - q_seed + 1;
-        }
-        if best_score - score > x_dropoff {
+            x_current = (-score).max(x_dropoff_neg);
+            sum = 0;
+        } else if sum < x_current {
             break;
         }
         qi += 1;
@@ -1501,19 +1653,19 @@ fn extend_seed_packed(
 
     // Extend left
     let mut left_score = 0i32;
-    let mut best_left_score = 0i32;
+    let mut left_sum = 0i32;
     let mut best_left = 0usize;
     if q_seed > 0 && s_seed > 0 {
         let mut qi = q_seed - 1;
         let mut si = s_seed - 1;
         loop {
             let sb = packed_base_at(subject_packed, si);
-            left_score += if query[qi] == sb { reward } else { penalty };
-            if left_score > best_left_score {
-                best_left_score = left_score;
+            left_sum += if query[qi] == sb { reward } else { penalty };
+            if left_sum > 0 {
+                left_score += left_sum;
                 best_left = q_seed - qi;
-            }
-            if best_left_score - left_score > x_dropoff {
+                left_sum = 0;
+            } else if left_sum < x_dropoff_neg {
                 break;
             }
             if qi == 0 || si == 0 {
@@ -1524,7 +1676,7 @@ fn extend_seed_packed(
         }
     }
 
-    let total_score = best_score + best_left_score;
+    let total_score = score + left_score;
     if total_score <= 0 {
         return None;
     }
@@ -1600,23 +1752,28 @@ fn extend_seed(
     evalue_threshold: f64,
     context: i32,
 ) -> Option<SearchHsp> {
-    // Extend right
+    // Extend right using NCBI's exact nucleotide ungapped algorithm:
+    // accumulate a temporary run score, fold positive runs into the HSP score,
+    // and stop once the current run drops below max(-xdrop, -score).
     let mut score = 0i32;
-    let mut best_score = 0i32;
+    let mut sum = 0i32;
     let mut best_right = 0usize;
     let mut qi = q_seed;
     let mut si = s_seed;
+    let x_dropoff_neg = -x_dropoff;
+    let mut x_current = x_dropoff_neg;
     while qi < query.len() && si < subject.len() {
-        score += if query[qi] == subject[si] {
+        sum += if query[qi] == subject[si] {
             reward
         } else {
             penalty
         };
-        if score > best_score {
-            best_score = score;
+        if sum > 0 {
+            score += sum;
             best_right = qi - q_seed + 1;
-        }
-        if best_score - score > x_dropoff {
+            x_current = (-score).max(x_dropoff_neg);
+            sum = 0;
+        } else if sum < x_current {
             break;
         }
         qi += 1;
@@ -1625,22 +1782,22 @@ fn extend_seed(
 
     // Extend left
     let mut score_l = 0i32;
-    let mut best_score_l = 0i32;
+    let mut sum_l = 0i32;
     let mut best_left = 0usize;
     if q_seed > 0 && s_seed > 0 {
         qi = q_seed - 1;
         si = s_seed - 1;
         loop {
-            score_l += if query[qi] == subject[si] {
+            sum_l += if query[qi] == subject[si] {
                 reward
             } else {
                 penalty
             };
-            if score_l > best_score_l {
-                best_score_l = score_l;
+            if sum_l > 0 {
+                score_l += sum_l;
                 best_left = q_seed - qi;
-            }
-            if best_score_l - score_l > x_dropoff {
+                sum_l = 0;
+            } else if sum_l < x_dropoff_neg {
                 break;
             }
             if qi == 0 || si == 0 {
@@ -1651,7 +1808,7 @@ fn extend_seed(
         }
     }
 
-    let total_score = best_score + best_score_l;
+    let total_score = score + score_l;
     if total_score <= 0 {
         return None;
     }
@@ -2386,6 +2543,41 @@ mod tests {
         );
         // The hit may be partial (avoiding the mismatch region)
         assert!(results[0].score > 0);
+    }
+
+    #[test]
+    fn test_extend_seed_right_stops_when_total_score_goes_negative() {
+        let query = vec![0u8, 0, 0, 0];
+        let subject = vec![0u8, 1, 0, 0];
+        let kbp = test_kbp();
+
+        let hsp = extend_seed(&query, &subject, 0, 0, 2, -3, 20, &kbp, 1e6, 1e10, 0)
+            .expect("first matching base should produce an HSP");
+
+        assert_eq!(hsp.score, 2);
+        assert_eq!(hsp.query_start, 0);
+        assert_eq!(hsp.query_end, 1);
+        assert_eq!(hsp.subject_start, 0);
+        assert_eq!(hsp.subject_end, 1);
+        assert_eq!(hsp.align_length, 1);
+    }
+
+    #[test]
+    fn test_extend_seed_packed_right_stops_when_total_score_goes_negative() {
+        let query = vec![0u8, 0, 0, 0];
+        let subject = pack_ncbi2na(&[0, 1, 0, 0]);
+        let kbp = test_kbp();
+
+        let hsp =
+            extend_seed_packed(&query, &subject, 4, 0, 0, 2, -3, 20, &kbp, 1e6, 1e10, 0)
+                .expect("first matching base should produce an HSP");
+
+        assert_eq!(hsp.score, 2);
+        assert_eq!(hsp.query_start, 0);
+        assert_eq!(hsp.query_end, 1);
+        assert_eq!(hsp.subject_start, 0);
+        assert_eq!(hsp.subject_end, 1);
+        assert_eq!(hsp.align_length, 1);
     }
 
     #[test]

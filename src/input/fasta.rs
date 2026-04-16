@@ -16,7 +16,49 @@ pub struct FastaRecord {
 /// Parse a multi-FASTA input, returning records in order.
 /// Uses noodles-fasta for parsing.
 pub fn parse_fasta<R: Read>(reader: R) -> Vec<FastaRecord> {
-    let buf = BufReader::new(reader);
+    parse_fasta_with_default_id(reader, "Query_1")
+}
+
+pub fn parse_fasta_with_default_id<R: Read>(mut reader: R, default_id: &str) -> Vec<FastaRecord> {
+    let mut input = Vec::new();
+    if reader.read_to_end(&mut input).is_err() {
+        return Vec::new();
+    }
+
+    let mut records = parse_noodles_fasta_records(&input);
+    if records.is_empty() {
+        if let Some(offset) = first_embedded_header_offset(&input) {
+            records = parse_noodles_fasta_records(&input[offset..]);
+        }
+    }
+
+    if records.is_empty() {
+        let mut sequence = Vec::new();
+        for line in input.split(|&b| b == b'\n' || b == b'\r') {
+            let line = line
+                .iter()
+                .copied()
+                .skip_while(|b| b.is_ascii_whitespace())
+                .collect::<Vec<u8>>();
+            if line.first() == Some(&b';') {
+                continue;
+            }
+            sequence.extend(line.into_iter().filter(|b| !b.is_ascii_whitespace()));
+        }
+        if !sequence.is_empty() {
+            records.push(FastaRecord {
+                id: default_id.to_string(),
+                defline: default_id.to_string(),
+                sequence,
+            });
+        }
+    }
+
+    records
+}
+
+fn parse_noodles_fasta_records(input: &[u8]) -> Vec<FastaRecord> {
+    let buf = BufReader::new(input);
     let mut noodles_reader = noodles_fasta::io::Reader::new(buf);
     let mut records = Vec::new();
 
@@ -42,6 +84,22 @@ pub fn parse_fasta<R: Read>(reader: R) -> Vec<FastaRecord> {
     }
 
     records
+}
+
+fn first_embedded_header_offset(input: &[u8]) -> Option<usize> {
+    if input.first() == Some(&b'>') {
+        return Some(0);
+    }
+
+    let mut line_start = true;
+    for (idx, &byte) in input.iter().enumerate() {
+        if line_start && byte == b'>' {
+            return Some(idx);
+        }
+        line_start = byte == b'\n' || byte == b'\r';
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -137,6 +195,23 @@ mod tests {
         let input2 = b"\n\n\n";
         let records2 = parse_fasta(&input2[..]);
         assert_eq!(records2.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_fasta_raw_sequence_uses_default_id() {
+        let records = parse_fasta_with_default_id(&b"ACGT\nTGCA\n"[..], "Subject_1");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "Subject_1");
+        assert_eq!(records[0].defline, "Subject_1");
+        assert_eq!(records[0].sequence, b"ACGTTGCA");
+    }
+
+    #[test]
+    fn test_parse_fasta_ignores_preamble_before_first_header() {
+        let records = parse_fasta_with_default_id(&b"ACGT\n>q1\nTGCA\n"[..], "Query_1");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "q1");
+        assert_eq!(records[0].sequence, b"TGCA");
     }
 
     /// Lowercase bases should be handled correctly (preserved as-is in raw sequence).

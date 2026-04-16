@@ -368,19 +368,27 @@ fn align_ex(
         // 'sc' now holds next_sc from the last iteration = diagonal for (ai, last_bi+1).
         if sc != MININT && best_score - sc <= x_dropoff && sc > best_score {
             let bi_extra = last_b + 1;
-            if bi_extra < alloc {
-                best_score = sc;
-                a_off = ai;
-                b_off = bi_extra;
-                sa[bi_extra].best = sc;
-                if bi_extra < row_script.len() {
-                    row_script[bi_extra] = SCRIPT_SUB;
-                }
-                if bi_extra >= b_size {
-                    b_size = bi_extra + 1;
-                }
-                last_b = bi_extra;
+            if bi_extra >= sa.len() {
+                sa.resize(
+                    bi_extra + 10,
+                    GapDP {
+                        best: MININT,
+                        best_gap: MININT,
+                    },
+                );
             }
+            if bi_extra >= row_script.len() {
+                row_script.resize(bi_extra + 1, 0);
+            }
+            best_score = sc;
+            a_off = ai;
+            b_off = bi_extra;
+            sa[bi_extra].best = sc;
+            row_script[bi_extra] = SCRIPT_SUB;
+            if bi_extra >= b_size {
+                b_size = bi_extra + 1;
+            }
+            last_b = bi_extra;
         }
 
         scripts.push(row_script);
@@ -865,6 +873,25 @@ mod tests {
             "edit script should have operations, got {:?}",
             r.edit_script.ops
         );
+    }
+
+    #[test]
+    fn test_blast_gapped_align_exact_match_extends_to_edges() {
+        let q = b"GAATCCATGCTGTGGGCCAGCAAGAGTTAAGGTGCTCATGGTTTTGAGAAAACATCTGAGGACTCTGACAGCACTCTCCCATCCTTGGTCTCCACAGTCT"
+            .iter()
+            .map(|b| match b {
+                b'A' => 0,
+                b'C' => 1,
+                b'G' => 2,
+                b'T' => 3,
+                _ => 15,
+            })
+            .collect::<Vec<u8>>();
+        let r = blast_gapped_align(&q, &q, 50, 50, 1, -3, 5, 2, 20)
+            .expect("exact match should align");
+        assert_eq!(r.score, 100);
+        assert_eq!((r.query_start, r.query_end), (0, 100));
+        assert_eq!((r.subject_start, r.subject_end), (0, 100));
     }
 
     #[test]

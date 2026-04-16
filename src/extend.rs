@@ -83,10 +83,12 @@ pub fn na_ungapped_extend_len(
     let s_len_bases = subject_len as i32;
 
     let mut score = 0i32;
-    let mut best_score = 0i32;
+    let mut sum = 0i32;
     let mut best_len_right = 0i32;
     let mut qi = q_offset;
     let mut si = s_offset;
+    let x_dropoff_neg = -x_dropoff;
+    let mut x_current = x_dropoff_neg;
 
     while qi < q_len && si < s_len_bases {
         let q_base = query[qi as usize];
@@ -94,13 +96,14 @@ pub fn na_ungapped_extend_len(
         let s_byte = subject[(si / 4) as usize];
         let s_base = (s_byte >> (6 - 2 * (si % 4))) & 3;
 
-        score += if q_base == s_base { reward } else { penalty };
+        sum += if q_base == s_base { reward } else { penalty };
 
-        if score > best_score {
-            best_score = score;
+        if sum > 0 {
+            score += sum;
             best_len_right = qi - q_offset + 1;
-        }
-        if best_score - score > x_dropoff {
+            x_current = (-score).max(x_dropoff_neg);
+            sum = 0;
+        } else if sum < x_current {
             break;
         }
         qi += 1;
@@ -109,7 +112,7 @@ pub fn na_ungapped_extend_len(
 
     // Extend left from the seed
     let mut score_left = 0i32;
-    let mut best_score_left = 0i32;
+    let mut sum_left = 0i32;
     let mut best_len_left = 0i32;
     qi = q_offset - 1;
     si = s_offset - 1;
@@ -119,20 +122,20 @@ pub fn na_ungapped_extend_len(
         let s_byte = subject[(si / 4) as usize];
         let s_base = (s_byte >> (6 - 2 * (si % 4))) & 3;
 
-        score_left += if q_base == s_base { reward } else { penalty };
+        sum_left += if q_base == s_base { reward } else { penalty };
 
-        if score_left > best_score_left {
-            best_score_left = score_left;
+        if sum_left > 0 {
+            score_left += sum_left;
             best_len_left = q_offset - qi;
-        }
-        if best_score_left - score_left > x_dropoff {
+            sum_left = 0;
+        } else if sum_left < x_dropoff_neg {
             break;
         }
         qi -= 1;
         si -= 1;
     }
 
-    let total_score = best_score + best_score_left;
+    let total_score = score + score_left;
     if total_score <= 0 {
         return None;
     }
@@ -202,6 +205,21 @@ mod tests {
         assert_eq!(data.score, 8);
         // The alignment length should be 4 (only the matching region).
         assert_eq!(data.length, 4);
+    }
+
+    #[test]
+    fn test_ungapped_extend_right_stops_when_total_score_goes_negative() {
+        // NCBI's exact nucleotide extender uses a dynamic right-side x-drop:
+        // after a +2 first base, a -3 mismatch makes the running total negative
+        // and terminates the right extension even when x_dropoff is much larger.
+        let query = vec![0u8, 0, 0, 0];
+        let subject = pack_ncbi2na(&[0, 1, 0, 0]);
+
+        let result = na_ungapped_extend_len(&query, &subject, 4, 0, 0, 2, -3, 20);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.score, 2);
+        assert_eq!(data.length, 1);
     }
 
     #[test]
