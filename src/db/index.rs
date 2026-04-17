@@ -50,12 +50,16 @@ pub struct BlastDb {
     pub title: String,
     pub date: String,
     pub num_oids: u32,
+    pub stats_num_oids: u64,
     pub total_length: u64,
     pub max_seq_len: u32,
     pub version: u32,
 
     volumes: Vec<BlastDbVolume>,
     volume_starts: Vec<u32>,
+    volume_active_indices: Vec<usize>,
+    volume_active_starts: Vec<u32>,
+    volume_active_counts: Vec<u32>,
     /// Optional global OID-to-taxid lookup (from alias-level .not/.pot files).
     tax_lookup: Option<TaxIdLookup>,
     /// Offset added to public OIDs before indexing `tax_lookup`.
@@ -85,6 +89,39 @@ struct BlastDbVolume {
     hdr_mmap: Mmap,
     /// OID-to-taxid lookup (from .not/.pot files, or legacy test .nto/.pto files).
     tax_lookup: Option<TaxIdLookup>,
+}
+
+#[derive(Clone, Copy)]
+struct BlastDbOidRun {
+    physical_start: u32,
+    logical_start: u64,
+    count: u32,
+}
+
+struct BlastDbVolumeSlice {
+    volume: BlastDbVolume,
+    oid_runs: Vec<BlastDbOidRun>,
+}
+
+impl BlastDbVolumeSlice {
+    fn full(volume: BlastDbVolume) -> Self {
+        let num_oids = volume.num_oids;
+        Self {
+            volume,
+            oid_runs: vec![BlastDbOidRun {
+                physical_start: 0,
+                logical_start: 0,
+                count: num_oids,
+            }],
+        }
+    }
+
+    fn is_full_volume(&self) -> bool {
+        self.oid_runs.len() == 1
+            && self.oid_runs[0].physical_start == 0
+            && self.oid_runs[0].logical_start == 0
+            && self.oid_runs[0].count == self.volume.num_oids
+    }
 }
 
 /// OID-to-taxid lookup table.
@@ -159,6 +196,20 @@ impl BlastDbVolume {
         } else {
             let end = self.seq_offsets[local_oid as usize + 1] as usize;
             (end - start) as u32
+        }
+    }
+
+    fn get_ambiguity_data(&self, local_oid: u32) -> Option<&[u8]> {
+        if self.db_type != DbType::Nucleotide {
+            return None;
+        }
+        let amb_offsets = self.amb_offsets.as_ref()?;
+        let start = amb_offsets[local_oid as usize] as usize;
+        let end = self.seq_offsets[local_oid as usize + 1] as usize;
+        if start == end {
+            None
+        } else {
+            Some(&self.seq_mmap[start..end])
         }
     }
 }
@@ -461,6 +512,148 @@ fn alias_base_and_volume_start_for_member(
     Ok(None)
 }
 
+struct AliasOpenData {
+    slices: Vec<BlastDbVolumeSlice>,
+    stats_num_oids: u64,
+    stats_total_length: u64,
+    logical_span: u64,
+}
+
+fn offset_slice_logical_oids(slice: &mut BlastDbVolumeSlice, offset: u64) {
+    if offset == 0 {
+        return;
+    }
+    for run in &mut slice.oid_runs {
+        run.logical_start = run.logical_start.saturating_add(offset);
+    }
+}
+
+fn alias_has_filters(alias: &crate::db::alias::AliasFile) -> bool {
+    alias.first_oid.is_some() || alias.last_oid.is_some() || alias.oidlist.is_some()
+}
+
+fn volume_slices_stats(slices: &[BlastDbVolumeSlice]) -> (u64, u64) {
+    let mut count = 0u64;
+    let mut total_length = 0u64;
+    for slice in slices {
+        for run in &slice.oid_runs {
+            count += run.count as u64;
+            for local_oid in run.physical_start..run.physical_start + run.count {
+                total_length =
+                    total_length.saturating_add(slice.volume.get_seq_len(local_oid) as u64);
+            }
+        }
+    }
+    (count, total_length)
+}
+
+fn parse_oid_bitmap(path: &Path) -> io::Result<Vec<bool>> {
+    let data = std::fs::read(path)?;
+    if data.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "OIDLIST file is too small",
+        ));
+    }
+    let bit_count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let needed = 4 + bit_count.div_ceil(8);
+    if data.len() < needed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "OIDLIST file is truncated",
+        ));
+    }
+
+    let mut bits = Vec::with_capacity(bit_count);
+    for oid in 0..bit_count {
+        let byte = data[4 + oid / 8];
+        let mask = 0x80 >> (oid % 8);
+        bits.push((byte & mask) != 0);
+    }
+    Ok(bits)
+}
+
+fn apply_alias_filters(
+    mut slices: Vec<BlastDbVolumeSlice>,
+    alias: &crate::db::alias::AliasFile,
+) -> io::Result<Vec<BlastDbVolumeSlice>> {
+    if alias.first_oid.is_none() && alias.last_oid.is_none() && alias.oidlist.is_none() {
+        return Ok(slices);
+    }
+
+    let total_oids: u64 = slices
+        .iter()
+        .flat_map(|slice| slice.oid_runs.iter())
+        .map(|run| run.logical_start + run.count as u64)
+        .max()
+        .unwrap_or(0);
+    let first_one_based = alias.first_oid.unwrap_or(1);
+    let last_one_based = alias
+        .last_oid
+        .unwrap_or_else(|| total_oids.min(u32::MAX as u64) as u32);
+    let wanted_start = first_one_based.saturating_sub(1) as u64;
+    let wanted_end = if first_one_based == 0 || last_one_based < first_one_based {
+        0
+    } else {
+        (last_one_based as u64).min(total_oids)
+    };
+    let oid_bitmap = match &alias.oidlist {
+        Some(path) => Some(parse_oid_bitmap(path)?),
+        None => None,
+    };
+
+    let mut filtered = Vec::new();
+    for mut slice in slices.drain(..) {
+        let mut runs = Vec::new();
+        for run in &slice.oid_runs {
+            let mut active_start: Option<u32> = None;
+            let mut active_logical_start = 0u64;
+            let mut active_count = 0u32;
+            for offset in 0..run.count {
+                let logical_oid = run.logical_start + offset as u64;
+                let keep_range = logical_oid >= wanted_start && logical_oid < wanted_end;
+                let keep_bitmap = oid_bitmap
+                    .as_ref()
+                    .map(|bits| bits.get(logical_oid as usize).copied().unwrap_or(false))
+                    .unwrap_or(true);
+                if keep_range && keep_bitmap {
+                    if active_start.is_none() {
+                        active_start = Some(run.physical_start + offset);
+                        active_logical_start = logical_oid;
+                    }
+                    active_count += 1;
+                } else if let Some(start) = active_start.take() {
+                    runs.push(BlastDbOidRun {
+                        physical_start: start,
+                        logical_start: active_logical_start,
+                        count: active_count,
+                    });
+                    active_count = 0;
+                }
+            }
+            if let Some(start) = active_start.take() {
+                runs.push(BlastDbOidRun {
+                    physical_start: start,
+                    logical_start: active_logical_start,
+                    count: active_count,
+                });
+            }
+        }
+        if !runs.is_empty() {
+            slice.oid_runs = runs;
+            filtered.push(slice);
+        }
+    }
+
+    if filtered.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Alias filters select no database sequences",
+        ));
+    }
+    Ok(filtered)
+}
+
 /// Taxonomy name information for a single taxid.
 #[derive(Debug, Clone, Default)]
 pub struct TaxInfo {
@@ -553,13 +746,10 @@ impl TaxNameDb {
 impl BlastDb {
     /// Global OID ranges for each physical volume in database order.
     pub fn volume_oid_ranges(&self) -> Vec<(u32, u32)> {
-        self.volumes
+        self.volume_starts
             .iter()
-            .enumerate()
-            .map(|(idx, vol)| {
-                let start = self.volume_starts[idx];
-                (start, start + vol.num_oids)
-            })
+            .zip(self.volume_active_counts.iter())
+            .map(|(&start, &count)| (start, start + count))
             .collect()
     }
 
@@ -569,18 +759,30 @@ impl BlastDb {
     /// active volume and need to avoid resolving every global OID in the hot
     /// loop.
     pub fn get_volume_sequence_and_len(&self, volume_idx: usize, local_oid: u32) -> (&[u8], u32) {
-        let vol = &self.volumes[volume_idx];
-        (vol.get_sequence(local_oid), vol.get_seq_len(local_oid))
+        assert!(local_oid < self.volume_active_counts[volume_idx]);
+        let vol = &self.volumes[self.volume_active_indices[volume_idx]];
+        let physical_oid = self.volume_active_starts[volume_idx] + local_oid;
+        (
+            vol.get_sequence(physical_oid),
+            vol.get_seq_len(physical_oid),
+        )
+    }
+
+    /// Get ambiguity data by physical volume and local OID.
+    pub fn get_volume_ambiguity_data(&self, volume_idx: usize, local_oid: u32) -> Option<&[u8]> {
+        assert!(local_oid < self.volume_active_counts[volume_idx]);
+        let physical_oid = self.volume_active_starts[volume_idx] + local_oid;
+        self.volumes[self.volume_active_indices[volume_idx]].get_ambiguity_data(physical_oid)
     }
 
     /// Hint that a volume is about to be scanned sequentially.
     pub fn advise_volume_sequential(&self, volume_idx: usize) {
-        let _ = self.volumes[volume_idx].advise(Advice::Sequential);
+        let _ = self.volumes[self.volume_active_indices[volume_idx]].advise(Advice::Sequential);
     }
 
     /// Hint that pages for a scanned volume can be dropped from resident memory.
     pub fn advise_volume_dontneed(&self, volume_idx: usize) {
-        let _ = self.volumes[volume_idx].advise_dontneed();
+        let _ = self.volumes[self.volume_active_indices[volume_idx]].advise_dontneed();
     }
 
     /// Open a BLAST database from the given base path (without extension).
@@ -611,36 +813,12 @@ impl BlastDb {
     }
 
     fn open_alias(base_path: &Path, alias: crate::db::alias::AliasFile) -> io::Result<Self> {
-        if alias.dblist.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "Empty alias file"));
-        }
+        let mut alias_stack = vec![base_path.to_path_buf()];
+        let data = Self::open_alias_volumes(base_path, &alias, &mut alias_stack)?;
 
-        let mut volumes = Vec::with_capacity(alias.dblist.len());
-        for (idx, vol_path) in alias.dblist.iter().enumerate() {
-            match Self::open_volume_auto(vol_path) {
-                Ok(volume) => volumes.push(volume),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    let volume_name = alias
-                        .raw_dblist
-                        .get(idx)
-                        .map(String::as_str)
-                        .unwrap_or_else(|| vol_path.to_str().unwrap_or_default());
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "Could not find volume or alias file ({}) referenced in alias file ({}).",
-                            volume_name,
-                            base_path.display()
-                        ),
-                    ));
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        let db_type = volumes[0].db_type;
-        for vol in &volumes {
-            if vol.db_type != db_type {
+        let db_type = data.slices[0].volume.db_type;
+        for vol in &data.slices {
+            if vol.volume.db_type != db_type {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Alias file references mixed nucleotide/protein volumes",
@@ -648,13 +826,118 @@ impl BlastDb {
             }
         }
 
-        Self::from_volumes(base_path, alias.title, volumes)
+        Self::from_volumes(
+            base_path,
+            alias.title,
+            Some(data.stats_num_oids),
+            Some(data.stats_total_length),
+            data.slices,
+        )
+    }
+
+    fn open_alias_volumes(
+        alias_base_path: &Path,
+        alias: &crate::db::alias::AliasFile,
+        alias_stack: &mut Vec<PathBuf>,
+    ) -> io::Result<AliasOpenData> {
+        if alias.dblist.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "Empty alias file"));
+        }
+
+        let mut volumes = Vec::new();
+        let mut child_stats_num_oids = 0u64;
+        let mut child_stats_total_length = 0u64;
+        let mut child_logical_span = 0u64;
+        for (idx, vol_path) in alias.dblist.iter().enumerate() {
+            match Self::open_volume_auto(vol_path) {
+                Ok(volume) => {
+                    child_stats_num_oids += volume.num_oids as u64;
+                    child_stats_total_length =
+                        child_stats_total_length.saturating_add(volume.total_length);
+                    let volume_oids = volume.num_oids as u64;
+                    let mut slice = BlastDbVolumeSlice::full(volume);
+                    offset_slice_logical_oids(&mut slice, child_logical_span);
+                    child_logical_span = child_logical_span.saturating_add(volume_oids);
+                    volumes.push(slice);
+                    continue;
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+
+            if let Some(nested_alias_path) = crate::db::alias::alias_path(vol_path) {
+                if alias_stack.iter().any(|seen| seen == vol_path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Alias file cycle involving {}", vol_path.display()),
+                    ));
+                }
+                let nested_alias = crate::db::alias::parse_alias_file(&nested_alias_path)?;
+                alias_stack.push(vol_path.clone());
+                let nested_data = Self::open_alias_volumes(vol_path, &nested_alias, alias_stack)?;
+                alias_stack.pop();
+                child_stats_num_oids =
+                    child_stats_num_oids.saturating_add(nested_data.stats_num_oids);
+                child_stats_total_length =
+                    child_stats_total_length.saturating_add(nested_data.stats_total_length);
+                let nested_span = nested_data.logical_span;
+                for mut slice in nested_data.slices {
+                    offset_slice_logical_oids(&mut slice, child_logical_span);
+                    volumes.push(slice);
+                }
+                child_logical_span = child_logical_span.saturating_add(nested_span);
+                continue;
+            }
+
+            let volume_name = alias
+                .raw_dblist
+                .get(idx)
+                .map(String::as_str)
+                .unwrap_or_else(|| vol_path.to_str().unwrap_or_default());
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Could not find volume or alias file ({}) referenced in alias file ({}).",
+                    volume_name,
+                    alias_base_path.display()
+                ),
+            ));
+        }
+
+        let had_filters = alias_has_filters(alias);
+        let volumes = apply_alias_filters(volumes, alias)?;
+        let (computed_num_oids, computed_total_length) = if had_filters {
+            volume_slices_stats(&volumes)
+        } else {
+            (child_stats_num_oids, child_stats_total_length)
+        };
+        let logical_span = volumes
+            .iter()
+            .flat_map(|slice| slice.oid_runs.iter())
+            .map(|run| run.logical_start + run.count as u64)
+            .max()
+            .unwrap_or(0);
+        Ok(AliasOpenData {
+            slices: volumes,
+            stats_num_oids: alias.stats_nseq.or(alias.nseq).unwrap_or(computed_num_oids),
+            stats_total_length: alias
+                .stats_total_length
+                .or(alias.length)
+                .unwrap_or(computed_total_length),
+            logical_span,
+        })
     }
 
     /// Open a BLAST database of known type.
     pub fn open_typed(base_path: &Path, db_type: DbType) -> io::Result<Self> {
         let volume = Self::open_volume_typed(base_path, db_type)?;
-        Self::from_volumes(base_path, None, vec![volume])
+        Self::from_volumes(
+            base_path,
+            None,
+            None,
+            None,
+            vec![BlastDbVolumeSlice::full(volume)],
+        )
     }
 
     fn open_volume_auto(base_path: &Path) -> io::Result<BlastDbVolume> {
@@ -809,37 +1092,72 @@ impl BlastDb {
     fn from_volumes(
         base_path: &Path,
         alias_title: Option<String>,
-        volumes: Vec<BlastDbVolume>,
+        alias_nseq: Option<u64>,
+        alias_length: Option<u64>,
+        volume_slices: Vec<BlastDbVolumeSlice>,
     ) -> io::Result<Self> {
-        if volumes.is_empty() {
+        if volume_slices.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "No database volumes",
             ));
         }
 
-        let db_type = volumes[0].db_type;
-        let version = volumes
+        let db_type = volume_slices[0].volume.db_type;
+        let version = volume_slices
             .iter()
-            .map(|v| v.version)
+            .map(|v| v.volume.version)
             .max()
-            .unwrap_or(volumes[0].version);
-        let title = alias_title.unwrap_or_else(|| volumes[0].title.clone());
-        let date = volumes[0].date.clone();
-        let max_seq_len = volumes.iter().map(|v| v.max_seq_len).max().unwrap_or(0);
-        let total_length = volumes.iter().map(|v| v.total_length).sum();
+            .unwrap_or(volume_slices[0].volume.version);
+        let title = alias_title.unwrap_or_else(|| volume_slices[0].volume.title.clone());
+        let date = volume_slices[0].volume.date.clone();
+        let mut max_seq_len = 0u32;
+        let mut total_length = 0u64;
+        for slice in &volume_slices {
+            if slice.is_full_volume() {
+                max_seq_len = max_seq_len.max(slice.volume.max_seq_len);
+                total_length = total_length.saturating_add(slice.volume.total_length);
+            } else {
+                for run in &slice.oid_runs {
+                    for local_oid in run.physical_start..run.physical_start + run.count {
+                        let len = slice.volume.get_seq_len(local_oid);
+                        max_seq_len = max_seq_len.max(len);
+                        total_length = total_length.saturating_add(len as u64);
+                    }
+                }
+            }
+        }
+
+        let load_single_volume_tax_lookup =
+            volume_slices.len() == 1 && volume_slices[0].is_full_volume();
+        if let Some(length) = alias_length {
+            total_length = length;
+        }
 
         let mut num_oids_u64 = 0u64;
-        let mut volume_starts = Vec::with_capacity(volumes.len());
-        for vol in &volumes {
-            volume_starts.push(u32::try_from(num_oids_u64).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Database has more than u32::MAX OIDs",
-                )
-            })?);
-            num_oids_u64 += vol.num_oids as u64;
+        let active_run_count: usize = volume_slices.iter().map(|slice| slice.oid_runs.len()).sum();
+        let mut volume_starts = Vec::with_capacity(active_run_count);
+        let mut volume_active_indices = Vec::with_capacity(active_run_count);
+        let mut volume_active_starts = Vec::with_capacity(active_run_count);
+        let mut volume_active_counts = Vec::with_capacity(active_run_count);
+        let mut volumes = Vec::with_capacity(volume_slices.len());
+        for slice in volume_slices {
+            let volume_idx = volumes.len();
+            for run in &slice.oid_runs {
+                volume_starts.push(u32::try_from(num_oids_u64).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Database has more than u32::MAX OIDs",
+                    )
+                })?);
+                volume_active_indices.push(volume_idx);
+                volume_active_starts.push(run.physical_start);
+                volume_active_counts.push(run.count);
+                num_oids_u64 += run.count as u64;
+            }
+            volumes.push(slice.volume);
         }
+        let stats_num_oids = alias_nseq.unwrap_or(num_oids_u64);
         let num_oids = u32::try_from(num_oids_u64).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -851,7 +1169,7 @@ impl BlastDb {
         // Large alias databases such as core_nt have a global .not that can be
         // over a GB; loading it eagerly makes opening the DB expensive even
         // when taxonomy fields are not requested.
-        let tax_lookup = if volumes.len() == 1 {
+        let tax_lookup = if load_single_volume_tax_lookup {
             let oid_path = db_path_with_ext(
                 base_path,
                 if db_type == DbType::Nucleotide {
@@ -882,11 +1200,15 @@ impl BlastDb {
             title,
             date,
             num_oids,
+            stats_num_oids,
             total_length,
             max_seq_len,
             version,
             volumes,
             volume_starts,
+            volume_active_indices,
+            volume_active_starts,
+            volume_active_counts,
             tax_lookup,
             tax_lookup_oid_offset: 0,
         })
@@ -904,8 +1226,8 @@ impl BlastDb {
             Err(0) => 0,
             Err(i) => i - 1,
         };
-        let local_oid = oid - self.volume_starts[idx];
-        (&self.volumes[idx], local_oid)
+        let local_oid = self.volume_active_starts[idx] + (oid - self.volume_starts[idx]);
+        (&self.volumes[self.volume_active_indices[idx]], local_oid)
     }
 
     /// Get the raw sequence bytes for the given OID.
@@ -1039,16 +1361,13 @@ impl BlastDb {
     /// Ambiguity data is stored between amb_offset and the next sequence's start.
     pub fn get_ambiguity_data(&self, oid: u32) -> Option<&[u8]> {
         let (vol, local_oid) = self.resolve_oid(oid);
-        let amb_offsets = vol.amb_offsets.as_ref()?;
-        let start = amb_offsets[local_oid as usize] as usize;
-        // Ambiguity data ends at the next sequence's start offset
-        let end = vol.seq_offsets[local_oid as usize + 1] as usize;
-        if start == end {
-            None
-        } else {
-            Some(&vol.seq_mmap[start..end])
-        }
+        vol.get_ambiguity_data(local_oid)
     }
+}
+
+fn extract_following_small_integer(bytes: &[u8]) -> Option<u32> {
+    let pos = bytes.windows(2).position(|window| window == [0x02, 0x01])?;
+    bytes.get(pos + 2).copied().map(u32::from)
 }
 
 fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
@@ -1068,7 +1387,14 @@ fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
                     .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'|'))
                 && first_local.is_none()
             {
-                first_local = Some(String::from_utf8_lossy(&hdr[start..end]).to_string());
+                let local = String::from_utf8_lossy(&hdr[start..end]).to_string();
+                first_local = if local == "BL_ORD_ID" {
+                    extract_following_small_integer(&hdr[end..])
+                        .map(|ord| format!("gnl|BL_ORD_ID|{ord}"))
+                        .or(Some(local))
+                } else {
+                    Some(local)
+                };
             }
         }
 
@@ -1263,6 +1589,18 @@ mod tests {
         let db = BlastDb::open(&test_db_path()).unwrap();
         // Reference BLAST reports slen=386 for OID 0
         assert_eq!(db.get_seq_len(0), 386);
+    }
+
+    #[test]
+    fn test_accession_preserves_blast_ord_id_general_id() {
+        let hdr = [
+            0x1a, 0x09, b'B', b'L', b'_', b'O', b'R', b'D', b'_', b'I', b'D', 0x00, 0x00, 0xa1,
+            0x80, 0xa0, 0x80, 0x02, 0x01, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("gnl|BL_ORD_ID|0")
+        );
     }
 
     #[test]

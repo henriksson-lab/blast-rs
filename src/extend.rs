@@ -96,7 +96,7 @@ pub fn na_ungapped_extend_len(
         let s_byte = subject[(si / 4) as usize];
         let s_base = (s_byte >> (6 - 2 * (si % 4))) & 3;
 
-        sum += if q_base == s_base { reward } else { penalty };
+        sum += blastna_score(q_base, s_base, reward, penalty);
 
         if sum > 0 {
             score += sum;
@@ -122,7 +122,7 @@ pub fn na_ungapped_extend_len(
         let s_byte = subject[(si / 4) as usize];
         let s_base = (s_byte >> (6 - 2 * (si % 4))) & 3;
 
-        sum_left += if q_base == s_base { reward } else { penalty };
+        sum_left += blastna_score(q_base, s_base, reward, penalty);
 
         if sum_left > 0 {
             score_left += sum_left;
@@ -146,6 +146,23 @@ pub fn na_ungapped_extend_len(
         length: best_len_left + best_len_right,
         score: total_score,
     })
+}
+
+#[inline(always)]
+fn blastna_score(a: u8, b: u8, reward: i32, penalty: i32) -> i32 {
+    const MASKS: [u8; 16] = [1, 2, 4, 8, 5, 10, 3, 12, 9, 6, 14, 13, 11, 7, 15, 0];
+    const DEGEN: [i32; 16] = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 0];
+
+    let a = a as usize;
+    let b = b as usize;
+    if a >= 15 || b >= 15 {
+        return i32::MIN / 2;
+    }
+    if MASKS[a] & MASKS[b] == 0 {
+        return penalty;
+    }
+    let degen = DEGEN[a.max(b)];
+    (((degen - 1) * penalty + reward) as f64 / degen as f64).round() as i32
 }
 
 #[cfg(test)]
@@ -220,6 +237,18 @@ mod tests {
         let data = result.unwrap();
         assert_eq!(data.score, 2);
         assert_eq!(data.length, 1);
+    }
+
+    #[test]
+    fn test_ungapped_extend_uses_blastna_ambiguity_score() {
+        let query = vec![0u8, 0, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0];
+        let subject = pack_ncbi2na(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let result = na_ungapped_extend_len(&query, &subject, 12, 0, 0, 1, -5, 20);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.score, 7);
+        assert_eq!(data.length, 12);
     }
 
     #[test]

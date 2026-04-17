@@ -12,6 +12,13 @@ pub struct AliasFile {
     pub raw_dblist: Vec<String>,
     pub nseq: Option<u64>,
     pub length: Option<u64>,
+    pub stats_nseq: Option<u64>,
+    pub stats_total_length: Option<u64>,
+    /// One-based inclusive OID range used by BLAST alias files.
+    pub first_oid: Option<u32>,
+    pub last_oid: Option<u32>,
+    pub oidlist: Option<PathBuf>,
+    pub raw_oidlist: Option<String>,
 }
 
 /// Parse a .nal or .pal alias file.
@@ -26,6 +33,12 @@ pub fn parse_alias_file(path: &Path) -> io::Result<AliasFile> {
         raw_dblist: Vec::new(),
         nseq: None,
         length: None,
+        stats_nseq: None,
+        stats_total_length: None,
+        first_oid: None,
+        last_oid: None,
+        oidlist: None,
+        raw_oidlist: None,
     };
 
     for line in reader.lines() {
@@ -44,6 +57,20 @@ pub fn parse_alias_file(path: &Path) -> io::Result<AliasFile> {
             alias.nseq = rest.trim().parse().ok();
         } else if let Some(rest) = line.strip_prefix("LENGTH ") {
             alias.length = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("STATS_NSEQ ") {
+            alias.stats_nseq = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("STATS_TOTLEN ") {
+            alias.stats_total_length = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("FIRST_OID ") {
+            alias.first_oid = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("LAST_OID ") {
+            alias.last_oid = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("OIDLIST ") {
+            let oidlist = rest.trim();
+            if !oidlist.is_empty() {
+                alias.raw_oidlist = Some(oidlist.to_string());
+                alias.oidlist = Some(dir.join(oidlist));
+            }
         }
     }
 
@@ -84,6 +111,11 @@ mod tests {
         writeln!(f, "DBLIST vol1 vol2 vol3").unwrap();
         writeln!(f, "NSEQ 10000").unwrap();
         writeln!(f, "LENGTH 5000000").unwrap();
+        writeln!(f, "STATS_NSEQ 9000").unwrap();
+        writeln!(f, "STATS_TOTLEN 4500000").unwrap();
+        writeln!(f, "FIRST_OID 2").unwrap();
+        writeln!(f, "LAST_OID 4").unwrap();
+        writeln!(f, "OIDLIST masks.msk").unwrap();
         drop(f);
 
         let alias = parse_alias_file(&alias_file).unwrap();
@@ -92,6 +124,12 @@ mod tests {
         assert_eq!(alias.raw_dblist, vec!["vol1", "vol2", "vol3"]);
         assert_eq!(alias.nseq, Some(10000));
         assert_eq!(alias.length, Some(5000000));
+        assert_eq!(alias.stats_nseq, Some(9000));
+        assert_eq!(alias.stats_total_length, Some(4500000));
+        assert_eq!(alias.first_oid, Some(2));
+        assert_eq!(alias.last_oid, Some(4));
+        assert_eq!(alias.raw_oidlist.as_deref(), Some("masks.msk"));
+        assert_eq!(alias.oidlist, Some(dir.join("masks.msk")));
 
         std::fs::remove_dir_all(&dir).ok();
     }

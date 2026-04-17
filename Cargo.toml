@@ -12,6 +12,7 @@ categories = ["science", "command-line-utilities"]
 include = [
     "src/**/*",
     "tests/**/*",
+    "benches/**/*",
     "!tests/fixtures/large_db/**",
     "Cargo.toml",
     "Cargo.lock",
@@ -33,11 +34,17 @@ clap = { version = "4", features = ["derive"] }
 memmap2 = "0.9"
 noodles-fasta = "0.47"
 rayon = "1"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 
 [profile.release]
 lto = true
 codegen-units = 1
 opt-level = 3
+
+
+[[bench]]
+name = "gapped_dp"
+harness = false
 
 [dev-dependencies]
 tempfile = "3.27.0"

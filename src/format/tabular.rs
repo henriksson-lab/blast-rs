@@ -16,6 +16,15 @@ fn expand_column_token<'a>(token: &'a str, columns: &mut Vec<&'a str>) {
     }
 }
 
+fn normalize_column_tokens(cols: &mut Vec<&str>) {
+    cols.retain(|col| field_display_name(col) != "unknown field");
+    let mut seen = std::collections::HashSet::new();
+    cols.retain(|col| seen.insert(*col));
+    if cols.is_empty() {
+        cols.extend(DEFAULT_TABULAR_COLUMNS.split_whitespace());
+    }
+}
+
 pub fn expanded_column_tokens(columns: &str) -> Vec<&str> {
     let mut cols = Vec::new();
     for col in columns.split_whitespace() {
@@ -23,6 +32,7 @@ pub fn expanded_column_tokens(columns: &str) -> Vec<&str> {
             expand_column_token(col, &mut cols);
         }
     }
+    normalize_column_tokens(&mut cols);
     cols
 }
 
@@ -429,6 +439,7 @@ pub fn format_tabular_custom_with_delimiter<W: Write>(
             expand_column_token(col, &mut cols);
         }
     }
+    normalize_column_tokens(&mut cols);
     let qcovs_by_subject = if cols.iter().any(|&c| c == "qcovs" || c == "qcovus") {
         compute_qcovs_by_query_subject(hits)
     } else {

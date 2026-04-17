@@ -25,22 +25,26 @@ pub fn parse_fasta_with_default_id<R: Read>(mut reader: R, default_id: &str) -> 
         return Vec::new();
     }
 
-    let mut records = parse_noodles_fasta_records(&input);
+    let fasta_input = strip_fasta_comment_lines(&input);
+    let mut records = parse_noodles_fasta_records(&fasta_input);
     if records.is_empty() {
-        if let Some(offset) = first_embedded_header_offset(&input) {
-            records = parse_noodles_fasta_records(&input[offset..]);
+        if let Some(offset) = first_embedded_header_offset(&fasta_input) {
+            records = parse_noodles_fasta_records(&fasta_input[offset..]);
+            if records.is_empty() {
+                records = parse_lenient_fasta_records(&fasta_input[offset..], default_id);
+            }
         }
     }
 
     if records.is_empty() {
         let mut sequence = Vec::new();
-        for line in input.split(|&b| b == b'\n' || b == b'\r') {
+        for line in fasta_input.split(|&b| b == b'\n' || b == b'\r') {
             let line = line
                 .iter()
                 .copied()
                 .skip_while(|b| b.is_ascii_whitespace())
                 .collect::<Vec<u8>>();
-            if line.first() == Some(&b';') {
+            if matches!(line.first(), Some(b';' | b'#' | b'>')) {
                 continue;
             }
             sequence.extend(line.into_iter().filter(|b| !b.is_ascii_whitespace()));
@@ -55,6 +59,24 @@ pub fn parse_fasta_with_default_id<R: Read>(mut reader: R, default_id: &str) -> 
     }
 
     records
+}
+
+fn strip_fasta_comment_lines(input: &[u8]) -> Vec<u8> {
+    let mut stripped = Vec::with_capacity(input.len());
+    for line in input.split(|&b| b == b'\n' || b == b'\r') {
+        let is_comment = matches!(
+            line.iter()
+                .copied()
+                .skip_while(|b| b.is_ascii_whitespace())
+                .next(),
+            Some(b';' | b'#')
+        );
+        if !is_comment {
+            stripped.extend_from_slice(line);
+            stripped.push(b'\n');
+        }
+    }
+    stripped
 }
 
 fn parse_noodles_fasta_records(input: &[u8]) -> Vec<FastaRecord> {
@@ -74,7 +96,13 @@ fn parse_noodles_fasta_records(input: &[u8]) -> Vec<FastaRecord> {
         } else {
             name.clone()
         };
-        let sequence = record.sequence().as_ref().to_vec();
+        let sequence = record
+            .sequence()
+            .as_ref()
+            .iter()
+            .copied()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
 
         records.push(FastaRecord {
             id: name,
@@ -84,6 +112,66 @@ fn parse_noodles_fasta_records(input: &[u8]) -> Vec<FastaRecord> {
     }
 
     records
+}
+
+fn parse_lenient_fasta_records(input: &[u8], default_id: &str) -> Vec<FastaRecord> {
+    let mut records = Vec::new();
+    let mut current_id: Option<String> = None;
+    let mut current_defline = String::new();
+    let mut current_sequence = Vec::new();
+
+    for line in input.split(|&b| b == b'\n' || b == b'\r') {
+        let trimmed = trim_ascii(line);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.first() == Some(&b'>') {
+            if let Some(id) = current_id.take() {
+                records.push(FastaRecord {
+                    id,
+                    defline: current_defline,
+                    sequence: std::mem::take(&mut current_sequence),
+                });
+            }
+
+            let defline_bytes = trim_ascii(&trimmed[1..]);
+            let defline_text = std::str::from_utf8(defline_bytes).unwrap_or("").to_string();
+            let id = defline_text
+                .split_whitespace()
+                .next()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(default_id)
+                .to_string();
+            current_defline = if defline_text.is_empty() {
+                default_id.to_string()
+            } else {
+                defline_text
+            };
+            current_id = Some(id);
+        } else if current_id.is_some() {
+            current_sequence.extend(trimmed.iter().copied().filter(|b| !b.is_ascii_whitespace()));
+        }
+    }
+
+    if let Some(id) = current_id {
+        records.push(FastaRecord {
+            id,
+            defline: current_defline,
+            sequence: current_sequence,
+        });
+    }
+
+    records
+}
+
+fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 fn first_embedded_header_offset(input: &[u8]) -> Option<usize> {
@@ -174,7 +262,54 @@ mod tests {
         assert_eq!(records2.len(), 0);
     }
 
+    #[test]
+    fn test_parse_fasta_skips_comment_lines_inside_record() {
+        let input = b">seq1\nACGT\n; internal comment\nTGCA\n# hash comment\nNNNN\n";
+        let records = parse_fasta(&input[..]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sequence, b"ACGTTGCANNNN");
+    }
+
     /// Sequences split across multiple lines should be concatenated.
+    #[test]
+    fn test_parse_fasta_ignores_whitespace_inside_sequence_lines() {
+        let records = parse_fasta(
+            &b">seq1
+ACGT ACGT
+ACGT	ACGT ACGT
+"[..],
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sequence, b"ACGTACGTACGTACGTACGT");
+    }
+
+    #[test]
+    fn test_parse_fasta_empty_defline_uses_default_id() {
+        let records = parse_fasta_with_default_id(
+            &b">
+ACGT
+"[..],
+            "Query_1",
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "Query_1");
+        assert_eq!(records[0].defline, "Query_1");
+        assert_eq!(records[0].sequence, b"ACGT");
+    }
+
+    #[test]
+    fn test_parse_fasta_raw_fallback_skips_indented_pseudo_header() {
+        let records = parse_fasta_with_default_id(
+            &b"  >q1
+ACGTACGT
+"[..],
+            "Query_1",
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "Query_1");
+        assert_eq!(records[0].sequence, b"ACGTACGT");
+    }
+
     #[test]
     fn test_parse_fasta_wrapped_lines() {
         let input = b">wrapped\nACGT\nTGCA\nAAAA\nCCCC\n";

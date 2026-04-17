@@ -887,8 +887,8 @@ mod tests {
                 _ => 15,
             })
             .collect::<Vec<u8>>();
-        let r = blast_gapped_align(&q, &q, 50, 50, 1, -3, 5, 2, 20)
-            .expect("exact match should align");
+        let r =
+            blast_gapped_align(&q, &q, 50, 50, 1, -3, 5, 2, 20).expect("exact match should align");
         assert_eq!(r.score, 100);
         assert_eq!((r.query_start, r.query_end), (0, 100));
         assert_eq!((r.subject_start, r.subject_end), (0, 100));

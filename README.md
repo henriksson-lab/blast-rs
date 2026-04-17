@@ -60,7 +60,7 @@ But:
 - **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `sstrand`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, BTOP, commented tabular, CSV, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
-- **581 passing release tests**: 360 library unit tests + 13 CLI unit tests + 203 integration tests + 4 stress tests + doc tests, plus ignored parity tests
+- **672 passing release tests**: 367 library unit tests + 13 CLI unit tests + 287 integration tests + 4 stress tests + doc tests, plus ignored parity tests
 
 ## Installation
 
@@ -332,7 +332,11 @@ GTCTCCTCTGACTTCAACAGCG
 | Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | standalone `core_nt.12` and `core_nt.28` | matched in release ignored regression | matched in release ignored regression | byte-identical |
 | Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | full `core_nt` alias | 1217.89 s | 455.80 s | byte-identical |
 
-On the first large real database volume, blast-rs is now roughly at parity to slightly faster than NCBI BLAST+ for the tested plain primer scan while producing byte-for-byte identical tabular output. This plain `outfmt 6` case is the better comparison for raw search-path speed.
+Post-ambiguity-overlay check on 2026-04-16, using the same 23 bp primer and `core_nt.00` plain `outfmt 6` command above with the existing release binary, produced byte-identical output: NCBI BLAST+ 14.33 s wall / 25.86 s user / 2.84 s sys / 2.98 GB max RSS; blast-rs 6.15 s wall / 36.53 s user / 1.80 s sys / 3.86 GB max RSS. This check was intended to catch regressions from BLAST DB ambiguity handling and should not replace the native-CPU benchmark table above.
+
+Post-DB-ordering check on 2026-04-16, using the taxonomy benchmark command above on `core_nt.00` with `BLASTDB=/husky/henriksson/for_claude/blast/core_nt`, produced byte-identical output after restoring DB tie ordering: NCBI BLAST+ 5.82 s wall / 44.59 s user / 0.43 s sys / 2.98 GB max RSS; blast-rs 7.81 s wall / 40.86 s user / 1.22 s sys / 3.61 GB max RSS. This was a warm-cache bounded check with the existing release binary, not the native-CPU benchmark table.
+
+On the first large real database volume, blast-rs is now roughly at parity to faster than NCBI BLAST+ for the tested plain primer scan while producing byte-for-byte identical tabular output. This plain `outfmt 6` case is the better comparison for raw search-path speed.
 
 The much larger taxonomy-output speedup should not be interpreted as Rust being intrinsically several times faster at BLAST alignment. That command also measures database metadata and taxonomy lookup behavior. For taxonomy-heavy output, blast-rs uses mmap-backed `.not/.pot` OID-to-taxid lookup, loads it only when taxonomy fields are requested, and touches only the OID index entries and taxid/name records needed by the returned hits. In the measured full `core_nt` alias run, NCBI BLAST+ used about 182 GB RSS versus about 4.4 GB for blast-rs, so the 455.80 s vs 1217.89 s gap is likely dominated by taxonomy/metadata working-set behavior rather than by the alignment scanner alone.
 
