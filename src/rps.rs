@@ -59,7 +59,7 @@ pub fn rps_blast_search(
                         score,
                         evalue,
                         bit_score: (kbp_lambda * score as f64 - kbp_k.ln())
-                            / std::f64::consts::LN_2,
+                            / crate::math::NCBIMATH_LN2,
                         num_ident: ident,
                         align_length: pssm.length as i32,
                     });
@@ -68,11 +68,8 @@ pub fn rps_blast_search(
         }
     }
 
-    hits.sort_by(|a, b| {
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Sort by evalue with NCBI `s_EvalueComp` denormal-region equivalence.
+    hits.sort_by(|a, b| crate::hspstream::evalue_comp(a.evalue, b.evalue));
     hits
 }
 

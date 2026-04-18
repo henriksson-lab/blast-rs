@@ -1,13 +1,23 @@
 //! Verbatim port of NCBI compo_mode_condition.c.
 //! Decides which matrix adjustment rule to use based on composition.
 
-const COMPO_NUM_TRUE_AA: usize = 20;
+// NCBI tables (BLOSUM62_BG) are declared with >16 significant digits.
+// Keep them byte-identical to the C source; f64 rounds the same as C.
+#![allow(clippy::excessive_precision)]
+
+use crate::composition::COMPO_NUM_TRUE_AA;
 const HIGH_PAIR_THRESHOLD: f64 = 0.4;
 const LENGTH_LOWER_THRESHOLD: usize = 50;
 const QUERY_MATCH_DISTANCE_THRESHOLD: f64 = 0.16;
 const LENGTH_RATIO_THRESHOLD: f64 = 3.0;
 const ANGLE_DEGREE_THRESHOLD: f64 = 70.0;
-const PI: f64 = std::f64::consts::PI;
+/// NCBI `HALF_CIRCLE_DEGREES` (`compo_mode_condition.c:39`).
+const HALF_CIRCLE_DEGREES: f64 = 180.0;
+/// NCBI locally re-defines PI in `compo_mode_condition.c:41` as a
+/// truncated 10-digit literal (`3.1415926543`). This differs from the
+/// canonical `NCBIMATH_PI` by ~2e-10; retained verbatim so the angle
+/// comparison at `ANGLE_DEGREE_THRESHOLD` matches NCBI bit-for-bit.
+const PI: f64 = 3.1415926543;
 
 /// Port of NCBI EMatrixAdjustRule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,9 +109,13 @@ fn test_re_adjustment_conditional(
     p_match: &[f64; COMPO_NUM_TRUE_AA],
     p_matrix: &[f64; COMPO_NUM_TRUE_AA],
 ) -> MatrixAdjustRule {
-    let mut corr_factor = 0.0f64;
+    // NCBI computes corr_factor for diagnostic/debug purposes here;
+    // retained as dead code for port-completeness (see
+    // `compo_mode_condition.c:testReAdjustmentConditional`).
+    #[allow(unused_assignments)]
+    let mut _corr_factor = 0.0f64;
     for i in 0..COMPO_NUM_TRUE_AA {
-        corr_factor += (p_query[i] - p_matrix[i]) * (p_match[i] - p_matrix[i]);
+        _corr_factor += (p_query[i] - p_matrix[i]) * (p_match[i] - p_matrix[i]);
     }
 
     let d_m_mat = relative_entropy(p_match, p_matrix);
@@ -112,7 +126,7 @@ fn test_re_adjustment_conditional(
         / (2.0 * d_m_mat * d_q_mat))
         .acos();
     // Convert radians to degrees
-    angle = angle * 180.0 / PI;
+    angle = angle * HALF_CIRCLE_DEGREES / PI;
 
     let len_q = len_query as f64;
     let len_m = len_match as f64;

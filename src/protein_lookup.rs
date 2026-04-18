@@ -27,13 +27,24 @@ pub struct ProteinHit {
     pub sseq: Option<String>,
 }
 
+/// Port of NCBI `ScoreCompareHSPs` (`blast_hits.c:1330`) for `ProteinHit`.
+/// Same tie-breaker as `hspstream::score_compare_hsps` / `search::score_compare_search_hsps`
+/// but over `ProteinHit`'s `usize` offset fields.
+fn score_compare_protein_hits(a: &ProteinHit, b: &ProteinHit) -> std::cmp::Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| a.subject_start.cmp(&b.subject_start))
+        .then_with(|| b.subject_end.cmp(&a.subject_end))
+        .then_with(|| a.query_start.cmp(&b.query_start))
+        .then_with(|| b.query_end.cmp(&a.query_end))
+}
+
 /// Protein word lookup table.
 ///
 /// Uses a CSR (compressed sparse row) layout for cache-friendly access:
 /// `data[offsets[hash]..offsets[hash+1]]` holds query offsets whose
 /// neighborhood contains the word that hashes to `hash`.
 /// `pv` is a presence-vector bit array for fast rejection.
-#[allow(dead_code)]
 /// Maximum hits stored inline per backbone cell (matches NCBI AA_HITS_PER_CELL).
 const HITS_PER_CELL: usize = 3;
 
@@ -123,7 +134,7 @@ impl ProteinLookupTable {
         }
 
         // Build presence vector.
-        let pv_len = (table_size + 63) / 64;
+        let pv_len = table_size.div_ceil(64);
         let mut pv = vec![0u64; pv_len];
         for (idx, entries) in backbone.iter().enumerate() {
             if !entries.is_empty() {
@@ -220,6 +231,7 @@ fn enumerate_neighbors(
 const CHARSIZE: usize = 5;
 /// Mask for the hash: (1 << (word_size * CHARSIZE)) - 1.
 /// For word_size=3: mask = (1 << 15) - 1 = 32767.
+#[allow(dead_code)]
 const HASH_MASK_W3: usize = (1 << (3 * CHARSIZE)) - 1;
 
 /// Hash a word using NCBI-style shift+or (matching ComputeTableIndex).
@@ -235,6 +247,7 @@ fn word_hash(word: &[u8], _alphabet_size: usize) -> usize {
 
 /// Incremental hash update (NCBI ComputeTableIndexIncremental).
 #[inline]
+#[allow(dead_code)]
 fn word_hash_incremental(prev_hash: usize, new_char: u8, mask: usize) -> usize {
     ((prev_hash << CHARSIZE) | new_char as usize) & mask
 }
@@ -264,7 +277,7 @@ pub fn merge_pv(tables: &[&ProteinLookupTable]) -> Vec<u64> {
 /// Only on a hit, individual query tables are checked. This reduces the
 /// inner loop from O(positions × queries) to O(positions + hits × queries).
 ///
-/// Returns a Vec of (query_index, Vec<ProteinHit>) for queries that had hits.
+/// Returns a `Vec` of `(query_index, Vec<ProteinHit>)` for queries that had hits.
 pub fn batch_scan_subject(
     queries: &[&[u8]],
     tables: &[&ProteinLookupTable],
@@ -369,7 +382,7 @@ pub fn batch_scan_subject(
         .enumerate()
         .filter(|(_, hits)| !hits.is_empty())
         .map(|(qi, mut hits)| {
-            hits.sort_by(|a, b| b.score.cmp(&a.score));
+            hits.sort_by(score_compare_protein_hits);
             (qi, hits)
         })
         .collect()
@@ -671,7 +684,7 @@ pub fn protein_scan_with_table_reuse(
     }
 
     if hits.len() > 1 {
-        hits.sort_unstable_by(|a, b| b.score.cmp(&a.score));
+        hits.sort_unstable_by(score_compare_protein_hits);
     }
     hits
 }
@@ -780,7 +793,7 @@ pub fn protein_gapped_scan_with_table(
         return ungapped;
     }
 
-    gapped_hits.sort_by(|a, b| b.score.cmp(&a.score));
+    gapped_hits.sort_by(score_compare_protein_hits);
     gapped_hits
 }
 
@@ -950,7 +963,7 @@ mod tests {
         let subject1 = query.clone();
         let subject2 = vec![2u8, 3, 4, 5, 6, 7]; // completely different
         let hits1 = protein_scan_with_table(&query, &subject1, &m, &table, 40);
-        let hits2 = protein_scan_with_table(&query, &subject2, &m, &table, 40);
+        let _hits2 = protein_scan_with_table(&query, &subject2, &m, &table, 40);
         assert!(
             !hits1.is_empty(),
             "Should find hits for identical sequences"

@@ -15,14 +15,14 @@ pub enum GapAlignOpType {
 }
 
 /// A gap edit script representing a gapped alignment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GapEditScript {
     pub ops: Vec<(GapAlignOpType, i32)>, // (operation, count) pairs
 }
 
 impl GapEditScript {
     pub fn new() -> Self {
-        GapEditScript { ops: Vec::new() }
+        Self::default()
     }
 
     pub fn with_capacity(size: usize) -> Self {

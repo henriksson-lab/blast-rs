@@ -1,8 +1,23 @@
 //! Rust equivalent of blast_encoding.c
 //! These tables will replace the C versions when the FFI layer is removed.
 
+/// NCBI `BLAST2NA_SIZE` (`blast_encoding.h:91`): compressed 2-bit
+/// nucleotide alphabet — 4 symbols (A, C, G, T).
+pub const BLAST2NA_SIZE: usize = 4;
+/// NCBI `BLASTNA_SIZE` (`blast_encoding.h:92`): full 16-symbol nucleotide
+/// alphabet (A, C, G, T, ambiguity codes, gap).
 pub const BLASTNA_SIZE: usize = 16;
+/// NCBI `BLASTAA_SIZE` (`blast_encoding.h:93`): 28-symbol amino-acid
+/// alphabet (NCBIstdaa).
 pub const BLASTAA_SIZE: usize = 28;
+
+/// NCBI `BLASTNA_SEQ_CODE` (`blast_encoding.h:96`): sequence-code
+/// identifier for BLASTNA (BLAST extension, not a registered ASN.1 code).
+pub const BLASTNA_SEQ_CODE: i32 = 99;
+/// NCBI `BLASTAA_SEQ_CODE` (`blast_encoding.h:98`): NCBIstdaa = ASN.1 code 11.
+pub const BLASTAA_SEQ_CODE: i32 = 11;
+/// NCBI `NCBI4NA_SEQ_CODE` (`blast_encoding.h:99`): NCBI4na = ASN.1 code 4.
+pub const NCBI4NA_SEQ_CODE: i32 = 4;
 
 pub static NCBI4NA_TO_BLASTNA: [u8; BLASTNA_SIZE] =
     [15, 0, 1, 6, 2, 4, 9, 13, 3, 8, 5, 12, 7, 11, 10, 14];
@@ -82,7 +97,7 @@ mod tests {
     #[test]
     fn test_blastna_to_iupacna_roundtrip() {
         // For each standard base: IUPAC -> BLASTNA -> IUPAC should be identity
-        for &ch in &[b'A', b'C', b'G', b'T'] {
+        for &ch in b"ACGT" {
             let blastna = IUPACNA_TO_BLASTNA[ch as usize];
             let back = BLASTNA_TO_IUPACNA[blastna as usize] as u8;
             assert_eq!(back, ch, "Roundtrip failed for {}", ch as char);

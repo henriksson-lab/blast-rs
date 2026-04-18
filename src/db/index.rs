@@ -225,6 +225,7 @@ impl TaxIdLookup {
     /// **V5 format** (BLAST+ v5 databases):
     ///   Flat per-OID records: for each OID: u32_LE count, then count × i32_LE taxids.
     ///   No header — the file is just a concatenation of per-OID records.
+    #[allow(dead_code)]
     fn from_file(path: &Path) -> io::Result<Self> {
         Self::from_file_with_hint(path, None)
     }
@@ -802,6 +803,12 @@ impl BlastDb {
                 "pal"
             };
             let alias = crate::db::alias::parse_alias_file(&base_path.with_extension(alias_ext))?;
+            // Surface any unsupported-filter fields (MEMB_BIT, GILIST, TILIST,
+            // SILIST, TAXIDLIST) to stderr so the user knows they are parsed
+            // but not applied. Silent on common/well-supported alias fields.
+            for w in alias.unsupported_filter_warnings() {
+                eprintln!("{}", w);
+            }
             return Self::open_alias(base_path, alias);
         } else {
             return Err(io::Error::new(
@@ -1787,9 +1794,8 @@ mod tests {
     fn test_empty_database() {
         let result = BlastDb::open(&corrupt_db_path("empty"));
         // Empty DB should either open with 0 sequences or fail gracefully
-        match result {
-            Ok(db) => assert_eq!(db.num_oids, 0),
-            Err(_) => {} // Also acceptable
+        if let Ok(db) = result {
+            assert_eq!(db.num_oids, 0);
         }
     }
 

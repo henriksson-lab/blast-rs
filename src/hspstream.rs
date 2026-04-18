@@ -43,8 +43,21 @@ impl HspList {
     }
 
     pub fn sort_by_score(&mut self) {
-        self.hsps.sort_by(|a, b| b.score.cmp(&a.score));
+        self.hsps.sort_by(score_compare_hsps);
     }
+}
+
+/// Port of NCBI `ScoreCompareHSPs` (`blast_hits.c:1330`). Total ordering
+/// used by `Blast_HSPListSortByScore`: primary key is score descending,
+/// with tie-breakers on `(subject_offset asc, subject_end desc,
+/// query_offset asc, query_end desc)`.
+pub fn score_compare_hsps(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| a.subject_offset.cmp(&b.subject_offset))
+        .then_with(|| b.subject_end.cmp(&a.subject_end))
+        .then_with(|| a.query_offset.cmp(&b.query_offset))
+        .then_with(|| b.query_end.cmp(&a.query_end))
 }
 
 /// Results for one query: a collection of HspLists from different subjects.
@@ -65,12 +78,47 @@ impl HitList {
     }
 
     pub fn sort_by_evalue(&mut self) {
-        self.hsp_lists.sort_by(|a, b| {
-            a.best_evalue
-                .partial_cmp(&b.best_evalue)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        self.hsp_lists.sort_by(evalue_compare_hsp_lists);
     }
+}
+
+/// Port of NCBI `s_EvalueComp` (`blast_hits.c:1390`). Two e-values that
+/// are both below `1.0e-180` compare equal; otherwise ordinary ordering.
+pub fn evalue_comp(evalue1: f64, evalue2: f64) -> std::cmp::Ordering {
+    const EPSILON: f64 = 1.0e-180;
+    if evalue1 < EPSILON && evalue2 < EPSILON {
+        return std::cmp::Ordering::Equal;
+    }
+    evalue1
+        .partial_cmp(&evalue2)
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Port of NCBI `s_EvalueCompareHSPLists` (`blast_hits.c:3078`). Sort
+/// order for HSP lists: primary key is best_evalue (via `evalue_comp`),
+/// then top-HSP score descending, then `oid` descending. Empty lists
+/// sort to the end.
+pub fn evalue_compare_hsp_lists(a: &HspList, b: &HspList) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match (a.hsps.is_empty(), b.hsps.is_empty()) {
+        (true, true) => return Equal,
+        (true, false) => return Greater,
+        (false, true) => return Less,
+        (false, false) => {}
+    }
+    let by_evalue = evalue_comp(a.best_evalue, b.best_evalue);
+    if by_evalue != Equal {
+        return by_evalue;
+    }
+    // NCBI `blast_hits.c:3099-3102`: top HSP score, descending.
+    let top_a = a.hsps[0].score;
+    let top_b = b.hsps[0].score;
+    let by_score = top_b.cmp(&top_a);
+    if by_score != Equal {
+        return by_score;
+    }
+    // NCBI `blast_hits.c:3106`: `BLAST_CMP(h2->oid, h1->oid)` — oid descending.
+    b.oid.cmp(&a.oid)
 }
 
 /// Complete search results for all queries.

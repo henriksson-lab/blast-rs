@@ -2,7 +2,7 @@
 //! Finds optimal target frequencies for compositionally adjusted score matrices.
 //!
 //! The optimal target frequencies x minimize the Kullback-Liebler "distance"
-//! sum_k x[k] * ln(x[k]/q[k]) subject to marginal sum constraints and
+//! `sum_k x[k] * ln(x[k]/q[k])` subject to marginal sum constraints and
 //! optionally a relative entropy constraint.
 
 use crate::nlm_linear_algebra::{
@@ -85,6 +85,9 @@ fn residuals_linear_constraints(
     row_sums: &[f64],
     col_sums: &[f64],
 ) {
+    // NCBI `optimize_target_freq.c:218-226` uses explicit index loops
+    // here; keep line-for-line parity rather than `copy_from_slice`.
+    #[allow(clippy::manual_memcpy)]
     for i in 0..alphsize {
         r_a[i] = col_sums[i];
     }
@@ -378,6 +381,9 @@ pub fn optimize_target_frequencies(
             relative_entropy,
         );
 
+        // NCBI `optimize_target_freq.c:527` uses `!(rnorm > tol)` rather
+        // than `rnorm <= tol` so NaN breaks the loop (NaN > tol is false).
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(rnorm > tol) {
             break;
         } else {
@@ -395,15 +401,9 @@ pub fn optimize_target_frequencies(
         }
     }
 
-    let converged = if its <= maxits && rnorm <= tol {
-        if !constrain_rel_entropy || z[m - 1] < 1.0 {
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    let converged = its <= maxits
+        && rnorm <= tol
+        && (!constrain_rel_entropy || z[m - 1] < 1.0);
 
     let status = if converged { 0 } else { 1 };
     (status, its)

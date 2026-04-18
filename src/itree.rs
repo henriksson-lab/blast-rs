@@ -51,6 +51,13 @@ impl IntervalTree {
 
     /// Check if a new HSP is contained within any existing interval.
     /// Returns true if the new interval should be rejected (contained).
+    ///
+    /// Simpler than NCBI `s_HSPIsContained` (`blast_itree.c:810`): the
+    /// NCBI version also requires matching query index, subject-frame
+    /// sign, and the new HSP's score to be ≤ the containing HSP's. Rust
+    /// callers pre-sort by score and feed per-strand, per-query
+    /// batches, so this function only performs the 2D coord check and
+    /// the optional min-diag separation rule.
     pub fn is_contained(&self, query: Interval, subject: Interval) -> bool {
         self.is_contained_with_min_diag_separation(query, subject, 0)
     }

@@ -1,8 +1,10 @@
 //! Rust equivalent of blast_lookup.c, blast_nalookup.c, lookup_wrap.c
 //! Lookup table structures for BLAST word finding.
 
-/// Lookup table types.
+/// Lookup table types. Variant names mirror NCBI `ELookupTableType`
+/// (`lookup_wrap.h`) so they can be line-diffed against the C enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum LookupTableType {
     MegablastLookup,
     SmallNaLookup,
@@ -201,7 +203,7 @@ mod tests {
     #[test]
     fn test_pv_array_bit_operations() {
         // Simulate PV array: set bit for index 100, check it
-        let mut pv = vec![0u32; 8]; // 256 bits
+        let mut pv = [0u32; 8]; // 256 bits
         let idx = 100usize;
         let word = idx / 32;
         let bit = idx % 32;

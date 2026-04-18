@@ -5,8 +5,7 @@
 //! matching NCBI BLAST+ behavior.
 
 use crate::matrix::AA_SIZE;
-
-const MININT: i32 = i32::MIN / 2;
+use crate::stat::MININT;
 
 pub struct GapDP {
     pub best: i32,
@@ -86,6 +85,10 @@ pub fn semi_gapped_align(
         let mut score_gap_row = MININT; // best score with gap in A (horizontal)
         let mut last_b_index = first_b_index;
 
+        // Mutating `first_b_index` advances the DP band for the NEXT outer
+        // iteration; the current iterator was snapshotted at loop entry
+        // (NCBI `blast_gapalign.c:1062-1077` Blast_SemiGappedAlign).
+        #[allow(clippy::mut_range_bound)]
         for b_index in first_b_index..b_size {
             let b_letter = if reverse {
                 match n.checked_sub(1 + b_index) {

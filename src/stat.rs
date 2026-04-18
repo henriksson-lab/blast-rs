@@ -2,12 +2,28 @@
 //! This is the mathematical core for computing E-values and bit scores.
 
 /// Karlin-Altschul statistical parameters for one context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct KarlinBlk {
     pub lambda: f64, // Lambda parameter
     pub k: f64,      // K parameter
     pub log_k: f64,  // ln(K)
     pub h: f64,      // H (relative entropy)
+    /// NCBI `BlastScoreBlk::round_down` (`blast_stat.c:1868`). When
+    /// `true`, odd scores are rounded down to even before e-value and
+    /// bit-score computation. Set by `nucl_gapped_kbp_lookup` for
+    /// scoring systems whose table values are only valid at even
+    /// scores (e.g. `(2,-3)`, `(2,-5)`, `(2,-7)`, `(3,-4)`).
+    pub round_down: bool,
+}
+
+/// Apply NCBI's `score &= ~1` even-rounding when `round_down` is set.
+#[inline]
+fn round_down_score(score: i32, round_down: bool) -> i32 {
+    if round_down {
+        score & !1
+    } else {
+        score
+    }
 }
 
 impl KarlinBlk {
@@ -16,24 +32,617 @@ impl KarlinBlk {
     }
 
     /// Convert a raw score to a bit score.
+    /// Port of NCBI `Blast_HSPListGetBitScores` (`blast_hits.c:1927`):
+    /// `(score * Lambda - logK) / NCBIMATH_LN2`. Note that unlike the
+    /// E-value path, the bit-score formula does NOT apply `round_down`
+    /// even-masking — `Blast_HSPListGetEvalues` (`blast_hits.c:1864-1869`)
+    /// applies `score &= ~1`, but `Blast_HSPListGetBitScores` (`:1907`)
+    /// only has a commented-out `#if 0` assertion for it.
     pub fn raw_to_bit(&self, raw_score: i32) -> f64 {
-        (self.lambda * raw_score as f64 - self.log_k) / std::f64::consts::LN_2
+        (self.lambda * raw_score as f64 - self.log_k) / crate::math::NCBIMATH_LN2
     }
 
     /// Convert a raw score and search space to an E-value.
+    /// Port of NCBI `BLAST_KarlinStoE_simple` (`blast_stat.c:4157`):
+    /// returns `-1.0` when the Karlin block is degenerate, otherwise
+    /// `searchsp * exp(-lambda * S + logK)` (NCBI `:4170` uses `logK`
+    /// inside the exponent for numerical stability at large magnitudes).
+    /// Applies `round_down` before the formula (`blast_hits.c:1864-1869`).
     pub fn raw_to_evalue(&self, raw_score: i32, search_space: f64) -> f64 {
-        search_space * self.k * (-self.lambda * raw_score as f64).exp()
+        if self.lambda < 0.0 || self.k < 0.0 || self.h < 0.0 {
+            return -1.0;
+        }
+        let score = round_down_score(raw_score, self.round_down);
+        search_space * (-self.lambda * score as f64 + self.log_k).exp()
     }
 
     /// Convert an E-value to the minimum raw score needed.
+    /// Port of NCBI `BlastKarlinEtoS_simple` (`blast_stat.c:4040`): the
+    /// e-value is clamped to `K_SMALL_FLOAT` before conversion to avoid
+    /// floating-point exceptions on extremely tight cutoffs. Returns
+    /// `BLAST_SCORE_MIN` when lambda/K/H are invalid (NCBI `:4054-4057`).
     pub fn evalue_to_raw(&self, evalue: f64, search_space: f64) -> i32 {
-        let denom = search_space * self.k;
-        if denom <= 0.0 || self.lambda <= 0.0 || evalue <= 0.0 {
-            return 1;
+        // NCBI checks `Lambda < 0. || K < 0. || H < 0.0`. We don't carry
+        // `h` here at the call site, but zero/negative lambda or K are
+        // definitive invalid markers; match NCBI's return value.
+        if self.lambda < 0.0 || self.k < 0.0 || self.h < 0.0 {
+            return BLAST_SCORE_MIN;
         }
+        let denom = search_space * self.k;
+        if denom <= 0.0 || self.lambda <= 0.0 {
+            return BLAST_SCORE_MIN;
+        }
+        let evalue = evalue.max(K_SMALL_FLOAT);
         let score = -(evalue / denom).ln() / self.lambda;
         score.ceil() as i32
     }
+}
+
+/// `BLAST_GAP_PROB` (`blast_parameters.h:66`): gap probability for
+/// ungapped sum-statistics (0.5).
+pub const BLAST_GAP_PROB: f64 = 0.5;
+/// `BLAST_GAP_PROB_GAPPED` (`blast_parameters.h:67`): gap probability
+/// for gapped sum-statistics (1.0).
+pub const BLAST_GAP_PROB_GAPPED: f64 = 1.0;
+/// Port of NCBI `BLAST_GAP_DECAY_RATE` (`blast_parameters.h:68`):
+/// default gap decay rate for ungapped search.
+pub const BLAST_GAP_DECAY_RATE: f64 = 0.5;
+/// Port of NCBI `BLAST_GAP_DECAY_RATE_GAPPED` (`blast_parameters.h:69`):
+/// default gap decay rate for gapped search.
+pub const BLAST_GAP_DECAY_RATE_GAPPED: f64 = 0.1;
+/// `BLAST_GAP_SIZE` (`blast_parameters.h:70`): default gap size (nt
+/// distance) used by HSP linking.
+pub const BLAST_GAP_SIZE: i32 = 40;
+/// `BLAST_OVERLAP_SIZE` (`blast_parameters.h:71`): default overlap
+/// allowed between linked HSPs.
+pub const BLAST_OVERLAP_SIZE: i32 = 9;
+/// `RESTRICTED_ALIGNMENT_WORST_EVALUE` (`blast_parameters.h:193`):
+/// composition-adjusted restricted alignment cutoff.
+pub const RESTRICTED_ALIGNMENT_WORST_EVALUE: f64 = 10.0;
+
+/// Port of NCBI `CUTOFF_E_BLASTN` (`blast_parameters.h:76`): default
+/// e-value used by the preliminary ungapped cutoff for nucleotide
+/// searches.
+pub const CUTOFF_E_BLASTN: f64 = 0.05;
+/// Port of NCBI `CUTOFF_E_BLASTP` (`blast_parameters.h:77`).
+pub const CUTOFF_E_BLASTP: f64 = 1.0e-300;
+/// Port of NCBI `CUTOFF_E_BLASTX` (`blast_parameters.h:78`).
+pub const CUTOFF_E_BLASTX: f64 = 1.0;
+/// Port of NCBI `CUTOFF_E_TBLASTN` (`blast_parameters.h:79`).
+pub const CUTOFF_E_TBLASTN: f64 = 1.0;
+/// Port of NCBI `CUTOFF_E_TBLASTX` (`blast_parameters.h:80`).
+pub const CUTOFF_E_TBLASTX: f64 = 1.0e-300;
+
+// X-dropoff defaults (in bits). NCBI `blast_options.h:122-148`.
+/// `BLAST_UNGAPPED_X_DROPOFF_PROT` — ungapped dropoff for protein.
+pub const BLAST_UNGAPPED_X_DROPOFF_PROT: i32 = 7;
+/// `BLAST_UNGAPPED_X_DROPOFF_NUCL` — ungapped dropoff for nucleotide.
+pub const BLAST_UNGAPPED_X_DROPOFF_NUCL: i32 = 20;
+/// `BLAST_GAP_X_DROPOFF_PROT` — default preliminary-gapped dropoff for protein.
+pub const BLAST_GAP_X_DROPOFF_PROT: i32 = 15;
+/// `BLAST_GAP_X_DROPOFF_NUCL` — default preliminary-gapped dropoff for nucleotide.
+pub const BLAST_GAP_X_DROPOFF_NUCL: i32 = 30;
+/// `BLAST_GAP_X_DROPOFF_GREEDY` — default dropoff for greedy megablast.
+pub const BLAST_GAP_X_DROPOFF_GREEDY: i32 = 25;
+/// `BLAST_GAP_X_DROPOFF_FINAL_PROT` — final-gapped dropoff for protein.
+pub const BLAST_GAP_X_DROPOFF_FINAL_PROT: i32 = 25;
+/// `BLAST_GAP_X_DROPOFF_FINAL_NUCL` — final-gapped dropoff for nucleotide.
+pub const BLAST_GAP_X_DROPOFF_FINAL_NUCL: i32 = 100;
+/// `BLAST_GAP_TRIGGER_PROT` — protein gap-trigger bit threshold (`blast_options.h:137`).
+pub const BLAST_GAP_TRIGGER_PROT: f64 = 22.0;
+/// `BLAST_GAP_TRIGGER_NUCL` — nucleotide gap-trigger bit threshold (`blast_options.h:140`).
+pub const BLAST_GAP_TRIGGER_NUCL: f64 = 27.0;
+
+// Default word sizes (NCBI `blast_options.h:66-73`).
+/// `BLAST_WORDSIZE_PROT` — default word size for protein searches (3).
+pub const BLAST_WORDSIZE_PROT: i32 = 3;
+/// `BLAST_WORDSIZE_NUCL` — default word size for blastn (11).
+pub const BLAST_WORDSIZE_NUCL: i32 = 11;
+/// `BLAST_WORDSIZE_MEGABLAST` — default word size for contiguous megablast (28).
+pub const BLAST_WORDSIZE_MEGABLAST: i32 = 28;
+/// `BLAST_WORDSIZE_MAPPER` — default word size for the magicblast mapper (18).
+pub const BLAST_WORDSIZE_MAPPER: i32 = 18;
+
+// Default gap costs (NCBI `blast_options.h:84-98`).
+/// `BLAST_GAP_OPEN_PROT` — protein gap-open (11).
+pub const BLAST_GAP_OPEN_PROT: i32 = 11;
+/// `BLAST_GAP_OPEN_NUCL` — blastn gap-open (5).
+pub const BLAST_GAP_OPEN_NUCL: i32 = 5;
+/// `BLAST_GAP_OPEN_MEGABLAST` — megablast gap-open (0).
+pub const BLAST_GAP_OPEN_MEGABLAST: i32 = 0;
+/// `BLAST_GAP_EXTN_PROT` — protein gap-extend (1).
+pub const BLAST_GAP_EXTN_PROT: i32 = 1;
+/// `BLAST_GAP_EXTN_NUCL` — blastn gap-extend (2).
+pub const BLAST_GAP_EXTN_NUCL: i32 = 2;
+/// `BLAST_GAP_EXTN_MEGABLAST` — megablast gap-extend (0).
+pub const BLAST_GAP_EXTN_MEGABLAST: i32 = 0;
+
+// Default match/mismatch scores (NCBI `blast_options.h:151-152`).
+/// `BLAST_PENALTY` — default nucleotide mismatch score (-3).
+pub const BLAST_PENALTY: i32 = -3;
+/// `BLAST_REWARD` — default nucleotide match score (1).
+pub const BLAST_REWARD: i32 = 1;
+
+// Default neighboring-word thresholds (NCBI `blast_options.h:104-116`).
+/// `BLAST_WORD_THRESHOLD_BLASTP` (11).
+pub const BLAST_WORD_THRESHOLD_BLASTP: f64 = 11.0;
+/// `BLAST_WORD_THRESHOLD_BLASTP_FAST` — word-size 5 threshold for blastp/x-fast (20).
+pub const BLAST_WORD_THRESHOLD_BLASTP_FAST: f64 = 20.0;
+/// `BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_6` (21).
+pub const BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_6: f64 = 21.0;
+/// `BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_7` (20.25).
+pub const BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_7: f64 = 20.25;
+/// `BLAST_WORD_THRESHOLD_BLASTN` (0 = no threshold).
+pub const BLAST_WORD_THRESHOLD_BLASTN: f64 = 0.0;
+/// `BLAST_WORD_THRESHOLD_BLASTX` (12).
+pub const BLAST_WORD_THRESHOLD_BLASTX: f64 = 12.0;
+/// `BLAST_WORD_THRESHOLD_TBLASTN` (13).
+pub const BLAST_WORD_THRESHOLD_TBLASTN: f64 = 13.0;
+/// `BLAST_WORD_THRESHOLD_TBLASTX` (13).
+pub const BLAST_WORD_THRESHOLD_TBLASTX: f64 = 13.0;
+/// `BLAST_WORD_THRESHOLD_MEGABLAST` (0).
+pub const BLAST_WORD_THRESHOLD_MEGABLAST: f64 = 0.0;
+
+/// `BLAST_SCAN_RANGE_NUCL` — default scan range for blastn (0, `blast_options.h:63`).
+pub const BLAST_SCAN_RANGE_NUCL: i32 = 0;
+/// `BLAST_GAP_X_DROPOFF_TBLASTX` (0, `blast_options.h:134`).
+pub const BLAST_GAP_X_DROPOFF_TBLASTX: i32 = 0;
+/// `BLAST_GAP_X_DROPOFF_FINAL_TBLASTX` (0, `blast_options.h:148`).
+pub const BLAST_GAP_X_DROPOFF_FINAL_TBLASTX: i32 = 0;
+
+/// `BLAST_DEFAULT_MATRIX` — default scoring matrix for protein searches
+/// (`blast_options.h:77`).
+pub const BLAST_DEFAULT_MATRIX: &str = "BLOSUM62";
+
+/// `BLAST_PENALTY_MAPPER` (`blast_options.h:154`): mapper nucleotide mismatch.
+pub const BLAST_PENALTY_MAPPER: i32 = -4;
+/// `BLAST_REWARD_MAPPER` (`blast_options.h:155`): mapper nucleotide match.
+pub const BLAST_REWARD_MAPPER: i32 = 1;
+/// `BLAST_GAP_OPEN_MAPPER` (`blast_options.h:89`).
+pub const BLAST_GAP_OPEN_MAPPER: i32 = 0;
+/// `BLAST_GAP_EXTN_MAPPER` (`blast_options.h:98`).
+pub const BLAST_GAP_EXTN_MAPPER: i32 = 4;
+
+/// `PSI_INCLUSION_ETHRESH` (`blast_options.h:163`): PSI-BLAST inclusion
+/// threshold (e-value below which a hit is used for the next iteration).
+pub const PSI_INCLUSION_ETHRESH: f64 = 0.002;
+/// `PSI_PSEUDO_COUNT_CONST` (`blast_options.h:164`): PSI-BLAST
+/// pseudo-count constant (0 disables).
+pub const PSI_PSEUDO_COUNT_CONST: i32 = 0;
+/// `DELTA_INCLUSION_ETHRESH` (`blast_options.h:165`): DELTA-BLAST inclusion.
+pub const DELTA_INCLUSION_ETHRESH: f64 = 0.05;
+
+/// `BLAST_GENETIC_CODE` (`blast_options.h:168`): the standard genetic
+/// code (NCBI table #1).
+pub const BLAST_GENETIC_CODE: i32 = 1;
+/// `MAX_DB_WORD_COUNT_MAPPER` (`blast_options.h:174`): word cap for
+/// the magicblast mapper.
+pub const MAX_DB_WORD_COUNT_MAPPER: i32 = 30;
+
+/// `HSP_MAX_WINDOW` — sliding-window size used by
+/// `BlastGetOffsetsForGappedAlignment` / `BlastGetStartForGappedAlignment`
+/// to pick a high-scoring seed offset near an ungapped HSP
+/// (`blast_gapalign_priv.h:120`).
+pub const HSP_MAX_WINDOW: usize = 11;
+
+/// NCBI `MININT` (`blast_gapalign.c:58`): `INT4_MIN/2`. Used as the
+/// sentinel for impossible DP cells; halving avoids underflow when
+/// small mismatches are added to this value during the recurrence.
+pub const MININT: i32 = i32::MIN / 2;
+
+/// `BLAST_EXPECT_VALUE` — default e-value threshold
+/// (`blast_options.h:158`).
+pub const BLAST_EXPECT_VALUE: f64 = 10.0;
+/// `BLAST_HITLIST_SIZE` — default number of database sequences to save hits
+/// for (`blast_options.h:160`).
+pub const BLAST_HITLIST_SIZE: usize = 500;
+
+// Default two-hit window sizes (NCBI `blast_options.h:57-61`).
+/// `BLAST_WINDOW_SIZE_PROT` — protein two-hit window (40).
+pub const BLAST_WINDOW_SIZE_PROT: i32 = 40;
+/// `BLAST_WINDOW_SIZE_NUCL` — blastn (non-MB) window (0 = disabled).
+pub const BLAST_WINDOW_SIZE_NUCL: i32 = 0;
+/// `BLAST_WINDOW_SIZE_MEGABLAST` — megablast window (0 = disabled).
+pub const BLAST_WINDOW_SIZE_MEGABLAST: i32 = 0;
+/// `BLAST_WINDOW_SIZE_DISC` — discontiguous-megablast window (40).
+pub const BLAST_WINDOW_SIZE_DISC: i32 = 40;
+
+/// Port of NCBI `BLAST_GapDecayDivisor` (`blast_stat.c:4079`).
+/// Computes the divisor used by sum-statistics to compensate for the
+/// effect of choosing the best among multiple alignments:
+/// `(1 - decayrate) * decayrate^(nsegs - 1)`. Typical `decayrate` values
+/// are [`BLAST_GAP_DECAY_RATE_GAPPED`] (0.1) and [`BLAST_GAP_DECAY_RATE`] (0.5).
+pub fn gap_decay_divisor(decayrate: f64, nsegs: u32) -> f64 {
+    // NCBI: `return (1. - decayrate) * BLAST_Powi(decayrate, nsegs - 1);`.
+    (1.0 - decayrate) * crate::math::powi(decayrate, (nsegs as i32) - 1)
+}
+
+/// Port of NCBI `BLAST_Cutoffs` (`blast_stat.c:4089`). Given a desired
+/// e-value `e_in`, a Karlin-Altschul block, a search space size, and an
+/// optional decay-rate adjustment, returns a tuple
+/// `(cutoff_score, effective_evalue)`.
+///
+/// * `dodecay=true, 0 < gap_decay_rate < 1` scales the input e-value by
+///   `BLAST_GapDecayDivisor(gap_decay_rate, 1)` before converting to a
+///   raw score (tightens the cutoff), then divides the recomputed
+///   e-value back out on the return trip.
+/// * The final cutoff is `max(s_floor, EtoS(e))`; callers pass a floor
+///   (typically 1) to match NCBI's behavior where a user-specified
+///   minimum score wins if it's larger than the statistics-derived one.
+///
+/// Returns `(1, e_in)` when the KarlinBlk is uncomputed (lambda/K/H == -1.0),
+/// matching NCBI `BLAST_Cutoffs` (`blast_stat.c:4101-4102`) which uses the
+/// exact -1.0 sentinel — not `< 0.0` — to detect "computation failed".
+/// Note: this differs from `raw_to_evalue` and `evalue_to_raw`, which use
+/// `< 0.0` to match their respective NCBI verbatim checks (NCBI itself is
+/// inconsistent across these three functions; the Rust port preserves
+/// each function's individual NCBI convention).
+pub fn blast_cutoffs(
+    s_floor: i32,
+    e_in: f64,
+    kbp: &KarlinBlk,
+    searchsp: f64,
+    dodecay: bool,
+    gap_decay_rate: f64,
+) -> (i32, f64) {
+    if kbp.lambda == -1.0 || kbp.k == -1.0 || kbp.h == -1.0 {
+        return (1, e_in);
+    }
+    let esave = e_in;
+    let mut s = s_floor;
+    let mut e = e_in;
+    let mut s_changed = false;
+    let mut es = 1i32;
+    if e > 0.0 {
+        if dodecay && gap_decay_rate > 0.0 && gap_decay_rate < 1.0 {
+            e *= gap_decay_divisor(gap_decay_rate, 1);
+        }
+        es = kbp.evalue_to_raw(e, searchsp);
+    }
+    if es > s {
+        s_changed = true;
+        s = es;
+    }
+    // Recompute the e-value from the final cutoff when the input e was
+    // non-positive or the cutoff didn't change. Mirrors NCBI's
+    // `blast_stat.c:4134-4146`.
+    let e_out = if esave <= 0.0 || !s_changed {
+        let mut recomputed = kbp.raw_to_evalue(s, searchsp);
+        if dodecay && gap_decay_rate > 0.0 && gap_decay_rate < 1.0 {
+            recomputed /= gap_decay_divisor(gap_decay_rate, 1);
+        }
+        recomputed
+    } else {
+        esave
+    };
+    (s, e_out)
+}
+
+// NCBI s_BlastSumP interpolation tables (blast_stat.c:4359-4379).
+// Retained verbatim so any drift is easy to spot against the C source.
+
+#[rustfmt::skip]
+const SUM_P_TAB2: [f64; 19] = [
+    0.01669,  0.0249,   0.03683,  0.05390,  0.07794,  0.1111,   0.1559,   0.2146,
+    0.2890,   0.3794,   0.4836,   0.5965,   0.7092,   0.8114,   0.8931,   0.9490,
+    0.9806,   0.9944,   0.9989,
+];
+
+#[rustfmt::skip]
+const SUM_P_TAB3: [f64; 38] = [
+    0.9806,   0.9944,   0.9989,   0.0001682,0.0002542,0.0003829,0.0005745,0.0008587,
+    0.001278, 0.001893, 0.002789, 0.004088, 0.005958, 0.008627, 0.01240,  0.01770,
+    0.02505,  0.03514,  0.04880,  0.06704,  0.09103,  0.1220,   0.1612,   0.2097,
+    0.2682,   0.3368,   0.4145,   0.4994,   0.5881,   0.6765,   0.7596,   0.8326,
+    0.8922,   0.9367,   0.9667,   0.9846,   0.9939,   0.9980,
+];
+
+#[rustfmt::skip]
+const SUM_P_TAB4: [f64; 55] = [
+    2.658e-07,4.064e-07,6.203e-07,9.450e-07,1.437e-06,2.181e-06,3.302e-06,4.990e-06,
+    7.524e-06,1.132e-05,1.698e-05,2.541e-05,3.791e-05,5.641e-05,8.368e-05,0.0001237,
+    0.0001823,0.0002677,0.0003915,0.0005704,0.0008275,0.001195, 0.001718, 0.002457,
+    0.003494, 0.004942, 0.006948, 0.009702, 0.01346,  0.01853,  0.02532,  0.03431,
+    0.04607,  0.06128,  0.08068,  0.1051,   0.1352,   0.1719,   0.2157,   0.2669,
+    0.3254,   0.3906,   0.4612,   0.5355,   0.6110,   0.6849,   0.7544,   0.8168,
+    0.8699,   0.9127,   0.9451,   0.9679,   0.9827,   0.9915,   0.9963,
+];
+
+/// Port of NCBI `s_BlastSumP` (`blast_stat.c:4357`).
+/// Estimates the Sum P-value by calculation or interpolation. Accuracy:
+/// ~2.5 digits throughout the range of `r` (number of segments) and `s`
+/// (total score in nats, adjusted by `-r*log(K*N)`).
+///
+/// For `r = 0` returns `0.0`; for `r = 1` uses the closed-form
+/// `1 - exp(-exp(-s))`; for `r` in `2..=4` uses the table-interpolation
+/// branches at `blast_stat.c:4394-4404` (either the analytic tail or
+/// the `kTable` interpolation); for `r >= 5` delegates to `sum_p_calc`
+/// (NCBI `s_BlastSumPCalc`, Romberg integration). Always returns `Some`.
+pub fn sum_p(r: u32, s: f64) -> Option<f64> {
+    if r == 1 {
+        // NCBI `blast_stat.c:4384`: `return -BLAST_Expm1(-exp(-s));`.
+        return Some(-crate::math::expm1(-(-s).exp()));
+    }
+    if r == 0 {
+        return Some(0.0);
+    }
+    if (2..=4).contains(&r) {
+        let r1 = (r - 1) as i32;
+        let r_i = r as i32;
+        if s >= (r * r + r - 1) as f64 {
+            // NCBI `blast_stat.c:4394`: `a = BLAST_LnGammaInt(r+1)`.
+            let a = crate::math::ln_gamma_int(r_i + 1);
+            return Some(r_i as f64 * (r1 as f64 * s.ln() - s - a - a).exp());
+        }
+        if s > -2.0 * r as f64 {
+            // Table interpolation — verbatim NCBI `blast_stat.c:4397-4403`:
+            //   i = (Int4)(a = s+s+(4*r));
+            //   a -= i;
+            //   i = kTabsize[r2] - i;
+            //   return a*kTable[r2][i-1] + (1.-a)*kTable[r2][i];
+            let table: &[f64] = match r {
+                2 => &SUM_P_TAB2,
+                3 => &SUM_P_TAB3,
+                4 => &SUM_P_TAB4,
+                _ => unreachable!(),
+            };
+            let mut a = s + s + (4 * r) as f64;
+            let mut i = a as i32;
+            a -= i as f64;
+            let tab_last = (table.len() - 1) as i32; // == NCBI `kTabsize[r2]`.
+            i = tab_last - i;
+            return Some(a * table[(i - 1) as usize] + (1.0 - a) * table[i as usize]);
+        }
+        return Some(1.0);
+    }
+    // r >= 5: delegate to `sum_p_calc` (Romberg integration).
+    Some(sum_p_calc(r, s))
+}
+
+/// Port of NCBI `s_BlastSumPCalc` (`blast_stat.c:4269`).
+/// Computes the Sum P-value via double Romberg integration for
+/// `r ≥ 5` (callers with smaller `r` should go through `sum_p` instead).
+/// Matches the Karlin-Altschul PNAS 1993 formula with the iteratively
+/// tightened `itmin` that NCBI uses when the convergence is marginal.
+pub fn sum_p_calc(r: u32, s: f64) -> f64 {
+    let r_i = r as i32;
+    if r == 1 {
+        if s > 8.0 {
+            return (-s).exp();
+        }
+        // NCBI `blast_stat.c:4271`: `return -BLAST_Expm1(-exp(-s));`.
+        return -crate::math::expm1(-(-s).exp());
+    }
+    if r < 1 {
+        return 0.0;
+    }
+
+    // Early-out bounds where the integral is essentially 1 ("no
+    // significant distinction"). NCBI `blast_stat.c:4286-4305` uses
+    // nested `if/else if { if (s <= …) return 1.0; }` — keep the nested
+    // layout so the port is line-diffable against the C source.
+    let rs = r as f64;
+    #[allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+    if r < 8 {
+        if s <= -2.3 * rs {
+            return 1.0;
+        }
+    } else if r < 15 {
+        if s <= -2.5 * rs {
+            return 1.0;
+        }
+    } else if r < 27 {
+        if s <= -3.0 * rs {
+            return 1.0;
+        }
+    } else if r < 51 {
+        if s <= -3.4 * rs {
+            return 1.0;
+        }
+    } else if r < 101 {
+        if s <= -4.0 * rs {
+            return 1.0;
+        }
+    }
+
+    let stddev = rs.sqrt();
+    let stddev4 = 4.0 * stddev;
+    let r1 = r - 1;
+
+    if r > 100 {
+        let est_mean = -(r as f64) * r1 as f64;
+        if s <= est_mean - stddev4 {
+            return 1.0;
+        }
+    }
+
+    let logr = rs.ln();
+    let mean = rs * (1.0 - logr) - 0.5;
+    if s <= mean - stddev4 {
+        return 1.0;
+    }
+
+    let (t0, itmin0) = if s >= mean {
+        (s + 6.0 * stddev, 1)
+    } else {
+        (mean + 6.0 * stddev, 2)
+    };
+
+    let num_hsps = r_i;
+    let num_hsps_minus_2 = r_i - 2;
+    // NCBI `blast_stat.c:4338`: `adj1 = num_hsps_minus_2*logr
+    //                                   - BLAST_LnGammaInt(r1)
+    //                                   - BLAST_LnGammaInt(r)`.
+    let adj1 = num_hsps_minus_2 as f64 * logr
+        - crate::math::ln_gamma_int(r1 as i32)
+        - crate::math::ln_gamma_int(r_i);
+    /// NCBI `kSumpEpsilon` (`blast_stat.c:4276`): Romberg convergence
+    /// epsilon for the sum-P double integral.
+    const EPSILON: f64 = 0.002;
+
+    // Inner integrand: the callback nested inside the outer Romberg.
+    // Mirrors `s_OuterIntegralCback` + `s_InnerIntegralCback`.
+    let integrand = |sv: f64| {
+        let adj2 = adj1 - sv;
+        let sdvir = sv / num_hsps as f64;
+        let mx = if sv > 0.0 { sdvir + 3.0 } else { 3.0 };
+        crate::math::romberg_integrate(
+            |x| {
+                let y = (x - sdvir).exp();
+                if y == f64::INFINITY {
+                    return 0.0;
+                }
+                if num_hsps_minus_2 == 0 {
+                    return (adj2 - y).exp();
+                }
+                if x == 0.0 {
+                    return 0.0;
+                }
+                (num_hsps_minus_2 as f64 * x.ln() + adj2 - y).exp()
+            },
+            0.0,
+            mx,
+            EPSILON,
+            0,
+            1,
+        )
+    };
+
+    // NCBI iteratively tightens `itmin` if the outer integral returns a
+    // marginal value (blast_stat.c:4345).
+    let mut itmin = itmin0;
+    let mut d;
+    loop {
+        d = crate::math::romberg_integrate(integrand, s, t0, EPSILON, 0, itmin);
+        if d == f64::INFINITY {
+            return d;
+        }
+        if !(s < mean && d < 0.4 && itmin < 4) {
+            break;
+        }
+        itmin += 1;
+    }
+    d.min(1.0)
+}
+
+/// Port of NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`).
+/// Convert a P-value to an E-value. For `p = 1` returns `f64::INFINITY`
+/// (NCBI returns `INT4_MAX`, which the sum-E callers cap below).
+pub fn karlin_p_to_e(p: f64) -> f64 {
+    if !(0.0..=1.0).contains(&p) {
+        return i32::MIN as f64;
+    }
+    if p == 1.0 {
+        return f64::INFINITY;
+    }
+    // NCBI: `return -BLAST_Log1p(-p)`.
+    -crate::math::log1p(-p)
+}
+
+const SUM_E_CAP: f64 = i32::MAX as f64;
+
+/// Port of NCBI `BLAST_SmallGapSumE` (`blast_stat.c:4418`).
+/// Computes the e-value of a collection of distinct alignments
+/// separated by small gaps. Matches NCBI's formula and cap at
+/// `INT4_MAX`. Delegates the P-value step to `sum_p`, which handles
+/// every `num` via closed-form / table interpolation / Romberg
+/// (`sum_p_calc`). Returns `Some` on every finite input; the `Option`
+/// return is retained for API symmetry with neighbouring helpers.
+#[allow(clippy::too_many_arguments)]
+pub fn small_gap_sum_e(
+    starting_points: i32,
+    num: u32,
+    mut xsum: f64,
+    query_length: i32,
+    subject_length: i32,
+    searchsp_eff: f64,
+    weight_divisor: f64,
+) -> Option<f64> {
+    let mut sum_e = if num == 1 {
+        searchsp_eff * (-xsum).exp()
+    } else {
+        let pair_search_space = subject_length as f64 * query_length as f64;
+        xsum -= pair_search_space.ln() + 2.0 * (num - 1) as f64 * (starting_points as f64).ln();
+        xsum -= crate::math::ln_factorial(num as i32);
+        let p = sum_p(num, xsum)?;
+        karlin_p_to_e(p) * (searchsp_eff / pair_search_space)
+    };
+    if weight_divisor == 0.0 {
+        sum_e = SUM_E_CAP;
+    } else {
+        sum_e /= weight_divisor;
+        if sum_e > SUM_E_CAP {
+            sum_e = SUM_E_CAP;
+        }
+    }
+    Some(sum_e)
+}
+
+/// Port of NCBI `BLAST_UnevenGapSumE` (`blast_stat.c:4491`).
+/// Used for HSP collections with asymmetric gap widths — e.g. exons
+/// separated by introns in translated searches.
+#[allow(clippy::too_many_arguments)]
+pub fn uneven_gap_sum_e(
+    query_start_points: i32,
+    subject_start_points: i32,
+    num: u32,
+    mut xsum: f64,
+    query_length: i32,
+    subject_length: i32,
+    searchsp_eff: f64,
+    weight_divisor: f64,
+) -> Option<f64> {
+    let mut sum_e = if num == 1 {
+        searchsp_eff * (-xsum).exp()
+    } else {
+        let pair_search_space = subject_length as f64 * query_length as f64;
+        xsum -= pair_search_space.ln()
+            + (num - 1) as f64
+                * ((query_start_points as f64).ln() + (subject_start_points as f64).ln());
+        xsum -= crate::math::ln_factorial(num as i32);
+        let p = sum_p(num, xsum)?;
+        karlin_p_to_e(p) * (searchsp_eff / pair_search_space)
+    };
+    if weight_divisor == 0.0 {
+        sum_e = SUM_E_CAP;
+    } else {
+        sum_e /= weight_divisor;
+        if sum_e > SUM_E_CAP {
+            sum_e = SUM_E_CAP;
+        }
+    }
+    Some(sum_e)
+}
+
+/// Port of NCBI `BLAST_LargeGapSumE` (`blast_stat.c:4532`).
+/// Computes the e-value of a collection of distinct alignments
+/// separated by arbitrarily large gaps.
+pub fn large_gap_sum_e(
+    num: u32,
+    mut xsum: f64,
+    query_length: i32,
+    subject_length: i32,
+    searchsp_eff: f64,
+    weight_divisor: f64,
+) -> Option<f64> {
+    let mut sum_e = if num == 1 {
+        searchsp_eff * (-xsum).exp()
+    } else {
+        let q = query_length as f64;
+        let s = subject_length as f64;
+        xsum -= num as f64 * (s * q).ln() - crate::math::ln_factorial(num as i32);
+        let p = sum_p(num, xsum)?;
+        karlin_p_to_e(p) * (searchsp_eff / (q * s))
+    };
+    if weight_divisor == 0.0 {
+        sum_e = SUM_E_CAP;
+    } else {
+        sum_e /= weight_divisor;
+        if sum_e > SUM_E_CAP {
+            sum_e = SUM_E_CAP;
+        }
+    }
+    Some(sum_e)
 }
 
 /// Score frequency distribution.
@@ -112,35 +721,20 @@ pub fn spouge_evalue(
     let vi_y = (2.0 * alphai_hat / kbp.lambda).max(alphai_hat * y + betai_hat);
     let sqrt_vi_y = vi_y.sqrt();
     let m_f = m_li_y / sqrt_vi_y;
-    let p_m_f = erfc_approx(-m_f / std::f64::consts::SQRT_2) / 2.0;
+    let p_m_f = crate::math::erfc(-m_f / std::f64::consts::SQRT_2) / 2.0;
     let p1 = m_li_y * p_m_f + sqrt_vi_y * CONST_VAL * (-0.5 * m_f * m_f).exp();
 
     let n_lj_y = n - (aj_hat * y + bj_hat);
     let vj_y = (2.0 * alphaj_hat / kbp.lambda).max(alphaj_hat * y + betaj_hat);
     let sqrt_vj_y = vj_y.sqrt();
     let n_f = n_lj_y / sqrt_vj_y;
-    let p_n_f = erfc_approx(-n_f / std::f64::consts::SQRT_2) / 2.0;
+    let p_n_f = crate::math::erfc(-n_f / std::f64::consts::SQRT_2) / 2.0;
     let p2 = n_lj_y * p_n_f + sqrt_vj_y * CONST_VAL * (-0.5 * n_f * n_f).exp();
 
     let c_y = (2.0 * sigma_hat / kbp.lambda).max(sigma_hat * y + tau_hat);
     let area = p1 * p2 + c_y * p_m_f * p_n_f;
 
     (area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor).max(0.0)
-}
-
-/// Complementary error function approximation (Abramowitz & Stegun 7.1.26).
-/// Accurate to ~1.5e-7 relative error.
-fn erfc_approx(x: f64) -> f64 {
-    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let poly = t
-        * (0.254829592
-            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    let result = poly * (-x * x).exp();
-    if x >= 0.0 {
-        result
-    } else {
-        2.0 - result
-    }
 }
 
 /// Build Gumbel block for protein BLOSUM62 with given gap costs.
@@ -197,48 +791,6 @@ fn lookup_blosum62_extended(gap_open: i32, gap_extend: i32) -> Option<(f64, f64)
     }
     None
 }
-
-/// Precomputed gap parameter tables for nucleotide scoring.
-/// Format: (gap_open, gap_extend, lambda, K, H, alpha, beta)
-pub const BLASTN_PARAMS_1_3: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
-    (5, 2, 0.208, 0.049, 0.14, 1.24, -0.70),
-    (2, 2, 0.278, 0.075, 0.27, 0.96, -0.52),
-    (1, 2, 0.308, 0.084, 0.34, 0.86, -0.42),
-    (0, 2, 0.368, 0.11, 0.56, 0.72, -0.25),
-    (4, 1, 0.228, 0.058, 0.18, 1.14, -0.62),
-    (3, 1, 0.248, 0.065, 0.21, 1.06, -0.56),
-    (2, 1, 0.278, 0.075, 0.28, 0.95, -0.48),
-];
-
-pub const BLASTN_PARAMS_1_2: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
-    (0, 0, 0.549, 0.205, 1.02, 0.45, -0.19),
-    (2, 2, 0.439, 0.14, 0.64, 0.60, -0.26),
-    (1, 2, 0.477, 0.16, 0.78, 0.53, -0.22),
-    (0, 2, 0.549, 0.205, 1.02, 0.45, -0.19),
-    (3, 1, 0.429, 0.13, 0.60, 0.62, -0.27),
-    (2, 1, 0.456, 0.15, 0.71, 0.56, -0.24),
-    (1, 1, 0.499, 0.18, 0.88, 0.49, -0.21),
-];
-
-pub const BLASTN_PARAMS_2_3: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
-    (4, 4, 0.22, 0.065, 0.35, 1.00, -0.43),
-    (2, 4, 0.29, 0.086, 0.52, 0.82, -0.31),
-    (0, 4, 0.38, 0.13, 0.92, 0.62, -0.17),
-    (3, 3, 0.23, 0.068, 0.38, 0.96, -0.40),
-    (6, 2, 0.21, 0.057, 0.30, 1.06, -0.48),
-    (5, 2, 0.23, 0.068, 0.38, 0.95, -0.39),
-    (4, 2, 0.25, 0.078, 0.45, 0.87, -0.34),
-];
-
-pub const BLASTN_PARAMS_1_1: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
-    (3, 2, 0.549, 0.205, 1.02, 0.45, -0.19),
-    (2, 2, 0.659, 0.26, 1.50, 0.37, -0.14),
-    (1, 2, 0.730, 0.29, 1.83, 0.33, -0.12),
-    (0, 2, 0.854, 0.37, 2.69, 0.27, -0.08),
-    (4, 1, 0.549, 0.205, 1.02, 0.45, -0.19),
-    (3, 1, 0.624, 0.24, 1.30, 0.39, -0.16),
-    (2, 1, 0.693, 0.27, 1.64, 0.35, -0.13),
-];
 
 /// Compute ungapped Karlin-Altschul lambda parameter for nucleotide scoring.
 /// Solves: 0.25 * exp(lambda * reward) + 0.75 * exp(lambda * penalty) = 1
@@ -297,43 +849,18 @@ pub fn compute_ungapped_kbp(reward: i32, penalty: i32) -> KarlinBlk {
         k,
         log_k: k.ln(),
         h,
+        round_down: false,
     }
-}
-
-/// Look up gapped Karlin-Altschul parameters for nucleotide scoring.
-pub fn lookup_nucleotide_params(
-    reward: i32,
-    penalty: i32,
-    gap_open: i32,
-    gap_extend: i32,
-) -> Option<GappedParams> {
-    let table = match (reward, penalty) {
-        (1, -3) => BLASTN_PARAMS_1_3,
-        (1, -2) => BLASTN_PARAMS_1_2,
-        (2, -3) => BLASTN_PARAMS_2_3,
-        (1, -1) => BLASTN_PARAMS_1_1,
-        _ => return None,
-    };
-
-    for &(go, ge, lambda, k, h, alpha, beta) in table {
-        if go == gap_open && ge == gap_extend {
-            return Some(GappedParams {
-                gap_open: go,
-                gap_extend: ge,
-                lambda,
-                k,
-                h,
-                alpha,
-                beta,
-            });
-        }
-    }
-    None
 }
 
 /// Compute length adjustment using the Altschul-Gish formula.
 /// This adjusts query and database lengths to account for edge effects.
 /// length_adj satisfies: K * (q - length_adj) * (d - N * length_adj) * exp(-lambda * S) = threshold
+/// Compute the length adjustment using NCBI `BLAST_ComputeLengthAdjustment`
+/// (`blast_stat.c:5041`). For callers that have no explicit alpha/beta
+/// (typically ungapped or missing-gapped-params paths), NCBI uses
+/// `alpha/lambda = 1/H` and `beta = 0`; that convention is applied
+/// here so the verbatim bracketing algorithm is exercised.
 pub fn compute_length_adjustment(
     query_length: i32,
     db_length: i64,
@@ -343,32 +870,19 @@ pub fn compute_length_adjustment(
     if !kbp.is_valid() || query_length <= 0 || db_length <= 0 {
         return 0;
     }
-
-    let h = kbp.h;
-    if h <= 0.0 {
+    if kbp.h <= 0.0 {
         return 0;
     }
-
-    // Iteratively solve for length_adjustment
-    // Formula: len_adj = (ln(K) + ln(eff_q * eff_d)) / H
-    let q = query_length as f64;
-    let d = db_length as f64;
-    let n = num_seqs as f64;
-    let log_k = kbp.log_k;
-
-    let mut len_adj = 0.0;
-    for _ in 0..20 {
-        let eff_q = (q - len_adj).max(1.0);
-        let eff_d = (d - n * len_adj).max(1.0);
-        let new_adj = (log_k + (eff_q * eff_d).ln()) / h;
-        let new_adj = new_adj.min(q - 1.0).min(d / n - 1.0).max(0.0);
-        if (new_adj - len_adj).abs() < 0.5 {
-            break;
-        }
-        len_adj = new_adj;
-    }
-
-    len_adj.round() as i32
+    let (adj, _converged) = compute_length_adjustment_exact(
+        kbp.k,
+        kbp.log_k,
+        1.0 / kbp.h,
+        0.0,
+        query_length,
+        db_length,
+        num_seqs,
+    );
+    adj
 }
 
 /// Precomputed Karlin-Altschul parameters for BLOSUM62 with various gap costs.
@@ -406,14 +920,16 @@ pub fn lookup_protein_params(gap_open: i32, gap_extend: i32) -> Option<GappedPar
     None
 }
 
-/// Compute ungapped KBP for protein BLOSUM62.
-/// Lambda ≈ 0.3176, K ≈ 0.134 for standard amino acid frequencies.
+/// Compute ungapped KBP for protein BLOSUM62. Values match NCBI
+/// `blosum62_values[0]` (ungapped entry) from `blast_stat.c:259`:
+/// Lambda = 0.3176, K = 0.134, H = 0.4012.
 pub fn protein_ungapped_kbp() -> KarlinBlk {
     KarlinBlk {
         lambda: 0.3176,
         k: 0.134,
         log_k: 0.134_f64.ln(),
-        h: 0.401,
+        h: 0.4012,
+        round_down: false,
     }
 }
 
@@ -530,18 +1046,102 @@ struct KbpTableMeta {
     round_down: bool,
 }
 
-fn kbp_gcd(a: i32, b: i32) -> i32 {
-    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
-    if b > a {
-        std::mem::swap(&mut a, &mut b);
-    }
-    while b != 0 {
-        let c = a % b;
-        a = b;
-        b = c;
-    }
-    a as i32
-}
+/// NCBI `kSmallFloat` (`blast_stat.c:4049`): smallest positive e-value
+/// used as a clamp in `BlastKarlinEtoS_simple` to prevent FP exceptions.
+pub const K_SMALL_FLOAT: f64 = 1.0e-297;
+
+/// NCBI `NUM_FRAMES` (`blast_def.h:88`): number of translation frames
+/// for protein searches (6 = ±3).
+pub const NUM_FRAMES: usize = 6;
+
+/// NCBI `CODON_LENGTH` (`blast_def.h:63`): nucleotides per amino acid.
+pub const CODON_LENGTH: usize = 3;
+
+/// NCBI `DEFAULT_LONGEST_INTRON` (`blast_def.h:78`): default longest
+/// intron length (nt) for linking spliced HSPs in translated searches.
+pub const DEFAULT_LONGEST_INTRON: usize = 122;
+
+/// NCBI `COMPRESSION_RATIO` (`blast_def.h:83`): NCBI2na packs 4 bases
+/// per byte.
+pub const COMPRESSION_RATIO: usize = 4;
+
+/// NCBI `NUM_STRANDS` (`blast_def.h:93`): plus / minus.
+pub const NUM_STRANDS: usize = 2;
+
+/// NCBI `GENCODE_STRLEN` (`blast_def.h:98`): fixed 64 codons in the
+/// genetic-code table (all unique `NNN` triplets in NCBIstdaa).
+pub const GENCODE_STRLEN: usize = 64;
+
+/// Port of NCBI `BLAST_SCORE_MIN` (`blast_stat.h:121`): minimum allowed
+/// score (one-letter comparison). NCBI defines it as `INT2_MIN`
+/// (-32768); we keep the value literally so downstream "impossible
+/// score" sentinels compare identically.
+pub const BLAST_SCORE_MIN: i32 = i16::MIN as i32;
+
+/// Port of NCBI `BLAST_SCORE_MAX` (`blast_stat.h:122`): maximum allowed
+/// score (one-letter comparison) = `INT2_MAX` (32767).
+pub const BLAST_SCORE_MAX: i32 = i16::MAX as i32;
+
+/// NCBI `BLAST_MATRIX_NOMINAL` (`blast_stat.h:53`): matrix quality flag
+/// for "acceptable values, not recommended".
+pub const BLAST_MATRIX_NOMINAL: i32 = 0;
+/// NCBI `BLAST_MATRIX_PREFERRED` (`blast_stat.h:54`): preferred values.
+pub const BLAST_MATRIX_PREFERRED: i32 = 1;
+/// NCBI `BLAST_MATRIX_BEST` (`blast_stat.h:55`): best value (one per matrix).
+pub const BLAST_MATRIX_BEST: i32 = 2;
+
+/// `DBSEQ_CHUNK_OVERLAP` (`blast_hits.h:192`): overlap between adjacent
+/// chunks when a subject is split for parallel/restarted scanning.
+pub const DBSEQ_CHUNK_OVERLAP: usize = 100;
+
+/// `PV_ARRAY_BYTES` (`blast_lookup.h:42`): bytes in the PV-array native word.
+pub const PV_ARRAY_BYTES: usize = 4;
+/// `PV_ARRAY_BTS` (`blast_lookup.h:43`): bits-to-shift from lookup
+/// index to pv-array index (word size 32 → shift 5).
+pub const PV_ARRAY_BTS: usize = 5;
+/// `PV_ARRAY_MASK` (`blast_lookup.h:44`): mask off low 5 bits to get
+/// the bit-within-word offset.
+pub const PV_ARRAY_MASK: u32 = 31;
+
+/// `BLAST_SEQSRC_MINGAP` (`blast_seqsrc.h:203`): minimal gap allowed in
+/// range list for a sequence source chunk reader.
+pub const BLAST_SEQSRC_MINGAP: usize = 1024;
+/// `BLAST_SEQSRC_OVERHANG` (`blast_seqsrc.h:204`): extension applied to
+/// each new range added to the seq-src range list.
+pub const BLAST_SEQSRC_OVERHANG: usize = 1024;
+/// `BLAST_SEQSRC_MINLENGTH` (`blast_seqsrc.h:205`): minimum sequence
+/// length a seq-src returns.
+pub const BLAST_SEQSRC_MINLENGTH: usize = 10;
+
+/// `BLAST_SEQSRC_EXCLUDED` (`blast_seqsrc.h:290`): seq-src status code —
+/// sequence excluded due to filtering.
+pub const BLAST_SEQSRC_EXCLUDED: i32 = -3;
+/// `BLAST_SEQSRC_ERROR` (`blast_seqsrc.h:291`): generic error retrieving sequence.
+pub const BLAST_SEQSRC_ERROR: i32 = -2;
+/// `BLAST_SEQSRC_EOF` (`blast_seqsrc.h:292`): no more sequences available.
+pub const BLAST_SEQSRC_EOF: i32 = -1;
+/// `BLAST_SEQSRC_SUCCESS` (`blast_seqsrc.h:293`): successful retrieval.
+pub const BLAST_SEQSRC_SUCCESS: i32 = 0;
+
+// Program-type bitmask flags (`blast_program.h:48-64`).
+/// `PROTEIN_QUERY_MASK`.
+pub const PROTEIN_QUERY_MASK: u32 = 1 << 0;
+/// `PROTEIN_SUBJECT_MASK`.
+pub const PROTEIN_SUBJECT_MASK: u32 = 1 << 1;
+/// `NUCLEOTIDE_QUERY_MASK`.
+pub const NUCLEOTIDE_QUERY_MASK: u32 = 1 << 2;
+/// `NUCLEOTIDE_SUBJECT_MASK`.
+pub const NUCLEOTIDE_SUBJECT_MASK: u32 = 1 << 3;
+/// `TRANSLATED_QUERY_MASK`.
+pub const TRANSLATED_QUERY_MASK: u32 = 1 << 4;
+/// `TRANSLATED_SUBJECT_MASK`.
+pub const TRANSLATED_SUBJECT_MASK: u32 = 1 << 5;
+/// `PSSM_QUERY_MASK`.
+pub const PSSM_QUERY_MASK: u32 = 1 << 6;
+/// `PSSM_SUBJECT_MASK`.
+pub const PSSM_SUBJECT_MASK: u32 = 1 << 7;
+/// `PATTERN_QUERY_MASK`.
+pub const PATTERN_QUERY_MASK: u32 = 1 << 8;
 
 fn get_kbp_table(reward: i32, penalty: i32) -> Option<KbpTableMeta> {
     match (reward, penalty) {
@@ -630,7 +1230,7 @@ pub fn nucl_gapped_kbp_lookup(
     penalty: i32,
     ungapped: &KarlinBlk,
 ) -> Result<(KarlinBlk, bool), String> {
-    let divisor = kbp_gcd(reward, penalty.abs());
+    let divisor = crate::math::gcd(reward, penalty.abs());
     let (nr, np) = (reward / divisor, penalty / divisor);
 
     let meta = get_kbp_table(nr, np)
@@ -646,7 +1246,14 @@ pub fn nucl_gapped_kbp_lookup(
             (meta.table, None)
         };
 
-    // GCD scaling
+    // GCD scaling (Rust extension beyond NCBI `Blast_KarlinBlkNuclGappedCalc`,
+    // `blast_stat.c:3846`): NCBI's lookup reduces `(reward, penalty)` by
+    // their GCD when selecting which table to use but then compares gap
+    // costs against the reduced-system table values directly — users
+    // must supply gap costs in the reduced units. Rust instead scales
+    // the table entries by the divisor so users can pass gap costs in
+    // the scaled system (e.g. `(reward=10, penalty=-20, gap_open=30,
+    // gap_extend=10)` reduces to KBPT_1_2 with scaled lambda = row[2]/10).
     let (mut go_max, mut ge_max) = (meta.gap_open_max, meta.gap_extend_max);
     let scale = |row: &KbpTableRow, d: i32| -> (f64, f64, f64, f64, f64) {
         let go = row[0] * d as f64;
@@ -669,6 +1276,7 @@ pub fn nucl_gapped_kbp_lookup(
                     k,
                     log_k: k.ln(),
                     h,
+                    round_down,
                 },
                 round_down,
             ));
@@ -685,6 +1293,7 @@ pub fn nucl_gapped_kbp_lookup(
                     k,
                     log_k: k.ln(),
                     h,
+                    round_down,
                 },
                 round_down,
             ));
@@ -786,15 +1395,15 @@ pub fn nucl_alpha_beta(
     gapped: bool,
 ) -> (f64, f64) {
     if !gapped {
-        let beta = if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) {
-            -2.0
-        } else {
-            0.0
-        };
-        return (ungapped_lambda / ungapped_h, beta);
+        return (ungapped_lambda / ungapped_h, get_ungapped_beta(reward, penalty));
     }
 
-    let divisor = kbp_gcd(reward, penalty.abs());
+    // Rust extension beyond NCBI `Blast_GetNuclAlphaBeta`
+    // (`blast_stat.c:3965`): scale gap costs and alpha by the GCD
+    // divisor so scaled scoring systems like `(10, -20)` match the
+    // reduced `(1, -2)` table. NCBI compares against raw table values
+    // and forces users to supply reduced-system gap costs.
+    let divisor = crate::math::gcd(reward, penalty.abs());
     let (nr, np) = (reward / divisor, penalty / divisor);
 
     if let Some(meta) = get_kbp_table(nr, np) {
@@ -824,13 +1433,21 @@ pub fn nucl_alpha_beta(
         }
     }
 
-    // Fallback: ungapped values
-    let beta = if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) {
+    // Fallback: ungapped values. NCBI `Blast_GetNuclAlphaBeta`
+    // (`blast_stat.c:4022-4026`): on lookup miss, returns
+    // `alpha = Lambda/H` and `beta = s_GetUngappedBeta(reward, penalty)`.
+    (ungapped_lambda / ungapped_h, get_ungapped_beta(reward, penalty))
+}
+
+/// Port of NCBI `s_GetUngappedBeta` (`blast_stat.c:3955`): `(1,-1)` and
+/// `(2,-3)` scoring systems use `beta = -2`; every other combination
+/// uses `beta = 0`.
+fn get_ungapped_beta(reward: i32, penalty: i32) -> f64 {
+    if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) {
         -2.0
     } else {
         0.0
-    };
-    (ungapped_lambda / ungapped_h, beta)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,7 +1455,9 @@ pub fn nucl_alpha_beta(
 // Port of Blast_ScoreBlkKbpUngappedCalc and sub-functions from blast_stat.c
 // ---------------------------------------------------------------------------
 
-/// Score frequency distribution (internal to KBP computation).
+/// Score frequency distribution (internal to KBP computation). Rust
+/// analog of NCBI `Blast_ScoreFreq` (`blast_stat.h:128`); `probs`
+/// corresponds to NCBI's `sprob` array (shifted by `score_min`).
 struct SfDist {
     score_min: i32,
     score_max: i32,
@@ -870,33 +1489,26 @@ impl SfDist {
     }
 }
 
-fn expm1_stable(x: f64) -> f64 {
-    if x.abs() > 0.33 {
-        x.exp() - 1.0
-    } else {
-        x.exp_m1()
-    }
-}
 
-fn powi(x: f64, n: i32) -> f64 {
-    if n == 0 {
-        return 1.0;
-    }
-    let mut x = if n < 0 { 1.0 / x } else { x };
-    let mut n = n.unsigned_abs();
-    let mut y = 1.0;
-    while n > 0 {
-        if n & 1 != 0 {
-            y *= x;
-        }
-        n /= 2;
-        x *= x;
-    }
-    y
-}
 
 /// Newton-Raphson solver for Lambda in x = exp(-lambda) space.
 /// Port of NlmKarlinLambdaNR from blast_stat.c.
+/// NCBI `BLAST_KARLIN_K_SUMLIMIT_DEFAULT` (`blast_stat.c:64`): inner-sum
+/// convergence threshold in the K solver.
+const BLAST_KARLIN_K_SUMLIMIT_DEFAULT: f64 = 0.0001;
+/// NCBI `BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT` (`blast_stat.c:66`):
+/// accuracy target for lambda solve.
+const BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT: f64 = 1.0e-5;
+/// NCBI `BLAST_KARLIN_LAMBDA_ITER_DEFAULT` (`blast_stat.c:68`): number
+/// of bisection iterations after the Newton phase (20 + 17 = 37 total).
+const BLAST_KARLIN_LAMBDA_ITER_DEFAULT: i32 = 17;
+/// NCBI `BLAST_KARLIN_K_ITER_MAX` (`blast_stat.c:72`): upper limit on
+/// iterations for the K solver.
+const BLAST_KARLIN_K_ITER_MAX: usize = 100;
+
+/// Port of NCBI `Blast_KarlinLambdaNR` (`blast_stat.c:2567`): combined
+/// Newton/bisection solver for the Karlin-Altschul lambda parameter
+/// over `x = exp(-lambda)`.
 fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 {
     let x0 = (-lambda0).exp();
     let mut x = if x0 > 0.0 && x0 < 1.0 { x0 } else { 0.5 };
@@ -904,15 +1516,16 @@ fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 
     let mut b = 1.0_f64;
     let mut f = 4.0_f64;
     let mut is_newton = false;
-    let max_iter = 37; // 20 + 17
-    let tolx = 1.0e-5;
+    let max_newton = 20;
+    let max_iter = max_newton + BLAST_KARLIN_LAMBDA_ITER_DEFAULT;
+    let tolx = BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT;
 
     for k in 0..max_iter {
         let fold = f;
         let was_newton = is_newton;
         is_newton = false;
 
-        // Horner evaluation of polynomial and derivative
+        // Horner evaluation of polynomial and derivative.
         let mut g = 0.0_f64;
         f = sfp.p(low);
         let mut i = low + d;
@@ -942,7 +1555,7 @@ fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 
             break;
         }
 
-        if k >= 20 || (was_newton && f.abs() > 0.9 * fold.abs()) || g >= 0.0 {
+        if k >= max_newton || (was_newton && f.abs() > 0.9 * fold.abs()) || g >= 0.0 {
             x = (a + b) / 2.0;
         } else {
             let p = -f / g;
@@ -961,7 +1574,13 @@ fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 
     -x.ln() / d as f64
 }
 
-/// Compute Lambda from score frequency distribution.
+/// NCBI `BLAST_KARLIN_LAMBDA0_DEFAULT` (`blast_stat.c:70`): initial
+/// guess for the Newton-Raphson lambda solver.
+const BLAST_KARLIN_LAMBDA0_DEFAULT: f64 = 0.5;
+
+/// Compute Lambda from score frequency distribution. Port of NCBI
+/// `Blast_KarlinLambdaNR` (`blast_stat.c:2567`) — score-GCD reduction
+/// followed by Newton-Raphson solve on `x = exp(-lambda)`.
 fn compute_lambda(sfp: &SfDist) -> f64 {
     if sfp.score_avg >= 0.0 {
         return -1.0;
@@ -974,10 +1593,10 @@ fn compute_lambda(sfp: &SfDist) -> f64 {
             break;
         }
         if sfp.p(low + i) != 0.0 {
-            d = kbp_gcd(d, i);
+            d = crate::math::gcd(d, i);
         }
     }
-    solve_lambda(sfp, d, low, high, 0.5)
+    solve_lambda(sfp, d, low, high, BLAST_KARLIN_LAMBDA0_DEFAULT)
 }
 
 /// Compute H (relative entropy) from score frequencies and Lambda.
@@ -990,7 +1609,7 @@ fn compute_h(sfp: &SfDist, lambda: f64) -> f64 {
     for s in (sfp.obs_min + 1)..=sfp.obs_max {
         sum = s as f64 * sfp.p(s) + etonlam * sum;
     }
-    let scale = powi(etonlam, sfp.obs_max);
+    let scale = crate::math::powi(etonlam, sfp.obs_max);
     if scale > 0.0 {
         lambda * sum / scale
     } else {
@@ -1011,7 +1630,7 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
             break;
         }
         if sfp.p(olow + i) != 0.0 {
-            divisor = kbp_gcd(divisor, i);
+            divisor = crate::math::gcd(divisor, i);
         }
     }
 
@@ -1047,7 +1666,7 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
         }
     };
     let ru = range as usize;
-    let max_iter = 100usize;
+    let max_iter = BLAST_KARLIN_K_ITER_MAX;
     let mut asp = vec![0.0_f64; max_iter * ru + 1];
     asp[0] = 1.0;
     let mut outer_sum = 0.0_f64;
@@ -1057,7 +1676,7 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
     let mut oldsum;
 
     for iter in 0..max_iter {
-        if inner_sum <= 0.0001 {
+        if inner_sum <= BLAST_KARLIN_K_SUMLIMIT_DEFAULT {
             break;
         }
         let mut first = range;
@@ -1107,7 +1726,7 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
         outer_sum += inner_sum / (iter + 1) as f64;
     }
 
-    -(-2.0 * outer_sum).exp() / (ftcf * expm1_stable(-lam_s))
+    -(-2.0 * outer_sum).exp() / (ftcf * crate::math::expm1(-lam_s))
 }
 
 /// Context info for ungapped KBP computation.
@@ -1220,6 +1839,7 @@ pub fn ungapped_kbp_calc(
             k,
             log_k: k.ln(),
             h,
+            round_down: false,
         }));
     }
     results
@@ -1230,12 +1850,406 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_gap_decay_divisor_matches_ncbi_formula() {
+        // NCBI `BLAST_GapDecayDivisor(decayrate, nsegs)` =
+        // `(1 - decayrate) * decayrate^(nsegs - 1)`. Spot-check a few
+        // typical values.
+        let eps = 1e-12;
+        // nsegs=1 → (1-r) * r^0 = 1-r.
+        assert!((gap_decay_divisor(0.1, 1) - 0.9).abs() < eps);
+        assert!((gap_decay_divisor(0.5, 1) - 0.5).abs() < eps);
+        // nsegs=2 → (1-r) * r.
+        assert!((gap_decay_divisor(0.1, 2) - 0.09).abs() < eps);
+        assert!((gap_decay_divisor(0.5, 2) - 0.25).abs() < eps);
+        // nsegs=3 → (1-r) * r^2.
+        assert!((gap_decay_divisor(0.1, 3) - 0.009).abs() < eps);
+    }
+
+    #[test]
+    fn test_blast_cutoffs_without_decay_matches_evalue_to_raw() {
+        // With dodecay=false the adjustment is skipped and the cutoff is
+        // just `EtoS(e)` (clamped to `s_floor`).
+        let kbp = KarlinBlk {
+            lambda: 0.625,
+            k: 0.41,
+            log_k: 0.41_f64.ln(),
+            h: 0.78,
+            round_down: false,
+        };
+        let searchsp = 1.0e9;
+        let e_in = 10.0;
+        let expected_s = kbp.evalue_to_raw(e_in, searchsp);
+        let (s, _e_out) = blast_cutoffs(1, e_in, &kbp, searchsp, false, 0.1);
+        assert_eq!(s, expected_s);
+    }
+
+    #[test]
+    fn test_blast_cutoffs_with_decay_tightens_cutoff() {
+        // With dodecay=true and gap_decay_rate=0.1, e is multiplied by
+        // `gap_decay_divisor(0.1, 1) = 0.9` before conversion, giving a
+        // slightly higher raw cutoff score than the no-decay path.
+        let kbp = KarlinBlk {
+            lambda: 0.625,
+            k: 0.41,
+            log_k: 0.41_f64.ln(),
+            h: 0.78,
+            round_down: false,
+        };
+        let searchsp = 1.0e9;
+        let e_in = 10.0;
+        let (s_no_decay, _) = blast_cutoffs(1, e_in, &kbp, searchsp, false, 0.1);
+        let (s_decay, _) = blast_cutoffs(1, e_in, &kbp, searchsp, true, 0.1);
+        assert!(
+            s_decay >= s_no_decay,
+            "decay={s_decay} vs no_decay={s_no_decay}"
+        );
+        // Independent calculation of the expected decayed cutoff.
+        let expected = kbp.evalue_to_raw(0.9 * e_in, searchsp);
+        assert_eq!(s_decay, expected);
+    }
+
+    #[test]
+    fn test_blast_cutoffs_respects_floor() {
+        // When the user supplies a floor larger than the stats-derived
+        // cutoff, the floor wins and the recomputed e-value corresponds
+        // to that floor (with the decay adjustment folded back in).
+        let kbp = KarlinBlk {
+            lambda: 0.625,
+            k: 0.41,
+            log_k: 0.41_f64.ln(),
+            h: 0.78,
+            round_down: false,
+        };
+        let searchsp = 1.0e9;
+        let e_in = 10.0;
+        let floor = 1000;
+        let (s, e_out) = blast_cutoffs(floor, e_in, &kbp, searchsp, true, 0.1);
+        assert_eq!(s, floor);
+        // e_in did not win → recompute e from s=floor, then divide by
+        // the decay divisor (0.9) to get the reported e-value.
+        let expected_e = kbp.raw_to_evalue(floor, searchsp) / 0.9;
+        assert!(
+            (e_out - expected_e).abs() < 1e-14,
+            "e_out={e_out} expected={expected_e}"
+        );
+    }
+
+    #[test]
+    fn test_blast_cutoffs_invalid_kbp_returns_one() {
+        // Lambda/K/H < 0 → NCBI returns immediately with S=1.
+        let kbp = KarlinBlk {
+            lambda: -1.0,
+            k: 0.41,
+            log_k: 0.0,
+            h: 0.78,
+            round_down: false,
+        };
+        let (s, e_out) = blast_cutoffs(5, 10.0, &kbp, 1.0e9, true, 0.1);
+        assert_eq!(s, 1);
+        assert_eq!(e_out, 10.0);
+    }
+
+    #[test]
+    fn test_sum_p_r1_formula() {
+        // r=1 closed form: p = 1 - exp(-exp(-s)).
+        // For s=0, exp(0)=1, 1-exp(-1) ≈ 0.632120.
+        let p = sum_p(1, 0.0).unwrap();
+        assert!((p - (1.0 - (-1.0_f64).exp())).abs() < 1e-12);
+        // For s=5, small p.
+        let p = sum_p(1, 5.0).unwrap();
+        assert!(p > 0.0 && p < 0.01);
+        // For s=-2, close to 1.
+        let p = sum_p(1, -2.0).unwrap();
+        assert!(p > 0.99);
+    }
+
+    #[test]
+    fn test_sum_p_r2_tail_formula_against_hand_calc() {
+        // r=2, s=6 is in the tail regime (s >= r^2 + r - 1 = 5).
+        // NCBI formula: r * exp((r-1)*ln(s) - s - 2*ln(r!)).
+        // = 2 * exp(ln(6) - 6 - 2*ln(2)) = 2 * (6/4) * exp(-6) = 3*exp(-6).
+        let p = sum_p(2, 6.0).unwrap();
+        let expected = 3.0 * (-6.0_f64).exp();
+        assert!(
+            (p - expected).abs() < 1e-12,
+            "sum_p(2, 6) = {p}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_sum_p_r3_tail_formula_against_hand_calc() {
+        // r=3, s=11 is in the tail regime (s >= r^2 + r - 1 = 11).
+        // NCBI formula: r * exp((r-1)*ln(s) - s - 2*ln(r!)).
+        // = 3 * exp(2*ln(11) - 11 - 2*ln(6)) = 3 * (121/36) * exp(-11).
+        let p = sum_p(3, 11.0).unwrap();
+        let expected = 3.0 * (121.0 / 36.0) * (-11.0_f64).exp();
+        assert!(
+            (p - expected).abs() < 1e-12,
+            "sum_p(3, 11) = {p}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_sum_p_r2_table_interpolation() {
+        // r=2 should produce a P-value in (0,1] for plausible s.
+        for s in [-2.0, 0.0, 2.0, 5.0, 10.0, 15.0] {
+            let p = sum_p(2, s).unwrap();
+            assert!(
+                (0.0..=1.0).contains(&p),
+                "sum_p(2, {}) = {} not in [0,1]",
+                s,
+                p
+            );
+        }
+        // At very negative s, should saturate to 1.
+        assert_eq!(sum_p(2, -10.0).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_sum_p_r_gte_5_uses_romberg_branch() {
+        // r >= 5 goes through `sum_p_calc` (Romberg integration). For
+        // very negative s it saturates to 1 via the early-out; for
+        // moderate s it produces a valid P-value in (0, 1].
+        assert_eq!(sum_p(5, -20.0).unwrap(), 1.0);
+        let p = sum_p(10, 5.0).unwrap();
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "sum_p(10, 5.0) = {p} not in [0,1]"
+        );
+        // r=1 via sum_p should still match sum_p_calc(r=1).
+        let s = 3.0;
+        assert!((sum_p(1, s).unwrap() - sum_p_calc(1, s)).abs() < 1e-14);
+    }
+
+    #[test]
+    fn test_sum_p_calc_r1_matches_closed_form() {
+        // sum_p_calc(1, s) has two branches (s>8 and s<=8); they are
+        // both small-x approximations of the same Karlin-Altschul
+        // P-value and agree to ~6 significant figures at the crossover.
+        let a = sum_p_calc(1, 8.0);
+        let b = sum_p_calc(1, 8.0 + 1e-12);
+        assert!((a - b).abs() < 1e-6, "a={a} b={b}");
+    }
+
+    #[test]
+    fn test_sum_e_num_gte_5_now_uses_romberg() {
+        // Since sum_p handles r >= 5 via Romberg, the sum-E wrappers
+        // now return Some for num >= 5 too.
+        let e = small_gap_sum_e(40, 5, 30.0, 100, 1000, 1.0e9, 1.0);
+        assert!(e.is_some(), "expected Some, got None");
+    }
+
+    #[test]
+    fn test_karlin_p_to_e_basic() {
+        // P = 0 → E = 0.
+        assert_eq!(karlin_p_to_e(0.0), 0.0);
+        // P = 1 → E = +infinity (NCBI caps at INT4_MAX downstream).
+        assert_eq!(karlin_p_to_e(1.0), f64::INFINITY);
+        // P = 0.5 → E = -ln(0.5) = ln(2) ≈ 0.6931.
+        assert!((karlin_p_to_e(0.5) - std::f64::consts::LN_2).abs() < 1e-12);
+        // Bad input returns sentinel.
+        assert_eq!(karlin_p_to_e(-0.1), i32::MIN as f64);
+        assert_eq!(karlin_p_to_e(1.5), i32::MIN as f64);
+    }
+
+    #[test]
+    fn test_sum_e_num1_reduces_to_searchsp_exp() {
+        // For num=1 all three sum-E variants collapse to
+        // `searchsp_eff * exp(-xsum) / weight_divisor`.
+        let xsum: f64 = 10.0;
+        let searchsp: f64 = 1.0e9;
+        let w: f64 = 0.9;
+        let expected = searchsp * (-xsum).exp() / w;
+        for got in [
+            small_gap_sum_e(40, 1, xsum, 100, 1000, searchsp, w).unwrap(),
+            uneven_gap_sum_e(40, 4000, 1, xsum, 100, 1000, searchsp, w).unwrap(),
+            large_gap_sum_e(1, xsum, 100, 1000, searchsp, w).unwrap(),
+        ] {
+            assert!((got - expected).abs() < 1e-6, "got={got} expected={expected}");
+        }
+    }
+
+    #[test]
+    fn test_sum_e_caps_at_int4_max() {
+        // Zero weight_divisor saturates to INT4_MAX.
+        let capped = small_gap_sum_e(40, 1, 0.0, 100, 1000, 1.0e15, 0.0).unwrap();
+        assert_eq!(capped, i32::MAX as f64);
+    }
+
+    #[test]
+    fn test_large_gap_sum_e_num2_matches_hand_calc() {
+        // Reconstruct the NCBI formula (`blast_stat.c:4557-4567`) for
+        // num=2 step-by-step and verify `large_gap_sum_e` agrees.
+        let q: i32 = 100;
+        let s: i32 = 1000;
+        let searchsp: f64 = 1.0e9;
+        let w: f64 = 0.5;
+        let raw_xsum: f64 = 120.0;
+        let num: u32 = 2;
+
+        // Manual: adjusted = xsum - num*ln(q*s) + ln_fact(num).
+        let adjusted = raw_xsum
+            - num as f64 * ((q as f64) * (s as f64)).ln()
+            + crate::math::ln_factorial(num as i32);
+        let p = sum_p(num, adjusted).unwrap();
+        let expected = karlin_p_to_e(p) * (searchsp / (q as f64 * s as f64)) / w;
+
+        let got = large_gap_sum_e(num, raw_xsum, q, s, searchsp, w).unwrap();
+        assert!(
+            (got - expected).abs() < expected.abs() * 1e-12 + 1e-12,
+            "got={got} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn test_small_gap_sum_e_num2_matches_hand_calc() {
+        // Hand-verify NCBI `BLAST_SmallGapSumE` (`blast_stat.c:4440-4456`)
+        // at num=2. Double-adjust xsum, fold in ln_factorial(2), then
+        // `karlin_p_to_e(sum_p) * (searchsp / (q*s)) / w`.
+        let q: i32 = 100;
+        let s: i32 = 1000;
+        let searchsp: f64 = 1.0e9;
+        let w: f64 = 0.9;
+        let raw_xsum: f64 = 120.0;
+        let num: u32 = 2;
+        let starting_points: i32 = 40;
+
+        let pair_search_space = s as f64 * q as f64;
+        let adjusted = raw_xsum
+            - pair_search_space.ln()
+            - 2.0 * (num - 1) as f64 * (starting_points as f64).ln()
+            - crate::math::ln_factorial(num as i32);
+        let p = sum_p(num, adjusted).unwrap();
+        let expected = karlin_p_to_e(p) * (searchsp / pair_search_space) / w;
+
+        let got = small_gap_sum_e(starting_points, num, raw_xsum, q, s, searchsp, w).unwrap();
+        assert!(
+            (got - expected).abs() < expected.abs() * 1e-12 + 1e-12,
+            "got={got} expected={expected}"
+        );
+    }
+
+
+    #[test]
+    fn test_sum_p_r0_is_zero() {
+        assert_eq!(sum_p(0, 0.0), Some(0.0));
+        assert_eq!(sum_p(0, 5.0), Some(0.0));
+    }
+
+    #[test]
+    fn test_evalue_to_raw_roundtrips_raw_to_evalue() {
+        // For any positive raw score, `raw_to_evalue` then `evalue_to_raw`
+        // should round-trip within ±1 (because `evalue_to_raw` rounds up
+        // and `raw_to_evalue` is smooth).
+        let kbp = KarlinBlk {
+            lambda: 0.625,
+            k: 0.41,
+            log_k: 0.41_f64.ln(),
+            h: 0.78,
+            round_down: false,
+        };
+        let search_space = 1.0e9;
+        for raw in [10, 25, 50, 100, 200] {
+            let e = kbp.raw_to_evalue(raw, search_space);
+            let back = kbp.evalue_to_raw(e, search_space);
+            assert!(
+                (back - raw).abs() <= 1,
+                "raw={raw} e={e} back={back} (should be within 1)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_down_affects_evalue_not_bit_score() {
+        // NCBI `blast_hits.c:1864-1869` applies `score &= ~1` before
+        // E-value calculation when `sbp->round_down` is set, but
+        // `Blast_HSPListGetBitScores` (`blast_hits.c:1907,1927`) does
+        // NOT apply the same mask to bit scores — only a commented-out
+        // `#if 0` assertion hints at it. Verify Rust matches that split.
+        let mut kbp = KarlinBlk {
+            lambda: 0.6,
+            k: 0.4,
+            log_k: 0.4_f64.ln(),
+            h: 0.7,
+            round_down: false,
+        };
+        // Without round_down, odd score 9 is used as-is.
+        let bit_odd = kbp.raw_to_bit(9);
+        let ev_odd = kbp.raw_to_evalue(9, 1.0e9);
+        // Even score 8 is a reference point.
+        let bit_even = kbp.raw_to_bit(8);
+        let ev_even = kbp.raw_to_evalue(8, 1.0e9);
+        assert_ne!(bit_odd, bit_even);
+        // With round_down, odd score 9 rounds to 8 for E-value only.
+        kbp.round_down = true;
+        let bit_rd = kbp.raw_to_bit(9);
+        let ev_rd = kbp.raw_to_evalue(9, 1.0e9);
+        // Bit score IGNORES round_down (per NCBI):
+        assert!((bit_rd - bit_odd).abs() < 1e-14);
+        // E-value RESPECTS round_down (per NCBI):
+        assert!((ev_rd - ev_even).abs() < ev_even.abs() * 1e-14);
+        // round_down=true but even input → bit and evalue unchanged.
+        let bit_even_rd = kbp.raw_to_bit(8);
+        assert!((bit_even_rd - bit_even).abs() < 1e-14);
+        let _ = ev_odd;
+    }
+
+    #[test]
+    fn test_nucl_gapped_kbp_lookup_sets_round_down_for_2_minus_3() {
+        // `(reward, penalty) = (2, -3)` scoring system has only
+        // even-score entries, so NCBI sets `sbp->round_down = TRUE`.
+        // Verify the returned KBP carries the flag.
+        let ungapped = KarlinBlk {
+            lambda: 0.55,
+            k: 0.21,
+            log_k: 0.21_f64.ln(),
+            h: 0.46,
+            round_down: false,
+        };
+        // Gap costs that exist in KBPT_2_3.
+        let (kbp, rd) = nucl_gapped_kbp_lookup(4, 4, 2, -3, &ungapped).unwrap();
+        assert!(rd, "expected round_down=true for (2,-3)");
+        assert!(kbp.round_down, "returned KBP should carry round_down=true");
+    }
+
+    #[test]
+    fn test_evalue_to_raw_pathological_inputs() {
+        // Invalid lambda or searchsp returns `BLAST_SCORE_MIN`, matching
+        // NCBI `BlastKarlinEtoS_simple` (`blast_stat.c:4054-4057`).
+        let kbp = KarlinBlk {
+            lambda: 0.0, // invalid: `denom <= 0.0 || lambda <= 0.0` triggers.
+            k: 0.41,
+            log_k: 0.41_f64.ln(),
+            h: 0.78,
+            round_down: false,
+        };
+        assert_eq!(kbp.evalue_to_raw(1.0, 1.0e9), BLAST_SCORE_MIN);
+        let kbp_ok = KarlinBlk {
+            lambda: 0.625,
+            k: 0.41,
+            log_k: 0.41_f64.ln(),
+            h: 0.78,
+            round_down: false,
+        };
+        // Zero search space → denom == 0 → return `BLAST_SCORE_MIN`.
+        assert_eq!(kbp_ok.evalue_to_raw(1.0, 0.0), BLAST_SCORE_MIN);
+        // Non-positive e-values are clamped to 1e-297 (NCBI
+        // `BlastKarlinEtoS_simple`, `blast_stat.c:4059`) rather than
+        // early-returning. The resulting raw score is finite and large.
+        let clamped = kbp_ok.evalue_to_raw(-1.0, 1.0e9);
+        let expected = kbp_ok.evalue_to_raw(1.0e-297, 1.0e9);
+        assert_eq!(clamped, expected);
+        assert_eq!(kbp_ok.evalue_to_raw(0.0, 1.0e9), expected);
+    }
+
+    #[test]
     fn test_karlin_blk_valid() {
         let kbp = KarlinBlk {
             lambda: 0.208,
             k: 0.049,
             log_k: 0.049_f64.ln(),
             h: 0.14,
+            round_down: false,
         };
         assert!(kbp.is_valid());
     }
@@ -1247,20 +2261,13 @@ mod tests {
             k: 0.049,
             log_k: 0.049_f64.ln(),
             h: 0.14,
+            round_down: false,
         };
         let bit = kbp.raw_to_bit(50);
         assert!(bit > 0.0);
         // lambda * 50 / ln(2) - ln(K)/ln(2) ≈ 0.208*50/0.693 - ln(0.049)/0.693
         // ≈ 15.0 + 4.35 ≈ 19.35
         assert!((bit - 19.35).abs() < 0.5);
-    }
-
-    #[test]
-    fn test_lookup_nucleotide_params() {
-        let params = lookup_nucleotide_params(1, -3, 5, 2).unwrap();
-        assert_eq!(params.gap_open, 5);
-        assert_eq!(params.gap_extend, 2);
-        assert!((params.lambda - 0.208).abs() < 0.001);
     }
 
     #[test]
@@ -1570,6 +2577,7 @@ mod tests {
             k: kbp.k,
             log_k: kbp.k.ln(),
             h: kbp.h,
+            round_down: false,
         };
         // Test cases from NCBI stat_unit_test.cpp
         let cases = [
@@ -1718,6 +2726,7 @@ mod tests {
             k: 0.041,
             log_k: 0.041_f64.ln(),
             h: 0.14,
+            round_down: false,
         };
         let search_space = 1e9;
         // For a given raw score, convert to evalue, then back to raw score
@@ -1819,6 +2828,7 @@ mod tests {
             k: 0.0,
             log_k: f64::NEG_INFINITY,
             h: 0.0,
+            round_down: false,
         };
         let adj = compute_length_adjustment(100, 1000000, 100, &kbp);
         assert_eq!(adj, 0);

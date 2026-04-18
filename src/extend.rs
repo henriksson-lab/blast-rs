@@ -162,7 +162,9 @@ fn blastna_score(a: u8, b: u8, reward: i32, penalty: i32) -> i32 {
         return penalty;
     }
     let degen = DEGEN[a.max(b)];
-    (((degen - 1) * penalty + reward) as f64 / degen as f64).round() as i32
+    // NCBI `blast_stat.c:1106`:
+    //   (Int4)BLAST_Nint((double)((degeneracy[i2]-1)*penalty + reward) / degeneracy[i2])
+    crate::math::nint(((degen - 1) * penalty + reward) as f64 / degen as f64) as i32
 }
 
 #[cfg(test)]
@@ -198,7 +200,7 @@ mod tests {
 
     /// Helper: pack a slice of bases (0..3) into NCBI2na packed bytes.
     fn pack_ncbi2na(bases: &[u8]) -> Vec<u8> {
-        let mut packed = vec![0u8; (bases.len() + 3) / 4];
+        let mut packed = vec![0u8; bases.len().div_ceil(4)];
         for (i, &b) in bases.iter().enumerate() {
             packed[i / 4] |= (b & 3) << (6 - 2 * (i % 4));
         }
@@ -279,7 +281,7 @@ mod tests {
     fn test_ungapped_extend_all_matches() {
         // 16 bases, all A, perfect match — extension should cover full length.
         let query = vec![0u8; 16];
-        let subject = pack_ncbi2na(&vec![0u8; 16]);
+        let subject = pack_ncbi2na(&[0u8; 16]);
 
         let result = na_ungapped_extend_len(&query, &subject, 16, 8, 8, 2, -3, 100);
         assert!(result.is_some());

@@ -1,8 +1,10 @@
 //! Scoring matrices and frequency ratios for BLAST.
 //! Rust equivalent of matrix_freq_ratios.c and parts of blast_stat.c.
 
-/// Standard amino acid alphabet size.
-pub const AA_SIZE: usize = 28;
+/// Standard amino acid alphabet size. Aliases `encoding::BLASTAA_SIZE`
+/// (NCBI `blast_encoding.h:BLASTAA_SIZE = 28`) for legacy call sites
+/// that import from `matrix` rather than `encoding`.
+pub const AA_SIZE: usize = crate::encoding::BLASTAA_SIZE;
 
 /// BLOSUM62 scoring matrix (NCBIstdaa order, 28x28).
 /// Row/column order: -ABCDEFGHIKLMNPQRSTVWXYZU*OJ
@@ -1043,84 +1045,6 @@ static BLOSUM62_FREQ_RATIOS: [[f64; AA_SIZE]; AA_SIZE] = [
     ],
 ];
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_nucleotide_matrix() {
-        let m = nucleotide_matrix(1, -3);
-        assert_eq!(m[0][0], 1); // A-A match
-        assert_eq!(m[0][1], -3); // A-C mismatch
-        assert_eq!(m[2][2], 1); // G-G match
-        assert_eq!(m[3][0], -3); // T-A mismatch
-    }
-
-    #[test]
-    fn test_blosum62_has_positive_diagonal() {
-        // The BLOSUM62 matrix should have positive self-scores for all standard
-        // amino acids. NCBIstdaa indices 1-20 are the standard 20 amino acids.
-        // If this test fails, the BLOSUM62 matrix is not properly initialized.
-        for i in 1..=20 {
-            assert!(
-                BLOSUM62[i][i] > 0,
-                "BLOSUM62 diagonal for NCBIstdaa index {} should be positive, got {}. \
-                 The BLOSUM62 matrix appears to be uninitialized (all zeros).",
-                i,
-                BLOSUM62[i][i]
-            );
-        }
-    }
-
-    #[test]
-    fn test_blosum62_known_values() {
-        // Known BLOSUM62 values in NCBIstdaa order:
-        // A (index 1) self-score should be 4
-        // M (index 12) self-score should be 5
-        // W (index 20) self-score should be 11
-        // A-R (indices 1,16) should be -1
-        //
-        // If these fail, the matrix is either not populated or in the wrong index order.
-        assert_eq!(BLOSUM62[1][1], 4, "A-A should be 4");
-        assert_eq!(
-            BLOSUM62[12][12], 5,
-            "M-M should be 5 (currently {})",
-            BLOSUM62[12][12]
-        );
-        assert_eq!(BLOSUM62[20][20], 11, "W-W should be 11");
-        assert_eq!(BLOSUM62[1][16], -1, "A-R should be -1");
-    }
-
-    #[test]
-    fn test_blosum62_symmetric() {
-        // BLOSUM62 should be symmetric: M[i][j] == M[j][i]
-        for i in 0..AA_SIZE {
-            for j in 0..AA_SIZE {
-                assert_eq!(
-                    BLOSUM62[i][j], BLOSUM62[j][i],
-                    "BLOSUM62 not symmetric at [{i}][{j}]: {} vs {}",
-                    BLOSUM62[i][j], BLOSUM62[j][i]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_aa_frequencies_sum() {
-        let sum: f64 = AA_FREQUENCIES.iter().sum();
-        assert!(
-            (sum - 1.0).abs() < 0.05,
-            "AA frequencies should sum to ~1.0, got {}",
-            sum
-        );
-    }
-
-    #[test]
-    fn test_nt_frequencies_sum() {
-        let sum: f64 = NT_FREQUENCIES.iter().sum();
-        assert!((sum - 1.0).abs() < 0.001);
-    }
-}
 pub static BLOSUM45: [[i32; AA_SIZE]; AA_SIZE] = [
     [
         -1, -1, -1, -2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, -1, -2, -1, -1,
@@ -1924,3 +1848,82 @@ pub static PAM250: [[i32; AA_SIZE]; AA_SIZE] = [
         -1, -8, -1, -1,
     ], // J
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nucleotide_matrix() {
+        let m = nucleotide_matrix(1, -3);
+        assert_eq!(m[0][0], 1); // A-A match
+        assert_eq!(m[0][1], -3); // A-C mismatch
+        assert_eq!(m[2][2], 1); // G-G match
+        assert_eq!(m[3][0], -3); // T-A mismatch
+    }
+
+    #[test]
+    fn test_blosum62_has_positive_diagonal() {
+        // The BLOSUM62 matrix should have positive self-scores for all standard
+        // amino acids. NCBIstdaa indices 1-20 are the standard 20 amino acids.
+        // If this test fails, the BLOSUM62 matrix is not properly initialized.
+        for i in 1..=20 {
+            assert!(
+                BLOSUM62[i][i] > 0,
+                "BLOSUM62 diagonal for NCBIstdaa index {} should be positive, got {}. \
+                 The BLOSUM62 matrix appears to be uninitialized (all zeros).",
+                i,
+                BLOSUM62[i][i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_blosum62_known_values() {
+        // Known BLOSUM62 values in NCBIstdaa order:
+        // A (index 1) self-score should be 4
+        // M (index 12) self-score should be 5
+        // W (index 20) self-score should be 11
+        // A-R (indices 1,16) should be -1
+        //
+        // If these fail, the matrix is either not populated or in the wrong index order.
+        assert_eq!(BLOSUM62[1][1], 4, "A-A should be 4");
+        assert_eq!(
+            BLOSUM62[12][12], 5,
+            "M-M should be 5 (currently {})",
+            BLOSUM62[12][12]
+        );
+        assert_eq!(BLOSUM62[20][20], 11, "W-W should be 11");
+        assert_eq!(BLOSUM62[1][16], -1, "A-R should be -1");
+    }
+
+    #[test]
+    fn test_blosum62_symmetric() {
+        // BLOSUM62 should be symmetric: M[i][j] == M[j][i]
+        for i in 0..AA_SIZE {
+            for j in 0..AA_SIZE {
+                assert_eq!(
+                    BLOSUM62[i][j], BLOSUM62[j][i],
+                    "BLOSUM62 not symmetric at [{i}][{j}]: {} vs {}",
+                    BLOSUM62[i][j], BLOSUM62[j][i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_aa_frequencies_sum() {
+        let sum: f64 = AA_FREQUENCIES.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 0.05,
+            "AA frequencies should sum to ~1.0, got {}",
+            sum
+        );
+    }
+
+    #[test]
+    fn test_nt_frequencies_sum() {
+        let sum: f64 = NT_FREQUENCIES.iter().sum();
+        assert!((sum - 1.0).abs() < 0.001);
+    }
+}

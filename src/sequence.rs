@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip() {
         // Encode standard bases then decode back, verify identity
-        for &base in &[b'A', b'C', b'G', b'T'] {
+        for &base in b"ACGT" {
             let encoded = iupac_to_blastna(base);
             let decoded = blastna_to_iupac(encoded);
             assert_eq!(decoded as u8, base);

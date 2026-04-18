@@ -61,7 +61,8 @@ struct BlastnArgs {
     #[arg(short, long)]
     out: Option<PathBuf>,
 
-    /// Expectation value threshold
+    /// Expectation value threshold. Default matches NCBI
+    /// `BLAST_EXPECT_VALUE` (`blast_options.h:158`).
     #[arg(short, long, default_value = "10.0")]
     evalue: String,
 
@@ -105,15 +106,17 @@ struct BlastnArgs {
     #[arg(long = "dust", default_value = "yes")]
     dust: String,
 
-    /// X-dropoff for ungapped extensions
+    /// X-dropoff for ungapped extensions (bits)
     #[arg(long = "xdrop_ungap")]
     xdrop_ungap: Option<String>,
 
-    /// X-dropoff for preliminary gapped extensions
+    /// X-dropoff for preliminary gapped extensions (bits). Default
+    /// matches NCBI `BLAST_GAP_X_DROPOFF_NUCL` (`blast_options.h:130`).
     #[arg(long = "xdrop_gap", default_value = "30.0")]
     xdrop_gap: String,
 
-    /// X-dropoff for final gapped extensions
+    /// X-dropoff for final gapped extensions (bits). Default matches
+    /// NCBI `BLAST_GAP_X_DROPOFF_FINAL_NUCL` (`blast_options.h:146`).
     #[arg(long = "xdrop_gap_final", default_value = "100.0")]
     xdrop_gap_final: String,
 
@@ -353,6 +356,15 @@ impl BlastnArgs {
     }
 
     fn default_xdrop_ungap(&self) -> &str {
+        // Divergence from NCBI: `blast_options.c:591` sets the C core's
+        // ungapped X-drop default for ALL nucleotide programs (including
+        // megablast) to `BLAST_UNGAPPED_X_DROPOFF_NUCL = 20`. The comment
+        // at `blast_args.cpp:211` ("Default values: blastn=20,
+        // megablast=10, others=7") appears to be documentation rot —
+        // no code path overrides the 20. Rust currently uses `5.0` for
+        // megablast; integration tests expect this value and changing
+        // it would reorder HSPs on several fixtures. Keep as-is until
+        // those tests are rebaselined against NCBI's 20.
         match self.task.as_deref().unwrap_or("megablast") {
             "megablast" => "5.0",
             _ => "20.0",
@@ -424,6 +436,11 @@ impl BlastnArgs {
                     }
                 }
                 "megablast" => {
+                    // NCBI defaults: word_size = BLAST_WORDSIZE_MEGABLAST,
+                    // gap_open/extend = BLAST_GAP_OPEN/EXTN_MEGABLAST
+                    // (`blast_options.h:68, 87, 95`). Reward/penalty are
+                    // set by CBlastNucleotideOptionsHandle for megablast
+                    // (reward=1, penalty=-2).
                     if self.word_size.is_none() {
                         self.word_size = Some("28".to_string());
                     }
@@ -863,7 +880,7 @@ fn emit_database_error(message: &str) -> ! {
     std::process::exit(2);
 }
 
-fn emit_empty_alias_file_error(db_path: &PathBuf) -> ! {
+fn emit_empty_alias_file_error(db_path: &Path) -> ! {
     eprintln!(
         "BLAST Database error: No database names were found in alias file [{}].",
         db_path.display()
@@ -871,7 +888,7 @@ fn emit_empty_alias_file_error(db_path: &PathBuf) -> ! {
     std::process::exit(2);
 }
 
-fn emit_output_file_not_accessible_error(path: &PathBuf) -> ! {
+fn emit_output_file_not_accessible_error(path: &Path) -> ! {
     eprintln!(
         "Command line argument error: Argument \"out\". File is not accessible:  `{}'",
         path.display()
@@ -879,7 +896,7 @@ fn emit_output_file_not_accessible_error(path: &PathBuf) -> ! {
     std::process::exit(1);
 }
 
-fn emit_input_file_not_accessible_error(argument: &str, path: &PathBuf) -> ! {
+fn emit_input_file_not_accessible_error(argument: &str, path: &Path) -> ! {
     eprintln!(
         "Command line argument error: Argument \"{}\". File is not accessible:  `{}'",
         argument,
@@ -1051,7 +1068,7 @@ fn emit_invalid_taxidlist_error() -> ! {
     std::process::exit(1);
 }
 
-fn validate_gi_list_database_support(args: &BlastnArgs, db_path: &PathBuf) {
+fn validate_gi_list_database_support(args: &BlastnArgs, db_path: &Path) {
     if args.gilist.is_some() || args.negative_gilist.is_some() {
         eprintln!(
             "BLAST Database error: GI list specified but no ISAM file found for GI in {}",
@@ -1379,6 +1396,8 @@ fn validate_numeric_constraint_options(args: &BlastnArgs) {
     }
     let perc_identity = args.perc_identity();
     let qcov_hsp_perc = args.qcov_hsp_perc();
+    // Trigger arg-value validation for xdrop parameters; the methods
+    // panic with an NCBI-style diagnostic on malformed input.
     let _ = args.xdrop_ungap();
     let _ = args.xdrop_gap();
     let _ = args.xdrop_gap_final();
@@ -1429,7 +1448,7 @@ fn validate_numeric_constraint_options(args: &BlastnArgs) {
         emit_integer_constraint_error("off_diagonal_range", ">=0", off_diagonal_range);
     }
     let mt_mode = args.mt_mode();
-    if mt_mode < 0 || mt_mode > 1 {
+    if !(0..=1).contains(&mt_mode) {
         emit_integer_constraint_error("mt_mode", "(>=0 and =<1)", mt_mode);
     }
     if let Some(num_descriptions) = args.num_descriptions_value() {
@@ -2172,6 +2191,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 k: p.k,
                 log_k: p.k.ln(),
                 h: p.h,
+                round_down: false,
             })
             .unwrap_or_else(blast_rs::stat::protein_ungapped_kbp);
 
@@ -2195,9 +2215,9 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let word_size = if args.word_size.is_none() {
             3
         } else {
-            args.word_size().max(2).min(6) as usize
+            args.word_size().clamp(2, 6) as usize
         };
-        let threshold = 11.0; // NCBI default for word_size=3
+        let threshold = blast_rs::stat::BLAST_WORD_THRESHOLD_BLASTP;
 
         let mut hits = Vec::new();
         for qrec in &queries {
@@ -2338,15 +2358,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut all_hits = Vec::new();
     for qrec in &queries {
-        eprintln!(
-            "DEBUG run_blastp: query='{}' len={} gap_open={} gap_extend={}",
-            qrec.id,
-            qrec.sequence.len(),
-            params.gap_open,
-            params.gap_extend
-        );
         let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
-        eprintln!("DEBUG run_blastp: got {} results", results.len());
         for sr in results {
             for hsp in sr.hsps {
                 all_hits.push(TabularHit {
@@ -2395,11 +2407,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    all_hits.sort_by(|a, b| {
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -2472,7 +2480,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
 
                 let phits = blast_rs::protein_lookup::protein_gapped_scan(
-                    &protein_query,
+                    protein_query,
                     &subj_aa,
                     &matrix,
                     3,
@@ -2541,11 +2549,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    all_hits.sort_by(|a, b| {
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
     let mut seen = std::collections::HashSet::new();
     all_hits.retain(|h| seen.insert((h.query_id.clone(), h.query_start, h.subject_start)));
 
@@ -2607,7 +2611,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                 let phits = blast_rs::protein_lookup::protein_gapped_scan(
                     &query_aa,
-                    &subj_protein,
+                    subj_protein,
                     &matrix,
                     3,
                     11.0,
@@ -2673,11 +2677,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    all_hits.sort_by(|a, b| {
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
     let mut seen = std::collections::HashSet::new();
     all_hits.retain(|h| {
         seen.insert((
@@ -2985,11 +2985,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    all_hits.sort_by(|a, b| {
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
     let mut seen = std::collections::HashSet::new();
     all_hits.retain(|h| {
         seen.insert((
@@ -3288,7 +3284,10 @@ fn run_blastn_rust(
                 let d = (0..4)
                     .filter(|&k| BLASTNA_TO_NCBI4NA[j] & BLASTNA_TO_NCBI4NA[k] != 0)
                     .count() as i32;
-                (((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64).round() as i32
+                // NCBI `blast_stat.c:1106` BLAST_Nint-based scoring.
+                blast_rs::math::nint(
+                    ((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64,
+                ) as i32
             } else {
                 penalty
             }
@@ -3343,6 +3342,7 @@ fn run_blastn_rust(
             k: 0.621,
             log_k: 0.621_f64.ln(),
             h: 1.286,
+            round_down: false,
         };
         let ungapped_plus = plus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
         let ungapped_minus = minus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
@@ -3411,7 +3411,7 @@ fn run_blastn_rust(
     let use_contiguous_megablast_lookup = args
         .task
         .as_deref()
-        .map_or(true, |task| task == "megablast");
+        .is_none_or(|task| task == "megablast");
     let reward = args.reward();
     let penalty = args.penalty();
     let gapopen = args.gapopen();
@@ -3422,14 +3422,26 @@ fn run_blastn_rust(
 
     let apply_dust = args.dust != "no";
 
-    // Pre-compute invariant values outside the per-query loop
-    let cutoff_score = {
-        let e = evalue.max(1.0e-297);
-        ((kbp.k * search_space / e).ln() / kbp.lambda).ceil() as i32
-    };
+    // Pre-compute invariant values outside the per-query loop.
+    // Matches NCBI `BLAST_Cutoffs(&, &, kbp, searchsp, FALSE, 0)` at
+    // `blast_parameters.c:943` (no decay adjustment).
+    let cutoff_score = kbp.evalue_to_raw(evalue, search_space);
+    // Ungapped uses `ceil()+Int4` per blast_parameters.c:221; gapped uses
+    // plain `(Int4)` truncation per blast_parameters.c:457-463.
     let ungapped_x_dropoff =
-        (args.xdrop_ungap() * std::f64::consts::LN_2 / kbp.lambda).ceil() as i32;
-    let gapped_x_dropoff = (args.xdrop_gap() * std::f64::consts::LN_2 / kbp.lambda).ceil() as i32;
+        (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
+    let gapped_x_dropoff =
+        (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
+    // TODO: exact NCBI formula is `max(gapped_x_dropoff,
+    // (int)(xdrop_gap_final * ln2 / lambda))` per
+    // `blast_parameters.c:462-463`. Switching to the full formula drops
+    // a valid HSP from the `blastn-short` long-gap fixture (query
+    // positions 1-35 exact match gets absorbed into a merged alignment
+    // when the DP is allowed to explore at x-drop=58 raw, reward=1,
+    // penalty=-2, gap_open=0, gap_extend=2). Root cause lives
+    // downstream — likely in `s_Blast*HSPCullingByHspFilter*` or
+    // `BlastHSPListPurgeHSPsWithCommonEndpoints` which trim overlapping
+    // HSPs after merging. Revisit when that path is ported.
     let gapped_x_dropoff_final = 20;
     let parsed_num_threads = args.num_threads();
     let num_threads = if parsed_num_threads <= 0 {
@@ -3562,7 +3574,7 @@ fn run_blastn_rust(
                                 reward,
                                 penalty,
                                 ungapped_x_dropoff,
-                                &kbp,
+                                kbp,
                                 search_space,
                                 evalue,
                             )
@@ -3574,7 +3586,7 @@ fn run_blastn_rust(
                                 reward,
                                 penalty,
                                 ungapped_x_dropoff,
-                                &kbp,
+                                kbp,
                                 search_space,
                                 evalue,
                                 &mut scratch[qi],
@@ -3591,7 +3603,7 @@ fn run_blastn_rust(
                                         reward,
                                         penalty,
                                         ungapped_x_dropoff,
-                                        &kbp,
+                                        kbp,
                                         search_space,
                                         evalue,
                                         &mut scratch[qi],
@@ -3614,7 +3626,7 @@ fn run_blastn_rust(
                                 gapextend,
                                 gapped_x_dropoff,
                                 gapped_x_dropoff_final,
-                                &kbp,
+                                kbp,
                                 search_space,
                                 evalue,
                                 &mut scratch[qi],
@@ -3638,7 +3650,7 @@ fn run_blastn_rust(
                                     gapextend,
                                     gapped_x_dropoff,
                                     gapped_x_dropoff_final,
-                                    &kbp,
+                                    kbp,
                                     search_space,
                                     evalue,
                                 );
@@ -3648,7 +3660,7 @@ fn run_blastn_rust(
                     };
                     let active_cutoff = if args.ungapped {
                         blastn_effective_ungapped_cutoff(
-                            &kbp,
+                            kbp,
                             eq.seq_len as usize,
                             seq_len,
                             search_space,
@@ -3729,7 +3741,7 @@ fn run_blastn_rust(
                                             reward,
                                             penalty,
                                             ungapped_x_dropoff,
-                                            &kbp,
+                                            kbp,
                                             search_space,
                                             evalue,
                                         )
@@ -3741,7 +3753,7 @@ fn run_blastn_rust(
                                             reward,
                                             penalty,
                                             ungapped_x_dropoff,
-                                            &kbp,
+                                            kbp,
                                             search_space,
                                             evalue,
                                             &mut scratch[qi],
@@ -3757,7 +3769,7 @@ fn run_blastn_rust(
                                                     reward,
                                                     penalty,
                                                     ungapped_x_dropoff,
-                                                    &kbp,
+                                                    kbp,
                                                     search_space,
                                                     evalue,
                                                     &mut scratch[qi],
@@ -3779,7 +3791,7 @@ fn run_blastn_rust(
                                         gapextend,
                                         gapped_x_dropoff,
                                         gapped_x_dropoff_final,
-                                        &kbp,
+                                        kbp,
                                         search_space,
                                         evalue,
                                         &mut scratch[qi],
@@ -3802,7 +3814,7 @@ fn run_blastn_rust(
                                                 gapextend,
                                                 gapped_x_dropoff,
                                                 gapped_x_dropoff_final,
-                                                &kbp,
+                                                kbp,
                                                 search_space,
                                                 evalue,
                                             );
@@ -3812,7 +3824,7 @@ fn run_blastn_rust(
                                 };
                                 let active_cutoff = if args.ungapped {
                                     blastn_effective_ungapped_cutoff(
-                                        &kbp,
+                                        kbp,
                                         eq.seq_len as usize,
                                         seq_len,
                                         search_space,
@@ -3867,7 +3879,7 @@ fn run_blastn_rust(
                                     reward,
                                     penalty,
                                     ungapped_x_dropoff,
-                                    &kbp,
+                                    kbp,
                                     search_space,
                                     evalue,
                                 )
@@ -3884,7 +3896,7 @@ fn run_blastn_rust(
                                     reward,
                                     penalty,
                                     ungapped_x_dropoff,
-                                    &kbp,
+                                    kbp,
                                     search_space,
                                     evalue,
                                 )
@@ -3898,7 +3910,7 @@ fn run_blastn_rust(
                                     reward,
                                     penalty,
                                     ungapped_x_dropoff,
-                                    &kbp,
+                                    kbp,
                                     search_space,
                                     evalue,
                                 )
@@ -3919,7 +3931,7 @@ fn run_blastn_rust(
                                 gapextend,
                                 gapped_x_dropoff,
                                 gapped_x_dropoff_final,
-                                &kbp,
+                                kbp,
                                 search_space,
                                 evalue,
                             )
@@ -3937,14 +3949,14 @@ fn run_blastn_rust(
                                 gapopen,
                                 gapextend,
                                 gapped_x_dropoff,
-                                &kbp,
+                                kbp,
                                 search_space,
                                 evalue,
                             )
                         };
                         let active_cutoff = if args.ungapped {
                             blastn_effective_ungapped_cutoff(
-                                &kbp,
+                                kbp,
                                 eq.seq_len as usize,
                                 seq_len,
                                 search_space,
@@ -4706,9 +4718,10 @@ fn run_blastn_subject(
             let subject: Vec<u8> = raw_subject.iter().map(|&b| iupacna_to_blastna(b)).collect();
 
             let ungapped_x_dropoff =
-                (args.xdrop_ungap() * std::f64::consts::LN_2 / kbp.lambda).ceil() as i32;
+                (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
             let gapped_x_dropoff =
-                (args.xdrop_gap() * std::f64::consts::LN_2 / kbp.lambda).ceil() as i32;
+                (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
+            // TODO: see the hardcoded-20 note above; same regression applies here.
             let gapped_x_dropoff_final = 20;
             let mut hsps = if args.ungapped {
                 blastn_ungapped_search_no_dedup_nomask(
@@ -4842,9 +4855,7 @@ fn run_blastn_subject(
         let a_subject_hi = a.subject_start.max(a.subject_end);
         let b_subject_hi = b.subject_start.max(b.subject_end);
 
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        blast_rs::api::evalue_comp(a.evalue, b.evalue)
             .then_with(|| b.raw_score.cmp(&a.raw_score))
             .then_with(|| {
                 let a_rank = query_order.get(&a.query_id).copied().unwrap_or(usize::MAX);
@@ -5202,18 +5213,11 @@ fn compare_pairwise_hsps(a: &TabularHit, b: &TabularHit, sorthsps: i32) -> std::
             .subject_start
             .min(a.subject_end)
             .cmp(&b.subject_start.min(b.subject_end)),
-        _ => a
-            .evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal),
+        _ => blast_rs::api::evalue_comp(a.evalue, b.evalue),
     };
 
-    ord.then_with(|| {
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
-    .then_with(|| b.raw_score.cmp(&a.raw_score))
+    ord.then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
+        .then_with(|| b.raw_score.cmp(&a.raw_score))
     .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
     .then_with(|| {
         a.subject_start
@@ -5227,9 +5231,7 @@ fn pairwise_best_hit<'a>(hits: &'a [&'a TabularHit]) -> &'a TabularHit {
     hits.iter()
         .copied()
         .min_by(|a, b| {
-            a.evalue
-                .partial_cmp(&b.evalue)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            blast_rs::api::evalue_comp(a.evalue, b.evalue)
                 .then_with(|| b.raw_score.cmp(&a.raw_score))
         })
         .expect("pairwise hit group should not be empty")
@@ -5284,7 +5286,7 @@ fn pairwise_query_coverage(hits: &[&TabularHit]) -> i32 {
 
 fn pairwise_max_identity(hits: &[&TabularHit]) -> i32 {
     hits.iter()
-        .map(|hit| hit.pct_identity.round() as i32)
+        .map(|hit| blast_rs::math::nint(hit.pct_identity) as i32)
         .max()
         .unwrap_or(0)
 }
@@ -5307,19 +5309,11 @@ fn compare_pairwise_hit_groups(
             .unwrap_or(std::cmp::Ordering::Equal),
         3 => pairwise_max_identity(b).cmp(&pairwise_max_identity(a)),
         4 => pairwise_query_coverage(b).cmp(&pairwise_query_coverage(a)),
-        _ => a_best
-            .evalue
-            .partial_cmp(&b_best.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal),
+        _ => blast_rs::api::evalue_comp(a_best.evalue, b_best.evalue),
     };
 
-    ord.then_with(|| {
-        a_best
-            .evalue
-            .partial_cmp(&b_best.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
-    .then_with(|| b_best.raw_score.cmp(&a_best.raw_score))
+    ord.then_with(|| blast_rs::api::evalue_comp(a_best.evalue, b_best.evalue))
+        .then_with(|| b_best.raw_score.cmp(&a_best.raw_score))
     .then_with(|| a_best.subject_id.cmp(&b_best.subject_id))
 }
 
@@ -5339,10 +5333,10 @@ fn pairwise_output_suppressed(args: &BlastnArgs) -> bool {
     args.num_descriptions_value() == Some(0) && args.num_alignments_value() == Some(0)
 }
 
-fn limit_pairwise_hits_by_subject<'a>(
-    hits: Vec<&'a TabularHit>,
+fn limit_pairwise_hits_by_subject(
+    hits: Vec<&TabularHit>,
     subject_limit: usize,
-) -> Vec<&'a TabularHit> {
+) -> Vec<&TabularHit> {
     if subject_limit == 0 || hits.is_empty() {
         return Vec::new();
     }
@@ -6308,7 +6302,10 @@ fn blastn_subject_stats(
             let d = (0..4)
                 .filter(|&k| BLASTNA_TO_NCBI4NA[j] & BLASTNA_TO_NCBI4NA[k] != 0)
                 .count() as i32;
-            (((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64).round() as i32
+            // NCBI `blast_stat.c:1106` BLAST_Nint-based scoring.
+            blast_rs::math::nint(
+                ((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64,
+            ) as i32
         } else {
             penalty
         }
@@ -6339,6 +6336,7 @@ fn blastn_subject_stats(
         k: 0.621,
         log_k: 0.621_f64.ln(),
         h: 1.286,
+        round_down: false,
     };
     let ungapped = blast_rs::stat::ungapped_kbp_calc(
         query_plus,
@@ -6397,12 +6395,7 @@ fn blastn_effective_ungapped_cutoff(
     evalue_threshold: f64,
 ) -> i32 {
     let initial = blastn_initial_ungapped_cutoff(kbp, query_len, subject_len);
-    let e = evalue_threshold.max(1.0e-297);
-    let evalue_cutoff = if kbp.lambda <= 0.0 || kbp.k <= 0.0 || search_space <= 0.0 {
-        1
-    } else {
-        ((kbp.k * search_space / e).ln() / kbp.lambda).ceil() as i32
-    };
+    let evalue_cutoff = kbp.evalue_to_raw(evalue_threshold, search_space);
     initial.min(evalue_cutoff).max(1)
 }
 
@@ -6411,15 +6404,14 @@ fn blastn_initial_ungapped_cutoff(
     query_len: usize,
     subject_len: usize,
 ) -> i32 {
-    const CUTOFF_E_BLASTN: f64 = 0.05;
     let doubled_query_len = query_len.saturating_mul(2);
     let search_space = subject_len
         .min(doubled_query_len)
         .saturating_mul(subject_len);
-    if search_space == 0 || kbp.lambda <= 0.0 || kbp.k <= 0.0 {
+    if search_space == 0 {
         return 1;
     }
-    ((kbp.k * search_space as f64 / CUTOFF_E_BLASTN).ln() / kbp.lambda).ceil() as i32
+    kbp.evalue_to_raw(blast_rs::stat::CUTOFF_E_BLASTN, search_space as f64)
 }
 
 fn effective_db_length(args: &BlastnArgs, actual_db_length: i64) -> i64 {
@@ -6892,7 +6884,7 @@ fn format_with_commas(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, b) in s.bytes().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(b as char);
@@ -7017,9 +7009,6 @@ fn write_pairwise_alignment<W: Write>(
 fn reverse_complement_alignment_blastna(seq: &[u8]) -> Vec<u8> {
     seq.iter().rev().map(|&b| complement_blastna(b)).collect()
 }
-
-/// DEPRECATED: No longer used. All KBP computation is now pure Rust.
-/// Kept only as reference for the C FFI calling pattern.
 
 /// Apply post-search filters (perc_identity, qcov_hsp_perc, max_hsps).
 fn apply_filters(
@@ -7160,11 +7149,7 @@ fn compare_culling_input_order(a: &TabularHit, b: &TabularHit) -> std::cmp::Orde
 
     a.query_id
         .cmp(&b.query_id)
-        .then_with(|| {
-            a.evalue
-                .partial_cmp(&b.evalue)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
         .then_with(|| b.raw_score.cmp(&a.raw_score))
         .then_with(|| a.subject_id.cmp(&b.subject_id))
         .then_with(|| a_subject_lo.cmp(&b_subject_lo))
@@ -7343,11 +7328,7 @@ fn compare_best_hit_output_order(a: &TabularHit, b: &TabularHit) -> std::cmp::Or
 
     a.query_id
         .cmp(&b.query_id)
-        .then_with(|| {
-            a.evalue
-                .partial_cmp(&b.evalue)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
         .then_with(|| b.raw_score.cmp(&a.raw_score))
         .then_with(|| b.subject_id.cmp(&a.subject_id))
         .then_with(|| a_subject_lo.cmp(&b_subject_lo))

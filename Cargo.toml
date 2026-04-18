@@ -41,6 +41,16 @@ lto = true
 codegen-units = 1
 opt-level = 3
 
+[lints.clippy]
+# BLAST C functions take many parameters (e.g. ALIGN_EX takes 14). Rust
+# ports mirror the C signatures so they can be compared line-by-line
+# against the NCBI source — don't "fix" by bundling args into structs.
+too_many_arguments = "allow"
+# NCBI uses C-style `for (i = 0; i < n; i++) arr[i] = ...` throughout.
+# Rust ports keep those loops indexed for line-by-line parity; converting
+# to `.iter_mut().enumerate()` would diverge from the C reference.
+needless_range_loop = "allow"
+
 
 [[bench]]
 name = "gapped_dp"
@@ -48,3 +58,4 @@ harness = false
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tracehash-rs = "0.1"

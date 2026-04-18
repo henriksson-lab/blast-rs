@@ -9,7 +9,7 @@
 //! - [`blastn`] — Builder API for blastn searches
 //! - [`db`] — BLAST database reader/writer
 //! - [`input`] — FASTA parser and sequence encoding
-//! - [`format`] — Output formatting (tabular, pairwise, XML, SAM)
+//! - [`mod@format`] — Output formatting (tabular, pairwise, XML, SAM)
 //! - [`search`] — Core search engine
 //! - [`stat`] — Karlin-Altschul statistics
 //! - [`filter`] — DUST low-complexity masking
@@ -101,7 +101,6 @@ pub mod util;
 
 // Internal modules used by the search engine (partially used — allow dead items
 // within them since they're ported from C and not all paths are active yet)
-#[allow(dead_code)]
 pub mod gapinfo;
 #[allow(dead_code)]
 pub(crate) mod hspstream;
@@ -114,7 +113,6 @@ pub(crate) mod options;
 // Kept for completeness and future use (e.g. full protein search, engine orchestration).
 #[allow(dead_code)]
 pub(crate) mod diagnostics;
-#[allow(dead_code)]
 pub mod encoding;
 #[allow(dead_code)]
 pub(crate) mod engine;
@@ -130,8 +128,7 @@ pub(crate) mod hits;
 pub(crate) mod listnode;
 #[allow(dead_code)]
 pub(crate) mod lookup;
-#[allow(dead_code)]
-pub(crate) mod math;
+pub mod math;
 #[allow(dead_code)]
 pub(crate) mod parameters;
 #[allow(dead_code)]

@@ -5,7 +5,7 @@ use crate::encoding::NCBI4NA_TO_BLASTNA;
 use crate::itree::{Interval, IntervalTree};
 use crate::sequence::blastna_to_iupac;
 use crate::stat::KarlinBlk;
-use crate::traceback::{blast_gapped_align, blast_gapped_score_only};
+use crate::traceback::{blast_gapped_align, blast_gapped_score_only, reevaluate_with_ambiguities_gapped};
 
 /// Result of a single HSP (High-Scoring Pair).
 #[derive(Debug, Clone)]
@@ -24,6 +24,18 @@ pub struct SearchHsp {
     pub context: i32, // 0=plus, 1=minus
     pub qseq: Option<String>,
     pub sseq: Option<String>,
+}
+
+/// Port of NCBI `ScoreCompareHSPs` (`blast_hits.c:1330`) for `SearchHsp`.
+/// Same tie-breaker structure as `hspstream::score_compare_hsps` but over
+/// `SearchHsp`'s `*_start`/`*_end` fields instead of `*_offset`/`*_end`.
+fn score_compare_search_hsps(a: &SearchHsp, b: &SearchHsp) -> std::cmp::Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| a.subject_start.cmp(&b.subject_start))
+        .then_with(|| b.subject_end.cmp(&a.subject_end))
+        .then_with(|| a.query_start.cmp(&b.query_start))
+        .then_with(|| b.query_end.cmp(&a.query_end))
 }
 
 /// Result of searching one query against one subject.
@@ -148,7 +160,7 @@ impl<'a> NaLookup<'a> {
 
         let mut lut: Vec<i32> = vec![-1; lut_size];
         let mut next: Vec<i32> = vec![-1; query.len()];
-        let pv_size = (lut_size + 63) / 64;
+        let pv_size = lut_size.div_ceil(64);
         let mut pv: Vec<u64> = vec![0; pv_size];
 
         for i in (0..=(query.len() - lut_word)).rev() {
@@ -447,7 +459,7 @@ fn blastn_ungapped_search_inner(
     }
 
     if dedup {
-        hsps.sort_by(|a, b| b.score.cmp(&a.score));
+        hsps.sort_by(score_compare_search_hsps);
         dedup_hsps_with_min_diag_separation(
             &mut hsps,
             min_diag_separation_for_ungapped(word_size, reward, penalty),
@@ -861,7 +873,7 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
         );
 
         if dedup {
-            hsps.sort_by(|a, b| b.score.cmp(&a.score));
+            hsps.sort_by(score_compare_search_hsps);
             dedup_hsps_with_min_diag_separation(
                 &mut hsps,
                 min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
@@ -959,7 +971,7 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
     }
 
     if dedup {
-        hsps.sort_by(|a, b| b.score.cmp(&a.score));
+        hsps.sort_by(score_compare_search_hsps);
         dedup_hsps_with_min_diag_separation(
             &mut hsps,
             min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
@@ -2057,15 +2069,11 @@ fn extend_seed(
 
 /// Remove HSPs that are contained within or significantly overlap higher-scoring ones.
 /// Uses an interval tree for efficient containment checking.
-fn dedup_hsps(hsps: &mut Vec<SearchHsp>) {
-    dedup_hsps_with_min_diag_separation(hsps, 0);
-}
-
 fn dedup_hsps_with_min_diag_separation(hsps: &mut Vec<SearchHsp>, min_diag_separation: i32) {
     if hsps.len() <= 1 {
         return;
     }
-    hsps.sort_by(|a, b| b.score.cmp(&a.score));
+    hsps.sort_by(score_compare_search_hsps);
 
     // Separate trees per context (strand)
     let q_max = hsps.iter().map(|h| h.query_end).max().unwrap_or(0) + 1;
@@ -2130,7 +2138,98 @@ fn blastna_score(a: u8, b: u8, reward: i32, penalty: i32) -> i32 {
         return penalty;
     }
     let degen = DEGEN[a.max(b)];
-    (((degen - 1) * penalty + reward) as f64 / degen as f64).round() as i32
+    // NCBI `blast_stat.c:1106`:
+    //   (Int4)BLAST_Nint((double)((degeneracy[i2]-1)*penalty + reward) / degeneracy[i2])
+    crate::math::nint(((degen - 1) * penalty + reward) as f64 / degen as f64) as i32
+}
+
+use crate::stat::HSP_MAX_WINDOW;
+
+/// Pick the gapped-alignment seed for a nucleotide ungapped HSP.
+///
+/// Port of `BlastGetOffsetsForGappedAlignment`
+/// (`blast_gapalign.c:3248`): slide an `HSP_MAX_WINDOW`-wide window of
+/// match/mismatch scores across the HSP, return the **strict** max-score
+/// window's right edge. For uniform-score HSPs (perfect matches) the first
+/// window wins and the returned offset is `q_start + HSP_MAX_WINDOW - 1`;
+/// that matches NCBI's tie-break (NCBI uses `if (score > max_score)` with
+/// strict `>`, so the first maximum is kept).
+///
+/// Returns `(q_off, s_off)` with the same semantics as NCBI's
+/// `*q_retval, *s_retval`.
+///
+/// NCBI also has a short-HSP fast path (`q_length <= HSP_MAX_WINDOW` →
+/// midpoint) and a `score > 0` fallback that checks the end window. Both
+/// are ported verbatim. Ambiguity handling matches NCBI's `matrix[q][s]`
+/// lookup (treating BLASTNA ambiguous codes via their matrix scores).
+fn blast_get_offsets_for_gapped_alignment(
+    query: &[u8],
+    subject: &[u8],
+    q_start: usize,
+    q_end: usize,
+    s_start: usize,
+    s_end: usize,
+    reward: i32,
+    penalty: i32,
+) -> Option<(usize, usize)> {
+    let q_length = q_end.saturating_sub(q_start);
+    let s_length = s_end.saturating_sub(s_start);
+    if q_length == 0 || s_length == 0 {
+        return None;
+    }
+    // Short-HSP fast path (blast_gapalign.c:3259-3263).
+    if q_length <= HSP_MAX_WINDOW {
+        let mid = q_length / 2;
+        return Some((q_start + mid, s_start + mid));
+    }
+
+    // Initial window [q_start .. q_start + HSP_MAX_WINDOW).
+    let mut score: i32 = 0;
+    for i in 0..HSP_MAX_WINDOW {
+        let q = query[q_start + i];
+        let s = subject[s_start + i];
+        score += blastna_score(q, s, reward, penalty);
+    }
+    let mut max_score = score;
+    let mut max_offset = q_start + HSP_MAX_WINDOW - 1;
+
+    // Slide the window to the end of the HSP.
+    let hsp_end = q_start + q_length.min(s_length);
+    for index1 in (q_start + HSP_MAX_WINDOW)..hsp_end {
+        let q_out = query[index1 - HSP_MAX_WINDOW];
+        let s_out = subject[(index1 - HSP_MAX_WINDOW) - q_start + s_start];
+        let q_in = query[index1];
+        let s_in = subject[index1 - q_start + s_start];
+        score -= blastna_score(q_out, s_out, reward, penalty);
+        score += blastna_score(q_in, s_in, reward, penalty);
+        // Strict > tie-break, matches NCBI blast_gapalign.c:3287.
+        if score > max_score {
+            max_score = score;
+            max_offset = index1;
+        }
+    }
+
+    if max_score > 0 {
+        return Some((max_offset, (max_offset - q_start) + s_start));
+    }
+
+    // Fallback: test the window at the end of the HSP
+    // (blast_gapalign.c:3300-3318).
+    let end_score: i32 = (0..HSP_MAX_WINDOW)
+        .map(|i| {
+            let q = query[q_end - HSP_MAX_WINDOW + i];
+            let s = subject[s_end - HSP_MAX_WINDOW + i];
+            blastna_score(q, s, reward, penalty)
+        })
+        .sum();
+    if end_score > 0 {
+        Some((
+            q_end - HSP_MAX_WINDOW / 2,
+            s_end - HSP_MAX_WINDOW / 2,
+        ))
+    } else {
+        None
+    }
 }
 
 fn min_diag_separation_for_gapped(
@@ -2140,6 +2239,11 @@ fn min_diag_separation_for_gapped(
     gap_open: i32,
     gap_extend: i32,
 ) -> i32 {
+    // NCBI `CBlastNucleotideOptionsHandle::SetMBHitSavingOptionsDefaults`
+    // (`blast_nucl_options.cpp:259`) sets min_diag_separation = 6 for
+    // megablast. Regular blastn (`SetHitSavingOptionsDefaults:239`)
+    // uses 50 but Rust currently only applies the megablast value on
+    // the matching scoring-system fingerprint.
     if word_size >= 28 && reward == 1 && penalty == -2 && gap_open == 0 && gap_extend == 0 {
         6
     } else {
@@ -2184,8 +2288,11 @@ pub fn blastn_gapped_search(
 }
 
 /// Gapped search with separate xdrop values for preliminary and final traceback.
-/// Currently uses only the preliminary `x_dropoff` — wiring `x_dropoff_final` into
-/// traceback is blocked on traceback-DP parity work (see TODO `xdrop_gap_final`).
+/// Passes `max(x_dropoff, x_dropoff_final)` to the traceback DP, matching NCBI
+/// `blast_parameters.c:462-463` which clamps the final x-drop to at least the
+/// preliminary value before handing it to `ALIGN_EX`. The CLI's caller still
+/// hardcodes the raw final value until the linear-gap lambda lookup matches
+/// NCBI for non-affine scoring systems (see `main.rs` lambda-table note).
 #[allow(clippy::too_many_arguments)]
 pub fn blastn_gapped_search_nomask_with_xdrops(
     query_plus: &[u8],
@@ -2199,11 +2306,19 @@ pub fn blastn_gapped_search_nomask_with_xdrops(
     gap_open: i32,
     gap_extend: i32,
     x_dropoff: i32,
-    _x_dropoff_final: i32,
+    x_dropoff_final: i32,
     kbp: &KarlinBlk,
     search_space: f64,
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
+    // NCBI's `BlastExtensionParametersNew` guarantees
+    // `gap_x_dropoff_final >= gap_x_dropoff`; traceback (`ALIGN_EX` in
+    // `blast_traceback.c`) uses the final value. Pass the final x_dropoff
+    // through so the traceback DP has the same exploration budget as NCBI.
+    // Preliminary score-only filtering (separate pass, inside
+    // `passes_preliminary_gapped_score`) still uses the stricter
+    // `x_dropoff`.
+    let effective = x_dropoff_final.max(x_dropoff);
     blastn_gapped_search_nomask(
         query_plus,
         query_minus,
@@ -2215,7 +2330,7 @@ pub fn blastn_gapped_search_nomask_with_xdrops(
         penalty,
         gap_open,
         gap_extend,
-        x_dropoff,
+        effective,
         kbp,
         search_space,
         evalue_threshold,
@@ -2270,10 +2385,27 @@ pub fn blastn_gapped_search_nomask(
             continue;
         }
 
-        // BLAST-style gapped alignment: bidirectional X-dropoff extension from seed
-        let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
-        let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
-
+        // Seed position for gapped extension. Mirrors NCBI's nucleotide path in
+        // blast_traceback.c:436-461: when `gapped_start` is unset (0,0), call
+        // `BlastGetOffsetsForGappedAlignment` to slide an 11-wide window and
+        // pick the max-score offset. Falls back to the midpoint if the seed
+        // picker returns None (extremely short HSPs or all-ambiguous regions).
+        let (seed_q, seed_s) = blast_get_offsets_for_gapped_alignment(
+            query,
+            subject,
+            seed.query_start as usize,
+            seed.query_end as usize,
+            seed.subject_start as usize,
+            seed.subject_end as usize,
+            reward,
+            penalty,
+        )
+        .unwrap_or_else(|| {
+            (
+                ((seed.query_start + seed.query_end) / 2) as usize,
+                ((seed.subject_start + seed.subject_end) / 2) as usize,
+            )
+        });
         if !passes_preliminary_gapped_score(
             query,
             subject,
@@ -2291,7 +2423,7 @@ pub fn blastn_gapped_search_nomask(
             continue;
         }
 
-        if let Some(tb) = blast_gapped_align(
+        if let Some(mut tb) = blast_gapped_align(
             query,
             subject,
             seed_q,
@@ -2302,6 +2434,27 @@ pub fn blastn_gapped_search_nomask(
             _gap_extend,
             x_dropoff,
         ) {
+            // NCBI runs `Blast_HSPReevaluateWithAmbiguitiesGapped` after
+            // `ALIGN_EX` (`blast_traceback.c:657`). The cutoff_score comes
+            // from `hit_params->cutoffs[context].cutoff_score` which is the
+            // e-value-based cutoff derived from KBP, search_space, and the
+            // user's evalue threshold (no decay adjustment — NCBI passes
+            // `dodecay=FALSE` at `blast_parameters.c:943`).
+            let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
+            let _delete = reevaluate_with_ambiguities_gapped(
+                &mut tb,
+                query,
+                subject,
+                reward,
+                penalty,
+                _gap_open,
+                _gap_extend,
+                cutoff_score.max(1),
+            );
+            if _delete {
+                continue;
+            }
+
             let evalue = kbp.raw_to_evalue(tb.score, search_space);
             if evalue > evalue_threshold {
                 continue;
@@ -2337,7 +2490,7 @@ pub fn blastn_gapped_search_nomask(
         }
     }
 
-    hsps.sort_by(|a, b| b.score.cmp(&a.score));
+    hsps.sort_by(score_compare_search_hsps);
     dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
     hsps
 }
@@ -2385,8 +2538,23 @@ fn blastn_gapped_search_decoded_prepared_with_scratch(
             continue;
         }
 
-        let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
-        let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
+        // Same NCBI-style seed picker as the non-prepared variant above.
+        let (seed_q, seed_s) = blast_get_offsets_for_gapped_alignment(
+            query,
+            subject,
+            seed.query_start as usize,
+            seed.query_end as usize,
+            seed.subject_start as usize,
+            seed.subject_end as usize,
+            reward,
+            penalty,
+        )
+        .unwrap_or_else(|| {
+            (
+                ((seed.query_start + seed.query_end) / 2) as usize,
+                ((seed.subject_start + seed.subject_end) / 2) as usize,
+            )
+        });
 
         if !passes_preliminary_gapped_score(
             query,
@@ -2405,9 +2573,27 @@ fn blastn_gapped_search_decoded_prepared_with_scratch(
             continue;
         }
 
-        if let Some(tb) = blast_gapped_align(
+        if let Some(mut tb) = blast_gapped_align(
             query, subject, seed_q, seed_s, reward, penalty, gap_open, gap_extend, x_dropoff,
         ) {
+            // Same reevaluate pass as the non-prepared variant —
+            // see `blast_traceback.c:657`. Matches NCBI `BLAST_Cutoffs`
+            // with `dodecay=FALSE` (`blast_parameters.c:943`).
+            let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
+            let _delete = reevaluate_with_ambiguities_gapped(
+                &mut tb,
+                query,
+                subject,
+                reward,
+                penalty,
+                gap_open,
+                gap_extend,
+                cutoff_score.max(1),
+            );
+            if _delete {
+                continue;
+            }
+
             let evalue = kbp.raw_to_evalue(tb.score, search_space);
             if evalue > evalue_threshold {
                 continue;
@@ -2442,7 +2628,7 @@ fn blastn_gapped_search_decoded_prepared_with_scratch(
         }
     }
 
-    hsps.sort_by(|a, b| b.score.cmp(&a.score));
+    hsps.sort_by(score_compare_search_hsps);
     dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
     hsps
 }
@@ -2504,9 +2690,10 @@ pub fn blastn_gapped_search_packed(
     )
 }
 
-/// Variant of `blastn_gapped_search_packed_prepared` that accepts both the preliminary
-/// and final gapped x-drop values. Currently uses only the preliminary value; final
-/// x-drop wiring is blocked on traceback DP parity work.
+/// Variant of `blastn_gapped_search_packed_prepared` that accepts both the
+/// preliminary and final gapped x-drop values. Pass the final value through
+/// (`max(x_dropoff, x_dropoff_final)`) to match NCBI's `ALIGN_EX` traceback
+/// exploration budget.
 #[allow(clippy::too_many_arguments)]
 pub fn blastn_gapped_search_packed_prepared_with_xdrops(
     prepared: &PreparedBlastnQuery<'_>,
@@ -2519,12 +2706,13 @@ pub fn blastn_gapped_search_packed_prepared_with_xdrops(
     gap_open: i32,
     gap_extend: i32,
     x_dropoff: i32,
-    _x_dropoff_final: i32,
+    x_dropoff_final: i32,
     kbp: &KarlinBlk,
     search_space: f64,
     evalue_threshold: f64,
     last_hit_scratch: &mut [Vec<i32>],
 ) -> Vec<SearchHsp> {
+    let effective = x_dropoff_final.max(x_dropoff);
     blastn_gapped_search_packed_prepared(
         prepared,
         query_plus_nomask,
@@ -2535,7 +2723,7 @@ pub fn blastn_gapped_search_packed_prepared_with_xdrops(
         penalty,
         gap_open,
         gap_extend,
-        x_dropoff,
+        effective,
         kbp,
         search_space,
         evalue_threshold,
@@ -2800,6 +2988,7 @@ mod tests {
             k: 0.049,
             log_k: 0.049_f64.ln(),
             h: 0.14,
+            round_down: false,
         }
     }
 
@@ -3146,9 +3335,7 @@ mod tests {
 
         // Subject with partial match (only first 9 bases match at pos 5)
         let mut subject = vec![3u8; 40];
-        for i in 0..9 {
-            subject[5 + i] = query[i];
-        }
+        subject[5..5 + 9].copy_from_slice(&query[..9]);
         // Also a full match at position 25
         for (i, &b) in query.iter().enumerate() {
             subject[25 + i] = b;

@@ -12789,7 +12789,8 @@ fn test_blastp_vs_ncbi() {
 
     // Known queries from Prokka plasmid test with NCBI BLAST+ results (comp_based_stats=0).
     // Format: (name, query_seq, ncbi_top_accession, ncbi_score, ncbi_evalue, ncbi_length)
-    let known: Vec<(&str, &[u8], &str, i32, f64, usize)> = vec![
+    type ProkkaExpectedRow<'a> = (&'a str, &'a [u8], &'a str, i32, f64, usize);
+    let known: Vec<ProkkaExpectedRow> = vec![
         // topB — DNA topoisomerase 3
         // NCBI blastp 2.12.0+ comp_based_stats=0: P14294 score=714 e=3.15e-84 len=666
         ("topB",
@@ -12890,8 +12891,6 @@ fn test_blastp_vs_ncbi() {
 #[test]
 #[ignore]
 fn test_blastp_plasmid_annotation_count() {
-    use blast_rs::encoding::AMINOACID_TO_NCBISTDAA;
-
     let sprot_paths = [
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../prokka-rs/prokka/db/kingdom/Bacteria/sprot"),
@@ -12925,7 +12924,7 @@ fn test_blastp_plasmid_annotation_count() {
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
 
     // Load plasmid CDS proteins from the .faa file if available, or skip
-    let faa_paths = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let _faa_paths = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../prokka-rs/tests/data/plasmid_cds.faa")];
     // If no .faa file, generate proteins by running prodigal on the plasmid
     // For now, use hardcoded test proteins from known CDS
@@ -13017,7 +13016,8 @@ fn test_lambda_ratio_stress() {
 
     // Compositionally biased queries with NCBI reference values.
     // (name, query, ncbi_mode0_score, ncbi_mode1_score, ncbi_mode0_acc, ncbi_mode1_acc)
-    let biased_queries: Vec<(&str, &[u8], i32, i32, &str, &str)> = vec![
+    type BiasedQueryRow<'a> = (&'a str, &'a [u8], i32, i32, &'a str, &'a str);
+    let biased_queries: Vec<BiasedQueryRow> = vec![
         // Pro-rich: extreme proline bias, NCBI mode1 drops score 36% and changes top hit
         ("pro_rich",
          b"MPPPPVALPPTPPEAPPPPAQPPDPPAQPPPPAQPVAPPAPPTPPEAPPPTAQPVAPPAPPTLPEAPPPTAQ",
@@ -13104,15 +13104,14 @@ fn test_lambda_ratio_stress() {
 
         // Check mode 1 score direction matches NCBI:
         // If NCBI score decreased, ours should also decrease (or at least not increase much)
-        if *ncbi_m1_score < *ncbi_m0_score {
-            if score_1 > score_0 + 5 {
+        if *ncbi_m1_score < *ncbi_m0_score
+            && score_1 > score_0 + 5 {
                 failures.push(format!(
                     "{}: mode1 score INCREASED ({} → {}) but NCBI DECREASED ({} → {}). \
                      Lambda ratio is likely wrong.",
                     name, score_0, score_1, ncbi_m0_score, ncbi_m1_score
                 ));
             }
-        }
     }
 
     if !failures.is_empty() {
@@ -14206,7 +14205,7 @@ fn test_blastp_swissprot() {
 
     // Sanity: most queries should find at least a self-hit
     assert!(
-        total_hits >= num_queries as usize,
+        total_hits >= num_queries,
         "Expected at least {} hits (one self-hit per query), got {}",
         num_queries,
         total_hits

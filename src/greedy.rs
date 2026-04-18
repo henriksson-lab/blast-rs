@@ -1,11 +1,52 @@
 //! Greedy nucleotide alignment for megablast.
 //! Faster than DP for high-identity matches (>90% identity).
+//!
+//! **STUB**: this is an ungapped greedy extension only. NCBI's
+//! `BLAST_GreedyAlign` (`greedy_align.c:~157 LOC`) and
+//! `BLAST_AffineGreedyAlign` (~243 LOC) implement the full
+//! gapped-greedy algorithm used by real megablast. Rust currently
+//! routes megablast through the standard affine DP instead of greedy,
+//! so this stub is unused in active search paths. Wiring in the
+//! full greedy path is tracked as a large remaining item in TODO.md.
+//!
+//! ## Porting roadmap (for future sessions)
+//!
+//! The NCBI greedy alignment lives in `ncbi-blast-2.17.0+-src/c++/src/algo/blast/core/greedy_align.c`
+//! (1251 LOC). Key structures and functions, with C file line numbers:
+//!
+//! 1. **Memory pool** — `SMBSpace`, `SGreedyOffset` (header
+//!    `greedy_align.h`), allocators `MBSpaceNew`/`MBSpaceFree`/
+//!    `s_GetMBSpace` (`greedy_align.c:35-126`). Manages per-row
+//!    offset arrays for the edit graph. In Rust these can be a
+//!    `Vec<Vec<i32>>` with row-local allocation — no pool needed.
+//! 2. **Edit-script utilities** — `s_FindFirstMismatch` at `:313`
+//!    (inline loop comparing seq1/seq2 words) and the traceback
+//!    helpers near `:170-275` that walk the three-diagonal state
+//!    machine (`state_substitute`/`state_gap_seq1`/`state_gap_seq2`).
+//! 3. **Main entry points**:
+//!    - `BLAST_GreedyAlign` (`:380`, 157 LOC) — non-affine greedy
+//!      (match/mismatch only). Builds `last_seq2_off[d][k]`, the
+//!      largest seq2 offset at edit-distance `d` on diagonal `k`,
+//!      then traces back.
+//!    - `BLAST_AffineGreedyAlign` (`:755`, 243 LOC) — affine-gap
+//!      version used by megablast proper. Maintains three parallel
+//!      states (substitute, gap_seq1, gap_seq2) plus `diag_lower`/
+//!      `diag_upper` bands that contract on X-dropoff.
+//! 4. **Wiring hook** — when `word_size >= 12 && gap_open == 0 &&
+//!    gap_extend == 0` in `src/search.rs::blastn_gapped_search_nomask`,
+//!    swap `align_ex` for `BLAST_AffineGreedyAlign`. NCBI dispatches
+//!    via `eGreedyScoreOnly`/`eGreedyTbck` in
+//!    `BlastExtensionOptions` (`blast_options.h`).
+//! 5. **Parity fixtures** — megablast `--task megablast` against a
+//!    high-identity subject should produce identical edit scripts to
+//!    NCBI; build a small fixture with `>90%` identity and compare
+//!    BTOP tokens before/after the swap.
 
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
 
 /// Perform greedy ungapped alignment between two nucleotide sequences.
 /// Optimized for high-identity matches (>90%) — extends greedily without gaps.
-/// Used by megablast for fast initial extension before full gapped DP.
+/// **Stub**; see module-level docs.
 ///
 /// Returns (score, query_start, query_end, subject_start, subject_end, edit_script)
 pub fn greedy_align(

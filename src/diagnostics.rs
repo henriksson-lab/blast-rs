@@ -139,9 +139,11 @@ mod tests {
 
     #[test]
     fn test_ungapped_stats_clone() {
-        let mut stats = UngappedStats::default();
-        stats.lookup_hits = 42;
-        stats.num_seqs_passed = 7;
+        let stats = UngappedStats {
+            lookup_hits: 42,
+            num_seqs_passed: 7,
+            ..Default::default()
+        };
         let cloned = stats.clone();
         assert_eq!(cloned.lookup_hits, 42);
         assert_eq!(cloned.num_seqs_passed, 7);
@@ -149,9 +151,11 @@ mod tests {
 
     #[test]
     fn test_gapped_stats_clone() {
-        let mut stats = GappedStats::default();
-        stats.extensions = 10;
-        stats.good_extensions = 3;
+        let stats = GappedStats {
+            extensions: 10,
+            good_extensions: 3,
+            ..Default::default()
+        };
         let cloned = stats.clone();
         assert_eq!(cloned.extensions, 10);
         assert_eq!(cloned.good_extensions, 3);

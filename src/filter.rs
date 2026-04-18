@@ -9,16 +9,14 @@ pub struct MaskedRegion {
 }
 
 /// Collection of masked regions for a query.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MaskLoc {
     pub regions: Vec<MaskedRegion>,
 }
 
 impl MaskLoc {
     pub fn new() -> Self {
-        MaskLoc {
-            regions: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn add(&mut self, start: i32, end: i32) {
@@ -229,12 +227,9 @@ mod tests {
         // Build: 30 bases of poly-A, then 30 bases of high-complexity sequence.
         let window = 10;
         let threshold = 2.0;
-        let mut seq = Vec::new();
-        for _ in 0..30 {
-            seq.push(0u8); // A — maximally repetitive
-        }
-        // High-complexity tail: pseudo-random, non-repeating triplet pattern
-        // Using (i*7+3)%4 over a 10-base window yields diverse triplets
+        let mut seq = vec![0u8; 30]; // 30× A — maximally repetitive
+                                     // High-complexity tail: pseudo-random, non-repeating triplet pattern
+                                     // Using (i*7+3)%4 over a 10-base window yields diverse triplets
         for i in 0..30 {
             seq.push(((i * 7 + 3) % 4) as u8);
         }

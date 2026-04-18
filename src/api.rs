@@ -18,6 +18,10 @@ use crate::stat::{
 };
 use crate::traceback::build_blastna_matrix;
 
+/// Re-export of `hspstream::evalue_comp` (port of NCBI `s_EvalueComp`):
+/// compare two e-values, treating both below `1e-180` as equal.
+pub use crate::hspstream::evalue_comp;
+
 // ── Result types ────────────────────────────────────────────────────────────
 
 /// A single high-scoring segment pair from a BLAST search.
@@ -68,6 +72,37 @@ impl SearchResult {
             .map(|h| h.evalue)
             .fold(f64::INFINITY, f64::min)
     }
+
+    /// Top HSP score, or `i32::MIN` if the result has no HSPs. Used as the
+    /// secondary key in `compare_search_results` (NCBI `s_EvalueCompareHSPLists`).
+    fn top_score(&self) -> i32 {
+        self.hsps.iter().map(|h| h.score).max().unwrap_or(i32::MIN)
+    }
+}
+
+/// Port of NCBI `s_EvalueCompareHSPLists` (`blast_hits.c:3078`) for
+/// `SearchResult`. Primary key is `best_evalue` (compared via
+/// `crate::stat::evalue_comp` — both <1e-180 compare equal). Ties break on
+/// top HSP score descending, then `subject_oid` descending (NCBI's
+/// `BLAST_CMP(h2->oid, h1->oid)`).
+pub fn compare_search_results(a: &SearchResult, b: &SearchResult) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    // Empty-hsps results sort to the end.
+    match (a.hsps.is_empty(), b.hsps.is_empty()) {
+        (true, true) => return Equal,
+        (true, false) => return Greater,
+        (false, true) => return Less,
+        (false, false) => {}
+    }
+    let by_evalue = crate::hspstream::evalue_comp(a.best_evalue(), b.best_evalue());
+    if by_evalue != Equal {
+        return by_evalue;
+    }
+    let by_score = b.top_score().cmp(&a.top_score());
+    if by_score != Equal {
+        return by_score;
+    }
+    b.subject_oid.cmp(&a.subject_oid)
 }
 
 // ── Search parameters ───────────────────────────────────────────────────────
@@ -189,14 +224,14 @@ impl SearchParams {
 
     pub fn blastp_defaults() -> Self {
         SearchParams {
-            word_size: 3,
+            word_size: crate::stat::BLAST_WORDSIZE_PROT as usize,
             matrix: MatrixType::Blosum62,
-            gap_open: 11,
-            gap_extend: 1,
-            evalue_threshold: 10.0,
-            max_target_seqs: 500,
-            x_drop_ungapped: 7, // BLAST_UNGAPPED_X_DROPOFF_PROT (bits)
-            x_drop_gapped: 15,  // BLAST_GAP_X_DROPOFF_PROT (in bits, converted to raw by blastp())
+            gap_open: crate::stat::BLAST_GAP_OPEN_PROT,
+            gap_extend: crate::stat::BLAST_GAP_EXTN_PROT,
+            evalue_threshold: crate::stat::BLAST_EXPECT_VALUE,
+            max_target_seqs: crate::stat::BLAST_HITLIST_SIZE,
+            x_drop_ungapped: crate::stat::BLAST_UNGAPPED_X_DROPOFF_PROT,
+            x_drop_gapped: crate::stat::BLAST_GAP_X_DROPOFF_PROT,
             ungapped_cutoff: 0,
             min_score: 0,
             match_score: 1,
@@ -210,8 +245,8 @@ impl SearchParams {
             max_hsps: None,
             culling_limit: None,
             two_hit: false,
-            two_hit_window: 40,
-            x_drop_final: 25, // BLAST_GAP_X_DROPOFF_FINAL_PROT
+            two_hit_window: crate::stat::BLAST_WINDOW_SIZE_PROT as usize,
+            x_drop_final: crate::stat::BLAST_GAP_X_DROPOFF_FINAL_PROT,
             soft_masking: false,
             lcase_masking: false,
         }
@@ -219,14 +254,14 @@ impl SearchParams {
 
     pub fn blastn_defaults() -> Self {
         SearchParams {
-            word_size: 11,
+            word_size: crate::stat::BLAST_WORDSIZE_NUCL as usize,
             matrix: MatrixType::Blosum62,
-            gap_open: 5,
-            gap_extend: 2,
-            evalue_threshold: 10.0,
-            max_target_seqs: 500,
-            x_drop_ungapped: 20, // BLAST_UNGAPPED_X_DROPOFF_NUCL
-            x_drop_gapped: 30,   // BLAST_GAP_X_DROPOFF_NUCL
+            gap_open: crate::stat::BLAST_GAP_OPEN_NUCL,
+            gap_extend: crate::stat::BLAST_GAP_EXTN_NUCL,
+            evalue_threshold: crate::stat::BLAST_EXPECT_VALUE,
+            max_target_seqs: crate::stat::BLAST_HITLIST_SIZE,
+            x_drop_ungapped: crate::stat::BLAST_UNGAPPED_X_DROPOFF_NUCL,
+            x_drop_gapped: crate::stat::BLAST_GAP_X_DROPOFF_NUCL,
             ungapped_cutoff: 0,
             min_score: 0,
             match_score: 2,
@@ -240,8 +275,12 @@ impl SearchParams {
             max_hsps: None,
             culling_limit: None,
             two_hit: false,
-            two_hit_window: 40,
-            x_drop_final: 100, // BLAST_GAP_X_DROPOFF_FINAL_NUCL
+            // NCBI `BLAST_WINDOW_SIZE_NUCL = 0` would disable two-hit
+            // regardless of `two_hit`; Rust keeps the protein default
+            // so enabling two-hit on the blastn path still has a usable
+            // window (40). `two_hit=false` by default, so unused.
+            two_hit_window: crate::stat::BLAST_WINDOW_SIZE_PROT as usize,
+            x_drop_final: crate::stat::BLAST_GAP_X_DROPOFF_FINAL_NUCL,
             soft_masking: false,
             lcase_masking: false,
         }
@@ -576,8 +615,8 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         .collect();
 
     let matrix = *get_matrix(params.matrix);
-    let word_size = params.word_size.max(2).min(6);
-    let threshold = 11.0;
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
 
     let prot_kbp = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend)
         .map(|p| crate::stat::KarlinBlk {
@@ -585,21 +624,26 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             k: p.k,
             log_k: p.k.ln(),
             h: p.h,
+            round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
     // Convert bit-score x_dropoff values to raw scores.
     // NCBI uses UNGAPPED KBP for ungapped x_drop, GAPPED KBP for gapped x_drop.
-    let ln2 = std::f64::consts::LN_2;
+    // Ungapped path: `ceil()` then Int4 cast (`blast_parameters.c:221`).
+    // Gapped path: plain `(Int4)` cast — truncation toward zero
+    // (`blast_parameters.c:457-463`).
+    let ln2 = crate::math::NCBIMATH_LN2;
     let ungapped_kbp = crate::stat::protein_ungapped_kbp();
     let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
-    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
-    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda).ceil() as i32;
+    let _x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda) as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
 
-    // Gap trigger: BLAST_GAP_TRIGGER_PROT = 22.0 bits → raw score.
-    // NCBI uses UNGAPPED KBP (kbp_std): (Int4)((bits * LN2 + logK) / Lambda)
-    // = (Int4)((22 * 0.693 + ln(0.134)) / 0.3176) = (Int4)(41.7) = 41
-    let gap_trigger_raw = ((22.0 * ln2 + ungapped_kbp.log_k) / ungapped_kbp.lambda) as i32;
+    // Gap trigger: NCBI `blast_parameters.c:343`:
+    //   (Int4)((gap_trigger * NCBIMATH_LN2 + kbp->logK) / kbp->Lambda)
+    // where `kbp` is the UNGAPPED KBP.
+    let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
+        / ungapped_kbp.lambda) as i32;
 
     let total_subj_len: usize = (0..db.num_oids)
         .map(|oid| db.get_seq_len(oid) as usize)
@@ -607,7 +651,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
     // Use exact length adjustment with alpha/beta from gapped params (matching NCBI C engine)
     let gapped_params = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend);
-    let (len_adj, search_space) = if let Some(ref gp) = gapped_params {
+    let (_len_adj, search_space) = if let Some(ref gp) = gapped_params {
         let alpha_d_lambda = gp.alpha / prot_kbp.lambda;
         let (adj, _) = crate::stat::compute_length_adjustment_exact(
             prot_kbp.k,
@@ -672,7 +716,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
         let ungapped_hits = crate::protein_lookup::protein_scan_with_table(
             &query_aa,
-            &subj_aa,
+            subj_aa,
             &matrix,
             &lookup_table,
             x_drop_ungapped,
@@ -697,7 +741,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             let seed_s = (uh.subject_start + uh.subject_end) / 2;
             if let Some(gr) = crate::protein::protein_gapped_align(
                 &query_aa,
-                &subj_aa,
+                subj_aa,
                 seed_q,
                 seed_s,
                 &matrix,
@@ -767,8 +811,8 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
         // Determine adjustment rule and optionally build adjusted matrix.
         // adj_result: None = no adjustment, Some((adjusted_matrix_opt, lambda_ratio_opt))
-        let adj_result: Option<(Option<[[i32; AA_SIZE]; AA_SIZE]>, Option<f64>)> = if comp_mode > 0
-        {
+        type AdjResult = Option<(Option<[[i32; AA_SIZE]; AA_SIZE]>, Option<f64>)>;
+        let adj_result: AdjResult = if comp_mode > 0 {
             let (qcomp28, qn) = crate::composition::read_composition(&query_aa, AA_SIZE);
             let (scomp28, sn) = crate::composition::read_composition(subj_aa, AA_SIZE);
             if qn == 0 || sn == 0 {
@@ -799,16 +843,14 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         // For non-position-based, startFreqRatios is initialized from
                         // the standard matrix frequency ratios.
                         let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
-                        match crate::composition::composition_scale_matrix(
+                        crate::composition::composition_scale_matrix(
                             &matrix,
                             &qcomp28,
                             &scomp28,
                             ungapped_lambda,
                             &freq_ratios,
-                        ) {
-                            Some(adj_mat) => Some((Some(adj_mat), None)),
-                            None => None,
-                        }
+                        )
+                        .map(|adj_mat| (Some(adj_mat), None))
                     }
                     MatrixAdjustRule::UserSpecifiedRelEntropy
                     | MatrixAdjustRule::UnconstrainedRelEntropy
@@ -929,6 +971,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                             k: prot_kbp.k,
                             log_k: prot_kbp.log_k,
                             h: prot_kbp.h,
+                            round_down: prot_kbp.round_down,
                         };
                         crate::stat::spouge_evalue(
                             ph.score,
@@ -1032,7 +1075,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
     // Run sequentially or in parallel depending on num_threads.
     let mut results: Vec<SearchResult> = if num_threads <= 1 {
-        (0..db.num_oids).filter_map(|oid| search_oid(oid)).collect()
+        (0..db.num_oids).filter_map(search_oid).collect()
     } else {
         use rayon::prelude::*;
         let pool = rayon::ThreadPoolBuilder::new()
@@ -1043,16 +1086,12 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         pool.install(|| {
             (0..db.num_oids)
                 .into_par_iter()
-                .filter_map(|oid| search_oid(oid))
+                .filter_map(search_oid)
                 .collect()
         })
     };
 
-    results.sort_by(|a, b| {
-        a.best_evalue()
-            .partial_cmp(&b.best_evalue())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(compare_search_results);
     if results.len() > params.max_target_seqs {
         results.truncate(params.max_target_seqs);
     }
@@ -1076,8 +1115,8 @@ pub fn blastp_batch(
     }
 
     let matrix = *get_matrix(params.matrix);
-    let word_size = params.word_size.max(2).min(6);
-    let threshold = 11.0;
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
 
     let prot_kbp = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend)
         .map(|p| crate::stat::KarlinBlk {
@@ -1085,6 +1124,7 @@ pub fn blastp_batch(
             k: p.k,
             log_k: p.k.ln(),
             h: p.h,
+            round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
@@ -1094,12 +1134,20 @@ pub fn blastp_batch(
 
     let max_hsps = params.max_hsps;
     let evalue_threshold = params.evalue_threshold;
-    // Convert bit-score parameters to raw (same as blastp())
-    let ln2_b = std::f64::consts::LN_2;
-    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2_b / prot_kbp.lambda).ceil() as i32;
-    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2_b / prot_kbp.lambda).ceil() as i32;
-    let x_drop_final = (params.x_drop_final as f64 * ln2_b / prot_kbp.lambda).ceil() as i32;
-    let gap_trigger_raw = (22.0 * ln2_b / prot_kbp.lambda).ceil() as i32;
+    // Convert bit-score parameters to raw (same as blastp()):
+    // ungapped uses `ceil()+Int4` with UNGAPPED KBP (blast_parameters.c:221),
+    // gapped uses plain `(Int4)` truncation with GAPPED KBP
+    // (blast_parameters.c:457-463). `gap_trigger` is
+    // `(Int4)((bits*ln2 + ungapped_log_k) / ungapped_lambda)` per
+    // blast_parameters.c:343-344.
+    let ln2_b = crate::math::NCBIMATH_LN2;
+    let ungapped_kbp_b = crate::stat::protein_ungapped_kbp();
+    let x_drop_ungapped =
+        (params.x_drop_ungapped as f64 * ln2_b / ungapped_kbp_b.lambda).ceil() as i32;
+    let _x_drop_gapped = (params.x_drop_gapped as f64 * ln2_b / prot_kbp.lambda) as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2_b / prot_kbp.lambda) as i32;
+    let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2_b + ungapped_kbp_b.log_k)
+        / ungapped_kbp_b.lambda) as i32;
     let gap_open = params.gap_open;
     let gap_extend = params.gap_extend;
 
@@ -1340,7 +1388,7 @@ pub fn blastp_batch(
 
     // Dispatch: sequential or parallel over subjects
     let all_hits: Vec<Vec<(usize, SearchResult)>> = if num_threads <= 1 {
-        (0..db.num_oids).map(|oid| process_oid(oid)).collect()
+        (0..db.num_oids).map(process_oid).collect()
     } else {
         use rayon::prelude::*;
         let pool = rayon::ThreadPoolBuilder::new()
@@ -1348,12 +1396,7 @@ pub fn blastp_batch(
             .stack_size(64 * 1024 * 1024)
             .build()
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-        pool.install(|| {
-            (0..db.num_oids)
-                .into_par_iter()
-                .map(|oid| process_oid(oid))
-                .collect()
-        })
+        pool.install(|| (0..db.num_oids).into_par_iter().map(process_oid).collect())
     };
 
     // Scatter results into per-query buckets
@@ -1366,11 +1409,7 @@ pub fn blastp_batch(
 
     // Sort each query's results by e-value and truncate
     for r in &mut results {
-        r.sort_by(|a, b| {
-            a.best_evalue()
-                .partial_cmp(&b.best_evalue())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        r.sort_by(compare_search_results);
         if r.len() > params.max_target_seqs {
             r.truncate(params.max_target_seqs);
         }
@@ -1400,6 +1439,7 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         k: 0.46,
         log_k: 0.46_f64.ln(),
         h: 0.85,
+        round_down: false,
     };
     let kbp = crate::stat::nucl_gapped_kbp_lookup(
         params.gap_open,
@@ -1507,11 +1547,7 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         });
     }
 
-    results.sort_by(|a, b| {
-        a.best_evalue()
-            .partial_cmp(&b.best_evalue())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(compare_search_results);
     if results.len() > params.max_target_seqs {
         results.truncate(params.max_target_seqs);
     }
@@ -1535,6 +1571,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             k: p.k,
             log_k: p.k.ln(),
             h: p.h,
+            round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
@@ -1543,8 +1580,8 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         .sum();
     let search_space = (query.len() as f64 / 3.0) * total_subj_len as f64;
 
-    let word_size = params.word_size.max(2).min(6);
-    let threshold = 11.0;
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
 
     let mut results = Vec::new();
     for (frame, prot) in &frames {
@@ -1604,11 +1641,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         }
     }
 
-    results.sort_by(|a, b| {
-        a.best_evalue()
-            .partial_cmp(&b.best_evalue())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(compare_search_results);
     if results.len() > params.max_target_seqs {
         results.truncate(params.max_target_seqs);
     }
@@ -1626,8 +1659,8 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
         .collect();
     let matrix = *get_matrix(params.matrix);
-    let word_size = params.word_size.max(2).min(6);
-    let threshold = 11.0;
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
 
     let prot_kbp = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend)
         .map(|p| crate::stat::KarlinBlk {
@@ -1635,6 +1668,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             k: p.k,
             log_k: p.k.ln(),
             h: p.h,
+            round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
@@ -1705,11 +1739,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         }
     }
 
-    results.sort_by(|a, b| {
-        a.best_evalue()
-            .partial_cmp(&b.best_evalue())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(compare_search_results);
     if results.len() > params.max_target_seqs {
         results.truncate(params.max_target_seqs);
     }
@@ -1726,8 +1756,8 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     let q_code = crate::util::lookup_genetic_code(params.query_gencode);
     let q_frames = crate::util::six_frame_translation(&query_2na, q_code);
     let matrix = *get_matrix(params.matrix);
-    let word_size = params.word_size.max(2).min(6);
-    let threshold = 11.0;
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
 
     let prot_kbp = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend)
         .map(|p| crate::stat::KarlinBlk {
@@ -1735,6 +1765,7 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             k: p.k,
             log_k: p.k.ln(),
             h: p.h,
+            round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
@@ -1808,11 +1839,7 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         }
     }
 
-    results.sort_by(|a, b| {
-        a.best_evalue()
-            .partial_cmp(&b.best_evalue())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(compare_search_results);
     if results.len() > params.max_target_seqs {
         results.truncate(params.max_target_seqs);
     }
@@ -2036,15 +2063,15 @@ impl Default for BlastnSearch {
 impl BlastnSearch {
     pub fn new() -> Self {
         BlastnSearch {
-            word_size: 11,
-            reward: 1,
-            penalty: -3,
-            gap_open: 5,
-            gap_extend: 2,
-            evalue: 10.0,
+            word_size: crate::stat::BLAST_WORDSIZE_NUCL as usize,
+            reward: crate::stat::BLAST_REWARD,
+            penalty: crate::stat::BLAST_PENALTY,
+            gap_open: crate::stat::BLAST_GAP_OPEN_NUCL,
+            gap_extend: crate::stat::BLAST_GAP_EXTN_NUCL,
+            evalue: crate::stat::BLAST_EXPECT_VALUE,
             dust: true,
             strand: Strand::Both,
-            xdrop_gap_final: 100.0,
+            xdrop_gap_final: crate::stat::BLAST_GAP_X_DROPOFF_FINAL_NUCL as f64,
             query_raw: Vec::new(),
             subject_raw: Vec::new(),
         }
@@ -2181,6 +2208,7 @@ impl BlastnSearch {
             k: 0.621,
             log_k: 0.621_f64.ln(),
             h: 1.286,
+            round_down: false,
         });
         let (gapped_kbp, _) = nucl_gapped_kbp_lookup(
             self.gap_open,
@@ -2212,7 +2240,8 @@ impl BlastnSearch {
         );
         let eff_db = (db_length - len_adj as i64).max(1);
         let search_space = eff_db as f64 * (self.query_raw.len() as i32 - len_adj).max(1) as f64;
-        let x_dropoff = (self.xdrop_gap_final * std::f64::consts::LN_2 / gapped_kbp.lambda) as i32;
+        let x_dropoff =
+            (self.xdrop_gap_final * crate::math::NCBIMATH_LN2 / gapped_kbp.lambda) as i32;
 
         blastn_gapped_search_nomask(
             qp,
@@ -2625,6 +2654,7 @@ pub fn search_with_pssm(
             k: p.k,
             log_k: p.k.ln(),
             h: p.h,
+            round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 
@@ -2806,6 +2836,7 @@ pub fn psiblast(
                 k: p.k,
                 log_k: p.k.ln(),
                 h: p.h,
+                round_down: false,
             })
             .unwrap_or_else(crate::stat::protein_ungapped_kbp);
 

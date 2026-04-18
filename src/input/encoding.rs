@@ -61,5 +61,6 @@ pub fn aminoacid_to_ncbistdaa(c: u8) -> u8 {
 }
 
 /// BLASTNA sentinel byte value (used to mark query boundaries).
+/// Alias for `crate::encoding::NUCL_SENTINEL` (both = 0xF = 15).
 #[allow(dead_code)]
-pub const BLASTNA_SENTINEL: u8 = 15;
+pub const BLASTNA_SENTINEL: u8 = crate::encoding::NUCL_SENTINEL;

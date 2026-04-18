@@ -6,13 +6,33 @@
 //!   1 = unconditional composition-based lambda adjustment
 //!   2 = conditional (only if composition diverges significantly)
 
+// NCBI score/joint-probability tables (BLOSUM62 etc.) are declared with
+// >16 significant digits. Keep them byte-identical to the C source; f64
+// rounds the same as C so the extra digits are harmless.
+#![allow(clippy::excessive_precision)]
+
 use crate::matrix::AA_SIZE;
 
-const COMPO_NUM_TRUE_AA: usize = 20;
-const LAMBDA_ERROR_TOLERANCE: f64 = 1e-7; // NCBI kLambdaErrorTolerance = 0.0000001
-const LAMBDA_FUNCTION_TOLERANCE: f64 = 1e-5; // NCBI kLambdaFunctionTolerance = 0.00001
+/// Port of NCBI `COMPO_NUM_TRUE_AA` (`composition_constants.h:46`):
+/// count of the 20 standard amino acids (excludes ambiguity codes).
+pub const COMPO_NUM_TRUE_AA: usize = 20;
+
+/// Port of NCBI `COMPO_LARGEST_ALPHABET` (`composition_constants.h:51`):
+/// 28-symbol NCBIstdaa alphabet size used by composition-adjustment
+/// buffers (matches `encoding::BLASTAA_SIZE`).
+pub const COMPO_LARGEST_ALPHABET: usize = crate::encoding::BLASTAA_SIZE;
+/// NCBI `kLambdaErrorTolerance` (`composition_adjustment.c:66`).
+const LAMBDA_ERROR_TOLERANCE: f64 = 0.000_000_1;
+/// NCBI `kLambdaFunctionTolerance` (`composition_adjustment.c:69`).
+const LAMBDA_FUNCTION_TOLERANCE: f64 = 0.000_01;
 const LAMBDA_ITERATION_LIMIT: usize = 100;
 const LAMBDA_RATIO_LOWER_BOUND: f64 = 0.5;
+/// Rust-specific float sentinel for "impossible score" in composition
+/// adjustment's float matrix. NCBI's `COMPO_SCORE_MIN`
+/// (`composition_constants.h:43`) is `INT2_MIN = -32768`, but its
+/// callers are in integer space. Rust uses a more aggressive value
+/// (−100 000) so a single float-scale accumulator comparison reaches
+/// it regardless of per-cell additions.
 const COMPO_SCORE_MIN: f64 = -100000.0;
 
 /// NCBIstdaa indices of the 20 true amino acids.
@@ -214,13 +234,13 @@ fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> 
     let high = obs_max;
 
     // Find greatest common divisor of all scores with nonzero probability
-    let mut d = (-low) as i32;
+    let mut d = -low;
     for i in 1..=(high - low) {
         if d <= 1 {
             break;
         }
         if sprob[i as usize] != 0.0 {
-            d = gcd(d, i);
+            d = crate::math::gcd(d, i);
         }
     }
     if d <= 0 {
@@ -234,9 +254,13 @@ fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> 
     let mut f = 4.0f64;
     let mut is_newton = 0i32;
 
-    let tolx = 1e-5; // BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT
-    let itmax = 20 + 100; // 20 + BLAST_KARLIN_LAMBDA_ITER_DEFAULT
+    // NCBI `Blast_KarlinLambdaNR` (`blast_stat.c:2594`):
+    //   `NlmKarlinLambdaNR(sprob, d, low, high, lambda0,
+    //                      BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT,
+    //                      20, 20 + BLAST_KARLIN_LAMBDA_ITER_DEFAULT, ...)`.
+    let tolx = 1.0e-5;
     let max_newton = 20;
+    let itmax = max_newton + 17; // BLAST_KARLIN_LAMBDA_ITER_DEFAULT = 17
 
     // sprob is indexed relative to sprob[0] = P(obs_min)
     // sprob[-obs_min] = P(0)
@@ -305,18 +329,6 @@ fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> 
     -x.ln() / d as f64
 }
 
-/// GCD helper for score divisor computation.
-fn gcd(mut a: i32, mut b: i32) -> i32 {
-    a = a.abs();
-    b = b.abs();
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a
-}
-
 /// Debug: dump lambda ratio computation details for a query/subject pair.
 pub fn debug_lambda_ratio(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -348,13 +360,13 @@ pub fn debug_lambda_ratio(
     eprintln!("  nonzero score probs: {}", nonzero);
 
     // GCD computation
-    let mut d = (-obs_min) as i32;
+    let mut d = -obs_min;
     for i in 1..=(obs_max - obs_min) {
         if d <= 1 {
             break;
         }
         if score_probs[i as usize] != 0.0 {
-            d = gcd(d, i);
+            d = crate::math::gcd(d, i);
         }
     }
     eprintln!("  GCD d={}", d);
@@ -381,7 +393,8 @@ pub fn compute_ungapped_lambda(matrix: &[[i32; AA_SIZE]; AA_SIZE]) -> f64 {
 /// specified background frequencies (in NCBIstdaa format).
 pub fn compute_ungapped_lambda_with_bg(matrix: &[[i32; AA_SIZE]; AA_SIZE], bg_prob: &[f64]) -> f64 {
     let (score_probs, obs_min, obs_max) = get_matrix_score_probs(matrix, AA_SIZE, bg_prob, bg_prob);
-    karlin_lambda_nr(&score_probs, obs_min, obs_max, 0.5) // BLAST_KARLIN_LAMBDA0_DEFAULT
+    // NCBI `BLAST_KARLIN_LAMBDA0_DEFAULT` = 0.5 (`blast_stat.c:70`).
+    karlin_lambda_nr(&score_probs, obs_min, obs_max, 0.5)
 }
 
 /// Compute composition-based LambdaRatio.
@@ -540,20 +553,26 @@ pub fn adjust_evalue_composition(
 }
 
 /// NCBI BLAST_KarlinEtoP: E-value to P-value conversion.
+/// Retained for future use once composition-based P-value combining is wired in.
+#[allow(dead_code)]
 fn karlin_e_to_p(x: f64) -> f64 {
-    -(-x).exp_m1() // = 1 - exp(-x)
+    // NCBI: `return -BLAST_Expm1(-x);` (= 1 - exp(-x) stably).
+    -crate::math::expm1(-x)
 }
 
 /// NCBI BLAST_KarlinPtoE: P-value to E-value conversion.
+#[allow(dead_code)]
 fn karlin_p_to_e(p: f64) -> f64 {
     if p <= 0.0 || p >= 1.0 {
         return p;
     }
-    -(1.0 - p).ln() // = -ln(1-p)
+    // NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`): `return -BLAST_Log1p(-p)`.
+    -crate::math::log1p(-p)
 }
 
 /// Combine composition P-value with alignment P-value using Fisher's method.
 /// Port of NCBI Blast_Overall_P_Value.
+#[allow(dead_code)]
 fn overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
     let product = p_comp * p_alignment;
     if product > 0.0 {
@@ -565,9 +584,13 @@ fn overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
 
 /// Composition P-value from lambda using the precomputed table.
 /// Port of NCBI Blast_CompositionPvalue.
+#[allow(dead_code)]
 fn composition_pvalue(lambda: f64) -> f64 {
+    /// NCBI `COMPO_MIN_LAMBDA` (`unified_pvalues.h:47`).
     const COMPO_MIN_LAMBDA: f64 = 0.034;
+    /// NCBI `LAMBDA_BIN_SIZE` (`unified_pvalues.c:47`).
     const LAMBDA_BIN_SIZE: f64 = 0.001;
+    /// NCBI `LOW_LAMBDA_BIN_CUT` (`unified_pvalues.c:53`).
     const LOW_LAMBDA_BIN_CUT: usize = 35;
 
     let score = (lambda - COMPO_MIN_LAMBDA) / LAMBDA_BIN_SIZE;
@@ -587,6 +610,7 @@ fn composition_pvalue(lambda: f64) -> f64 {
 
 /// NCBI P_lambda_table — precomputed composition P-values.
 /// 565 entries, bin size 0.001, starting at COMPO_MIN_LAMBDA=0.034.
+#[allow(dead_code)]
 static P_LAMBDA_TABLE: [f64; 565] = [
     1.247750e-07,
     1.247750e-07,
@@ -1165,7 +1189,7 @@ pub static ALPHA_CONVERT: [i32; 28] = [
 ];
 
 /// BLOSUM62 integer scores in ARND... 20-letter alphabet.
-/// Port of NCBI BLOS62[20][20] from composition_adjustment.c.
+/// Port of NCBI `BLOS62[20][20]` from composition_adjustment.c.
 pub static BLOS62: [[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA] = [
     [
         4.0, -1.0, -2.0, -2.0, 0.0, -1.0, -1.0, 0.0, -2.0, -1.0, -1.0, -1.0, -1.0, -2.0, -1.0, 1.0,
@@ -1720,26 +1744,37 @@ pub static BLOSUM62_BG: [f64; COMPO_NUM_TRUE_AA] = [
 ];
 
 // Constants from composition_adjustment.c
-const COMPO_ADJUST_ERR_TOLERANCE: f64 = 0.00000001;
+/// NCBI `kCompoAdjustErrTolerance` (`composition_adjustment.c:73`).
+const COMPO_ADJUST_ERR_TOLERANCE: f64 = 0.000_000_01;
+/// NCBI `kCompoAdjustIterationLimit` (`composition_adjustment.c:75`).
 const COMPO_ADJUST_ITERATION_LIMIT: usize = 2000;
+/// NCBI `kFixedReBlosum62` (`composition_adjustment.c:77`): target
+/// relative entropy used by the rel-entropy-constrained matrix
+/// adjustment path for BLOSUM62.
+#[allow(dead_code)]
 const FIXED_RE_BLOSUM62: f64 = 0.44;
-const RE_PSEUDOCOUNTS: i32 = 20; // NCBI default
+/// NCBI `kReMatrixAdjustmentPseudocounts` (`redo_alignment.c:83`).
+#[allow(dead_code)]
+const RE_PSEUDOCOUNTS: i32 = 20;
 
-/// NCBIstdaa character constants.
-const E_STOP_CHAR: usize = 0;
+// NCBIstdaa character indices — verbatim port of NCBI's anonymous
+// enum in `composition_adjustment.h:46-49`.
+#[allow(dead_code)]
+const E_GAP_CHAR: usize = 0; // NCBI `eGapChar`
 const E_BCHAR: usize = 2; // B = D or N
+const E_CCHAR: usize = 3;
 const E_DCHAR: usize = 4;
-const E_NCHAR: usize = 13;
 const E_ECHAR: usize = 5;
+const E_ICHAR: usize = 9;
+const E_LCHAR: usize = 11;
+const E_NCHAR: usize = 13;
 const E_QCHAR: usize = 15;
 const E_XCHAR: usize = 21; // X = unknown
 const E_ZCHAR: usize = 23; // Z = E or Q
-const E_ICHAR: usize = 9;
-const E_LCHAR: usize = 11;
-const E_JCHAR: usize = 27; // J = I or L
-const E_CCHAR: usize = 3;
 const E_SELENOCYSTEINE: usize = 24; // U
-const E_OCHAR: usize = 25; // O = pyrrolysine
+const E_STOP_CHAR: usize = 25; // NCBI `eStopChar` ('*')
+const E_OCHAR: usize = 26; // O = pyrrolysine
+const E_JCHAR: usize = 27; // J = I or L
 const MAXIMUM_X_SCORE: f64 = -1.0;
 
 /// Port of NCBI s_GatherLetterProbs.
@@ -1893,6 +1928,13 @@ fn entropy_old_freq_new_context(
 
 /// Port of NCBI Blast_TrueAaToStdTargetFreqs.
 /// Convert 20x20 target frequencies to NCBIstdaa alphabet matrix.
+///
+/// The `E_*CHAR < std_alphsize` bounds checks below are verbatim from
+/// NCBI `Blast_TrueAaToStdTargetFreqs` where `Alphsize` is a runtime
+/// parameter. In our port it's always `AA_SIZE = 28` and every
+/// `E_*CHAR` is `< 28`, so the checks fold to true — `redundant_comparisons`
+/// is suppressed locally rather than removing the NCBI-verbatim guards.
+#[allow(clippy::redundant_comparisons)]
 fn true_aa_to_std_target_freqs(
     std_freq: &mut [[f64; AA_SIZE]; AA_SIZE],
     freq: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
@@ -1963,6 +2005,12 @@ fn calc_avg_score(m: &[f64], alphsize: usize, inc_m: usize, probs: &[f64]) -> f6
 }
 
 /// Port of NCBI s_SetXUOScores.
+///
+/// The `E_*CHAR < alphsize` guards are verbatim from NCBI; callers
+/// always pass `alphsize = AA_SIZE = 28` so every compile-time-constant
+/// E_*CHAR check folds to true. Suppress `redundant_comparisons`
+/// locally rather than removing the defensive NCBI guards.
+#[allow(clippy::redundant_comparisons)]
 fn set_xuo_scores(
     m: &mut [[f64; AA_SIZE]; AA_SIZE],
     alphsize: usize,
@@ -2038,10 +2086,10 @@ fn set_xuo_scores(
     }
 }
 
-/// Round to nearest integer.
+/// Round to nearest integer (i32-narrowed view of `crate::math::nint`,
+/// which mirrors NCBI `BLAST_Nint`).
 fn nint(x: f64) -> i32 {
-    let x = x + if x >= 0.0 { 0.5 } else { -0.5 };
-    x as i32
+    crate::math::nint(x) as i32
 }
 
 /// Port of NCBI s_ScoresStdAlphabet.
@@ -2235,4 +2283,39 @@ pub fn blosum62_workspace() -> (
         }
     }
     (BLOSUM62_JOINT_PROBS, row_sums, col_sums)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoding::{AMINOACID_TO_NCBISTDAA, NCBISTDAA_TO_AMINOACID};
+
+    /// Pin the NCBIstdaa character indices to NCBI's enum values
+    /// (`composition_adjustment.h:46-49`). Also cross-check them
+    /// against the `encoding` tables so a rename there surfaces here.
+    #[test]
+    fn test_ncbistdaa_indices_match_ncbi_enum() {
+        assert_eq!(E_GAP_CHAR, 0);
+        assert_eq!(E_BCHAR, 2);
+        assert_eq!(E_CCHAR, 3);
+        assert_eq!(E_DCHAR, 4);
+        assert_eq!(E_ECHAR, 5);
+        assert_eq!(E_ICHAR, 9);
+        assert_eq!(E_LCHAR, 11);
+        assert_eq!(E_NCHAR, 13);
+        assert_eq!(E_QCHAR, 15);
+        assert_eq!(E_XCHAR, 21);
+        assert_eq!(E_ZCHAR, 23);
+        assert_eq!(E_SELENOCYSTEINE, 24);
+        assert_eq!(E_STOP_CHAR, 25);
+        assert_eq!(E_OCHAR, 26);
+        assert_eq!(E_JCHAR, 27);
+
+        // Cross-check with encoding tables.
+        assert_eq!(NCBISTDAA_TO_AMINOACID[E_STOP_CHAR] as u8, b'*');
+        assert_eq!(NCBISTDAA_TO_AMINOACID[E_OCHAR] as u8, b'O');
+        assert_eq!(NCBISTDAA_TO_AMINOACID[E_GAP_CHAR] as u8, b'-');
+        assert_eq!(AMINOACID_TO_NCBISTDAA[b'*' as usize] as usize, E_STOP_CHAR);
+        assert_eq!(AMINOACID_TO_NCBISTDAA[b'O' as usize] as usize, E_OCHAR);
+    }
 }

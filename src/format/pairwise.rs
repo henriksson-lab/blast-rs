@@ -151,7 +151,7 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
     if show_subject_header {
         write_wrapped_subject_header(writer, subject_id)?;
     }
-    writeln!(writer, "")?;
+    writeln!(writer)?;
     writeln!(
         writer,
         " Score = {:.1} bits ({}),  Expect = {}",
@@ -178,7 +178,7 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
         " Strand=Plus/{}",
         if s_start <= s_end { "Plus" } else { "Minus" }
     )?;
-    writeln!(writer, "")?;
+    writeln!(writer)?;
 
     let blastna_to_char = |b: u8| -> char {
         match b {
@@ -400,13 +400,13 @@ mod tests {
     #[test]
     fn test_pairwise_long_alignment() {
         // Create an alignment longer than 60 characters to test wrapping
-        let len = 130;
+        let len: i32 = 130;
         let query: Vec<u8> = (0..len).map(|i| (i % 4) as u8).collect(); // repeating ACGT
         let subject: Vec<u8> = (0..len).map(|i| (i % 4) as u8).collect();
         let mut buf = Vec::new();
         format_pairwise_alignment(
-            &mut buf, "query1", "subject1", &query, &subject, 1, len as i32, 1, len as i32, 260,
-            480.0, 1e-100, len as i32, len as i32, 0,
+            &mut buf, "query1", "subject1", &query, &subject, 1, len, 1, len, 260, 480.0, 1e-100,
+            len, len, 0,
         )
         .unwrap();
         let output = String::from_utf8(buf).unwrap();

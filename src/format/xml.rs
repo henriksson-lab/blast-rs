@@ -34,6 +34,11 @@ pub fn write_xml_footer<W: Write>(writer: &mut W) -> std::io::Result<()> {
     Ok(())
 }
 
+/// One HSP's XML fields, packed in NCBI's `<Hsp>` element order:
+/// `(query_start, query_end, subject_start, subject_end, evalue,
+/// bit_score, num_ident, align_length, num_gaps)`.
+pub type XmlHsp = (i32, i32, i32, i32, f64, f64, i32, i32, i32);
+
 /// Write one hit in XML format.
 pub fn write_xml_hit<W: Write>(
     writer: &mut W,
@@ -41,7 +46,7 @@ pub fn write_xml_hit<W: Write>(
     subject_id: &str,
     subject_def: &str,
     subject_len: i32,
-    hsps: &[(i32, i32, i32, i32, f64, f64, i32, i32, i32)], // (qs,qe,ss,se,eval,bit,ident,alen,gaps)
+    hsps: &[XmlHsp],
 ) -> std::io::Result<()> {
     writeln!(writer, "    <Hit>")?;
     writeln!(writer, "      <Hit_num>{}</Hit_num>", hit_num)?;

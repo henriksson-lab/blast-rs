@@ -4,7 +4,7 @@
 /// Port of NCBI Nlm_FactorLtriangPosDef.
 /// Cholesky factorization of a symmetric positive-definite matrix
 /// stored as lower-triangular row pointers.
-/// The matrix A is modified in-place; on exit A[i][j] for j <= i
+/// The matrix A is modified in-place; on exit `A[i][j]` for `j <= i`
 /// holds the lower Cholesky factor L.
 pub fn factor_ltriag_pos_def(a: &mut [Vec<f64>], n: usize) {
     for i in 0..n {
@@ -64,7 +64,7 @@ pub fn euclidean_norm(v: &[f64], n: usize) -> f64 {
 }
 
 /// Port of NCBI Nlm_AddVectors.
-/// y[i] += alpha * x[i] for i in 0..n.
+/// `y[i] += alpha * x[i]` for `i` in `0..n`.
 pub fn add_vectors(y: &mut [f64], n: usize, alpha: f64, x: &[f64]) {
     for i in 0..n {
         y[i] += alpha * x[i];

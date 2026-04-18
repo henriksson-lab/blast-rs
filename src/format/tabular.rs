@@ -87,10 +87,10 @@ pub fn format_evalue(val: f64) -> String {
         if let Some(e_pos) = s.find('e') {
             let (mantissa, exp_part) = s.split_at(e_pos);
             let exp_str = &exp_part[1..]; // skip 'e'
-            let (sign, digits) = if exp_str.starts_with('-') {
-                ("-", &exp_str[1..])
-            } else if exp_str.starts_with('+') {
-                ("", &exp_str[1..])
+            let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
+                ("-", rest)
+            } else if let Some(rest) = exp_str.strip_prefix('+') {
+                ("", rest)
             } else {
                 ("", exp_str)
             };
@@ -255,6 +255,14 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             }
         }
         "ppos" => {
+            // NCBI `s_Blast_HSPGetNumIdentitiesAndPositives` (`blast_hits.c:746`)
+            // counts `num_pos` by testing `matrix[q][s] > 0` for protein
+            // mismatches. For nucleotide programs no substitution gives a
+            // positive score, so `num_pos == num_ident`. Rust currently
+            // reports `num_ident` here, which is exact for blastn but a
+            // divergence for blastp/blastx/tblastn/tblastx (protein match
+            // outputs often show positives > identities). Proper parity
+            // requires threading the scoring matrix through HSP traceback.
             if hit.align_len > 0 {
                 format!("{:.2}", 100.0 * hit.num_ident as f64 / hit.align_len as f64)
             } else {
@@ -374,7 +382,9 @@ fn format_btop(hit: &TabularHit) -> String {
 }
 
 fn compute_qcovs_by_query_subject(hits: &[TabularHit]) -> HashMap<(&str, &str), i32> {
-    let mut intervals: HashMap<(&str, &str), (i32, Vec<(i32, i32)>)> = HashMap::new();
+    // (query_len, list of (start, end) intervals on this query×subject pair)
+    type QCovBuckets<'a> = HashMap<(&'a str, &'a str), (i32, Vec<(i32, i32)>)>;
+    let mut intervals: QCovBuckets = HashMap::new();
     for hit in hits {
         let start = hit.query_start.min(hit.query_end);
         let end = hit.query_start.max(hit.query_end);
@@ -468,7 +478,8 @@ fn format_query_coverage(cov: f64) -> String {
 }
 
 fn rounded_query_coverage(cov: f64) -> i32 {
-    ((cov.min(100.0) + 0.5).floor() as i32).min(100)
+    // NCBI-style half-up rounding via `BLAST_Nint`, clamped to 100.
+    (crate::math::nint(cov.min(100.0)) as i32).min(100)
 }
 
 #[cfg(test)]

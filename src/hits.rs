@@ -37,12 +37,12 @@ pub fn compute_identities(
                     s_pos += 1;
                 }
             }
-            0 | 1 | 2 => {
+            0..=2 => {
                 // Deletion (gap in query, advance subject)
                 s_pos += count;
                 gap_opens += 1;
             }
-            4 | 5 | 6 => {
+            4..=6 => {
                 // Insertion (gap in subject, advance query)
                 q_pos += count;
                 gap_opens += 1;
@@ -61,9 +61,10 @@ pub fn filter_by_evalue(list: &mut HspList, max_evalue: f64) {
     list.hsps.retain(|hsp| hsp.evalue <= max_evalue);
 }
 
-/// Sort HSP list by score (descending).
+/// Sort HSP list by score (descending), using NCBI's full tie-breaker.
+/// See `crate::hspstream::score_compare_hsps` (port of `ScoreCompareHSPs`).
 pub fn sort_by_score(list: &mut HspList) {
-    list.hsps.sort_by(|a, b| b.score.cmp(&a.score));
+    list.hsps.sort_by(crate::hspstream::score_compare_hsps);
 }
 
 /// Remove HSPs that are contained within higher-scoring HSPs.
@@ -72,8 +73,10 @@ pub fn remove_contained(list: &mut HspList) {
     if list.hsps.len() <= 1 {
         return;
     }
-    // Sort by score first
-    list.hsps.sort_by(|a, b| b.score.cmp(&a.score));
+    // Sort by score (with NCBI's full tie-breaker from `ScoreCompareHSPs`)
+    // so the containment scan consistently keeps the NCBI-preferred HSP
+    // when scores tie (smaller subject_offset wins, etc).
+    list.hsps.sort_by(crate::hspstream::score_compare_hsps);
 
     let mut keep = vec![true; list.hsps.len()];
     for i in 0..list.hsps.len() {

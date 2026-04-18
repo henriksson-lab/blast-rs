@@ -164,8 +164,9 @@ pub struct ProteinGappedResult {
     pub edit_script: GapEditScript,
 }
 
-const MININT: i32 = i32::MIN / 2;
+use crate::stat::MININT;
 
+#[allow(dead_code)]
 struct GapDP {
     best: i32,
     best_gap: i32,
@@ -175,6 +176,7 @@ struct GapDP {
 /// Returns the best score found.
 /// Score-only gapped extension in one direction, matching NCBI Blast_SemiGappedAlign.
 /// Band dynamically expands as needed (no fixed max_band).
+#[allow(dead_code)]
 fn protein_gapped_score_one_dir(
     query: &[u8],
     subject: &[u8],
@@ -227,6 +229,9 @@ fn protein_gapped_score_one_dir(
         let mut sgr = MININT;
         let mut last_b = first_b;
 
+        // See `traceback::align_ex` for why mutating `first_b` inside the
+        // loop is safe — this mirrors NCBI's ALIGN_EX band shrinkage.
+        #[allow(clippy::mut_range_bound)]
         for bi in first_b..b_size {
             let b_idx = if reverse {
                 n.checked_sub(1 + bi).unwrap_or(usize::MAX)
@@ -443,16 +448,16 @@ fn protein_nw_traceback(
     (esp, nw_score, sw_q_start, sw_s_start, sw_q_end, sw_s_end)
 }
 
-/// HSP_MAX_WINDOW — size of the sliding window used to find the best
-/// starting position for gapped alignment.
-/// Port of NCBI HSP_MAX_WINDOW from blast_gapalign.c.
-const HSP_MAX_WINDOW: usize = 11;
+use crate::stat::HSP_MAX_WINDOW;
 
 /// Find the best starting position for gapped alignment within an ungapped
 /// hit region. Uses a sliding window of size HSP_MAX_WINDOW to find the
 /// highest-scoring region, then returns its midpoint.
 ///
-/// Port of NCBI BlastGetStartForGappedAlignment.
+/// Port of NCBI `BlastGetStartForGappedAlignment` (`blast_gapalign.c:3393`).
+/// NCBI returns only `q_offset`; this port also returns the corresponding
+/// `s_offset` derived as `s_start + (q_offset - q_start)` (identical
+/// because the HSP is ungapped).
 pub fn get_start_for_gapped_alignment(
     query: &[u8],
     subject: &[u8],
@@ -521,7 +526,7 @@ pub fn protein_gapped_align(
     gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<ProteinGappedResult> {
-    let gap_oe = gap_open + gap_extend;
+    let _gap_oe = gap_open + gap_extend;
 
     // Clamp seed points to valid range
     let seed_q = seed_q.min(query.len().saturating_sub(1));

@@ -1,7 +1,14 @@
 //! Rust equivalent of blast_util.c — BLAST utility functions.
 
-/// Translate a nucleotide sequence using a genetic code.
-/// Takes 3 bases (codon) and returns the amino acid in NCBIstdaa encoding.
+/// Translate a codon using a genetic code.
+/// Takes 3 NCBI2na bases (2-bit unambiguous A=0/C=1/G=2/T=3) and
+/// returns the amino acid in NCBIstdaa encoding.
+///
+/// Companion to NCBI's `s_CodonToAA` (`blast_util.c:369`), but simpler:
+/// NCBI's version takes NCBI4na bases and iterates over all possible
+/// combinations (returning X when a codon with an ambiguity code
+/// translates to multiple amino acids). This Rust port assumes the
+/// caller has already resolved ambiguities or is using NCBI2na input.
 pub fn translate_codon(b1: u8, b2: u8, b3: u8, genetic_code: &[u8; 64]) -> u8 {
     let idx = ((b1 & 3) as usize) * 16 + ((b2 & 3) as usize) * 4 + (b3 & 3) as usize;
     genetic_code[idx]

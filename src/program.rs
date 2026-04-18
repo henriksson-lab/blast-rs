@@ -79,13 +79,19 @@ pub fn is_valid(p: ProgramType) -> bool {
     )
 }
 
+/// Port of NCBI `BLAST_GetNumberOfContexts` (`blast_util.c:1373`).
+/// Returns `NUM_FRAMES` (6) for translated queries, `NUM_STRANDS` (2)
+/// for nucleotide queries, `1` for protein queries on valid programs,
+/// and `0` for invalid programs — matching NCBI's dispatch order.
 pub fn num_contexts(p: ProgramType) -> u32 {
-    if is_nucleotide(p) || is_mapping(p) {
-        2
-    } else if query_is_translated(p) {
+    if query_is_translated(p) {
         6
-    } else {
+    } else if query_is_nucleotide(p) {
+        2
+    } else if is_valid(p) {
         1
+    } else {
+        0
     }
 }
 

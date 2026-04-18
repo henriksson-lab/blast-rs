@@ -42,10 +42,6 @@ const PSEUDO_SMALL_INITIAL: f64 = 5.5;
 /// Arbitrary constant for columns with zero observations.
 const ZERO_OBS_PSEUDO: f64 = 30.0;
 
-/// Scale factor for the scaled PSSM (used in _PSIConvertFreqRatiosToPSSM).
-#[allow(dead_code)]
-const PSI_SCALE_FACTOR: i32 = 200;
-
 /// NCBIstdaa code for gap.
 const GAP_RESIDUE: u8 = 0;
 
@@ -472,12 +468,12 @@ impl Pssm {
 
                 // freq_ratio = q_over_p * std_prob[r] (the C code multiplies then
                 // divides by std_prob in the next stage -- we go directly to score)
-                // Score = round((1/lambda) * ln(q_over_p))
+                // Score = BLAST_Nint((1/lambda) * ln(q_over_p)).
                 if q_over_p > POS_EPSILON {
-                    let score = (q_over_p.ln() / lambda).round() as i32;
+                    let score = crate::math::nint(q_over_p.ln() / lambda) as i32;
                     self.scores[pos][r] = score;
                 } else {
-                    self.scores[pos][r] = i32::MIN / 2; // BLAST_SCORE_MIN equivalent
+                    self.scores[pos][r] = crate::stat::BLAST_SCORE_MIN;
                 }
             }
         }
@@ -749,7 +745,7 @@ fn compute_information_content(
                 }
             }
         }
-        info[pos] = sum / std::f64::consts::LN_2;
+        info[pos] = sum / crate::math::NCBIMATH_LN2;
     }
 
     info
@@ -818,11 +814,9 @@ pub fn psi_blast_iteration(
         }
     }
 
-    results.sort_by(|a, b| {
-        a.evalue
-            .partial_cmp(&b.evalue)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Sort by evalue with NCBI `s_EvalueComp` denormal-region equivalence
+    // (values < 1e-180 compare equal) — same helper used by HSP-list sorts.
+    results.sort_by(|a, b| crate::hspstream::evalue_comp(a.evalue, b.evalue));
     results
 }
 

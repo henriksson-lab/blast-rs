@@ -65,10 +65,7 @@ fn strip_fasta_comment_lines(input: &[u8]) -> Vec<u8> {
     let mut stripped = Vec::with_capacity(input.len());
     for line in input.split(|&b| b == b'\n' || b == b'\r') {
         let is_comment = matches!(
-            line.iter()
-                .copied()
-                .skip_while(|b| b.is_ascii_whitespace())
-                .next(),
+            line.iter().copied().find(|b| !b.is_ascii_whitespace()),
             Some(b';' | b'#')
         );
         if !is_comment {
