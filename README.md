@@ -4,21 +4,14 @@ Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool). Prod
 
 Based on [NCBI BLAST+ 2.17.0](https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/) source distribution (`ncbi-blast-2.17.0+-src.tar.gz`, also on [GitHub](https://github.com/ncbi/blast)). The C core algorithms in `src/algo/blast/core/` were ported function-by-function to Rust.
 
-This is a translation of the original code and not the authoritative implementation. This code should generate bitwise
-equal output to the original. Please report any deviations.
+**This code is not ready for production yet. Do not trust README below**
 
-The aim of this project is to increase performance, especially by providing this code through a type-safe library interface.
-The code can also be compiled to be used for webassembly.
-
-**Remaining open issues in ported code:**
-
-  Remaining:
-  1. Composition-based statistics performance — comp_adjust=2 (NCBI default) is extremely slow, had to disable it. Needs profiling/optimization
-  2. Combined multi-query lookup table — scan subject truly once for all queries (would close the remaining multi-query gap: 0.68s vs NCBI's 0.41s)
-  3. blastp finds extra hits — our ungapped extension scores differ by 1-2 points from NCBI, catching slightly more seeds 
-
-**There are many more gaps. Don't use this code for production yet!**
-
+Some things left, as example:
+  1. Sum-P / HSP linking (~400 LOC + coefficient table) — s_BlastEvenGapLinkHSPs (406 LOC), s_BlastUnevenGapLinkHSPs (~80 LOC), ComputeLinkingCutoffs (~60 LOC). Primitives are all ported; orchestrator missing. Affects multi-HSP e-values.                                                                                        
+  2. Greedy aligner for megablast (~400 LOC total) — BLAST_GreedyAlign (157 LOC) + BLAST_AffineGreedyAlign (243 LOC). src/greedy.rs is an ungapped stub; megablast silently falls back to DP. Porting roadmap documented in greedy.rs + TODO.md item #7.
+  3. Composition-adjusted redo (Blast_RedoAlignmentCore_MT, 669 LOC). Helpers exist; orchestration loop (iterate HSPs, re-score, re-align, merge) absent. Blocks credible blastp parity claims.                                                                                                                                      
+  4. Translated searches parity (blastx/tblastn/tblastx) — frame/coord/context arithmetic and out-of-frame alignment (s_OutOfFrameGappedAlign 233 LOC, s_OutOfFrameAlignWithTraceback 348 LOC).                                                                                                                                      
+  5. PHI/PSI/RPS/DELTA BLAST and Jumper/mapper — mostly absent; clap rejects the options but not with NCBI's error format.           
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
 
