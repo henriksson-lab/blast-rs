@@ -125,6 +125,8 @@ pub(crate) mod greedy;
 #[allow(dead_code)]
 pub(crate) mod hits;
 #[allow(dead_code)]
+pub(crate) mod link_hsps;
+#[allow(dead_code)]
 pub(crate) mod listnode;
 #[allow(dead_code)]
 pub(crate) mod lookup;

@@ -3,6 +3,7 @@
 use blast_rs::db::{BlastDb, DbType};
 use blast_rs::format::{format_tabular, TabularHit};
 use blast_rs::input::{iupacna_to_blastna, parse_fasta_with_default_id, FastaRecord};
+use blast_rs::BlastDbBuilder;
 use clap::{Parser, Subcommand};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -2182,131 +2183,81 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref subject_path) = args.subject {
         let subject_file = open_input_file("subject", subject_path);
         let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-
-        let matrix = blast_rs::matrix::BLOSUM62;
-
-        let prot_kbp = blast_rs::stat::lookup_protein_params(args.gapopen(), args.gapextend())
-            .map(|p| blast_rs::stat::KarlinBlk {
-                lambda: p.lambda,
-                k: p.k,
-                log_k: p.k.ln(),
-                h: p.h,
-                round_down: false,
-            })
-            .unwrap_or_else(blast_rs::stat::protein_ungapped_kbp);
-
-        let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
-        let avg_q_len =
-            queries.iter().map(|q| q.sequence.len()).sum::<usize>() / queries.len().max(1);
-        let len_adj = blast_rs::stat::compute_length_adjustment(
-            avg_q_len as i32,
-            total_subj_len as i64,
-            subjects.len() as i32,
-            &prot_kbp,
-        );
-        let search_space = blast_rs::stat::compute_search_space(
-            avg_q_len as i64,
-            total_subj_len as i64,
-            subjects.len() as i32,
-            len_adj,
-        );
-
-        // Protein default word_size=3 (NCBI default), cap at 6 to keep table size manageable
-        let word_size = if args.word_size.is_none() {
-            3
-        } else {
-            args.word_size().clamp(2, 6) as usize
-        };
-        let threshold = blast_rs::stat::BLAST_WORD_THRESHOLD_BLASTP;
+        let scratch = std::env::temp_dir().join(format!(
+            "blast-cli-subject-db-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&scratch)?;
+        let base = scratch.join("subject_db");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "subject db");
+        for srec in &subjects {
+            builder.add(blast_rs::api::SequenceEntry {
+                title: srec.id.clone(),
+                accession: srec.id.clone(),
+                sequence: srec.sequence.clone(),
+                taxid: None,
+            });
+        }
+        builder.write(&base)?;
+        let db = BlastDb::open(&base)?;
+        let params = build_blastp_params(args);
 
         let mut hits = Vec::new();
         for qrec in &queries {
-            let query_aa: Vec<u8> = qrec
-                .sequence
-                .iter()
-                .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
-                .collect();
-
-            for srec in &subjects {
-                let subj_aa: Vec<u8> = srec
-                    .sequence
-                    .iter()
-                    .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
-                    .collect();
-
-                let phits = blast_rs::protein_lookup::protein_gapped_scan(
-                    &query_aa,
-                    &subj_aa,
-                    &matrix,
-                    word_size,
-                    threshold,
-                    30,
-                    args.gapopen(),
-                    args.gapextend(),
-                    50,
-                    0,
-                );
-                for ph in phits {
-                    let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                    if evalue > args.evalue() {
-                        continue;
-                    }
+            let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
+            for sr in results {
+                for hsp in sr.hsps {
                     hits.push(TabularHit {
                         query_id: qrec.id.clone(),
                         query_gi: None,
                         query_acc: None,
                         query_accver: None,
-                        subject_id: srec.id.clone(),
+                        subject_id: sr.subject_accession.clone(),
                         subject_gi: None,
                         subject_acc: None,
                         subject_accver: None,
                         subject_title: String::new(),
-                        pct_identity: if ph.align_length > 0 {
-                            100.0 * ph.num_ident as f64 / ph.align_length as f64
+                        pct_identity: hsp.percent_identity(),
+                        align_len: hsp.alignment_length as i32,
+                        mismatches: (hsp.alignment_length - hsp.num_identities - hsp.num_gaps)
+                            as i32,
+                        gap_opens: hsp.num_gaps as i32,
+                        query_start: hsp.query_start as i32 + 1,
+                        query_end: hsp.query_end as i32,
+                        subject_start: hsp.subject_start as i32 + 1,
+                        subject_end: hsp.subject_end as i32,
+                        evalue: hsp.evalue,
+                        bit_score: hsp.bit_score,
+                        query_len: qrec.sequence.len() as i32,
+                        subject_len: sr.subject_len as i32,
+                        raw_score: hsp.score,
+                        qseq: if hsp.query_aln.is_empty() {
+                            None
                         } else {
-                            0.0
+                            Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
                         },
-                        align_len: ph.align_length,
-                        mismatches: ph.mismatches,
-                        gap_opens: ph.gap_opens,
-                        query_start: ph.query_start as i32 + 1,
-                        query_end: ph.query_end as i32,
-                        subject_start: ph.subject_start as i32 + 1,
-                        subject_end: ph.subject_end as i32,
-                        evalue,
-                        bit_score: prot_kbp.raw_to_bit(ph.score),
-                        query_len: query_aa.len() as i32,
-                        subject_len: subj_aa.len() as i32,
-                        raw_score: ph.score,
-                        qseq: ph.qseq.clone(),
-                        sseq: ph.sseq.clone(),
+                        sseq: if hsp.subject_aln.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
+                        },
                         qframe: 0,
                         sframe: 0,
-                        subject_taxids: vec![],
+                        subject_taxids: sr.taxids.clone(),
                         subject_sci_name: String::new(),
                         subject_common_name: String::new(),
                         subject_blast_name: String::new(),
                         subject_kingdom: String::new(),
-                        num_ident: ph.num_ident,
+                        num_ident: hsp.num_identities as i32,
                     });
                 }
             }
         }
 
-        hits.sort_by(|a, b| {
-            b.bit_score
-                .partial_cmp(&a.bit_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut seen = std::collections::HashSet::new();
-        hits.retain(|h| {
-            seen.insert((
-                h.query_id.clone(),
-                h.subject_id.clone(),
-                h.query_start,
-                h.subject_start,
-            ))
-        });
+        all_hits_sort_by_evalue(&mut hits);
 
         let stdout = io::stdout();
         let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -2329,32 +2280,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err("blastp requires a protein database".into());
     }
 
-    let parsed_num_threads = args.num_threads();
-    let mut params = blast_rs::api::SearchParams::blastp()
-        .evalue(args.evalue())
-        .num_threads(if parsed_num_threads <= 0 {
-            1
-        } else {
-            parsed_num_threads as usize
-        });
-    // Don't override gap costs with blastn defaults (5/2).
-    // SearchParams::blastp() already sets the correct protein defaults (11/1).
-    // Only override if user explicitly set non-default values on the command line.
-    if args.gapopen() != 5 || args.gapextend() != 2 {
-        params.gap_open = args.gapopen();
-        params.gap_extend = args.gapextend();
-    }
-    if let Some(ws) = args
-        .word_size
-        .as_deref()
-        .map(|value| parse_validated_i32("word_size", value))
-    {
-        params.word_size = ws as usize;
-    }
-    params.max_target_seqs = args.effective_max_target_seqs() as usize;
-    params.max_hsps = args.max_hsps_value().map(|max| max as usize);
-    // TODO: composition adjustment is very slow, disable for now
-    params.comp_adjust = 0;
+    let params = build_blastp_params(args);
 
     let mut all_hits = Vec::new();
     for qrec in &queries {
@@ -2420,6 +2346,42 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn all_hits_sort_by_evalue(hits: &mut [TabularHit]) {
+    hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
+}
+
+fn build_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
+    let parsed_num_threads = args.num_threads();
+    let mut params = blast_rs::api::SearchParams::blastp()
+        .evalue(args.evalue())
+        .num_threads(if parsed_num_threads <= 0 {
+            1
+        } else {
+            parsed_num_threads as usize
+        });
+    // Don't override gap costs with blastn defaults (5/2).
+    // SearchParams::blastp() already sets the correct protein defaults (11/1).
+    // Only override if user explicitly set non-default values on the command line.
+    if args.gapopen() != 5 || args.gapextend() != 2 {
+        params.gap_open = args.gapopen();
+        params.gap_extend = args.gapextend();
+    }
+    if let Some(ws) = args
+        .word_size
+        .as_deref()
+        .map(|value| parse_validated_i32("word_size", value))
+    {
+        params.word_size = ws as usize;
+    }
+    params.max_target_seqs = args.effective_max_target_seqs() as usize;
+    params.max_hsps = args.max_hsps_value().map(|max| max as usize);
+    params
+}
+
+fn mask_cli_protein_query(seq: &mut [u8]) {
+    blast_rs::api::apply_seg_ncbistdaa(seq);
+}
+
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
 
@@ -2458,7 +2420,10 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             .collect();
 
         // Translate in 6 frames
-        let frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
+        let mut frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
+        for (_, protein_query) in &mut frames {
+            mask_cli_protein_query(protein_query);
+        }
 
         for (frame, protein_query) in &frames {
             if protein_query.len() < 3 {
@@ -2582,11 +2547,12 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut all_hits = Vec::new();
     for qrec in &queries {
-        let query_aa: Vec<u8> = qrec
+        let mut query_aa: Vec<u8> = qrec
             .sequence
             .iter()
             .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
             .collect();
+        mask_cli_protein_query(&mut query_aa);
 
         for srec in &subjects {
             let nuc_seq: Vec<u8> = srec
@@ -2719,11 +2685,12 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let search_space = (queries[0].sequence.len() * total_subj_len) as f64;
 
     // Build initial PSSM from query
-    let query_aa: Vec<u8> = queries[0]
+    let mut query_aa: Vec<u8> = queries[0]
         .sequence
         .iter()
         .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
         .collect();
+    mask_cli_protein_query(&mut query_aa);
     let mut pssm = Pssm::from_sequence(&query_aa, &matrix);
 
     // Prepare subjects as (id, aa_sequence) pairs
@@ -2901,7 +2868,10 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 _ => 0,
             })
             .collect();
-        let q_frames = six_frame_translation(&q_nuc, &STANDARD_GENETIC_CODE);
+        let mut q_frames = six_frame_translation(&q_nuc, &STANDARD_GENETIC_CODE);
+        for (_, q_prot) in &mut q_frames {
+            mask_cli_protein_query(q_prot);
+        }
 
         for srec in &subjects {
             let s_nuc: Vec<u8> = srec
@@ -2942,6 +2912,18 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         if evalue > args.evalue() {
                             continue;
                         }
+                        let (q_nuc_start, q_nuc_end) = blast_rs::util::protein_to_nuc_coords(
+                            ph.query_start as i32,
+                            ph.query_end as i32,
+                            *qframe,
+                            q_nuc.len() as i32,
+                        );
+                        let (s_nuc_start, s_nuc_end) = blast_rs::util::protein_to_nuc_coords(
+                            ph.subject_start as i32,
+                            ph.subject_end as i32,
+                            *sframe,
+                            s_nuc.len() as i32,
+                        );
                         all_hits.push(TabularHit {
                             query_id: qrec.id.clone(),
                             query_gi: None,
@@ -2960,14 +2942,14 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                             align_len: ph.align_length,
                             mismatches: ph.mismatches,
                             gap_opens: ph.gap_opens,
-                            query_start: ph.query_start as i32 + 1,
-                            query_end: ph.query_end as i32,
-                            subject_start: ph.subject_start as i32 + 1,
-                            subject_end: ph.subject_end as i32,
+                            query_start: q_nuc_start,
+                            query_end: q_nuc_end,
+                            subject_start: s_nuc_start,
+                            subject_end: s_nuc_end,
                             evalue,
                             bit_score: prot_kbp.raw_to_bit(ph.score),
-                            query_len: q_prot.len() as i32,
-                            subject_len: s_prot.len() as i32,
+                            query_len: q_nuc.len() as i32,
+                            subject_len: s_nuc.len() as i32,
                             raw_score: ph.score,
                             qseq: ph.qseq.clone(),
                             sseq: ph.sseq.clone(),
@@ -3285,9 +3267,8 @@ fn run_blastn_rust(
                     .filter(|&k| BLASTNA_TO_NCBI4NA[j] & BLASTNA_TO_NCBI4NA[k] != 0)
                     .count() as i32;
                 // NCBI `blast_stat.c:1106` BLAST_Nint-based scoring.
-                blast_rs::math::nint(
-                    ((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64,
-                ) as i32
+                blast_rs::math::nint(((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64)
+                    as i32
             } else {
                 penalty
             }
@@ -3408,10 +3389,8 @@ fn run_blastn_rust(
     let search_space = searchsp_plus;
     let word_size = args.word_size() as usize;
     #[cfg(not(test))]
-    let use_contiguous_megablast_lookup = args
-        .task
-        .as_deref()
-        .is_none_or(|task| task == "megablast");
+    let use_contiguous_megablast_lookup =
+        args.task.as_deref().is_none_or(|task| task == "megablast");
     let reward = args.reward();
     let penalty = args.penalty();
     let gapopen = args.gapopen();
@@ -3430,8 +3409,7 @@ fn run_blastn_rust(
     // plain `(Int4)` truncation per blast_parameters.c:457-463.
     let ungapped_x_dropoff =
         (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
-    let gapped_x_dropoff =
-        (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
+    let gapped_x_dropoff = (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
     // TODO: exact NCBI formula is `max(gapped_x_dropoff,
     // (int)(xdrop_gap_final * ln2 / lambda))` per
     // `blast_parameters.c:462-463`. Switching to the full formula drops
@@ -4458,7 +4436,7 @@ fn write_blastn_tabular_output<W: Write>(
 fn apply_blastn_dust_mask(seq: &mut [u8]) {
     let window = seq.len().min(64);
     if window >= 3 {
-        let mask = blast_rs::filter::dust_filter(seq, window, 2.0);
+        let mask = blast_rs::filter::dust_filter(seq, 20, window, 1);
         mask.apply(seq, 14);
     }
 }
@@ -5218,13 +5196,13 @@ fn compare_pairwise_hsps(a: &TabularHit, b: &TabularHit, sorthsps: i32) -> std::
 
     ord.then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
         .then_with(|| b.raw_score.cmp(&a.raw_score))
-    .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
-    .then_with(|| {
-        a.subject_start
-            .min(a.subject_end)
-            .cmp(&b.subject_start.min(b.subject_end))
-    })
-    .then_with(|| b.sframe.cmp(&a.sframe))
+        .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
+        .then_with(|| {
+            a.subject_start
+                .min(a.subject_end)
+                .cmp(&b.subject_start.min(b.subject_end))
+        })
+        .then_with(|| b.sframe.cmp(&a.sframe))
 }
 
 fn pairwise_best_hit<'a>(hits: &'a [&'a TabularHit]) -> &'a TabularHit {
@@ -5314,7 +5292,7 @@ fn compare_pairwise_hit_groups(
 
     ord.then_with(|| blast_rs::api::evalue_comp(a_best.evalue, b_best.evalue))
         .then_with(|| b_best.raw_score.cmp(&a_best.raw_score))
-    .then_with(|| a_best.subject_id.cmp(&b_best.subject_id))
+        .then_with(|| a_best.subject_id.cmp(&b_best.subject_id))
 }
 
 fn pairwise_num_descriptions(args: &BlastnArgs) -> usize {
@@ -6303,9 +6281,8 @@ fn blastn_subject_stats(
                 .filter(|&k| BLASTNA_TO_NCBI4NA[j] & BLASTNA_TO_NCBI4NA[k] != 0)
                 .count() as i32;
             // NCBI `blast_stat.c:1106` BLAST_Nint-based scoring.
-            blast_rs::math::nint(
-                ((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64,
-            ) as i32
+            blast_rs::math::nint(((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64)
+                as i32
         } else {
             penalty
         }
@@ -7523,6 +7500,25 @@ mod tests {
         assert_eq!(args.penalty(), -3);
         assert_eq!(args.gapopen(), 5);
         assert_eq!(args.gapextend(), 2);
+    }
+
+    #[test]
+    fn test_blastp_cli_keeps_default_comp_adjust() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(params.comp_adjust, 2);
     }
 
     #[test]

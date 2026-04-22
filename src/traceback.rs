@@ -1193,8 +1193,8 @@ mod tests {
             b"ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT",
         );
         ALIGN_EX_TRACEHASH_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
-        let r = blast_gapped_align(&q, &s, 17, 17, 1, -3, 5, 2, 16)
-            .expect("alignment should succeed");
+        let r =
+            blast_gapped_align(&q, &s, 17, 17, 1, -3, 5, 2, 16).expect("alignment should succeed");
         ALIGN_EX_TRACEHASH_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
         eprintln!(
             "alignment: score={} q=[{}..{}] s=[{}..{}] ops={:?}",
@@ -1255,9 +1255,24 @@ mod tests {
         // NCBI path: 35 Sub, 5 Ins (gap in B), 42 Sub.
         let ops = &r.edit_script.ops;
         assert_eq!(ops.len(), 3, "expected 3 op-runs, got {:?}", ops);
-        assert_eq!(ops[0], (GapAlignOpType::Sub, 35), "first run should be 35 matches, got {:?}", ops[0]);
-        assert_eq!(ops[1], (GapAlignOpType::Ins, 5), "middle run should be 5 insertions (gap in subject), got {:?}", ops[1]);
-        assert_eq!(ops[2], (GapAlignOpType::Sub, 42), "last run should be 42 matches, got {:?}", ops[2]);
+        assert_eq!(
+            ops[0],
+            (GapAlignOpType::Sub, 35),
+            "first run should be 35 matches, got {:?}",
+            ops[0]
+        );
+        assert_eq!(
+            ops[1],
+            (GapAlignOpType::Ins, 5),
+            "middle run should be 5 insertions (gap in subject), got {:?}",
+            ops[1]
+        );
+        assert_eq!(
+            ops[2],
+            (GapAlignOpType::Sub, 42),
+            "last run should be 42 matches, got {:?}",
+            ops[2]
+        );
     }
 
     #[test]

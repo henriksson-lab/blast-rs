@@ -5,7 +5,9 @@ use crate::encoding::NCBI4NA_TO_BLASTNA;
 use crate::itree::{Interval, IntervalTree};
 use crate::sequence::blastna_to_iupac;
 use crate::stat::KarlinBlk;
-use crate::traceback::{blast_gapped_align, blast_gapped_score_only, reevaluate_with_ambiguities_gapped};
+use crate::traceback::{
+    blast_gapped_align, blast_gapped_score_only, reevaluate_with_ambiguities_gapped,
+};
 
 /// Result of a single HSP (High-Scoring Pair).
 #[derive(Debug, Clone)]
@@ -2223,10 +2225,7 @@ fn blast_get_offsets_for_gapped_alignment(
         })
         .sum();
     if end_score > 0 {
-        Some((
-            q_end - HSP_MAX_WINDOW / 2,
-            s_end - HSP_MAX_WINDOW / 2,
-        ))
+        Some((q_end - HSP_MAX_WINDOW / 2, s_end - HSP_MAX_WINDOW / 2))
     } else {
         None
     }

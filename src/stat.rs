@@ -1395,7 +1395,10 @@ pub fn nucl_alpha_beta(
     gapped: bool,
 ) -> (f64, f64) {
     if !gapped {
-        return (ungapped_lambda / ungapped_h, get_ungapped_beta(reward, penalty));
+        return (
+            ungapped_lambda / ungapped_h,
+            get_ungapped_beta(reward, penalty),
+        );
     }
 
     // Rust extension beyond NCBI `Blast_GetNuclAlphaBeta`
@@ -1436,7 +1439,10 @@ pub fn nucl_alpha_beta(
     // Fallback: ungapped values. NCBI `Blast_GetNuclAlphaBeta`
     // (`blast_stat.c:4022-4026`): on lookup miss, returns
     // `alpha = Lambda/H` and `beta = s_GetUngappedBeta(reward, penalty)`.
-    (ungapped_lambda / ungapped_h, get_ungapped_beta(reward, penalty))
+    (
+        ungapped_lambda / ungapped_h,
+        get_ungapped_beta(reward, penalty),
+    )
 }
 
 /// Port of NCBI `s_GetUngappedBeta` (`blast_stat.c:3955`): `(1,-1)` and
@@ -1488,8 +1494,6 @@ impl SfDist {
         &mut self.probs[(s - self.score_min) as usize]
     }
 }
-
-
 
 /// Newton-Raphson solver for Lambda in x = exp(-lambda) space.
 /// Port of NlmKarlinLambdaNR from blast_stat.c.
@@ -2065,7 +2069,10 @@ mod tests {
             uneven_gap_sum_e(40, 4000, 1, xsum, 100, 1000, searchsp, w).unwrap(),
             large_gap_sum_e(1, xsum, 100, 1000, searchsp, w).unwrap(),
         ] {
-            assert!((got - expected).abs() < 1e-6, "got={got} expected={expected}");
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "got={got} expected={expected}"
+            );
         }
     }
 
@@ -2088,8 +2095,7 @@ mod tests {
         let num: u32 = 2;
 
         // Manual: adjusted = xsum - num*ln(q*s) + ln_fact(num).
-        let adjusted = raw_xsum
-            - num as f64 * ((q as f64) * (s as f64)).ln()
+        let adjusted = raw_xsum - num as f64 * ((q as f64) * (s as f64)).ln()
             + crate::math::ln_factorial(num as i32);
         let p = sum_p(num, adjusted).unwrap();
         let expected = karlin_p_to_e(p) * (searchsp / (q as f64 * s as f64)) / w;
@@ -2128,7 +2134,6 @@ mod tests {
             "got={got} expected={expected}"
         );
     }
-
 
     #[test]
     fn test_sum_p_r0_is_zero() {

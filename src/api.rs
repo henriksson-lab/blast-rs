@@ -609,10 +609,10 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         return Vec::new();
     }
 
-    let query_aa: Vec<u8> = query
-        .iter()
-        .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-        .collect();
+    let query_aa = encode_protein_query(query, params.filter_low_complexity);
+    if crate::composition::read_composition(&query_aa, AA_SIZE).1 == 0 {
+        return Vec::new();
+    }
 
     let matrix = *get_matrix(params.matrix);
     let word_size = params.word_size.clamp(2, 6);
@@ -1562,7 +1562,10 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
     let query_2na = ascii_to_ncbi2na(query);
     let code = crate::util::lookup_genetic_code(params.query_gencode);
-    let frames = crate::util::six_frame_translation(&query_2na, code);
+    let frames = maybe_mask_translated_query_frames(
+        crate::util::six_frame_translation(&query_2na, code),
+        params.filter_low_complexity,
+    );
     let matrix = *get_matrix(params.matrix);
 
     let prot_kbp = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend)
@@ -1612,6 +1615,12 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 if evalue <= params.evalue_threshold {
                     let accession = db.get_accession(oid).unwrap_or_default();
                     let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+                    let (query_start, query_end) = crate::util::protein_to_oriented_nuc_coords(
+                        ph.query_start,
+                        ph.query_end,
+                        *frame,
+                    );
+
                     results.push(SearchResult {
                         subject_oid: oid,
                         subject_title: title,
@@ -1621,8 +1630,8 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                             score: ph.score,
                             bit_score: prot_kbp.raw_to_bit(ph.score),
                             evalue,
-                            query_start: ph.query_start,
-                            query_end: ph.query_end,
+                            query_start,
+                            query_end,
                             subject_start: ph.subject_start,
                             subject_end: ph.subject_end,
                             num_identities: ph.num_ident as usize,
@@ -1654,10 +1663,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         return Vec::new();
     }
 
-    let query_aa: Vec<u8> = query
-        .iter()
-        .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-        .collect();
+    let query_aa = encode_protein_query(query, params.filter_low_complexity);
     let matrix = *get_matrix(params.matrix);
     let word_size = params.word_size.clamp(2, 6);
     let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
@@ -1710,19 +1716,25 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 if evalue <= params.evalue_threshold {
                     let accession = db.get_accession(oid).unwrap_or_default();
                     let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+                    let (subject_start, subject_end) = crate::util::protein_to_oriented_nuc_coords(
+                        ph.subject_start,
+                        ph.subject_end,
+                        *frame,
+                    );
+
                     results.push(SearchResult {
                         subject_oid: oid,
                         subject_title: title,
                         subject_accession: accession,
-                        subject_len: prot.len(),
+                        subject_len,
                         hsps: vec![Hsp {
                             score: ph.score,
                             bit_score: prot_kbp.raw_to_bit(ph.score),
                             evalue,
                             query_start: ph.query_start,
                             query_end: ph.query_end,
-                            subject_start: ph.subject_start,
-                            subject_end: ph.subject_end,
+                            subject_start,
+                            subject_end,
                             num_identities: ph.num_ident as usize,
                             num_gaps: ph.gap_opens as usize,
                             alignment_length: ph.align_length as usize,
@@ -1754,7 +1766,10 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
 
     let query_2na = ascii_to_ncbi2na(query);
     let q_code = crate::util::lookup_genetic_code(params.query_gencode);
-    let q_frames = crate::util::six_frame_translation(&query_2na, q_code);
+    let q_frames = maybe_mask_translated_query_frames(
+        crate::util::six_frame_translation(&query_2na, q_code),
+        params.filter_low_complexity,
+    );
     let matrix = *get_matrix(params.matrix);
     let word_size = params.word_size.clamp(2, 6);
     let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
@@ -1809,19 +1824,30 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     if evalue <= params.evalue_threshold {
                         let accession = db.get_accession(oid).unwrap_or_default();
                         let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
-                        results.push(SearchResult {
-                            subject_oid: oid,
-                            subject_title: title,
-                            subject_accession: accession,
-                            subject_len: s_prot.len(),
-                            hsps: vec![Hsp {
+                    let (query_start, query_end) = crate::util::protein_to_oriented_nuc_coords(
+                        ph.query_start,
+                        ph.query_end,
+                        *qframe,
+                    );
+                    let (subject_start, subject_end) = crate::util::protein_to_oriented_nuc_coords(
+                        ph.subject_start,
+                        ph.subject_end,
+                        *sframe,
+                    );
+
+                    results.push(SearchResult {
+                        subject_oid: oid,
+                        subject_title: title,
+                        subject_accession: accession,
+                        subject_len,
+                        hsps: vec![Hsp {
                                 score: ph.score,
                                 bit_score: prot_kbp.raw_to_bit(ph.score),
                                 evalue,
-                                query_start: ph.query_start,
-                                query_end: ph.query_end,
-                                subject_start: ph.subject_start,
-                                subject_end: ph.subject_end,
+                                query_start,
+                                query_end,
+                                subject_start,
+                                subject_end,
                                 num_identities: ph.num_ident as usize,
                                 num_gaps: ph.gap_opens as usize,
                                 alignment_length: ph.align_length as usize,
@@ -1954,21 +1980,15 @@ pub struct BlastDefLine {
 
 /// Apply SEG masking on NCBIstdaa-encoded sequence in place.
 pub fn apply_seg_ncbistdaa(seq: &mut [u8]) {
-    // SEG on raw NCBIstdaa: convert to ASCII, mask, convert back
-    let mut ascii: Vec<u8> = seq
-        .iter()
-        .map(|&b| {
-            if (b as usize) < AA_SIZE {
-                NCBISTDAA_TO_AMINOACID[b as usize] as u8
-            } else {
-                b'X'
+    let mask = crate::filter::seg_filter_ncbistdaa(seq, 12, 2.2, 2.5);
+    let masked = AMINOACID_TO_NCBISTDAA[b'X' as usize & 0x7F];
+    for r in &mask.regions {
+        let start = r.start.max(0) as usize;
+        let end = (r.end as usize).min(seq.len());
+        for aa in &mut seq[start..end] {
+            if *aa != masked {
+                *aa = masked;
             }
-        })
-        .collect();
-    apply_seg(&mut ascii);
-    for (i, &b) in ascii.iter().enumerate() {
-        if b == b'X' && seq[i] != AMINOACID_TO_NCBISTDAA[b'X' as usize & 0x7F] {
-            seq[i] = AMINOACID_TO_NCBISTDAA[b'X' as usize & 0x7F]; // masked
         }
     }
 }
@@ -2130,7 +2150,7 @@ impl BlastnSearch {
             .collect();
 
         if self.dust {
-            let mask = crate::filter::dust_filter(&query_plus, 64, 2.0);
+            let mask = crate::filter::dust_filter(&query_plus, 20, 64, 1);
             mask.apply(&mut query_plus, 14);
         }
 
@@ -2326,6 +2346,29 @@ fn ncbistdaa_to_ascii(b: u8) -> u8 {
     }
 }
 
+fn encode_protein_query(sequence: &[u8], filter_low_complexity: bool) -> Vec<u8> {
+    let mut query_aa: Vec<u8> = sequence
+        .iter()
+        .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+        .collect();
+    if filter_low_complexity {
+        apply_seg_ncbistdaa(&mut query_aa);
+    }
+    query_aa
+}
+
+fn maybe_mask_translated_query_frames(
+    mut frames: Vec<(i32, Vec<u8>)>,
+    filter_low_complexity: bool,
+) -> Vec<(i32, Vec<u8>)> {
+    if filter_low_complexity {
+        for (_, prot) in &mut frames {
+            apply_seg_ncbistdaa(prot);
+        }
+    }
+    frames
+}
+
 fn build_midline(qseq: &str, sseq: &str) -> Vec<u8> {
     qseq.bytes()
         .zip(sseq.bytes())
@@ -2360,7 +2403,7 @@ pub fn get_codon_table(code: u8) -> &'static [u8; 64] {
 
 /// Apply DUST low-complexity masking in place (replaces masked positions with N).
 pub fn apply_dust(seq: &mut [u8]) {
-    let mask = crate::filter::dust_filter(seq, 64, 2.0);
+    let mask = crate::filter::dust_filter(seq, 20, 64, 1);
     for r in &mask.regions {
         let start = r.start.max(0) as usize;
         let end = (r.end as usize).min(seq.len());

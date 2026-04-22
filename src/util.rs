@@ -183,6 +183,23 @@ pub fn protein_to_nuc_coords(
     }
 }
 
+/// Map protein coordinates onto nucleotide coordinates within the oriented
+/// frame-specific sequence used during translated search.
+///
+/// The returned interval is 0-based with an exclusive end. For negative frames
+/// the coordinates are relative to the reverse-complement orientation that was
+/// translated, matching the crate's internal convention for minus-strand
+/// blastn HSP coordinates before output formatting maps them back to BLAST's
+/// displayed coordinates.
+pub fn protein_to_oriented_nuc_coords(
+    prot_start: usize,
+    prot_end: usize,
+    frame: i32,
+) -> (usize, usize) {
+    let offset = frame.unsigned_abs() as usize - 1;
+    (prot_start * 3 + offset, prot_end * 3 + offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +285,18 @@ mod tests {
         let (start, end) = protein_to_nuc_coords(1, 4, -2, 30);
         assert_eq!(start, 18);
         assert_eq!(end, 26);
+    }
+
+    #[test]
+    fn test_protein_to_oriented_nuc_coords_forward_frame2() {
+        let (start, end) = protein_to_oriented_nuc_coords(0, 3, 2);
+        assert_eq!((start, end), (1, 10));
+    }
+
+    #[test]
+    fn test_protein_to_oriented_nuc_coords_reverse_frame3() {
+        let (start, end) = protein_to_oriented_nuc_coords(2, 5, -3);
+        assert_eq!((start, end), (8, 17));
     }
 
     #[test]

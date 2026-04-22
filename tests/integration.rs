@@ -197,6 +197,154 @@ fn assert_blastn_subject_task_outfmt_matches_ncbi(
     );
 }
 
+fn assert_blastp_subject_outfmt_matches_ncbi(
+    query_fasta: &str,
+    subject_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastp").exists() {
+        eprintln!("Skipping: /usr/bin/blastp not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&subject, subject_fasta).expect("write subject FASTA");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastp")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli blastp subject parity");
+    assert!(rust_status.success(), "blast-cli blastp exited with {}", rust_status);
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastp");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastp subject parity");
+    assert!(ncbi_status.success(), "NCBI blastp exited with {}", ncbi_status);
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust blastp --subject output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+fn assert_translated_subject_outfmt_matches_ncbi(
+    program: &str,
+    ncbi_program: &str,
+    query_fasta: &str,
+    subject_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new(ncbi_program).exists() {
+        eprintln!("Skipping: {ncbi_program} not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&subject, subject_fasta).expect("write subject FASTA");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg(program)
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli translated parity");
+    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+
+    let mut ncbi_cmd = std::process::Command::new(ncbi_program);
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI translated parity");
+    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust {program} --subject output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
 fn normalize_sam_for_cli_parity(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -11571,6 +11719,68 @@ fn blastn_subject_ncbi_parity_sall_fields() {
     );
 }
 
+#[test]
+fn blastp_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 low complexity query\nAAAAAAAAAAAAAAAAAAAA\n",
+        concat!(
+            ">s1 low complexity subject\nAAAAAAAAAAAAAAAAAAAA\n",
+            ">s2 mixed subject\nACDEFGHIKLMNPQRSTVWY\n"
+        ),
+        "6 qseqid sseqid length bitscore evalue",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1 low complexity nt query\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
+        concat!(
+            ">s1 low complexity protein subject\nAAAAAAAAAAAAAAAAAAAA\n",
+            ">s2 mixed protein subject\nACDEFGHIKLMNPQRSTVWY\n"
+        ),
+        "6 qseqid sseqid length bitscore evalue",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1 low complexity protein query\nAAAAAAAAAAAAAAAAAAAA\n",
+        concat!(
+            ">s1 low complexity nt subject\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
+            ">s2 mixed nt subject\nGCTTGTGATGAATTTGGTCATATAAAACTGATGAATCCTCAACGTTCTACTGTGGTA\n"
+        ),
+        "6 qseqid sseqid length bitscore evalue",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1 low complexity nt query\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
+        concat!(
+            ">s1 low complexity nt subject\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
+            ">s2 mixed nt subject\nGCTTGTGATGAATTTGGTCATATAAAACTGATGAATCCTCAACGTTCTACTGTGGTA\n"
+        ),
+        "6 qseqid sseqid length bitscore evalue",
+        &[],
+        &[],
+    );
+}
+
 // ── BLASTP tests ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -11730,6 +11940,31 @@ fn blastp_all_twenty_amino_acids() {
     let hsp = &results[0].hsps[0];
     assert!((hsp.percent_identity() - 100.0).abs() < 0.01);
     assert_eq!(hsp.alignment_length, 20);
+}
+
+#[test]
+fn blastp_default_seg_masks_low_complexity_query() {
+    let query = "AAAAAAAAAAAAAAAAAAAA";
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "poly-a subject", query)]);
+
+    let filtered = SearchParams::blastp().evalue(1e6).num_threads(1);
+    let unfiltered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let filtered_results = blastp(&db, query.as_bytes(), &filtered);
+    let unfiltered_results = blastp(&db, query.as_bytes(), &unfiltered);
+
+    assert!(
+        filtered_results.is_empty(),
+        "default blastp SEG masking should suppress low-complexity query hits"
+    );
+    assert!(
+        !unfiltered_results.is_empty(),
+        "disabling low-complexity masking should restore the poly-A hit"
+    );
 }
 
 // ── BLASTN tests ─────────────────────────────────────────────────────────────
@@ -11907,6 +12142,8 @@ fn blastx_finds_translated_hit() {
         hsp.query_frame != 0,
         "blastx HSP should have a non-zero query frame"
     );
+    assert_eq!(hsp.query_start, 0);
+    assert_eq!(hsp.query_end, nt_query.len());
 }
 
 #[test]
@@ -11924,6 +12161,35 @@ fn blastx_empty_nt_query() {
 
     let results = blastx(&db, b"", &params);
     assert!(results.is_empty());
+}
+
+#[test]
+fn blastx_default_seg_masks_low_complexity_translation() {
+    let nt_query = "GCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT";
+    let protein = "AAAAAAAAAAAAAAAAAAAA";
+
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "poly-a target", protein)]);
+    let filtered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .comp_adjust(0);
+    let unfiltered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let filtered_results = blastx(&db, nt_query.as_bytes(), &filtered);
+    let unfiltered_results = blastx(&db, nt_query.as_bytes(), &unfiltered);
+
+    assert!(
+        filtered_results.is_empty(),
+        "default blastx SEG masking should suppress low-complexity translated query hits"
+    );
+    assert!(
+        !unfiltered_results.is_empty(),
+        "disabling low-complexity masking should restore the translated poly-A hit"
+    );
 }
 
 // ── TBLASTN test ────────────────────────────────────────────────────────────
@@ -11950,6 +12216,9 @@ fn tblastn_finds_protein_in_nt_db() {
         hsp.subject_frame != 0,
         "tblastn HSP should have non-zero subject frame"
     );
+    assert_eq!(results[0].subject_len, nt_subject.len());
+    assert_eq!(hsp.subject_start, 0);
+    assert_eq!(hsp.subject_end, nt_subject.len());
 }
 
 #[test]
@@ -11964,6 +12233,35 @@ fn tblastn_empty_protein_query() {
 
     let results = tblastn(&db, b"", &params);
     assert!(results.is_empty());
+}
+
+#[test]
+fn tblastn_default_seg_masks_low_complexity_query() {
+    let protein_query = "AAAAAAAAAAAAAAAAAAAA";
+    let nt_subject = "GCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT";
+
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "poly-a coding region", nt_subject)]);
+    let filtered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .comp_adjust(0);
+    let unfiltered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let filtered_results = tblastn(&db, protein_query.as_bytes(), &filtered);
+    let unfiltered_results = tblastn(&db, protein_query.as_bytes(), &unfiltered);
+
+    assert!(
+        filtered_results.is_empty(),
+        "default tblastn SEG masking should suppress low-complexity protein query hits"
+    );
+    assert!(
+        !unfiltered_results.is_empty(),
+        "disabling low-complexity masking should restore the tblastn poly-A hit"
+    );
 }
 
 // ── TBLASTX test ────────────────────────────────────────────────────────────
@@ -11986,6 +12284,40 @@ fn tblastx_translated_vs_translated() {
     let hsp = &results[0].hsps[0];
     assert!(hsp.query_frame != 0, "tblastx should set query frame");
     assert!(hsp.subject_frame != 0, "tblastx should set subject frame");
+    assert_eq!(results[0].subject_len, nt_seq.len());
+    assert!(hsp.query_start < nt_seq.len());
+    assert!(hsp.subject_start < nt_seq.len());
+    assert!(hsp.query_end <= nt_seq.len());
+    assert!(hsp.subject_end <= nt_seq.len());
+    assert!(hsp.query_end > nt_seq.len() / 3);
+    assert!(hsp.subject_end > nt_seq.len() / 3);
+}
+
+#[test]
+fn tblastx_default_seg_masks_low_complexity_translation() {
+    let nt_seq = "GCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT";
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "poly-a coding nt", nt_seq)]);
+    let filtered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .comp_adjust(0);
+    let unfiltered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let filtered_results = tblastx(&db, nt_seq.as_bytes(), &filtered);
+    let unfiltered_results = tblastx(&db, nt_seq.as_bytes(), &unfiltered);
+
+    assert!(
+        filtered_results.is_empty(),
+        "default tblastx SEG masking should suppress low-complexity translated query hits"
+    );
+    assert!(
+        !unfiltered_results.is_empty(),
+        "disabling low-complexity masking should restore the tblastx poly-A hit"
+    );
 }
 
 // ── Database round-trip tests ────────────────────────────────────────────────
@@ -13104,14 +13436,13 @@ fn test_lambda_ratio_stress() {
 
         // Check mode 1 score direction matches NCBI:
         // If NCBI score decreased, ours should also decrease (or at least not increase much)
-        if *ncbi_m1_score < *ncbi_m0_score
-            && score_1 > score_0 + 5 {
-                failures.push(format!(
-                    "{}: mode1 score INCREASED ({} → {}) but NCBI DECREASED ({} → {}). \
+        if *ncbi_m1_score < *ncbi_m0_score && score_1 > score_0 + 5 {
+            failures.push(format!(
+                "{}: mode1 score INCREASED ({} → {}) but NCBI DECREASED ({} → {}). \
                      Lambda ratio is likely wrong.",
-                    name, score_0, score_1, ncbi_m0_score, ncbi_m1_score
-                ));
-            }
+                name, score_0, score_1, ncbi_m0_score, ncbi_m1_score
+            ));
+        }
     }
 
     if !failures.is_empty() {

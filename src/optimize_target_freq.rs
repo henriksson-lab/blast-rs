@@ -401,9 +401,7 @@ pub fn optimize_target_frequencies(
         }
     }
 
-    let converged = its <= maxits
-        && rnorm <= tol
-        && (!constrain_rel_entropy || z[m - 1] < 1.0);
+    let converged = its <= maxits && rnorm <= tol && (!constrain_rel_entropy || z[m - 1] < 1.0);
 
     let status = if converged { 0 } else { 1 };
     (status, its)
