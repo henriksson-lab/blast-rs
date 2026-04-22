@@ -345,6 +345,91 @@ fn assert_translated_subject_outfmt_matches_ncbi(
     );
 }
 
+fn assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+    program: &str,
+    ncbi_program: &str,
+    query_fasta: &str,
+    subject_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new(ncbi_program).exists() {
+        eprintln!("Skipping: {ncbi_program} not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&subject, subject_fasta).expect("write subject FASTA");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg(program)
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli translated parity");
+    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+
+    let mut ncbi_cmd = std::process::Command::new(ncbi_program);
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI translated parity");
+    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+
+    let sort_lines = |bytes: Vec<u8>| {
+        let mut lines: Vec<String> = String::from_utf8(bytes)
+            .expect("UTF-8 tabular output")
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    };
+
+    let rust = sort_lines(std::fs::read(&rust_out).expect("read rust output"));
+    let ncbi = sort_lines(std::fs::read(&ncbi_out).expect("read ncbi output"));
+    assert_eq!(
+        rust, ncbi,
+        "Rust {program} --subject sorted output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
 fn normalize_sam_for_cli_parity(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -11781,6 +11866,19 @@ fn tblastx_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
     );
 }
 
+#[test]
+fn tblastx_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
 // ── BLASTP tests ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -12327,6 +12425,7 @@ fn protein_db_roundtrip() {
     let seq = "MKFLILLFNILCLFPVLAADNHGVSMNAS";
     let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "test seq", seq)]);
     assert_eq!(db.num_oids, 1);
+    assert_eq!(db.get_seq_len(0), seq.len() as u32);
 }
 
 #[test]
@@ -14243,6 +14342,329 @@ fn test_comp_adjust_debug() {
         eprintln!("A-E (1,5): {} → {}", matrix[1][5], adj[1][5]);
         eprintln!("K-R (10,16): {} → {}", matrix[10][16], adj[10][16]);
     }
+}
+
+#[test]
+#[ignore]
+fn test_comp_adjust_short_exact_debug() {
+    use blast_rs::compo_mode_condition::MatrixAdjustRule;
+
+    let query = b"MKFLILLF";
+    let subject = b"MKFLILLF";
+    let query_ncbi: Vec<u8> = query
+        .iter()
+        .map(|&b| blast_rs::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+        .collect();
+    let subject_ncbi: Vec<u8> = subject
+        .iter()
+        .map(|&b| blast_rs::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
+        .collect();
+
+    let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
+    let (qcomp28, qn) = blast_rs::composition::read_composition(&query_ncbi, 28);
+    let (scomp28, sn) = blast_rs::composition::read_composition(&subject_ncbi, 28);
+
+    let mut qp20 = [0.0f64; 20];
+    let mut sp20 = [0.0f64; 20];
+    blast_rs::compo_mode_condition::gather_letter_probs(&qcomp28, &mut qp20);
+    blast_rs::compo_mode_condition::gather_letter_probs(&scomp28, &mut sp20);
+
+    let rule = blast_rs::compo_mode_condition::choose_matrix_adjust_rule(
+        query_ncbi.len(),
+        subject_ncbi.len(),
+        &qp20,
+        &sp20,
+        2,
+    );
+    eprintln!("rule={rule:?} qn={qn} sn={sn}");
+    let lr = blast_rs::composition::composition_lambda_ratio(
+        &matrix,
+        &qcomp28,
+        &scomp28,
+        blast_rs::stat::protein_ungapped_kbp().lambda,
+    );
+    eprintln!("lambda_ratio={lr:?}");
+
+    let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
+    let mut adj_matrix = matrix;
+    let status = blast_rs::composition::composition_matrix_adj(
+        &mut adj_matrix,
+        blast_rs::matrix::AA_SIZE,
+        rule,
+        qn,
+        sn,
+        &qcomp28,
+        &scomp28,
+        20,
+        0.44,
+        &joint_probs,
+        &first_std,
+        &second_std,
+        blast_rs::stat::protein_ungapped_kbp().lambda,
+        &matrix,
+    );
+    eprintln!("status={status}");
+    eprintln!(
+        "diag M={} K={} F={} L={} I={}",
+        adj_matrix[12][12],
+        adj_matrix[10][10],
+        adj_matrix[6][6],
+        adj_matrix[11][11],
+        adj_matrix[9][9]
+    );
+
+    let freq_ratios = blast_rs::matrix::get_blosum62_freq_ratios();
+    let scaled = blast_rs::composition::composition_scale_matrix(
+        &matrix,
+        &qcomp28,
+        &scomp28,
+        blast_rs::stat::protein_ungapped_kbp().lambda,
+        &freq_ratios,
+    );
+    if let Some(scaled) = scaled {
+        eprintln!(
+            "scaled diag M={} K={} F={} L={} I={}",
+            scaled[12][12], scaled[10][10], scaled[6][6], scaled[11][11], scaled[9][9]
+        );
+    } else {
+        eprintln!("scaled matrix: none");
+    }
+
+    for specified_re in [0.40, 0.42, 0.44, 0.46, 0.48, 0.50] {
+        let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
+        let mut adj = matrix;
+        let status = blast_rs::composition::composition_matrix_adj(
+            &mut adj,
+            blast_rs::matrix::AA_SIZE,
+            rule,
+            qn,
+            sn,
+            &qcomp28,
+            &scomp28,
+            20,
+            specified_re,
+            &joint_probs,
+            &first_std,
+            &second_std,
+            blast_rs::stat::protein_ungapped_kbp().lambda,
+            &matrix,
+        );
+        let score = query_ncbi
+            .iter()
+            .zip(subject_ncbi.iter())
+            .map(|(&qa, &sa)| adj[qa as usize][sa as usize])
+            .sum::<i32>();
+        eprintln!(
+            "specified_re={:.2} status={} score={} diag M={} K={} F={} L={} I={}",
+            specified_re,
+            status,
+            score,
+            adj[12][12],
+            adj[10][10],
+            adj[6][6],
+            adj[11][11],
+            adj[9][9]
+        );
+    }
+
+    for lambda in [0.315, 0.316, 0.317, 0.3176, 0.318, 0.319, 0.320] {
+        let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
+        let mut adj = matrix;
+        let status = blast_rs::composition::composition_matrix_adj(
+            &mut adj,
+            blast_rs::matrix::AA_SIZE,
+            rule,
+            qn,
+            sn,
+            &qcomp28,
+            &scomp28,
+            20,
+            0.44,
+            &joint_probs,
+            &first_std,
+            &second_std,
+            lambda,
+            &matrix,
+        );
+        let score = query_ncbi
+            .iter()
+            .zip(subject_ncbi.iter())
+            .map(|(&qa, &sa)| adj[qa as usize][sa as usize])
+            .sum::<i32>();
+        eprintln!(
+            "lambda={:.4} status={} score={} diag M={} K={} F={} L={} I={}",
+            lambda,
+            status,
+            score,
+            adj[12][12],
+            adj[10][10],
+            adj[6][6],
+            adj[11][11],
+            adj[9][9]
+        );
+    }
+
+    for test_rule in [
+        MatrixAdjustRule::UnconstrainedRelEntropy,
+        MatrixAdjustRule::RelEntropyOldMatrixNewContext,
+        MatrixAdjustRule::RelEntropyOldMatrixOldContext,
+        MatrixAdjustRule::UserSpecifiedRelEntropy,
+    ] {
+        let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
+        let mut adj = matrix;
+        let status = blast_rs::composition::composition_matrix_adj(
+            &mut adj,
+            blast_rs::matrix::AA_SIZE,
+            test_rule,
+            qn,
+            sn,
+            &qcomp28,
+            &scomp28,
+            20,
+            0.44,
+            &joint_probs,
+            &first_std,
+            &second_std,
+            blast_rs::stat::protein_ungapped_kbp().lambda,
+            &matrix,
+        );
+        let score = query_ncbi
+            .iter()
+            .zip(subject_ncbi.iter())
+            .map(|(&qa, &sa)| adj[qa as usize][sa as usize])
+            .sum::<i32>();
+        eprintln!(
+            "test_rule={test_rule:?} status={} score={} diag M={} K={} F={} L={} I={}",
+            status,
+            score,
+            adj[12][12],
+            adj[10][10],
+            adj[6][6],
+            adj[11][11],
+            adj[9][9]
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn test_blastp_short_exact_default_debug() {
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "exact", "MKFLILLF")]);
+    let params = SearchParams::blastp().evalue(10.0).num_threads(1);
+    let results = blastp(&db, b"MKFLILLF", &params);
+    eprintln!("results={}", results.len());
+    if let Some(first) = results.first().and_then(|r| r.hsps.first()) {
+        eprintln!(
+            "score={} bitscore={:.1} evalue={:.2e} q={}..{} s={}..{}",
+            first.score,
+            first.bit_score,
+            first.evalue,
+            first.query_start,
+            first.query_end,
+            first.subject_start,
+            first.subject_end
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn test_blastp_short_exact_comp_modes_debug() {
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "exact", "MKFLILLF")]);
+    for mode in [0, 1, 2] {
+        let params = SearchParams::blastp()
+            .evalue(10.0)
+            .num_threads(1)
+            .comp_adjust(mode);
+        let results = blastp(&db, b"MKFLILLF", &params);
+        if let Some(first) = results.first().and_then(|r| r.hsps.first()) {
+            eprintln!(
+                "mode={} score={} bitscore={:.1} evalue={:.2e}",
+                mode, first.score, first.bit_score, first.evalue
+            );
+        } else {
+            eprintln!("mode={} no hits", mode);
+        }
+    }
+}
+
+#[test]
+fn blastp_comp_adjust_mode1_is_not_a_noop_on_short_exact_hit() {
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "exact", "MKFLILLF")]);
+    let mode0 = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .comp_adjust(0);
+    let mode1 = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .comp_adjust(1);
+
+    let score0 = blastp(&db, b"MKFLILLF", &mode0)[0].hsps[0].score;
+    let score1 = blastp(&db, b"MKFLILLF", &mode1)[0].hsps[0].score;
+
+    assert!(
+        score1 < score0,
+        "comp_adjust=1 should rescale this short exact protein hit instead of leaving the raw BLOSUM62 score unchanged (mode0={}, mode1={})",
+        score0,
+        score1
+    );
+}
+
+#[test]
+fn blastp_short_exact_comp_modes_match_ncbi_reference_scores() {
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "exact", "MKFLILLF")]);
+
+    let score_for = |mode| {
+        let params = SearchParams::blastp()
+            .evalue(10.0)
+            .num_threads(1)
+            .comp_adjust(mode);
+        blastp(&db, b"MKFLILLF", &params)[0].hsps[0].score
+    };
+
+    assert_eq!(score_for(0), 38, "NCBI blastp -comp_based_stats 0 gives 38");
+    assert_eq!(score_for(1), 21, "NCBI blastp -comp_based_stats 1 gives 21");
+    assert_eq!(score_for(2), 32, "NCBI blastp -comp_based_stats 2 gives 32");
+}
+
+#[test]
+fn blastx_short_exact_comp_modes_match_ncbi_reference_scores() {
+    let nt_query = b"ATGAAATTTCTTATTCTTCTTTTC";
+    let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "exact", "MKFLILLF")]);
+
+    let score_for = |mode| {
+        let params = SearchParams::blastp()
+            .evalue(10.0)
+            .num_threads(1)
+            .comp_adjust(mode);
+        blastx(&db, nt_query, &params)[0].hsps[0].score
+    };
+
+    assert_eq!(score_for(0), 38, "NCBI blastx -comp_based_stats 0 gives 38");
+    assert_eq!(score_for(1), 21, "NCBI blastx -comp_based_stats 1 gives 21");
+    assert_eq!(score_for(2), 32, "NCBI blastx -comp_based_stats 2 gives 32");
+}
+
+#[test]
+fn tblastn_short_exact_comp_modes_match_ncbi_reference_scores() {
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry(
+        "N001",
+        "exact coding nt",
+        "ATGAAATTTCTTATTCTTCTTTTC",
+    )]);
+
+    let score_for = |mode| {
+        let params = SearchParams::blastp()
+            .evalue(10.0)
+            .num_threads(1)
+            .comp_adjust(mode);
+        tblastn(&db, b"MKFLILLF", &params)[0].hsps[0].score
+    };
+
+    assert_eq!(score_for(0), 38, "NCBI tblastn -comp_based_stats 0 gives 38");
+    assert_eq!(score_for(1), 21, "NCBI tblastn -comp_based_stats 1 gives 21");
+    assert_eq!(score_for(2), 32, "NCBI tblastn -comp_based_stats 2 gives 32");
 }
 
 // ── Stress tests for short-primer / large-DB scenarios (stack overflow regression) ──

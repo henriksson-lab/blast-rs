@@ -170,7 +170,7 @@ impl BlastDbVolume {
         let end = if self.db_type == DbType::Nucleotide {
             self.amb_offsets.as_ref().unwrap()[local_oid as usize] as usize
         } else {
-            self.seq_offsets[local_oid as usize + 1] as usize
+            self.seq_offsets[local_oid as usize + 1].saturating_sub(1) as usize
         };
         &self.seq_mmap[start..end]
     }
@@ -194,7 +194,7 @@ impl BlastDbVolume {
             let remainder = (last_byte & 0x03) as u32;
             whole_bytes * 4 + remainder
         } else {
-            let end = self.seq_offsets[local_oid as usize + 1] as usize;
+            let end = self.seq_offsets[local_oid as usize + 1].saturating_sub(1) as usize;
             (end - start) as u32
         }
     }

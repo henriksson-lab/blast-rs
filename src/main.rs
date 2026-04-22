@@ -769,7 +769,9 @@ fn main_inner() {
         Commands::Deltablast(a) => ("deltablast", a),
     };
 
-    args.apply_task_defaults();
+    if program_uses_blastn_task_defaults(program) {
+        args.apply_task_defaults();
+    }
     validate_subject_db_options(&args);
     validate_no_taxid_expansion_options(&args);
     validate_subject_filter_options(&args);
@@ -843,6 +845,10 @@ fn main_inner() {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
+}
+
+fn program_uses_blastn_task_defaults(program: &str) -> bool {
+    program == "blastn"
 }
 
 fn blastn_unexpected_positional_arg(err: &clap::Error) -> Option<String> {
@@ -2346,6 +2352,121 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn make_subject_db_from_fasta(
+    subjects: &[FastaRecord],
+    db_type: DbType,
+) -> Result<(std::path::PathBuf, BlastDb), Box<dyn std::error::Error>> {
+    let scratch = std::env::temp_dir().join(format!(
+        "blast-cli-subject-db-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    fs::create_dir_all(&scratch)?;
+    let base = scratch.join("subject_db");
+    let mut builder = BlastDbBuilder::new(db_type, "subject db");
+    for srec in subjects {
+        builder.add(blast_rs::api::SequenceEntry {
+            title: srec.id.clone(),
+            accession: srec.id.clone(),
+            sequence: srec.sequence.clone(),
+            taxid: None,
+        });
+    }
+    builder.write(&base)?;
+    let db = BlastDb::open(&base)?;
+    Ok((scratch, db))
+}
+
+fn search_result_hsps_to_tabular_hits(
+    query_id: &str,
+    query_len: usize,
+    subjects: &[FastaRecord],
+    results: Vec<blast_rs::api::SearchResult>,
+) -> Vec<TabularHit> {
+    let mut hits = Vec::new();
+    for sr in results {
+        let subject_id = if sr.subject_accession.is_empty() {
+            subjects
+                .get(sr.subject_oid as usize)
+                .map(|s| s.id.clone())
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| sr.subject_title.clone())
+        } else {
+            sr.subject_accession.clone()
+        };
+        for hsp in sr.hsps {
+            let (query_start, query_end) = translated_display_coords(
+                hsp.query_start,
+                hsp.query_end,
+                hsp.query_frame,
+                query_len,
+            );
+            let (subject_start, subject_end) = translated_display_coords(
+                hsp.subject_start,
+                hsp.subject_end,
+                hsp.subject_frame,
+                sr.subject_len,
+            );
+            hits.push(TabularHit {
+                query_id: query_id.to_string(),
+                query_gi: None,
+                query_acc: None,
+                query_accver: None,
+                subject_id: subject_id.clone(),
+                subject_gi: None,
+                subject_acc: None,
+                subject_accver: None,
+                subject_title: String::new(),
+                pct_identity: hsp.percent_identity(),
+                align_len: hsp.alignment_length as i32,
+                mismatches: (hsp.alignment_length - hsp.num_identities - hsp.num_gaps) as i32,
+                gap_opens: hsp.num_gaps as i32,
+                query_start,
+                query_end,
+                subject_start,
+                subject_end,
+                evalue: hsp.evalue,
+                bit_score: hsp.bit_score,
+                query_len: query_len as i32,
+                subject_len: sr.subject_len as i32,
+                raw_score: hsp.score,
+                qseq: if hsp.query_aln.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
+                },
+                sseq: if hsp.subject_aln.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
+                },
+                qframe: hsp.query_frame,
+                sframe: hsp.subject_frame,
+                subject_taxids: sr.taxids.clone(),
+                subject_sci_name: String::new(),
+                subject_common_name: String::new(),
+                subject_blast_name: String::new(),
+                subject_kingdom: String::new(),
+                num_ident: hsp.num_identities as i32,
+            });
+        }
+    }
+    hits
+}
+
+fn translated_display_coords(start: usize, end: usize, frame: i32, seq_len: usize) -> (i32, i32) {
+    if frame >= 0 {
+        (start as i32 + 1, end as i32)
+    } else {
+        (
+            seq_len as i32 - start as i32,
+            seq_len as i32 - end as i32 + 1,
+        )
+    }
+}
+
 fn all_hits_sort_by_evalue(hits: &mut [TabularHit]) {
     hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
 }
@@ -2383,8 +2504,6 @@ fn mask_cli_protein_query(seq: &mut [u8]) {
 }
 
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
-
     let query_file = open_input_file("query", &args.query);
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
     if queries.is_empty() {
@@ -2397,126 +2516,20 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("blastx requires --subject (protein FASTA)")?;
     let subject_file = open_input_file("subject", subject_path);
     let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-
-    let matrix = blast_rs::matrix::BLOSUM62;
-
-    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
-    let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
-
+    let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Protein)?;
+    let params = build_blastp_params(args);
     let mut all_hits = Vec::new();
-
     for qrec in &queries {
-        // Encode nucleotide query
-        let nuc_seq: Vec<u8> = qrec
-            .sequence
-            .iter()
-            .map(|&b| match b {
-                b'A' | b'a' => 0,
-                b'C' | b'c' => 1,
-                b'G' | b'g' => 2,
-                b'T' | b't' => 3,
-                _ => 0,
-            })
-            .collect();
-
-        // Translate in 6 frames
-        let mut frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
-        for (_, protein_query) in &mut frames {
-            mask_cli_protein_query(protein_query);
-        }
-
-        for (frame, protein_query) in &frames {
-            if protein_query.len() < 3 {
-                continue;
-            }
-
-            let search_space = blast_rs::stat::compute_search_space(
-                protein_query.len() as i64,
-                total_subj_len as i64,
-                subjects.len() as i32,
-                0,
-            );
-
-            for srec in &subjects {
-                let subj_aa: Vec<u8> = srec
-                    .sequence
-                    .iter()
-                    .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
-                    .collect();
-
-                let phits = blast_rs::protein_lookup::protein_gapped_scan(
-                    protein_query,
-                    &subj_aa,
-                    &matrix,
-                    3,
-                    11.0,
-                    30,
-                    args.gapopen(),
-                    args.gapextend(),
-                    50,
-                    0,
-                );
-                let nuc_len = nuc_seq.len() as i32;
-
-                for ph in phits {
-                    let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                    if evalue > args.evalue() {
-                        continue;
-                    }
-
-                    let (q_nuc_start, q_nuc_end) = blast_rs::util::protein_to_nuc_coords(
-                        ph.query_start as i32,
-                        ph.query_end as i32,
-                        *frame,
-                        nuc_len,
-                    );
-
-                    all_hits.push(TabularHit {
-                        query_id: qrec.id.clone(),
-                        query_gi: None,
-                        query_acc: None,
-                        query_accver: None,
-                        subject_id: srec.id.clone(),
-                        subject_gi: None,
-                        subject_acc: None,
-                        subject_accver: None,
-                        subject_title: String::new(),
-                        pct_identity: if ph.align_length > 0 {
-                            100.0 * ph.num_ident as f64 / ph.align_length as f64
-                        } else {
-                            0.0
-                        },
-                        align_len: ph.align_length,
-                        mismatches: ph.mismatches,
-                        gap_opens: ph.gap_opens,
-                        query_start: q_nuc_start,
-                        query_end: q_nuc_end,
-                        subject_start: ph.subject_start as i32 + 1,
-                        subject_end: ph.subject_end as i32,
-                        evalue,
-                        bit_score: prot_kbp.raw_to_bit(ph.score),
-                        query_len: nuc_len,
-                        subject_len: subj_aa.len() as i32,
-                        raw_score: ph.score,
-                        qseq: ph.qseq.clone(),
-                        sseq: ph.sseq.clone(),
-                        qframe: *frame,
-                        sframe: 0,
-                        subject_taxids: vec![],
-                        subject_sci_name: String::new(),
-                        subject_common_name: String::new(),
-                        subject_blast_name: String::new(),
-                        subject_kingdom: String::new(),
-                        num_ident: ph.num_ident,
-                    });
-                }
-            }
-        }
+        let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
+        all_hits.extend(search_result_hsps_to_tabular_hits(
+            &qrec.id,
+            qrec.sequence.len(),
+            &subjects,
+            results,
+        ));
     }
 
-    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
-    let mut seen = std::collections::HashSet::new();
-    all_hits.retain(|h| seen.insert((h.query_id.clone(), h.query_start, h.subject_start)));
+    all_hits_sort_by_evalue(&mut all_hits);
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -2530,9 +2543,6 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
-
-    // tblastn: protein query vs translated nucleotide subject
     let query_file = open_input_file("query", &args.query);
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
     let subject_path = args
@@ -2541,118 +2551,19 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("tblastn requires --subject (nucleotide FASTA)")?;
     let subject_file = open_input_file("subject", subject_path);
     let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-
-    let matrix = blast_rs::matrix::BLOSUM62;
-    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
-
+    let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
+    let params = build_blastp_params(args);
     let mut all_hits = Vec::new();
     for qrec in &queries {
-        let mut query_aa: Vec<u8> = qrec
-            .sequence
-            .iter()
-            .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
-            .collect();
-        mask_cli_protein_query(&mut query_aa);
-
-        for srec in &subjects {
-            let nuc_seq: Vec<u8> = srec
-                .sequence
-                .iter()
-                .map(|&b| match b {
-                    b'A' | b'a' => 0,
-                    b'C' | b'c' => 1,
-                    b'G' | b'g' => 2,
-                    b'T' | b't' => 3,
-                    _ => 0,
-                })
-                .collect();
-            let frames = six_frame_translation(&nuc_seq, &STANDARD_GENETIC_CODE);
-
-            for (frame, subj_protein) in &frames {
-                if subj_protein.len() < 3 || query_aa.len() < 3 {
-                    continue;
-                }
-                let search_space = (query_aa.len() * subj_protein.len()) as f64;
-                let subj_nuc_len = nuc_seq.len() as i32;
-
-                let phits = blast_rs::protein_lookup::protein_gapped_scan(
-                    &query_aa,
-                    subj_protein,
-                    &matrix,
-                    3,
-                    11.0,
-                    30,
-                    args.gapopen(),
-                    args.gapextend(),
-                    50,
-                    0,
-                );
-
-                for ph in phits {
-                    let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                    if evalue > args.evalue() {
-                        continue;
-                    }
-
-                    let (s_nuc_start, s_nuc_end) = blast_rs::util::protein_to_nuc_coords(
-                        ph.subject_start as i32,
-                        ph.subject_end as i32,
-                        *frame,
-                        subj_nuc_len,
-                    );
-
-                    all_hits.push(TabularHit {
-                        query_id: qrec.id.clone(),
-                        query_gi: None,
-                        query_acc: None,
-                        query_accver: None,
-                        subject_id: srec.id.clone(),
-                        subject_gi: None,
-                        subject_acc: None,
-                        subject_accver: None,
-                        subject_title: String::new(),
-                        pct_identity: if ph.align_length > 0 {
-                            100.0 * ph.num_ident as f64 / ph.align_length as f64
-                        } else {
-                            0.0
-                        },
-                        align_len: ph.align_length,
-                        mismatches: ph.mismatches,
-                        gap_opens: ph.gap_opens,
-                        query_start: ph.query_start as i32 + 1,
-                        query_end: ph.query_end as i32,
-                        subject_start: s_nuc_start,
-                        subject_end: s_nuc_end,
-                        evalue,
-                        bit_score: prot_kbp.raw_to_bit(ph.score),
-                        query_len: query_aa.len() as i32,
-                        subject_len: subj_nuc_len,
-                        raw_score: ph.score,
-                        qseq: ph.qseq.clone(),
-                        sseq: ph.sseq.clone(),
-                        qframe: 0,
-                        sframe: *frame,
-                        subject_taxids: vec![],
-                        subject_sci_name: String::new(),
-                        subject_common_name: String::new(),
-                        subject_blast_name: String::new(),
-                        subject_kingdom: String::new(),
-                        num_ident: ph.num_ident,
-                    });
-                }
-            }
-        }
+        let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
+        all_hits.extend(search_result_hsps_to_tabular_hits(
+            &qrec.id,
+            qrec.sequence.len(),
+            &subjects,
+            results,
+        ));
     }
-    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
-    let mut seen = std::collections::HashSet::new();
-    all_hits.retain(|h| {
-        seen.insert((
-            h.query_id.clone(),
-            h.subject_id.clone(),
-            h.query_start,
-            h.subject_start,
-        ))
-    });
+    all_hits_sort_by_evalue(&mut all_hits);
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -2840,9 +2751,6 @@ fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::util::{six_frame_translation, STANDARD_GENETIC_CODE};
-
-    // tblastx: translated nucleotide query vs translated nucleotide subject
     let query_file = open_input_file("query", &args.query);
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
     let subject_path = args
@@ -2851,132 +2759,20 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("tblastx requires --subject (nucleotide FASTA)")?;
     let subject_file = open_input_file("subject", subject_path);
     let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-
-    let matrix = blast_rs::matrix::BLOSUM62;
-    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
-
+    let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
+    let mut params = build_blastp_params(args);
+    params.comp_adjust = 0;
     let mut all_hits = Vec::new();
     for qrec in &queries {
-        let q_nuc: Vec<u8> = qrec
-            .sequence
-            .iter()
-            .map(|&b| match b {
-                b'A' | b'a' => 0,
-                b'C' | b'c' => 1,
-                b'G' | b'g' => 2,
-                b'T' | b't' => 3,
-                _ => 0,
-            })
-            .collect();
-        let mut q_frames = six_frame_translation(&q_nuc, &STANDARD_GENETIC_CODE);
-        for (_, q_prot) in &mut q_frames {
-            mask_cli_protein_query(q_prot);
-        }
-
-        for srec in &subjects {
-            let s_nuc: Vec<u8> = srec
-                .sequence
-                .iter()
-                .map(|&b| match b {
-                    b'A' | b'a' => 0,
-                    b'C' | b'c' => 1,
-                    b'G' | b'g' => 2,
-                    b'T' | b't' => 3,
-                    _ => 0,
-                })
-                .collect();
-            let s_frames = six_frame_translation(&s_nuc, &STANDARD_GENETIC_CODE);
-
-            for (qframe, q_prot) in &q_frames {
-                for (sframe, s_prot) in &s_frames {
-                    if q_prot.len() < 3 || s_prot.len() < 3 {
-                        continue;
-                    }
-                    let search_space = (q_prot.len() * s_prot.len()) as f64;
-
-                    let phits = blast_rs::protein_lookup::protein_gapped_scan(
-                        q_prot,
-                        s_prot,
-                        &matrix,
-                        3,
-                        13.0,
-                        25,
-                        args.gapopen(),
-                        args.gapextend(),
-                        50,
-                        0,
-                    );
-
-                    for ph in phits {
-                        let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
-                        if evalue > args.evalue() {
-                            continue;
-                        }
-                        let (q_nuc_start, q_nuc_end) = blast_rs::util::protein_to_nuc_coords(
-                            ph.query_start as i32,
-                            ph.query_end as i32,
-                            *qframe,
-                            q_nuc.len() as i32,
-                        );
-                        let (s_nuc_start, s_nuc_end) = blast_rs::util::protein_to_nuc_coords(
-                            ph.subject_start as i32,
-                            ph.subject_end as i32,
-                            *sframe,
-                            s_nuc.len() as i32,
-                        );
-                        all_hits.push(TabularHit {
-                            query_id: qrec.id.clone(),
-                            query_gi: None,
-                            query_acc: None,
-                            query_accver: None,
-                            subject_id: srec.id.clone(),
-                            subject_gi: None,
-                            subject_acc: None,
-                            subject_accver: None,
-                            subject_title: String::new(),
-                            pct_identity: if ph.align_length > 0 {
-                                100.0 * ph.num_ident as f64 / ph.align_length as f64
-                            } else {
-                                0.0
-                            },
-                            align_len: ph.align_length,
-                            mismatches: ph.mismatches,
-                            gap_opens: ph.gap_opens,
-                            query_start: q_nuc_start,
-                            query_end: q_nuc_end,
-                            subject_start: s_nuc_start,
-                            subject_end: s_nuc_end,
-                            evalue,
-                            bit_score: prot_kbp.raw_to_bit(ph.score),
-                            query_len: q_nuc.len() as i32,
-                            subject_len: s_nuc.len() as i32,
-                            raw_score: ph.score,
-                            qseq: ph.qseq.clone(),
-                            sseq: ph.sseq.clone(),
-                            qframe: *qframe,
-                            sframe: *sframe,
-                            subject_taxids: vec![],
-                            subject_sci_name: String::new(),
-                            subject_common_name: String::new(),
-                            subject_blast_name: String::new(),
-                            subject_kingdom: String::new(),
-                            num_ident: ph.num_ident,
-                        });
-                    }
-                }
-            }
-        }
+        let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
+        all_hits.extend(search_result_hsps_to_tabular_hits(
+            &qrec.id,
+            qrec.sequence.len(),
+            &subjects,
+            results,
+        ));
     }
-    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
-    let mut seen = std::collections::HashSet::new();
-    all_hits.retain(|h| {
-        seen.insert((
-            h.query_id.clone(),
-            h.subject_id.clone(),
-            h.query_start,
-            h.subject_start,
-        ))
-    });
+    all_hits_sort_by_evalue(&mut all_hits);
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -7519,6 +7315,35 @@ mod tests {
         let params = build_blastp_params(&args);
 
         assert_eq!(params.comp_adjust, 2);
+    }
+
+    #[test]
+    fn test_tblastx_cli_uses_unadjusted_comp_mode() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "tblastx",
+            "--query",
+            "tests/fixtures/query_random_200.fa",
+            "--subject",
+            "tests/fixtures/query_random_200.fa",
+        ]);
+        let Commands::Tblastx(args) = cli.command else {
+            panic!("expected tblastx command");
+        };
+
+        let mut params = build_blastp_params(&args);
+        params.comp_adjust = 0;
+
+        assert_eq!(params.comp_adjust, 0);
+    }
+
+    #[test]
+    fn translated_programs_do_not_use_blastn_task_defaults() {
+        assert!(!program_uses_blastn_task_defaults("blastp"));
+        assert!(!program_uses_blastn_task_defaults("blastx"));
+        assert!(!program_uses_blastn_task_defaults("tblastn"));
+        assert!(!program_uses_blastn_task_defaults("tblastx"));
+        assert!(program_uses_blastn_task_defaults("blastn"));
     }
 
     #[test]

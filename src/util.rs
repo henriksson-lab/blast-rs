@@ -174,12 +174,12 @@ pub fn protein_to_nuc_coords(
         let offset = frame - 1;
         (prot_start * 3 + offset + 1, prot_end * 3 + offset)
     } else {
-        // Reverse strand: map RC protein coords to forward strand nucleotide coords.
-        // Returns (low, high) on forward strand; caller uses qframe to indicate direction.
+        // Reverse strand: BLAST reports minus-frame coordinates in strand
+        // orientation, so the displayed interval runs high→low.
         let offset = (-frame) - 1;
         let rc_start = prot_start * 3 + offset;
         let rc_end = prot_end * 3 + offset - 1;
-        (nuc_len - rc_end, nuc_len - rc_start)
+        (nuc_len - rc_start, nuc_len - rc_end)
     }
 }
 
@@ -260,31 +260,20 @@ mod tests {
     #[test]
     fn test_protein_to_nuc_coords_reverse_frame1() {
         // 30bp sequence, frame -1, protein pos 0..3 (0-based on rev-comp)
-        // offset = 0
-        // rc_start = 0*3 + 0 = 0, rc_end = 3*3 + 0 - 1 = 8
-        // nuc: (30 - 8, 30 - 0 + 1) = (22, 31) — but 31 > 30, so:
-        // Actually: start on forward = nuc_len - rc_end = 30 - 8 = 22
-        //           end on forward = nuc_len - rc_start + 1 = 30 - 0 + 1 = 31
-        // Hmm, that's > nuc_len. Let me reconsider.
-        // For BLAST output on minus strand, coordinates go high→low.
-        // A protein alignment at positions 0..3 on the reverse complement
-        // means nucleotides rc[0..9] which maps to forward strand [21..30].
-        // 30bp sequence, frame -1, protein pos 0..3 (0-based on rev-comp)
-        // rc_start=0, rc_end=8, fwd: (30-8, 30-0) = (22, 30)
+        // BLAST displays minus-strand intervals as high→low.
+        // rc_start=0, rc_end=8, so the forward coordinates are 30..22.
         let (start, end) = protein_to_nuc_coords(0, 3, -1, 30);
-        assert_eq!(start, 22);
-        assert_eq!(end, 30);
+        assert_eq!(start, 30);
+        assert_eq!(end, 22);
     }
 
     #[test]
     fn test_protein_to_nuc_coords_reverse_frame2() {
         // 30bp, frame -2, protein pos 1..4
-        // offset = 1
-        // rc_start = 1*3 + 1 = 4, rc_end = 4*3 + 1 - 1 = 12
-        // nuc: (30 - 12, 30 - 4) = (18, 26)
+        // rc_start = 4, rc_end = 12, so the forward coordinates are 26..18.
         let (start, end) = protein_to_nuc_coords(1, 4, -2, 30);
-        assert_eq!(start, 18);
-        assert_eq!(end, 26);
+        assert_eq!(start, 26);
+        assert_eq!(end, 18);
     }
 
     #[test]
@@ -409,12 +398,10 @@ mod tests {
     #[test]
     fn test_protein_to_nuc_coords_reverse_frame3() {
         // 30bp, frame -3, protein pos 0..2
-        // offset = 2
-        // rc_start = 0*3 + 2 = 2, rc_end = 2*3 + 2 - 1 = 7
-        // nuc: (30 - 7, 30 - 2) = (23, 28)
+        // rc_start = 2, rc_end = 7, so the forward coordinates are 28..23.
         let (start, end) = protein_to_nuc_coords(0, 2, -3, 30);
-        assert_eq!(start, 23);
-        assert_eq!(end, 28);
+        assert_eq!(start, 28);
+        assert_eq!(end, 23);
     }
 
     #[test]

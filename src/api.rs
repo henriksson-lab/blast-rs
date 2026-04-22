@@ -22,6 +22,8 @@ use crate::traceback::build_blastna_matrix;
 /// compare two e-values, treating both below `1e-180` as equal.
 pub use crate::hspstream::evalue_comp;
 
+const COMPO_ADJUST_SCALE_FACTOR: f64 = 32.0;
+
 // ── Result types ────────────────────────────────────────────────────────────
 
 /// A single high-scoring segment pair from a BLAST search.
@@ -219,7 +221,9 @@ impl SearchParams {
         Self::blastp_defaults()
     }
     pub fn tblastx() -> Self {
-        Self::blastp_defaults()
+        let mut params = Self::blastp_defaults();
+        params.comp_adjust = 0;
+        params
     }
 
     pub fn blastp_defaults() -> Self {
@@ -808,6 +812,14 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         // Composition-based e-value adjustment (NCBI comp_based_stats).
         // Verbatim port of Blast_AdjustScores + s_AdjustEvaluesForComposition.
         let comp_mode = params.comp_adjust;
+        let comp_scale = if comp_mode > 0 {
+            COMPO_ADJUST_SCALE_FACTOR
+        } else {
+            1.0
+        };
+        let scaled_gap_open = crate::math::nint(gap_open as f64 * comp_scale) as i32;
+        let scaled_gap_extend = crate::math::nint(gap_extend as f64 * comp_scale) as i32;
+        let scaled_x_drop_final = crate::math::nint(x_drop_final as f64 * comp_scale) as i32;
 
         // Determine adjustment rule and optionally build adjusted matrix.
         // adj_result: None = no adjustment, Some((adjusted_matrix_opt, lambda_ratio_opt))
@@ -837,14 +849,19 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                     MatrixAdjustRule::ScaleOldMatrix => {
                         // Port of NCBI Blast_CompositionBasedStats: rescale matrix
                         // using composition-specific lambda ratio, then re-align.
-                        let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda;
+                        let ungapped_lambda =
+                            crate::stat::protein_ungapped_kbp().lambda / comp_scale;
                         // Build the frequency ratio matrix from the standard BLOSUM62
                         // joint probs (used as freq_ratios in s_ScaleSquareMatrix).
                         // For non-position-based, startFreqRatios is initialized from
                         // the standard matrix frequency ratios.
                         let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+                        let start_matrix = crate::composition::matrix_from_freq_ratios(
+                            ungapped_lambda,
+                            &freq_ratios,
+                        );
                         crate::composition::composition_scale_matrix(
-                            &matrix,
+                            &start_matrix,
                             &qcomp28,
                             &scomp28,
                             ungapped_lambda,
@@ -862,7 +879,13 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         let mut adj_matrix = matrix;
                         // NCBI uses ungappedLambda (0.3176 for BLOSUM62) for matrix scaling,
                         // NOT the gapped lambda. See matrixInfo->ungappedLambda.
-                        let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda;
+                        let ungapped_lambda =
+                            crate::stat::protein_ungapped_kbp().lambda / comp_scale;
+                        let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+                        let start_matrix = crate::composition::matrix_from_freq_ratios(
+                            ungapped_lambda,
+                            &freq_ratios,
+                        );
                         let status = crate::composition::composition_matrix_adj(
                             &mut adj_matrix,
                             AA_SIZE,
@@ -877,7 +900,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                             &first_std,
                             &second_std,
                             ungapped_lambda,
-                            &matrix,
+                            &start_matrix,
                         );
                         if status == 0 {
                             // Optimization succeeded — use adjusted matrix
@@ -885,10 +908,10 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         } else {
                             // Fall back to lambda ratio scaling
                             let lr = crate::composition::composition_lambda_ratio(
-                                &matrix,
+                                &start_matrix,
                                 &qcomp28,
                                 &scomp28,
-                                prot_kbp.lambda,
+                                ungapped_lambda,
                             );
                             Some((None, lr))
                         }
@@ -904,17 +927,15 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             // Re-do gapped alignment with adjusted matrix
             let mut new_phits = Vec::new();
             for ph in &phits {
-                let seed_q = (ph.query_start + ph.query_end) / 2;
-                let seed_s = (ph.subject_start + ph.subject_end) / 2;
                 if let Some(gr) = crate::protein::protein_gapped_align(
                     &query_aa,
                     subj_aa,
-                    seed_q,
-                    seed_s,
+                    ph.query_start,
+                    ph.subject_start,
                     adj_mat,
-                    gap_open,
-                    gap_extend,
-                    x_drop_final,
+                    scaled_gap_open,
+                    scaled_gap_extend,
+                    scaled_x_drop_final,
                 ) {
                     let q_slice = &query_aa[gr.query_start..gr.query_end];
                     let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
@@ -928,7 +949,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         query_end: gr.query_end,
                         subject_start: gr.subject_start,
                         subject_end: gr.subject_end,
-                        score: gr.score,
+                        score: crate::math::nint(gr.score as f64 / comp_scale) as i32,
                         num_ident: gr.num_ident,
                         align_length: gr.align_length,
                         mismatches: gr.mismatches,
@@ -1559,7 +1580,6 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     if query.len() < 3 {
         return Vec::new();
     }
-
     let query_2na = ascii_to_ncbi2na(query);
     let code = crate::util::lookup_genetic_code(params.query_gencode);
     let frames = maybe_mask_translated_query_frames(
@@ -1577,6 +1597,12 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
+    let ln2 = crate::math::NCBIMATH_LN2;
+    let ungapped_kbp = crate::stat::protein_ungapped_kbp();
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
+    let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
+        / ungapped_kbp.lambda) as i32;
 
     let total_subj_len: usize = (0..db.num_oids)
         .map(|oid| db.get_seq_len(oid) as usize)
@@ -1591,27 +1617,42 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         if prot.len() < word_size {
             continue;
         }
-
+        if crate::composition::read_composition(prot, AA_SIZE).1 == 0 {
+            continue;
+        }
         // Build lookup table once per frame (not per subject).
         let lookup_table =
             crate::protein_lookup::ProteinLookupTable::build(prot, word_size, &matrix, threshold);
 
         for oid in 0..db.num_oids {
             let subj_raw = db.get_sequence(oid);
-            let subj_aa: Vec<u8> = subj_raw.iter().filter(|&&b| b != 0).copied().collect();
-            if subj_aa.is_empty() {
+            let subj_len = db.get_seq_len(oid) as usize;
+            if subj_len == 0 {
                 continue;
             }
+            let subj_aa = &subj_raw[..subj_len];
 
-            let phits = crate::protein_lookup::protein_scan_with_table(
+            let phits = crate::protein_lookup::protein_gapped_scan_with_table(
                 prot,
                 &subj_aa,
                 &matrix,
                 &lookup_table,
-                params.x_drop_gapped,
+                x_drop_ungapped,
+                params.gap_open,
+                params.gap_extend,
+                x_drop_final,
+                (gap_trigger_raw * 9) / 10,
             );
             for ph in &phits {
-                let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                let (score, bit_score, evalue) = translated_protein_hit_stats(
+                    ph,
+                    prot,
+                    &subj_aa,
+                    &matrix,
+                    &prot_kbp,
+                    search_space,
+                    params.comp_adjust,
+                );
                 if evalue <= params.evalue_threshold {
                     let accession = db.get_accession(oid).unwrap_or_default();
                     let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
@@ -1625,10 +1666,10 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         subject_oid: oid,
                         subject_title: title,
                         subject_accession: accession,
-                        subject_len: subj_aa.len(),
+                        subject_len: subj_len,
                         hsps: vec![Hsp {
-                            score: ph.score,
-                            bit_score: prot_kbp.raw_to_bit(ph.score),
+                            score,
+                            bit_score,
                             evalue,
                             query_start,
                             query_end,
@@ -1662,8 +1703,10 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     if query.is_empty() {
         return Vec::new();
     }
-
     let query_aa = encode_protein_query(query, params.filter_low_complexity);
+    if crate::composition::read_composition(&query_aa, AA_SIZE).1 == 0 {
+        return Vec::new();
+    }
     let matrix = *get_matrix(params.matrix);
     let word_size = params.word_size.clamp(2, 6);
     let threshold = crate::stat::BLAST_WORD_THRESHOLD_BLASTP;
@@ -1677,6 +1720,12 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             round_down: false,
         })
         .unwrap_or_else(crate::stat::protein_ungapped_kbp);
+    let ln2 = crate::math::NCBIMATH_LN2;
+    let ungapped_kbp = crate::stat::protein_ungapped_kbp();
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
+    let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
+        / ungapped_kbp.lambda) as i32;
 
     // Build lookup table once per query.
     let lookup_table =
@@ -1703,16 +1752,31 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             if prot.len() < word_size {
                 continue;
             }
-            let phits = crate::protein_lookup::protein_scan_with_table(
+            if crate::composition::read_composition(prot, AA_SIZE).1 == 0 {
+                continue;
+            }
+            let phits = crate::protein_lookup::protein_gapped_scan_with_table(
                 &query_aa,
                 prot,
                 &matrix,
                 &lookup_table,
-                params.x_drop_gapped,
+                x_drop_ungapped,
+                params.gap_open,
+                params.gap_extend,
+                x_drop_final,
+                (gap_trigger_raw * 9) / 10,
             );
             for ph in &phits {
                 let search_space = (query_aa.len() * subject_len) as f64;
-                let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                let (score, bit_score, evalue) = translated_protein_hit_stats(
+                    ph,
+                    &query_aa,
+                    prot,
+                    &matrix,
+                    &prot_kbp,
+                    search_space,
+                    params.comp_adjust,
+                );
                 if evalue <= params.evalue_threshold {
                     let accession = db.get_accession(oid).unwrap_or_default();
                     let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
@@ -1728,8 +1792,8 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                         subject_accession: accession,
                         subject_len,
                         hsps: vec![Hsp {
-                            score: ph.score,
-                            bit_score: prot_kbp.raw_to_bit(ph.score),
+                            score,
+                            bit_score,
                             evalue,
                             query_start: ph.query_start,
                             query_end: ph.query_end,
@@ -1763,7 +1827,6 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     if query.len() < 3 {
         return Vec::new();
     }
-
     let query_2na = ascii_to_ncbi2na(query);
     let q_code = crate::util::lookup_genetic_code(params.query_gencode);
     let q_frames = maybe_mask_translated_query_frames(
@@ -1805,9 +1868,15 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             if q_prot.len() < word_size {
                 continue;
             }
+            if crate::composition::read_composition(q_prot, AA_SIZE).1 == 0 {
+                continue;
+            }
 
             for (sframe, s_prot) in &s_frames {
                 if s_prot.len() < word_size {
+                    continue;
+                }
+                if crate::composition::read_composition(s_prot, AA_SIZE).1 == 0 {
                     continue;
                 }
                 let phits = crate::protein_lookup::protein_scan(
@@ -1820,7 +1889,15 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 );
                 for ph in &phits {
                     let search_space = (q_prot.len() * s_prot.len()) as f64;
-                    let evalue = prot_kbp.raw_to_evalue(ph.score, search_space);
+                    let (score, bit_score, evalue) = translated_protein_hit_stats(
+                        ph,
+                        q_prot,
+                        s_prot,
+                        &matrix,
+                        &prot_kbp,
+                        search_space,
+                        params.comp_adjust,
+                    );
                     if evalue <= params.evalue_threshold {
                         let accession = db.get_accession(oid).unwrap_or_default();
                         let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
@@ -1841,8 +1918,8 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                         subject_accession: accession,
                         subject_len,
                         hsps: vec![Hsp {
-                                score: ph.score,
-                                bit_score: prot_kbp.raw_to_bit(ph.score),
+                                score,
+                                bit_score,
                                 evalue,
                                 query_start,
                                 query_end,
@@ -1873,6 +1950,141 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
 }
 
 // ── Utility functions ───────────────────────────────────────────────────────
+
+type ProteinCompositionAdjustment = Option<(Option<[[i32; AA_SIZE]; AA_SIZE]>, Option<f64>)>;
+
+fn protein_composition_adjustment(
+    query_aa: &[u8],
+    subj_aa: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    comp_mode: u8,
+) -> ProteinCompositionAdjustment {
+    if comp_mode == 0 {
+        return None;
+    }
+
+    let (qcomp28, qn) = crate::composition::read_composition(query_aa, AA_SIZE);
+    let (scomp28, sn) = crate::composition::read_composition(subj_aa, AA_SIZE);
+    if qn == 0 || sn == 0 {
+        return None;
+    }
+
+    let mut qp20 = [0.0f64; 20];
+    let mut sp20 = [0.0f64; 20];
+    crate::compo_mode_condition::gather_letter_probs(&qcomp28, &mut qp20);
+    crate::compo_mode_condition::gather_letter_probs(&scomp28, &mut sp20);
+
+    let rule = crate::compo_mode_condition::choose_matrix_adjust_rule(
+        query_aa.len(),
+        subj_aa.len(),
+        &qp20,
+        &sp20,
+        comp_mode,
+    );
+
+    use crate::compo_mode_condition::MatrixAdjustRule;
+    match rule {
+        MatrixAdjustRule::DontAdjust => None,
+        MatrixAdjustRule::ScaleOldMatrix => {
+            let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda / COMPO_ADJUST_SCALE_FACTOR;
+            let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+            let start_matrix =
+                crate::composition::matrix_from_freq_ratios(ungapped_lambda, &freq_ratios);
+            crate::composition::composition_scale_matrix(
+                &start_matrix,
+                &qcomp28,
+                &scomp28,
+                ungapped_lambda,
+                &freq_ratios,
+            )
+            .map(|adj_mat| (Some(adj_mat), None))
+        }
+        MatrixAdjustRule::UserSpecifiedRelEntropy
+        | MatrixAdjustRule::UnconstrainedRelEntropy
+        | MatrixAdjustRule::RelEntropyOldMatrixNewContext
+        | MatrixAdjustRule::RelEntropyOldMatrixOldContext => {
+            let (joint_probs, first_std, second_std) = crate::composition::blosum62_workspace();
+            let mut adj_matrix = *matrix;
+            let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda / COMPO_ADJUST_SCALE_FACTOR;
+            let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+            let start_matrix =
+                crate::composition::matrix_from_freq_ratios(ungapped_lambda, &freq_ratios);
+            let status = crate::composition::composition_matrix_adj(
+                &mut adj_matrix,
+                AA_SIZE,
+                rule,
+                qn,
+                sn,
+                &qcomp28,
+                &scomp28,
+                20,
+                0.44,
+                &joint_probs,
+                &first_std,
+                &second_std,
+                ungapped_lambda,
+                &start_matrix,
+            );
+            if status == 0 {
+                Some((Some(adj_matrix), None))
+            } else {
+                let lr = crate::composition::composition_lambda_ratio(
+                    &start_matrix,
+                    &qcomp28,
+                    &scomp28,
+                    ungapped_lambda,
+                );
+                Some((None, lr))
+            }
+        }
+    }
+}
+
+fn rescore_ungapped_protein_hit(
+    ph: &crate::protein_lookup::ProteinHit,
+    query_aa: &[u8],
+    subj_aa: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+) -> i32 {
+    let q = &query_aa[ph.query_start..ph.query_end];
+    let s = &subj_aa[ph.subject_start..ph.subject_end];
+    q.iter()
+        .zip(s.iter())
+        .map(|(&qa, &sa)| matrix[qa as usize][sa as usize])
+        .sum()
+}
+
+fn translated_protein_hit_stats(
+    ph: &crate::protein_lookup::ProteinHit,
+    query_aa: &[u8],
+    subj_aa: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    prot_kbp: &crate::stat::KarlinBlk,
+    search_space: f64,
+    comp_mode: u8,
+) -> (i32, f64, f64) {
+    let comp_scale = if comp_mode > 0 {
+        COMPO_ADJUST_SCALE_FACTOR
+    } else {
+        1.0
+    };
+    let mut score = rescore_ungapped_protein_hit(ph, query_aa, subj_aa, matrix);
+    let mut evalue = prot_kbp.raw_to_evalue(score, search_space);
+
+    if let Some((adj_matrix, lambda_ratio)) = protein_composition_adjustment(query_aa, subj_aa, matrix, comp_mode) {
+        if let Some(adj_matrix) = adj_matrix {
+            score = crate::math::nint(
+                rescore_ungapped_protein_hit(ph, query_aa, subj_aa, &adj_matrix) as f64 / comp_scale,
+            ) as i32;
+            evalue = prot_kbp.raw_to_evalue(score, search_space);
+        } else if let Some(lr) = lambda_ratio {
+            let scaled_lambda = prot_kbp.lambda / lr;
+            evalue = search_space * prot_kbp.k * (-scaled_lambda * score as f64).exp();
+        }
+    }
+
+    (score, prot_kbp.raw_to_bit(score), evalue)
+}
 
 /// Parse a multi-FASTA byte slice into (title, sequence) pairs.
 pub fn parse_fasta(input: &[u8]) -> Vec<(String, Vec<u8>)> {

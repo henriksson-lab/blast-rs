@@ -412,32 +412,27 @@ pub fn composition_lambda_ratio(
     let (score_probs, obs_min, obs_max) =
         get_matrix_score_probs(matrix, AA_SIZE, query_prob, subject_prob);
 
-    // Check average score is negative
+    // NCBI's Blast_CompositionBasedStats lets the lambda solver fail with
+    // `-1` when the expected score is nonnegative, then clamps the resulting
+    // ratio to [LambdaRatioLowerBound, 1]. Returning `None` here turns that
+    // case into "no adjustment", which is not faithful for mode 1.
     let range = (obs_max - obs_min + 1) as usize;
     let mut avg = 0.0f64;
     for i in 0..range {
         avg += (obs_min + i as i32) as f64 * score_probs[i];
     }
-    if avg >= 0.0 {
-        return None; // Expected score must be negative
-    }
 
     // Compute lambda using Horner's-rule NR (port of s_CalcLambda)
-    let adjusted_lambda = karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda);
-
-    if adjusted_lambda <= 0.0 {
-        return None;
-    }
+    let adjusted_lambda = if avg >= 0.0 {
+        -1.0
+    } else {
+        karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda)
+    };
 
     let mut ratio = adjusted_lambda / standard_lambda;
     ratio = ratio.min(1.0); // MIN(1, LambdaRatio) when pValueAdjustment==0
     ratio = ratio.max(LAMBDA_RATIO_LOWER_BOUND);
-
-    if ratio >= 1.0 {
-        None // No adjustment needed
-    } else {
-        Some(ratio)
-    }
+    Some(ratio)
 }
 
 /// Port of NCBI Blast_CompositionBasedStats (matrix rescaling mode).
@@ -520,6 +515,30 @@ pub fn composition_scale_matrix(
         result[E_STOP_CHAR][i] = matrix[E_STOP_CHAR][i];
     }
     Some(result)
+}
+
+/// Build an integer matrix directly from frequency ratios at a given lambda.
+/// Port of NCBI `Blast_Int4MatrixFromFreq` for the non-position-based case.
+pub fn matrix_from_freq_ratios(
+    lambda: f64,
+    freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
+) -> [[i32; AA_SIZE]; AA_SIZE] {
+    let mut result = [[0i32; AA_SIZE]; AA_SIZE];
+    for i in 0..AA_SIZE {
+        for j in 0..AA_SIZE {
+            let score = if freq_ratios[i][j] == 0.0 {
+                COMPO_SCORE_MIN
+            } else {
+                freq_ratios[i][j].ln() / lambda
+            };
+            result[i][j] = if score < i32::MIN as f64 {
+                i32::MIN
+            } else {
+                nint(score)
+            };
+        }
+    }
+    result
 }
 
 /// Adjust e-value using composition-based statistics.

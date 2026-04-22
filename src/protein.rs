@@ -4,6 +4,7 @@
 use crate::encoding::NCBISTDAA_TO_AMINOACID;
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
 use crate::matrix::AA_SIZE;
+use crate::stat::MININT;
 
 /// Convert an NCBIstdaa-encoded amino acid to its single-letter IUPAC character.
 pub fn ncbistdaa_to_char(b: u8) -> char {
@@ -164,12 +165,263 @@ pub struct ProteinGappedResult {
     pub edit_script: GapEditScript,
 }
 
-use crate::stat::MININT;
-
+#[derive(Clone, Copy)]
 #[allow(dead_code)]
 struct GapDP {
     best: i32,
     best_gap: i32,
+}
+
+const SCRIPT_SUB: u8 = 0x00;
+const SCRIPT_GAP_IN_A: u8 = 0x01;
+const SCRIPT_GAP_IN_B: u8 = 0x02;
+const SCRIPT_OP_MASK: u8 = 0x03;
+const SCRIPT_EXTEND_GAP_A: u8 = 0x10;
+const SCRIPT_EXTEND_GAP_B: u8 = 0x40;
+
+fn script_to_op(s: u8) -> GapAlignOpType {
+    match s {
+        SCRIPT_GAP_IN_A => GapAlignOpType::Del,
+        SCRIPT_GAP_IN_B => GapAlignOpType::Ins,
+        _ => GapAlignOpType::Sub,
+    }
+}
+
+fn protein_align_ex(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+    mut x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
+    let gap_oe = gap_open + gap_extend;
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return (0, 0, 0, Vec::new());
+    }
+
+    let extra = if gap_extend > 0 {
+        (x_dropoff / gap_extend) as usize + 3
+    } else {
+        n + 3
+    };
+    let alloc = (extra * 2 + 20).min(n + extra + 10);
+    let mut sa = vec![
+        GapDP {
+            best: MININT,
+            best_gap: MININT,
+        };
+        alloc
+    ];
+
+    sa[0] = GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    };
+    let mut score = -gap_oe;
+    let mut b_size = 1usize;
+    while b_size <= n && score >= -x_dropoff {
+        sa[b_size] = GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        };
+        score -= gap_extend;
+        b_size += 1;
+    }
+
+    let mut scripts: Vec<Vec<u8>> = Vec::with_capacity(m + 1);
+    scripts.push(vec![SCRIPT_GAP_IN_A; b_size]);
+
+    let mut best_score = 0i32;
+    let mut first_b = 0usize;
+    let mut a_off = 0usize;
+    let mut b_off = 0usize;
+
+    for ai in 1..=m {
+        let a_idx = if reverse { m - ai } else { ai };
+        if a_idx >= a.len() {
+            break;
+        }
+        let a_letter = a[a_idx] as usize;
+        let matrix_row = &matrix[a_letter];
+
+        let mut row_script = vec![0u8; b_size + extra + 10];
+        let mut sc = MININT;
+        let mut sgr = MININT;
+        let mut last_b = first_b;
+
+        #[allow(clippy::mut_range_bound)]
+        for bi in first_b..b_size {
+            let b_idx = if reverse {
+                n.checked_sub(1 + bi).unwrap_or(usize::MAX)
+            } else {
+                bi + 1
+            };
+            let b_in_range = b_idx < b.len();
+            let sgc = sa[bi].best_gap;
+            let next_sc = if b_in_range {
+                sa[bi].best + matrix_row[b[b_idx] as usize]
+            } else {
+                MININT
+            };
+
+            let mut script = SCRIPT_SUB;
+            if sc < sgc {
+                script = SCRIPT_GAP_IN_B;
+                sc = sgc;
+            }
+            if sc < sgr {
+                script = SCRIPT_GAP_IN_A;
+                sc = sgr;
+            }
+
+            if best_score - sc > x_dropoff {
+                if first_b == bi {
+                    first_b += 1;
+                } else {
+                    sa[bi].best = MININT;
+                }
+            } else {
+                last_b = bi;
+                if sc > best_score {
+                    best_score = sc;
+                    a_off = ai;
+                    b_off = bi;
+                }
+
+                if sgc - gap_extend < sc - gap_oe {
+                    sa[bi].best_gap = sc - gap_oe;
+                } else {
+                    sa[bi].best_gap = sgc - gap_extend;
+                    script |= SCRIPT_EXTEND_GAP_B;
+                }
+                if sgr - gap_extend < sc - gap_oe {
+                    sgr = sc - gap_oe;
+                } else {
+                    sgr -= gap_extend;
+                    script |= SCRIPT_EXTEND_GAP_A;
+                }
+                sa[bi].best = sc;
+            }
+            sc = next_sc;
+            if bi < row_script.len() {
+                row_script[bi] = script;
+            }
+        }
+
+        scripts.push(row_script);
+
+        if first_b >= b_size {
+            break;
+        }
+
+        if last_b < b_size - 1 {
+            b_size = last_b + 1;
+        } else {
+            while sgr >= best_score - x_dropoff && b_size <= n {
+                if b_size >= sa.len() {
+                    sa.resize(
+                        b_size + 10,
+                        GapDP {
+                            best: MININT,
+                            best_gap: MININT,
+                        },
+                    );
+                }
+                sa[b_size] = GapDP {
+                    best: sgr,
+                    best_gap: sgr - gap_oe,
+                };
+                sgr -= gap_extend;
+                b_size += 1;
+            }
+        }
+        if b_size <= n {
+            if b_size >= sa.len() {
+                sa.resize(
+                    b_size + 10,
+                    GapDP {
+                        best: MININT,
+                        best_gap: MININT,
+                    },
+                );
+            }
+            sa[b_size] = GapDP {
+                best: MININT,
+                best_gap: MININT,
+            };
+            b_size += 1;
+        }
+    }
+
+    let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
+    let mut ai = a_off;
+    let mut bi = b_off;
+    let mut cur_script = SCRIPT_SUB;
+
+    while ai > 0 || bi > 0 {
+        if ai >= scripts.len() || bi >= scripts[ai].len() {
+            break;
+        }
+        let s = scripts[ai][bi];
+        cur_script = match cur_script & SCRIPT_OP_MASK {
+            SCRIPT_GAP_IN_A => {
+                if s & SCRIPT_EXTEND_GAP_A != 0 {
+                    SCRIPT_GAP_IN_A
+                } else {
+                    s & SCRIPT_OP_MASK
+                }
+            }
+            SCRIPT_GAP_IN_B => {
+                if s & SCRIPT_EXTEND_GAP_B != 0 {
+                    SCRIPT_GAP_IN_B
+                } else {
+                    s & SCRIPT_OP_MASK
+                }
+            }
+            _ => s & SCRIPT_OP_MASK,
+        };
+
+        let op = script_to_op(cur_script);
+        match cur_script & SCRIPT_OP_MASK {
+            SCRIPT_GAP_IN_A => {
+                if bi == 0 {
+                    break;
+                }
+                bi -= 1;
+            }
+            SCRIPT_GAP_IN_B => {
+                if ai == 0 {
+                    break;
+                }
+                ai -= 1;
+            }
+            _ => {
+                if ai == 0 || bi == 0 {
+                    break;
+                }
+                ai -= 1;
+                bi -= 1;
+            }
+        }
+        if let Some(last) = ops.last_mut() {
+            if last.0 == op {
+                last.1 += 1;
+            } else {
+                ops.push((op, 1));
+            }
+        } else {
+            ops.push((op, 1));
+        }
+    }
+
+    (best_score, a_off, b_off, ops)
 }
 
 /// Score-only gapped extension in one direction (left or right from seed).
@@ -314,6 +566,7 @@ fn protein_gapped_score_one_dir(
     (best_score, best_q, best_s)
 }
 
+#[cfg(test)]
 /// Needleman-Wunsch affine-gap traceback on a sub-region.
 /// Returns (edit_script, num_ident, mismatches, gap_opens, align_length).
 /// Local alignment (Smith-Waterman) with traceback.
@@ -526,14 +779,11 @@ pub fn protein_gapped_align(
     gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<ProteinGappedResult> {
-    let _gap_oe = gap_open + gap_extend;
-
     // Clamp seed points to valid range
     let seed_q = seed_q.min(query.len().saturating_sub(1));
     let seed_s = seed_s.min(subject.len().saturating_sub(1));
 
-    // Left extension (NCBI: Blast_SemiGappedAlign with reversed=TRUE)
-    let (score_l, ext_q_l, ext_s_l) = crate::semi_gapped_align::semi_gapped_align(
+    let (score_l, ql, sl, left_ops) = protein_align_ex(
         &query[..seed_q + 1],
         &subject[..seed_s + 1],
         seed_q + 1,
@@ -544,10 +794,11 @@ pub fn protein_gapped_align(
         x_dropoff,
         true,
     );
+    let q_start = seed_q + 1 - ql;
+    let s_start = seed_s + 1 - sl;
 
-    // Right extension (NCBI: Blast_SemiGappedAlign with reversed=FALSE)
-    let (score_r, ext_q_r, ext_s_r) = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
-        crate::semi_gapped_align::semi_gapped_align(
+    let (score_r, qr, sr, right_ops) = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
+        protein_align_ex(
             &query[seed_q..],
             &subject[seed_s..],
             query.len() - seed_q - 1,
@@ -559,7 +810,7 @@ pub fn protein_gapped_align(
             false,
         )
     } else {
-        (0, 0, 0)
+        (0, 0, 0, Vec::new())
     };
 
     let total_score = score_l + score_r;
@@ -567,37 +818,27 @@ pub fn protein_gapped_align(
         return None;
     }
 
-    // X-drop boundaries with a small margin to let SW find the optimal local
-    // alignment. Keep margin small to avoid O(m*n) blowup on long sequences.
-    let margin = 5; // Small margin to let SW find optimal local alignment
-    let q_start = (seed_q + 1).saturating_sub(ext_q_l).saturating_sub(margin);
-    let q_end = (seed_q + ext_q_r + margin).min(query.len());
-    let s_start = (seed_s + 1).saturating_sub(ext_s_l).saturating_sub(margin);
-    let s_end = (seed_s + ext_s_r + margin).min(subject.len());
-    if q_start >= q_end || s_start >= s_end {
+    let mut edit_script = GapEditScript::new();
+    for &(op, cnt) in &left_ops {
+        edit_script.push(op, cnt);
+    }
+    for &(op, cnt) in right_ops.iter().rev() {
+        edit_script.push(op, cnt);
+    }
+    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
+        edit_script.ops.remove(0);
+    }
+    while !edit_script.ops.is_empty() && edit_script.ops.last().unwrap().0 != GapAlignOpType::Sub {
+        edit_script.ops.pop();
+    }
+    if edit_script.ops.is_empty() {
         return None;
     }
 
-    // Smith-Waterman local alignment on the x-drop region — produces the
-    // optimal local score regardless of seed position.
-    let q_slice = &query[q_start..q_end];
-    let s_slice = &subject[s_start..s_end];
-    let (edit_script, sw_score, sw_qs, sw_ss, sw_qe, sw_se) =
-        protein_nw_traceback(q_slice, s_slice, matrix, gap_open, gap_extend);
-    let final_score = total_score.max(sw_score);
-    if final_score <= 0 {
-        return None;
-    }
-
-    // Adjust boundaries to the SW local alignment region
-    let final_q_start = q_start + sw_qs;
-    let final_q_end = q_start + sw_qe;
-    let final_s_start = s_start + sw_ss;
-    let final_s_end = s_start + sw_se;
-    if final_q_start >= final_q_end || final_s_start >= final_s_end {
-        return None;
-    }
-
+    let final_q_start = q_start;
+    let final_q_end = seed_q + qr + 1;
+    let final_s_start = s_start;
+    let final_s_end = seed_s + sr + 1;
     let local_q = &query[final_q_start..final_q_end];
     let local_s = &subject[final_s_start..final_s_end];
     let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
@@ -608,7 +849,7 @@ pub fn protein_gapped_align(
         query_end: final_q_end,
         subject_start: final_s_start,
         subject_end: final_s_end,
-        score: final_score,
+        score: total_score,
         num_ident,
         align_length,
         mismatches,
@@ -926,4 +1167,5 @@ mod tests {
             r.score
         );
     }
+
 }
