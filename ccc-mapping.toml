@@ -1,0 +1,1876 @@
+[[entries]]
+rust  = "query_is_protein"
+other = "Blast_QueryIsProtein"
+
+[[entries]]
+rust  = "query_is_nucleotide"
+other = "Blast_QueryIsNucleotide"
+
+[[entries]]
+rust  = "query_is_pssm"
+other = "Blast_QueryIsPssm"
+
+[[entries]]
+rust  = "subject_is_protein"
+other = "Blast_SubjectIsProtein"
+
+[[entries]]
+rust  = "subject_is_nucleotide"
+other = "Blast_SubjectIsNucleotide"
+
+[[entries]]
+rust  = "query_is_pssm"
+other = "Blast_SubjectIsPssm"
+
+[[entries]]
+rust  = "query_is_translated"
+other = "Blast_QueryIsTranslated"
+
+[[entries]]
+rust  = "subject_is_translated"
+other = "Blast_SubjectIsTranslated"
+
+[[entries]]
+rust  = "is_psi_blast"
+other = "Blast_ProgramIsPsiBlast"
+
+[[entries]]
+rust  = "is_phi_blast"
+other = "Blast_ProgramIsPhiBlast"
+
+[[entries]]
+rust  = "is_rps_blast"
+other = "Blast_ProgramIsRpsBlast"
+
+[[entries]]
+rust  = "is_mapping"
+other = "Blast_ProgramIsMapping"
+
+[[entries]]
+rust  = "query_is_pattern"
+other = "Blast_QueryIsPattern"
+
+[[entries]]
+rust  = "is_nucleotide"
+other = "Blast_ProgramIsNucleotide"
+
+[[entries]]
+rust  = "is_valid"
+other = "Blast_ProgramIsValid"
+
+[[entries]]
+rust  = "batch_scan_subject"
+other = "s_BlastAaScanSubject"
+
+[[entries]]
+rust  = "batch_scan_subject"
+other = "BlastRPSScanSubject"
+
+[[entries]]
+rust  = "protein_scan"
+other = "BlastChooseProteinScanSubject"
+
+[[entries]]
+rust  = "sort_by_score"
+other = "Blast_HSPListSortByScore"
+
+[[entries]]
+rust  = "is_contained"
+other = "s_HSPIsContained"
+
+[[entries]]
+rust  = "extend_right"
+other = "s_ExtendRight"
+
+[[entries]]
+rust  = "extend_left"
+other = "s_ExtendLeft"
+
+[[entries]]
+rust  = "validate_filtering_options"
+other = "BlastHSPFilteringOptionsValidate"
+
+[[entries]]
+rust  = "align_ex"
+other = "ALIGN_EX"
+
+[[entries]]
+rust  = "gapped_align"
+other = "Blast_SemiGappedAlign"
+
+[[entries]]
+rust  = "gapped_align"
+other = "s_RestrictedGappedAlign"
+
+[[entries]]
+rust  = "get_start_for_gapped_alignment"
+other = "BlastGetStartForGappedAlignmentNucl"
+
+[[entries]]
+rust  = "get_start_for_gapped_alignment"
+other = "BlastGetStartForGappedAlignment"
+
+[[entries]]
+rust  = "greedy_align"
+other = "BLAST_GreedyAlign"
+
+[[entries]]
+rust  = "greedy_align"
+other = "BLAST_AffineGreedyAlign"
+
+[[entries]]
+rust  = "compute_sequence_weights_and_match_weights"
+other = "_PSIComputeSequenceWeights"
+
+[[entries]]
+rust  = "compute_column_pseudocounts"
+other = "s_columnSpecificPseudocounts"
+
+[[entries]]
+rust  = "compute_effective_observations"
+other = "s_effectiveObservations"
+
+[[entries]]
+rust  = "add_lookup_hit"
+other = "BlastLookupAddWordHit"
+
+[[entries]]
+rust  = "max_seq_len"
+other = "BlastSeqSrcGetMaxSeqLen"
+
+[[entries]]
+rust  = "min_seq_len"
+other = "BlastSeqSrcGetMinSeqLen"
+
+[[entries]]
+rust  = "avg_seq_len"
+other = "BlastSeqSrcGetAvgSeqLen"
+
+[[entries]]
+rust  = "get_sequence"
+other = "BlastSeqSrcGetSequence"
+
+[[entries]]
+rust  = "seq_len"
+other = "BlastSeqSrcGetSeqLen"
+
+[[entries]]
+rust  = "expm1"
+other = "BLAST_Expm1"
+
+[[entries]]
+rust  = "log1p"
+other = "BLAST_Log1p"
+
+[[entries]]
+rust  = "gcd"
+other = "BLAST_Gcd"
+
+[[entries]]
+rust  = "nint"
+other = "BLAST_Nint"
+
+[[entries]]
+rust  = "powi"
+other = "BLAST_Powi"
+
+[[entries]]
+rust  = "ln_factorial"
+other = "BLAST_LnFactorial"
+
+[[entries]]
+rust  = "add_hsp"
+other = "BlastHSPPipeInfo_Add"
+
+[[entries]]
+rust  = "protein_gumbel_blk"
+other = "s_BlastGumbelBlkNew"
+
+[[entries]]
+rust  = "protein_gumbel_blk"
+other = "s_BlastGumbelBlkFree"
+
+[[entries]]
+rust  = "karlin_lambda_nr"
+other = "NlmKarlinLambdaNR"
+
+[[entries]]
+rust  = "karlin_lambda_nr"
+other = "Blast_KarlinLambdaNR"
+
+[[entries]]
+rust  = "ungapped_kbp_calc"
+other = "Blast_ScoreBlkKbpUngappedCalc"
+
+[[entries]]
+rust  = "nucl_alpha_beta"
+other = "BLAST_GetAlphaBeta"
+
+[[entries]]
+rust  = "protein_gumbel_blk"
+other = "Blast_GumbelBlkCalc"
+
+[[entries]]
+rust  = "nucl_alpha_beta"
+other = "Blast_GetNuclAlphaBeta"
+
+[[entries]]
+rust  = "compute_length_adjustment"
+other = "BLAST_ComputeLengthAdjustment"
+
+[[entries]]
+rust  = "gapped_align"
+other = "BLAST_GappedAlignmentWithTraceback"
+
+[[entries]]
+rust  = "semi_gapped_align"
+other = "Blast_SemiGappedAlign"
+
+[[entries]]
+rust  = "compute_length_adjustment_exact"
+other = "BLAST_ComputeLengthAdjustment"
+
+[[entries]]
+rust  = "protein_nw_traceback"
+other = "ALIGN_EX"
+
+[[entries]]
+rust  = "s_ln_gamma"
+other = "s_LnGamma"
+
+[[entries]]
+rust  = "s_ln_gamma"
+other = "s_GeneralLnGamma"
+
+[[entries]]
+rust  = "s_ln_gamma"
+other = "s_PolyGamma"
+
+[[entries]]
+rust  = "ln_gamma_int"
+other = "BLAST_LnGammaInt"
+
+[[entries]]
+rust  = "romberg_integrate"
+other = "BLAST_RombergIntegrate"
+
+[[entries]]
+rust  = "raw_to_bit"
+other = "Blast_HSPListGetBitScores"
+
+[[entries]]
+rust  = "raw_to_evalue"
+other = "BLAST_KarlinStoE_simple"
+
+[[entries]]
+rust  = "evalue_to_raw"
+other = "BlastKarlinEtoS_simple"
+
+[[entries]]
+rust  = "blast_cutoffs"
+other = "BLAST_Cutoffs"
+
+[[entries]]
+rust  = "gap_decay_divisor"
+other = "BLAST_GapDecayDivisor"
+
+[[entries]]
+rust  = "sum_p"
+other = "s_BlastSumP"
+
+[[entries]]
+rust  = "sum_p_calc"
+other = "s_BlastSumPCalc"
+
+[[entries]]
+rust  = "karlin_p_to_e"
+other = "BLAST_KarlinPtoE"
+
+[[entries]]
+rust  = "small_gap_sum_e"
+other = "BLAST_SmallGapSumE"
+
+[[entries]]
+rust  = "uneven_gap_sum_e"
+other = "BLAST_UnevenGapSumE"
+
+[[entries]]
+rust  = "large_gap_sum_e"
+other = "BLAST_LargeGapSumE"
+
+[[entries]]
+rust  = "compute_lambda"
+other = "Blast_KarlinLambdaNR"
+
+[[entries]]
+rust  = "solve_lambda"
+other = "NlmKarlinLambdaNR"
+
+[[entries]]
+rust  = "compute_h"
+other = "BlastKarlinLtoH"
+
+[[entries]]
+rust  = "compute_k"
+other = "BlastKarlinLHtoK"
+
+[[entries]]
+rust  = "nucl_gapped_kbp_lookup"
+other = "Blast_KarlinBlkNuclGappedCalc"
+
+[[entries]]
+rust  = "nucl_gapped_kbp_lookup"
+other = "s_GetNuclValuesArray"
+
+[[entries]]
+rust  = "get_ungapped_beta"
+other = "s_GetUngappedBeta"
+
+[[entries]]
+rust  = "spouge_evalue"
+other = "BLAST_SpougeStoE"
+
+[[entries]]
+rust  = "SfDist"
+other = "Blast_ScoreFreq"
+
+[[entries]]
+rust  = "KarlinBlk"
+other = "Blast_KarlinBlk"
+
+[[entries]]
+rust  = "GumbelBlk"
+other = "Blast_GumbelBlk"
+
+[[entries]]
+rust  = "GappedParams"
+other = "array_of_8"
+
+[[entries]]
+rust  = "build_blastna_matrix"
+other = "BlastScoreBlkNuclMatrixCreate"
+
+[[entries]]
+rust  = "reevaluate_with_ambiguities_gapped"
+other = "Blast_HSPReevaluateWithAmbiguitiesGapped"
+
+[[entries]]
+rust  = "blast_gapped_align"
+other = "BLAST_GappedAlignmentWithTraceback"
+
+[[entries]]
+rust  = "blast_gapped_score_only"
+other = "Blast_SemiGappedAlign"
+
+[[entries]]
+rust  = "TracebackResult"
+other = "BlastGapAlignStruct"
+
+[[entries]]
+rust  = "GapAlignOpType"
+other = "EGapAlignOpType"
+
+[[entries]]
+rust  = "blast_get_offsets_for_gapped_alignment"
+other = "BlastGetOffsetsForGappedAlignment"
+
+[[entries]]
+rust  = "dedup_hsps_with_min_diag_separation"
+other = "Blast_HSPListSortByScore"
+
+[[entries]]
+rust  = "SearchHsp"
+other = "BlastHSP"
+
+[[entries]]
+rust  = "na_ungapped_extend_len"
+other = "s_NuclUngappedExtendExact"
+
+[[entries]]
+rust  = "InitHitList"
+other = "BlastInitHitList"
+
+[[entries]]
+rust  = "protein_gapped_align"
+other = "Blast_SemiGappedAlign"
+
+[[entries]]
+rust  = "protein_gapped_score_one_dir"
+other = "Blast_SemiGappedAlign"
+
+[[entries]]
+rust  = "ProteinLookupTable"
+other = "BlastAaLookupTable"
+
+[[entries]]
+rust  = "read_composition"
+other = "Blast_ReadAaComposition"
+
+[[entries]]
+rust  = "compute_ungapped_lambda"
+other = "Blast_CalcLambdaFullPrecision"
+
+[[entries]]
+rust  = "compute_ungapped_lambda_with_bg"
+other = "Blast_CalcLambdaFullPrecision"
+
+[[entries]]
+rust  = "composition_lambda_ratio"
+other = "Blast_CompositionBasedStats"
+
+[[entries]]
+rust  = "composition_scale_matrix"
+other = "s_ScaleSquareMatrix"
+
+[[entries]]
+rust  = "adjust_evalue_composition"
+other = "s_AdjustEvaluesForComposition"
+
+[[entries]]
+rust  = "karlin_e_to_p"
+other = "BLAST_KarlinEtoP"
+
+[[entries]]
+rust  = "overall_p_value"
+other = "Blast_Overall_P_Value"
+
+[[entries]]
+rust  = "composition_matrix_adj"
+other = "Blast_CompositionMatrixAdj"
+
+[[entries]]
+rust  = "MatrixAdjustRule"
+other = "EMatrixAdjustRule"
+
+[[entries]]
+rust  = "choose_matrix_adjust_rule"
+other = "Blast_ChooseMatrixAdjustRule"
+
+[[entries]]
+rust  = "optimize_target_frequencies"
+other = "Blast_OptimizeTargetFrequencies"
+
+[[entries]]
+rust  = "NCBI4NA_TO_BLASTNA"
+other = "NCBI4NA_TO_BLASTNA"
+
+[[entries]]
+rust  = "BLASTNA_TO_NCBI4NA"
+other = "BLASTNA_TO_NCBI4NA"
+
+[[entries]]
+rust  = "BLASTNA_TO_IUPACNA"
+other = "BLASTNA_TO_IUPACNA"
+
+[[entries]]
+rust  = "IUPACNA_TO_BLASTNA"
+other = "IUPACNA_TO_BLASTNA"
+
+[[entries]]
+rust  = "IUPACNA_TO_NCBI4NA"
+other = "IUPACNA_TO_NCBI4NA"
+
+[[entries]]
+rust  = "NCBI4NA_TO_IUPACNA"
+other = "NCBI4NA_TO_IUPACNA"
+
+[[entries]]
+rust  = "AMINOACID_TO_NCBISTDAA"
+other = "AMINOACID_TO_NCBISTDAA"
+
+[[entries]]
+rust  = "NCBISTDAA_TO_AMINOACID"
+other = "NCBISTDAA_TO_AMINOACID"
+
+[[entries]]
+rust  = "BlastDb"
+other = "BlastSeqSrc"
+
+[[entries]]
+rust  = "get_seq_len"
+other = "BlastSeqSrcGetSeqLen"
+
+[[entries]]
+rust  = "num_oids"
+other = "BlastSeqSrcGetNumSeqs"
+
+[[entries]]
+rust  = "format_evalue"
+other = "NStr::DoubleToString"
+
+[[entries]]
+rust  = "rounded_query_coverage"
+other = "CAlignFormatUtil::GetAlnSpaceCount"
+
+[[entries]]
+rust  = "apply_lowercase_mask"
+other = "Blast_MaskTheResidues"
+
+[[entries]]
+rust  = "BlastnSearch"
+other = "CBlastNucleotideOptionsHandle"
+
+[[entries]]
+rust  = "SearchParams"
+other = "BlastInitialWordOptions"
+
+[[entries]]
+rust  = "Diagnostics"
+other = "BlastDiagnostics"
+
+[[entries]]
+rust  = "UngappedStats"
+other = "BlastUngappedStats"
+
+[[entries]]
+rust  = "GappedStats"
+other = "BlastGappedStats"
+
+[[entries]]
+rust  = "add_ungapped_hit"
+other = "Blast_UngappedStatsUpdate"
+
+[[entries]]
+rust  = "IntervalTree"
+other = "BlastIntervalTree"
+
+[[entries]]
+rust  = "Pssm"
+other = "_PSIMsa"
+
+[[entries]]
+rust  = "build_pssm"
+other = "_PSIComputeFreqRatios"
+
+[[entries]]
+rust  = "MININT"
+other = "MININT"
+
+[[entries]]
+rust  = "HSP_MAX_WINDOW"
+other = "HSP_MAX_WINDOW"
+
+[[entries]]
+rust  = "BLAST_SCORE_MIN"
+other = "BLAST_SCORE_MIN"
+
+[[entries]]
+rust  = "BLAST_EXPECT_VALUE"
+other = "BLAST_EXPECT_VALUE"
+
+[[entries]]
+rust  = "BLAST_HITLIST_SIZE"
+other = "BLAST_HITLIST_SIZE"
+
+[[entries]]
+rust  = "BLAST_REWARD"
+other = "BLAST_REWARD"
+
+[[entries]]
+rust  = "BLAST_PENALTY"
+other = "BLAST_PENALTY"
+
+[[entries]]
+rust  = "BLAST_GAP_OPEN_PROT"
+other = "BLAST_GAP_OPEN_PROT"
+
+[[entries]]
+rust  = "BLAST_GAP_OPEN_NUCL"
+other = "BLAST_GAP_OPEN_NUCL"
+
+[[entries]]
+rust  = "BLAST_GAP_OPEN_MEGABLAST"
+other = "BLAST_GAP_OPEN_MEGABLAST"
+
+[[entries]]
+rust  = "BLAST_GAP_EXTN_PROT"
+other = "BLAST_GAP_EXTN_PROT"
+
+[[entries]]
+rust  = "BLAST_GAP_EXTN_NUCL"
+other = "BLAST_GAP_EXTN_NUCL"
+
+[[entries]]
+rust  = "BLAST_GAP_EXTN_MEGABLAST"
+other = "BLAST_GAP_EXTN_MEGABLAST"
+
+[[entries]]
+rust  = "BLAST_WORDSIZE_PROT"
+other = "BLAST_WORDSIZE_PROT"
+
+[[entries]]
+rust  = "BLAST_WORDSIZE_NUCL"
+other = "BLAST_WORDSIZE_NUCL"
+
+[[entries]]
+rust  = "BLAST_WORDSIZE_MEGABLAST"
+other = "BLAST_WORDSIZE_MEGABLAST"
+
+[[entries]]
+rust  = "BLAST_WORDSIZE_MAPPER"
+other = "BLAST_WORDSIZE_MAPPER"
+
+[[entries]]
+rust  = "BLAST_WINDOW_SIZE_PROT"
+other = "BLAST_WINDOW_SIZE_PROT"
+
+[[entries]]
+rust  = "BLAST_WINDOW_SIZE_NUCL"
+other = "BLAST_WINDOW_SIZE_NUCL"
+
+[[entries]]
+rust  = "BLAST_WINDOW_SIZE_MEGABLAST"
+other = "BLAST_WINDOW_SIZE_MEGABLAST"
+
+[[entries]]
+rust  = "BLAST_WINDOW_SIZE_DISC"
+other = "BLAST_WINDOW_SIZE_DISC"
+
+[[entries]]
+rust  = "BLAST_UNGAPPED_X_DROPOFF_PROT"
+other = "BLAST_UNGAPPED_X_DROPOFF_PROT"
+
+[[entries]]
+rust  = "BLAST_UNGAPPED_X_DROPOFF_NUCL"
+other = "BLAST_UNGAPPED_X_DROPOFF_NUCL"
+
+[[entries]]
+rust  = "BLAST_GAP_X_DROPOFF_PROT"
+other = "BLAST_GAP_X_DROPOFF_PROT"
+
+[[entries]]
+rust  = "BLAST_GAP_X_DROPOFF_NUCL"
+other = "BLAST_GAP_X_DROPOFF_NUCL"
+
+[[entries]]
+rust  = "BLAST_GAP_X_DROPOFF_GREEDY"
+other = "BLAST_GAP_X_DROPOFF_GREEDY"
+
+[[entries]]
+rust  = "BLAST_GAP_X_DROPOFF_TBLASTX"
+other = "BLAST_GAP_X_DROPOFF_TBLASTX"
+
+[[entries]]
+rust  = "BLAST_GAP_X_DROPOFF_FINAL_PROT"
+other = "BLAST_GAP_X_DROPOFF_FINAL_PROT"
+
+[[entries]]
+rust  = "BLAST_GAP_X_DROPOFF_FINAL_NUCL"
+other = "BLAST_GAP_X_DROPOFF_FINAL_NUCL"
+
+[[entries]]
+rust  = "BLAST_GAP_X_DROPOFF_FINAL_TBLASTX"
+other = "BLAST_GAP_X_DROPOFF_FINAL_TBLASTX"
+
+[[entries]]
+rust  = "BLAST_GAP_TRIGGER_PROT"
+other = "BLAST_GAP_TRIGGER_PROT"
+
+[[entries]]
+rust  = "BLAST_GAP_TRIGGER_NUCL"
+other = "BLAST_GAP_TRIGGER_NUCL"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_BLASTP"
+other = "BLAST_WORD_THRESHOLD_BLASTP"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_BLASTP_FAST"
+other = "BLAST_WORD_THRESHOLD_BLASTP_FAST"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_6"
+other = "BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_6"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_7"
+other = "BLAST_WORD_THRESHOLD_BLASTP_WD_SZ_7"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_BLASTN"
+other = "BLAST_WORD_THRESHOLD_BLASTN"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_BLASTX"
+other = "BLAST_WORD_THRESHOLD_BLASTX"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_TBLASTN"
+other = "BLAST_WORD_THRESHOLD_TBLASTN"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_TBLASTX"
+other = "BLAST_WORD_THRESHOLD_TBLASTX"
+
+[[entries]]
+rust  = "BLAST_WORD_THRESHOLD_MEGABLAST"
+other = "BLAST_WORD_THRESHOLD_MEGABLAST"
+
+[[entries]]
+rust  = "BLAST_DEFAULT_MATRIX"
+other = "BLAST_DEFAULT_MATRIX"
+
+[[entries]]
+rust  = "BLAST_SCAN_RANGE_NUCL"
+other = "BLAST_SCAN_RANGE_NUCL"
+
+[[entries]]
+rust  = "CUTOFF_E_BLASTN"
+other = "CUTOFF_E_BLASTN"
+
+[[entries]]
+rust  = "CUTOFF_E_BLASTP"
+other = "CUTOFF_E_BLASTP"
+
+[[entries]]
+rust  = "CUTOFF_E_BLASTX"
+other = "CUTOFF_E_BLASTX"
+
+[[entries]]
+rust  = "CUTOFF_E_TBLASTN"
+other = "CUTOFF_E_TBLASTN"
+
+[[entries]]
+rust  = "CUTOFF_E_TBLASTX"
+other = "CUTOFF_E_TBLASTX"
+
+[[entries]]
+rust  = "BLAST_GAP_DECAY_RATE"
+other = "BLAST_GAP_DECAY_RATE"
+
+[[entries]]
+rust  = "BLAST_GAP_DECAY_RATE_GAPPED"
+other = "BLAST_GAP_DECAY_RATE_GAPPED"
+
+[[entries]]
+rust  = "BLAST_KARLIN_LAMBDA0_DEFAULT"
+other = "BLAST_KARLIN_LAMBDA0_DEFAULT"
+
+[[entries]]
+rust  = "BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT"
+other = "BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT"
+
+[[entries]]
+rust  = "BLAST_KARLIN_LAMBDA_ITER_DEFAULT"
+other = "BLAST_KARLIN_LAMBDA_ITER_DEFAULT"
+
+[[entries]]
+rust  = "BLAST_KARLIN_K_SUMLIMIT_DEFAULT"
+other = "BLAST_KARLIN_K_SUMLIMIT_DEFAULT"
+
+[[entries]]
+rust  = "BLAST_KARLIN_K_ITER_MAX"
+other = "BLAST_KARLIN_K_ITER_MAX"
+
+[[entries]]
+rust  = "NCBIMATH_LN2"
+other = "NCBIMATH_LN2"
+
+[[entries]]
+rust  = "NCBIMATH_LNPI"
+other = "NCBIMATH_LNPI"
+
+[[entries]]
+rust  = "NCBIMATH_PI"
+other = "NCBIMATH_PI"
+
+[[entries]]
+rust  = "GAMMA_COEF"
+other = "_default_gamma_coef"
+
+[[entries]]
+rust  = "BLASTNA_SIZE"
+other = "BLASTNA_SIZE"
+
+[[entries]]
+rust  = "BLASTAA_SIZE"
+other = "BLASTAA_SIZE"
+
+[[entries]]
+rust  = "AA_SIZE"
+other = "BLASTAA_SIZE"
+
+[[entries]]
+rust  = "COMPO_NUM_TRUE_AA"
+other = "COMPO_NUM_TRUE_AA"
+
+[[entries]]
+rust  = "PROT_SENTINEL"
+other = "AMINOACID_TO_NCBISTDAA"
+
+[[entries]]
+rust  = "E_GAP_CHAR"
+other = "eGapChar"
+
+[[entries]]
+rust  = "E_BCHAR"
+other = "eBchar"
+
+[[entries]]
+rust  = "E_CCHAR"
+other = "eCchar"
+
+[[entries]]
+rust  = "E_DCHAR"
+other = "eDchar"
+
+[[entries]]
+rust  = "E_ECHAR"
+other = "eEchar"
+
+[[entries]]
+rust  = "E_ICHAR"
+other = "eIchar"
+
+[[entries]]
+rust  = "E_LCHAR"
+other = "eLchar"
+
+[[entries]]
+rust  = "E_NCHAR"
+other = "eNchar"
+
+[[entries]]
+rust  = "E_QCHAR"
+other = "eQchar"
+
+[[entries]]
+rust  = "E_XCHAR"
+other = "eXchar"
+
+[[entries]]
+rust  = "E_ZCHAR"
+other = "eZchar"
+
+[[entries]]
+rust  = "E_SELENOCYSTEINE"
+other = "eSelenocysteine"
+
+[[entries]]
+rust  = "E_STOP_CHAR"
+other = "eStopChar"
+
+[[entries]]
+rust  = "E_OCHAR"
+other = "eOchar"
+
+[[entries]]
+rust  = "E_JCHAR"
+other = "eJchar"
+
+[[entries]]
+rust  = "SCRIPT_SUB"
+other = "eGapAlignSub"
+
+[[entries]]
+rust  = "SCRIPT_GAP_IN_A"
+other = "eGapAlignDel"
+
+[[entries]]
+rust  = "SCRIPT_GAP_IN_B"
+other = "eGapAlignIns"
+
+[[entries]]
+rust  = "SCRIPT_OP_MASK"
+other = "SCRIPT_OP_MASK"
+
+[[entries]]
+rust  = "SCRIPT_EXTEND_GAP_A"
+other = "SCRIPT_EXTEND_GAP_A"
+
+[[entries]]
+rust  = "SCRIPT_EXTEND_GAP_B"
+other = "SCRIPT_EXTEND_GAP_B"
+
+[[entries]]
+rust  = "FIXED_RE_BLOSUM62"
+other = "kFixedReBlosum62"
+
+[[entries]]
+rust  = "RE_PSEUDOCOUNTS"
+other = "kReMatrixAdjustmentPseudocounts"
+
+[[entries]]
+rust  = "COMPO_ADJUST_ERR_TOLERANCE"
+other = "kCompoAdjustErrTolerance"
+
+[[entries]]
+rust  = "COMPO_ADJUST_ITERATION_LIMIT"
+other = "kCompoAdjustIterationLimit"
+
+[[entries]]
+rust  = "LAMBDA_ERROR_TOLERANCE"
+other = "kLambdaErrorTolerance"
+
+[[entries]]
+rust  = "LAMBDA_FUNCTION_TOLERANCE"
+other = "kLambdaFunctionTolerance"
+
+[[entries]]
+rust  = "Hsp"
+other = "BlastHSP"
+
+[[entries]]
+rust  = "HspList"
+other = "BlastHSPList"
+
+[[entries]]
+rust  = "HspResults"
+other = "BlastHSPResults"
+
+[[entries]]
+rust  = "HspStream"
+other = "BlastHSPStream"
+
+[[entries]]
+rust  = "add_hsp"
+other = "Blast_HSPListSaveHSP"
+
+[[entries]]
+rust  = "add_hsp_list"
+other = "Blast_HSPResultsInsertHSPList"
+
+[[entries]]
+rust  = "sort_by_evalue"
+other = "Blast_HSPResultsSortByEvalue"
+
+[[entries]]
+rust  = "write"
+other = "BlastHSPStreamWrite"
+
+[[entries]]
+rust  = "lookup_table"
+other = "LookupTable"
+
+[[entries]]
+rust  = "PV_ARRAY_BTS"
+other = "PV_ARRAY_BTS"
+
+[[entries]]
+rust  = "ListNode"
+other = "ListNode"
+
+[[entries]]
+rust  = "is_contained_with_min_diag_separation"
+other = "BlastIntervalTreeContainsHSP"
+
+[[entries]]
+rust  = "cutoff_score_min"
+other = "cutoff_score_min"
+
+[[entries]]
+rust  = "translate_codon"
+other = "s_CodonToAA"
+
+[[entries]]
+rust  = "six_frame_translate"
+other = "BLAST_GetAllTranslations"
+
+[[entries]]
+rust  = "reverse_complement"
+other = "GetReverseNuclSequence"
+
+[[entries]]
+rust  = "UngappedData"
+other = "BlastUngappedData"
+
+[[entries]]
+rust  = "add_vectors"
+other = "Nlm_AddVectors"
+
+[[entries]]
+rust  = "BlastnArgs"
+other = "CArgs"
+
+[[entries]]
+rust  = "update_from_alignment"
+other = "PSICreatePssm"
+
+[[entries]]
+rust  = "TaxInfo"
+other = "SSeqDBTaxInfo"
+
+[[entries]]
+rust  = "SequenceEntry"
+other = "CSeq_entry"
+
+[[entries]]
+rust  = "raw_gilist"
+other = "GILIST"
+
+[[entries]]
+rust  = "raw_taxidlist"
+other = "TAXIDLIST"
+
+[[entries]]
+rust  = "dblist"
+other = "DBLIST"
+
+[[entries]]
+rust  = "oidlist"
+other = "OIDLIST"
+
+[[entries]]
+rust  = "title"
+other = "TITLE"
+
+[[entries]]
+rust  = "nseq"
+other = "NSEQ"
+
+[[entries]]
+rust  = "length"
+other = "LENGTH"
+
+[[entries]]
+rust  = "stats_nseq"
+other = "STATS_NSEQ"
+
+[[entries]]
+rust  = "stats_total_length"
+other = "STATS_TOTLEN"
+
+[[entries]]
+rust  = "first_oid"
+other = "FIRST_OID"
+
+[[entries]]
+rust  = "last_oid"
+other = "LAST_OID"
+
+[[entries]]
+rust  = "GapEditScript"
+other = "GapEditScript"
+
+[[entries]]
+rust  = "Strand"
+other = "ENa_strand"
+
+[[entries]]
+rust  = "Strand::Plus"
+other = "eNa_strand_plus"
+
+[[entries]]
+rust  = "Strand::Minus"
+other = "eNa_strand_minus"
+
+[[entries]]
+rust  = "Strand::Both"
+other = "eNa_strand_both"
+
+[[entries]]
+rust  = "nucleotide_matrix"
+other = "BlastScoreBlkNuclMatrixCreate"
+
+[[entries]]
+rust  = "AA_FREQUENCIES"
+other = "Robinson_prob"
+
+[[entries]]
+rust  = "BLOSUM62_FREQ_RATIOS"
+other = "BLOSUM62_FREQRATIOS"
+
+[[entries]]
+rust  = "MaskedRegion"
+other = "BlastSeqLoc"
+
+[[entries]]
+rust  = "MaskLoc"
+other = "BlastSeqLoc"
+
+[[entries]]
+rust  = "add"
+other = "BlastSeqLocNew"
+
+[[entries]]
+rust  = "apply"
+other = "Blast_MaskTheResidues"
+
+[[entries]]
+rust  = "NaLookup"
+other = "BlastNaLookupTable"
+
+[[entries]]
+rust  = "pv_array"
+other = "PV_ARRAY_TYPE"
+
+[[entries]]
+rust  = "InitialWordOptions"
+other = "BlastInitialWordOptions"
+
+[[entries]]
+rust  = "ExtensionOptions"
+other = "BlastExtensionOptions"
+
+[[entries]]
+rust  = "HitSavingOptions"
+other = "BlastHitSavingOptions"
+
+[[entries]]
+rust  = "ScoringOptions"
+other = "BlastScoringOptions"
+
+[[entries]]
+rust  = "EffectiveLengthsOptions"
+other = "BlastEffectiveLengthsOptions"
+
+[[entries]]
+rust  = "QueryInfo"
+other = "BlastQueryInfo"
+
+[[entries]]
+rust  = "ContextInfo"
+other = "BlastContextInfo"
+
+[[entries]]
+rust  = "ScoringMatrix"
+other = "SBlastScoreMatrix"
+
+[[entries]]
+rust  = "build"
+other = "BlastAaLookupIndexQuery"
+
+[[entries]]
+rust  = "INT4_MAX"
+other = "INT4_MAX"
+
+[[entries]]
+rust  = "INT4_MIN"
+other = "INT4_MIN"
+
+[[entries]]
+rust  = "INT2_MAX"
+other = "INT2_MAX"
+
+[[entries]]
+rust  = "INT2_MIN"
+other = "INT2_MIN"
+
+[[entries]]
+rust  = "COMPO_LARGEST_ALPHABET"
+other = "COMPO_LARGEST_ALPHABET"
+
+[[entries]]
+rust  = "K_SMALL_FLOAT"
+other = "kSmallFloat"
+
+[[entries]]
+rust  = "NUM_FRAMES"
+other = "NUM_FRAMES"
+
+[[entries]]
+rust  = "CODON_LENGTH"
+other = "CODON_LENGTH"
+
+[[entries]]
+rust  = "DEFAULT_LONGEST_INTRON"
+other = "DEFAULT_LONGEST_INTRON"
+
+[[entries]]
+rust  = "COMPRESSION_RATIO"
+other = "COMPRESSION_RATIO"
+
+[[entries]]
+rust  = "NUM_STRANDS"
+other = "NUM_STRANDS"
+
+[[entries]]
+rust  = "GENCODE_STRLEN"
+other = "GENCODE_STRLEN"
+
+[[entries]]
+rust  = "BLAST_PENALTY_MAPPER"
+other = "BLAST_PENALTY_MAPPER"
+
+[[entries]]
+rust  = "BLAST_REWARD_MAPPER"
+other = "BLAST_REWARD_MAPPER"
+
+[[entries]]
+rust  = "BLAST_GAP_OPEN_MAPPER"
+other = "BLAST_GAP_OPEN_MAPPER"
+
+[[entries]]
+rust  = "BLAST_GAP_EXTN_MAPPER"
+other = "BLAST_GAP_EXTN_MAPPER"
+
+[[entries]]
+rust  = "PSI_INCLUSION_ETHRESH"
+other = "PSI_INCLUSION_ETHRESH"
+
+[[entries]]
+rust  = "PSI_PSEUDO_COUNT_CONST"
+other = "PSI_PSEUDO_COUNT_CONST"
+
+[[entries]]
+rust  = "DELTA_INCLUSION_ETHRESH"
+other = "DELTA_INCLUSION_ETHRESH"
+
+[[entries]]
+rust  = "BLAST_GENETIC_CODE"
+other = "BLAST_GENETIC_CODE"
+
+[[entries]]
+rust  = "MAX_DB_WORD_COUNT_MAPPER"
+other = "MAX_DB_WORD_COUNT_MAPPER"
+
+[[entries]]
+rust  = "BLAST_GAP_PROB"
+other = "BLAST_GAP_PROB"
+
+[[entries]]
+rust  = "BLAST_GAP_PROB_GAPPED"
+other = "BLAST_GAP_PROB_GAPPED"
+
+[[entries]]
+rust  = "BLAST_GAP_SIZE"
+other = "BLAST_GAP_SIZE"
+
+[[entries]]
+rust  = "BLAST_OVERLAP_SIZE"
+other = "BLAST_OVERLAP_SIZE"
+
+[[entries]]
+rust  = "RESTRICTED_ALIGNMENT_WORST_EVALUE"
+other = "RESTRICTED_ALIGNMENT_WORST_EVALUE"
+
+[[entries]]
+rust  = "BLAST_SCORE_MAX"
+other = "BLAST_SCORE_MAX"
+
+[[entries]]
+rust  = "BLAST_MATRIX_NOMINAL"
+other = "BLAST_MATRIX_NOMINAL"
+
+[[entries]]
+rust  = "BLAST_MATRIX_PREFERRED"
+other = "BLAST_MATRIX_PREFERRED"
+
+[[entries]]
+rust  = "BLAST_MATRIX_BEST"
+other = "BLAST_MATRIX_BEST"
+
+[[entries]]
+rust  = "DBSEQ_CHUNK_OVERLAP"
+other = "DBSEQ_CHUNK_OVERLAP"
+
+[[entries]]
+rust  = "PV_ARRAY_BYTES"
+other = "PV_ARRAY_BYTES"
+
+[[entries]]
+rust  = "PV_ARRAY_MASK"
+other = "PV_ARRAY_MASK"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_MINGAP"
+other = "BLAST_SEQSRC_MINGAP"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_OVERHANG"
+other = "BLAST_SEQSRC_OVERHANG"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_MINLENGTH"
+other = "BLAST_SEQSRC_MINLENGTH"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_EXCLUDED"
+other = "BLAST_SEQSRC_EXCLUDED"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_ERROR"
+other = "BLAST_SEQSRC_ERROR"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_EOF"
+other = "BLAST_SEQSRC_EOF"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_SUCCESS"
+other = "BLAST_SEQSRC_SUCCESS"
+
+[[entries]]
+rust  = "PROTEIN_QUERY_MASK"
+other = "PROTEIN_QUERY_MASK"
+
+[[entries]]
+rust  = "PROTEIN_SUBJECT_MASK"
+other = "PROTEIN_SUBJECT_MASK"
+
+[[entries]]
+rust  = "NUCLEOTIDE_QUERY_MASK"
+other = "NUCLEOTIDE_QUERY_MASK"
+
+[[entries]]
+rust  = "NUCLEOTIDE_SUBJECT_MASK"
+other = "NUCLEOTIDE_SUBJECT_MASK"
+
+[[entries]]
+rust  = "TRANSLATED_QUERY_MASK"
+other = "TRANSLATED_QUERY_MASK"
+
+[[entries]]
+rust  = "TRANSLATED_SUBJECT_MASK"
+other = "TRANSLATED_SUBJECT_MASK"
+
+[[entries]]
+rust  = "PSSM_QUERY_MASK"
+other = "PSSM_QUERY_MASK"
+
+[[entries]]
+rust  = "PSSM_SUBJECT_MASK"
+other = "PSSM_SUBJECT_MASK"
+
+[[entries]]
+rust  = "PATTERN_QUERY_MASK"
+other = "PATTERN_QUERY_MASK"
+
+[[entries]]
+rust  = "COMPO_SCORE_MIN"
+other = "COMPO_SCORE_MIN"
+
+[[entries]]
+rust  = "BLAST2NA_SIZE"
+other = "BLAST2NA_SIZE"
+
+[[entries]]
+rust  = "BLASTNA_SEQ_CODE"
+other = "BLASTNA_SEQ_CODE"
+
+[[entries]]
+rust  = "BLASTAA_SEQ_CODE"
+other = "BLASTAA_SEQ_CODE"
+
+[[entries]]
+rust  = "NCBI4NA_SEQ_CODE"
+other = "NCBI4NA_SEQ_CODE"
+
+[[entries]]
+rust  = "COMPO_MIN_LAMBDA"
+other = "COMPO_MIN_LAMBDA"
+
+[[entries]]
+rust  = "LAMBDA_BIN_SIZE"
+other = "LAMBDA_BIN_SIZE"
+
+[[entries]]
+rust  = "LOW_LAMBDA_BIN_CUT"
+other = "LOW_LAMBDA_BIN_CUT"
+
+[[entries]]
+rust  = "composition_pvalue"
+other = "Blast_CompositionPvalue"
+
+[[entries]]
+rust  = "P_LAMBDA_TABLE"
+other = "P_lambda_table"
+
+[[entries]]
+rust  = "MessageSeverity::Info"
+other = "eBlastSevInfo"
+
+[[entries]]
+rust  = "MessageSeverity::Warning"
+other = "eBlastSevWarning"
+
+[[entries]]
+rust  = "MessageSeverity::Error"
+other = "eBlastSevError"
+
+[[entries]]
+rust  = "MessageSeverity::Fatal"
+other = "eBlastSevFatal"
+
+[[entries]]
+rust  = "GetSeqArg"
+other = "BlastSeqSrcGetSeqArg"
+
+[[entries]]
+rust  = "SeqData"
+other = "BLAST_SequenceBlk"
+
+[[entries]]
+rust  = "iupac_to_blastna"
+other = "IUPACNA_TO_BLASTNA"
+
+[[entries]]
+rust  = "blastna_to_iupac"
+other = "BLASTNA_TO_IUPACNA"
+
+[[entries]]
+rust  = "new_blastn"
+other = "BlastQueryInfoNew"
+
+[[entries]]
+rust  = "num_contexts"
+other = "BLAST_GetNumberOfContexts"
+
+[[entries]]
+rust  = "compute_identities"
+other = "Blast_HSPGetNumIdentitiesAndPositives"
+
+[[entries]]
+rust  = "filter_by_evalue"
+other = "Blast_HSPListReapByEvalue"
+
+[[entries]]
+rust  = "remove_contained"
+other = "Blast_HSPListPurgeHSPsWithCommonEndpoints"
+
+[[entries]]
+rust  = "ncbistdaa_to_char"
+other = "NCBISTDAA_TO_AMINOACID"
+
+[[entries]]
+rust  = "ProteinGappedResult"
+other = "BlastGapAlignStruct"
+
+[[entries]]
+rust  = "protein_search_hit"
+other = "BlastHSP"
+
+[[entries]]
+rust  = "ScoringParameters"
+other = "BlastScoringParameters"
+
+[[entries]]
+rust  = "ExtensionParameters"
+other = "BlastExtensionParameters"
+
+[[entries]]
+rust  = "HitSavingParameters"
+other = "BlastHitSavingParameters"
+
+[[entries]]
+rust  = "InitialWordParameters"
+other = "BlastInitialWordParameters"
+
+[[entries]]
+rust  = "EffectiveLengthsParameters"
+other = "BlastEffectiveLengthsParameters"
+
+[[entries]]
+rust  = "ProgramType"
+other = "EBlastProgramType"
+
+[[entries]]
+rust  = "factor_ltriag_pos_def"
+other = "Nlm_FactorLtriangPosDef"
+
+[[entries]]
+rust  = "solve_ltriag_pos_def"
+other = "Nlm_SolveLtriangPosDef"
+
+[[entries]]
+rust  = "euclidean_norm"
+other = "Nlm_EuclideanNorm"
+
+[[entries]]
+rust  = "step_bound"
+other = "Nlm_StepBound"
+
+[[entries]]
+rust  = "OffsetPair"
+other = "BlastOffsetPair"
+
+[[entries]]
+rust  = "SmallNaLookupTable"
+other = "BlastSmallNaLookupTable"
+
+[[entries]]
+rust  = "MbLookupTable"
+other = "BlastMBLookupTable"
+
+[[entries]]
+rust  = "AaLookupTable"
+other = "BlastAaLookupTable"
+
+[[entries]]
+rust  = "LookupTableType"
+other = "ELookupTableType"
+
+[[entries]]
+rust  = "add_pointer"
+other = "ListNodeAddPointer"
+
+[[entries]]
+rust  = "RpsProfile"
+other = "BlastRPSProfileHeader"
+
+[[entries]]
+rust  = "RpsHit"
+other = "BlastHSP"
+
+[[entries]]
+rust  = "ProteinHit"
+other = "BlastInitHitList"
+
+[[entries]]
+rust  = "HitList"
+other = "BlastHitList"
+
+[[entries]]
+rust  = "SearchConfig"
+other = "BlastOptions"
+
+[[entries]]
+rust  = "QueryResult"
+other = "BlastHSPResults"
+
+[[entries]]
+rust  = "AlignmentHit"
+other = "BlastHSP"
+
+[[entries]]
+rust  = "MaskedRegion"
+other = "SSeqRange"
+
+[[entries]]
+rust  = "InitHsp"
+other = "BlastInitHSP"
+
+[[entries]]
+rust  = "FastaRecord"
+other = "BLAST_SequenceBlk"
+
+[[entries]]
+rust  = "TabularHit"
+other = "BlastHSP"
+
+[[entries]]
+rust  = "format_tabular"
+other = "CBlastTabularInfo"
+
+[[entries]]
+rust  = "format_bitscore"
+other = "CAlignFormatUtil::GetScoreString"
+
+[[entries]]
+rust  = "make_nucleotide_db"
+other = "CWriteDB"
+
+[[entries]]
+rust  = "Interval"
+other = "SSeqRange"
+
+[[entries]]
+rust  = "SearchResult"
+other = "BlastHSPResults"
+
+[[entries]]
+rust  = "SearchParams"
+other = "BlastOptions"
+
+[[entries]]
+rust  = "SequenceEntry"
+other = "BLAST_SequenceBlk"
+
+[[entries]]
+rust  = "BlastDbBuilder"
+other = "CWriteDB"
+
+[[entries]]
+rust  = "TranslatedFrame"
+other = "BlastQueryInfo"
+
+[[entries]]
+rust  = "BlastDefLine"
+other = "Blast_def_line"
+
+[[entries]]
+rust  = "DbType"
+other = "ESeqType"
+
+[[entries]]
+rust  = "calc_lambda_full_precision"
+other = "Blast_CalcLambdaFullPrecision"
+
+[[entries]]
+rust  = "debug_lambda_ratio"
+other = "Blast_CompositionBasedStats"
+
+[[entries]]
+rust  = "std_prob_ncbistdaa"
+other = "BLAST_GetStandardAaProbabilities"
+
+[[entries]]
+rust  = "effective_bg_probs"
+other = "s_effectiveObservations"
+
+[[entries]]
+rust  = "six_frame_translation"
+other = "BLAST_GetAllTranslations"
+
+[[entries]]
+rust  = "protein_to_nuc_coords"
+other = "BLAST_FrameToContext"
+
+[[entries]]
+rust  = "na_ungapped_extend"
+other = "s_BlastNaExtend"
+
+[[entries]]
+rust  = "compute_ungapped_k"
+other = "BlastKarlinLHtoK"
+
+[[entries]]
+rust  = "compute_ungapped_kbp"
+other = "Blast_KarlinBlkUngappedCalc"
+
+[[entries]]
+rust  = "protein_ungapped_kbp"
+other = "blosum62_values"
+
+[[entries]]
+rust  = "lookup_protein_params"
+other = "blosum62_values"
+
+[[entries]]
+rust  = "blastn_gapped_search"
+other = "BLAST_GappedAlignmentWithTraceback"
+
+[[entries]]
+rust  = "gather_letter_probs"
+other = "s_GatherLetterProbs"
+
+[[entries]]
+rust  = "aminoacid_to_ncbistdaa"
+other = "AMINOACID_TO_NCBISTDAA"
+
+[[entries]]
+rust  = "iupacna_to_blastna"
+other = "IUPACNA_TO_BLASTNA"
+
+[[entries]]
+rust  = "erfc"
+other = "BLAST_ErfC"
+
+
+[[entries]]
+rust  = "DatabaseOptions"
+other = "BlastDatabaseOptions"
+
+[[entries]]
+rust  = "PrelimGapExt"
+other = "EBlastPrelimGapExt"
+
+[[entries]]
+rust  = "TracebackExt"
+other = "EBlastTbackExt"
+
+[[entries]]
+rust  = "relative_entropy"
+other = "Blast_GetRelativeEntropy"
+
+[[entries]]
+rust  = "high_pair_frequencies"
+other = "s_HighPairFrequencies"
+
+[[entries]]
+rust  = "high_pair_either_seq"
+other = "s_HighPairEitherSeq"
+
+[[entries]]
+rust  = "test_re_adjustment_conditional"
+other = "s_TestToApplyREAdjustmentConditional"
+
+[[entries]]
+rust  = "HALF_CIRCLE_DEGREES"
+other = "HALF_CIRCLE_DEGREES"
+
+[[entries]]
+rust  = "BLOSUM62_BG"
+other = "BLOSUM62_bg"
+
+[[entries]]
+rust  = "apply_pseudocounts"
+other = "Blast_ApplyPseudocounts"
+
+[[entries]]
+rust  = "calc_freq_ratios"
+other = "Blast_CalcFreqRatios"
+
+[[entries]]
+rust  = "freq_ratio_to_score"
+other = "Blast_FreqRatioToScore"
+
+[[entries]]
+rust  = "target_freq_entropy"
+other = "Blast_TargetFreqEntropy"
+
+[[entries]]
+rust  = "unpack_letter_probs"
+other = "s_UnpackLetterProbs"
+
+[[entries]]
+rust  = "scaled_symmetric_product_a"
+other = "ScaledSymmetricProductA"
+
+[[entries]]
+rust  = "multiply_by_a"
+other = "MultiplyByA"
+
+[[entries]]
+rust  = "multiply_by_a_transpose"
+other = "MultiplyByAtranspose"
+
+[[entries]]
+rust  = "dual_residuals"
+other = "DualResiduals"
+
+[[entries]]
+rust  = "calculate_residuals"
+other = "CalculateResiduals"
+
+[[entries]]
+rust  = "evaluate_re_functions"
+other = "EvaluateReFunctions"
+
+[[entries]]
+rust  = "compute_scores_from_probs"
+other = "ComputeScoresFromProbs"
+
+[[entries]]
+rust  = "residuals_linear_constraints"
+other = "ResidualsLinearConstraints"
+
+[[entries]]
+rust  = "score_compare_hsps"
+other = "ScoreCompareHSPs"
+
+[[entries]]
+rust  = "evalue_comp"
+other = "s_EvalueComp"
+
+[[entries]]
+rust  = "evalue_compare_hsp_lists"
+other = "s_EvalueCompareHSPLists"
+
+[[entries]]
+rust  = "BLOSUM62"
+other = "NCBISM_Blosum62"
+
+[[entries]]
+rust  = "BLOSUM45"
+other = "NCBISM_Blosum45"
+
+[[entries]]
+rust  = "BLOSUM50"
+other = "NCBISM_Blosum50"
+
+[[entries]]
+rust  = "BLOSUM80"
+other = "NCBISM_Blosum80"
+
+[[entries]]
+rust  = "BLOSUM90"
+other = "NCBISM_Blosum90"
+
+[[entries]]
+rust  = "PAM30"
+other = "NCBISM_Pam30"
+
+[[entries]]
+rust  = "PAM70"
+other = "NCBISM_Pam70"
+
+[[entries]]
+rust  = "PAM250"
+other = "NCBISM_Pam250"
+
+[[entries]]
+rust  = "SeqEncoding"
+other = "EBlastEncoding"
+
+[[entries]]
+rust  = "BlastSeqSource"
+other = "BlastSeqSrc"
+
+[[entries]]
+rust  = "SEQSRC_EOF"
+other = "BLAST_SEQSRC_EOF"
+
+[[entries]]
+rust  = "BLASTP"
+other = "eBlastTypeBlastp"
+
+[[entries]]
+rust  = "BLASTN"
+other = "eBlastTypeBlastn"
+
+[[entries]]
+rust  = "BLASTX"
+other = "eBlastTypeBlastx"
+
+[[entries]]
+rust  = "TBLASTN"
+other = "eBlastTypeTblastn"
+
+[[entries]]
+rust  = "TBLASTX"
+other = "eBlastTypeTblastx"
+
+[[entries]]
+rust  = "PSI_BLAST"
+other = "eBlastTypePsiBlast"
+
+[[entries]]
+rust  = "RPS_BLAST"
+other = "eBlastTypeRpsBlast"
+
+[[entries]]
+rust  = "MAPPING"
+other = "eBlastTypeMapping"
+
+[[entries]]
+rust  = "AliasFile"
+other = "CSeqDBAliasFile"
+
+[[entries]]
+rust  = "parse_alias_file"
+other = "CSeqDBAliasNode"
+
+[[entries]]
+rust  = "set_xuo_scores"
+other = "s_SetXUOScores"
+
+[[entries]]
+rust  = "calc_avg_score"
+other = "s_CalcAvgScore"
+
+[[entries]]
+rust  = "scores_std_alphabet"
+other = "s_ScoresStdAlphabet"
+
+[[entries]]
+rust  = "matrix_entropy"
+other = "Blast_MatrixEntropy"
+
+[[entries]]
+rust  = "entropy_old_freq_new_context"
+other = "Blast_EntropyOldFreqNewContext"
+
+[[entries]]
+rust  = "true_aa_to_std_target_freqs"
+other = "Blast_TrueAaToStdTargetFreqs"
+
+[[entries]]
+rust  = "find_neighboring_words"
+other = "s_AddNeighboringWords"
+
+[[entries]]
+rust  = "add_hsp_list"
+other = "Blast_HitListUpdate"
+
+[[entries]]
+rust  = "score_compare_search_hsps"
+other = "ScoreCompareHSPs"
+
+[[entries]]
+rust  = "score_compare_protein_hits"
+other = "ScoreCompareHSPs"
+
+[[entries]]
+rust  = "compare_search_results"
+other = "s_EvalueCompareHSPLists"

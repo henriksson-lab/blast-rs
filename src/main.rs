@@ -103,6 +103,10 @@ struct BlastnArgs {
     #[arg(long = "max_target_seqs", alias = "max-target-seqs")]
     max_target_seqs: Option<String>,
 
+    /// Protein composition-based score adjustment mode.
+    #[arg(long = "comp_based_stats", alias = "comp-based-stats")]
+    comp_based_stats: Option<String>,
+
     /// DUST low-complexity filtering: yes/no
     #[arg(long = "dust", default_value = "yes")]
     dust: String,
@@ -2215,17 +2219,28 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         for qrec in &queries {
             let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
             for sr in results {
+                let subject_id = if sr.subject_accession.is_empty()
+                    || sr.subject_accession.starts_with("oid_")
+                {
+                    subjects
+                        .get(sr.subject_oid as usize)
+                        .map(|s| s.id.clone())
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| sr.subject_title.clone())
+                } else {
+                    sr.subject_accession.clone()
+                };
                 for hsp in sr.hsps {
                     hits.push(TabularHit {
                         query_id: qrec.id.clone(),
                         query_gi: None,
                         query_acc: None,
                         query_accver: None,
-                        subject_id: sr.subject_accession.clone(),
+                        subject_id: subject_id.clone(),
                         subject_gi: None,
                         subject_acc: None,
                         subject_accver: None,
-                        subject_title: String::new(),
+                        subject_title: sr.subject_title.clone(),
                         pct_identity: hsp.percent_identity(),
                         align_len: hsp.alignment_length as i32,
                         mismatches: (hsp.alignment_length - hsp.num_identities - hsp.num_gaps)
@@ -2387,7 +2402,7 @@ fn search_result_hsps_to_tabular_hits(
 ) -> Vec<TabularHit> {
     let mut hits = Vec::new();
     for sr in results {
-        let subject_id = if sr.subject_accession.is_empty() {
+        let subject_id = if sr.subject_accession.is_empty() || sr.subject_accession.starts_with("oid_") {
             subjects
                 .get(sr.subject_oid as usize)
                 .map(|s| s.id.clone())
@@ -2494,6 +2509,13 @@ fn build_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
     {
         params.word_size = ws as usize;
     }
+    if let Some(comp) = args
+        .comp_based_stats
+        .as_deref()
+        .map(|value| parse_validated_i32("comp_based_stats", value))
+    {
+        params.comp_adjust = comp as u8;
+    }
     params.max_target_seqs = args.effective_max_target_seqs() as usize;
     params.max_hsps = args.max_hsps_value().map(|max| max as usize);
     params
@@ -2510,26 +2532,38 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err("No sequences found in query file".into());
     }
 
-    let subject_path = args
-        .subject
-        .as_ref()
-        .ok_or("blastx requires --subject (protein FASTA)")?;
-    let subject_file = open_input_file("subject", subject_path);
-    let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-    let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Protein)?;
     let params = build_blastp_params(args);
     let mut all_hits = Vec::new();
-    for qrec in &queries {
-        let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
-        all_hits.extend(search_result_hsps_to_tabular_hits(
-            &qrec.id,
-            qrec.sequence.len(),
-            &subjects,
-            results,
-        ));
-    }
 
-    all_hits_sort_by_evalue(&mut all_hits);
+    if let Some(subject_path) = args.subject.as_ref() {
+        let subject_file = open_input_file("subject", subject_path);
+        let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
+        let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Protein)?;
+        for qrec in &queries {
+            let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
+            all_hits.extend(search_result_hsps_to_tabular_hits(
+                &qrec.id,
+                qrec.sequence.len(),
+                &subjects,
+                results,
+            ));
+        }
+    } else {
+        let db_path = args.db.as_ref().ok_or("blastx requires --db or --subject")?;
+        let db = BlastDb::open(db_path)?;
+        if db.db_type != DbType::Protein {
+            return Err("blastx requires a protein database".into());
+        }
+        for qrec in &queries {
+            let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
+            all_hits.extend(search_result_hsps_to_tabular_hits(
+                &qrec.id,
+                qrec.sequence.len(),
+                &[],
+                results,
+            ));
+        }
+    }
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -2545,26 +2579,38 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", &args.query);
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
-    let subject_path = args
-        .subject
-        .as_ref()
-        .ok_or("tblastn requires --subject (nucleotide FASTA)")?;
-    let subject_file = open_input_file("subject", subject_path);
-    let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-    let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
     let params = build_blastp_params(args);
     let mut all_hits = Vec::new();
-    for qrec in &queries {
-        let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
-        all_hits.extend(search_result_hsps_to_tabular_hits(
-            &qrec.id,
-            qrec.sequence.len(),
-            &subjects,
-            results,
-        ));
-    }
-    all_hits_sort_by_evalue(&mut all_hits);
 
+    if let Some(subject_path) = args.subject.as_ref() {
+        let subject_file = open_input_file("subject", subject_path);
+        let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
+        let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
+        for qrec in &queries {
+            let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
+            all_hits.extend(search_result_hsps_to_tabular_hits(
+                &qrec.id,
+                qrec.sequence.len(),
+                &subjects,
+                results,
+            ));
+        }
+    } else {
+        let db_path = args.db.as_ref().ok_or("tblastn requires --db or --subject")?;
+        let db = BlastDb::open(db_path)?;
+        if db.db_type != DbType::Nucleotide {
+            return Err("tblastn requires a nucleotide database".into());
+        }
+        for qrec in &queries {
+            let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
+            all_hits.extend(search_result_hsps_to_tabular_hits(
+                &qrec.id,
+                qrec.sequence.len(),
+                &[],
+                results,
+            ));
+        }
+    }
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
         Box::new(BufWriter::new(create_output_file(path)))
@@ -2753,27 +2799,39 @@ fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", &args.query);
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
-    let subject_path = args
-        .subject
-        .as_ref()
-        .ok_or("tblastx requires --subject (nucleotide FASTA)")?;
-    let subject_file = open_input_file("subject", subject_path);
-    let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-    let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
     let mut params = build_blastp_params(args);
     params.comp_adjust = 0;
     let mut all_hits = Vec::new();
-    for qrec in &queries {
-        let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
-        all_hits.extend(search_result_hsps_to_tabular_hits(
-            &qrec.id,
-            qrec.sequence.len(),
-            &subjects,
-            results,
-        ));
-    }
-    all_hits_sort_by_evalue(&mut all_hits);
 
+    if let Some(subject_path) = args.subject.as_ref() {
+        let subject_file = open_input_file("subject", subject_path);
+        let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
+        let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
+        for qrec in &queries {
+            let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
+            all_hits.extend(search_result_hsps_to_tabular_hits(
+                &qrec.id,
+                qrec.sequence.len(),
+                &subjects,
+                results,
+            ));
+        }
+    } else {
+        let db_path = args.db.as_ref().ok_or("tblastx requires --db or --subject")?;
+        let db = BlastDb::open(db_path)?;
+        if db.db_type != DbType::Nucleotide {
+            return Err("tblastx requires a nucleotide database".into());
+        }
+        for qrec in &queries {
+            let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
+            all_hits.extend(search_result_hsps_to_tabular_hits(
+                &qrec.id,
+                qrec.sequence.len(),
+                &[],
+                results,
+            ));
+        }
+    }
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
         Box::new(BufWriter::new(create_output_file(path)))
@@ -3206,17 +3264,9 @@ fn run_blastn_rust(
     let ungapped_x_dropoff =
         (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
     let gapped_x_dropoff = (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
-    // TODO: exact NCBI formula is `max(gapped_x_dropoff,
-    // (int)(xdrop_gap_final * ln2 / lambda))` per
-    // `blast_parameters.c:462-463`. Switching to the full formula drops
-    // a valid HSP from the `blastn-short` long-gap fixture (query
-    // positions 1-35 exact match gets absorbed into a merged alignment
-    // when the DP is allowed to explore at x-drop=58 raw, reward=1,
-    // penalty=-2, gap_open=0, gap_extend=2). Root cause lives
-    // downstream — likely in `s_Blast*HSPCullingByHspFilter*` or
-    // `BlastHSPListPurgeHSPsWithCommonEndpoints` which trim overlapping
-    // HSPs after merging. Revisit when that path is ported.
-    let gapped_x_dropoff_final = 20;
+    let gapped_x_dropoff_final = gapped_x_dropoff.max(
+        (args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32,
+    );
     let parsed_num_threads = args.num_threads();
     let num_threads = if parsed_num_threads <= 0 {
         rayon::current_num_threads()
@@ -3367,21 +3417,23 @@ fn run_blastn_rust(
                             );
                             if !hsps.is_empty() {
                                 if let Some(amb) = ambiguity_data {
-                                    let subject_decoded =
-                                        blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                            packed, seq_len, amb,
+                                    if blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps) {
+                                        let subject_decoded =
+                                            blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                                packed, seq_len, amb,
+                                            );
+                                        hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
+                                            &prepared_queries[qi],
+                                            &subject_decoded,
+                                            reward,
+                                            penalty,
+                                            ungapped_x_dropoff,
+                                            kbp,
+                                            search_space,
+                                            evalue,
+                                            &mut scratch[qi],
                                         );
-                                    hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
-                                        &prepared_queries[qi],
-                                        &subject_decoded,
-                                        reward,
-                                        penalty,
-                                        ungapped_x_dropoff,
-                                        kbp,
-                                        search_space,
-                                        evalue,
-                                        &mut scratch[qi],
-                                    );
+                                    }
                                 }
                             }
                             hsps
@@ -3407,27 +3459,29 @@ fn run_blastn_rust(
                             );
                         if !hsps.is_empty() {
                             if let Some(amb) = ambiguity_data {
-                                let subject_decoded =
-                                    blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                        packed, seq_len, amb,
+                                if blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps) {
+                                    let subject_decoded =
+                                        blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                            packed, seq_len, amb,
+                                        );
+                                    hsps = blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
+                                        &eq.plus_masked,
+                                        &eq.minus_masked,
+                                        &eq.plus_nomask,
+                                        &eq.minus_nomask,
+                                        &subject_decoded,
+                                        word_size,
+                                        reward,
+                                        penalty,
+                                        gapopen,
+                                        gapextend,
+                                        gapped_x_dropoff,
+                                        gapped_x_dropoff_final,
+                                        kbp,
+                                        search_space,
+                                        evalue,
                                     );
-                                hsps = blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
-                                    &eq.plus_masked,
-                                    &eq.minus_masked,
-                                    &eq.plus_nomask,
-                                    &eq.minus_nomask,
-                                    &subject_decoded,
-                                    word_size,
-                                    reward,
-                                    penalty,
-                                    gapopen,
-                                    gapextend,
-                                    gapped_x_dropoff,
-                                    gapped_x_dropoff_final,
-                                    kbp,
-                                    search_space,
-                                    evalue,
-                                );
+                                }
                             }
                         }
                         hsps
@@ -3534,20 +3588,24 @@ fn run_blastn_rust(
                                         );
                                         if !hsps.is_empty() {
                                             if let Some(amb) = ambiguity_data {
-                                                let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                                    packed, seq_len, amb,
-                                                );
-                                                hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
-                                                    &prepared_queries[qi],
-                                                    &subject_decoded,
-                                                    reward,
-                                                    penalty,
-                                                    ungapped_x_dropoff,
-                                                    kbp,
-                                                    search_space,
-                                                    evalue,
-                                                    &mut scratch[qi],
-                                                );
+                                                if blast_rs::search::ambiguity_data_overlaps_hsps(
+                                                    amb, &hsps,
+                                                ) {
+                                                    let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                                        packed, seq_len, amb,
+                                                    );
+                                                    hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
+                                                        &prepared_queries[qi],
+                                                        &subject_decoded,
+                                                        reward,
+                                                        penalty,
+                                                        ungapped_x_dropoff,
+                                                        kbp,
+                                                        search_space,
+                                                        evalue,
+                                                        &mut scratch[qi],
+                                                    );
+                                                }
                                             }
                                         }
                                         hsps
@@ -3572,26 +3630,30 @@ fn run_blastn_rust(
                                     );
                                     if !hsps.is_empty() {
                                         if let Some(amb) = ambiguity_data {
-                                            let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                                packed, seq_len, amb,
-                                            );
-                                            hsps = blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
-                                                &eq.plus_masked,
-                                                &eq.minus_masked,
-                                                &eq.plus_nomask,
-                                                &eq.minus_nomask,
-                                                &subject_decoded,
-                                                word_size,
-                                                reward,
-                                                penalty,
-                                                gapopen,
-                                                gapextend,
-                                                gapped_x_dropoff,
-                                                gapped_x_dropoff_final,
-                                                kbp,
-                                                search_space,
-                                                evalue,
-                                            );
+                                            if blast_rs::search::ambiguity_data_overlaps_hsps(
+                                                amb, &hsps,
+                                            ) {
+                                                let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                                    packed, seq_len, amb,
+                                                );
+                                                hsps = blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
+                                                    &eq.plus_masked,
+                                                    &eq.minus_masked,
+                                                    &eq.plus_nomask,
+                                                    &eq.minus_nomask,
+                                                    &subject_decoded,
+                                                    word_size,
+                                                    reward,
+                                                    penalty,
+                                                    gapopen,
+                                                    gapextend,
+                                                    gapped_x_dropoff,
+                                                    gapped_x_dropoff_final,
+                                                    kbp,
+                                                    search_space,
+                                                    evalue,
+                                                );
+                                            }
                                         }
                                     }
                                     hsps
@@ -4495,8 +4557,9 @@ fn run_blastn_subject(
                 (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
             let gapped_x_dropoff =
                 (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
-            // TODO: see the hardcoded-20 note above; same regression applies here.
-            let gapped_x_dropoff_final = 20;
+            let gapped_x_dropoff_final = gapped_x_dropoff.max(
+                (args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32,
+            );
             let mut hsps = if args.ungapped {
                 blastn_ungapped_search_no_dedup_nomask(
                     &query_plus,

@@ -414,8 +414,8 @@ pub fn composition_lambda_ratio(
 
     // NCBI's Blast_CompositionBasedStats lets the lambda solver fail with
     // `-1` when the expected score is nonnegative, then clamps the resulting
-    // ratio to [LambdaRatioLowerBound, 1]. Returning `None` here turns that
-    // case into "no adjustment", which is not faithful for mode 1.
+    // ratio to [LambdaRatioLowerBound, 1]. Keep following that path here
+    // rather than treating the case as "no adjustment".
     let range = (obs_max - obs_min + 1) as usize;
     let mut avg = 0.0f64;
     for i in 0..range {

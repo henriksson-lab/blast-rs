@@ -212,7 +212,8 @@ impl DustTriplets {
                 {
                     let perfect = self.perfects[perfect_idx];
                     if max_perfect_score == 0
-                        || max_len * perfect.score as usize > max_perfect_score as usize * perfect.len
+                        || max_len * perfect.score as usize
+                            > max_perfect_score as usize * perfect.len
                     {
                         max_perfect_score = perfect.score;
                         max_len = perfect.len;
@@ -256,7 +257,13 @@ fn blastna_to_ncbi2na(base: u8) -> u8 {
     }
 }
 
-fn save_masked_regions(mask: &mut MaskLoc, perfects: &mut Vec<PerfectInterval>, wstart: usize, start: usize, linker: usize) {
+fn save_masked_regions(
+    mask: &mut MaskLoc,
+    perfects: &mut Vec<PerfectInterval>,
+    wstart: usize,
+    start: usize,
+    linker: usize,
+) {
     if let Some(bounds) = perfects.last().copied() {
         if bounds.start < wstart {
             let start_pos = (bounds.start + start) as i32;
@@ -314,7 +321,8 @@ pub fn dust_filter(sequence: &[u8], level: u32, window: usize, linker: usize) ->
     let stop = sequence.len() - 1;
     while stop > start + 2 {
         let mut triplets = DustTriplets::new(window, low_k, thresholds.clone());
-        let mut t = (blastna_to_ncbi2na(sequence[start]) << 2) + blastna_to_ncbi2na(sequence[start + 1]);
+        let mut t =
+            (blastna_to_ncbi2na(sequence[start]) << 2) + blastna_to_ncbi2na(sequence[start + 1]);
         let mut next_pos = start + triplets.stop + 2;
         let mut done = false;
 
@@ -638,7 +646,12 @@ fn seg_seq(seq: &[u8], params: SegParameters, segs: &mut Vec<SegSegment>, offset
 
             let mut leftend = loi - downset;
             let mut rightend = hii + upset - 1;
-            seg_trim(&seq[leftend..=rightend], &mut leftend, &mut rightend, params);
+            seg_trim(
+                &seq[leftend..=rightend],
+                &mut leftend,
+                &mut rightend,
+                params,
+            );
 
             if i + upset - 1 < leftend {
                 let lend = loi - downset;
@@ -784,14 +797,7 @@ mod tests {
     #[test]
     fn test_dust_normal_sequence() {
         fn debruijn(k: usize, n: usize) -> Vec<usize> {
-            fn db(
-                t: usize,
-                p: usize,
-                k: usize,
-                n: usize,
-                a: &mut [usize],
-                out: &mut Vec<usize>,
-            ) {
+            fn db(t: usize, p: usize, k: usize, n: usize, a: &mut [usize], out: &mut Vec<usize>) {
                 if t > n {
                     if n.is_multiple_of(p) {
                         out.extend_from_slice(&a[1..=p]);
@@ -869,9 +875,9 @@ mod tests {
     fn test_dust_with_different_parameters() {
         let mut seq: Vec<u8> = (0..40).map(|i| if i % 2 == 0 { 0 } else { 1 }).collect();
         seq.extend([
-            0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 1, 1, 0, 1, 2, 0, 1, 3, 0, 2, 1, 0, 2, 2, 0, 2,
-            3, 0, 3, 1, 0, 3, 2, 0, 3, 3, 1, 1, 1, 2, 1, 1, 3, 1, 2, 2, 1, 2, 3, 1, 3, 2, 1,
-            3, 3, 2, 2, 2, 3, 2, 2, 3,
+            0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 1, 1, 0, 1, 2, 0, 1, 3, 0, 2, 1, 0, 2, 2, 0, 2, 3, 0,
+            3, 1, 0, 3, 2, 0, 3, 3, 1, 1, 1, 2, 1, 1, 3, 1, 2, 2, 1, 2, 3, 1, 3, 2, 1, 3, 3, 2, 2,
+            2, 3, 2, 2, 3,
         ]);
 
         let mask_default = dust_filter(&seq, 20, 64, 1);

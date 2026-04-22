@@ -38,7 +38,9 @@ use crate::program::{
     query_is_nucleotide, query_is_translated, subject_is_translated, ProgramType, BLASTX,
 };
 use crate::queryinfo::QueryInfo;
-use crate::stat::{gap_decay_divisor, large_gap_sum_e, small_gap_sum_e, uneven_gap_sum_e, KarlinBlk};
+use crate::stat::{
+    gap_decay_divisor, large_gap_sum_e, small_gap_sum_e, uneven_gap_sum_e, KarlinBlk,
+};
 
 /// NCBI BLAST constants (`blast_def.h` / `ncbi_std.h`).
 const NUM_FRAMES: i32 = 6;
@@ -419,8 +421,7 @@ pub fn s_BlastEvenGapLinkHSPs(
     // Allocate per-frame headers (`hp_frame_start`, `hp_frame_number`).
     let mut hp_frame_start: Vec<Option<usize>> =
         vec![None; (num_subject_frames * num_query_frames) as usize];
-    let mut hp_frame_number: Vec<i32> =
-        vec![0; (num_subject_frames * num_query_frames) as usize];
+    let mut hp_frame_number: Vec<i32> = vec![0; (num_subject_frames * num_query_frames) as usize];
 
     // Hook up the HSPs in the order determined above.
     if !order.is_empty() {
@@ -435,7 +436,11 @@ pub fn s_BlastEvenGapLinkHSPs(
             // Reset start_of_chain.
             nodes[h_idx].start_of_chain = false;
             hp_frame_number[cur_frame as usize] += 1;
-            nodes[h_idx].prev = if index > 0 { Some(order[index - 1]) } else { None };
+            nodes[h_idx].prev = if index > 0 {
+                Some(order[index - 1])
+            } else {
+                None
+            };
             nodes[h_idx].next = if index < (number_of_hsps as usize) - 1 {
                 Some(order[index + 1])
             } else {
@@ -1033,8 +1038,7 @@ fn s_SumHSPEvalue(
 
     let context = head_hsp.context as usize;
     let len_adj = query_info.contexts[context].length_adjustment;
-    let query_eff_length =
-        std::cmp::max(query_info.contexts[context].query_length - len_adj, 1);
+    let query_eff_length = std::cmp::max(query_info.contexts[context].query_length - len_adj, 1);
     let subject_eff_length = std::cmp::max(subject_eff_length - len_adj, 1);
 
     let sum_score = sets[new_idx].sum_score + sets[head_idx].sum_score;
@@ -1368,7 +1372,9 @@ fn s_LinkedHSPSetArrayIndexQueryEnds(
         return qend_index_array;
     }
     let mut current_index = 0i32;
-    let mut current_end = hsp_array[sets[offset_hsp_array[0]].hsp_idx as usize].query.end;
+    let mut current_end = hsp_array[sets[offset_hsp_array[0]].hsp_idx as usize]
+        .query
+        .end;
     for index in 1..hspcnt {
         let s = &sets[offset_hsp_array[index]];
         let h = &hsp_array[s.hsp_idx as usize];
@@ -1479,7 +1485,9 @@ pub fn s_BlastUnevenGapLinkHSPs(
             sets[head].queryId,
             left_offset,
         );
-        let tail_q_end = hsp_list.hsp_array[sets[tail_hsp].hsp_idx as usize].query.end;
+        let tail_q_end = hsp_list.hsp_array[sets[tail_hsp].hsp_idx as usize]
+            .query
+            .end;
         let hsp_index_right = s_HSPOffsetBinarySearch(
             &sets,
             &hsp_list.hsp_array,
@@ -1494,7 +1502,9 @@ pub fn s_BlastUnevenGapLinkHSPs(
             let lhsp = offset_hsp_array[index1 as usize];
             // Representative: leftmost HSP whose query.end >= left_offset.
             if let Some(prev_idx) = sets[lhsp].prev {
-                let prev_q_end = hsp_list.hsp_array[sets[prev_idx].hsp_idx as usize].query.end;
+                let prev_q_end = hsp_list.hsp_array[sets[prev_idx].hsp_idx as usize]
+                    .query
+                    .end;
                 if prev_q_end >= left_offset {
                     index1 += 1;
                     continue;
@@ -1600,9 +1610,7 @@ pub fn BLAST_LinkHsps(
     }
 
     // Sort by score descending and compute best_evalue.
-    hsp_list
-        .hsp_array
-        .sort_by(|a, b| b.score.cmp(&a.score));
+    hsp_list.hsp_array.sort_by(|a, b| b.score.cmp(&a.score));
     let mut best_evalue = hsp_list.hsp_array[0].evalue;
     for hsp in hsp_list.hsp_array.iter().skip(1) {
         if hsp.evalue < best_evalue {
@@ -1703,7 +1711,7 @@ mod tests {
             query_index: 0,
             hsp_array: vec![
                 make_hsp(0, 10, 60, 100, 150, 50, 1),
-                make_hsp(0, 80, 130, 200, 250, 50, 1),
+                make_hsp(0, 70, 120, 170, 220, 50, 1),
             ],
             best_evalue: f64::MAX,
         };
@@ -1725,13 +1733,11 @@ mod tests {
         // 50*1.3 - ln(0.71) ≈ 65.342 per HSP. The small-gap chain of 2
         // hsps has num = 2; at least one HSP in the returned list
         // should carry that count.
-        let max_num = hsp_list
-            .hsp_array
-            .iter()
-            .map(|h| h.num)
-            .max()
-            .unwrap_or(0);
-        assert!(max_num >= 2, "expected at least one chain of 2, got {max_num}");
+        let max_num = hsp_list.hsp_array.iter().map(|h| h.num).max().unwrap_or(0);
+        assert!(
+            max_num >= 2,
+            "expected at least one chain of 2, got {max_num}"
+        );
     }
 
     #[test]

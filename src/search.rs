@@ -1,12 +1,14 @@
 //! Pure Rust BLAST search engine — no FFI.
 //! This module implements the complete blastn search pipeline in Rust.
 
+use crate::gapinfo::{GapAlignOpType, GapEditScript};
 use crate::encoding::NCBI4NA_TO_BLASTNA;
 use crate::itree::{Interval, IntervalTree};
 use crate::sequence::blastna_to_iupac;
 use crate::stat::KarlinBlk;
 use crate::traceback::{
     blast_gapped_align, blast_gapped_score_only, reevaluate_with_ambiguities_gapped,
+    TracebackResult,
 };
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -45,6 +47,11 @@ fn score_compare_search_hsps(a: &SearchHsp, b: &SearchHsp) -> std::cmp::Ordering
 pub struct SubjectResult {
     pub oid: i32,
     pub hsps: Vec<SearchHsp>,
+}
+
+enum GappedCandidate {
+    Final(SearchHsp),
+    Traceback { context: i32, tb: TracebackResult },
 }
 
 struct NaLookup<'a> {
@@ -2109,6 +2116,326 @@ fn dedup_hsps_with_min_diag_separation(hsps: &mut Vec<SearchHsp>, min_diag_separ
     });
 }
 
+fn purge_common_endpoint_hsps(hsps: &mut Vec<SearchHsp>) {
+    if hsps.len() <= 1 {
+        return;
+    }
+
+    hsps.sort_by(|a, b| {
+        a.context
+            .cmp(&b.context)
+            .then_with(|| a.query_start.cmp(&b.query_start))
+            .then_with(|| a.subject_start.cmp(&b.subject_start))
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| b.query_end.cmp(&a.query_end))
+            .then_with(|| b.subject_end.cmp(&a.subject_end))
+    });
+    hsps.dedup_by(|b, a| {
+        a.context == b.context
+            && a.query_start == b.query_start
+            && a.subject_start == b.subject_start
+    });
+
+    hsps.sort_by(|a, b| {
+        a.context
+            .cmp(&b.context)
+            .then_with(|| a.query_end.cmp(&b.query_end))
+            .then_with(|| a.subject_end.cmp(&b.subject_end))
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| b.query_start.cmp(&a.query_start))
+            .then_with(|| b.subject_start.cmp(&a.subject_start))
+    });
+    hsps.dedup_by(|b, a| {
+        a.context == b.context && a.query_end == b.query_end && a.subject_end == b.subject_end
+    });
+}
+
+fn candidate_context(candidate: &GappedCandidate) -> i32 {
+    match candidate {
+        GappedCandidate::Final(hsp) => hsp.context,
+        GappedCandidate::Traceback { context, .. } => *context,
+    }
+}
+
+fn candidate_query_start(candidate: &GappedCandidate) -> i32 {
+    match candidate {
+        GappedCandidate::Final(hsp) => hsp.query_start,
+        GappedCandidate::Traceback { tb, .. } => tb.query_start as i32,
+    }
+}
+
+fn candidate_query_end(candidate: &GappedCandidate) -> i32 {
+    match candidate {
+        GappedCandidate::Final(hsp) => hsp.query_end,
+        GappedCandidate::Traceback { tb, .. } => tb.query_end as i32,
+    }
+}
+
+fn candidate_subject_start(candidate: &GappedCandidate) -> i32 {
+    match candidate {
+        GappedCandidate::Final(hsp) => hsp.subject_start,
+        GappedCandidate::Traceback { tb, .. } => tb.subject_start as i32,
+    }
+}
+
+fn candidate_subject_end(candidate: &GappedCandidate) -> i32 {
+    match candidate {
+        GappedCandidate::Final(hsp) => hsp.subject_end,
+        GappedCandidate::Traceback { tb, .. } => tb.subject_end as i32,
+    }
+}
+
+fn candidate_score(candidate: &GappedCandidate) -> i32 {
+    match candidate {
+        GappedCandidate::Final(hsp) => hsp.score,
+        GappedCandidate::Traceback { tb, .. } => tb.score,
+    }
+}
+
+fn cut_traceback_at(tb: &mut TracebackResult, q_cut: usize, s_cut: usize, cut_begin: bool) -> bool {
+    let mut qid = 0usize;
+    let mut sid = 0usize;
+    let mut found = None;
+
+    for (index, &(op_type, count_i32)) in tb.edit_script.ops.iter().enumerate() {
+        let count = count_i32 as usize;
+        let mut opid = 0usize;
+        match op_type {
+            GapAlignOpType::Sub => {
+                while opid < count {
+                    qid += 1;
+                    sid += 1;
+                    opid += 1;
+                    if qid >= q_cut && sid >= s_cut {
+                        found = Some((index, opid));
+                        break;
+                    }
+                }
+            }
+            GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2 => {
+                sid += count;
+                opid = count;
+                if qid >= q_cut && sid >= s_cut {
+                    found = Some((index, opid));
+                }
+            }
+            GapAlignOpType::Ins | GapAlignOpType::Ins1 | GapAlignOpType::Ins2 => {
+                qid += count;
+                opid = count;
+                if qid >= q_cut && sid >= s_cut {
+                    found = Some((index, opid));
+                }
+            }
+            GapAlignOpType::Decline => {
+                qid += count;
+                sid += count;
+                opid = count;
+                if qid >= q_cut && sid >= s_cut {
+                    found = Some((index, opid));
+                }
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+
+    let Some((index, opid)) = found else {
+        return false;
+    };
+
+    let mut new_ops = Vec::new();
+    if cut_begin {
+        let count = tb.edit_script.ops[index].1 as usize;
+        if opid < count {
+            debug_assert!(matches!(tb.edit_script.ops[index].0, GapAlignOpType::Sub));
+            new_ops.push((tb.edit_script.ops[index].0, (count - opid) as i32));
+        }
+        new_ops.extend(tb.edit_script.ops.iter().skip(index + 1).copied());
+        tb.query_start += qid;
+        tb.subject_start += sid;
+    } else {
+        new_ops.extend(tb.edit_script.ops.iter().take(index).copied());
+        if opid < tb.edit_script.ops[index].1 as usize {
+            debug_assert!(matches!(tb.edit_script.ops[index].0, GapAlignOpType::Sub));
+            new_ops.push((tb.edit_script.ops[index].0, opid as i32));
+        } else {
+            new_ops.push(tb.edit_script.ops[index]);
+        }
+        tb.query_end = tb.query_start + qid;
+        tb.subject_end = tb.subject_start + sid;
+    }
+    tb.edit_script = GapEditScript { ops: new_ops };
+    true
+}
+
+fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
+    if candidates.len() <= 1 {
+        return;
+    }
+
+    candidates.sort_by(|a, b| {
+        candidate_context(a)
+            .cmp(&candidate_context(b))
+            .then_with(|| candidate_query_start(a).cmp(&candidate_query_start(b)))
+            .then_with(|| candidate_subject_start(a).cmp(&candidate_subject_start(b)))
+            .then_with(|| candidate_score(b).cmp(&candidate_score(a)))
+            .then_with(|| candidate_query_end(b).cmp(&candidate_query_end(a)))
+            .then_with(|| candidate_subject_end(b).cmp(&candidate_subject_end(a)))
+    });
+    let mut i = 0usize;
+    while i < candidates.len() {
+        let mut j = i + 1;
+        while j < candidates.len()
+            && candidate_context(&candidates[i]) == candidate_context(&candidates[j])
+            && candidate_query_start(&candidates[i]) == candidate_query_start(&candidates[j])
+            && candidate_subject_start(&candidates[i]) == candidate_subject_start(&candidates[j])
+        {
+            let leader_q_end = candidate_query_end(&candidates[i]);
+            let leader_s_end = candidate_subject_end(&candidates[i]);
+            let keep = match &mut candidates[j] {
+                GappedCandidate::Traceback { tb, .. }
+                    if tb.query_end as i32 > leader_q_end
+                        && tb.subject_end as i32 > leader_s_end =>
+                {
+                    cut_traceback_at(
+                        tb,
+                        (leader_q_end - tb.query_start as i32).max(0) as usize,
+                        (leader_s_end - tb.subject_start as i32).max(0) as usize,
+                        true,
+                    ) && !tb.edit_script.ops.is_empty()
+                }
+                _ => false,
+            };
+            if keep {
+                j += 1;
+            } else {
+                candidates.remove(j);
+            }
+        }
+        i = j;
+    }
+
+    candidates.sort_by(|a, b| {
+        candidate_context(a)
+            .cmp(&candidate_context(b))
+            .then_with(|| candidate_query_end(a).cmp(&candidate_query_end(b)))
+            .then_with(|| candidate_subject_end(a).cmp(&candidate_subject_end(b)))
+            .then_with(|| candidate_score(b).cmp(&candidate_score(a)))
+            .then_with(|| candidate_query_start(b).cmp(&candidate_query_start(a)))
+            .then_with(|| candidate_subject_start(b).cmp(&candidate_subject_start(a)))
+    });
+    let mut i = 0usize;
+    while i < candidates.len() {
+        let mut j = i + 1;
+        while j < candidates.len()
+            && candidate_context(&candidates[i]) == candidate_context(&candidates[j])
+            && candidate_query_end(&candidates[i]) == candidate_query_end(&candidates[j])
+            && candidate_subject_end(&candidates[i]) == candidate_subject_end(&candidates[j])
+        {
+            let leader_q_start = candidate_query_start(&candidates[i]);
+            let leader_s_start = candidate_subject_start(&candidates[i]);
+            let keep = match &mut candidates[j] {
+                GappedCandidate::Traceback { tb, .. }
+                    if (tb.query_start as i32) < leader_q_start
+                        && (tb.subject_start as i32) < leader_s_start =>
+                {
+                    cut_traceback_at(
+                        tb,
+                        (leader_q_start - tb.query_start as i32).max(0) as usize,
+                        (leader_s_start - tb.subject_start as i32).max(0) as usize,
+                        false,
+                    ) && !tb.edit_script.ops.is_empty()
+                }
+                _ => false,
+            };
+            if keep {
+                j += 1;
+            } else {
+                candidates.remove(j);
+            }
+        }
+        i = j;
+    }
+}
+
+fn finalize_gapped_candidates(
+    mut candidates: Vec<GappedCandidate>,
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    min_diag_separation: i32,
+) -> Vec<SearchHsp> {
+    purge_common_endpoint_tracebacks(&mut candidates);
+
+    let mut hsps = Vec::new();
+    for candidate in candidates {
+        match candidate {
+            GappedCandidate::Final(hsp) => hsps.push(hsp),
+            GappedCandidate::Traceback { context, mut tb } => {
+                let query = if context == 0 {
+                    query_plus_nomask
+                } else {
+                    query_minus_nomask
+                };
+                let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
+                if reevaluate_with_ambiguities_gapped(
+                    &mut tb,
+                    query,
+                    subject,
+                    reward,
+                    penalty,
+                    gap_open,
+                    gap_extend,
+                    cutoff_score.max(1),
+                ) {
+                    continue;
+                }
+                let evalue = kbp.raw_to_evalue(tb.score, search_space);
+                if evalue > evalue_threshold {
+                    continue;
+                }
+                let q_slice = &query[tb.query_start..tb.query_end];
+                let s_slice = &subject[tb.subject_start..tb.subject_end];
+                let (align_len, num_ident, gap_opens) =
+                    tb.edit_script.count_identities(q_slice, s_slice);
+                let (qseq, sseq) = tb
+                    .edit_script
+                    .render_alignment(q_slice, s_slice, blastna_to_iupac);
+
+                hsps.push(SearchHsp {
+                    query_start: tb.query_start as i32,
+                    query_end: tb.query_end as i32,
+                    subject_start: tb.subject_start as i32,
+                    subject_end: tb.subject_end as i32,
+                    score: tb.score,
+                    bit_score: kbp.raw_to_bit(tb.score),
+                    evalue,
+                    num_ident,
+                    align_length: align_len,
+                    mismatches: (align_len - num_ident - gap_opens).max(0),
+                    gap_opens,
+                    context,
+                    qseq: Some(qseq),
+                    sseq: Some(sseq),
+                });
+            }
+        }
+    }
+
+    purge_common_endpoint_hsps(&mut hsps);
+    hsps.sort_by(score_compare_search_hsps);
+    dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
+    hsps
+}
+
 fn min_diag_separation_for_ungapped(word_size: usize, reward: i32, penalty: i32) -> i32 {
     if word_size >= 28 && reward == 1 && penalty == -2 {
         6
@@ -2367,7 +2694,7 @@ pub fn blastn_gapped_search_nomask(
         evalue_threshold * 100.0, // permissive threshold for seeds
     );
 
-    let mut hsps = Vec::new();
+    let mut candidates = Vec::new();
     let min_diag_separation =
         min_diag_separation_for_gapped(word_size, reward, penalty, _gap_open, _gap_extend);
 
@@ -2380,7 +2707,7 @@ pub fn blastn_gapped_search_nomask(
         };
 
         if min_diag_separation != 0 && is_perfect_ungapped_hsp(seed, reward) {
-            hsps.push(seed.clone());
+            candidates.push(GappedCandidate::Final(seed.clone()));
             continue;
         }
 
@@ -2422,7 +2749,7 @@ pub fn blastn_gapped_search_nomask(
             continue;
         }
 
-        if let Some(mut tb) = blast_gapped_align(
+        if let Some(tb) = blast_gapped_align(
             query,
             subject,
             seed_q,
@@ -2433,203 +2760,30 @@ pub fn blastn_gapped_search_nomask(
             _gap_extend,
             x_dropoff,
         ) {
-            // NCBI runs `Blast_HSPReevaluateWithAmbiguitiesGapped` after
-            // `ALIGN_EX` (`blast_traceback.c:657`). The cutoff_score comes
-            // from `hit_params->cutoffs[context].cutoff_score` which is the
-            // e-value-based cutoff derived from KBP, search_space, and the
-            // user's evalue threshold (no decay adjustment — NCBI passes
-            // `dodecay=FALSE` at `blast_parameters.c:943`).
-            let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
-            let _delete = reevaluate_with_ambiguities_gapped(
-                &mut tb,
-                query,
-                subject,
-                reward,
-                penalty,
-                _gap_open,
-                _gap_extend,
-                cutoff_score.max(1),
-            );
-            if _delete {
-                continue;
-            }
-
-            let evalue = kbp.raw_to_evalue(tb.score, search_space);
-            if evalue > evalue_threshold {
-                continue;
-            }
-
-            let q_slice = &query[tb.query_start..tb.query_end];
-            let s_slice = &subject[tb.subject_start..tb.subject_end];
-            let (align_len, num_ident, gap_opens) =
-                tb.edit_script.count_identities(q_slice, s_slice);
-            let (qseq, sseq) = tb
-                .edit_script
-                .render_alignment(q_slice, s_slice, blastna_to_iupac);
-
-            hsps.push(SearchHsp {
-                query_start: tb.query_start as i32,
-                query_end: tb.query_end as i32,
-                subject_start: tb.subject_start as i32,
-                subject_end: tb.subject_end as i32,
-                score: tb.score,
-                bit_score: kbp.raw_to_bit(tb.score),
-                evalue,
-                num_ident,
-                align_length: align_len,
-                mismatches: (align_len - num_ident - gap_opens).max(0),
-                gap_opens,
+            candidates.push(GappedCandidate::Traceback {
                 context: seed.context,
-                qseq: Some(qseq),
-                sseq: Some(sseq),
+                tb,
             });
         } else {
             // Traceback failed, use ungapped seed
-            hsps.push(seed.clone());
+            candidates.push(GappedCandidate::Final(seed.clone()));
         }
     }
 
-    hsps.sort_by(score_compare_search_hsps);
-    dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
-    hsps
-}
-
-#[allow(clippy::too_many_arguments)]
-fn blastn_gapped_search_decoded_prepared_with_scratch(
-    prepared: &PreparedBlastnQuery<'_>,
-    query_plus_nomask: &[u8],
-    query_minus_nomask: &[u8],
-    subject: &[u8],
-    reward: i32,
-    penalty: i32,
-    gap_open: i32,
-    gap_extend: i32,
-    x_dropoff: i32,
-    kbp: &KarlinBlk,
-    search_space: f64,
-    evalue_threshold: f64,
-    last_hit_scratch: &mut [Vec<i32>],
-) -> Vec<SearchHsp> {
-    let ungapped = blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
-        prepared,
+    finalize_gapped_candidates(
+        candidates,
+        query_plus_nomask,
+        query_minus_nomask,
         subject,
         reward,
         penalty,
-        x_dropoff,
+        _gap_open,
+        _gap_extend,
         kbp,
         search_space,
-        evalue_threshold * 100.0,
-        last_hit_scratch,
-    );
-    let mut hsps = Vec::new();
-    let min_diag_separation =
-        min_diag_separation_for_gapped(prepared.word_size, reward, penalty, gap_open, gap_extend);
-
-    for seed in &ungapped {
-        let query = if seed.context == 0 {
-            query_plus_nomask
-        } else {
-            query_minus_nomask
-        };
-
-        if min_diag_separation != 0 && is_perfect_ungapped_hsp(seed, reward) {
-            hsps.push(seed.clone());
-            continue;
-        }
-
-        // Same NCBI-style seed picker as the non-prepared variant above.
-        let (seed_q, seed_s) = blast_get_offsets_for_gapped_alignment(
-            query,
-            subject,
-            seed.query_start as usize,
-            seed.query_end as usize,
-            seed.subject_start as usize,
-            seed.subject_end as usize,
-            reward,
-            penalty,
-        )
-        .unwrap_or_else(|| {
-            (
-                ((seed.query_start + seed.query_end) / 2) as usize,
-                ((seed.subject_start + seed.subject_end) / 2) as usize,
-            )
-        });
-
-        if !passes_preliminary_gapped_score(
-            query,
-            subject,
-            seed_q,
-            seed_s,
-            reward,
-            penalty,
-            gap_open,
-            gap_extend,
-            x_dropoff,
-            kbp,
-            search_space,
-            evalue_threshold,
-        ) {
-            continue;
-        }
-
-        if let Some(mut tb) = blast_gapped_align(
-            query, subject, seed_q, seed_s, reward, penalty, gap_open, gap_extend, x_dropoff,
-        ) {
-            // Same reevaluate pass as the non-prepared variant —
-            // see `blast_traceback.c:657`. Matches NCBI `BLAST_Cutoffs`
-            // with `dodecay=FALSE` (`blast_parameters.c:943`).
-            let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
-            let _delete = reevaluate_with_ambiguities_gapped(
-                &mut tb,
-                query,
-                subject,
-                reward,
-                penalty,
-                gap_open,
-                gap_extend,
-                cutoff_score.max(1),
-            );
-            if _delete {
-                continue;
-            }
-
-            let evalue = kbp.raw_to_evalue(tb.score, search_space);
-            if evalue > evalue_threshold {
-                continue;
-            }
-
-            let q_slice = &query[tb.query_start..tb.query_end];
-            let s_slice = &subject[tb.subject_start..tb.subject_end];
-            let (align_len, num_ident, gap_opens) =
-                tb.edit_script.count_identities(q_slice, s_slice);
-            let (qseq, sseq) = tb
-                .edit_script
-                .render_alignment(q_slice, s_slice, blastna_to_iupac);
-
-            hsps.push(SearchHsp {
-                query_start: tb.query_start as i32,
-                query_end: tb.query_end as i32,
-                subject_start: tb.subject_start as i32,
-                subject_end: tb.subject_end as i32,
-                score: tb.score,
-                bit_score: kbp.raw_to_bit(tb.score),
-                evalue,
-                num_ident,
-                align_length: align_len,
-                mismatches: (align_len - num_ident - gap_opens).max(0),
-                gap_opens,
-                context: seed.context,
-                qseq: Some(qseq),
-                sseq: Some(sseq),
-            });
-        } else {
-            hsps.push((*seed).clone());
-        }
-    }
-
-    hsps.sort_by(score_compare_search_hsps);
-    dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
-    hsps
+        evalue_threshold,
+        min_diag_separation,
+    )
 }
 
 /// Fast gapped search on packed NCBI2na subject.
@@ -2746,7 +2900,7 @@ pub fn blastn_gapped_search_packed_prepared(
     evalue_threshold: f64,
     last_hit_scratch: &mut [Vec<i32>],
 ) -> Vec<SearchHsp> {
-    let ungapped_probe = blastn_ungapped_search_packed_prepared_with_scratch(
+    let ungapped = blastn_ungapped_search_packed_prepared_with_scratch(
         prepared,
         subject_packed,
         subject_len,
@@ -2758,25 +2912,87 @@ pub fn blastn_gapped_search_packed_prepared(
         evalue_threshold * 100.0,
         last_hit_scratch,
     );
-    if ungapped_probe.is_empty() {
+    let mut candidates = Vec::new();
+    if ungapped.is_empty() {
         return Vec::new();
     }
 
-    let subject_decoded = decode_packed_ncbi2na(subject_packed, subject_len);
-    blastn_gapped_search_decoded_prepared_with_scratch(
-        prepared,
+    let cutoff_score = {
+        let e = evalue_threshold.max(1.0e-297);
+        ((kbp.k * search_space / e).ln() / kbp.lambda).ceil() as i32
+    };
+
+    let mut subject_decoded = None;
+    let min_diag_separation =
+        min_diag_separation_for_gapped(prepared.word_size, reward, penalty, gap_open, gap_extend);
+
+    for seed in ungapped.iter().filter(|s| s.score >= cutoff_score) {
+        let query = if seed.context == 0 {
+            query_plus_nomask
+        } else {
+            query_minus_nomask
+        };
+
+        if min_diag_separation != 0 && is_perfect_ungapped_hsp(seed, reward) {
+            candidates.push(GappedCandidate::Final(seed.clone()));
+            continue;
+        }
+
+        let subject_decoded = subject_decoded
+            .get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len));
+        let seed_q = ((seed.query_start + seed.query_end) / 2) as usize;
+        let seed_s = ((seed.subject_start + seed.subject_end) / 2) as usize;
+
+        if !passes_preliminary_gapped_score(
+            query,
+            subject_decoded,
+            seed_q,
+            seed_s,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+        ) {
+            continue;
+        }
+
+        if let Some(tb) = blast_gapped_align(
+            query,
+            subject_decoded,
+            seed_q,
+            seed_s,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+        ) {
+            candidates.push(GappedCandidate::Traceback {
+                context: seed.context,
+                tb,
+            });
+        } else {
+            candidates.push(GappedCandidate::Final(seed.clone()));
+        }
+    }
+
+    finalize_gapped_candidates(
+        candidates,
         query_plus_nomask,
         query_minus_nomask,
-        &subject_decoded,
+        subject_decoded.get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len)),
         reward,
         penalty,
         gap_open,
         gap_extend,
-        x_dropoff,
         kbp,
         search_space,
         evalue_threshold,
-        last_hit_scratch,
+        min_diag_separation,
     )
 }
 
@@ -2854,6 +3070,60 @@ pub fn decode_packed_ncbi2na_with_ambiguity(
     let mut decoded = decode_packed_ncbi2na(packed, len);
     overlay_ncbi4na_ambiguity(&mut decoded, ambiguity_data);
     decoded
+}
+
+pub fn ambiguity_data_overlaps_hsps(ambiguity_data: &[u8], hsps: &[SearchHsp]) -> bool {
+    if ambiguity_data.len() < 4 || hsps.is_empty() {
+        return false;
+    }
+
+    let words: Vec<u32> = ambiguity_data
+        .chunks_exact(4)
+        .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+
+    let mut amb_num = words[0];
+    let new_format = (amb_num & 0x8000_0000) != 0;
+    if new_format {
+        amb_num &= 0x7fff_ffff;
+    }
+
+    let mut i = 1usize;
+    let mut seen = 0u32;
+    while seen < amb_num && i < words.len() {
+        let word = words[i];
+        let run_len_minus_one: usize;
+        let position: usize;
+
+        if new_format {
+            if i + 1 >= words.len() {
+                break;
+            }
+            run_len_minus_one = ((word >> 16) & 0x0fff) as usize;
+            position = words[i + 1] as usize;
+            i += 2;
+        } else {
+            run_len_minus_one = ((word >> 24) & 0x0f) as usize;
+            position = (word & 0x00ff_ffff) as usize;
+            i += 1;
+        }
+
+        let end = position.saturating_add(run_len_minus_one + 1);
+        if hsps.iter().any(|hsp| {
+            let hsp_start = hsp.subject_start.max(0) as usize;
+            let hsp_end = hsp.subject_end.max(0) as usize;
+            position < hsp_end && end > hsp_start
+        }) {
+            return true;
+        }
+
+        seen += 1;
+    }
+
+    false
 }
 
 fn overlay_ncbi4na_ambiguity(decoded: &mut [u8], ambiguity_data: &[u8]) {
@@ -3008,6 +3278,116 @@ mod tests {
         new.extend_from_slice(&6u32.to_be_bytes());
         let decoded = decode_packed_ncbi2na_with_ambiguity(&packed, 8, &new);
         assert_eq!(&decoded[6..8], &[4, 4]);
+    }
+
+    #[test]
+    fn test_ambiguity_data_overlaps_hsps_detects_old_and_new_format_runs() {
+        let hsps = vec![SearchHsp {
+            query_start: 0,
+            query_end: 4,
+            subject_start: 2,
+            subject_end: 5,
+            score: 8,
+            bit_score: 0.0,
+            evalue: 0.0,
+            num_ident: 4,
+            align_length: 4,
+            mismatches: 0,
+            gap_opens: 0,
+            context: 0,
+            qseq: None,
+            sseq: None,
+        }];
+
+        let old_record = (15u32 << 28) | (2u32 << 24) | 2u32;
+        let mut old = Vec::new();
+        old.extend_from_slice(&1u32.to_be_bytes());
+        old.extend_from_slice(&old_record.to_be_bytes());
+        assert!(ambiguity_data_overlaps_hsps(&old, &hsps));
+
+        let new_record = (5u32 << 28) | (1u32 << 16);
+        let mut new = Vec::new();
+        new.extend_from_slice(&(0x8000_0001u32).to_be_bytes());
+        new.extend_from_slice(&new_record.to_be_bytes());
+        new.extend_from_slice(&6u32.to_be_bytes());
+        assert!(!ambiguity_data_overlaps_hsps(&new, &hsps));
+    }
+
+    #[test]
+    fn test_purge_common_endpoint_hsps_matches_ncbi_tie_policy() {
+        let mut hsps = vec![
+            SearchHsp {
+                query_start: 5,
+                query_end: 25,
+                subject_start: 10,
+                subject_end: 30,
+                score: 40,
+                bit_score: 0.0,
+                evalue: 0.0,
+                num_ident: 20,
+                align_length: 20,
+                mismatches: 0,
+                gap_opens: 0,
+                context: 0,
+                qseq: None,
+                sseq: None,
+            },
+            SearchHsp {
+                query_start: 5,
+                query_end: 22,
+                subject_start: 10,
+                subject_end: 27,
+                score: 35,
+                bit_score: 0.0,
+                evalue: 0.0,
+                num_ident: 17,
+                align_length: 17,
+                mismatches: 0,
+                gap_opens: 0,
+                context: 0,
+                qseq: None,
+                sseq: None,
+            },
+            SearchHsp {
+                query_start: 12,
+                query_end: 30,
+                subject_start: 17,
+                subject_end: 40,
+                score: 45,
+                bit_score: 0.0,
+                evalue: 0.0,
+                num_ident: 18,
+                align_length: 23,
+                mismatches: 0,
+                gap_opens: 1,
+                context: 0,
+                qseq: None,
+                sseq: None,
+            },
+            SearchHsp {
+                query_start: 15,
+                query_end: 30,
+                subject_start: 20,
+                subject_end: 40,
+                score: 41,
+                bit_score: 0.0,
+                evalue: 0.0,
+                num_ident: 15,
+                align_length: 20,
+                mismatches: 0,
+                gap_opens: 1,
+                context: 0,
+                qseq: None,
+                sseq: None,
+            },
+        ];
+
+        purge_common_endpoint_hsps(&mut hsps);
+        hsps.sort_by(score_compare_search_hsps);
+
+        assert_eq!(hsps.len(), 2);
+        assert_eq!((hsps[0].query_start, hsps[0].query_end), (12, 30));
+        assert_eq!((hsps[1].query_start, hsps[1].query_end), (5, 25));
     }
 
     #[test]

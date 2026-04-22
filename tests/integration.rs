@@ -430,6 +430,198 @@ fn assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
     );
 }
 
+fn assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+    program: &str,
+    ncbi_program: &str,
+    dbtype: &str,
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new(ncbi_program).exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: {ncbi_program} or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg(dbtype)
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(make_status.success(), "makeblastdb exited with {make_status}");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg(program)
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli translated DB parity");
+    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+
+    let mut ncbi_cmd = std::process::Command::new(ncbi_program);
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI translated DB parity");
+    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+
+    let sort_lines = |bytes: Vec<u8>| {
+        let mut lines: Vec<String> = String::from_utf8(bytes)
+            .expect("UTF-8 tabular output")
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    };
+
+    let rust = sort_lines(std::fs::read(&rust_out).expect("read rust output"));
+    let ncbi = sort_lines(std::fs::read(&ncbi_out).expect("read ncbi output"));
+    assert_eq!(
+        rust, ncbi,
+        "Rust {program} DB sorted output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+fn assert_translated_db_outfmt_matches_ncbi(
+    program: &str,
+    ncbi_program: &str,
+    dbtype: &str,
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new(ncbi_program).exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: {ncbi_program} or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg(dbtype)
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(make_status.success(), "makeblastdb exited with {make_status}");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg(program)
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli translated DB parity");
+    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+
+    let mut ncbi_cmd = std::process::Command::new(ncbi_program);
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI translated DB parity");
+    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust {program} DB output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
 fn normalize_sam_for_cli_parity(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -11879,6 +12071,168 @@ fn tblastx_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
     );
 }
 
+#[test]
+fn blastx_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
+    let query = format!(">q1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        &query,
+        ">s1\nMKFLILLF\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
+    let subject = format!(">s1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLF\n",
+        &subject,
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
+    let query = format!(">q1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
+    let subject = format!(">s1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        &query,
+        &subject,
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_exact_translation_coordinates_and_frames() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_multi_subject_ordering() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        concat!(
+            ">s_exact\nMKFLILLF\n",
+            ">s_near\nMKFLILLY\n",
+        ),
+        "6 qseqid sseqid score qframe sframe frames",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_multi_subject_ordering() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        concat!(
+            ">s_exact\nATGAAATTTCTGATTCTGCTGTTT\n",
+            ">s_near\nATGAAATTTCTGATTCTGCTGTAT\n",
+        ),
+        "6 qseqid sseqid score qframe sframe frames",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_multi_subject_ordering() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        concat!(
+            ">s_exact\nATGAAATTTCTGATTCTGCTGTTT\n",
+            ">s_near\nATGAAATTTCTGATTCTGCTGTAT\n",
+        ),
+        "6 qseqid sseqid score qframe sframe frames",
+        &[],
+        &[],
+    );
+}
+
 // ── BLASTP tests ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -12800,6 +13154,126 @@ fn tblastn_multi_subject_nt_db() {
     assert_eq!(
         results[0].subject_oid, 2,
         "should match OID 2 (the coding sequence)"
+    );
+}
+
+#[test]
+fn blastx_same_subject_can_emit_multiple_hsps() {
+    let nt_query = "ATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT";
+    let (_tmp, db) = build_protein_db(vec![protein_entry(
+        "P001",
+        "multi",
+        "MKFLILLFQQQQGMKFLILLF",
+    )]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let results = blastx(&db, nt_query.as_bytes(), &params);
+    assert_eq!(results.len(), 1, "expected one subject hit");
+    assert!(
+        results[0].hsps.len() >= 2,
+        "blastx should report multiple translated HSPs for separated matching regions"
+    );
+}
+
+#[test]
+fn tblastn_same_subject_can_emit_multiple_hsps() {
+    let nt_target = "ATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT";
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "multi", nt_target)]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .comp_adjust(0);
+
+    let results = tblastn(&db, b"MKFLILLFQQQQGMKFLILLF", &params);
+    assert_eq!(results.len(), 1, "expected one subject hit");
+    assert!(
+        results[0].hsps.len() >= 2,
+        "tblastn should report multiple translated HSPs for separated matching regions"
+    );
+}
+
+#[test]
+fn blastx_translated_overlap_repro_matches_expected_hsp_set() {
+    let nt_query = "ATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT";
+    let (_tmp, db) = build_protein_db(vec![protein_entry(
+        "P001",
+        "translated-overlap",
+        "MKFLILLFQQQQGMKFLILLF",
+    )]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false);
+
+    let results = blastx(&db, nt_query.as_bytes(), &params);
+    assert_eq!(results.len(), 1, "expected one subject hit");
+    let hsps: Vec<_> = results[0]
+        .hsps
+        .iter()
+        .map(|h| {
+            (
+                h.query_start,
+                h.query_end,
+                h.subject_start,
+                h.subject_end,
+                h.score,
+                h.alignment_length,
+                h.query_frame,
+                h.subject_frame,
+            )
+        })
+        .collect();
+    assert_eq!(
+        hsps,
+        vec![
+            (0, 33, 0, 11, 36, 11, 1, 0),
+            (0, 24, 13, 21, 34, 8, 1, 0),
+            (40, 64, 0, 8, 32, 8, 2, 0),
+            (40, 64, 13, 21, 32, 8, 2, 0),
+        ]
+    );
+}
+
+#[test]
+fn tblastn_translated_overlap_repro_matches_expected_hsp_set() {
+    let nt_target = "ATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT";
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "translated-overlap", nt_target)]);
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false);
+
+    let results = tblastn(&db, b"MKFLILLFQQQQGMKFLILLF", &params);
+    assert_eq!(results.len(), 1, "expected one subject hit");
+    let hsps: Vec<_> = results[0]
+        .hsps
+        .iter()
+        .map(|h| {
+            (
+                h.query_start,
+                h.query_end,
+                h.subject_start,
+                h.subject_end,
+                h.score,
+                h.alignment_length,
+                h.query_frame,
+                h.subject_frame,
+            )
+        })
+        .collect();
+    assert_eq!(
+        hsps,
+        vec![
+            (0, 11, 0, 33, 36, 11, 0, 1),
+            (13, 21, 0, 24, 34, 8, 0, 1),
+            (0, 8, 40, 64, 32, 8, 0, 2),
+            (13, 21, 40, 64, 32, 8, 0, 2),
+        ]
     );
 }
 
