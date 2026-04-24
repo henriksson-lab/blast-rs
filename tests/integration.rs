@@ -240,8 +240,14 @@ fn assert_blastp_subject_outfmt_matches_ncbi(
     for arg in rust_extra_args {
         rust_cmd.arg(arg);
     }
-    let rust_status = rust_cmd.status().expect("run blast-cli blastp subject parity");
-    assert!(rust_status.success(), "blast-cli blastp exited with {}", rust_status);
+    let rust_status = rust_cmd
+        .status()
+        .expect("run blast-cli blastp subject parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli blastp exited with {}",
+        rust_status
+    );
 
     let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastp");
     ncbi_cmd
@@ -259,7 +265,11 @@ fn assert_blastp_subject_outfmt_matches_ncbi(
         ncbi_cmd.arg(arg);
     }
     let ncbi_status = ncbi_cmd.status().expect("run NCBI blastp subject parity");
-    assert!(ncbi_status.success(), "NCBI blastp exited with {}", ncbi_status);
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastp exited with {}",
+        ncbi_status
+    );
 
     let rust = std::fs::read(&rust_out).expect("read rust output");
     let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
@@ -316,7 +326,11 @@ fn assert_translated_subject_outfmt_matches_ncbi(
         rust_cmd.arg(arg);
     }
     let rust_status = rust_cmd.status().expect("run blast-cli translated parity");
-    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+    assert!(
+        rust_status.success(),
+        "blast-cli {program} exited with {}",
+        rust_status
+    );
 
     let mut ncbi_cmd = std::process::Command::new(ncbi_program);
     ncbi_cmd
@@ -334,7 +348,11 @@ fn assert_translated_subject_outfmt_matches_ncbi(
         ncbi_cmd.arg(arg);
     }
     let ncbi_status = ncbi_cmd.status().expect("run NCBI translated parity");
-    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+    assert!(
+        ncbi_status.success(),
+        "NCBI {program} exited with {}",
+        ncbi_status
+    );
 
     let rust = std::fs::read(&rust_out).expect("read rust output");
     let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
@@ -391,7 +409,11 @@ fn assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         rust_cmd.arg(arg);
     }
     let rust_status = rust_cmd.status().expect("run blast-cli translated parity");
-    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+    assert!(
+        rust_status.success(),
+        "blast-cli {program} exited with {}",
+        rust_status
+    );
 
     let mut ncbi_cmd = std::process::Command::new(ncbi_program);
     ncbi_cmd
@@ -409,7 +431,11 @@ fn assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         ncbi_cmd.arg(arg);
     }
     let ncbi_status = ncbi_cmd.status().expect("run NCBI translated parity");
-    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+    assert!(
+        ncbi_status.success(),
+        "NCBI {program} exited with {}",
+        ncbi_status
+    );
 
     let sort_lines = |bytes: Vec<u8>| {
         let mut lines: Vec<String> = String::from_utf8(bytes)
@@ -473,7 +499,10 @@ fn assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         .stdout(std::process::Stdio::null())
         .status()
         .expect("run makeblastdb");
-    assert!(make_status.success(), "makeblastdb exited with {make_status}");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
 
     let mut rust_cmd = std::process::Command::new(blast_cli);
     rust_cmd
@@ -491,8 +520,14 @@ fn assert_translated_db_outfmt_matches_ncbi_sorted_lines(
     for arg in rust_extra_args {
         rust_cmd.arg(arg);
     }
-    let rust_status = rust_cmd.status().expect("run blast-cli translated DB parity");
-    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+    let rust_status = rust_cmd
+        .status()
+        .expect("run blast-cli translated DB parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli {program} exited with {}",
+        rust_status
+    );
 
     let mut ncbi_cmd = std::process::Command::new(ncbi_program);
     ncbi_cmd
@@ -510,7 +545,11 @@ fn assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         ncbi_cmd.arg(arg);
     }
     let ncbi_status = ncbi_cmd.status().expect("run NCBI translated DB parity");
-    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+    assert!(
+        ncbi_status.success(),
+        "NCBI {program} exited with {}",
+        ncbi_status
+    );
 
     let sort_lines = |bytes: Vec<u8>| {
         let mut lines: Vec<String> = String::from_utf8(bytes)
@@ -574,7 +613,10 @@ fn assert_translated_db_outfmt_matches_ncbi(
         .stdout(std::process::Stdio::null())
         .status()
         .expect("run makeblastdb");
-    assert!(make_status.success(), "makeblastdb exited with {make_status}");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
 
     let mut rust_cmd = std::process::Command::new(blast_cli);
     rust_cmd
@@ -592,8 +634,14 @@ fn assert_translated_db_outfmt_matches_ncbi(
     for arg in rust_extra_args {
         rust_cmd.arg(arg);
     }
-    let rust_status = rust_cmd.status().expect("run blast-cli translated DB parity");
-    assert!(rust_status.success(), "blast-cli {program} exited with {}", rust_status);
+    let rust_status = rust_cmd
+        .status()
+        .expect("run blast-cli translated DB parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli {program} exited with {}",
+        rust_status
+    );
 
     let mut ncbi_cmd = std::process::Command::new(ncbi_program);
     ncbi_cmd
@@ -611,7 +659,11 @@ fn assert_translated_db_outfmt_matches_ncbi(
         ncbi_cmd.arg(arg);
     }
     let ncbi_status = ncbi_cmd.status().expect("run NCBI translated DB parity");
-    assert!(ncbi_status.success(), "NCBI {program} exited with {}", ncbi_status);
+    assert!(
+        ncbi_status.success(),
+        "NCBI {program} exited with {}",
+        ncbi_status
+    );
 
     let rust = std::fs::read(&rust_out).expect("read rust output");
     let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
@@ -12099,7 +12151,10 @@ fn tblastn_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
 
 #[test]
 fn blastx_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
-    let query = format!(">q1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
+    let query = format!(
+        ">q1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "blastx",
         "/usr/bin/blastx",
@@ -12113,7 +12168,10 @@ fn blastx_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
 
 #[test]
 fn tblastn_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
-    let subject = format!(">s1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
+    let subject = format!(
+        ">s1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
         "/usr/bin/tblastn",
@@ -12127,8 +12185,14 @@ fn tblastn_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
 
 #[test]
 fn tblastx_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
-    let query = format!(">q1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
-    let subject = format!(">s1\n{}\n", ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT"));
+    let query = format!(
+        ">q1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
+    let subject = format!(
+        ">s1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
         "/usr/bin/tblastx",
@@ -12189,10 +12253,7 @@ fn blastx_db_ncbi_parity_multi_subject_ordering() {
         "/usr/bin/blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
-        concat!(
-            ">s_exact\nMKFLILLF\n",
-            ">s_near\nMKFLILLY\n",
-        ),
+        concat!(">s_exact\nMKFLILLF\n", ">s_near\nMKFLILLY\n",),
         "6 qseqid sseqid score qframe sframe frames",
         &[],
         &[],
@@ -12692,7 +12753,8 @@ fn tblastn_default_seg_masks_low_complexity_query() {
     let protein_query = "AAAAAAAAAAAAAAAAAAAA";
     let nt_subject = "GCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT";
 
-    let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "poly-a coding region", nt_subject)]);
+    let (_tmp, db) =
+        build_nucleotide_db(vec![nt_entry("N001", "poly-a coding region", nt_subject)]);
     let filtered = SearchParams::blastp()
         .evalue(1e6)
         .num_threads(1)
@@ -14967,14 +15029,7 @@ fn test_comp_adjust_short_exact_debug() {
             .sum::<i32>();
         eprintln!(
             "lambda={:.4} status={} score={} diag M={} K={} F={} L={} I={}",
-            lambda,
-            status,
-            score,
-            adj[12][12],
-            adj[10][10],
-            adj[6][6],
-            adj[11][11],
-            adj[9][9]
+            lambda, status, score, adj[12][12], adj[10][10], adj[6][6], adj[11][11], adj[9][9]
         );
     }
 
@@ -15009,13 +15064,7 @@ fn test_comp_adjust_short_exact_debug() {
             .sum::<i32>();
         eprintln!(
             "test_rule={test_rule:?} status={} score={} diag M={} K={} F={} L={} I={}",
-            status,
-            score,
-            adj[12][12],
-            adj[10][10],
-            adj[6][6],
-            adj[11][11],
-            adj[9][9]
+            status, score, adj[12][12], adj[10][10], adj[6][6], adj[11][11], adj[9][9]
         );
     }
 }
@@ -15136,9 +15185,21 @@ fn tblastn_short_exact_comp_modes_match_ncbi_reference_scores() {
         tblastn(&db, b"MKFLILLF", &params)[0].hsps[0].score
     };
 
-    assert_eq!(score_for(0), 38, "NCBI tblastn -comp_based_stats 0 gives 38");
-    assert_eq!(score_for(1), 21, "NCBI tblastn -comp_based_stats 1 gives 21");
-    assert_eq!(score_for(2), 32, "NCBI tblastn -comp_based_stats 2 gives 32");
+    assert_eq!(
+        score_for(0),
+        38,
+        "NCBI tblastn -comp_based_stats 0 gives 38"
+    );
+    assert_eq!(
+        score_for(1),
+        21,
+        "NCBI tblastn -comp_based_stats 1 gives 21"
+    );
+    assert_eq!(
+        score_for(2),
+        32,
+        "NCBI tblastn -comp_based_stats 2 gives 32"
+    );
 }
 
 // ── Stress tests for short-primer / large-DB scenarios (stack overflow regression) ──

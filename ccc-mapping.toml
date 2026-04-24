@@ -67,6 +67,14 @@ rust  = "batch_scan_subject"
 other = "BlastRPSScanSubject"
 
 [[entries]]
+rust  = "blast_na_word_finder_scan_subject_packed"
+other = "BlastNaWordFinder"
+
+[[entries]]
+rust  = "blast_na_hash_lookup_scan_subject_packed"
+other = "s_NaHashLookupScanSubjectForWordCounts"
+
+[[entries]]
 rust  = "protein_scan"
 other = "BlastChooseProteinScanSubject"
 
@@ -1607,8 +1615,56 @@ rust  = "protein_to_nuc_coords"
 other = "BLAST_FrameToContext"
 
 [[entries]]
-rust  = "na_ungapped_extend"
+rust  = "diag_table_extend_initial_hit_packed"
+other = "s_BlastnDiagTableExtendInitialHit"
+
+[[entries]]
+rust  = "diag_hash_extend_initial_hit_packed"
+other = "s_BlastnDiagHashExtendInitialHit"
+
+[[entries]]
+rust  = "blast_preliminary_search_engine_packed_prepared_with_split_xdrop"
+other = "BLAST_PreliminarySearchEngine"
+
+[[entries]]
+rust  = "blast_run_preliminary_search_packed_prepared_with_split_xdrop"
+other = "Blast_RunPreliminarySearch"
+
+[[entries]]
+rust  = "blast_run_preliminary_search_with_interrupt_packed_prepared_with_split_xdrop"
+other = "Blast_RunPreliminarySearchWithInterrupt"
+
+[[entries]]
+rust  = "blast_run_full_search_packed_prepared_with_split_xdrop"
+other = "Blast_RunFullSearch"
+
+[[entries]]
+rust  = "small_na_extend_packed_generic"
+other = "s_BlastSmallNaExtend"
+
+[[entries]]
+rust  = "small_na_extend_packed_aligned_one_byte"
+other = "s_BlastSmallNaExtendAlignedOneByte"
+
+[[entries]]
+rust  = "blast_na_extend_direct_packed"
+other = "s_BlastNaExtendDirect"
+
+[[entries]]
+rust  = "blast_na_extend_packed_generic"
 other = "s_BlastNaExtend"
+
+[[entries]]
+rust  = "blast_na_extend_packed_aligned"
+other = "s_BlastNaExtendAligned"
+
+[[entries]]
+rust  = "extend_seed_packed"
+other = "s_NuclUngappedExtend"
+
+[[entries]]
+rust  = "extend_seed_packed_exact"
+other = "s_NuclUngappedExtendExact"
 
 [[entries]]
 rust  = "compute_ungapped_k"

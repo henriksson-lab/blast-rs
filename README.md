@@ -6,12 +6,6 @@ Based on [NCBI BLAST+ 2.17.0](https://ftp.ncbi.nlm.nih.gov/blast/executables/bla
 
 **This code is not ready for production yet. Do not trust README below**
 
-Some things left, as example:
-  1. Sum-P / HSP linking (~400 LOC + coefficient table) — s_BlastEvenGapLinkHSPs (406 LOC), s_BlastUnevenGapLinkHSPs (~80 LOC), ComputeLinkingCutoffs (~60 LOC). Primitives are all ported; orchestrator missing. Affects multi-HSP e-values.                                                                                        
-  2. Greedy aligner for megablast (~400 LOC total) — BLAST_GreedyAlign (157 LOC) + BLAST_AffineGreedyAlign (243 LOC). src/greedy.rs is an ungapped stub; megablast silently falls back to DP. Porting roadmap documented in greedy.rs + TODO.md item #7.
-  3. Composition-adjusted redo (Blast_RedoAlignmentCore_MT, 669 LOC). Helpers exist; orchestration loop (iterate HSPs, re-score, re-align, merge) absent. Blocks credible blastp parity claims.                                                                                                                                      
-  4. Translated searches parity (blastx/tblastn/tblastx) — frame/coord/context arithmetic and out-of-frame alignment (s_OutOfFrameGappedAlign 233 LOC, s_OutOfFrameAlignWithTraceback 348 LOC).                                                                                                                                      
-  5. PHI/PSI/RPS/DELTA BLAST and Jumper/mapper — mostly absent; clap rejects the options but not with NCBI's error format.           
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
 
@@ -279,102 +273,7 @@ Single crate `blast-rs` with modules:
 
 ## Benchmarks
 
-Wall-clock time including process startup and database loading, measured on Linux x86-64.
 
-### Current core_nt primer benchmark
-
-Measured 2026-04-14/15 on Linux x86-64 with a native CPU release build:
-
-```bash
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-target/release/blast-cli blastn \
-    --query /tmp/core_nt_realistic_primer.fa \
-    --db /husky/henriksson/for_claude/blast/core_nt/core_nt.00 \
-    --task blastn-short \
-    --outfmt 6 \
-    --max_target_seqs 500 \
-    --num_threads 8
-```
-
-Taxonomy benchmark command:
-
-```bash
-target/release/blast-cli blastn \
-    --task blastn-short \
-    --evalue 5 \
-    --max_target_seqs 10000 \
-    --max_hsps 1 \
-    --num_threads 8 \
-    --perc_identity 90 \
-    --db /husky/henriksson/for_claude/blast/core_nt/core_nt.00 \
-    --outfmt '6 qseqid qlen qstart qend saccver slen sstart send bitscore staxid ssciname sskingdom length pident' \
-    --query /tmp/core_nt_realistic_primer.fa \
-    --out /tmp/primer.vsCore_nt.rsblastn
-```
-
-Query sequence:
-
-```text
-GTCTCCTCTGACTTCAACAGCG
-```
-
-| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs native release | Output |
-|------|----------|--------------------:|------------------------:|--------|
-| 23bp primer, `blastn-short`, 8 threads, `outfmt 6` | `core_nt.00` | 2.04-2.05 s warm | 1.98-1.99 s warm | byte-identical |
-| Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | `core_nt.00` | 4.60 s with `BLASTDB` taxdb, ~5.59 s without | 2.01 s with `BLASTDB` taxdb, 2.00 s without | byte-identical |
-| Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | standalone `core_nt.12` and `core_nt.28` | matched in release ignored regression | matched in release ignored regression | byte-identical |
-| Same primer, taxonomy outfmt with `staxid ssciname sskingdom` | full `core_nt` alias | 1217.89 s | 455.80 s | byte-identical |
-
-Post-ambiguity-overlay check on 2026-04-16, using the same 23 bp primer and `core_nt.00` plain `outfmt 6` command above with the existing release binary, produced byte-identical output: NCBI BLAST+ 14.33 s wall / 25.86 s user / 2.84 s sys / 2.98 GB max RSS; blast-rs 6.15 s wall / 36.53 s user / 1.80 s sys / 3.86 GB max RSS. This check was intended to catch regressions from BLAST DB ambiguity handling and should not replace the native-CPU benchmark table above.
-
-Post-DB-ordering check on 2026-04-16, using the taxonomy benchmark command above on `core_nt.00` with `BLASTDB=/husky/henriksson/for_claude/blast/core_nt`, produced byte-identical output after restoring DB tie ordering: NCBI BLAST+ 5.82 s wall / 44.59 s user / 0.43 s sys / 2.98 GB max RSS; blast-rs 7.81 s wall / 40.86 s user / 1.22 s sys / 3.61 GB max RSS. This was a warm-cache bounded check with the existing release binary, not the native-CPU benchmark table.
-
-On the first large real database volume, blast-rs is now roughly at parity to faster than NCBI BLAST+ for the tested plain primer scan while producing byte-for-byte identical tabular output. This plain `outfmt 6` case is the better comparison for raw search-path speed.
-
-The much larger taxonomy-output speedup should not be interpreted as Rust being intrinsically several times faster at BLAST alignment. That command also measures database metadata and taxonomy lookup behavior. For taxonomy-heavy output, blast-rs uses mmap-backed `.not/.pot` OID-to-taxid lookup, loads it only when taxonomy fields are requested, and touches only the OID index entries and taxid/name records needed by the returned hits. In the measured full `core_nt` alias run, NCBI BLAST+ used about 182 GB RSS versus about 4.4 GB for blast-rs, so the 455.80 s vs 1217.89 s gap is likely dominated by taxonomy/metadata working-set behavior rather than by the alignment scanner alone.
-
-Standalone nonzero volumes use the alias DBLIST to translate local OIDs into the global OID namespace before indexing the alias-level `.not` file.
-
-Ignored real-database parity tests for these cases:
-
-```bash
-RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt00_primer_taxonomy_outfmt_matches_ncbi
-RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt_nonzero_volume_taxonomy_outfmt_matches_ncbi
-RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt00_primer_taxonomy_names_with_blastdb_match_ncbi
-BLAST_RS_RUN_FULL_CORE_NT=1 RUSTFLAGS="-C target-cpu=native" cargo test --release -- --ignored test_core_nt_alias_primer_taxonomy_outfmt_matches_ncbi
-```
-
-The following older benchmark tables are single-threaded BLAST database mode (`--db`), median of 3 runs.
-
-### blastn — single query
-
-| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs 0.10.0 |
-|------|----------|--------------------:|----------------:|
-| 200bp query | C. elegans (100 MB) | 411 ms | 786 ms |
-| 200bp query | S. cerevisiae (12 MB) | 394 ms | 126 ms |
-| 200bp query | S. pombe (2.5 MB) | 390 ms | 49 ms |
-| 200bp query | seqn (1 MB, 2K seqs) | 392 ms | 68 ms |
-| 1000bp query | C. elegans (100 MB) | 413 ms | 943 ms |
-
-### blastn-short — primer search
-
-| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs 0.10.0 |
-|------|----------|--------------------:|----------------:|
-| 30bp primer | C. elegans (100 MB) | 493 ms | 723 ms |
-| 19bp primer | 16S rRNA (10 MB, 27K seqs) | 1254 ms | 923 ms |
-
-### blastn — multi-query
-
-| Test | Database | NCBI BLAST+ 2.17.0 | blast-rs 0.10.0 |
-|------|----------|--------------------:|----------------:|
-| 10x 200bp queries | C. elegans (100 MB) | 420 ms | 8000 ms |
-| 20 primers | 16S rRNA (10 MB, 27K seqs) | 598 ms | 7226 ms |
-
-**Notes:**
-- NCBI BLAST+ has ~390 ms fixed startup overhead (shared library loading, ASN.1 initialization). On small databases, NCBI wall-clock time is dominated by startup, not search.
-- blast-rs has near-zero startup (<10 ms), so it is faster on wall-clock for small-to-medium databases with single queries.
-- For large databases (C. elegans 100 MB) and multi-query workloads, NCBI BLAST+ is faster at raw search throughput. The inner scanning loop needs further optimization.
-- Multi-threaded search (`--num_threads`) parallelizes across database sequences using rayon.
 
 ## Algorithms
 
@@ -431,46 +330,6 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
 
 ## Changelog
 
-### 0.10.0
-
-- **BLAST database v5 support**: Fixed `.nto` taxonomy file parser for v5 databases (used by all modern NCBI databases including core_nt, 16S_ribosomal_RNA, etc.)
-- **Composition-based statistics**: Ported `composition_adjustment/` for blastp/blastx compositional score correction (matrix scaling, relative entropy optimization, lambda ratio adjustment)
-- **Stack overflow fix**: Rayon thread pools now use 64 MB stack size and respect `--num_threads`, fixing crashes on large databases with many threads
-- **Stress tests**: Added 4 new stress tests for blastn-short primer search scenarios (2000 subjects, long subjects, 15bp primers, real V5 database)
-- Updated benchmarks against NCBI BLAST+ 2.17.0
-
-### 0.9.1
-
-- Maintenance release
-
-### 0.9.0
-
-- **204 new tests** (189 → 393): ported from NCBI BLAST+ unit test suite covering scoring/statistics, lookup tables, scanning, extension, HSP processing, traceback, gapped alignment, PSSM/PSI-BLAST, options, DUST filtering, database I/O, output formatting, encoding, and end-to-end integration
-- Updated benchmarks with larger databases (C. elegans 100 MB, S. cerevisiae 12 MB) and wall-clock timing
-
-### 0.8.0
-
-- **33x blastp speedup**: Protein lookup table is now built once per query instead of per subject, eliminating redundant work when searching large databases
-- **Gapped protein alignment**: blastp now performs two-phase search (ungapped seeds → Smith-Waterman gapped alignment), matching NCBI BLAST+ sensitivity for distant homologs
-- **Smith-Waterman local alignment**: Protein gapped traceback uses local alignment so scores are seed-position-independent, producing optimal alignments matching NCBI BLAST+ scores
-- **Corrected protein X-drop defaults**: `x_drop_ungapped` (7→40) and `x_drop_gapped` (38→260) now match NCBI BLAST+ defaults for protein searches
-- **Pre-built lookup table API**: New `protein_scan_with_table()` and `protein_gapped_scan_with_table()` for amortizing lookup table construction across multiple subjects
-- Inner-loop allocation optimizations in lookup table construction (`suffix_max`, `word_buf` reused across query positions)
-
-### 0.7.0
-
-- **High-level library API**: New `blast_rs::api` module with `blastp()`, `blastn_search()`, `blastx()`, `tblastn()`, `tblastx()` functions, `SearchParams` builder, `SearchResult`/`Hsp` types
-- **Database creation**: `BlastDbBuilder` for programmatically creating protein and nucleotide BLAST databases
-- **BLOSUM62 matrix**: Populated with correct values from NCBI source (was all zeros)
-- **43 integration tests** ported from previous implementation covering all search programs, database operations, edge cases, and multi-subject indexing
-- **17 bug fixes**: gapalign traceback, protein scoring matrix, i16 overflow, RPS search space, tabular output fields, log1p math, length adjustment formula, encoding tables, and more (see TODO.md)
-- Utility functions: `reverse_complement()`, `six_frame_translate()`, `parse_fasta()` for ASCII sequences
-- Lowercase support in encoding tables (IUPACNA, NCBI4NA, amino acid)
-- OID bounds checking in database accessors
-
-### 0.6.0
-
-- Initial pure-Rust implementation with CLI and core search engine
 
 ## License
 

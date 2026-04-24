@@ -85,6 +85,12 @@ pub use db::BlastDb;
 pub use matrix::AA_FREQUENCIES as BACKGROUND_FREQ;
 pub use pssm::Pssm;
 pub use stat::KarlinBlk as KarlinAltschul;
+pub use link_hsps::{
+    BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
+    LinkScoreBlock,
+};
+pub use program::BLASTN;
+pub use queryinfo::QueryInfo;
 // blastn builder (BlastnSearch) is now in the api module.
 pub mod db;
 pub mod filter;

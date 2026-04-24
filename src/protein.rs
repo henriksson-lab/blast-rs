@@ -1167,5 +1167,4 @@ mod tests {
             r.score
         );
     }
-
 }

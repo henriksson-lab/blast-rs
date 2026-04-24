@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(
@@ -361,19 +362,9 @@ impl BlastnArgs {
     }
 
     fn default_xdrop_ungap(&self) -> &str {
-        // Divergence from NCBI: `blast_options.c:591` sets the C core's
-        // ungapped X-drop default for ALL nucleotide programs (including
-        // megablast) to `BLAST_UNGAPPED_X_DROPOFF_NUCL = 20`. The comment
-        // at `blast_args.cpp:211` ("Default values: blastn=20,
-        // megablast=10, others=7") appears to be documentation rot —
-        // no code path overrides the 20. Rust currently uses `5.0` for
-        // megablast; integration tests expect this value and changing
-        // it would reorder HSPs on several fixtures. Keep as-is until
-        // those tests are rebaselined against NCBI's 20.
-        match self.task.as_deref().unwrap_or("megablast") {
-            "megablast" => "5.0",
-            _ => "20.0",
-        }
+        // Match the C core default in `blast_options.c`: nucleotide programs
+        // use `BLAST_UNGAPPED_X_DROPOFF_NUCL = 20`, including megablast.
+        "20.0"
     }
 
     fn xdrop_gap(&self) -> f64 {
@@ -1305,6 +1296,13 @@ fn is_ncbi_bool(value: &str) -> bool {
         value.to_ascii_lowercase().as_str(),
         "true" | "false" | "t" | "f" | "1" | "0" | "yes" | "no"
     )
+}
+
+fn ncbi_bool_enabled(value: Option<&str>, default: bool) -> bool {
+    match value.map(|v| v.to_ascii_lowercase()) {
+        None => default,
+        Some(v) => matches!(v.as_str(), "true" | "t" | "1" | "yes"),
+    }
 }
 
 fn parse_validated_f64(argument: &str, value: &str) -> f64 {
@@ -2402,15 +2400,16 @@ fn search_result_hsps_to_tabular_hits(
 ) -> Vec<TabularHit> {
     let mut hits = Vec::new();
     for sr in results {
-        let subject_id = if sr.subject_accession.is_empty() || sr.subject_accession.starts_with("oid_") {
-            subjects
-                .get(sr.subject_oid as usize)
-                .map(|s| s.id.clone())
-                .filter(|id| !id.is_empty())
-                .unwrap_or_else(|| sr.subject_title.clone())
-        } else {
-            sr.subject_accession.clone()
-        };
+        let subject_id =
+            if sr.subject_accession.is_empty() || sr.subject_accession.starts_with("oid_") {
+                subjects
+                    .get(sr.subject_oid as usize)
+                    .map(|s| s.id.clone())
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| sr.subject_title.clone())
+            } else {
+                sr.subject_accession.clone()
+            };
         for hsp in sr.hsps {
             let (query_start, query_end) = translated_display_coords(
                 hsp.query_start,
@@ -2486,6 +2485,120 @@ fn all_hits_sort_by_evalue(hits: &mut [TabularHit]) {
     hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
 }
 
+fn apply_blastn_linked_sum_stats_to_hsps(
+    hsps: &mut Vec<blast_rs::search::SearchHsp>,
+    query_len: i32,
+    subject_len: i32,
+    kbp_plus: &blast_rs::stat::KarlinBlk,
+    kbp_minus: &blast_rs::stat::KarlinBlk,
+    searchsp_plus: f64,
+    searchsp_minus: f64,
+    len_adj_plus: i32,
+    len_adj_minus: i32,
+) {
+    use blast_rs::{
+        BLASTN, BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg,
+        LinkHSPParameters, LinkScoreBlock, QueryInfo,
+    };
+
+    if hsps.len() <= 1 {
+        return;
+    }
+
+    let mut query_info = QueryInfo::new_blastn(&[query_len.max(0) as usize]);
+    if let Some(ctx) = query_info.contexts.get_mut(0) {
+        ctx.eff_searchsp = searchsp_plus.round() as i64;
+        ctx.length_adjustment = len_adj_plus;
+    }
+    if let Some(ctx) = query_info.contexts.get_mut(1) {
+        ctx.eff_searchsp = searchsp_minus.round() as i64;
+        ctx.length_adjustment = len_adj_minus;
+    }
+
+    let score_block = LinkScoreBlock {
+        kbp: vec![kbp_plus.clone(), kbp_minus.clone()],
+        kbp_gap: vec![kbp_plus.clone(), kbp_minus.clone()],
+    };
+    let link_params = LinkHSPParameters::default();
+
+    let mut hsp_list = LinkBlastHspList {
+        oid: 0,
+        query_index: 0,
+        hsp_array: hsps
+            .iter()
+            .map(|hsp| LinkBlastHsp {
+                score: hsp.score,
+                num_ident: hsp.num_ident,
+                bit_score: hsp.bit_score,
+                evalue: hsp.evalue,
+                query: LinkBlastSeg {
+                    frame: 1,
+                    offset: hsp.query_start,
+                    end: hsp.query_end,
+                    gapped_start: hsp.query_start,
+                },
+                subject: LinkBlastSeg {
+                    frame: if hsp.context == 1 { -1 } else { 1 },
+                    offset: hsp.subject_start,
+                    end: hsp.subject_end,
+                    gapped_start: hsp.subject_start,
+                },
+                context: hsp.context,
+                num: 1,
+            })
+            .collect(),
+        best_evalue: f64::INFINITY,
+    };
+
+    let original_keys: Vec<(i32, i32, i32, i32, i32, i32)> = hsps
+        .iter()
+        .map(|hsp| {
+            (
+                hsp.score,
+                hsp.context,
+                hsp.query_start,
+                hsp.query_end,
+                hsp.subject_start,
+                hsp.subject_end,
+            )
+        })
+        .collect();
+
+    BLAST_LinkHsps(
+        BLASTN,
+        &mut hsp_list,
+        &query_info,
+        subject_len,
+        &score_block,
+        &link_params,
+        false,
+    );
+
+    let mut linked_evalues: std::collections::HashMap<(i32, i32, i32, i32, i32, i32), Vec<f64>> =
+        std::collections::HashMap::new();
+    for linked in &hsp_list.hsp_array {
+        linked_evalues
+            .entry((
+                linked.score,
+                linked.context,
+                linked.query.offset,
+                linked.query.end,
+                linked.subject.offset,
+                linked.subject.end,
+            ))
+            .or_default()
+            .push(linked.evalue);
+    }
+
+    for (hsp, key) in hsps.iter_mut().zip(original_keys) {
+        if let Some(evalues) = linked_evalues.get_mut(&key) {
+            if let Some(evalue) = evalues.pop() {
+                hsp.evalue = evalue;
+            }
+        }
+    }
+}
+
 fn build_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
     let parsed_num_threads = args.num_threads();
     let mut params = blast_rs::api::SearchParams::blastp()
@@ -2549,7 +2662,10 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
     } else {
-        let db_path = args.db.as_ref().ok_or("blastx requires --db or --subject")?;
+        let db_path = args
+            .db
+            .as_ref()
+            .ok_or("blastx requires --db or --subject")?;
         let db = BlastDb::open(db_path)?;
         if db.db_type != DbType::Protein {
             return Err("blastx requires a protein database".into());
@@ -2596,7 +2712,10 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
     } else {
-        let db_path = args.db.as_ref().ok_or("tblastn requires --db or --subject")?;
+        let db_path = args
+            .db
+            .as_ref()
+            .ok_or("tblastn requires --db or --subject")?;
         let db = BlastDb::open(db_path)?;
         if db.db_type != DbType::Nucleotide {
             return Err("tblastn requires a nucleotide database".into());
@@ -2817,7 +2936,10 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
     } else {
-        let db_path = args.db.as_ref().ok_or("tblastx requires --db or --subject")?;
+        let db_path = args
+            .db
+            .as_ref()
+            .ok_or("tblastx requires --db or --subject")?;
         let db = BlastDb::open(db_path)?;
         if db.db_type != DbType::Nucleotide {
             return Err("tblastx requires a nucleotide database".into());
@@ -2989,7 +3111,28 @@ fn is_blastn_sequence_byte(byte: u8) -> bool {
     )
 }
 
+fn blastn_profile_enabled() -> bool {
+    std::env::var_os("BLAST_RS_PROFILE").is_some()
+}
+
+fn blastn_profile_mark(enabled: bool, start: Instant, last: &mut Instant, phase: &str) {
+    if !enabled {
+        return;
+    }
+    let now = Instant::now();
+    eprintln!(
+        "[blastn-profile] phase={} delta_ms={} total_ms={}",
+        phase,
+        now.duration_since(*last).as_millis(),
+        now.duration_since(start).as_millis()
+    );
+    *last = now;
+}
+
 fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let profile_enabled = blastn_profile_enabled();
+    let profile_start = Instant::now();
+    let mut profile_last = profile_start;
     let query_bytes = read_input_bytes("query", &args.query);
     validate_blastn_fasta_input(&query_bytes);
     let records = sanitize_blastn_records(parse_fasta_with_default_id(&query_bytes[..], "Query_1"));
@@ -3011,6 +3154,12 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         .filter(|record| !record.sequence.is_empty())
         .cloned()
         .collect();
+    blastn_profile_mark(
+        profile_enabled,
+        profile_start,
+        &mut profile_last,
+        "query_load",
+    );
 
     // Subject mode (FASTA vs FASTA)
     if let Some(ref subject_path) = args.subject {
@@ -3027,7 +3176,20 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        return run_blastn_subject(args, &nonempty_records, &subject_records);
+        blastn_profile_mark(
+            profile_enabled,
+            profile_start,
+            &mut profile_last,
+            "subject_load",
+        );
+        return run_blastn_subject(
+            args,
+            &nonempty_records,
+            &subject_records,
+            profile_enabled,
+            profile_start,
+            &mut profile_last,
+        );
     }
 
     let db_path = args
@@ -3046,8 +3208,16 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     if outfmt_requests_taxonomy(&args.outfmt) {
         db.load_tax_lookup_from_base_path(db_path)?;
     }
+    blastn_profile_mark(profile_enabled, profile_start, &mut profile_last, "db_open");
 
-    run_blastn_rust(args, &nonempty_records, db)
+    run_blastn_rust(
+        args,
+        &nonempty_records,
+        db,
+        profile_enabled,
+        profile_start,
+        &mut profile_last,
+    )
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -3080,6 +3250,9 @@ fn run_blastn_rust(
     args: &BlastnArgs,
     records: &[blast_rs::input::FastaRecord],
     db: BlastDb,
+    profile_enabled: bool,
+    profile_start: Instant,
+    profile_last: &mut Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use rayon::prelude::*;
 
@@ -3091,7 +3264,7 @@ fn run_blastn_rust(
 
     // Pure Rust KBP computation — per-context (plus + minus) for exact e-value matching
     // The C engine computes separate KBP for each context based on strand composition
-    let (kbp_plus, kbp_minus, searchsp_plus, searchsp_minus) = {
+    let (kbp_plus, kbp_minus, searchsp_plus, searchsp_minus, len_adj_plus, len_adj_minus) = {
         let rec = &records[0];
         let (loc_start, loc_end) = query_loc_bounds(args, rec.sequence.len())?;
         let query_plus: Vec<u8> = rec.sequence[loc_start..loc_end]
@@ -3200,49 +3373,75 @@ fn run_blastn_rust(
         )
         .unwrap_or((ungapped_minus.clone(), false));
 
+        let stats_kbp_plus = if args.ungapped {
+            ungapped_plus.clone()
+        } else {
+            gkbp_plus.clone()
+        };
+        let stats_kbp_minus = if args.ungapped {
+            ungapped_minus.clone()
+        } else {
+            gkbp_minus.clone()
+        };
+
         // Per-context search space
         let database_length = effective_db_length(args, db.total_length as i64);
-        let compute_searchsp = |kbp: &blast_rs::stat::KarlinBlk,
-                                ukbp: &blast_rs::stat::KarlinBlk|
-         -> f64 {
+        let compute_searchsp =
+            |kbp: &blast_rs::stat::KarlinBlk, ukbp: &blast_rs::stat::KarlinBlk| -> (f64, i32) {
             let searchsp = args.searchsp();
             if searchsp > 0 {
-                return searchsp as f64;
+                return (searchsp as f64, 0);
             }
-            let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
-                reward,
-                penalty,
-                args.gapopen(),
-                args.gapextend(),
-                ukbp.lambda,
-                ukbp.h,
-                true,
-            );
-            let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
-                kbp.k,
-                kbp.log_k,
-                alpha / kbp.lambda,
-                beta,
-                qlen,
-                database_length,
-                db.stats_num_oids.min(i32::MAX as u64) as i32,
-            );
+            let len_adj = if args.ungapped {
+                blast_rs::stat::compute_length_adjustment(
+                    qlen,
+                    database_length,
+                    db.stats_num_oids.min(i32::MAX as u64) as i32,
+                    kbp,
+                )
+            } else {
+                let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
+                    reward,
+                    penalty,
+                    args.gapopen(),
+                    args.gapextend(),
+                    ukbp.lambda,
+                    ukbp.h,
+                    true,
+                );
+                blast_rs::stat::compute_length_adjustment_exact(
+                    kbp.k,
+                    kbp.log_k,
+                    alpha / kbp.lambda,
+                    beta,
+                    qlen,
+                    database_length,
+                    db.stats_num_oids.min(i32::MAX as u64) as i32,
+                )
+                .0
+            };
             let eff_db = std::cmp::max(
                 database_length - db.stats_num_oids.min(i64::MAX as u64) as i64 * len_adj as i64,
                 1,
             );
-            eff_db as f64 * (qlen - len_adj).max(1) as f64
+            (eff_db as f64 * (qlen - len_adj).max(1) as f64, len_adj)
         };
-        let sp_plus = compute_searchsp(&gkbp_plus, &ungapped_plus);
-        let sp_minus = compute_searchsp(&gkbp_minus, &ungapped_minus);
+        let (sp_plus, len_adj_plus) = compute_searchsp(&stats_kbp_plus, &ungapped_plus);
+        let (sp_minus, len_adj_minus) = compute_searchsp(&stats_kbp_minus, &ungapped_minus);
 
-        (gkbp_plus, gkbp_minus, sp_plus, sp_minus)
+        (
+            stats_kbp_plus,
+            stats_kbp_minus,
+            sp_plus,
+            sp_minus,
+            len_adj_plus,
+            len_adj_minus,
+        )
     };
     // Use plus-strand KBP as the primary (for seed finding threshold)
     let kbp = &kbp_plus;
     let search_space = searchsp_plus;
     let word_size = args.word_size() as usize;
-    #[cfg(not(test))]
     let use_contiguous_megablast_lookup =
         args.task.as_deref().is_none_or(|task| task == "megablast");
     let reward = args.reward();
@@ -3264,9 +3463,8 @@ fn run_blastn_rust(
     let ungapped_x_dropoff =
         (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
     let gapped_x_dropoff = (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
-    let gapped_x_dropoff_final = gapped_x_dropoff.max(
-        (args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32,
-    );
+    let gapped_x_dropoff_final = gapped_x_dropoff
+        .max((args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32);
     let parsed_num_threads = args.num_threads();
     let num_threads = if parsed_num_threads <= 0 {
         rayon::current_num_threads()
@@ -3278,6 +3476,7 @@ fn run_blastn_rust(
         .stack_size(64 * 1024 * 1024) // 64 MB per thread to avoid stack overflow on large DBs
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "search_setup");
 
     let search_plus = args.strand != "minus";
     let search_minus = args.strand != "plus";
@@ -3304,17 +3503,16 @@ fn run_blastn_rust(
                 .map(|&b| complement_blastna(b))
                 .collect();
             let mut plus_masked = plus_nomask.clone();
+            let mut minus_masked = minus_nomask.clone();
             if apply_dust {
                 apply_blastn_dust_mask(&mut plus_masked);
+                apply_blastn_dust_mask(&mut minus_masked);
             }
             if args.lcase_masking {
                 apply_lowercase_mask(raw_query, &mut plus_masked);
+                let reversed_raw_query: Vec<u8> = raw_query.iter().rev().copied().collect();
+                apply_lowercase_mask(&reversed_raw_query, &mut minus_masked);
             }
-            let minus_masked: Vec<u8> = plus_masked
-                .iter()
-                .rev()
-                .map(|&b| complement_blastna(b))
-                .collect();
             Ok(EncodedQuery {
                 id: rec.id.clone(),
                 seq_len: plus_nomask.len() as i32,
@@ -3334,31 +3532,47 @@ fn run_blastn_rust(
             })
         })
         .collect::<Result<_, _>>()?;
+    blastn_profile_mark(
+        profile_enabled,
+        profile_start,
+        profile_last,
+        "query_prepare",
+    );
 
     // Scan subjects in parallel. For each subject, check ALL queries.
     // This keeps subject data in cache across queries (subject-major order).
     let hitlist_size = args.effective_max_target_seqs();
     let prelim_hitlist_size =
         std::cmp::min(std::cmp::max(2 * hitlist_size, 10), hitlist_size + 50) as usize;
+    let do_sum_stats = !args.ungapped && ncbi_bool_enabled(args.sum_stats.as_deref(), true);
 
     // Collect hits: (query_idx, oid, hsps)
     #[cfg(not(test))]
     let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> = if num_threads
         <= 1
     {
+        let mut profile_db_oid_count = 0usize;
+        let mut profile_packed_search_ms = 0u128;
+        let mut profile_ambiguity_check_ms = 0u128;
+        let mut profile_ambiguity_rerun_ms = 0u128;
+        let mut profile_ambiguity_rerun_count = 0usize;
         let prepared_queries: Vec<_> = encoded_queries
             .iter()
             .map(|eq| {
                 if use_contiguous_megablast_lookup {
-                    blast_rs::search::PreparedBlastnQuery::new_megablast(
+                    blast_rs::search::PreparedBlastnQuery::new_megablast_with_nomask(
                         &eq.plus_masked,
                         &eq.minus_masked,
+                        &eq.plus_nomask,
+                        &eq.minus_nomask,
                         word_size,
                     )
                 } else {
-                    blast_rs::search::PreparedBlastnQuery::new(
+                    blast_rs::search::PreparedBlastnQuery::new_with_nomask(
                         &eq.plus_masked,
                         &eq.minus_masked,
+                        &eq.plus_nomask,
+                        &eq.minus_nomask,
                         word_size,
                     )
                 }
@@ -3373,6 +3587,16 @@ fn run_blastn_rust(
         for (volume_idx, (start_oid, end_oid)) in db.volume_oid_ranges().into_iter().enumerate() {
             db.advise_volume_sequential(volume_idx);
             for oid in start_oid..end_oid {
+                profile_db_oid_count += 1;
+                let oid_profile_start = if profile_enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                let oid_packed_search_ms_before = profile_packed_search_ms;
+                let oid_ambiguity_check_ms_before = profile_ambiguity_check_ms;
+                let oid_ambiguity_rerun_ms_before = profile_ambiguity_rerun_ms;
+                let oid_ambiguity_rerun_count_before = profile_ambiguity_rerun_count;
                 let local_oid = oid - start_oid;
                 let (packed, seq_len) = db.get_volume_sequence_and_len(volume_idx, local_oid);
                 let seq_len = seq_len as usize;
@@ -3403,25 +3627,64 @@ fn run_blastn_rust(
                                 evalue,
                             )
                         } else {
-                            let mut hsps = blast_rs::search::blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
-                                &prepared_queries[qi],
-                                packed,
-                                seq_len,
-                                reward,
-                                penalty,
-                                ungapped_x_dropoff,
-                                kbp,
-                                search_space,
-                                evalue,
-                                &mut scratch[qi],
-                            );
+                            let mut hsps = if seq_len > 5_000_000 {
+                                let mut combined = Vec::new();
+                                for (chunk_start, chunk_end) in blast_db_subject_chunks(seq_len) {
+                                    let chunk_packed =
+                                        packed_subject_chunk(packed, chunk_start, chunk_end);
+                                    let chunk_hsps = blast_rs::search::blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
+                                        &prepared_queries[qi],
+                                        chunk_packed,
+                                        chunk_end - chunk_start,
+                                        reward,
+                                        penalty,
+                                        ungapped_x_dropoff,
+                                        kbp,
+                                        search_space,
+                                        evalue,
+                                        &mut scratch[qi],
+                                    );
+                                    combined.extend(offset_subject_hsps(chunk_hsps, chunk_start));
+                                }
+                                combined
+                            } else {
+                                blast_rs::search::blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
+                                    &prepared_queries[qi],
+                                    packed,
+                                    seq_len,
+                                    reward,
+                                    penalty,
+                                    ungapped_x_dropoff,
+                                    kbp,
+                                    search_space,
+                                    evalue,
+                                    &mut scratch[qi],
+                                )
+                            };
                             if !hsps.is_empty() {
                                 if let Some(amb) = ambiguity_data {
-                                    if blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps) {
+                                    let ambiguity_check_start = if profile_enabled {
+                                        Some(Instant::now())
+                                    } else {
+                                        None
+                                    };
+                                    let overlaps =
+                                        blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps);
+                                    if let Some(start) = ambiguity_check_start {
+                                        profile_ambiguity_check_ms += start.elapsed().as_millis();
+                                    }
+                                    if overlaps {
                                         let subject_decoded =
                                             blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
                                                 packed, seq_len, amb,
                                             );
+                                        let ambiguity_rerun_start = if profile_enabled {
+                                            Some(Instant::now())
+                                        } else {
+                                            None
+                                        };
+                                        let mut decoded_last_hit_scratch =
+                                            prepared_queries[qi].decoded_last_hit_scratch();
                                         hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
                                             &prepared_queries[qi],
                                             &subject_decoded,
@@ -3431,56 +3694,119 @@ fn run_blastn_rust(
                                             kbp,
                                             search_space,
                                             evalue,
-                                            &mut scratch[qi],
+                                            &mut decoded_last_hit_scratch,
                                         );
+                                        if let Some(start) = ambiguity_rerun_start {
+                                            profile_ambiguity_rerun_ms +=
+                                                start.elapsed().as_millis();
+                                            profile_ambiguity_rerun_count += 1;
+                                        }
                                     }
                                 }
                             }
                             hsps
                         }
                     } else {
+                        let packed_search_start = if profile_enabled {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
                         let mut hsps =
-                            blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
-                                &prepared_queries[qi],
-                                &eq.plus_nomask,
-                                &eq.minus_nomask,
-                                packed,
-                                seq_len,
-                                reward,
-                                penalty,
-                                gapopen,
-                                gapextend,
-                                gapped_x_dropoff,
-                                gapped_x_dropoff_final,
-                                kbp,
-                                search_space,
-                                evalue,
-                                &mut scratch[qi],
-                            );
+                            if seq_len > 5_000_000 {
+                                let mut combined = Vec::new();
+                                for (chunk_start, chunk_end) in blast_db_subject_chunks(seq_len) {
+                                    let chunk_packed =
+                                        packed_subject_chunk(packed, chunk_start, chunk_end);
+                                    let chunk_hsps =
+                                        blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
+                                            &prepared_queries[qi],
+                                            &eq.plus_nomask,
+                                            &eq.minus_nomask,
+                                            chunk_packed,
+                                            chunk_end - chunk_start,
+                                            reward,
+                                            penalty,
+                                            gapopen,
+                                            gapextend,
+                                            ungapped_x_dropoff,
+                                            gapped_x_dropoff,
+                                            gapped_x_dropoff_final,
+                                            kbp,
+                                            search_space,
+                                            evalue,
+                                            &mut scratch[qi],
+                                        );
+                                    combined.extend(offset_subject_hsps(chunk_hsps, chunk_start));
+                                }
+                                combined
+                            } else {
+                                blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
+                                    &prepared_queries[qi],
+                                    &eq.plus_nomask,
+                                    &eq.minus_nomask,
+                                    packed,
+                                    seq_len,
+                                    reward,
+                                    penalty,
+                                    gapopen,
+                                    gapextend,
+                                    ungapped_x_dropoff,
+                                    gapped_x_dropoff,
+                                    gapped_x_dropoff_final,
+                                    kbp,
+                                    search_space,
+                                    evalue,
+                                    &mut scratch[qi],
+                                )
+                            };
+                        if let Some(start) = packed_search_start {
+                            profile_packed_search_ms += start.elapsed().as_millis();
+                        }
                         if !hsps.is_empty() {
                             if let Some(amb) = ambiguity_data {
-                                if blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps) {
+                                let ambiguity_check_start = if profile_enabled {
+                                    Some(Instant::now())
+                                } else {
+                                    None
+                                };
+                                let overlaps =
+                                    blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps);
+                                if let Some(start) = ambiguity_check_start {
+                                    profile_ambiguity_check_ms += start.elapsed().as_millis();
+                                }
+                                if overlaps {
                                     let subject_decoded =
                                         blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
                                             packed, seq_len, amb,
                                         );
-                                    hsps = blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
-                                        &eq.plus_masked,
-                                        &eq.minus_masked,
-                                        &eq.plus_nomask,
-                                        &eq.minus_nomask,
-                                        &subject_decoded,
-                                        word_size,
-                                        reward,
-                                        penalty,
-                                        gapopen,
-                                        gapextend,
-                                        gapped_x_dropoff,
-                                        gapped_x_dropoff_final,
-                                        kbp,
-                                        search_space,
-                                        evalue,
-                                    );
+                                    let ambiguity_rerun_start = if profile_enabled {
+                                        Some(Instant::now())
+                                    } else {
+                                        None
+                                    };
+                                    hsps =
+                                        blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
+                                            &eq.plus_masked,
+                                            &eq.minus_masked,
+                                            &eq.plus_nomask,
+                                            &eq.minus_nomask,
+                                            &subject_decoded,
+                                            word_size,
+                                            reward,
+                                            penalty,
+                                            gapopen,
+                                            gapextend,
+                                            gapped_x_dropoff,
+                                            gapped_x_dropoff_final,
+                                            kbp,
+                                            search_space,
+                                            evalue,
+                                        );
+                                    if let Some(start) = ambiguity_rerun_start {
+                                        profile_ambiguity_rerun_ms += start.elapsed().as_millis();
+                                        profile_ambiguity_rerun_count += 1;
+                                    }
                                 }
                             }
                         }
@@ -3498,6 +3824,19 @@ fn run_blastn_rust(
                         cutoff_score
                     };
                     hsps.retain(|h| h.score >= active_cutoff);
+                    if do_sum_stats && hsps.len() > 1 {
+                        apply_blastn_linked_sum_stats_to_hsps(
+                            &mut hsps,
+                            eq.seq_len,
+                            seq_len as i32,
+                            &kbp_plus,
+                            &kbp_minus,
+                            searchsp_plus,
+                            searchsp_minus,
+                            len_adj_plus,
+                            len_adj_minus,
+                        );
+                    }
                     if !hsps.is_empty() {
                         results.push((qi, oid, hsps));
                     }
@@ -3505,8 +3844,30 @@ fn run_blastn_rust(
                 if !results.is_empty() {
                     collected.push(results);
                 }
+                if let Some(start) = oid_profile_start {
+                    eprintln!(
+                        "[blastn-profile] oid={} subject_len={} oid_total_ms={} oid_packed_search_ms={} oid_ambiguity_check_ms={} oid_ambiguity_rerun_ms={} oid_ambiguity_rerun_count={}",
+                        oid,
+                        seq_len,
+                        start.elapsed().as_millis(),
+                        profile_packed_search_ms - oid_packed_search_ms_before,
+                        profile_ambiguity_check_ms - oid_ambiguity_check_ms_before,
+                        profile_ambiguity_rerun_ms - oid_ambiguity_rerun_ms_before,
+                        profile_ambiguity_rerun_count - oid_ambiguity_rerun_count_before
+                    );
+                }
             }
             db.advise_volume_dontneed(volume_idx);
+        }
+        if profile_enabled {
+            eprintln!(
+                "[blastn-profile] db_scan_stats oids={} packed_search_ms={} ambiguity_check_ms={} ambiguity_rerun_ms={} ambiguity_rerun_count={}",
+                profile_db_oid_count,
+                profile_packed_search_ms,
+                profile_ambiguity_check_ms,
+                profile_ambiguity_rerun_ms,
+                profile_ambiguity_rerun_count
+            );
         }
         collected
     } else {
@@ -3514,15 +3875,19 @@ fn run_blastn_rust(
             .iter()
             .map(|eq| {
                 if use_contiguous_megablast_lookup {
-                    blast_rs::search::PreparedBlastnQuery::new_megablast(
+                    blast_rs::search::PreparedBlastnQuery::new_megablast_with_nomask(
                         &eq.plus_masked,
                         &eq.minus_masked,
+                        &eq.plus_nomask,
+                        &eq.minus_nomask,
                         word_size,
                     )
                 } else {
-                    blast_rs::search::PreparedBlastnQuery::new(
+                    blast_rs::search::PreparedBlastnQuery::new_with_nomask(
                         &eq.plus_masked,
                         &eq.minus_masked,
+                        &eq.plus_nomask,
+                        &eq.minus_nomask,
                         word_size,
                     )
                 }
@@ -3574,18 +3939,48 @@ fn run_blastn_rust(
                                             evalue,
                                         )
                                     } else {
-                                        let mut hsps = blast_rs::search::blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
-                                            &prepared_queries[qi],
-                                            packed,
-                                            seq_len,
-                                            reward,
-                                            penalty,
-                                            ungapped_x_dropoff,
-                                            kbp,
-                                            search_space,
-                                            evalue,
-                                            &mut scratch[qi],
-                                        );
+                                        let mut hsps = if seq_len > 5_000_000 {
+                                            let mut combined = Vec::new();
+                                            for (chunk_start, chunk_end) in
+                                                blast_db_subject_chunks(seq_len)
+                                            {
+                                                let chunk_packed = packed_subject_chunk(
+                                                    packed,
+                                                    chunk_start,
+                                                    chunk_end,
+                                                );
+                                                let chunk_hsps = blast_rs::search::blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
+                                                    &prepared_queries[qi],
+                                                    chunk_packed,
+                                                    chunk_end - chunk_start,
+                                                    reward,
+                                                    penalty,
+                                                    ungapped_x_dropoff,
+                                                    kbp,
+                                                    search_space,
+                                                    evalue,
+                                                    &mut scratch[qi],
+                                                );
+                                                combined.extend(offset_subject_hsps(
+                                                    chunk_hsps,
+                                                    chunk_start,
+                                                ));
+                                            }
+                                            combined
+                                        } else {
+                                            blast_rs::search::blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
+                                                &prepared_queries[qi],
+                                                packed,
+                                                seq_len,
+                                                reward,
+                                                penalty,
+                                                ungapped_x_dropoff,
+                                                kbp,
+                                                search_space,
+                                                evalue,
+                                                &mut scratch[qi],
+                                            )
+                                        };
                                         if !hsps.is_empty() {
                                             if let Some(amb) = ambiguity_data {
                                                 if blast_rs::search::ambiguity_data_overlaps_hsps(
@@ -3594,6 +3989,8 @@ fn run_blastn_rust(
                                                     let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
                                                         packed, seq_len, amb,
                                                     );
+                                                    let mut decoded_last_hit_scratch =
+                                                        prepared_queries[qi].decoded_last_hit_scratch();
                                                     hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
                                                         &prepared_queries[qi],
                                                         &subject_decoded,
@@ -3603,7 +4000,7 @@ fn run_blastn_rust(
                                                         kbp,
                                                         search_space,
                                                         evalue,
-                                                        &mut scratch[qi],
+                                                        &mut decoded_last_hit_scratch,
                                                     );
                                                 }
                                             }
@@ -3611,23 +4008,61 @@ fn run_blastn_rust(
                                         hsps
                                     }
                                 } else {
-                                    let mut hsps = blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
-                                        &prepared_queries[qi],
-                                        &eq.plus_nomask,
-                                        &eq.minus_nomask,
-                                        packed,
-                                        seq_len,
-                                        reward,
-                                        penalty,
-                                        gapopen,
-                                        gapextend,
-                                        gapped_x_dropoff,
-                                        gapped_x_dropoff_final,
-                                        kbp,
-                                        search_space,
-                                        evalue,
-                                        &mut scratch[qi],
-                                    );
+                                    let mut hsps = if seq_len > 5_000_000 {
+                                        let mut combined = Vec::new();
+                                        for (chunk_start, chunk_end) in
+                                            blast_db_subject_chunks(seq_len)
+                                        {
+                                            let chunk_packed = packed_subject_chunk(
+                                                packed,
+                                                chunk_start,
+                                                chunk_end,
+                                            );
+                                            let chunk_hsps =
+                                                blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
+                                                    &prepared_queries[qi],
+                                                    &eq.plus_nomask,
+                                                    &eq.minus_nomask,
+                                                    chunk_packed,
+                                                    chunk_end - chunk_start,
+                                                    reward,
+                                                    penalty,
+                                                    gapopen,
+                                                    gapextend,
+                                                    ungapped_x_dropoff,
+                                                    gapped_x_dropoff,
+                                                    gapped_x_dropoff_final,
+                                                    kbp,
+                                                    search_space,
+                                                    evalue,
+                                                    &mut scratch[qi],
+                                                );
+                                            combined.extend(offset_subject_hsps(
+                                                chunk_hsps,
+                                                chunk_start,
+                                            ));
+                                        }
+                                        combined
+                                    } else {
+                                blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
+                                    &prepared_queries[qi],
+                                    &eq.plus_nomask,
+                                    &eq.minus_nomask,
+                                    packed,
+                                            seq_len,
+                                    reward,
+                                    penalty,
+                                    gapopen,
+                                    gapextend,
+                                    ungapped_x_dropoff,
+                                    gapped_x_dropoff,
+                                    gapped_x_dropoff_final,
+                                    kbp,
+                                    search_space,
+                                            evalue,
+                                            &mut scratch[qi],
+                                        )
+                                    };
                                     if !hsps.is_empty() {
                                         if let Some(amb) = ambiguity_data {
                                             if blast_rs::search::ambiguity_data_overlaps_hsps(
@@ -3670,6 +4105,19 @@ fn run_blastn_rust(
                                     cutoff_score
                                 };
                                 hsps.retain(|h| h.score >= active_cutoff);
+                                if do_sum_stats && hsps.len() > 1 {
+                                    apply_blastn_linked_sum_stats_to_hsps(
+                                        &mut hsps,
+                                        eq.seq_len,
+                                        seq_len as i32,
+                                        &kbp_plus,
+                                        &kbp_minus,
+                                        searchsp_plus,
+                                        searchsp_minus,
+                                        len_adj_plus,
+                                        len_adj_minus,
+                                    );
+                                }
                                 if !hsps.is_empty() {
                                     results.push((qi, oid, hsps));
                                 }
@@ -3689,13 +4137,44 @@ fn run_blastn_rust(
         }
         collected
     };
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "subject_scan");
 
     #[cfg(test)]
     let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> =
-        pool.install(|| {
+        {
+            let prepared_queries: Vec<_> = encoded_queries
+                .iter()
+                .map(|eq| {
+                    if use_contiguous_megablast_lookup {
+                        blast_rs::search::PreparedBlastnQuery::new_megablast_with_nomask(
+                            &eq.plus_masked,
+                            &eq.minus_masked,
+                            &eq.plus_nomask,
+                            &eq.minus_nomask,
+                            word_size,
+                        )
+                    } else {
+                        blast_rs::search::PreparedBlastnQuery::new_with_nomask(
+                            &eq.plus_masked,
+                            &eq.minus_masked,
+                            &eq.plus_nomask,
+                            &eq.minus_nomask,
+                            word_size,
+                        )
+                    }
+                })
+                .collect();
+            pool.install(|| {
             (0..db.num_oids)
                 .into_par_iter()
-                .filter_map(|oid| {
+                .map_init(
+                    || {
+                        prepared_queries
+                            .iter()
+                            .map(|prepared| prepared.last_hit_scratch())
+                            .collect::<Vec<_>>()
+                    },
+                    |scratch, oid| {
                     let packed = db.get_sequence(oid);
                     let seq_len = db.get_seq_len(oid) as usize;
                     let subject_decoded_with_ambiguity = db.get_ambiguity_data(oid).map(|amb| {
@@ -3737,12 +4216,10 @@ fn run_blastn_rust(
                                     evalue,
                                 )
                             } else {
-                                blast_rs::search::blastn_ungapped_search_packed(
-                                    &eq.plus_masked,
-                                    &eq.minus_masked,
+                                blast_rs::search::blastn_ungapped_search_packed_prepared(
+                                    &prepared_queries[qi],
                                     packed,
                                     seq_len,
-                                    word_size,
                                     reward,
                                     penalty,
                                     ungapped_x_dropoff,
@@ -3772,22 +4249,23 @@ fn run_blastn_rust(
                                 evalue,
                             )
                         } else {
-                            blast_rs::search::blastn_gapped_search_packed(
-                                &eq.plus_masked,
-                                &eq.minus_masked,
-                                &eq.plus_nomask,
-                                &eq.minus_nomask,
-                                packed,
+                                blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
+                                    &prepared_queries[qi],
+                                    &eq.plus_nomask,
+                                    &eq.minus_nomask,
+                                    packed,
                                 seq_len,
-                                word_size,
-                                reward,
-                                penalty,
-                                gapopen,
-                                gapextend,
-                                gapped_x_dropoff,
-                                kbp,
-                                search_space,
+                                    reward,
+                                    penalty,
+                                    gapopen,
+                                    gapextend,
+                                    ungapped_x_dropoff,
+                                    gapped_x_dropoff,
+                                    gapped_x_dropoff_final,
+                                    kbp,
+                                    search_space,
                                 evalue,
+                                &mut scratch[qi],
                             )
                         };
                         let active_cutoff = if args.ungapped {
@@ -3812,8 +4290,10 @@ fn run_blastn_rust(
                         Some(results)
                     }
                 })
+                .filter_map(|hits| hits)
                 .collect()
-        });
+            })
+        };
 
     // Flatten and group by query
     let mut per_query_oid_hits: Vec<Vec<(u32, Vec<blast_rs::search::SearchHsp>)>> =
@@ -3828,6 +4308,16 @@ fn run_blastn_rust(
     for (qi, mut oid_hits) in per_query_oid_hits.into_iter().enumerate() {
         let eq = &encoded_queries[qi];
 
+        if std::env::var_os("BLAST_RS_TRACE_HIT_COUNTS").is_some() {
+            let total_hsps: usize = oid_hits.iter().map(|(_, hsps)| hsps.len()).sum();
+            eprintln!(
+                "[hit-counts] query={} pre_hitlist_subjects={} pre_hitlist_hsps={}",
+                eq.id,
+                oid_hits.len(),
+                total_hsps
+            );
+        }
+
         // Sort by OID for deterministic output
         oid_hits.sort_by_key(|&(oid, _)| oid);
 
@@ -3838,6 +4328,16 @@ fn run_blastn_rust(
             });
             oid_hits.truncate(prelim_hitlist_size);
             oid_hits.sort_by_key(|&(oid, _)| oid);
+        }
+
+        if std::env::var_os("BLAST_RS_TRACE_HIT_COUNTS").is_some() {
+            let total_hsps: usize = oid_hits.iter().map(|(_, hsps)| hsps.len()).sum();
+            eprintln!(
+                "[hit-counts] query={} post_hitlist_subjects={} post_hitlist_hsps={}",
+                eq.id,
+                oid_hits.len(),
+                total_hsps
+            );
         }
 
         for (oid, hsps) in oid_hits {
@@ -4006,8 +4506,8 @@ fn run_blastn_rust(
                         .partial_cmp(&a.bit_score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a_subject_lo.cmp(&b_subject_lo))
+                        .then_with(|| b_subject_hi.cmp(&a_subject_hi))
                         .then_with(|| b.sframe.cmp(&a.sframe))
-                        .then_with(|| a_subject_hi.cmp(&b_subject_hi))
                         .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
                 });
             }
@@ -4090,8 +4590,17 @@ fn run_blastn_rust(
             })
             .collect();
     let mut hits: Vec<TabularHit> = all_hits.into_iter().map(|(_, h)| h).collect();
+    if std::env::var_os("BLAST_RS_TRACE_HIT_COUNTS").is_some() {
+        eprintln!("[hit-counts] pre_filters_tabular_hits={}", hits.len());
+    }
     apply_filters(&mut hits, args, query_len, args.db.as_deref());
+    if std::env::var_os("BLAST_RS_TRACE_HIT_COUNTS").is_some() {
+        eprintln!("[hit-counts] post_filters_tabular_hits={}", hits.len());
+    }
     apply_max_target_seqs_filter(&mut hits, args.effective_max_target_seqs() as usize);
+    if std::env::var_os("BLAST_RS_TRACE_HIT_COUNTS").is_some() {
+        eprintln!("[hit-counts] post_max_target_tabular_hits={}", hits.len());
+    }
     let db_sam_labels: std::collections::HashMap<String, String> = hits
         .iter()
         .filter_map(|hit| {
@@ -4126,6 +4635,7 @@ fn run_blastn_rust(
             }
         }
     }
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "postprocess");
 
     // Output
     let stdout = io::stdout();
@@ -4213,6 +4723,7 @@ fn run_blastn_rust(
         write_blastn_tabular_output(&mut writer, &hits, &args.outfmt, records, &database_label)?;
     }
     writer.flush()?;
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "output");
 
     Ok(())
 }
@@ -4295,6 +4806,16 @@ fn apply_blastn_dust_mask(seq: &mut [u8]) {
     let window = seq.len().min(64);
     if window >= 3 {
         let mask = blast_rs::filter::dust_filter(seq, 20, window, 1);
+        if std::env::var_os("BLAST_RS_TRACE_DUST").is_some() {
+            eprintln!(
+                "[rs-dust] regions={}",
+                mask.regions
+                    .iter()
+                    .map(|r| format!("{}-{}", r.start, r.end))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
         mask.apply(seq, 14);
     }
 }
@@ -4305,6 +4826,41 @@ fn apply_lowercase_mask(raw_query: &[u8], encoded_query: &mut [u8]) {
             *encoded = 14;
         }
     }
+}
+
+fn blast_db_subject_chunks(seq_len: usize) -> Vec<(usize, usize)> {
+    const MAX_DBSEQ_LEN: usize = 5_000_000;
+
+    if seq_len <= MAX_DBSEQ_LEN {
+        return vec![(0, seq_len)];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < seq_len {
+        let end = seq_len.min(start.saturating_add(MAX_DBSEQ_LEN));
+        chunks.push((start, end));
+        start = end;
+    }
+    chunks
+}
+
+fn packed_subject_chunk(packed: &[u8], start: usize, end: usize) -> &[u8] {
+    let byte_start = start / 4;
+    let byte_end = end.div_ceil(4);
+    &packed[byte_start..byte_end]
+}
+
+fn offset_subject_hsps(mut hsps: Vec<blast_rs::search::SearchHsp>, offset: usize) -> Vec<blast_rs::search::SearchHsp> {
+    if offset == 0 {
+        return hsps;
+    }
+    let offset = offset as i32;
+    for hsp in &mut hsps {
+        hsp.subject_start += offset;
+        hsp.subject_end += offset;
+    }
+    hsps
 }
 
 fn query_loc_bounds(
@@ -4500,6 +5056,9 @@ fn run_blastn_subject(
     args: &BlastnArgs,
     queries: &[blast_rs::input::FastaRecord],
     subjects: &[blast_rs::input::FastaRecord],
+    profile_enabled: bool,
+    profile_start: Instant,
+    profile_last: &mut Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use blast_rs::search::{
         blastn_gapped_search_nomask_with_xdrops, blastn_ungapped_search_no_dedup_nomask,
@@ -4514,6 +5073,7 @@ fn run_blastn_subject(
     let word_size = args.word_size() as usize;
     let search_plus = args.strand != "minus";
     let search_minus = args.strand != "plus";
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "search_setup");
 
     let mut all_hits = Vec::new();
 
@@ -4557,9 +5117,8 @@ fn run_blastn_subject(
                 (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
             let gapped_x_dropoff =
                 (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
-            let gapped_x_dropoff_final = gapped_x_dropoff.max(
-                (args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32,
-            );
+            let gapped_x_dropoff_final = gapped_x_dropoff
+                .max((args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32);
             let mut hsps = if args.ungapped {
                 blastn_ungapped_search_no_dedup_nomask(
                     &query_plus,
@@ -4680,6 +5239,7 @@ fn run_blastn_subject(
             }
         }
     }
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "subject_scan");
 
     let query_order: std::collections::HashMap<String, usize> = queries
         .iter()
@@ -4720,6 +5280,7 @@ fn run_blastn_subject(
             )
         })
         .collect();
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "postprocess");
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -4827,6 +5388,7 @@ fn run_blastn_subject(
         )?;
     }
     writer.flush()?;
+    blastn_profile_mark(profile_enabled, profile_start, profile_last, "output");
     Ok(())
 }
 
@@ -6185,7 +6747,7 @@ fn blastn_subject_stats(
     )[0]
     .clone()
     .unwrap_or(default_kbp);
-    let (kbp, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
+    let (gapped_kbp, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
         args.gapopen(),
         args.gapextend(),
         reward,
@@ -6193,31 +6755,41 @@ fn blastn_subject_stats(
         &ungapped,
     )
     .unwrap_or((ungapped.clone(), false));
+    let kbp = if args.ungapped {
+        ungapped.clone()
+    } else {
+        gapped_kbp
+    };
 
-    let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
-        reward,
-        penalty,
-        args.gapopen(),
-        args.gapextend(),
-        ungapped.lambda,
-        ungapped.h,
-        true,
-    );
     let searchsp = args.searchsp();
     if searchsp > 0 {
         return (kbp, searchsp as f64, 0);
     }
 
     let database_length = effective_db_length(args, total_subject_len);
-    let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
-        kbp.k,
-        kbp.log_k,
-        alpha / kbp.lambda,
-        beta,
-        qlen,
-        database_length,
-        num_subjects,
-    );
+    let len_adj = if args.ungapped {
+        blast_rs::stat::compute_length_adjustment(qlen, database_length, num_subjects, &kbp)
+    } else {
+        let (alpha, beta) = blast_rs::stat::nucl_alpha_beta(
+            reward,
+            penalty,
+            args.gapopen(),
+            args.gapextend(),
+            ungapped.lambda,
+            ungapped.h,
+            true,
+        );
+        blast_rs::stat::compute_length_adjustment_exact(
+            kbp.k,
+            kbp.log_k,
+            alpha / kbp.lambda,
+            beta,
+            qlen,
+            database_length,
+            num_subjects,
+        )
+        .0
+    };
     let eff_db = std::cmp::max(database_length - num_subjects as i64 * len_adj as i64, 1);
     let search_space = eff_db as f64 * (qlen - len_adj).max(1) as f64;
     (kbp, search_space, len_adj)
@@ -7982,6 +8554,32 @@ mod tests {
         }
     }
 
+    fn blastn_link_test_hsp(
+        query_start: i32,
+        query_end: i32,
+        subject_start: i32,
+        subject_end: i32,
+        score: i32,
+        evalue: f64,
+    ) -> blast_rs::search::SearchHsp {
+        blast_rs::search::SearchHsp {
+            query_start,
+            query_end,
+            subject_start,
+            subject_end,
+            score,
+            bit_score: score as f64,
+            evalue,
+            num_ident: score,
+            align_length: query_end - query_start,
+            mismatches: 0,
+            gap_opens: 0,
+            context: 0,
+            qseq: None,
+            sseq: None,
+        }
+    }
+
     #[test]
     fn test_hitlist_prelim_pruning_prefers_high_oid_on_exact_ties() {
         let low = vec![hsp_for_hitlist(28, 1.0e-13)];
@@ -8011,6 +8609,44 @@ mod tests {
         assert_eq!(
             compare_oid_hsps_for_hitlist(100, &lower_score, 1, &higher_score),
             std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_apply_blastn_linked_sum_stats_updates_linked_evalues() {
+        let kbp = blast_rs::stat::KarlinBlk {
+            lambda: 1.3,
+            k: 0.71,
+            log_k: 0.71_f64.ln(),
+            h: 1.0,
+            round_down: false,
+        };
+        let searchsp = 1000.0;
+        let initial = kbp.raw_to_evalue(50, searchsp);
+        let mut hsps = vec![
+            blastn_link_test_hsp(10, 60, 100, 150, 50, initial),
+            blastn_link_test_hsp(70, 120, 170, 220, 50, initial),
+        ];
+
+        apply_blastn_linked_sum_stats_to_hsps(
+            &mut hsps,
+            500,
+            5000,
+            &kbp,
+            &kbp,
+            searchsp,
+            searchsp,
+            0,
+            0,
+        );
+
+        assert!(
+            hsps.iter().any(|hsp| hsp.evalue != initial),
+            "expected at least one HSP evalue to change after linking"
+        );
+        assert!(
+            hsps.iter().all(|hsp| hsp.evalue <= initial),
+            "linked evalues should not get worse"
         );
     }
 
