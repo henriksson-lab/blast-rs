@@ -64,7 +64,11 @@ pub fn protein_ungapped_extend(
             best_r = qi - q_seed + 1;
             best_ident_r = ident_r;
         }
-        if best - score > x_dropoff {
+        // NCBI `s_BlastAaExtendRight` (`aa_ungapped.c:859`):
+        //   `if (score <= 0 || (maxscore - score) >= dropoff) break;`
+        // Right extension has BOTH a `score <= 0` early termination AND
+        // the `>=` X-drop test (intentional per inline NCBI comment).
+        if score <= 0 || best - score >= x_dropoff {
             break;
         }
         qi += 1;
@@ -94,7 +98,9 @@ pub fn protein_ungapped_extend(
                 best_left = q_seed - qi;
                 best_ident_l = ident_l;
             }
-            if best_l - sl > x_dropoff {
+            // NCBI `s_BlastAaExtendLeft` (`aa_ungapped.c:915`): `>=` is
+            // intentional per inline comment.
+            if best_l - sl >= x_dropoff {
                 break;
             }
             if qi == 0 || si == 0 {
@@ -172,10 +178,16 @@ struct GapDP {
     best_gap: i32,
 }
 
-const SCRIPT_SUB: u8 = 0x00;
-const SCRIPT_GAP_IN_A: u8 = 0x01;
-const SCRIPT_GAP_IN_B: u8 = 0x02;
-const SCRIPT_OP_MASK: u8 = 0x03;
+// NCBI's `eGapAlignOpType` enum values from `gapinfo.h:44`. These also
+// match `SCRIPT_OP_MASK = 0x07` in `blast_gapalign.c:368`. Keeping these
+// in lock-step with NCBI matters because uninitialized rows of the
+// per-row script buffer default to `0u8`, which must mean
+// `SCRIPT_GAP_IN_A` (== `eGapAlignDel`) — not `SCRIPT_SUB` — so the
+// traceback walks through band-pruned cells the same way NCBI does.
+const SCRIPT_SUB: u8 = 3;
+const SCRIPT_GAP_IN_A: u8 = 0;
+const SCRIPT_GAP_IN_B: u8 = 6;
+const SCRIPT_OP_MASK: u8 = 0x07;
 const SCRIPT_EXTEND_GAP_A: u8 = 0x10;
 const SCRIPT_EXTEND_GAP_B: u8 = 0x40;
 
@@ -187,7 +199,7 @@ fn script_to_op(s: u8) -> GapAlignOpType {
     }
 }
 
-fn protein_align_ex(
+pub(crate) fn protein_align_ex(
     a: &[u8],
     b: &[u8],
     m: usize,
@@ -315,15 +327,23 @@ fn protein_align_ex(
             }
         }
 
-        scripts.push(row_script);
-
         if first_b >= b_size {
+            // NCBI breaks here too. Push the row_script and exit the outer
+            // loop so traceback can find the path that ended in this row.
+            scripts.push(row_script);
             break;
         }
 
         if last_b < b_size - 1 {
             b_size = last_b + 1;
         } else {
+            // NCBI's `ALIGN_EX` (`blast_gapalign.c:657-664`) sets
+            // `edit_script_row[b_size] = SCRIPT_GAP_IN_A` for each cell
+            // grown in this loop. The grown cells represent a hypothetical
+            // gap-only path that may be visited during traceback if the
+            // alignment ends here. Without setting this, traceback hitting
+            // a grown cell reads 0 (= SCRIPT_SUB) and incorrectly walks
+            // diagonally instead of horizontally.
             while sgr >= best_score - x_dropoff && b_size <= n {
                 if b_size >= sa.len() {
                     sa.resize(
@@ -338,10 +358,15 @@ fn protein_align_ex(
                     best: sgr,
                     best_gap: sgr - gap_oe,
                 };
+                if b_size >= row_script.len() {
+                    row_script.resize(b_size + 1, 0);
+                }
+                row_script[b_size] = SCRIPT_GAP_IN_A;
                 sgr -= gap_extend;
                 b_size += 1;
             }
         }
+        scripts.push(row_script);
         if b_size <= n {
             if b_size >= sa.len() {
                 sa.resize(
@@ -850,6 +875,133 @@ pub fn protein_gapped_align(
         subject_start: final_s_start,
         subject_end: final_s_end,
         score: total_score,
+        num_ident,
+        align_length,
+        mismatches,
+        gap_opens,
+        edit_script,
+    })
+}
+
+/// 1-1 port of `s_SWFindFinalEndsUsingXdrop` (`blast_kappa.c:843`):
+/// forward-only X-drop alignment from `(seed_q, seed_s)` bounded to
+/// the rectangle `(seed_q .. seed_q + q_extent + 1) × (seed_s ..
+/// seed_s + s_extent + 1)`. Used by the composition-adjustment redo
+/// flow to refine the SW-derived bounds with traceback. Doubles
+/// `x_dropoff` up to three times if the X-drop result falls below the
+/// SW score, matching NCBI's `doublingCount < 3` retry loop.
+///
+/// Returns `Some` with a `ProteinGappedResult` whose extent is at most
+/// `(q_extent, s_extent)`. Returns `None` if no positive-scoring
+/// alignment is found inside the rectangle.
+pub fn protein_sw_bounded_xdrop_align(
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    q_extent: usize,
+    s_extent: usize,
+    target_score: i32,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<ProteinGappedResult> {
+    if seed_q >= query.len() || seed_s >= subject.len() {
+        return None;
+    }
+    // Slice the query/subject to NCBI's pointer arithmetic
+    // (`&query->data[queryStart] - 1`, `&subject->data[matchStart] - 1`)
+    // and bound the DP cells by `queryEnd-queryStart+1`,
+    // `matchEnd-matchStart+1`. NCBI's `-1` shift makes ALIGN_EX's
+    // 1-based indexing match the bytes starting at `queryStart` —
+    // i.e. ALIGN_EX accesses `data[queryStart..queryEnd]` (m =
+    // queryEnd - queryStart + 1 cells inclusive). Our protein_align_ex
+    // uses `a[ai]` indexing starting at ai=1, so we need to put a
+    // sentinel byte at index 0 of the slice we pass in (NCBI gets the
+    // same effect via `data - 1` pointer arithmetic, which is UB in
+    // Rust). Without this the DP would skip the seed cell at
+    // `(seed_q, seed_s)` and produce a 1-cell-too-short alignment.
+    let mut q_padded: Vec<u8> = Vec::with_capacity(q_extent + 2);
+    q_padded.push(0);
+    q_padded.extend_from_slice(
+        &query[seed_q..(seed_q + q_extent + 1).min(query.len())],
+    );
+    let mut s_padded: Vec<u8> = Vec::with_capacity(s_extent + 2);
+    s_padded.push(0);
+    s_padded.extend_from_slice(
+        &subject[seed_s..(seed_s + s_extent + 1).min(subject.len())],
+    );
+    let m = q_padded.len().saturating_sub(1);
+    let n = s_padded.len().saturating_sub(1);
+    if m == 0 || n == 0 {
+        return None;
+    }
+
+    let mut current_xdrop = x_dropoff;
+    let mut score = 0i32;
+    let mut qr: usize = 0;
+    let mut sr: usize = 0;
+    let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
+    // 1-1 with the `do { ... } while ((XdropAlignScore < score) && (doublingCount < 3))`
+    // retry loop in `s_SWFindFinalEndsUsingXdrop`.
+    for _ in 0..3 {
+        let (s, q_extent_out, s_extent_out, ops_out) = protein_align_ex(
+            &q_padded,
+            &s_padded,
+            m,
+            n,
+            matrix,
+            gap_open,
+            gap_extend,
+            current_xdrop,
+            false,
+        );
+        score = s;
+        qr = q_extent_out;
+        sr = s_extent_out;
+        ops = ops_out;
+        if score >= target_score {
+            break;
+        }
+        current_xdrop = current_xdrop.saturating_mul(2);
+    }
+    if score <= 0 {
+        return None;
+    }
+
+    let mut edit_script = GapEditScript::new();
+    for &(op, cnt) in &ops {
+        edit_script.push(op, cnt);
+    }
+    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
+        edit_script.ops.remove(0);
+    }
+    while !edit_script.ops.is_empty()
+        && edit_script.ops.last().unwrap().0 != GapAlignOpType::Sub
+    {
+        edit_script.ops.pop();
+    }
+    if edit_script.ops.is_empty() {
+        return None;
+    }
+
+    let final_q_start = seed_q;
+    let final_q_end = seed_q + qr;
+    let final_s_start = seed_s;
+    let final_s_end = seed_s + sr;
+    let local_q = &query[final_q_start..final_q_end];
+    let local_s = &subject[final_s_start..final_s_end];
+    let (align_length, num_ident, gap_opens) =
+        edit_script.count_identities(local_q, local_s);
+    let mismatches = (align_length - num_ident - gap_opens).max(0);
+
+    Some(ProteinGappedResult {
+        query_start: final_q_start,
+        query_end: final_q_end,
+        subject_start: final_s_start,
+        subject_end: final_s_end,
+        score,
         num_ident,
         align_length,
         mismatches,

@@ -12457,10 +12457,17 @@ fn blastp_all_twenty_amino_acids() {
 
 #[test]
 fn blastp_default_seg_masks_low_complexity_query() {
+    // NCBI's blastp default has SEG OFF (`blastp_args.cpp:50`,
+    // `kFilterByDefault = false`); the suppression of low-complexity hits
+    // comes from comp_adjust=2 collapsing the A-A diagonal, not from SEG.
+    // We explicitly enable filter_low_complexity here to test our SEG impl.
     let query = "AAAAAAAAAAAAAAAAAAAA";
     let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "poly-a subject", query)]);
 
-    let filtered = SearchParams::blastp().evalue(1e6).num_threads(1);
+    let filtered = SearchParams::blastp()
+        .evalue(1e6)
+        .num_threads(1)
+        .filter_low_complexity(true);
     let unfiltered = SearchParams::blastp()
         .evalue(1e6)
         .num_threads(1)
@@ -12472,7 +12479,7 @@ fn blastp_default_seg_masks_low_complexity_query() {
 
     assert!(
         filtered_results.is_empty(),
-        "default blastp SEG masking should suppress low-complexity query hits"
+        "explicit blastp SEG masking should suppress low-complexity query hits"
     );
     assert!(
         !unfiltered_results.is_empty(),
@@ -12682,9 +12689,13 @@ fn blastx_default_seg_masks_low_complexity_translation() {
     let protein = "AAAAAAAAAAAAAAAAAAAA";
 
     let (_tmp, db) = build_protein_db(vec![protein_entry("P001", "poly-a target", protein)]);
+    // `SearchParams::blastp()` now defaults filter_low_complexity = false to
+    // match NCBI's `blastp_args.cpp:50`. Explicitly enable filtering here to
+    // exercise the SEG path on the translated query.
     let filtered = SearchParams::blastp()
         .evalue(1e6)
         .num_threads(1)
+        .filter_low_complexity(true)
         .comp_adjust(0);
     let unfiltered = SearchParams::blastp()
         .evalue(1e6)
@@ -12755,9 +12766,13 @@ fn tblastn_default_seg_masks_low_complexity_query() {
 
     let (_tmp, db) =
         build_nucleotide_db(vec![nt_entry("N001", "poly-a coding region", nt_subject)]);
+    // `SearchParams::blastp()` now defaults filter_low_complexity = false.
+    // Explicitly enable filtering here to exercise the SEG path on the
+    // protein query.
     let filtered = SearchParams::blastp()
         .evalue(1e6)
         .num_threads(1)
+        .filter_low_complexity(true)
         .comp_adjust(0);
     let unfiltered = SearchParams::blastp()
         .evalue(1e6)
@@ -12811,9 +12826,13 @@ fn tblastx_translated_vs_translated() {
 fn tblastx_default_seg_masks_low_complexity_translation() {
     let nt_seq = "GCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT";
     let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "poly-a coding nt", nt_seq)]);
+    // `SearchParams::blastp()` now defaults filter_low_complexity = false.
+    // Explicitly enable filtering here to exercise the SEG path on the
+    // translated query/subject.
     let filtered = SearchParams::blastp()
         .evalue(1e6)
         .num_threads(1)
+        .filter_low_complexity(true)
         .comp_adjust(0);
     let unfiltered = SearchParams::blastp()
         .evalue(1e6)

@@ -25,6 +25,11 @@ pub struct ProteinHit {
     pub gap_opens: i32,
     pub qseq: Option<String>,
     pub sseq: Option<String>,
+    /// Pre-rounding scaled DP score from comp_adjust path.
+    /// `None` outside comp_adjust. NCBI feeds this scaled value into Spouge with a
+    /// matching scaled Lambda; we use it so the rounding-to-display-units doesn't
+    /// distort the e-value (`s_HSPListNormalizeScores` happens *after* e-value calc).
+    pub scaled_score: Option<i32>,
 }
 
 /// Port of NCBI `ScoreCompareHSPs` (`blast_hits.c:1330`) for `ProteinHit`.
@@ -370,6 +375,7 @@ pub fn batch_scan_subject(
                         gap_opens: 0,
                         qseq: None,
                         sseq: None,
+                        scaled_score: None,
                     });
                 }
             }
@@ -459,7 +465,10 @@ fn extend_left(
             best_d = d;
             best_ident = ident;
         }
-        if best - score > x_dropoff {
+        // NCBI `s_BlastAaExtendLeft` (`aa_ungapped.c:915`) uses `>=` here
+        // — the inline comment in the C source explicitly notes this is
+        // intentional and differs from older code that used `>`.
+        if best - score >= x_dropoff {
             break;
         }
         if qi == 0 || si == 0 {
@@ -474,8 +483,15 @@ fn extend_left(
 
 /// Extend right from position (q_start, s_start) with x-dropoff.
 /// `init_score` is the cumulative score from left extension.
-/// Returns (best_score, right_displacement, num_identities).
-/// Matches NCBI s_BlastAaExtendRight.
+/// Returns (best_score, right_displacement, num_identities, s_last_off_delta).
+///
+/// `s_last_off_delta` is the rightmost subject offset EXAMINED by the loop
+/// (one past the last cell processed) — used by NCBI's
+/// `s_BlastAaWordFinder_TwoHit` to set `last_hit = s_last_off - (wordsize - 1)`
+/// for diagonal bookkeeping (`aa_ungapped.c:599`). Distinct from `best_d`,
+/// which is the displacement to the maximum-score cell. NCBI tracks this
+/// via `s_BlastAaExtendRight`'s `s_last_off` out-parameter
+/// (`aa_ungapped.c:864`: `*s_last_off = s_off + i;`).
 #[inline]
 fn extend_right(
     query: &[u8],
@@ -485,7 +501,7 @@ fn extend_right(
     s_start: usize,
     x_dropoff: i32,
     init_score: i32,
-) -> (i32, i32, i32) {
+) -> (i32, i32, i32, i32) {
     let mut score = init_score;
     let mut best = init_score;
     let mut best_d = 0i32;
@@ -495,6 +511,7 @@ fn extend_right(
     let mut si = s_start;
     let qlen = query.len();
     let slen = subject.len();
+    let mut last_off_delta: i32 = 0;
     while qi < qlen && si < slen {
         unsafe {
             let q = *query.as_ptr().add(qi);
@@ -509,13 +526,28 @@ fn extend_right(
             best_d = (qi - q_start + 1) as i32;
             best_ident = ident;
         }
-        if best - score > x_dropoff {
+        // NCBI `s_BlastAaExtendRight` (`aa_ungapped.c:859`):
+        //   `if (score <= 0 || (maxscore - score) >= dropoff) break;`
+        // The right extension has BOTH a `score <= 0` early termination AND
+        // the `>=` X-drop test (the inline comment notes the `>=` is intentional).
+        // Left extension uses only the `>=` X-drop test.
+        if score <= 0 || best - score >= x_dropoff {
+            // NCBI's `*s_last_off = s_off + i` where `i` is the for-loop
+            // counter value at break — i.e., the index of the cell that
+            // triggered the break (NOT one past). With our loop using a
+            // pre-increment pattern that DOESN'T advance qi/si on break,
+            // `qi - q_start` matches NCBI's `i` exactly.
+            last_off_delta = (qi - q_start) as i32;
             break;
         }
         qi += 1;
         si += 1;
+        // After the increment, `qi - q_start` equals the number of
+        // completed iterations. If we exit the while via the bounds
+        // check, this matches NCBI's `i = n` after loop completion.
+        last_off_delta = (qi - q_start) as i32;
     }
-    (best, best_d, best_ident)
+    (best, best_d, best_ident, last_off_delta)
 }
 
 /// Like `protein_scan_with_table` but reuses a diagonal tracking buffer.
@@ -650,7 +682,7 @@ pub fn protein_scan_with_table_reuse(
 
                 if reached_first {
                     // Extend right with cumulative score
-                    let (right_score, right_d_r, right_ident) =
+                    let (right_score, right_d_r, right_ident, s_last_off_delta) =
                         extend_right(query, subject, matrix, ext_q, ext_s, x_dropoff, left_score);
 
                     let total_score = left_score.max(right_score);
@@ -659,7 +691,15 @@ pub fn protein_scan_with_table_reuse(
                         let qe = ext_q + right_d_r as usize;
                         let ss = ext_s - left_d as usize;
                         let se = ext_s + right_d_r as usize;
-                        *diag_ptr.add(diag) = -(se as i32 + 1);
+                        // NCBI `aa_ungapped.c:597-599`: barrier uses
+                        // `s_last_off`, the rightmost subject position
+                        // EXAMINED by the right extension loop — NOT the
+                        // best-score position. `s_last_off_delta` is the
+                        // displacement from `ext_s` matching NCBI's
+                        // `s_BlastAaExtendRight` `*s_last_off = s_off + i`.
+                        let s_last_off = ext_s as i32 + s_last_off_delta;
+                        let barrier = s_last_off - (ws - 1);
+                        *diag_ptr.add(diag) = -(barrier + 1);
                         let alen = (qe - qs) as i32;
                         let ident = left_ident + right_ident;
                         hits.push(ProteinHit {
@@ -674,6 +714,7 @@ pub fn protein_scan_with_table_reuse(
                             gap_opens: 0,
                             qseq: None,
                             sseq: None,
+                            scaled_score: None,
                         });
                         continue;
                     }
@@ -784,6 +825,7 @@ pub fn protein_gapped_scan_with_table(
                 gap_opens: gr.gap_opens,
                 qseq: Some(qseq),
                 sseq: Some(sseq),
+                scaled_score: None,
             });
         }
     }

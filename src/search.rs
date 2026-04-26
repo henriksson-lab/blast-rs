@@ -3061,7 +3061,7 @@ fn scan_byte_oriented_step1(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn scan_byte_oriented_lut8_mod1(
     subject_packed: &[u8],
     subject_len: usize,
@@ -7461,8 +7461,13 @@ mod tests {
 
     #[test]
     fn test_masked_lookup_allows_lut_word_inside_long_unmasked_run() {
-        let mut query: Vec<u8> = (0..80).map(|i| (i % 4) as u8).collect();
-        query[45] = 14;
+        // `BlastChooseNaLookupTable` (`blast_nalookup.c:162-174`) only selects
+        // the megablast table (lut_word=11) when approx_table_entries >= 8500;
+        // smaller queries downgrade to the small-NA table (lut_word=8). Size
+        // the query past that threshold so we actually exercise the MB path.
+        let mut query: Vec<u8> = (0..9000).map(|i| (i % 4) as u8).collect();
+        let mask_pos = 4045usize;
+        query[mask_pos] = 14;
 
         let prepared = PreparedBlastnQuery::new_megablast(&query, &[], 28);
         let lookup = &prepared.lookups[0];
@@ -7474,10 +7479,13 @@ mod tests {
             "NCBI indexes lookup words inside any unmasked run at least word_size long"
         );
 
-        let key_masked = word_hash_n(&query[35..46], lookup.lut_word) as usize;
+        let masked_word_start = mask_pos - 10;
+        let key_masked =
+            word_hash_n(&query[masked_word_start..masked_word_start + 11], lookup.lut_word)
+                as usize;
         let mut pos = lookup.lut[key_masked];
         while pos >= 0 {
-            assert_ne!(pos, 35);
+            assert_ne!(pos as usize, masked_word_start);
             pos = lookup.next[pos as usize];
         }
     }
@@ -7593,24 +7601,23 @@ mod tests {
         let kbp = test_kbp();
         let nucl_score_table = InitialWordParameters::build_nucl_score_table(2, -3);
 
-        let hsp = build_packed_hsp_from_seed_extension(
+        let data = extend_seed_packed(
             &query,
             &subject,
             4,
             0,
             0,
+            1,
             2,
             -3,
             20,
-            &kbp,
-            1e6,
-            1e10,
-            0,
             4,
             &nucl_score_table,
             0,
         )
-        .expect("first matching base should produce an HSP");
+        .expect("first matching base should produce an extension");
+        let hsp = build_packed_hsp(&query, &subject, data, &kbp, 1e6, 1e10, 0)
+            .expect("first matching base should produce an HSP");
 
         assert_eq!(hsp.score, 2);
         assert_eq!(hsp.query_start, 0);

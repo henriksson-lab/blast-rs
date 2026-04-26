@@ -967,16 +967,28 @@ rust  = "cutoff_score_min"
 other = "cutoff_score_min"
 
 [[entries]]
-rust  = "translate_codon"
+rust  = "codon_to_aa"
 other = "s_CodonToAA"
 
 [[entries]]
-rust  = "six_frame_translate"
+rust  = "blast_get_translation"
+other = "BLAST_GetTranslation"
+
+[[entries]]
+rust  = "blast_get_all_translations_ncbi4na"
 other = "BLAST_GetAllTranslations"
 
 [[entries]]
-rust  = "reverse_complement"
+rust  = "get_reverse_nucl_sequence"
 other = "GetReverseNuclSequence"
+
+[[entries]]
+rust  = "blast_context_to_frame_blastx"
+other = "BLAST_ContextToFrame"
+
+[[entries]]
+rust  = "is_residue"
+other = "IS_residue"
 
 [[entries]]
 rust  = "UngappedData"
@@ -1606,13 +1618,6 @@ other = "BLAST_GetStandardAaProbabilities"
 rust  = "effective_bg_probs"
 other = "s_effectiveObservations"
 
-[[entries]]
-rust  = "six_frame_translation"
-other = "BLAST_GetAllTranslations"
-
-[[entries]]
-rust  = "protein_to_nuc_coords"
-other = "BLAST_FrameToContext"
 
 [[entries]]
 rust  = "diag_table_extend_initial_hit_packed"
@@ -1930,3 +1935,402 @@ other = "ScoreCompareHSPs"
 [[entries]]
 rust  = "compare_search_results"
 other = "s_EvalueCompareHSPLists"
+
+# blast_kappa.c — leaf utility ports (composition-based scoring helpers)
+[[entries]]
+rust  = "get_subject_length"
+other = "s_GetSubjectLength"
+
+[[entries]]
+rust  = "hsp_list_normalize_scores"
+other = "s_HSPListNormalizeScores"
+
+[[entries]]
+rust  = "get_hash"
+other = "s_GetHash"
+
+[[entries]]
+rust  = "extend_right"
+other = "s_ExtendRight"
+
+[[entries]]
+rust  = "extend_left"
+other = "s_ExtendLeft"
+
+[[entries]]
+rust  = "find_num_identical"
+other = "s_FindNumIdentical"
+
+[[entries]]
+rust  = "hitlist_reap_contained"
+other = "s_HitlistReapContained"
+
+[[entries]]
+rust  = "calc_lambda"
+other = "s_CalcLambda"
+
+[[entries]]
+rust  = "contained_in_hsp"
+other = "CONTAINED_IN_HSP"
+
+[[entries]]
+rust  = "get_nucl_length"
+other = "GET_NUCL_LENGTH"
+
+# blast_setup.c — search-space setup
+[[entries]]
+rust  = "blast_calc_eff_lengths"
+other = "BLAST_CalcEffLengths"
+
+[[entries]]
+rust  = "is_search_space_set"
+other = "BlastEffectiveLengthsOptions_IsSearchSpaceSet"
+
+[[entries]]
+rust  = "get_effective_search_space_for_context"
+other = "s_GetEffectiveSearchSpaceForContext"
+
+[[entries]]
+rust  = "blast_get_alpha_beta"
+other = "BLAST_GetAlphaBeta"
+
+[[entries]]
+rust  = "new_alignment_from_gap_align"
+other = "s_NewAlignmentFromGapAlign"
+
+[[entries]]
+rust  = "hsp_list_from_distinct_alignments"
+other = "s_HSPListFromDistinctAlignments"
+
+[[entries]]
+rust  = "test_near_identical"
+other = "s_TestNearIdentical"
+
+[[entries]]
+rust  = "adjust_evalues_for_composition"
+other = "s_AdjustEvaluesForComposition"
+
+[[entries]]
+rust  = "karlin_e_to_p"
+other = "BLAST_KarlinEtoP"
+
+[[entries]]
+rust  = "karlin_p_to_e_compo"
+other = "BLAST_KarlinPtoE"
+
+[[entries]]
+rust  = "overall_p_value"
+other = "Blast_Overall_P_Value"
+
+[[entries]]
+rust  = "hitlist_evaluate_and_purge"
+other = "s_HitlistEvaluateAndPurge"
+
+[[entries]]
+rust  = "blast_hsp_get_num_identities"
+other = "s_Blast_HSPGetNumIdentitiesAndPositives"
+
+[[entries]]
+rust  = "blast_hsp_get_num_identities"
+other = "Blast_HSPGetNumIdentitiesAndPositives"
+
+[[entries]]
+rust  = "compute_num_identities_blastp"
+other = "s_ComputeNumIdentities"
+
+[[entries]]
+rust  = "create_word_array"
+other = "s_CreateWordArray"
+
+[[entries]]
+rust  = "get_query_info"
+other = "s_GetQueryInfo"
+
+[[entries]]
+rust  = "free_blast_compo_query_info_array"
+other = "s_FreeBlastCompo_QueryInfoArray"
+
+[[entries]]
+rust  = "clear_heap"
+other = "s_ClearHeap"
+
+[[entries]]
+rust  = "fill_results_from_compo_heaps"
+other = "s_FillResultsFromCompoHeaps"
+
+[[entries]]
+rust  = "BlastCompoHeap"
+other = "BlastCompo_Heap"
+
+[[entries]]
+rust  = "BlastKappaSavedParameters"
+other = "BlastKappa_SavedParameters"
+
+[[entries]]
+rust  = "BlastKappaSavedParameters::new"
+other = "s_SavedParametersNew"
+
+[[entries]]
+rust  = "saved_parameters_free"
+other = "s_SavedParametersFree"
+
+[[entries]]
+rust  = "record_initial_search"
+other = "s_RecordInitialSearch"
+
+[[entries]]
+rust  = "restore_search"
+other = "s_RestoreSearch"
+
+[[entries]]
+rust  = "gapping_params_new"
+other = "s_GappingParamsNew"
+
+[[entries]]
+rust  = "matrix_info_init_blastp"
+other = "s_MatrixInfoInit"
+
+[[entries]]
+rust  = "rescale_search"
+other = "s_RescaleSearch"
+
+[[entries]]
+rust  = "sequence_prep_query_range"
+other = "s_SequenceGetRange"
+
+[[entries]]
+rust  = "do_seg_sequence_data"
+other = "s_DoSegSequenceData"
+
+[[entries]]
+rust  = "matching_sequence_release"
+other = "s_MatchingSequenceRelease"
+
+[[entries]]
+rust  = "result_hsp_to_distinct_align"
+other = "s_ResultHspToDistinctAlign"
+
+[[entries]]
+rust  = "blast_redo_align_params_new"
+other = "Blast_RedoAlignParamsNew"
+
+[[entries]]
+rust  = "blast_redo_align_params_free"
+other = "Blast_RedoAlignParamsFree"
+
+[[entries]]
+rust  = "get_start_freq_ratios"
+other = "s_GetStartFreqRatios"
+
+[[entries]]
+rust  = "sw_find_final_ends_using_xdrop"
+other = "s_SWFindFinalEndsUsingXdrop"
+
+[[entries]]
+rust  = "new_alignment_using_xdrop"
+other = "s_NewAlignmentUsingXdrop"
+
+[[entries]]
+rust  = "redo_one_alignment"
+other = "s_RedoOneAlignment"
+
+# hspfilter_culling.c — culling-tree skeleton
+[[entries]]
+rust  = "LinkedHsp"
+other = "LinkedHSP"
+
+[[entries]]
+rust  = "LinkedHsp::copy"
+other = "s_HSPCopy"
+
+[[entries]]
+rust  = "dominate_test"
+other = "s_DominateTest"
+
+[[entries]]
+rust  = "full_pass"
+other = "s_FullPass"
+
+[[entries]]
+rust  = "process_hsp_list"
+other = "s_ProcessHSPList"
+
+[[entries]]
+rust  = "mark_down_hsp_list"
+other = "s_MarkDownHSPList"
+
+[[entries]]
+rust  = "add_hsp_to_list"
+other = "s_AddHSPtoList"
+
+[[entries]]
+rust  = "CTreeNode"
+other = "CTreeNode"
+
+[[entries]]
+rust  = "CTreeChild"
+other = "ECTreeChild"
+
+[[entries]]
+rust  = "CTreeNode::new_child"
+other = "s_CTreeNodeNew"
+
+[[entries]]
+rust  = "fork_children"
+other = "s_ForkChildren"
+
+[[entries]]
+rust  = "mark_down_ctree"
+other = "s_MarkDownCTree"
+
+[[entries]]
+rust  = "process_ctree"
+other = "s_ProcessCTree"
+
+[[entries]]
+rust  = "ctree_new"
+other = "s_CTreeNew"
+
+[[entries]]
+rust  = "rip_hsp_off_ctree"
+other = "s_RipHSPOffCTree"
+
+[[entries]]
+rust  = "save_hsp"
+other = "s_SaveHSP"
+
+[[entries]]
+rust  = "BlastHSPCullingParams"
+other = "BlastHSPCullingParams"
+
+[[entries]]
+rust  = "BlastHSPCullingOptions"
+other = "BlastHSPCullingOptions"
+
+[[entries]]
+rust  = "BlastHSPWriterInfo"
+other = "BlastHSPWriterInfo"
+
+[[entries]]
+rust  = "BlastHSPPipeInfo"
+other = "BlastHSPPipeInfo"
+
+[[entries]]
+rust  = "blast_hsp_culling_params_new"
+other = "BlastHSPCullingParamsNew"
+
+[[entries]]
+rust  = "blast_hsp_culling_params_free"
+other = "BlastHSPCullingParamsFree"
+
+[[entries]]
+rust  = "blast_hsp_culling_info_new"
+other = "BlastHSPCullingInfoNew"
+
+[[entries]]
+rust  = "blast_hsp_culling_pipe_info_new"
+other = "BlastHSPCullingPipeInfoNew"
+
+[[entries]]
+rust  = "BlastHSPCullingData"
+other = "BlastHSPCullingData"
+
+[[entries]]
+rust  = "BlastHSPCullingData::new"
+other = "s_BlastHSPCullingNew"
+
+[[entries]]
+rust  = "BlastHSPCullingData::init"
+other = "s_BlastHSPCullingInit"
+
+[[entries]]
+rust  = "BlastHSPCullingData::run"
+other = "s_BlastHSPCullingRun"
+
+[[entries]]
+rust  = "BlastHSPCullingData::finalize"
+other = "s_BlastHSPCullingFinal"
+
+[[entries]]
+rust  = "blast_get_query_index_from_context"
+other = "Blast_GetQueryIndexFromContext"
+
+[[entries]]
+rust  = "blast_hsp_culling_pipe_run"
+other = "s_BlastHSPCullingPipeRun"
+
+[[entries]]
+rust  = "blast_hsp_culling_pipe_new"
+other = "s_BlastHSPCullingPipeNew"
+
+[[entries]]
+rust  = "blast_hsp_culling_pipe_free"
+other = "s_BlastHSPCullingPipeFree"
+
+[[entries]]
+rust  = "get_align_params"
+other = "s_GetAlignParams"
+
+[[entries]]
+rust  = "BlastGapAlignWorkspace"
+other = "BlastGapAlignStruct"
+
+[[entries]]
+rust  = "BlastGapAlignWorkspace::deep_copy"
+other = "s_BlastGapAlignStruct_Copy"
+
+[[entries]]
+rust  = "blast_gap_align_struct_free"
+other = "s_BlastGapAlignStruct_Free"
+
+[[entries]]
+rust  = "BlastKappaGappingParamsContext"
+other = "BlastKappa_GappingParamsContext"
+
+[[entries]]
+rust  = "blast_redo_alignment_core"
+other = "Blast_RedoAlignmentCore"
+
+[[entries]]
+rust  = "blast_redo_alignment_core_mt"
+other = "Blast_RedoAlignmentCore_MT"
+
+[[entries]]
+rust  = "smith_waterman::bl_basic_smith_waterman_score_only"
+other = "BLbasicSmithWatermanScoreOnly"
+
+[[entries]]
+rust  = "smith_waterman::bl_smith_waterman_find_start"
+other = "BLSmithWatermanFindStart"
+
+[[entries]]
+rust  = "smith_waterman::bl_special_smith_waterman_score_only"
+other = "BLspecialSmithWatermanScoreOnly"
+
+[[entries]]
+rust  = "smith_waterman::bl_special_smith_waterman_find_start"
+other = "BLspecialSmithWatermanFindStart"
+
+[[entries]]
+rust  = "smith_waterman::blast_smith_waterman_score_only"
+other = "Blast_SmithWatermanScoreOnly"
+
+[[entries]]
+rust  = "smith_waterman::blast_smith_waterman_find_start"
+other = "Blast_SmithWatermanFindStart"
+
+[[entries]]
+rust  = "smith_waterman::BlastForbiddenRanges"
+other = "Blast_ForbiddenRanges"
+
+[[entries]]
+rust  = "smith_waterman::BlastForbiddenRanges::new"
+other = "Blast_ForbiddenRangesInitialize"
+
+[[entries]]
+rust  = "smith_waterman::BlastForbiddenRanges::clear"
+other = "Blast_ForbiddenRangesClear"
+
+[[entries]]
+rust  = "smith_waterman::BlastForbiddenRanges::push"
+other = "Blast_ForbiddenRangesPush"

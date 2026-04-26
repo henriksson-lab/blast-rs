@@ -78,6 +78,25 @@ impl QueryInfo {
     }
 }
 
+/// 1-1 port of `Blast_GetQueryIndexFromContext`
+/// (`blast_query_info.c:40`). Maps a context index to its parent
+/// query index, accounting for per-program context multiplicity:
+/// - protein/PSSM queries: `context` directly (1 context per query).
+/// - translated queries (blastx/tblastx/RPS-tblastn): `context / 6`.
+/// - nucleotide queries (blastn): `context / 2`.
+pub fn blast_get_query_index_from_context(
+    context: i32,
+    program: crate::program::ProgramType,
+) -> i32 {
+    if crate::program::query_is_protein(program) {
+        context
+    } else if crate::program::query_is_translated(program) {
+        context / crate::util::NUM_FRAMES as i32
+    } else {
+        context / crate::util::NUM_STRANDS as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

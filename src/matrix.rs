@@ -139,12 +139,15 @@ pub fn nucleotide_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
 }
 
 /// Background amino acid frequencies (Robinson & Robinson, 1991).
+/// 1-1 with NCBI's `Robinson_prob` (`blast_stat.c:1795`) divided by 1000.
+/// Earlier values for C (was 0.05129) and F (was 0.04259) were wrong;
+/// they matched neither Robinson nor any other published source.
 pub static AA_FREQUENCIES: [f64; 20] = [
     0.07805, // A
-    0.05129, // C
+    0.01925, // C
     0.05364, // D
     0.06295, // E
-    0.04259, // F
+    0.03856, // F
     0.07377, // G
     0.02199, // H
     0.05142, // I

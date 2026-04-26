@@ -685,6 +685,33 @@ pub struct GumbelBlk {
 /// Compute Spouge finite-size correction e-value.
 /// Port of BLAST_SpougeStoE from blast_stat.c:5176.
 /// Uses per-subject lengths for more accurate e-values than simple Karlin formula.
+/// Spouge e-value with NCBI's HSP-linking gap-decay correction
+/// applied. Used by translated searches (blastx/tblastn/tblastx) and
+/// ungapped paths where `do_sum_stats=TRUE` (set in
+/// `blast_options.c:1467`). NCBI applies this divisor in
+/// `link_hsps.c:1791` via `link_hsp_params->gap_decay_rate`. The
+/// default rate is `BLAST_GAP_DECAY_RATE_GAPPED = 0.1` for protein
+/// gapped, giving an effective `/0.9 ≈ ×1.111` scaling vs. the raw
+/// per-pair Spouge.
+pub fn spouge_evalue_with_gap_decay(
+    score: i32,
+    kbp: &KarlinBlk,
+    gbp: &GumbelBlk,
+    query_length: i32,
+    subject_length: i32,
+) -> f64 {
+    let raw = spouge_evalue(score, kbp, gbp, query_length, subject_length);
+    raw / gap_decay_divisor(BLAST_GAP_DECAY_RATE_GAPPED, 1)
+}
+
+/// 1-1 port of `BLAST_SpougeStoE` (`blast_stat.c:5176`). Returns the raw
+/// per-pair Spouge finite-size-corrected e-value. Some NCBI call sites
+/// (e.g. translated searches with HSP linking via `link_hsps.c:1791`)
+/// further divide by `BLAST_GapDecayDivisor(gap_decay_rate, 1)` —
+/// callers in those paths should use [`spouge_evalue_with_gap_decay`]
+/// instead. Standard blastp / direct traceback paths
+/// (`blast_traceback.c:234`, `blast_kappa.c:419`) pass
+/// `gap_decay_rate=0` and use the raw value unchanged.
 pub fn spouge_evalue(
     score: i32,
     kbp: &KarlinBlk,
@@ -735,6 +762,55 @@ pub fn spouge_evalue(
     let area = p1 * p2 + c_y * p_m_f * p_n_f;
 
     (area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor).max(0.0)
+}
+
+/// Port of NCBI `BLAST_SpougeEtoS` (`blast_stat.c:5236`). Binary-search the
+/// raw score `S` such that `BLAST_SpougeStoE(S, kbp, gbp, m, n) <= e0`.
+///
+/// Used for the per-context cutoff in `BlastHitSavingParametersUpdate`
+/// (`blast_parameters.c:940`): the cutoff is computed at `m=query_length` and
+/// `n=avg_subject_length`, with `gbp->db_length` set to the full DB. The
+/// binary search uses Spouge's full FSC formula, so the cutoff is more
+/// conservative than the simple Karlin `evalue_to_raw` formula.
+pub fn spouge_etos(e0: f64, kbp: &KarlinBlk, gbp: &GumbelBlk, m: i32, n: i32) -> i32 {
+    let db_scale_factor = if gbp.db_length > 0 {
+        gbp.db_length as f64
+    } else {
+        1.0
+    };
+
+    // C: `b = MAX((int)(log(db_scale_factor/e0) / kbp->Lambda), 2);`
+    let mut b = ((db_scale_factor / e0).ln() / kbp.lambda) as i32;
+    if b < 2 {
+        b = 2;
+    }
+
+    let mut a: i32 = 0;
+    let mut e = spouge_evalue(b, kbp, gbp, m, n);
+
+    if e > e0 {
+        while e > e0 {
+            a = b;
+            // C: `b *= 2;` — note the integer overflow possibility on a
+            // pathological input is mirrored from C verbatim
+            b = b.saturating_mul(2);
+            e = spouge_evalue(b, kbp, gbp, m, n);
+            if b == i32::MAX {
+                break;
+            }
+        }
+    }
+    while b - a > 1 {
+        let c = (a + b) / 2;
+        e = spouge_evalue(c, kbp, gbp, m, n);
+        if e > e0 {
+            a = c;
+        } else {
+            b = c;
+        }
+    }
+    let _ = e; // suppress unused on the final iteration
+    a
 }
 
 /// Build Gumbel block for protein BLOSUM62 with given gap costs.
@@ -931,6 +1007,74 @@ pub fn protein_ungapped_kbp() -> KarlinBlk {
         h: 0.4012,
         round_down: false,
     }
+}
+
+/// Compute the query-specific ungapped Karlin block for a protein query.
+/// Mirrors NCBI's `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`):
+/// `Blast_ResFreqString` over the query → `BlastScoreFreqCalc` →
+/// `Blast_KarlinBlkUngappedCalc`. The result drifts slightly from the ideal
+/// kbp depending on query composition; the drift is what makes `gap_trigger`
+/// match NCBI bit-for-bit at boundary cases (see iter 99).
+pub fn query_specific_protein_ungapped_kbp(
+    query_aa_ncbistdaa: &[u8],
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+) -> KarlinBlk {
+    let std_freq = protein_std_freq_ncbistdaa();
+    // NCBIstdaa ambiguity letters that NCBI's Blast_ResFreqString skips.
+    let ambiguous: [u8; 8] = [0, 2, 21, 23, 24, 25, 26, 27];
+    let contexts = [UngappedKbpContext {
+        query_offset: 0,
+        query_length: query_aa_ncbistdaa.len() as i32,
+        is_valid: true,
+    }];
+    let mat = |i: usize, j: usize| matrix[i][j];
+    let r = ungapped_kbp_calc_with_std(
+        query_aa_ncbistdaa,
+        &contexts,
+        -4,
+        11,
+        crate::matrix::AA_SIZE,
+        &ambiguous,
+        &std_freq,
+        &mat,
+    );
+    r.into_iter()
+        .next()
+        .flatten()
+        .unwrap_or_else(protein_ungapped_kbp)
+}
+
+/// NCBIstdaa-indexed standard amino-acid background frequencies.
+/// Robinson & Robinson 1991 (matches NCBI's `Blast_ResFreqStdComp` table for
+/// `BLASTAA_SEQ_CODE`). Entries for `*`, `-`, ambiguity letters (B/Z/X/U/O/J)
+/// are zero — the C path leaves them out of the score-frequency calculation.
+pub fn protein_std_freq_ncbistdaa() -> [f64; 28] {
+    use crate::matrix::AA_FREQUENCIES;
+    // AA_FREQUENCIES is alphabetical (A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y).
+    // NCBIstdaa indices: -=0 A=1 B=2 C=3 D=4 E=5 F=6 G=7 H=8 I=9 K=10 L=11 M=12
+    // N=13 P=14 Q=15 R=16 S=17 T=18 V=19 W=20 X=21 Y=22 Z=23 U=24 *=25 O=26 J=27
+    let mut out = [0.0f64; 28];
+    out[1] = AA_FREQUENCIES[0]; // A
+    out[3] = AA_FREQUENCIES[1]; // C
+    out[4] = AA_FREQUENCIES[2]; // D
+    out[5] = AA_FREQUENCIES[3]; // E
+    out[6] = AA_FREQUENCIES[4]; // F
+    out[7] = AA_FREQUENCIES[5]; // G
+    out[8] = AA_FREQUENCIES[6]; // H
+    out[9] = AA_FREQUENCIES[7]; // I
+    out[10] = AA_FREQUENCIES[8]; // K
+    out[11] = AA_FREQUENCIES[9]; // L
+    out[12] = AA_FREQUENCIES[10]; // M
+    out[13] = AA_FREQUENCIES[11]; // N
+    out[14] = AA_FREQUENCIES[12]; // P
+    out[15] = AA_FREQUENCIES[13]; // Q
+    out[16] = AA_FREQUENCIES[14]; // R
+    out[17] = AA_FREQUENCIES[15]; // S
+    out[18] = AA_FREQUENCIES[16]; // T
+    out[19] = AA_FREQUENCIES[17]; // V
+    out[20] = AA_FREQUENCIES[18]; // W
+    out[22] = AA_FREQUENCIES[19]; // Y
+    out
 }
 
 /// Compute effective search space.
@@ -1520,8 +1664,14 @@ fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 
     let mut b = 1.0_f64;
     let mut f = 4.0_f64;
     let mut is_newton = false;
-    let max_newton = 20;
-    let max_iter = max_newton + BLAST_KARLIN_LAMBDA_ITER_DEFAULT;
+    // NCBI's `Blast_KarlinLambdaNR` calls `NlmKarlinLambdaNR(... 20, 20 +
+    // BLAST_KARLIN_LAMBDA_ITER_DEFAULT, ...)` — passing `itmax=20` and
+    // `maxNewton=37`. In NCBI's implementation `itmax` is the loop bound and
+    // `maxNewton` is the Newton-fallback threshold; with maxNewton > itmax
+    // the threshold never fires within the loop. So the effective behavior
+    // is "20 iterations, Newton always tried." Match NCBI exactly.
+    let max_iter = 20;
+    let max_newton = 20 + BLAST_KARLIN_LAMBDA_ITER_DEFAULT; // 37, threshold beyond max_iter
     let tolx = BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT;
 
     for k in 0..max_iter {
@@ -1679,10 +1829,19 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
     let mut inner_sum = 1.0_f64;
     let mut oldsum;
 
-    for iter in 0..max_iter {
-        if inner_sum <= BLAST_KARLIN_K_SUMLIMIT_DEFAULT {
-            break;
-        }
+    // NCBI's `BlastKarlinLHtoK` (`blast_stat.c:2346`) uses an idiomatic C
+    // for-loop:
+    //   for (iterCounter = 0;
+    //        (iterCounter < iterlimit) && (innerSum > sumlimit);
+    //        outerSum += innerSum /= ++iterCounter)
+    // The increment expression DIVIDES innerSum in-place by the new
+    // iterCounter BEFORE adding to outerSum. So the loop CONDITION at
+    // iter K (K > 0) compares `innerSum_{K-1} / K > sumlimit` — i.e. the
+    // divided value carries into the next iter's check. That makes the
+    // effective sumlimit grow as K (sumlimit * K threshold). We mirror
+    // this by mutating `inner_sum` after the body.
+    let mut iter_counter = 0i32;
+    while iter_counter < max_iter as i32 && inner_sum > BLAST_KARLIN_K_SUMLIMIT_DEFAULT {
         let mut first = range;
         let mut last = range;
         low_as += low;
@@ -1727,7 +1886,12 @@ fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
         }
         oldsum = inner_sum;
         let _ = oldsum;
-        outer_sum += inner_sum / (iter + 1) as f64;
+        // Match NCBI's `outerSum += innerSum /= ++iterCounter`:
+        // first increment iterCounter, then divide innerSum in place,
+        // then add to outerSum.
+        iter_counter += 1;
+        inner_sum /= iter_counter as f64;
+        outer_sum += inner_sum;
     }
 
     -(-2.0 * outer_sum).exp() / (ftcf * crate::math::expm1(-lam_s))
@@ -1741,7 +1905,8 @@ pub struct UngappedKbpContext {
 }
 
 /// Compute ungapped KBP for all contexts. Returns per-context `Option<KarlinBlk>`.
-/// Port of Blast_ScoreBlkKbpUngappedCalc from blast_stat.c.
+/// Port of Blast_ScoreBlkKbpUngappedCalc from blast_stat.c (nucleotide path —
+/// std composition is fixed at 0.25 for A/C/G/T).
 pub fn ungapped_kbp_calc(
     query: &[u8],
     contexts: &[UngappedKbpContext],
@@ -1756,7 +1921,27 @@ pub fn ungapped_kbp_calc(
     for i in 0..4.min(alphabet_size) {
         std_freq[i] = 0.25;
     }
+    ungapped_kbp_calc_with_std(query, contexts, loscore, hiscore, alphabet_size, ambiguous, &std_freq, matrix)
+}
 
+/// Like [`ungapped_kbp_calc`] but takes an explicit `std_freq` array.
+/// Used by protein paths (blastx/tblastn/tblastx) where the standard
+/// background is BLOSUM62's Robinson & Robinson amino acid frequencies
+/// rather than the uniform 0.25 nucleotide composition.
+///
+/// Mirrors `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`): per-context
+/// `Blast_ResFreqString` → `BlastScoreFreqCalc` → `Blast_KarlinBlkUngappedCalc`.
+pub fn ungapped_kbp_calc_with_std(
+    query: &[u8],
+    contexts: &[UngappedKbpContext],
+    loscore: i32,
+    hiscore: i32,
+    alphabet_size: usize,
+    ambiguous: &[u8],
+    std_freq: &[f64],
+    matrix: &dyn Fn(usize, usize) -> i32,
+) -> Vec<Option<KarlinBlk>> {
+    let std_freq = std_freq.to_vec();
     let mut results = Vec::with_capacity(contexts.len());
     for ctx in contexts {
         if !ctx.is_valid || ctx.query_length <= 0 {
@@ -1767,10 +1952,14 @@ pub fn ungapped_kbp_calc(
         let len = ctx.query_length as usize;
         let buf = &query[off..off + len];
 
-        // Count residue composition
+        // Count residue composition. The 4-bit mask was needed only when the
+        // caller was nucleotide-only (BLASTNA bytes are 0..15); now the
+        // function is also used for protein (NCBIstdaa, bytes 0..27).
+        // Removing the mask is a no-op for nucleotide (bytes already <16) and
+        // unblocks protein. The `idx < alphabet_size` guard still bounds.
         let mut counts = vec![0i32; alphabet_size];
         for &b in buf {
-            let idx = (b & 0x0F) as usize;
+            let idx = b as usize;
             if idx < alphabet_size {
                 counts[idx] += 1;
             }
@@ -2549,12 +2738,13 @@ mod tests {
     }
 
     /// Port of BlastResFreqStdCompProteinTest: verify specific amino acid frequencies.
-    /// NCBI NCBIstdaa indices: 6=F, 12=M, 22=Y. Compact AA_FREQUENCIES: F=4, M=10, Y=19.
-    /// NCBI expects (multiplied by 100000): F→4259(≈3856 NCBI val), M→2243, Y→3216
+    /// Compact AA_FREQUENCIES indices (alphabetical): A=0,C=1,D=2,E=3,F=4,G=5,
+    /// H=6,I=7,K=8,L=9,M=10,N=11,P=12,Q=13,R=14,S=15,T=16,V=17,W=18,Y=19.
+    /// Expected x100000 from NCBI's `Robinson_prob` (`blast_stat.c:1795`)
+    /// divided by 1000: F→3856, M→2243, Y→3216, C→1925.
     #[test]
     fn test_protein_standard_frequencies() {
         let freqs = &crate::matrix::AA_FREQUENCIES;
-        // Compact indices: A=0,C=1,D=2,E=3,F=4,G=5,H=6,I=7,K=8,L=9,M=10,N=11,P=12,Q=13,R=14,S=15,T=16,V=17,W=18,Y=19
         let check = |idx: usize, expected_x100k: i32, name: &str| {
             let got = (freqs[idx] * 100000.0).round() as i32;
             assert!(
@@ -2567,7 +2757,8 @@ mod tests {
                 freqs[idx]
             );
         };
-        check(4, 4259, "F"); // Phe
+        check(1, 1925, "C"); // Cys
+        check(4, 3856, "F"); // Phe
         check(10, 2243, "M"); // Met
         check(19, 3216, "Y"); // Tyr
     }

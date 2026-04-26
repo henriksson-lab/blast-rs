@@ -225,6 +225,13 @@ pub fn calc_lambda_full_precision(
 /// Port of NCBI Blast_CompositionBasedStats (score-only mode).
 ///
 /// Returns LambdaRatio (adjusted_lambda / standard_lambda), or None if
+/// Public wrapper for `karlin_lambda_nr` so other modules (e.g.
+/// `blast_kappa::s_CalcLambda`) can call it without re-exporting the
+/// name. Forwards directly.
+pub fn karlin_lambda_nr_pub(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> f64 {
+    karlin_lambda_nr(sprob, obs_min, obs_max, lambda0)
+}
+
 /// adjustment is not applicable.
 /// Port of NCBI NlmKarlinLambdaNR + Blast_KarlinLambdaNR.
 /// Compute lambda from a score probability distribution using
@@ -436,6 +443,26 @@ pub fn composition_lambda_ratio(
 }
 
 /// Port of NCBI Blast_CompositionBasedStats (matrix rescaling mode).
+/// Like [`composition_scale_matrix`] but also returns the
+/// `lambda_ratio` used to scale the matrix. Callers that recompute
+/// bit-scores or e-values after rescoring with the returned matrix
+/// MUST use `lambda_scaled = ungapped_lambda / lambda_ratio` (or
+/// equivalently `kbp.lambda * lambda_ratio` if the kbp Lambda was
+/// computed at the unscaled matrix). NCBI does this implicitly by
+/// updating `kbp->Lambda *= lambdaRatio` after calling
+/// `Blast_CompositionBasedStats`.
+pub fn composition_scale_matrix_with_ratio(
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    query_prob: &[f64],
+    subject_prob: &[f64],
+    ungapped_lambda: f64,
+    freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
+) -> Option<([[i32; AA_SIZE]; AA_SIZE], f64)> {
+    let lr = composition_lambda_ratio(matrix, query_prob, subject_prob, ungapped_lambda)?;
+    let scaled = composition_scale_matrix(matrix, query_prob, subject_prob, ungapped_lambda, freq_ratios)?;
+    Some((scaled, lr))
+}
+
 /// Rescales the scoring matrix using the composition-based lambda ratio.
 /// Returns the rescaled matrix, or None if no adjustment needed.
 pub fn composition_scale_matrix(
@@ -572,16 +599,13 @@ pub fn adjust_evalue_composition(
 }
 
 /// NCBI BLAST_KarlinEtoP: E-value to P-value conversion.
-/// Retained for future use once composition-based P-value combining is wired in.
-#[allow(dead_code)]
-fn karlin_e_to_p(x: f64) -> f64 {
+pub fn karlin_e_to_p(x: f64) -> f64 {
     // NCBI: `return -BLAST_Expm1(-x);` (= 1 - exp(-x) stably).
     -crate::math::expm1(-x)
 }
 
 /// NCBI BLAST_KarlinPtoE: P-value to E-value conversion.
-#[allow(dead_code)]
-fn karlin_p_to_e(p: f64) -> f64 {
+pub fn karlin_p_to_e_compo(p: f64) -> f64 {
     if p <= 0.0 || p >= 1.0 {
         return p;
     }
@@ -591,8 +615,7 @@ fn karlin_p_to_e(p: f64) -> f64 {
 
 /// Combine composition P-value with alignment P-value using Fisher's method.
 /// Port of NCBI Blast_Overall_P_Value.
-#[allow(dead_code)]
-fn overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
+pub fn overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
     let product = p_comp * p_alignment;
     if product > 0.0 {
         product * (1.0 - product.ln())

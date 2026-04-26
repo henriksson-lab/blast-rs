@@ -1,17 +1,201 @@
 //! Rust equivalent of blast_util.c — BLAST utility functions.
 
-/// Translate a codon using a genetic code.
+/// Translate a codon using a genetic code (NCBI2na fast path).
 /// Takes 3 NCBI2na bases (2-bit unambiguous A=0/C=1/G=2/T=3) and
 /// returns the amino acid in NCBIstdaa encoding.
 ///
-/// Companion to NCBI's `s_CodonToAA` (`blast_util.c:369`), but simpler:
-/// NCBI's version takes NCBI4na bases and iterates over all possible
-/// combinations (returning X when a codon with an ambiguity code
-/// translates to multiple amino acids). This Rust port assumes the
-/// caller has already resolved ambiguities or is using NCBI2na input.
+/// For NCBI4na input with ambiguity resolution, use [`codon_to_aa`] —
+/// the 1-1 port of NCBI's `s_CodonToAA`.
 pub fn translate_codon(b1: u8, b2: u8, b3: u8, genetic_code: &[u8; 64]) -> u8 {
     let idx = ((b1 & 3) as usize) * 16 + ((b2 & 3) as usize) * 4 + (b3 & 3) as usize;
     genetic_code[idx]
+}
+
+/// Translate a codon given in NCBI4na (each byte is a 4-bit mask over
+/// {A=1, C=2, G=4, T=8}) into an NCBIstdaa amino acid.
+///
+/// Port of NCBI `s_CodonToAA` (`blast_util.c:369`). When an input base
+/// is an ambiguity code matching multiple unambiguous bases, enumerates
+/// every compatible codon; returns the unique amino acid if they all
+/// agree, otherwise returns NCBIstdaa `X` (21). Bytes > 15 (malformed
+/// or FENCE_SENTRY) also yield `X`.
+///
+/// NCBI's C iterates `mapping[4] = {T=8, C=2, A=1, G=4}` so its
+/// `codes` table is TCAG-ordered. Our [`STANDARD_GENETIC_CODE`] is
+/// ACGT-ordered, so `MAPPING` here is `[A=1, C=2, G=4, T=8]`.
+pub fn codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
+    const X_RESIDUE: u8 = 21;
+    const MAPPING: [u8; 4] = [1, 2, 4, 8];
+
+    if (codon[0] | codon[1] | codon[2]) > 15 {
+        return X_RESIDUE;
+    }
+
+    let mut aa: u8 = 0;
+    for i in 0..4 {
+        if codon[0] & MAPPING[i] != 0 {
+            let index0 = i * 16;
+            for j in 0..4 {
+                if codon[1] & MAPPING[j] != 0 {
+                    let index1 = index0 + j * 4;
+                    for k in 0..4 {
+                        if codon[2] & MAPPING[k] != 0 {
+                            let taa = genetic_code[index1 + k];
+                            if aa == 0 {
+                                aa = taa;
+                            } else if taa != aa {
+                                return X_RESIDUE;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    aa
+}
+
+// Macros from `blast_util.h` and `blast_def.h` ported as `const`/`fn`.
+
+/// `NULLB` (`ncbi_std.h:181`).
+pub const NULLB: u8 = 0;
+/// `FENCE_SENTRY` (`blast_util.h:364`).
+pub const FENCE_SENTRY: u8 = 201;
+/// `CODON_LENGTH` (`blast_def.h:63`).
+pub const CODON_LENGTH: usize = 3;
+/// `NUM_FRAMES` (`blast_def.h:88`).
+pub const NUM_FRAMES: usize = 6;
+/// `NUM_STRANDS` (`blast_def.h:93`).
+pub const NUM_STRANDS: usize = 2;
+
+/// Port of `IS_residue(x)` (`blast_util.h:48`).
+#[inline]
+pub fn is_residue(x: u8) -> bool {
+    x <= 250
+}
+
+/// Port of `BLAST_ContextToFrame` (`blast_util.c:839`) for blastx-style
+/// programs (eBlastTypeBlastx/Tblastx/RpsTblastn). Maps the 6 contexts
+/// 0..5 to frames 1, 2, 3, -1, -2, -3.
+pub fn blast_context_to_frame_blastx(context_number: u32) -> i32 {
+    match (context_number as usize) % NUM_FRAMES {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => -1,
+        4 => -2,
+        5 => -3,
+        _ => unreachable!(),
+    }
+}
+
+/// Port of `GetReverseNuclSequence` (`blast_util.c:807`). Builds the
+/// reverse-complement of an NCBI4na buffer with NULLB sentinels at
+/// positions 0 and length+1, matching the C layout used by
+/// `BLAST_GetTranslation` (`query_seq_rev + 1` skips the leading NULLB).
+pub fn get_reverse_nucl_sequence(sequence: &[u8], length: usize) -> Vec<u8> {
+    // C: rev_sequence = malloc(length + 2);
+    //    rev_sequence[0] = rev_sequence[length+1] = NULLB;
+    let mut rev = vec![NULLB; length + 2];
+    // Conversion table from forward to reverse strand residue (NCBI4na).
+    // (`blast_util.c:814-819`. The C source comment says "blastna
+    // encoding" but the table values are NCBI4na bit masks; see the
+    // identities A(1)↔T(8), C(2)↔G(4), N(15)↔N(15).)
+    const CONVERSION_TABLE: [u8; 16] = [
+        0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15,
+    ];
+    for index in 0..length {
+        let b = sequence[index];
+        rev[length - index] = if b == FENCE_SENTRY {
+            FENCE_SENTRY
+        } else {
+            CONVERSION_TABLE[b as usize & 0x0f]
+        };
+    }
+    rev
+}
+
+/// Port of `BLAST_GetTranslation` (`blast_util.c:427`). Translates one
+/// frame of an NCBI4na nucleotide sequence into NCBIstdaa. Writes
+/// `prot_seq[0] = NULLB` then residues at indices 1..=k then a trailing
+/// NULLB; returns `k` (the number of residues written).
+///
+/// `query_seq_rev` must be the buffer returned by [`get_reverse_nucl_sequence`]
+/// (length+2 bytes, leading NULLB at [0]). It is dereferenced only when
+/// `frame < 0`. Frames in {1,2,3} read from `query_seq` directly; frames
+/// in {-1,-2,-3} read from `&query_seq_rev[1..]`.
+pub fn blast_get_translation(
+    query_seq: &[u8],
+    query_seq_rev: &[u8],
+    nt_length: usize,
+    frame: i32,
+    prot_seq: &mut [u8],
+    genetic_code: &[u8; 64],
+) -> usize {
+    // C: nucl_seq = (frame >= 0 ? query_seq : query_seq_rev + 1);
+    let nucl_seq: &[u8] = if frame >= 0 { query_seq } else { &query_seq_rev[1..] };
+
+    // C: prot_seq[0] = NULLB; index_prot = 1;
+    prot_seq[0] = NULLB;
+    let mut index_prot: usize = 1;
+
+    // C: for (index = ABS(frame) - 1; index < nt_length - 2; index += CODON_LENGTH)
+    let start = (frame.unsigned_abs() as usize) - 1;
+    if nt_length >= 2 {
+        let mut index = start;
+        while index < nt_length - 2 {
+            let codon = [nucl_seq[index], nucl_seq[index + 1], nucl_seq[index + 2]];
+            let residue = codon_to_aa(codon, genetic_code);
+            // C: if (IS_residue(residue) || residue == FENCE_SENTRY)
+            if is_residue(residue) || residue == FENCE_SENTRY {
+                prot_seq[index_prot] = residue;
+                index_prot += 1;
+            }
+            index += CODON_LENGTH;
+        }
+    }
+    prot_seq[index_prot] = NULLB;
+    index_prot - 1
+}
+
+/// Port of `BLAST_GetAllTranslations` (`blast_util.c:1045`) for the
+/// `eBlastEncodingNcbi4na` path only. Translates a nucleotide sequence
+/// in all 6 frames into a single concatenated buffer separated by NULLB
+/// sentinels, returning `(translation_buffer, frame_offsets)`.
+///
+/// Frame `ctx`'s residues are at
+/// `&translation_buffer[frame_offsets[ctx] + 1 .. frame_offsets[ctx+1]]`
+/// (matching C's `translation_buffer + frame_offsets[ctx] + 1`).
+pub fn blast_get_all_translations_ncbi4na(
+    nucl_seq: &[u8],
+    nucl_length: usize,
+    genetic_code: &[u8; 64],
+) -> (Vec<u8>, [u32; NUM_FRAMES + 1]) {
+    // C: buffer_length = 2*(nucl_length+1)+2;
+    let buffer_length = 2 * (nucl_length + 1) + 2;
+    let mut translation_buffer = vec![0u8; buffer_length];
+    let nucl_seq_rev = get_reverse_nucl_sequence(nucl_seq, nucl_length);
+
+    let mut offset: u32 = 0;
+    let mut frame_offsets = [0u32; NUM_FRAMES + 1];
+    frame_offsets[0] = 0;
+
+    for context in 0..NUM_FRAMES {
+        let frame = blast_context_to_frame_blastx(context as u32);
+        let length = blast_get_translation(
+            nucl_seq,
+            &nucl_seq_rev,
+            nucl_length,
+            frame,
+            &mut translation_buffer[offset as usize..],
+            genetic_code,
+        );
+        // C: offset += length + 1;  (1 extra byte for the inter-frame NULLB)
+        offset += (length as u32) + 1;
+        frame_offsets[context + 1] = offset;
+    }
+
+    (translation_buffer, frame_offsets)
 }
 
 /// Standard genetic code (NCBI translation table 1).
@@ -117,43 +301,6 @@ pub fn lookup_genetic_code(code: u8) -> &'static [u8; 64] {
     }
 }
 
-/// Translate a nucleotide sequence to protein in all 6 reading frames.
-/// Returns Vec of (frame, protein_sequence) where frame is 1,2,3,-1,-2,-3.
-pub fn six_frame_translation(nuc_seq: &[u8], genetic_code: &[u8; 64]) -> Vec<(i32, Vec<u8>)> {
-    let mut results = Vec::new();
-    let len = nuc_seq.len();
-
-    // Forward frames 1, 2, 3
-    for frame_offset in 0..3 {
-        let mut protein = Vec::new();
-        let mut i = frame_offset;
-        while i + 2 < len {
-            protein.push(translate_codon(
-                nuc_seq[i],
-                nuc_seq[i + 1],
-                nuc_seq[i + 2],
-                genetic_code,
-            ));
-            i += 3;
-        }
-        results.push((frame_offset as i32 + 1, protein));
-    }
-
-    // Reverse complement for frames -1, -2, -3
-    let rc: Vec<u8> = nuc_seq.iter().rev().map(|&b| 3 - (b & 3)).collect();
-    for frame_offset in 0..3 {
-        let mut protein = Vec::new();
-        let mut i = frame_offset;
-        while i + 2 < rc.len() {
-            protein.push(translate_codon(rc[i], rc[i + 1], rc[i + 2], genetic_code));
-            i += 3;
-        }
-        results.push((-(frame_offset as i32 + 1), protein));
-    }
-
-    results
-}
-
 /// Map protein coordinates back to nucleotide coordinates given a reading frame.
 ///
 /// For blastx: maps query protein coords → query nucleotide coords.
@@ -220,14 +367,15 @@ mod tests {
 
     #[test]
     fn test_six_frame() {
-        // ACGTACGTAC (10 bases)
-        let seq = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
-        let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
-        assert_eq!(frames.len(), 6);
-        assert_eq!(frames[0].0, 1); // frame +1
-        assert_eq!(frames[3].0, -1); // frame -1
-                                     // Frame +1: ACG TAC GTA → 3 codons
-        assert_eq!(frames[0].1.len(), 3);
+        // ACGTACGTAC (10 bases) in NCBI4na: A=1, C=2, G=4, T=8
+        let seq = vec![1u8, 2, 4, 8, 1, 2, 4, 8, 1, 2];
+        let (_buf, offsets) =
+            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        // Frame +1 covers ACG TAC GTA → 3 residues.
+        assert_eq!(offsets[1] - offsets[0] - 1, 3);
+        // Frame names are produced in order 1, 2, 3, -1, -2, -3.
+        assert_eq!(blast_context_to_frame_blastx(0), 1);
+        assert_eq!(blast_context_to_frame_blastx(3), -1);
     }
 
     #[test]
@@ -316,6 +464,118 @@ mod tests {
     }
 
     #[test]
+    fn test_codon_to_aa_unambiguous() {
+        // ATG -> M (12): NCBI4na A=1, T=8, G=4
+        assert_eq!(codon_to_aa([1, 8, 4], &STANDARD_GENETIC_CODE), 12);
+        // TAA -> * (25)
+        assert_eq!(codon_to_aa([8, 1, 1], &STANDARD_GENETIC_CODE), 25);
+        // GCT -> A (1)
+        assert_eq!(codon_to_aa([4, 2, 8], &STANDARD_GENETIC_CODE), 1);
+    }
+
+    #[test]
+    fn test_codon_to_aa_ambiguity_resolves_to_x() {
+        // CTN: CTA=L, CTC=L, CTG=L, CTT=L — all leucine, so resolves to L (11).
+        // CTN with N=15
+        assert_eq!(codon_to_aa([2, 8, 15], &STANDARD_GENETIC_CODE), 11);
+
+        // ATN: ATA=I, ATC=I, ATG=M, ATT=I — mixed, must return X (21).
+        assert_eq!(codon_to_aa([1, 8, 15], &STANDARD_GENETIC_CODE), 21);
+
+        // YTA (Y=C|T=10): CTA=L, TTA=L — both L, so resolves to L (11).
+        assert_eq!(codon_to_aa([10, 8, 1], &STANDARD_GENETIC_CODE), 11);
+
+        // RTA (R=A|G=5): ATA=I, GTA=V — mixed, X.
+        assert_eq!(codon_to_aa([5, 8, 1], &STANDARD_GENETIC_CODE), 21);
+    }
+
+    #[test]
+    fn test_codon_to_aa_n_in_first_position_mixed() {
+        // NCT (N=15): all four first-base options. ACT=T, CCT=P, GCT=A, TCT=S.
+        // Mixed → X.
+        assert_eq!(codon_to_aa([15, 2, 8], &STANDARD_GENETIC_CODE), 21);
+    }
+
+    #[test]
+    fn test_codon_to_aa_malformed_returns_x() {
+        // Any byte > 15 (e.g. FENCE_SENTRY) → X.
+        assert_eq!(codon_to_aa([1, 8, 200], &STANDARD_GENETIC_CODE), 21);
+    }
+
+    #[test]
+    fn test_get_reverse_nucl_sequence_layout() {
+        // NCBI4na: A=1, C=2, G=4, T=8 → ACGT
+        let seq = vec![1u8, 2, 4, 8];
+        let rev = get_reverse_nucl_sequence(&seq, 4);
+        // Length+2 with NULLB sentinels at [0] and [length+1]; reverse-complement
+        // of ACGT is ACGT (palindrome), so rev[1..=4] should be 1, 2, 4, 8.
+        assert_eq!(rev.len(), 6);
+        assert_eq!(rev[0], NULLB);
+        assert_eq!(rev[5], NULLB);
+        assert_eq!(&rev[1..=4], &[1u8, 2, 4, 8]);
+
+        // Non-palindrome: AAAC → GTTT in reverse-complement.
+        let seq = vec![1u8, 1, 1, 2];
+        let rev = get_reverse_nucl_sequence(&seq, 4);
+        assert_eq!(&rev[1..=4], &[4u8, 8, 8, 8]);
+    }
+
+    #[test]
+    fn test_blast_get_translation_forward_and_reverse() {
+        // ATG GCT (NCBI4na) → M A in frame +1.
+        let seq: Vec<u8> = vec![1, 8, 4, 4, 2, 8];
+        let rev = get_reverse_nucl_sequence(&seq, seq.len());
+        let mut prot = vec![0u8; seq.len() / CODON_LENGTH + 2];
+        let n = blast_get_translation(
+            &seq,
+            &rev,
+            seq.len(),
+            1,
+            &mut prot,
+            &STANDARD_GENETIC_CODE,
+        );
+        assert_eq!(n, 2);
+        assert_eq!(prot[0], NULLB);
+        assert_eq!(prot[1], 12); // Met
+        assert_eq!(prot[2], 1);  // Ala
+        assert_eq!(prot[3], NULLB);
+
+        // Frame -1 reads the reverse-complement of ATGGCT = AGCCAT, codon AGC = S(17)
+        // and CAT = H(8).
+        let n_rev = blast_get_translation(
+            &seq,
+            &rev,
+            seq.len(),
+            -1,
+            &mut prot,
+            &STANDARD_GENETIC_CODE,
+        );
+        assert_eq!(n_rev, 2);
+        assert_eq!(prot[1], 17); // Ser
+        assert_eq!(prot[2], 8);  // His
+    }
+
+    #[test]
+    fn test_blast_get_all_translations_ncbi4na_offsets_and_frames() {
+        let seq: Vec<u8> = vec![1, 8, 4, 4, 2, 8]; // ATGGCT
+        let (buf, offsets) =
+            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        // Six contexts, frame ∈ {1,2,3,-1,-2,-3}; lengths in residues are
+        // 2, 1, 1, 2, 1, 1 for ATGGCT (frame +1: ATG GCT → M A; frame +2:
+        // TGG → W; frame +3: GGC → G; reverse-complement is AGCCAT,
+        // similarly).
+        for ctx in 0..NUM_FRAMES {
+            let begin = (offsets[ctx] + 1) as usize; // skip leading NULLB sentinel
+            let end = offsets[ctx + 1] as usize;
+            assert!(begin <= end);
+            // Trailing NULLB at offsets[ctx+1] - 1.
+            assert!(end == 0 || buf[end] == NULLB || buf[end] == 0);
+        }
+        // Frame +1 has 2 residues.
+        assert_eq!(offsets[1] - offsets[0] - 1, 2);
+    }
+
+    #[test]
     fn test_genetic_code_2_vertebrate_mito() {
         // AGA -> * (stop, 25) instead of R
         assert_eq!(translate_codon(0, 2, 0, &GENETIC_CODE_2), 25);
@@ -354,36 +614,39 @@ mod tests {
 
     #[test]
     fn test_six_frame_translation_short_seq() {
-        // Sequence shorter than 3 bases: no codons in any frame
-        let seq = vec![0u8, 1]; // AC
-        let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
-        assert_eq!(frames.len(), 6);
-        for (_, protein) in &frames {
-            assert_eq!(protein.len(), 0);
+        // Sequence shorter than 3 bases (NCBI4na: A=1, C=2): no codons in any frame.
+        let seq = vec![1u8, 2]; // AC
+        let (_buf, offsets) =
+            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        for ctx in 0..NUM_FRAMES {
+            assert_eq!(offsets[ctx + 1] - offsets[ctx], 1, "expected zero residues in ctx {ctx}");
         }
     }
 
     #[test]
     fn test_six_frame_translation_exact_codon() {
-        // Exactly 3 bases: one codon in frame +1, zero in +2 and +3
-        let seq = vec![0u8, 3, 2]; // ATG = Met
-        let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
-        assert_eq!(frames[0].1.len(), 1); // frame +1
-        assert_eq!(frames[0].1[0], 12); // Met = 12
-        assert_eq!(frames[1].1.len(), 0); // frame +2
-        assert_eq!(frames[2].1.len(), 0); // frame +3
+        // Exactly 3 bases (NCBI4na): ATG = Met. A=1, T=8, G=4.
+        let seq = vec![1u8, 8, 4];
+        let (buf, offsets) =
+            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        // Frame +1 has 1 residue (Met = 12).
+        assert_eq!(offsets[1] - offsets[0] - 1, 1);
+        assert_eq!(buf[(offsets[0] + 1) as usize], 12);
+        // Frames +2 and +3 have 0 residues.
+        assert_eq!(offsets[2] - offsets[1] - 1, 0);
+        assert_eq!(offsets[3] - offsets[2] - 1, 0);
     }
 
     #[test]
     fn test_six_frame_frame_numbers() {
-        let seq = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]; // 12 bases
-        let frames = six_frame_translation(&seq, &STANDARD_GENETIC_CODE);
-        assert_eq!(frames[0].0, 1);
-        assert_eq!(frames[1].0, 2);
-        assert_eq!(frames[2].0, 3);
-        assert_eq!(frames[3].0, -1);
-        assert_eq!(frames[4].0, -2);
-        assert_eq!(frames[5].0, -3);
+        // Frame numbering follows BLAST_ContextToFrame for blastx-style programs:
+        // contexts 0..5 → frames 1, 2, 3, -1, -2, -3.
+        assert_eq!(blast_context_to_frame_blastx(0), 1);
+        assert_eq!(blast_context_to_frame_blastx(1), 2);
+        assert_eq!(blast_context_to_frame_blastx(2), 3);
+        assert_eq!(blast_context_to_frame_blastx(3), -1);
+        assert_eq!(blast_context_to_frame_blastx(4), -2);
+        assert_eq!(blast_context_to_frame_blastx(5), -3);
     }
 
     #[test]

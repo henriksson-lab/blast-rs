@@ -27,6 +27,16 @@ use std::time::Instant;
 pub(crate) static ALIGN_EX_TRACEHASH_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+fn trace_target_bounds() -> Option<(i32, i32, i32, i32)> {
+    let raw = std::env::var("BLAST_RS_TRACE_TARGET").ok()?;
+    let mut parts = raw.split(':');
+    let qs = parts.next()?.parse().ok()?;
+    let qe = parts.next()?.parse().ok()?;
+    let ss = parts.next()?.parse().ok()?;
+    let se = parts.next()?.parse().ok()?;
+    Some((qs, qe, ss, se))
+}
+
 /// Perform traceback alignment between query and subject sequences.
 /// This is the full dynamic programming alignment that produces
 /// a complete GapEditScript for output formatting.
@@ -258,7 +268,12 @@ fn script_to_op(s: u8) -> GapAlignOpType {
 
 /// One-directional gapped extension with X-dropoff and traceback.
 /// Port of `ALIGN_EX` in `ncbi-blast-2.17.0+-src/c++/src/algo/blast/core/blast_gapalign.c:374`.
-fn align_ex(
+///
+/// `pub(crate)` so kappa-side callers (`blast_kappa::sw_find_final_ends_using_xdrop`)
+/// can drive the traceback without re-implementing the DP. The
+/// signature is identical to the C function's effective output:
+/// `(best_score, a_offset, b_offset, edit_ops)`.
+pub(crate) fn align_ex(
     a: &[u8],
     b: &[u8],
     m: usize,
@@ -288,17 +303,18 @@ fn align_ex(
     } else {
         n + 3
     };
-    // Cap allocation: band never exceeds the X-drop-driven width. The
-    // score-only path uses the same principle (`gapped_score_one_dir`), and
-    // letting traceback grow unbounded here makes long near-self hits
-    // pathological even when the intended X-drop band is narrow.
-    let max_band = (extra * 2 + 20).min(n + extra + 10);
+    // NCBI `ALIGN_EX` (`blast_gapalign.c:463-469`) sizes `dp_mem` to cover
+    // any position that can survive the X-drop check, starting at
+    // `num_extra_cells` and growing via `realloc` (same file, 3276-3284).
+    // The score-only paths match that; `align_ex` must too, otherwise any
+    // alignment where `b_size` would exceed the initial allocation gets
+    // truncated silently.
     let mut sa = vec![
         GapDP {
             best: MININT,
             best_gap: MININT
         };
-        max_band
+        n + extra + 10
     ];
 
     // Row 0 initialization
@@ -1019,13 +1035,10 @@ fn gapped_score_one_dir_packed_subject(
     let mut first_b = 0usize;
 
     for ai in 1..=m {
-        let subj_base = if reverse {
-            let abs_pos = subject_base_offset + (m - ai);
-            let byte = subject_packed[abs_pos >> 2];
-            (byte >> (2 * (3 - ((ai - 1) & 3)))) & 0x03
-        } else {
-            unpack_ncbi2na_base(subject_packed, subject_base_offset + ai - 1)
-        };
+        let subj_base = unpack_ncbi2na_base(
+            subject_packed,
+            subject_base_offset + if reverse { m - ai } else { ai - 1 },
+        );
         let mrow = &matrix[subj_base as usize & 0x0F];
         let mut sc = MININT;
         let mut sgr = MININT;
@@ -1393,21 +1406,40 @@ pub fn blast_gapped_align(
         esp.push(op, cnt);
     }
 
-    // Prune terminal gaps
-    while !esp.ops.is_empty() && esp.ops[0].0 != GapAlignOpType::Sub {
-        esp.ops.remove(0);
-    }
-    while !esp.ops.is_empty() && esp.ops.last().unwrap().0 != GapAlignOpType::Sub {
-        esp.ops.pop();
+    // Do NOT strip terminal gaps. NCBI `Blast_HSPCalcLengthAndGaps`
+    // (`blast_hits.c:1054`) walks the entire edit script and counts every
+    // Del/Ins as a gap_open. Stripping leading/trailing gaps here was a
+    // Rust-only divergence that produced a 1-low gap_opens count whenever
+    // ALIGN_EX traceback ended on a gap state.
+    let query_end = seed_q + qr + 1;
+    let subject_end = seed_s + sr + 1;
+    if let Some((qs, qe, ss, se)) = trace_target_bounds() {
+        let q_start_i = q_start as i32;
+        let s_start_i = s_start as i32;
+        let q_end_i = query_end as i32;
+        let s_end_i = subject_end as i32;
+        if q_start_i <= qe && q_end_i >= qs && s_start_i <= se && s_end_i >= ss {
+            eprintln!(
+                "[traceback-combine] seed=({}, {}) left_score={} right_score={} total={} left_ops={:?} right_ops={:?} combined={:?}",
+                seed_q,
+                seed_s,
+                score_l,
+                score_r,
+                total_score,
+                left_ops,
+                right_ops,
+                esp.ops
+            );
+        }
     }
 
     Some(TracebackResult {
         score: total_score,
         edit_script: esp,
         query_start: q_start,
-        query_end: seed_q + qr + 1,
+        query_end,
         subject_start: s_start,
-        subject_end: seed_s + sr + 1,
+        subject_end,
     })
 }
 
@@ -2035,7 +2067,7 @@ mod tests {
             12,
             true,
         );
-        assert_eq!(left_packed, left_decoded);
+        assert_eq!(left_packed.0, left_decoded);
 
     }
 }

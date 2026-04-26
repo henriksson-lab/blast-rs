@@ -1377,7 +1377,177 @@ fn extract_following_small_integer(bytes: &[u8]) -> Option<u32> {
     bytes.get(pos + 2).copied().map(u32::from)
 }
 
+/// ASN.1 BER tags for Seq-id CHOICE alternatives that wrap a Textseq-id
+/// (genbank, embl, pir, swissprot, other/refseq, ddbj, prf, tpg/tpe/tpd, gpipe,
+/// named-annot-track). PDB ([14]=0xae) is handled separately because its inner
+/// structure is `PDB-seq-id`, not `Textseq-id`.
+const TEXTSEQ_ID_TAGS: &[u8] = &[0xa4, 0xa5, 0xa6, 0xa7, 0xa9, 0xac, 0xad, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3];
+
+/// Walk the binary header, find the first Seq-id whose CHOICE arm wraps a
+/// Textseq-id, and extract the `accession` (field [1]) plus optional `version`
+/// (field [3]). Returns `accession.version` if both present. Also handles
+/// PDB seq-ids (`[14]=0xae`) which carry a `mol` VisibleString + `chain` INTEGER
+/// — formatted as `MOL_<chain-letter>` to match NCBI's `1MC7_A` style.
+fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    let n = hdr.len();
+    let mut i = 0;
+    while i < n {
+        // PDB seq-id [14] = 0xae — different inner shape from Textseq-id.
+        if hdr[i] == 0xae && i + 1 < n && hdr[i + 1] == 0x80 {
+            let mut j = i + 2;
+            if j + 1 < n && hdr[j] == 0x30 && hdr[j + 1] == 0x80 {
+                j += 2;
+            }
+            let scan_end = (j + 64).min(n);
+            let mut mol: Option<String> = None;
+            let mut chain: Option<u8> = None;
+            while j + 1 < scan_end {
+                // mol field [0]
+                if hdr[j] == 0xa0 && hdr[j + 1] == 0x80 {
+                    let mut k = j + 2;
+                    while k + 1 < scan_end {
+                        if hdr[k] == 0x1a {
+                            let len = hdr[k + 1] as usize;
+                            let s = k + 2;
+                            let e = s.saturating_add(len);
+                            if len > 0 && e <= n {
+                                let bytes = &hdr[s..e];
+                                if bytes.iter().all(|&b| b.is_ascii_alphanumeric()) {
+                                    mol = Some(String::from_utf8_lossy(bytes).to_string());
+                                }
+                            }
+                            j = e;
+                            break;
+                        }
+                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) { break; }
+                        k += 1;
+                    }
+                    continue;
+                }
+                // chain field [1] = INTEGER (ASCII code of chain letter)
+                if hdr[j] == 0xa1 && hdr[j + 1] == 0x80 {
+                    let mut k = j + 2;
+                    while k + 2 < scan_end {
+                        if hdr[k] == 0x02 && hdr[k + 1] == 0x01 {
+                            chain = Some(hdr[k + 2]);
+                            j = k + 3;
+                            break;
+                        }
+                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) { break; }
+                        k += 1;
+                    }
+                    continue;
+                }
+                if hdr[j] == 0x00 && hdr.get(j + 1) == Some(&0x00)
+                    && hdr.get(j + 2) == Some(&0x00) && hdr.get(j + 3) == Some(&0x00) {
+                    break; // end of pdb seq-id
+                }
+                j += 1;
+            }
+            if let Some(m) = mol {
+                if let Some(c) = chain {
+                    if c.is_ascii_alphanumeric() || c == b'|' {
+                        return Some(format!("{}_{}", m, c as char));
+                    }
+                }
+                return Some(m);
+            }
+            i = j.max(i + 2);
+            continue;
+        }
+        if !TEXTSEQ_ID_TAGS.contains(&hdr[i]) {
+            i += 1;
+            continue;
+        }
+        // Tag found — expect `tag 0x80` (indefinite length) for context-specific
+        // constructed types in the BLAST DB encoding.
+        if i + 1 >= n || hdr[i + 1] != 0x80 {
+            i += 1;
+            continue;
+        }
+        // Inside the seq-id wrapper: the inner Textseq-id is a SEQUENCE
+        // (0x30 0x80 …). Skip past it.
+        let mut j = i + 2;
+        if j + 1 < n && hdr[j] == 0x30 && hdr[j + 1] == 0x80 {
+            j += 2;
+        }
+        // Hunt for the accession field (0xa1 0x80 …). Walk forward in this
+        // seq-id's scope until we hit the end-of-content marker (0x00 0x00 0x00 0x00)
+        // or run out of bytes.
+        let scan_end = (j + 256).min(n);
+        let mut acc: Option<String> = None;
+        while j + 1 < scan_end {
+            if hdr[j] == 0xa1 && hdr[j + 1] == 0x80 {
+                // Inside the accession field, find the VisibleString (0x1a LEN content).
+                let mut k = j + 2;
+                while k + 1 < n && k < scan_end {
+                    if hdr[k] == 0x1a {
+                        let len = hdr[k + 1] as usize;
+                        let s = k + 2;
+                        let e = s.saturating_add(len);
+                        if len > 0 && e <= n {
+                            let bytes = &hdr[s..e];
+                            if bytes.iter().all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-')) {
+                                acc = Some(String::from_utf8_lossy(bytes).to_string());
+                                j = e;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    // End of accession field
+                    if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) {
+                        break;
+                    }
+                    k += 1;
+                }
+                break;
+            }
+            j += 1;
+        }
+        if let Some(acc_str) = acc {
+            // Look for the version field (0xa3 0x80 0x02 0x01 NN) anywhere in the
+            // remaining seq-id scope. Skip leading 0x00 padding.
+            let mut vi = j;
+            let scan_end = (vi + 64).min(n);
+            while vi < scan_end {
+                if hdr[vi] == 0xa3 && vi + 4 < n
+                    && hdr[vi + 1] == 0x80 && hdr[vi + 2] == 0x02 && hdr[vi + 3] == 0x01
+                {
+                    let version = hdr[vi + 4];
+                    if version > 0 {
+                        return Some(format!("{}.{}", acc_str, version));
+                    }
+                    return Some(acc_str);
+                }
+                if hdr[vi] == 0x00 && hdr.get(vi + 1) == Some(&0x00)
+                    && hdr.get(vi + 2) == Some(&0x00) && hdr.get(vi + 3) == Some(&0x00)
+                {
+                    break; // end of seq-id
+                }
+                vi += 1;
+            }
+            return Some(acc_str);
+        }
+        // No accession — advance past the tag and try the next seq-id.
+        i += 2;
+    }
+    None
+}
+
 fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
+    // Honor ASN.1 Seq-id structure when possible. Each Seq-id CHOICE alternative
+    // uses a constructed context-specific tag: `[4]=genbank` (0xa4),
+    // `[7]=swissprot` (0xa7), `[9]=other` (0xa9, refseq), etc. Inside, the
+    // Textseq-id has `name [0]=0xa0`, `accession [1]=0xa1`, `release [2]=0xa2`,
+    // `version [3]=0xa3`. NCBI's `blast_format` walks this list and returns the
+    // first TextSeq-id's accession — that's `P95690` for `sp|P95690|DPO1_SULAC`
+    // and `NP_839091` for `ref|NP_839091|`. The legacy regex-based fallback below
+    // can drift to a cross-referenced GenBank accession found later in the title,
+    // so try the structured walk first.
+    if let Some(acc) = extract_textseq_accession_from_asn(hdr) {
+        return Some(acc);
+    }
     let mut i = 0;
     let mut first_text_versioned = None;
     let mut first_unversioned = None;
@@ -1477,7 +1647,126 @@ fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
             i += 1;
         }
     }
+    // Prefer UniProt-style alternating-character accessions over the
+    // arbitrary letters+digits match — NCBI's `blast_formatter` recognizes
+    // UniProt IDs explicitly, so when a header contains BOTH (e.g.
+    // prokka's `>Q2G184 ~~~name~~~COG0449`) NCBI displays `Q2G184` while
+    // our strict regex would capture `COG0449` first. UniProt patterns
+    // from https://www.uniprot.org/help/accession_numbers:
+    // `[OPQ][0-9][A-Z0-9]{3}[0-9]` (6 chars, e.g. `Q2G184`) or
+    // `[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]` (also 6 chars, e.g. `A0A123`).
+    // Only fall back to UniProt when versioned isn't present (text-versioned
+    // already includes a `.N` suffix that signals an authoritative seq-id).
+    if first_text_versioned.is_none() {
+        if let Some(uniprot) = extract_uniprot_accession(hdr) {
+            return Some(uniprot);
+        }
+    }
     first_text_versioned.or(first_unversioned).or(first_local)
+}
+
+/// Scan `hdr` for a UniProt-style 6-char accession.
+/// Pattern (per https://www.uniprot.org/help/accession_numbers):
+/// `[OPQ][0-9][A-Z0-9]{3}[0-9]` or `[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]`.
+/// Both are 6 chars total. Walks ASN.1 text-field markers (`0x1a | 0x0c`)
+/// to extract clean printable-text strings, then searches each string for
+/// a 6-char window matching the UniProt pattern at a word boundary. This
+/// avoids false hits on letter prefixes that appear in the binary
+/// length/tag bytes adjacent to text fields.
+fn extract_uniprot_accession(hdr: &[u8]) -> Option<String> {
+    let n = hdr.len();
+    let mut i = 0;
+    while i < n {
+        if matches!(hdr[i], 0x1a | 0x0c) {
+            if let Some((len, len_len)) = read_ber_len(hdr, i + 1) {
+                let start = i + 1 + len_len;
+                let end = start.saturating_add(len);
+                if len > 0 && end <= n {
+                    let bytes = &hdr[start..end];
+                    if let Some(acc) = scan_text_for_uniprot(bytes) {
+                        return Some(acc);
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Search a clean-text byte slice for a UniProt-format accession, either
+/// 6-char (`[OPQ][0-9][A-Z0-9]{3}[0-9]` or `[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]`)
+/// or 10-char (`[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9][A-Z][A-Z0-9]{2}[0-9]`,
+/// e.g. `A0A0H3LKL4`). Tries 10-char first because a 6-char match
+/// would otherwise be the prefix of a 10-char one. End-bounded by
+/// non-alphanumeric chars; LEFT side allows in-string matches because
+/// makedb sometimes prepends a single-letter tag in the binary header.
+fn scan_text_for_uniprot(text: &[u8]) -> Option<String> {
+    let n = text.len();
+    if n < 6 {
+        return None;
+    }
+    // Try 10-char first.
+    let mut i = 0;
+    while i + 10 <= n {
+        let mut s = [0u8; 10];
+        s.copy_from_slice(&text[i..i + 10]);
+        let end_boundary = i + 10 == n || !text[i + 10].is_ascii_alphanumeric();
+        if end_boundary && is_uniprot_accession_10(&s) {
+            return Some(String::from_utf8_lossy(&s).to_string());
+        }
+        i += 1;
+    }
+    // Then 6-char.
+    let mut i = 0;
+    while i + 6 <= n {
+        let mut s = [0u8; 6];
+        s.copy_from_slice(&text[i..i + 6]);
+        let end_boundary = i + 6 == n || !text[i + 6].is_ascii_alphanumeric();
+        if end_boundary && is_uniprot_accession(&s) {
+            return Some(String::from_utf8_lossy(&s).to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 10-char UniProt pattern: `[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9][A-Z][A-Z0-9]{2}[0-9]`.
+/// Example: `A0A0H3LKL4`.
+#[inline]
+fn is_uniprot_accession_10(s: &[u8; 10]) -> bool {
+    s[0].is_ascii_uppercase()
+        && !matches!(s[0], b'O' | b'P' | b'Q')
+        && s[1].is_ascii_digit()
+        && s[2].is_ascii_uppercase()
+        && (s[3].is_ascii_uppercase() | s[3].is_ascii_digit())
+        && (s[4].is_ascii_uppercase() | s[4].is_ascii_digit())
+        && s[5].is_ascii_digit()
+        && s[6].is_ascii_uppercase()
+        && (s[7].is_ascii_uppercase() | s[7].is_ascii_digit())
+        && (s[8].is_ascii_uppercase() | s[8].is_ascii_digit())
+        && s[9].is_ascii_digit()
+}
+
+#[inline]
+fn is_uniprot_accession(s: &[u8; 6]) -> bool {
+    // Pattern 1: [OPQ][0-9][A-Z0-9]{3}[0-9]
+    let p1 = matches!(s[0], b'O' | b'P' | b'Q')
+        && s[1].is_ascii_digit()
+        && s[2].is_ascii_uppercase() | s[2].is_ascii_digit()
+        && s[3].is_ascii_uppercase() | s[3].is_ascii_digit()
+        && s[4].is_ascii_uppercase() | s[4].is_ascii_digit()
+        && s[5].is_ascii_digit();
+    // Pattern 2: [A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]
+    let p2 = (s[0].is_ascii_uppercase() && !matches!(s[0], b'O' | b'P' | b'Q'))
+        && s[1].is_ascii_digit()
+        && s[2].is_ascii_uppercase()
+        && (s[3].is_ascii_uppercase() | s[3].is_ascii_digit())
+        && (s[4].is_ascii_uppercase() | s[4].is_ascii_digit())
+        && s[5].is_ascii_digit();
+    p1 || p2
 }
 
 fn extract_title_from_header(hdr: &[u8]) -> Option<String> {

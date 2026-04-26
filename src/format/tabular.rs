@@ -5,6 +5,19 @@
 use std::collections::HashMap;
 use std::io::Write;
 
+/// Strip a trailing `.N` version suffix from an accession-like string.
+/// `AAC44598.1` → `AAC44598`; `gi|123|ref|NP_839091.2|` is left untouched
+/// because the trailing `|` after the digits prevents the strip.
+fn strip_accession_version(s: &str) -> &str {
+    if let Some(dot) = s.rfind('.') {
+        let suffix = &s[dot + 1..];
+        if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            return &s[..dot];
+        }
+    }
+    s
+}
+
 pub const DEFAULT_TABULAR_COLUMNS: &str =
     "qaccver saccver pident length mismatch gapopen qstart qend sstart send evalue bitscore";
 
@@ -203,7 +216,15 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             .clone(),
         "qgi" => hit.query_gi.as_deref().unwrap_or("0").to_string(),
         "sseqid" | "sallseqid" => hit.subject_id.clone(),
-        "sacc" | "sallacc" => hit.subject_acc.as_ref().unwrap_or(&hit.subject_id).clone(),
+        "sacc" | "sallacc" => {
+            // NCBI's `-outfmt 6 sacc` returns the accession without version
+            // suffix; `saccver` returns it WITH version (`blast_format.cpp` —
+            // `eDefline_AccessionWithoutVersion` vs `eDefline_AccessionWithVersion`).
+            // Our extracted `subject_id` typically carries `.N`; strip when
+            // emitting `sacc` so column values match.
+            let raw = hit.subject_acc.as_ref().unwrap_or(&hit.subject_id);
+            strip_accession_version(raw).to_string()
+        }
         "saccver" => hit
             .subject_accver
             .as_ref()

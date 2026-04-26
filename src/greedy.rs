@@ -473,6 +473,14 @@ fn rebuild_edit_script(esp: &mut GapEditScript) {
 }
 
 fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
+    // 1-1 port of NCBI `s_UpdateEditScript` (`blast_gapalign.c:2573`). The
+    // `op_type[op] = Sub` write must precede the `op_type[pos-1] = Del/Ins`
+    // (or `pos+1` for the af branch) write, mirroring the C statement
+    // order: when `op == pos-1` (or `op == pos+1` for af), the C code
+    // first stamps Sub and then immediately overwrites it with Del/Ins on
+    // the very next statement, so Del/Ins wins. Reordering these in Rust
+    // (Sub last) silently loses one gap_open per HSP whenever the search
+    // window collapses to its neighbour.
     if bf > 0 {
         let mut op = pos as i32;
         let (mut qd, mut sd) = (bf, bf);
@@ -495,6 +503,9 @@ fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
             }
         }
         esp.ops[op as usize].1 = -qd.max(sd);
+        // C: `esp->op_type[op++] = eGapAlignSub;` — stamp Sub at the old
+        // op, then advance past it for the zero-out loop.
+        esp.ops[op as usize].0 = GapAlignOpType::Sub;
         let mut next = op as usize + 1;
         while next < pos.saturating_sub(1) {
             esp.ops[next].1 = 0;
@@ -510,7 +521,6 @@ fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
             };
             esp.ops[pos - 1].1 = qd.unsigned_abs() as i32;
         }
-        esp.ops[op as usize].0 = GapAlignOpType::Sub;
     }
 
     if af > 0 {
@@ -535,6 +545,9 @@ fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
             }
         }
         esp.ops[op as usize].1 = -qd.max(sd);
+        // C: `esp->op_type[op--] = eGapAlignSub;` — stamp Sub at op,
+        // then step back through the gap-zeroing loop.
+        esp.ops[op as usize].0 = GapAlignOpType::Sub;
         let mut prev = op as usize - 1;
         while prev > pos + 1 {
             esp.ops[prev].1 = 0;
@@ -550,11 +563,13 @@ fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
             };
             esp.ops[pos + 1].1 = qd.unsigned_abs() as i32;
         }
-        esp.ops[op as usize].0 = GapAlignOpType::Sub;
     }
 }
 
 fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
+    if std::env::var_os("BLAST_RS_SKIP_REDUCE_GAPS").is_some() {
+        return;
+    }
     let trace_this = trace_reduce_script(esp, query, subject);
     if trace_this {
         eprintln!("[reduce-trace] begin ops={:?}", esp.ops);

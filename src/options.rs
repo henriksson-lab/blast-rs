@@ -170,11 +170,18 @@ impl ExtensionOptions {
     }
 }
 
-/// Effective length options.
+/// Effective length options. 1-1 port of `BlastEffectiveLengthsOptions`
+/// (`blast_options.h:484`).
 #[derive(Debug, Clone, Default)]
 pub struct EffectiveLengthsOptions {
+    /// Database length used for statistical calculations.
     pub db_length: i64,
+    /// Number of database sequences used for statistical calculations.
+    pub dbseq_num: i32,
+    /// Number of elements in `searchsp_eff` (must equal the number of
+    /// contexts in the search).
     pub num_searchspaces: i32,
+    /// Search space override per query context.
     pub searchsp_eff: Vec<i64>,
 }
 

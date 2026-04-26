@@ -19,11 +19,15 @@
 
 // Public API modules
 pub mod api;
+pub mod blast_kappa;
+pub mod blast_setup;
+pub mod hspfilter_culling;
 pub mod compo_mode_condition;
 pub mod composition;
 pub mod nlm_linear_algebra;
 pub mod optimize_target_freq;
 pub mod semi_gapped_align;
+pub mod smith_waterman;
 
 // Re-export high-level API at crate root for convenience
 pub use api::{

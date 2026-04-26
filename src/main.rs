@@ -7905,7 +7905,7 @@ mod tests {
         assert_eq!(args.penalty(), -2);
         assert_eq!(args.gapopen(), 0);
         assert_eq!(args.gapextend(), 0);
-        assert_eq!(args.xdrop_ungap(), 5.0);
+        assert_eq!(args.xdrop_ungap(), 20.0);
     }
 
     #[test]
