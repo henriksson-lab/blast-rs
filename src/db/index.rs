@@ -1381,7 +1381,95 @@ fn extract_following_small_integer(bytes: &[u8]) -> Option<u32> {
 /// (genbank, embl, pir, swissprot, other/refseq, ddbj, prf, tpg/tpe/tpd, gpipe,
 /// named-annot-track). PDB ([14]=0xae) is handled separately because its inner
 /// structure is `PDB-seq-id`, not `Textseq-id`.
-const TEXTSEQ_ID_TAGS: &[u8] = &[0xa4, 0xa5, 0xa6, 0xa7, 0xa9, 0xac, 0xad, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3];
+const TEXTSEQ_ID_TAGS: &[u8] = &[
+    0xa4, 0xa5, 0xa6, 0xa7, 0xa9, 0xac, 0xad, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3,
+];
+
+fn asn1_value_bounds(
+    buf: &[u8],
+    pos: usize,
+    tag: u8,
+    fallback_limit: usize,
+) -> Option<(usize, usize, usize)> {
+    if buf.get(pos).copied()? != tag {
+        return None;
+    }
+    let len_pos = pos + 1;
+    let first_len = *buf.get(len_pos)?;
+    if first_len == 0x80 {
+        let start = pos + 2;
+        let end = start.saturating_add(fallback_limit).min(buf.len());
+        let after = find_eoc(buf, start)
+            .map(|eoc| eoc.saturating_add(2).min(buf.len()))
+            .unwrap_or(end);
+        return Some((start, end, after));
+    }
+    let (len, len_len) = read_ber_len(buf, len_pos)?;
+    let start = len_pos + len_len;
+    let end = start.checked_add(len)?;
+    if end <= buf.len() {
+        Some((start, end, end))
+    } else {
+        None
+    }
+}
+
+fn find_eoc(buf: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i + 1 < buf.len() {
+        if buf[i] == 0x00 && buf[i + 1] == 0x00 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_visible_string(buf: &[u8], start: usize, end: usize) -> Option<String> {
+    let mut i = start;
+    while i + 1 < end {
+        if matches!(buf[i], 0x1a | 0x0c) {
+            let (len, len_len) = read_ber_len(buf, i + 1)?;
+            let s = i + 1 + len_len;
+            let e = s.checked_add(len)?;
+            if len > 0 && e <= end {
+                let bytes = &buf[s..e];
+                if bytes
+                    .iter()
+                    .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+                {
+                    return Some(String::from_utf8_lossy(bytes).to_string());
+                }
+            }
+            i = e.min(end);
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_small_integer(buf: &[u8], start: usize, end: usize) -> Option<u32> {
+    let mut i = start;
+    while i + 1 < end {
+        if buf[i] == 0x02 {
+            let (len, len_len) = read_ber_len(buf, i + 1)?;
+            let s = i + 1 + len_len;
+            let e = s.checked_add(len)?;
+            if len > 0 && len <= 4 && e <= end {
+                let mut value = 0u32;
+                for &b in &buf[s..e] {
+                    value = (value << 8) | u32::from(b);
+                }
+                return Some(value);
+            }
+            i = e.min(end);
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
 
 /// Walk the binary header, find the first Seq-id whose CHOICE arm wraps a
 /// Textseq-id, and extract the `accession` (field [1]) plus optional `version`
@@ -1419,7 +1507,9 @@ fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
                             j = e;
                             break;
                         }
-                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) { break; }
+                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) {
+                            break;
+                        }
                         k += 1;
                     }
                     continue;
@@ -1433,13 +1523,18 @@ fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
                             j = k + 3;
                             break;
                         }
-                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) { break; }
+                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) {
+                            break;
+                        }
                         k += 1;
                     }
                     continue;
                 }
-                if hdr[j] == 0x00 && hdr.get(j + 1) == Some(&0x00)
-                    && hdr.get(j + 2) == Some(&0x00) && hdr.get(j + 3) == Some(&0x00) {
+                if hdr[j] == 0x00
+                    && hdr.get(j + 1) == Some(&0x00)
+                    && hdr.get(j + 2) == Some(&0x00)
+                    && hdr.get(j + 3) == Some(&0x00)
+                {
                     break; // end of pdb seq-id
                 }
                 j += 1;
@@ -1459,78 +1554,61 @@ fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
             i += 1;
             continue;
         }
-        // Tag found — expect `tag 0x80` (indefinite length) for context-specific
-        // constructed types in the BLAST DB encoding.
-        if i + 1 >= n || hdr[i + 1] != 0x80 {
+        let Some((mut j, seq_id_end, after_seq_id)) = asn1_value_bounds(hdr, i, hdr[i], 512) else {
             i += 1;
             continue;
+        };
+        // Inside the seq-id wrapper: the inner Textseq-id is commonly encoded
+        // as a SEQUENCE. Honor its BER length when present.
+        let mut scan_end = seq_id_end;
+        if let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) {
+            j = seq_start;
+            scan_end = seq_end;
         }
-        // Inside the seq-id wrapper: the inner Textseq-id is a SEQUENCE
-        // (0x30 0x80 …). Skip past it.
-        let mut j = i + 2;
-        if j + 1 < n && hdr[j] == 0x30 && hdr[j + 1] == 0x80 {
-            j += 2;
-        }
-        // Hunt for the accession field (0xa1 0x80 …). Walk forward in this
-        // seq-id's scope until we hit the end-of-content marker (0x00 0x00 0x00 0x00)
-        // or run out of bytes.
-        let scan_end = (j + 256).min(n);
+        // Hunt for the accession field ([1]) or fall back to the
+        // `name` field (0xa0 0x80 …). PIR records often have `name` set but
+        // no `accession` (e.g. T30219 stores its identifier as `name`); NCBI
+        // uses whichever is present.
         let mut acc: Option<String> = None;
-        while j + 1 < scan_end {
-            if hdr[j] == 0xa1 && hdr[j + 1] == 0x80 {
-                // Inside the accession field, find the VisibleString (0x1a LEN content).
-                let mut k = j + 2;
-                while k + 1 < n && k < scan_end {
-                    if hdr[k] == 0x1a {
-                        let len = hdr[k + 1] as usize;
-                        let s = k + 2;
-                        let e = s.saturating_add(len);
-                        if len > 0 && e <= n {
-                            let bytes = &hdr[s..e];
-                            if bytes.iter().all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-')) {
-                                acc = Some(String::from_utf8_lossy(bytes).to_string());
-                                j = e;
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                    // End of accession field
-                    if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) {
-                        break;
-                    }
-                    k += 1;
+        let mut name: Option<String> = None;
+        let mut version: Option<u32> = None;
+        while j < scan_end {
+            // accession [1]
+            if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa1, 128) {
+                if let Some(value) = extract_visible_string(hdr, field_start, field_end) {
+                    acc = Some(value);
                 }
-                break;
+                j = after;
+                continue;
+            }
+            // name [0] — fall-back identifier (PIR uses this).
+            if name.is_none() {
+                if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa0, 128)
+                {
+                    name = extract_visible_string(hdr, field_start, field_end);
+                    j = after;
+                    continue;
+                }
+            }
+            // version [3]
+            if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa3, 32) {
+                version = extract_small_integer(hdr, field_start, field_end);
+                j = after;
+                continue;
             }
             j += 1;
         }
+        let acc = acc.or(name);
         if let Some(acc_str) = acc {
-            // Look for the version field (0xa3 0x80 0x02 0x01 NN) anywhere in the
-            // remaining seq-id scope. Skip leading 0x00 padding.
-            let mut vi = j;
-            let scan_end = (vi + 64).min(n);
-            while vi < scan_end {
-                if hdr[vi] == 0xa3 && vi + 4 < n
-                    && hdr[vi + 1] == 0x80 && hdr[vi + 2] == 0x02 && hdr[vi + 3] == 0x01
-                {
-                    let version = hdr[vi + 4];
-                    if version > 0 {
-                        return Some(format!("{}.{}", acc_str, version));
-                    }
-                    return Some(acc_str);
+            if let Some(version) = version {
+                if version > 0 {
+                    return Some(format!("{}.{}", acc_str, version));
                 }
-                if hdr[vi] == 0x00 && hdr.get(vi + 1) == Some(&0x00)
-                    && hdr.get(vi + 2) == Some(&0x00) && hdr.get(vi + 3) == Some(&0x00)
-                {
-                    break; // end of seq-id
-                }
-                vi += 1;
             }
             return Some(acc_str);
         }
         // No accession — advance past the tag and try the next seq-id.
-        i += 2;
+        i = after_seq_id.max(i + 1);
     }
     None
 }
@@ -1546,6 +1624,9 @@ fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
     // can drift to a cross-referenced GenBank accession found later in the title,
     // so try the structured walk first.
     if let Some(acc) = extract_textseq_accession_from_asn(hdr) {
+        return Some(acc);
+    }
+    if let Some(acc) = extract_accession_from_visible_strings(hdr) {
         return Some(acc);
     }
     let mut i = 0;
@@ -1663,6 +1744,74 @@ fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
         }
     }
     first_text_versioned.or(first_unversioned).or(first_local)
+}
+
+fn extract_accession_from_visible_strings(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    let mut first_versioned = None;
+    let mut first_unversioned = None;
+    while i + 1 < hdr.len() {
+        if matches!(hdr[i], 0x1a | 0x0c) {
+            if let Some((len, len_len)) = read_ber_len(hdr, i + 1) {
+                let start = i + 1 + len_len;
+                let end = start.saturating_add(len);
+                if len > 0 && end <= hdr.len() {
+                    scan_text_for_accession(
+                        &hdr[start..end],
+                        &mut first_versioned,
+                        &mut first_unversioned,
+                    );
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    first_versioned.or(first_unversioned)
+}
+
+fn scan_text_for_accession(
+    text: &[u8],
+    first_versioned: &mut Option<String>,
+    first_unversioned: &mut Option<String>,
+) {
+    let mut i = 0;
+    while i < text.len() {
+        if !text[i].is_ascii_uppercase() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < text.len() && text[i].is_ascii_uppercase() {
+            i += 1;
+        }
+        let mut j = i;
+        if j < text.len() && text[j] == b'_' {
+            j += 1;
+        }
+        if j >= text.len() || !text[j].is_ascii_digit() {
+            continue;
+        }
+        i = j;
+        while i < text.len() && text[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i - start < 6 {
+            continue;
+        }
+        if i + 1 < text.len() && text[i] == b'.' && text[i + 1].is_ascii_digit() {
+            i += 1;
+            while i < text.len() && text[i].is_ascii_digit() {
+                i += 1;
+            }
+            if first_versioned.is_none() {
+                *first_versioned = Some(String::from_utf8_lossy(&text[start..i]).to_string());
+            }
+        } else if first_unversioned.is_none() {
+            *first_unversioned = Some(String::from_utf8_lossy(&text[start..i]).to_string());
+        }
+    }
 }
 
 /// Scan `hdr` for a UniProt-style 6-char accession.
@@ -1914,6 +2063,20 @@ mod tests {
         }
         let db = BlastDb::open(&pombe).unwrap();
         assert_eq!(db.get_accession(0).as_deref(), Some("NC_003421.2"));
+    }
+
+    #[test]
+    fn test_accession_yeast_definite_textseq_id() {
+        let yeast = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/large_db/yeast");
+        if !yeast.with_extension("nin").exists() {
+            return;
+        }
+        let db = BlastDb::open(&yeast).unwrap();
+        assert!((0..db.num_oids).any(|oid| db.get_accession(oid).as_deref() == Some("NC_001147.6")));
+        assert!((0..db.num_oids).all(|oid| {
+            db.get_accession(oid)
+                .map_or(true, |acc| !acc.contains("NC_") || acc.starts_with("NC_"))
+        }));
     }
 
     #[test]

@@ -1921,7 +1921,16 @@ pub fn ungapped_kbp_calc(
     for i in 0..4.min(alphabet_size) {
         std_freq[i] = 0.25;
     }
-    ungapped_kbp_calc_with_std(query, contexts, loscore, hiscore, alphabet_size, ambiguous, &std_freq, matrix)
+    ungapped_kbp_calc_with_std(
+        query,
+        contexts,
+        loscore,
+        hiscore,
+        alphabet_size,
+        ambiguous,
+        &std_freq,
+        matrix,
+    )
 }
 
 /// Like [`ungapped_kbp_calc`] but takes an explicit `std_freq` array.

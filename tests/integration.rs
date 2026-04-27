@@ -12,6 +12,31 @@ use blast_rs::{
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+fn blast_cli_bin_for_tests() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    {
+        return Some(path);
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let deps_dir = exe.parent()?;
+    let debug_dir = if deps_dir.file_name().is_some_and(|name| name == "deps") {
+        deps_dir.parent()?
+    } else {
+        deps_dir
+    };
+    let release_bin = debug_dir
+        .parent()
+        .map(|target_dir| target_dir.join("release").join("blast-cli"));
+    if let Some(release_bin) = release_bin.filter(|path| path.exists()) {
+        return Some(release_bin);
+    }
+    let debug_bin = debug_dir.join("blast-cli");
+    debug_bin.exists().then_some(debug_bin)
+}
+
 fn ascii_reverse_complement(seq: &str) -> String {
     seq.as_bytes()
         .iter()
@@ -1103,6 +1128,113 @@ fn assert_blastn_db_outfmt_matches_ncbi(
     );
 }
 
+fn large_db_fixture_paths(query_name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/large_db");
+    let query = root.join(query_name);
+    let db = root.join("celegans");
+    if query.exists() && db.with_extension("nin").exists() {
+        Some((query, db))
+    } else {
+        eprintln!(
+            "Skipping: large_db fixture not present under {}",
+            root.display()
+        );
+        None
+    }
+}
+
+fn run_large_db_blastn(
+    query_name: &str,
+    max_hsps: Option<&str>,
+    extra_env: Option<(&str, &str)>,
+) -> Option<(TempDir, std::path::PathBuf)> {
+    let Some((query, db)) = large_db_fixture_paths(query_name) else {
+        return None;
+    };
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli or set BLAST_RS_CLI_BIN to run CLI parity");
+        return None;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let out = tmp.path().join("out.tsv");
+    let mut cmd = std::process::Command::new(blast_cli);
+    cmd.arg("blastn")
+        .arg("--task")
+        .arg("blastn-short")
+        .arg("--dust")
+        .arg("no")
+        .arg("--evalue")
+        .arg("10")
+        .arg("--query")
+        .arg(query)
+        .arg("--db")
+        .arg(db)
+        .arg("--outfmt")
+        .arg("6 qseqid sseqid pident length qstart qend sstart send bitscore evalue")
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&out);
+    if let Some(max_hsps) = max_hsps {
+        cmd.arg("--max_hsps").arg(max_hsps);
+    }
+    if let Some((key, value)) = extra_env {
+        cmd.env(key, value);
+    }
+    let status = cmd.status().expect("run blast-cli large_db parity");
+    assert!(status.success(), "blast-cli exited with {status}");
+    Some((tmp, out))
+}
+
+fn assert_large_db_blastn_matches_ncbi(query_name: &str, max_hsps: Option<&str>) {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some((query, db)) = large_db_fixture_paths(query_name) else {
+        return;
+    };
+    let Some((rust_tmp, rust_out)) = run_large_db_blastn(query_name, max_hsps, None) else {
+        return;
+    };
+
+    let ncbi_tmp = TempDir::new().expect("tempdir");
+    let ncbi_out = ncbi_tmp.path().join("ncbi.tsv");
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-task")
+        .arg("blastn-short")
+        .arg("-dust")
+        .arg("no")
+        .arg("-evalue")
+        .arg("10")
+        .arg("-query")
+        .arg(query)
+        .arg("-db")
+        .arg(db)
+        .arg("-outfmt")
+        .arg("6 qseqid sseqid pident length qstart qend sstart send bitscore evalue")
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    if let Some(max_hsps) = max_hsps {
+        ncbi_cmd.arg("-max_hsps").arg(max_hsps);
+    }
+    let status = ncbi_cmd.status().expect("run NCBI blastn large_db parity");
+    assert!(status.success(), "NCBI blastn exited with {status}");
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust large_db output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+    drop(rust_tmp);
+}
+
 #[test]
 fn blastn_subject_ncbi_parity_dust_no_exact_hits() {
     assert_blastn_subject_matches_ncbi(
@@ -1111,6 +1243,52 @@ fn blastn_subject_ncbi_parity_dust_no_exact_hits() {
         &["--dust", "no", "--max_target_seqs", "10", "--max_hsps", "2"],
         &["-dust", "no", "-max_target_seqs", "10", "-max_hsps", "2"],
     );
+}
+
+#[test]
+#[ignore = "requires the large celegans fixture and NCBI blastn"]
+fn blastn_large_db_ncbi_parity_q500_q2000_regressions() {
+    assert_large_db_blastn_matches_ncbi("query_500.fa", None);
+    assert_large_db_blastn_matches_ncbi("query_2000.fa", None);
+    assert_large_db_blastn_matches_ncbi("query_2000.fa", Some("1"));
+}
+
+#[test]
+#[ignore = "diagnostic; requires the large celegans fixture"]
+fn blastn_large_db_packed_and_decoded_ungapped_paths_diff_report() {
+    for query_name in ["query_500.fa", "query_2000.fa"] {
+        let Some((normal_tmp, normal_out)) = run_large_db_blastn(query_name, None, None) else {
+            return;
+        };
+        let Some((decoded_tmp, decoded_out)) = run_large_db_blastn(
+            query_name,
+            None,
+            Some(("BLAST_RS_FORCE_DECODED_UNGAPPED", "1")),
+        ) else {
+            return;
+        };
+
+        let normal = std::fs::read(&normal_out).expect("read normal output");
+        let decoded = std::fs::read(&decoded_out).expect("read decoded output");
+        if normal != decoded {
+            let normal_lines: std::collections::BTreeSet<_> = String::from_utf8_lossy(&normal)
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            let decoded_lines: std::collections::BTreeSet<_> = String::from_utf8_lossy(&decoded)
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            let packed_only = normal_lines.difference(&decoded_lines).count();
+            let decoded_only = decoded_lines.difference(&normal_lines).count();
+            eprintln!(
+                "{query_name}: packed/decoded paths differ; packed_only={packed_only} decoded_only={decoded_only}; normal={:?} decoded={:?}",
+                normal_out, decoded_out
+            );
+        }
+        drop(normal_tmp);
+        drop(decoded_tmp);
+    }
 }
 
 #[test]
@@ -15151,6 +15329,30 @@ fn blastp_comp_adjust_mode1_is_not_a_noop_on_short_exact_hit() {
         score0,
         score1
     );
+}
+
+#[test]
+fn blastp_accepts_reusable_rayon_thread_pool() {
+    let (_tmp, db) = build_protein_db(vec![
+        protein_entry("P001", "exact", "MKFLILLF"),
+        protein_entry("P002", "near", "MKYLIILF"),
+        protein_entry("P003", "unrelated", "GGGGGGGG"),
+    ]);
+    let baseline_params = SearchParams::blastp().evalue(10.0).num_threads(1);
+    let baseline = blastp(&db, b"MKFLILLF", &baseline_params);
+
+    let pool = std::sync::Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("build rayon pool"),
+    );
+    let pooled_params = SearchParams::blastp().evalue(10.0).thread_pool(pool);
+    let pooled = blastp(&db, b"MKFLILLF", &pooled_params);
+
+    assert_eq!(pooled.len(), baseline.len());
+    assert_eq!(pooled[0].subject_accession, baseline[0].subject_accession);
+    assert_eq!(pooled[0].hsps[0].score, baseline[0].hsps[0].score);
 }
 
 #[test]

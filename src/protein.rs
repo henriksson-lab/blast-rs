@@ -869,6 +869,22 @@ pub fn protein_gapped_align(
     let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
     let mismatches = (align_length - num_ident - gap_opens).max(0);
 
+    if std::env::var("NB_TRACE_EDIT").is_ok() {
+        let mut ops_str = String::new();
+        for (op, cnt) in &edit_script.ops {
+            let code = match op {
+                GapAlignOpType::Sub => 3,
+                GapAlignOpType::Del => 0,
+                GapAlignOpType::Ins => 6,
+                _ => 99,
+            };
+            ops_str.push_str(&format!(" {}:{}", code, cnt));
+        }
+        eprintln!(
+            "[ours-edit] qstart={} qstop={} sstart={} sstop={} score={} ops:{}",
+            final_q_start, final_q_end, final_s_start, final_s_end, total_score, ops_str
+        );
+    }
     Some(ProteinGappedResult {
         query_start: final_q_start,
         query_end: final_q_end,
@@ -924,14 +940,10 @@ pub fn protein_sw_bounded_xdrop_align(
     // `(seed_q, seed_s)` and produce a 1-cell-too-short alignment.
     let mut q_padded: Vec<u8> = Vec::with_capacity(q_extent + 2);
     q_padded.push(0);
-    q_padded.extend_from_slice(
-        &query[seed_q..(seed_q + q_extent + 1).min(query.len())],
-    );
+    q_padded.extend_from_slice(&query[seed_q..(seed_q + q_extent + 1).min(query.len())]);
     let mut s_padded: Vec<u8> = Vec::with_capacity(s_extent + 2);
     s_padded.push(0);
-    s_padded.extend_from_slice(
-        &subject[seed_s..(seed_s + s_extent + 1).min(subject.len())],
-    );
+    s_padded.extend_from_slice(&subject[seed_s..(seed_s + s_extent + 1).min(subject.len())]);
     let m = q_padded.len().saturating_sub(1);
     let n = s_padded.len().saturating_sub(1);
     if m == 0 || n == 0 {
@@ -977,9 +989,7 @@ pub fn protein_sw_bounded_xdrop_align(
     while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
         edit_script.ops.remove(0);
     }
-    while !edit_script.ops.is_empty()
-        && edit_script.ops.last().unwrap().0 != GapAlignOpType::Sub
-    {
+    while !edit_script.ops.is_empty() && edit_script.ops.last().unwrap().0 != GapAlignOpType::Sub {
         edit_script.ops.pop();
     }
     if edit_script.ops.is_empty() {
@@ -992,8 +1002,7 @@ pub fn protein_sw_bounded_xdrop_align(
     let final_s_end = seed_s + sr;
     let local_q = &query[final_q_start..final_q_end];
     let local_s = &subject[final_s_start..final_s_end];
-    let (align_length, num_ident, gap_opens) =
-        edit_script.count_identities(local_q, local_s);
+    let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
     let mismatches = (align_length - num_ident - gap_opens).max(0);
 
     Some(ProteinGappedResult {

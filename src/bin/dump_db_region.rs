@@ -36,7 +36,10 @@ fn render_raw_window(packed: &[u8], start: usize, end: usize) -> String {
 }
 
 fn render_decoded_window(decoded: &[u8], start: usize, end: usize) -> String {
-    decoded[start..end].iter().map(|&b| code_to_char(b)).collect()
+    decoded[start..end]
+        .iter()
+        .map(|&b| code_to_char(b))
+        .collect()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

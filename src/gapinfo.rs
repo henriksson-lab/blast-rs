@@ -31,7 +31,21 @@ impl GapEditScript {
         }
     }
 
+    /// Append an edit op, merging with the previous op if the type matches.
+    /// Mirrors NCBI's `Blast_PrelimEditBlockToGapEditScript`
+    /// (`blast_gapalign.c:2482`) which collapses consecutive same-type ops
+    /// when concatenating the reverse + forward halves into a single
+    /// edit script. Without this merge, our left-half-end and right-half-
+    /// start SUB runs become two ops (`3:6 3:14`) instead of NCBI's
+    /// single op (`3:20`), and downstream reevaluation walks them
+    /// differently — affecting Kadane's-best-subarray decisions.
     pub fn push(&mut self, op: GapAlignOpType, count: i32) {
+        if let Some(last) = self.ops.last_mut() {
+            if last.0 == op {
+                last.1 += count;
+                return;
+            }
+        }
         self.ops.push((op, count));
     }
 

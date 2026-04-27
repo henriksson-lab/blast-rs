@@ -16,9 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let packed = db.get_sequence(oid);
     let seq_len = db.get_seq_len(oid) as usize;
-    let defline = db
-        .get_defline(oid)
-        .unwrap_or_else(|| accession.to_string());
+    let defline = db.get_defline(oid).unwrap_or_else(|| accession.to_string());
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     writeln!(out, ">{}", defline)?;
     for chunk_start in (0..seq_len).step_by(60) {

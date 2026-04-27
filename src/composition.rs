@@ -459,7 +459,13 @@ pub fn composition_scale_matrix_with_ratio(
     freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
 ) -> Option<([[i32; AA_SIZE]; AA_SIZE], f64)> {
     let lr = composition_lambda_ratio(matrix, query_prob, subject_prob, ungapped_lambda)?;
-    let scaled = composition_scale_matrix(matrix, query_prob, subject_prob, ungapped_lambda, freq_ratios)?;
+    let scaled = composition_scale_matrix(
+        matrix,
+        query_prob,
+        subject_prob,
+        ungapped_lambda,
+        freq_ratios,
+    )?;
     Some((scaled, lr))
 }
 

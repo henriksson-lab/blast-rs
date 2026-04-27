@@ -2497,8 +2497,8 @@ fn apply_blastn_linked_sum_stats_to_hsps(
     len_adj_minus: i32,
 ) {
     use blast_rs::{
-        BLASTN, BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg,
-        LinkHSPParameters, LinkScoreBlock, QueryInfo,
+        BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
+        LinkScoreBlock, QueryInfo, BLASTN,
     };
 
     if hsps.len() <= 1 {
@@ -2628,6 +2628,9 @@ fn build_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
         .map(|value| parse_validated_i32("comp_based_stats", value))
     {
         params.comp_adjust = comp as u8;
+    }
+    if let Some(xdrop_ungap) = args.xdrop_ungap.as_deref() {
+        params.x_drop_ungapped = parse_validated_f64("xdrop_ungap", xdrop_ungap) as i32;
     }
     params.max_target_seqs = args.effective_max_target_seqs() as usize;
     params.max_hsps = args.max_hsps_value().map(|max| max as usize);
@@ -3386,8 +3389,9 @@ fn run_blastn_rust(
 
         // Per-context search space
         let database_length = effective_db_length(args, db.total_length as i64);
-        let compute_searchsp =
-            |kbp: &blast_rs::stat::KarlinBlk, ukbp: &blast_rs::stat::KarlinBlk| -> (f64, i32) {
+        let compute_searchsp = |kbp: &blast_rs::stat::KarlinBlk,
+                                ukbp: &blast_rs::stat::KarlinBlk|
+         -> (f64, i32) {
             let searchsp = args.searchsp();
             if searchsp > 0 {
                 return (searchsp as f64, 0);
@@ -3471,11 +3475,17 @@ fn run_blastn_rust(
     } else {
         parsed_num_threads as usize
     };
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .stack_size(64 * 1024 * 1024) // 64 MB per thread to avoid stack overflow on large DBs
-        .build()
-        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+    let pool = if num_threads > 1 {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .stack_size(64 * 1024 * 1024) // 64 MB per thread to avoid stack overflow on large DBs
+                .build()
+                .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap()),
+        )
+    } else {
+        None
+    };
     blastn_profile_mark(profile_enabled, profile_start, profile_last, "search_setup");
 
     let search_plus = args.strand != "minus";
@@ -3712,13 +3722,12 @@ fn run_blastn_rust(
                         } else {
                             None
                         };
-                        let mut hsps =
-                            if seq_len > 5_000_000 {
-                                let mut combined = Vec::new();
-                                for (chunk_start, chunk_end) in blast_db_subject_chunks(seq_len) {
-                                    let chunk_packed =
-                                        packed_subject_chunk(packed, chunk_start, chunk_end);
-                                    let chunk_hsps =
+                        let mut hsps = if seq_len > 5_000_000 {
+                            let mut combined = Vec::new();
+                            for (chunk_start, chunk_end) in blast_db_subject_chunks(seq_len) {
+                                let chunk_packed =
+                                    packed_subject_chunk(packed, chunk_start, chunk_end);
+                                let chunk_hsps =
                                         blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
                                             &prepared_queries[qi],
                                             &eq.plus_nomask,
@@ -3737,29 +3746,29 @@ fn run_blastn_rust(
                                             evalue,
                                             &mut scratch[qi],
                                         );
-                                    combined.extend(offset_subject_hsps(chunk_hsps, chunk_start));
-                                }
-                                combined
-                            } else {
-                                blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
-                                    &prepared_queries[qi],
-                                    &eq.plus_nomask,
-                                    &eq.minus_nomask,
-                                    packed,
-                                    seq_len,
-                                    reward,
-                                    penalty,
-                                    gapopen,
-                                    gapextend,
-                                    ungapped_x_dropoff,
-                                    gapped_x_dropoff,
-                                    gapped_x_dropoff_final,
-                                    kbp,
-                                    search_space,
-                                    evalue,
-                                    &mut scratch[qi],
-                                )
-                            };
+                                combined.extend(offset_subject_hsps(chunk_hsps, chunk_start));
+                            }
+                            combined
+                        } else {
+                            blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
+                                &prepared_queries[qi],
+                                &eq.plus_nomask,
+                                &eq.minus_nomask,
+                                packed,
+                                seq_len,
+                                reward,
+                                penalty,
+                                gapopen,
+                                gapextend,
+                                ungapped_x_dropoff,
+                                gapped_x_dropoff,
+                                gapped_x_dropoff_final,
+                                kbp,
+                                search_space,
+                                evalue,
+                                &mut scratch[qi],
+                            )
+                        };
                         if let Some(start) = packed_search_start {
                             profile_packed_search_ms += start.elapsed().as_millis();
                         }
@@ -3897,7 +3906,10 @@ fn run_blastn_rust(
         let mut collected = Vec::new();
         for (volume_idx, (start_oid, end_oid)) in db.volume_oid_ranges().into_iter().enumerate() {
             db.advise_volume_sequential(volume_idx);
-            let mut volume_hits: Vec<_> = pool.install(|| {
+            let mut volume_hits: Vec<_> = pool
+                .as_ref()
+                .expect("parallel thread pool required")
+                .install(|| {
                 (start_oid..end_oid)
                     .into_par_iter()
                     .map_init(
@@ -4131,7 +4143,7 @@ fn run_blastn_rust(
                     )
                     .filter_map(|hits| hits)
                     .collect()
-            });
+                });
             collected.append(&mut volume_hits);
             db.advise_volume_dontneed(volume_idx);
         }
@@ -4140,32 +4152,33 @@ fn run_blastn_rust(
     blastn_profile_mark(profile_enabled, profile_start, profile_last, "subject_scan");
 
     #[cfg(test)]
-    let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> =
-        {
-            let prepared_queries: Vec<_> = encoded_queries
-                .iter()
-                .map(|eq| {
-                    if use_contiguous_megablast_lookup {
-                        blast_rs::search::PreparedBlastnQuery::new_megablast_with_nomask(
-                            &eq.plus_masked,
-                            &eq.minus_masked,
-                            &eq.plus_nomask,
-                            &eq.minus_nomask,
-                            word_size,
-                        )
-                    } else {
-                        blast_rs::search::PreparedBlastnQuery::new_with_nomask(
-                            &eq.plus_masked,
-                            &eq.minus_masked,
-                            &eq.plus_nomask,
-                            &eq.minus_nomask,
-                            word_size,
-                        )
-                    }
-                })
-                .collect();
-            pool.install(|| {
-            (0..db.num_oids)
+    let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> = {
+        let prepared_queries: Vec<_> = encoded_queries
+            .iter()
+            .map(|eq| {
+                if use_contiguous_megablast_lookup {
+                    blast_rs::search::PreparedBlastnQuery::new_megablast_with_nomask(
+                        &eq.plus_masked,
+                        &eq.minus_masked,
+                        &eq.plus_nomask,
+                        &eq.minus_nomask,
+                        word_size,
+                    )
+                } else {
+                    blast_rs::search::PreparedBlastnQuery::new_with_nomask(
+                        &eq.plus_masked,
+                        &eq.minus_masked,
+                        &eq.plus_nomask,
+                        &eq.minus_nomask,
+                        word_size,
+                    )
+                }
+            })
+            .collect();
+        pool.as_ref()
+            .expect("parallel thread pool required")
+            .install(|| {
+                (0..db.num_oids)
                 .into_par_iter()
                 .map_init(
                     || {
@@ -4293,7 +4306,7 @@ fn run_blastn_rust(
                 .filter_map(|hits| hits)
                 .collect()
             })
-        };
+    };
 
     // Flatten and group by query
     let mut per_query_oid_hits: Vec<Vec<(u32, Vec<blast_rs::search::SearchHsp>)>> =
@@ -4502,13 +4515,23 @@ fn run_blastn_rust(
                     let b_subject_lo = b.subject_start.min(b.subject_end);
                     let a_subject_hi = a.subject_start.max(a.subject_end);
                     let b_subject_hi = b.subject_start.max(b.subject_end);
-                    b.bit_score
+                    let score_order = b
+                        .bit_score
                         .partial_cmp(&a.bit_score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a_subject_lo.cmp(&b_subject_lo))
-                        .then_with(|| b_subject_hi.cmp(&a_subject_hi))
-                        .then_with(|| b.sframe.cmp(&a.sframe))
-                        .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
+                        .unwrap_or(std::cmp::Ordering::Equal);
+                    if a.query_len >= 1000 || b.query_len >= 1000 {
+                        score_order
+                            .then_with(|| a_subject_lo.cmp(&b_subject_lo))
+                            .then_with(|| b_subject_hi.cmp(&a_subject_hi))
+                            .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
+                            .then_with(|| a.sframe.cmp(&b.sframe))
+                    } else {
+                        score_order
+                            .then_with(|| a.sframe.cmp(&b.sframe))
+                            .then_with(|| a_subject_lo.cmp(&b_subject_lo))
+                            .then_with(|| b_subject_hi.cmp(&a_subject_hi))
+                            .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
+                    }
                 });
             }
         }
@@ -4851,7 +4874,10 @@ fn packed_subject_chunk(packed: &[u8], start: usize, end: usize) -> &[u8] {
     &packed[byte_start..byte_end]
 }
 
-fn offset_subject_hsps(mut hsps: Vec<blast_rs::search::SearchHsp>, offset: usize) -> Vec<blast_rs::search::SearchHsp> {
+fn offset_subject_hsps(
+    mut hsps: Vec<blast_rs::search::SearchHsp>,
+    offset: usize,
+) -> Vec<blast_rs::search::SearchHsp> {
     if offset == 0 {
         return hsps;
     }
@@ -5260,10 +5286,10 @@ fn run_blastn_subject(
                 a_rank.cmp(&b_rank)
             })
             .then_with(|| b.subject_id.cmp(&a.subject_id))
+            .then_with(|| a.sframe.cmp(&b.sframe))
             .then_with(|| a_subject_lo.cmp(&b_subject_lo))
             .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
             .then_with(|| a_subject_hi.cmp(&b_subject_hi))
-            .then_with(|| b.sframe.cmp(&a.sframe))
     });
     let query_len = queries
         .first()
@@ -7493,16 +7519,57 @@ fn apply_filters(
     // Limit HSPs per subject
     if let Some(max_hsps) = args.max_hsps_value() {
         let max = max_hsps as usize;
-        let mut counts: std::collections::HashMap<(String, String), usize> =
-            std::collections::HashMap::new();
-        hits.retain(|h| {
-            let c = counts
-                .entry((h.query_id.clone(), h.subject_id.clone()))
-                .or_insert(0);
-            *c += 1;
-            *c <= max
-        });
+        apply_max_hsps_filter(hits, max);
     }
+}
+
+fn apply_max_hsps_filter(hits: &mut Vec<TabularHit>, max: usize) {
+    let mut groups: std::collections::HashMap<(String, String), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, hit) in hits.iter().enumerate() {
+        groups
+            .entry((hit.query_id.clone(), hit.subject_id.clone()))
+            .or_default()
+            .push(idx);
+    }
+
+    let mut keep = std::collections::HashSet::new();
+    for mut indices in groups.into_values() {
+        indices.sort_by(|&ai, &bi| compare_hsps_for_max_hsps(&hits[ai], &hits[bi]));
+        keep.extend(indices.into_iter().take(max));
+    }
+
+    let mut idx = 0usize;
+    hits.retain(|_| {
+        let retain = keep.contains(&idx);
+        idx += 1;
+        retain
+    });
+}
+
+fn compare_hsps_for_max_hsps(a: &TabularHit, b: &TabularHit) -> std::cmp::Ordering {
+    b.raw_score
+        .cmp(&a.raw_score)
+        .then_with(|| {
+            a.subject_start
+                .min(a.subject_end)
+                .cmp(&b.subject_start.min(b.subject_end))
+        })
+        .then_with(|| {
+            b.subject_start
+                .max(b.subject_end)
+                .cmp(&a.subject_start.max(a.subject_end))
+        })
+        .then_with(|| {
+            a.query_start
+                .min(a.query_end)
+                .cmp(&b.query_start.min(b.query_end))
+        })
+        .then_with(|| {
+            b.query_start
+                .max(b.query_end)
+                .cmp(&a.query_start.max(a.query_end))
+        })
 }
 
 fn apply_max_target_seqs_filter(hits: &mut Vec<TabularHit>, max_subjects: usize) {
@@ -8629,15 +8696,7 @@ mod tests {
         ];
 
         apply_blastn_linked_sum_stats_to_hsps(
-            &mut hsps,
-            500,
-            5000,
-            &kbp,
-            &kbp,
-            searchsp,
-            searchsp,
-            0,
-            0,
+            &mut hsps, 500, 5000, &kbp, &kbp, searchsp, searchsp, 0, 0,
         );
 
         assert!(

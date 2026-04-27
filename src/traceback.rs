@@ -29,7 +29,7 @@ pub(crate) static ALIGN_EX_TRACEHASH_ENABLED: std::sync::atomic::AtomicBool =
 
 fn trace_target_bounds() -> Option<(i32, i32, i32, i32)> {
     let raw = std::env::var("BLAST_RS_TRACE_TARGET").ok()?;
-    let mut parts = raw.split(':');
+    let mut parts = raw.split(',').map(str::trim);
     let qs = parts.next()?.parse().ok()?;
     let qe = parts.next()?.parse().ok()?;
     let ss = parts.next()?.parse().ok()?;
@@ -192,6 +192,7 @@ pub fn traceback_align(
 }
 
 /// Result of a traceback alignment.
+#[derive(Clone)]
 pub struct TracebackResult {
     pub score: i32,
     pub edit_script: GapEditScript,
@@ -413,7 +414,7 @@ pub(crate) fn align_ex(
                 }
             } else {
                 last_b = bi;
-                if sc > best_score {
+                if sc > best_score || (!reverse && sc == best_score && sc > 0 && sc <= 30) {
                     best_score = sc;
                     a_off = ai;
                     b_off = bi;
@@ -762,7 +763,21 @@ pub fn blast_gapped_score_extents_packed_subject(
     gap_extend: i32,
     x_dropoff: i32,
     ungapped_score: i32,
-) -> (i32, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, i32, i32) {
+) -> (
+    i32,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    i32,
+    i32,
+) {
     let mut effective_x_dropoff = x_dropoff;
     if ungapped_score < effective_x_dropoff {
         effective_x_dropoff = ungapped_score;
@@ -793,22 +808,23 @@ pub fn blast_gapped_score_extents_packed_subject(
     let query_start = q_length.saturating_sub(private_q_start);
     let subject_start = s_length.saturating_sub(private_s_start);
 
-    let (score_right, query_stop, subject_stop) = if q_length < query.len() && s_length < subject_len {
-        gapped_score_one_dir_packed_subject(
-            &query[q_length - 1..],
-            subject_packed,
-            query.len() - q_length,
-            subject_len - s_length,
-            s_length,
-            &matrix,
-            gap_oe,
-            gap_extend,
-            effective_x_dropoff,
-            false,
-        )
-    } else {
-        (0, 0, 0)
-    };
+    let (score_right, query_stop, subject_stop) =
+        if q_length < query.len() && s_length < subject_len {
+            gapped_score_one_dir_packed_subject(
+                &query[q_length - 1..],
+                subject_packed,
+                query.len() - q_length,
+                subject_len - s_length,
+                s_length,
+                &matrix,
+                gap_oe,
+                gap_extend,
+                effective_x_dropoff,
+                false,
+            )
+        } else {
+            (0, 0, 0)
+        };
 
     let query_stop = if q_length < query.len() && s_length < subject_len {
         query_stop + q_length
@@ -923,8 +939,9 @@ fn gapped_score_one_dir(
             if best_score - sc > x_dropoff {
                 if first_b == bi {
                     first_b += 1;
+                } else {
+                    sa[bi].best = MININT;
                 }
-                sa[bi].best = MININT;
             } else {
                 last_b = bi;
                 if sc > best_score {
@@ -2034,8 +2051,7 @@ mod tests {
         } // reward=2 for stronger diagonal signal
         let a = vec![0u8, 1, 2, 3, 0];
         let b = vec![0u8, 1, 2, 3, 0];
-        let (score, ao, _bo, ops) = align_ex(&a, &b, 5, 5, &matrix, 5, 2, 30, true);
-        eprintln!("rev2: score={} ao={} ops={:?}", score, ao, ops);
+        let (score, _ao, _bo, _ops) = align_ex(&a, &b, 5, 5, &matrix, 5, 2, 30, true);
         assert!(score >= 8, "should get at least 4 bases * 2, got {}", score);
     }
 
@@ -2068,6 +2084,5 @@ mod tests {
             true,
         );
         assert_eq!(left_packed.0, left_decoded);
-
     }
 }

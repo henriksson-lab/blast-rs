@@ -200,8 +200,7 @@ fn find_first_mismatch_packed(
     if reverse {
         while seq1_index < len1
             && seq2_index < len2
-            && seq1[len1 - 1 - seq1_index]
-                == unpack_packed_base(seq2_packed, len2 - 1 - seq2_index)
+            && seq1[len1 - 1 - seq1_index] == unpack_packed_base(seq2_packed, len2 - 1 - seq2_index)
         {
             seq1_index += 1;
             seq2_index += 1;
@@ -209,8 +208,7 @@ fn find_first_mismatch_packed(
     } else {
         while seq1_index < len1
             && seq2_index < len2
-            && seq1[seq1_index]
-                == unpack_packed_base(seq2_packed, seq2_index + rem)
+            && seq1[seq1_index] == unpack_packed_base(seq2_packed, seq2_index + rem)
         {
             seq1_index += 1;
             seq2_index += 1;
@@ -1225,7 +1223,10 @@ pub fn greedy_align_with_seed(
     };
 
     let initial_max_dist = initial_greedy_max_dist(subject.len());
-    let max_possible_dist = query.len().saturating_add(subject.len()).max(initial_max_dist);
+    let max_possible_dist = query
+        .len()
+        .saturating_add(subject.len())
+        .max(initial_max_dist);
 
     let right = greedy_align_one_side_with_growth(
         &query[q_seed..],
@@ -1305,7 +1306,10 @@ pub fn greedy_align_with_seed_packed_subject(
     };
 
     let initial_max_dist = initial_greedy_max_dist(subject_len);
-    let max_possible_dist = query.len().saturating_add(subject_len).max(initial_max_dist);
+    let max_possible_dist = query
+        .len()
+        .saturating_add(subject_len)
+        .max(initial_max_dist);
 
     let right = greedy_align_one_side_with_growth_packed_subject(
         &query[q_seed..],
@@ -1402,7 +1406,10 @@ fn adjusted_greedy_seed(
     if right_len > left_len {
         (right_q + right_len, right_s + right_len)
     } else {
-        (left_q.saturating_sub(left_len), left_s.saturating_sub(left_len))
+        (
+            left_q.saturating_sub(left_len),
+            left_s.saturating_sub(left_len),
+        )
     }
 }
 

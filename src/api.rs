@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::db::{BlastDb, DbType};
 use crate::encoding::{AMINOACID_TO_NCBISTDAA, IUPACNA_TO_BLASTNA, NCBISTDAA_TO_AMINOACID};
@@ -400,59 +401,68 @@ fn best_protein_alignment_hit(
         .max_by_key(|uh| uh.score)
     {
         let mut best_hit = None;
-        for (seed_q, seed_s) in protein_gapped_candidate_seeds(query_aa, subj_aa, seed, matrix) {
-            if let Some(gr) = crate::protein::protein_gapped_align(
-                query_aa,
-                subj_aa,
-                seed_q,
-                seed_s,
-                matrix,
-                gap_open,
-                gap_extend,
-                x_drop_final,
-            ) {
-                let q_slice = &query_aa[gr.query_start..gr.query_end];
-                let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
-                let (qseq, sseq) = gr.edit_script.render_alignment(
-                    q_slice,
-                    s_slice,
-                    crate::protein::ncbistdaa_to_char,
-                );
-                let hit = crate::protein_lookup::ProteinHit {
-                    query_start: gr.query_start,
-                    query_end: gr.query_end,
-                    subject_start: gr.subject_start,
-                    subject_end: gr.subject_end,
-                    score: gr.score,
-                    num_ident: gr.num_ident,
-                    align_length: gr.align_length,
-                    mismatches: gr.mismatches,
-                    gap_opens: gr.gap_opens,
-                    qseq: Some(qseq),
-                    sseq: Some(sseq),
-                    scaled_score: None,
-                };
-                let replace =
-                    best_hit
-                        .as_ref()
-                        .map_or(true, |best: &crate::protein_lookup::ProteinHit| {
-                            hit.score > best.score
-                                || (hit.score == best.score
-                                    && (
-                                        hit.subject_start,
-                                        usize::MAX - hit.subject_end,
-                                        hit.query_start,
-                                        usize::MAX - hit.query_end,
-                                    ) < (
-                                        best.subject_start,
-                                        usize::MAX - best.subject_end,
-                                        best.query_start,
-                                        usize::MAX - best.query_end,
-                                    ))
-                        });
-                if replace {
-                    best_hit = Some(hit);
-                }
+        let (seed_q, seed_s) = crate::protein::get_start_for_gapped_alignment(
+            query_aa,
+            subj_aa,
+            seed.query_start,
+            seed.query_end.saturating_sub(seed.query_start),
+            seed.subject_start,
+            seed.subject_end.saturating_sub(seed.subject_start),
+            matrix,
+        );
+        if let Some(gr) = crate::protein::protein_gapped_align(
+            query_aa,
+            subj_aa,
+            seed_q,
+            seed_s,
+            matrix,
+            gap_open,
+            gap_extend,
+            x_drop_final,
+        ) {
+            let q_slice = &query_aa[gr.query_start..gr.query_end];
+            let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
+            let (qseq, sseq) = gr.edit_script.render_alignment(
+                q_slice,
+                s_slice,
+                crate::protein::ncbistdaa_to_char,
+            );
+            let hit = crate::protein_lookup::ProteinHit {
+                query_start: gr.query_start,
+                query_end: gr.query_end,
+                subject_start: gr.subject_start,
+                subject_end: gr.subject_end,
+                score: gr.score,
+                num_ident: gr.num_ident,
+                align_length: gr.align_length,
+                mismatches: gr.mismatches,
+                gap_opens: gr.gap_opens,
+                qseq: Some(qseq),
+                sseq: Some(sseq),
+                scaled_score: None,
+                gapped_start_q: seed_q,
+                gapped_start_s: seed_s,
+            };
+            let replace =
+                best_hit
+                    .as_ref()
+                    .map_or(true, |best: &crate::protein_lookup::ProteinHit| {
+                        hit.score > best.score
+                            || (hit.score == best.score
+                                && (
+                                    hit.subject_start,
+                                    usize::MAX - hit.subject_end,
+                                    hit.query_start,
+                                    usize::MAX - hit.query_end,
+                                ) < (
+                                    best.subject_start,
+                                    usize::MAX - best.subject_end,
+                                    best.query_start,
+                                    usize::MAX - best.query_end,
+                                ))
+                    });
+            if replace {
+                best_hit = Some(hit);
             }
         }
         if best_hit.is_some() {
@@ -463,49 +473,6 @@ fn best_protein_alignment_hit(
     Some(best_ungapped)
 }
 
-fn protein_gapped_candidate_seeds(
-    query_aa: &[u8],
-    subj_aa: &[u8],
-    seed: &crate::protein_lookup::ProteinHit,
-    matrix: &[[i32; AA_SIZE]; AA_SIZE],
-) -> Vec<(usize, usize)> {
-    let (blast_seed_q, blast_seed_s) = crate::protein::get_start_for_gapped_alignment(
-        query_aa,
-        subj_aa,
-        seed.query_start,
-        seed.query_end.saturating_sub(seed.query_start),
-        seed.subject_start,
-        seed.subject_end.saturating_sub(seed.subject_start),
-        matrix,
-    );
-    let mut candidate_seeds = Vec::with_capacity(4);
-    let mut push_unique = |pair| {
-        if !candidate_seeds.contains(&pair) {
-            candidate_seeds.push(pair);
-        }
-    };
-    push_unique((blast_seed_q, blast_seed_s));
-    push_unique((
-        (seed.query_start + seed.query_end) / 2,
-        (seed.subject_start + seed.subject_end) / 2,
-    ));
-    push_unique((seed.query_start, seed.subject_start));
-    if seed.query_end > seed.query_start && seed.subject_end > seed.subject_start {
-        push_unique((seed.query_end - 1, seed.subject_end - 1));
-    }
-    if !query_aa.is_empty() && !subj_aa.is_empty() {
-        push_unique((
-            seed.query_end.min(query_aa.len() - 1),
-            seed.subject_end.min(subj_aa.len() - 1),
-        ));
-        push_unique((
-            seed.query_end.saturating_add(1).min(query_aa.len() - 1),
-            seed.subject_end.saturating_add(1).min(subj_aa.len() - 1),
-        ));
-    }
-    candidate_seeds
-}
-
 fn protein_alignment_hits(
     query_aa: &[u8],
     subj_aa: &[u8],
@@ -514,18 +481,12 @@ fn protein_alignment_hits(
     x_drop_ungapped: i32,
     gap_open: i32,
     gap_extend: i32,
+    x_drop_gapped: i32,
     x_drop_final: i32,
     gap_trigger_raw: i32,
 ) -> Vec<crate::protein_lookup::ProteinHit> {
-    // 2-pass gapped DP: NCBI's `s_BlastProtGappedAlignment` runs preliminary
-    // gapped alignment with `gap_x_dropoff` (~half of `gap_x_dropoff_final`)
-    // for cutoff filtering, then `Blast_TracebackFromHSPList` re-extends each
-    // surviving HSP with `gap_x_dropoff_final` for the final alignment.
-    // We use `x_drop_final / 2` as the preliminary x_drop heuristic since
-    // BLAST_GAP_X_DROPOFF_PROT (15 bits) is roughly half of
-    // BLAST_GAP_X_DROPOFF_FINAL_PROT (25 bits) — the exact ratio depends on
-    // lambda but is close. For blastn defaults it's 30 vs 100 (~1/3).
-    let x_drop_prelim = (x_drop_final / 2).max(gap_open + gap_extend);
+    use crate::itree::{Interval, IntervalTree};
+
     let ungapped_hits = crate::protein_lookup::protein_scan_with_table(
         query_aa,
         subj_aa,
@@ -550,80 +511,115 @@ fn protein_alignment_hits(
         .filter(|uh| uh.score >= seed_cutoff)
         .collect();
     passing_seeds.sort_by(|a, b| b.score.cmp(&a.score));
+    let mut tree = IntervalTree::new(query_aa.len() as i32 + 1, subj_aa.len() as i32 + 1);
     for seed in &passing_seeds {
-        // Pre-gapped containment check: skip if ungapped seed is fully
-        // contained in any accepted gapped HSP with greater-or-equal score.
-        let pre_contained = hits.iter().any(|p: &crate::protein_lookup::ProteinHit| {
-            p.score >= seed.score
-                && p.query_start <= seed.query_start
-                && p.query_end >= seed.query_end
-                && p.subject_start <= seed.subject_start
-                && p.subject_end >= seed.subject_end
-        });
+        let pre_contained = tree.is_contained(
+            Interval::new(seed.query_start as i32, seed.query_end as i32),
+            Interval::new(seed.subject_start as i32, seed.subject_end as i32),
+            seed.score,
+        );
         if pre_contained {
             continue;
         }
-        for (seed_q, seed_s) in protein_gapped_candidate_seeds(query_aa, subj_aa, seed, matrix) {
-            // Preliminary gapped DP filter (NCBI's `Blast_GetGappedScore` →
-            // `s_BlastProtGappedAlignment`).
-            let Some(prelim) = crate::protein::protein_gapped_align(
-                query_aa,
-                subj_aa,
-                seed_q,
-                seed_s,
-                matrix,
-                gap_open,
-                gap_extend,
-                x_drop_prelim,
-            ) else { continue };
-            if prelim.score < seed_cutoff {
-                continue;
-            }
-            if let Some(gr) = crate::protein::protein_gapped_align(
-                query_aa,
-                subj_aa,
-                seed_q,
-                seed_s,
-                matrix,
-                gap_open,
-                gap_extend,
-                x_drop_final,
-            ) {
-                // Post-gapped containment check (mirrors `BlastIntervalTreeAddHSP`
-                // pre-add containment check).
-                let post_contained = hits.iter().any(|p: &crate::protein_lookup::ProteinHit| {
-                    p.score >= gr.score
-                        && p.query_start <= gr.query_start
-                        && p.query_end >= gr.query_end
-                        && p.subject_start <= gr.subject_start
-                        && p.subject_end >= gr.subject_end
-                });
-                if post_contained {
-                    continue;
-                }
-                let q_slice = &query_aa[gr.query_start..gr.query_end];
-                let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
-                let (qseq, sseq) = gr.edit_script.render_alignment(
-                    q_slice,
-                    s_slice,
-                    crate::protein::ncbistdaa_to_char,
-                );
-                hits.push(crate::protein_lookup::ProteinHit {
-                    query_start: gr.query_start,
-                    query_end: gr.query_end,
-                    subject_start: gr.subject_start,
-                    subject_end: gr.subject_end,
-                    score: gr.score,
-                    num_ident: gr.num_ident,
-                    align_length: gr.align_length,
-                    mismatches: gr.mismatches,
-                    gap_opens: gr.gap_opens,
-                    qseq: Some(qseq),
-                    sseq: Some(sseq),
-                    scaled_score: None,
-                });
-            }
+        let (seed_q, seed_s) = crate::protein::get_start_for_gapped_alignment(
+            query_aa,
+            subj_aa,
+            seed.query_start,
+            seed.query_end.saturating_sub(seed.query_start),
+            seed.subject_start,
+            seed.subject_end.saturating_sub(seed.subject_start),
+            matrix,
+        );
+        // PRELIMINARY gapped DP only (matches NCBI engine flow:
+        // `s_BlastProtGappedAlignment` calls `Blast_SemiGappedAlign` with
+        // preliminary `gap_x_dropoff` only — the larger
+        // `gap_x_dropoff_final` is used in `Blast_TracebackFromHSPList`).
+        // Pre/post-gapped containment uses preliminary bounds (interval
+        // tree carries preliminary HSPs only). Final-xdrop traceback
+        // happens in the post-loop block below.
+        let Some(prelim) = crate::protein::protein_gapped_align(
+            query_aa,
+            subj_aa,
+            seed_q,
+            seed_s,
+            matrix,
+            gap_open,
+            gap_extend,
+            x_drop_gapped,
+        ) else {
+            continue;
+        };
+        if prelim.score < seed_cutoff {
+            continue;
         }
+        let post_contained = tree.is_contained(
+            Interval::new(prelim.query_start as i32, prelim.query_end as i32),
+            Interval::new(prelim.subject_start as i32, prelim.subject_end as i32),
+            prelim.score,
+        );
+        if post_contained {
+            continue;
+        }
+        hits.push(crate::protein_lookup::ProteinHit {
+            query_start: prelim.query_start,
+            query_end: prelim.query_end,
+            subject_start: prelim.subject_start,
+            subject_end: prelim.subject_end,
+            score: prelim.score,
+            num_ident: prelim.num_ident,
+            align_length: prelim.align_length,
+            mismatches: prelim.mismatches,
+            gap_opens: prelim.gap_opens,
+            qseq: None,
+            sseq: None,
+            // Pack seed for post-loop traceback re-run.
+            scaled_score: Some(((seed_q as i32) << 16) | (seed_s as i32 & 0xffff)),
+            gapped_start_q: seed_q,
+            gapped_start_s: seed_s,
+        });
+        tree.insert(
+            Interval::new(prelim.query_start as i32, prelim.query_end as i32),
+            Interval::new(prelim.subject_start as i32, prelim.subject_end as i32),
+            prelim.score,
+        );
+    }
+    // TRACEBACK phase: re-run gapped DP with `x_drop_final` for each
+    // accepted preliminary HSP. Mirrors NCBI's
+    // `Blast_TracebackFromHSPList` loop (`blast_traceback.c:375-625`).
+    for ph in hits.iter_mut() {
+        let Some(packed) = ph.scaled_score.take() else {
+            continue;
+        };
+        let seed_q = (packed >> 16) as usize;
+        let seed_s = (packed & 0xffff) as usize;
+        let Some(gr) = crate::protein::protein_gapped_align(
+            query_aa,
+            subj_aa,
+            seed_q,
+            seed_s,
+            matrix,
+            gap_open,
+            gap_extend,
+            x_drop_final,
+        ) else {
+            continue;
+        };
+        let q_slice = &query_aa[gr.query_start..gr.query_end];
+        let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
+        let (qseq, sseq) =
+            gr.edit_script
+                .render_alignment(q_slice, s_slice, crate::protein::ncbistdaa_to_char);
+        ph.query_start = gr.query_start;
+        ph.query_end = gr.query_end;
+        ph.subject_start = gr.subject_start;
+        ph.subject_end = gr.subject_end;
+        ph.score = gr.score;
+        ph.num_ident = gr.num_ident;
+        ph.align_length = gr.align_length;
+        ph.mismatches = gr.mismatches;
+        ph.gap_opens = gr.gap_opens;
+        ph.qseq = Some(qseq);
+        ph.sseq = Some(sseq);
     }
     // Mirror NCBI's `Blast_HSPListPurgeHSPsWithCommonEndpoints`
     // (`blast_hits.c:2455`), called after gapped extension at
@@ -737,16 +733,15 @@ pub struct SearchParams {
     pub x_drop_final: i32,
     pub soft_masking: bool,
     pub lcase_masking: bool,
+    /// Optional reusable Rayon pool for API searches that parallelize over
+    /// database subjects. When present, it is used instead of constructing a
+    /// per-search pool from `num_threads`.
+    pub thread_pool: Option<Arc<rayon::ThreadPool>>,
 }
 
 impl SearchParams {
     pub fn blastp() -> Self {
-        // NCBI's blastp default has SEG OFF (`blastp_args.cpp:50`:
-        // `kFilterByDefault = false`). Other programs (blastx, tblastn,
-        // tblastx, blastn) keep their default ON via `CFilteringArgs(...)`.
-        let mut params = Self::blastp_defaults();
-        params.filter_low_complexity = false;
-        params
+        Self::blastp_defaults()
     }
     pub fn blastn() -> Self {
         Self::blastn_defaults()
@@ -791,6 +786,7 @@ impl SearchParams {
             x_drop_final: crate::stat::BLAST_GAP_X_DROPOFF_FINAL_PROT,
             soft_masking: false,
             lcase_masking: false,
+            thread_pool: None,
         }
     }
 
@@ -825,6 +821,7 @@ impl SearchParams {
             x_drop_final: crate::stat::BLAST_GAP_X_DROPOFF_FINAL_NUCL,
             soft_masking: false,
             lcase_masking: false,
+            thread_pool: None,
         }
     }
 
@@ -839,6 +836,14 @@ impl SearchParams {
     }
     pub fn num_threads(mut self, v: usize) -> Self {
         self.num_threads = v;
+        self
+    }
+    /// Use an existing Rayon thread pool for parallel API searches.
+    ///
+    /// Supplying a pool enables the parallel path even when `num_threads` is
+    /// left at its default value; the pool's own size controls concurrency.
+    pub fn thread_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
+        self.thread_pool = Some(pool);
         self
     }
     pub fn filter_low_complexity(mut self, v: bool) -> Self {
@@ -1157,7 +1162,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     } else {
         query_aa.clone()
     };
-    if crate::composition::read_composition(&query_aa, AA_SIZE).1 == 0 {
+    if crate::composition::read_composition(&query_aa_masked, AA_SIZE).1 == 0 {
         return Vec::new();
     }
 
@@ -1210,12 +1215,16 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     // NCBI uses MIN subject length (not average) for `cutoff_score_max`
     // calculation when gbp is filled (`blast_setup.c:970`). Compute it here
     // and reuse for the per-OID seed cutoff.
-    let min_subject_length: i32 = (0..db.num_oids)
-        .map(|oid| db.get_seq_len(oid) as i32)
-        .filter(|&l| l > 0)
-        .min()
-        .unwrap_or(1)
-        .max(1);
+    // NCBI's `BlastSeqSrcGetMinSeqLen` returns the DB's `m_MinLen` from
+    // metadata, defaulting to `BLAST_SEQSRC_MINLENGTH = 10` when the
+    // metadata isn't stored (V4 DBs don't store min_seq_len, only
+    // max_seq_len — see `seqdbimpl.cpp:131-136`). Our V4 DB matches:
+    // we don't have a stored min_seq_len, so faithfully default to 10.
+    // (Computing actual min from scan diverges from NCBI: e.g. seqp's
+    // shortest seq is 7 aa but NCBI uses 10, giving different
+    // SpougeEtoS cutoffs.)
+    const BLAST_SEQSRC_MINLENGTH: i32 = 10;
+    let min_subject_length: i32 = BLAST_SEQSRC_MINLENGTH;
 
     // Use exact length adjustment with alpha/beta from gapped params (matching NCBI C engine)
     let gapped_params = crate::stat::lookup_protein_params(params.gap_open, params.gap_extend);
@@ -1261,13 +1270,6 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         threshold,
     );
 
-    // Configure threading
-    let num_threads = if params.num_threads == 0 {
-        rayon::current_num_threads()
-    } else {
-        params.num_threads
-    };
-
     let max_hsps = params.max_hsps;
     let evalue_threshold = params.evalue_threshold;
     let gap_open = params.gap_open;
@@ -1281,6 +1283,13 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         if subj_len < word_size {
             return None;
         }
+        let trace_acc = std::env::var("NB_TRACE_ACC").ok();
+        let subject_accession = db
+            .get_accession(oid)
+            .unwrap_or_else(|| format!("oid_{}", oid));
+        let do_trace = trace_acc
+            .as_deref()
+            .map_or(false, |want| want == subject_accession);
 
         // Use length-based slice — no allocation (matches NCBI C approach).
         // get_sequence() includes trailing sentinel; subj_len excludes it.
@@ -1299,18 +1308,25 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
         // NCBI's per-context seed cutoff: `MIN(gap_trigger, cutoff_score_max)`
         // (`blast_parameters.c:367`). `cutoff_score_max` is computed via
-        // `BLAST_SpougeEtoS(evalue, kbp, gbp, query_length, min_subject_length)`
-        // (`blast_setup.c:970-976`): when gbp is filled, NCBI passes the
-        // **MINIMUM** subject length in the DB (`BlastSeqSrcGetMinSeqLen`),
-        // NOT the average. Smaller `n` means less area in the Spouge formula,
-        // so the binary search lands on a lower cutoff — letting through
-        // more weak hits that hit short subjects. Using avg here had us
-        // miss seqp's NP_982592 hit (ungapped score 36 vs avg-based cutoff
-        // 39 vs min-based cutoff 36).
+        // `BLAST_SpougeEtoS(cbs_stretch*evalue, kbp, gbp, query_length,
+        // min_subject_length)` (`blast_parameters.c:935-941`): when gbp is
+        // filled, NCBI passes the **MINIMUM** subject length in the DB
+        // (`BlastSeqSrcGetMinSeqLen`, `blast_setup.c:970`), NOT the average.
+        // NCBI also uses `cbs_stretch * evalue` (= 5*evalue when comp_adjust>1)
+        // to make the prelim cutoff more permissive, on the theory that
+        // composition adjustment will rescue the borderline seeds. Until our
+        // `composition_matrix_adj` matches NCBI's exactly (iter-25 / iter-49
+        // known divergence on certain compositions), enabling cbs_stretch
+        // pushes through borderline subjects whose comp-adjusted scores
+        // diverge from NCBI's, producing both FPs (when our adj DP scores
+        // higher) and false-bound mismatches (when our adj DP scores lower).
+        // Keep the strict cutoff for now.
+        let _cbs_stretch: f64 = if params.comp_adjust > 1 { 5.0 } else { 1.0 };
+        let prelim_evalue = evalue_threshold;
         let eval_cutoff = if let Some(ref gbp) = gumbel_blk {
             let min_subj_len = min_subject_length.max(1);
             crate::stat::spouge_etos(
-                evalue_threshold,
+                prelim_evalue,
                 &prot_kbp,
                 gbp,
                 query_aa.len() as i32,
@@ -1318,11 +1334,77 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             )
             .max(1)
         } else {
-            prot_kbp
-                .evalue_to_raw(evalue_threshold, search_space)
-                .max(1)
+            prot_kbp.evalue_to_raw(prelim_evalue, search_space).max(1)
         };
         let adjusted_cutoff = gap_trigger_raw.min(eval_cutoff);
+        // word_cutoff = MIN(gap_trigger, eval_cutoff) per NCBI
+        // `BlastInitialWordParametersUpdate` (`blast_parameters.c:367`).
+        let word_cutoff = adjusted_cutoff;
+        // hit_cutoff = SpougeEtoS(eval, ...) per NCBI
+        // `BlastHitSavingParametersUpdate` (`blast_parameters.c:939`).
+        let hit_cutoff = eval_cutoff;
+        // Chaining: NCBI `s_ChainingAlignment` (`blast_gapalign.c:3592`) runs
+        // before gapped DP for blastp+BLOSUM62 by default
+        // (`ext_params->options->chaining`). It computes a chained-score
+        // approximation for each ungapped seed and DROPS seeds whose
+        // best chained score (minus a single gap penalty plus
+        // word_cutoff - 1) cannot reach the hit_cutoff. Without this,
+        // we send many more seeds to gapped DP than NCBI does — each
+        // can produce slightly different bounds and scores via
+        // X-drop-band differences in repeats, breaking parity even when
+        // every other function is byte-faithful.
+        //
+        // ungapped_hits is sorted by score desc, but chaining wants
+        // sort by query offset (asc) within each context. We have a
+        // single context per call, so just sort by q_start.
+        let mut chained_hits: Vec<crate::protein_lookup::ProteinHit> =
+            ungapped_hits.iter().cloned().collect();
+        chained_hits.sort_by_key(|h| h.query_start);
+        let gap_score = gap_open + gap_extend;
+        let n = chained_hits.len();
+        // best_score[k] starts at chained_hits[k].score and gets updated
+        // by chaining DP. Process k from last to first.
+        let mut best_score: Vec<i32> = chained_hits.iter().map(|h| h.score).collect();
+        for k in (0..n).rev() {
+            let self_score = best_score[k];
+            for j in (k + 1)..n {
+                let q_diff = chained_hits[j].query_start as i32
+                    - chained_hits[k].query_start as i32
+                    + (chained_hits[k].query_end - chained_hits[k].query_start) as i32;
+                let s_diff = chained_hits[j].subject_start as i32
+                    - chained_hits[k].subject_start as i32
+                    + (chained_hits[k].subject_end - chained_hits[k].subject_start) as i32;
+                if s_diff < 0 {
+                    continue;
+                }
+                let bridge = (q_diff.min(s_diff) * 3).min(word_cutoff);
+                let gap_penalty = q_diff.abs_diff(s_diff).max(1) as i32 + gap_open;
+                let new_score = self_score + best_score[j] + bridge - gap_penalty;
+                if new_score > best_score[k] {
+                    best_score[k] = new_score;
+                }
+            }
+        }
+        // Drop chained_hits[k] when its chained score can't reach hit_cutoff:
+        //   best_score[k] - gap_score + word_cutoff - 1 < hit_cutoff
+        // i.e. keep when best_score[k] >= hit_cutoff + gap_score - word_cutoff + 1.
+        let mut keep = vec![true; n];
+        for k in 0..n {
+            if best_score[k] - gap_score + word_cutoff - 1 < hit_cutoff {
+                keep[k] = false;
+            }
+        }
+        let chained_kept: std::collections::HashSet<(usize, usize)> = chained_hits
+            .iter()
+            .zip(keep.iter())
+            .filter_map(|(h, &k)| {
+                if k {
+                    Some((h.query_start, h.subject_start))
+                } else {
+                    None
+                }
+            })
+            .collect();
         // Mirror NCBI's `BLAST_GetGappedScore` flow (`blast_gapalign.c:3925+`):
         //   1. Sort ungapped HSPs by score descending.
         //   2. For each ungapped HSP, check `BlastIntervalTreeContainsHSP`
@@ -1341,23 +1423,32 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         // got score=50, and either kept it (iter-105 → FP) or rejected via
         // a stricter overlap rule (iter-104 → also rejects legit overlapping
         // HSPs). Mirroring NCBI's exact pre-check resolves both.
-        let passing_seeds: Vec<&crate::protein_lookup::ProteinHit> = ungapped_hits
+        let mut passing_seeds: Vec<&crate::protein_lookup::ProteinHit> = ungapped_hits
             .iter()
-            .filter(|uh| uh.score >= adjusted_cutoff)
+            .filter(|uh| {
+                uh.score >= adjusted_cutoff
+                    && chained_kept.contains(&(uh.query_start, uh.subject_start))
+            })
             .collect();
-        let trace_oid = std::env::var("NB_TRACE_OID")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok());
-        let do_trace = trace_oid.map_or(false, |t| t == oid);
+        passing_seeds.sort_by(|a, b| b.score.cmp(&a.score));
         if do_trace {
-            eprintln!("[trace oid={}] total_seeds={} passing={} cutoff={}",
-                oid, ungapped_hits.len(), passing_seeds.len(), adjusted_cutoff);
-            for s in &passing_seeds {
-                eprintln!("  seed q={}-{} s={}-{} score={}",
-                    s.query_start, s.query_end, s.subject_start, s.subject_end, s.score);
+            eprintln!(
+                "[trace acc={}] ungapped={} passing={} cutoff={}",
+                subject_accession,
+                ungapped_hits.len(),
+                passing_seeds.len(),
+                adjusted_cutoff
+            );
+            for uh in &ungapped_hits {
+                eprintln!(
+                    "  ungapped q={}-{} s={}-{} score={}",
+                    uh.query_start, uh.query_end, uh.subject_start, uh.subject_end, uh.score
+                );
             }
         }
         let mut phits: Vec<crate::protein_lookup::ProteinHit> = Vec::new();
+        let mut tree =
+            crate::itree::IntervalTree::new(query_aa.len() as i32 + 1, subj_len as i32 + 1);
         for uh in &passing_seeds {
             // Ungapped span (NCBI's `tmp_hsp` constructed at line 3976-3990
             // from `init_hsp->ungapped_data`).
@@ -1369,13 +1460,11 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             // PRE-gapped containment check: skip if this ungapped HSP is
             // fully enveloped by an already-accepted gapped HSP with score
             // greater-or-equal (`s_HSPIsContained`, `blast_itree.c:810`).
-            let pre_contained = phits.iter().any(|p| {
-                p.score >= ungap_score
-                    && p.query_start <= ungap_q_start
-                    && p.query_end >= ungap_q_end
-                    && p.subject_start <= ungap_s_start
-                    && p.subject_end >= ungap_s_end
-            });
+            let pre_contained = tree.is_contained(
+                crate::itree::Interval::new(ungap_q_start as i32, ungap_q_end as i32),
+                crate::itree::Interval::new(ungap_s_start as i32, ungap_s_end as i32),
+                ungap_score,
+            );
             if pre_contained {
                 continue;
             }
@@ -1388,7 +1477,14 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 uh.subject_end.saturating_sub(uh.subject_start),
                 &matrix,
             );
-            // 2-pass gapped DP (preliminary x_drop_gapped → traceback x_drop_final).
+            // PRELIMINARY gapped DP only (matches NCBI engine flow:
+            // `s_BlastProtGappedAlignment` calls `Blast_SemiGappedAlign`
+            // with `gap_x_dropoff` only — the larger `gap_x_dropoff_final`
+            // is used in `Blast_TracebackFromHSPList`, NOT in the engine).
+            // Using x_drop_final here makes our containment tree contain
+            // larger bounds than NCBI's, which envelops legitimate seeds for
+            // weaker HSPs. The traceback (final-xdrop) re-runs after the
+            // engine completes — see the post-loop block.
             let Some(prelim) = crate::protein::protein_gapped_align(
                 &query_aa,
                 subj_aa,
@@ -1398,10 +1494,102 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 gap_open,
                 gap_extend,
                 x_drop_gapped,
-            ) else { continue };
+            ) else {
+                continue;
+            };
+            if do_trace {
+                eprintln!(
+                    "  prelim from ungapped q={}-{} s={}-{} score={} -> seed=({}, {}) prelim_score={} bounds q={}-{} s={}-{}",
+                    uh.query_start, uh.query_end, uh.subject_start, uh.subject_end, uh.score,
+                    seed_q, seed_s, prelim.score,
+                    prelim.query_start, prelim.query_end, prelim.subject_start, prelim.subject_end
+                );
+            }
             if prelim.score < adjusted_cutoff {
                 continue;
             }
+            // Post-gapped containment check uses PRELIMINARY bounds
+            // (`BlastIntervalTreeContainsHSP` in NCBI's engine sees
+            // `Blast_SemiGappedAlign` bounds, not traceback bounds).
+            let post_contained = tree.is_contained(
+                crate::itree::Interval::new(prelim.query_start as i32, prelim.query_end as i32),
+                crate::itree::Interval::new(prelim.subject_start as i32, prelim.subject_end as i32),
+                prelim.score,
+            );
+            if post_contained {
+                continue;
+            }
+            if do_trace {
+                eprintln!(
+                    "  prelim accepted q={}-{} s={}-{} score={}",
+                    prelim.query_start,
+                    prelim.query_end,
+                    prelim.subject_start,
+                    prelim.subject_end,
+                    prelim.score
+                );
+            }
+            // Stash the (seed_q, seed_s) so we can re-run final-xdrop DP after
+            // the engine loop closes (NCBI's traceback phase).
+            phits.push(crate::protein_lookup::ProteinHit {
+                query_start: prelim.query_start,
+                query_end: prelim.query_end,
+                subject_start: prelim.subject_start,
+                subject_end: prelim.subject_end,
+                score: prelim.score,
+                num_ident: prelim.num_ident,
+                align_length: prelim.align_length,
+                mismatches: prelim.mismatches,
+                gap_opens: prelim.gap_opens,
+                // Pack seed for later traceback re-run via qseq/sseq.
+                // We don't have a real edit script yet — mark so the
+                // post-loop traceback can detect and refresh.
+                qseq: None,
+                sseq: None,
+                scaled_score: Some(((seed_q as i32) << 16) | (seed_s as i32 & 0xffff)),
+                gapped_start_q: seed_q,
+                gapped_start_s: seed_s,
+            });
+            tree.insert(
+                crate::itree::Interval::new(prelim.query_start as i32, prelim.query_end as i32),
+                crate::itree::Interval::new(prelim.subject_start as i32, prelim.subject_end as i32),
+                prelim.score,
+            );
+        }
+        // TRACEBACK phase: re-run gapped DP with `x_drop_final` for each
+        // accepted preliminary HSP. Mirrors NCBI's `Blast_TracebackFromHSPList`
+        // loop (`blast_traceback.c:375-625`):
+        // 1. Sort HSPs by prelim score desc.
+        // 2. For each HSP in order, check `BlastIntervalTreeContainsHSP`
+        //    against tree of already-tracebacked HSPs (line 404).
+        // 3. If contained: drop HSP without running ALIGN_EX.
+        // 4. Else: run ALIGN_EX (final xdrop), update bounds, add to tree.
+        //
+        // Without the containment check, redundant traceback DPs from
+        // different seeds can produce slightly different bounds and
+        // scores in repetitive regions, leaving multiple HSPs that the
+        // common-endpoints purge keeps the higher-scoring one of —
+        // but NCBI never computed the higher-scoring one because its
+        // traceback skipped the seed.
+        phits.sort_by(|a, b| b.score.cmp(&a.score));
+        let mut tb_tree =
+            crate::itree::IntervalTree::new(query_aa.len() as i32 + 1, subj_len as i32 + 1);
+        let mut keep = vec![true; phits.len()];
+        for (idx, ph) in phits.iter_mut().enumerate() {
+            let Some(packed) = ph.scaled_score.take() else {
+                continue;
+            };
+            let pre_contained = tb_tree.is_contained(
+                crate::itree::Interval::new(ph.query_start as i32, ph.query_end as i32),
+                crate::itree::Interval::new(ph.subject_start as i32, ph.subject_end as i32),
+                ph.score,
+            );
+            if pre_contained {
+                keep[idx] = false;
+                continue;
+            }
+            let seed_q = (packed >> 16) as usize;
+            let seed_s = (packed & 0xffff) as usize;
             let Some(gr) = crate::protein::protein_gapped_align(
                 &query_aa,
                 subj_aa,
@@ -1411,19 +1599,10 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 gap_open,
                 gap_extend,
                 x_drop_final,
-            ) else { continue };
-            // Post-gapped containment check (NCBI's interval tree also
-            // catches gapped-vs-gapped containment).
-            let post_contained = phits.iter().any(|p| {
-                p.score >= gr.score
-                    && p.query_start <= gr.query_start
-                    && p.query_end >= gr.query_end
-                    && p.subject_start <= gr.subject_start
-                    && p.subject_end >= gr.subject_end
-            });
-            if post_contained {
+            ) else {
+                keep[idx] = false;
                 continue;
-            }
+            };
             let q_slice = &query_aa[gr.query_start..gr.query_end];
             let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
             let (qs, ss) = gr.edit_script.render_alignment(
@@ -1431,21 +1610,29 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 s_slice,
                 crate::protein::ncbistdaa_to_char,
             );
-            phits.push(crate::protein_lookup::ProteinHit {
-                query_start: gr.query_start,
-                query_end: gr.query_end,
-                subject_start: gr.subject_start,
-                subject_end: gr.subject_end,
-                score: gr.score,
-                num_ident: gr.num_ident,
-                align_length: gr.align_length,
-                mismatches: gr.mismatches,
-                gap_opens: gr.gap_opens,
-                qseq: Some(qs),
-                sseq: Some(ss),
-                scaled_score: None,
-            });
+            ph.query_start = gr.query_start;
+            ph.query_end = gr.query_end;
+            ph.subject_start = gr.subject_start;
+            ph.subject_end = gr.subject_end;
+            ph.score = gr.score;
+            ph.num_ident = gr.num_ident;
+            ph.align_length = gr.align_length;
+            ph.mismatches = gr.mismatches;
+            ph.gap_opens = gr.gap_opens;
+            ph.qseq = Some(qs);
+            ph.sseq = Some(ss);
+            tb_tree.insert(
+                crate::itree::Interval::new(ph.query_start as i32, ph.query_end as i32),
+                crate::itree::Interval::new(ph.subject_start as i32, ph.subject_end as i32),
+                ph.score,
+            );
         }
+        let mut idx = 0usize;
+        phits.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
         // Mirror NCBI's `Blast_HSPListPurgeHSPsWithCommonEndpoints`
         // (`blast_hits.c:2455`), which the engine calls at
         // `blast_engine.c:544` after `BLAST_GetGappedScore`. Removes HSPs
@@ -1454,6 +1641,10 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         // highest-scoring HSP wins (sort tiebreaker by score descending).
         // For protein this is the FULL purge variant (FREE duplicates,
         // not preserve via gap-edit cutoff).
+        // NCBI forces `purge=TRUE` for protein at `blast_hits.c:2464`
+        // (`purge |= (program != eBlastTypeBlastn)`). Pass `true` here so
+        // common-endpoint duplicates are FREED, not preserved via
+        // cut-off-edit-script (the cut-off path is the blastn-only branch).
         purge_hsps_with_common_endpoints(&mut phits);
         phits.sort_by(|a, b| {
             b.score
@@ -1470,8 +1661,8 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         // The engine-loop containment (iter 120 / 122) processes seeds in
         // **ungapped score** order, so a low-ungapped-score seed that
         // produces a high-gapped-score HSP can arrive AFTER several
-        // high-ungapped-score seeds whose gapped HSPs are smaller —
-        // those smaller HSPs end up accepted, then the bigger one too.
+        // high-ungapped-score seeds whose gapped HSPs are smaller — those
+        // smaller HSPs end up accepted, then the bigger one too.
         // Re-running containment on the gapped list in score order kills
         // those duplicates. Concrete case (iter 123): AAC46500 vs
         // XP_353871, where 4 seeds with ungapped 64/61 produced gapped
@@ -1480,24 +1671,24 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         {
             let mut accepted: Vec<crate::protein_lookup::ProteinHit> =
                 Vec::with_capacity(phits.len());
+            let mut tree =
+                crate::itree::IntervalTree::new(query_aa.len() as i32 + 1, subj_len as i32 + 1);
             for ph in phits.drain(..) {
-                let contained = accepted.iter().any(|p| {
-                    p.score >= ph.score
-                        && p.query_start <= ph.query_start
-                        && p.query_end >= ph.query_end
-                        && p.subject_start <= ph.subject_start
-                        && p.subject_end >= ph.subject_end
-                });
+                let contained = tree.is_contained(
+                    crate::itree::Interval::new(ph.query_start as i32, ph.query_end as i32),
+                    crate::itree::Interval::new(ph.subject_start as i32, ph.subject_end as i32),
+                    ph.score,
+                );
                 if !contained {
+                    tree.insert(
+                        crate::itree::Interval::new(ph.query_start as i32, ph.query_end as i32),
+                        crate::itree::Interval::new(ph.subject_start as i32, ph.subject_end as i32),
+                        ph.score,
+                    );
                     accepted.push(ph);
                 }
             }
             phits = accepted;
-        }
-        let best_ungapped_score = ungapped_hits.first().map(|h| h.score).unwrap_or(i32::MIN);
-        let best_gapped_score = phits.first().map(|h| h.score).unwrap_or(i32::MIN);
-        if phits.is_empty() || best_ungapped_score > best_gapped_score {
-            phits = ungapped_hits;
         }
         if phits.is_empty() {
             return None;
@@ -1506,7 +1697,20 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             ph.score = rescore_protein_hit(ph, &query_aa, subj_aa, &matrix, gap_open, gap_extend);
         }
 
-        // Pre-filter: check e-value with Spouge FSC if available, else simple Karlin.
+        // Pre-filter: check e-value with Spouge FSC if available, else simple
+        // Karlin. NCBI uses `hit_params->prelim_evalue` here
+        // (`blast_engine.c:653`) which is `cbs_stretch * evalue`. Faithfully
+        // matching NCBI requires our composition-adjusted DP to match NCBI's,
+        // since the boosted score can either keep or drop the HSP at the final
+        // evalue=10 gate. Our `composition_matrix_adj` (Newton optimization)
+        // diverges from NCBI's on certain query/subject compositions
+        // (iter-25 / iter-49 known issue), producing higher scores for some
+        // borderline subjects (e.g. NP_982592→NP_777001 score=1358 ours vs
+        // NCBI's 403 for similar bounds). So using `prelim_evalue` here lets
+        // those FPs through. Until comp_adjust matrix matches NCBI's, gate
+        // with `evalue_threshold` (= the strict user e-value). This keeps the
+        // seed fix + cbs_stretch wins (more legitimate seeds) while preventing
+        // FPs from the matrix divergence.
         let best_raw_ev = phits
             .iter()
             .map(|ph| {
@@ -1527,9 +1731,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             return None;
         }
 
-        let accession = db
-            .get_accession(oid)
-            .unwrap_or_else(|| format!("oid_{}", oid));
+        let accession = subject_accession;
         let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
         let sl = subj_aa.len();
 
@@ -1727,11 +1929,20 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 } else {
                     None
                 };
+                // NCBI's `s_RedoOneAlignment` (`blast_kappa.c:1924-1926`) uses
+                // `hsp->query.gapped_start` (the seed midpoint) — NOT the
+                // alignment's `query.offset` — when re-running the rescaled
+                // gapped DP. Using `query_start` (alignment left edge) here
+                // shifts the WHOLE alignment off-center: with X-drop=2078 in
+                // scaled units, both directions extend further, and
+                // (`a_offset`, `b_offset`) lock onto a maximum cell that
+                // produces longer-but-suboptimal bounds vs NCBI's
+                // seed-centered DP.
                 let bidir_gr = crate::protein::protein_gapped_align(
                     &query_aa,
                     subj_aa,
-                    ph.query_start,
-                    ph.subject_start,
+                    ph.gapped_start_q,
+                    ph.gapped_start_s,
                     adj_mat,
                     scaled_gap_open,
                     scaled_gap_extend,
@@ -1772,6 +1983,8 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         qseq: Some(qs),
                         sseq: Some(ss),
                         scaled_score: Some(gr.score),
+                        gapped_start_q: ph.gapped_start_q,
+                        gapped_start_s: ph.gapped_start_s,
                     });
                 }
             }
@@ -1951,11 +2164,25 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         })
     };
 
-    // Run sequentially or in parallel depending on num_threads.
-    let mut results: Vec<SearchResult> = if num_threads <= 1 {
+    // Run sequentially or in parallel depending on num_threads/pool.
+    let mut results: Vec<SearchResult> = if params.thread_pool.is_none() && params.num_threads == 1
+    {
         (0..db.num_oids).filter_map(search_oid).collect()
+    } else if let Some(pool) = params.thread_pool.as_deref() {
+        use rayon::prelude::*;
+        pool.install(|| {
+            (0..db.num_oids)
+                .into_par_iter()
+                .filter_map(search_oid)
+                .collect()
+        })
     } else {
         use rayon::prelude::*;
+        let num_threads = if params.num_threads == 0 {
+            rayon::current_num_threads()
+        } else {
+            params.num_threads
+        };
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .stack_size(64 * 1024 * 1024)
@@ -2022,8 +2249,7 @@ pub fn blastp_batch(
     // composition-driven drift is what makes seed cutoffs match bit-for-bit;
     // see iter 99 fix in `blastp()` for the boundary case it resolves).
     let ln2_b = crate::math::NCBIMATH_LN2;
-    let _x_drop_gapped =
-        (params.x_drop_gapped as f64 * ln2_b / prot_kbp.lambda) as i32;
+    let _x_drop_gapped = (params.x_drop_gapped as f64 * ln2_b / prot_kbp.lambda) as i32;
     let x_drop_final = (params.x_drop_final as f64 * ln2_b / prot_kbp.lambda) as i32;
     let gap_open = params.gap_open;
     let gap_extend = params.gap_extend;
@@ -2043,8 +2269,7 @@ pub fn blastp_batch(
                 .iter()
                 .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
                 .collect();
-            let ungapped_kbp =
-                crate::stat::query_specific_protein_ungapped_kbp(&aa, &matrix);
+            let ungapped_kbp = crate::stat::query_specific_protein_ungapped_kbp(&aa, &matrix);
             let x_drop_ungapped =
                 (params.x_drop_ungapped as f64 * ln2_b / ungapped_kbp.lambda).ceil() as i32;
             let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2_b
@@ -2076,11 +2301,6 @@ pub fn blastp_batch(
         .collect();
 
     let num_queries = queries.len();
-    let num_threads = if params.num_threads == 0 {
-        rayon::current_num_threads()
-    } else {
-        params.num_threads
-    };
 
     // Build merged PV — bitwise OR of all query PVs.
     // Subject positions that don't match the merged PV can't match ANY query.
@@ -2171,6 +2391,8 @@ pub fn blastp_batch(
                         qseq: Some(qs),
                         sseq: Some(ss),
                         scaled_score: None,
+                        gapped_start_q: seed_q,
+                        gapped_start_s: seed_s,
                     });
                 }
             }
@@ -2285,18 +2507,27 @@ pub fn blastp_batch(
         hits_for_queries
     };
 
-    // Dispatch: sequential or parallel over subjects
-    let all_hits: Vec<Vec<(usize, SearchResult)>> = if num_threads <= 1 {
-        (0..db.num_oids).map(process_oid).collect()
-    } else {
-        use rayon::prelude::*;
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .stack_size(64 * 1024 * 1024)
-            .build()
-            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-        pool.install(|| (0..db.num_oids).into_par_iter().map(process_oid).collect())
-    };
+    // Dispatch: sequential or parallel over subjects.
+    let all_hits: Vec<Vec<(usize, SearchResult)>> =
+        if params.thread_pool.is_none() && params.num_threads == 1 {
+            (0..db.num_oids).map(process_oid).collect()
+        } else if let Some(pool) = params.thread_pool.as_deref() {
+            use rayon::prelude::*;
+            pool.install(|| (0..db.num_oids).into_par_iter().map(process_oid).collect())
+        } else {
+            use rayon::prelude::*;
+            let num_threads = if params.num_threads == 0 {
+                rayon::current_num_threads()
+            } else {
+                params.num_threads
+            };
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .stack_size(64 * 1024 * 1024)
+                .build()
+                .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+            pool.install(|| (0..db.num_oids).into_par_iter().map(process_oid).collect())
+        };
 
     // Scatter results into per-query buckets
     let mut results: Vec<Vec<SearchResult>> = vec![Vec::new(); num_queries];
@@ -2488,6 +2719,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     let ln2 = crate::math::NCBIMATH_LN2;
     let ungapped_kbp = crate::stat::protein_ungapped_kbp();
     let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
+    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda) as i32;
     let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
     let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
         / ungapped_kbp.lambda) as i32;
@@ -2495,14 +2727,11 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     let total_subj_len: usize = (0..db.num_oids)
         .map(|oid| db.get_seq_len(oid) as usize)
         .sum();
-    // NCBI uses the MIN subject length (not avg) to compute `cutoff_score_max`
-    // (`blast_setup.c:970`). Reuse here for the per-OID seed cutoff.
-    let min_subject_length: i32 = (0..db.num_oids)
-        .map(|oid| db.get_seq_len(oid) as i32)
-        .filter(|&l| l > 0)
-        .min()
-        .unwrap_or(1)
-        .max(1);
+    // NCBI uses MIN subject length to compute `cutoff_score_max`
+    // (`blast_setup.c:970`). Defaults to BLAST_SEQSRC_MINLENGTH=10 when
+    // metadata is absent (V4 DBs).
+    const BLAST_SEQSRC_MINLENGTH_BLASTX: i32 = 10;
+    let min_subject_length: i32 = BLAST_SEQSRC_MINLENGTH_BLASTX;
     let gumbel_blk =
         crate::stat::protein_gumbel_blk(params.gap_open, params.gap_extend, total_subj_len as i64);
 
@@ -2606,6 +2835,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 x_drop_ungapped,
                 params.gap_open,
                 params.gap_extend,
+                x_drop_gapped,
                 x_drop_final,
                 blastx_seed_cutoff,
             );
@@ -2641,8 +2871,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             // SW score, the redo loop in
             // `apply_compositional_adjustment_per_subject` stops
             // chasing further alignments.
-            let cutoff_s_blastx =
-                prot_kbp.evalue_to_raw(params.evalue_threshold, search_space);
+            let cutoff_s_blastx = prot_kbp.evalue_to_raw(params.evalue_threshold, search_space);
             let (final_phits, use_adj_matrix, lambda_ratio_opt) =
                 apply_compositional_adjustment_per_subject(
                     prot,
@@ -2810,6 +3039,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     // we trace the seed-selection sensitivity, leave tblastn on the ideal.
     let ungapped_kbp = crate::stat::protein_ungapped_kbp();
     let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
+    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda) as i32;
     let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
     let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
         / ungapped_kbp.lambda) as i32;
@@ -2817,15 +3047,11 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         .map(|oid| db.get_seq_len(oid) as usize)
         .sum();
     // NCBI uses MIN subject length for `cutoff_score_max` (`blast_setup.c:970`).
-    // For translated-subject programs (tblastn), divide by 3 to get the
-    // protein-frame length (`blast_setup.c:973`).
-    let min_subject_length: i32 = (0..db.num_oids)
-        .map(|oid| db.get_seq_len(oid) as i32)
-        .filter(|&l| l > 0)
-        .min()
-        .unwrap_or(3)
-        .max(3)
-        / 3;
+    // For translated-subject programs (tblastn), NCBI applies the
+    // BLAST_SEQSRC_MINLENGTH=10 default for nucleotide DBs then divides
+    // by 3 (`blast_setup.c:970-973`). 10/3 = 3 (truncating int divide).
+    const BLAST_SEQSRC_MINLENGTH_TBLASTN: i32 = 10;
+    let min_subject_length: i32 = BLAST_SEQSRC_MINLENGTH_TBLASTN / 3;
     // BLAST_CalcEffLengths handles `db_length /= 3` internally for tblastn,
     // so we pass the raw total. For Gumbel-block lookup we still need the
     // translated total ourselves.
@@ -2936,6 +3162,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 x_drop_ungapped,
                 params.gap_open,
                 params.gap_extend,
+                x_drop_gapped,
                 x_drop_final,
                 tblastn_seed_cutoff,
             );
@@ -2965,8 +3192,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 .get_accession(oid)
                 .unwrap_or_else(|| format!("oid_{}", oid));
             let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
-            let cutoff_s_tblastn =
-                prot_kbp.evalue_to_raw(params.evalue_threshold, search_space);
+            let cutoff_s_tblastn = prot_kbp.evalue_to_raw(params.evalue_threshold, search_space);
             let (final_phits, use_adj_matrix, lambda_ratio_opt) =
                 apply_compositional_adjustment_per_subject(
                     &query_aa,
@@ -3110,8 +3336,11 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     }
     let query_ncbi4na = ascii_to_ncbi4na(query);
     let q_code = crate::util::lookup_genetic_code(params.query_gencode);
-    let (mut query_translation, query_offsets) =
-        crate::util::blast_get_all_translations_ncbi4na(&query_ncbi4na, query_ncbi4na.len(), q_code);
+    let (mut query_translation, query_offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        &query_ncbi4na,
+        query_ncbi4na.len(),
+        q_code,
+    );
     if params.filter_low_complexity {
         for ctx in 0..crate::util::NUM_FRAMES {
             let begin = (query_offsets[ctx] + 1) as usize;
@@ -3430,10 +3659,8 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     // `blast_stat.c:4557`) divides the raw KarlinStoE result
                     // by `BLAST_GapDecayDivisor(BLAST_GAP_DECAY_RATE, 1)`
                     // = 0.5, multiplying the e-value by 2.
-                    let weight_divisor = crate::stat::gap_decay_divisor(
-                        crate::stat::BLAST_GAP_DECAY_RATE,
-                        1,
-                    );
+                    let weight_divisor =
+                        crate::stat::gap_decay_divisor(crate::stat::BLAST_GAP_DECAY_RATE, 1);
                     let raw_evalue =
                         e_kbp.raw_to_evalue(e_score_i32, search_space) / weight_divisor;
                     if use_adj_matrix {
@@ -3651,11 +3878,7 @@ fn apply_compositional_adjustment_per_subject(
     x_drop_final: i32,
     comp_mode: u8,
     cutoff_s: i32,
-) -> (
-    Vec<crate::protein_lookup::ProteinHit>,
-    bool,
-    Option<f64>,
-) {
+) -> (Vec<crate::protein_lookup::ProteinHit>, bool, Option<f64>) {
     if comp_mode == 0 {
         return (phits, false, None);
     }
@@ -3711,32 +3934,35 @@ fn apply_compositional_adjustment_per_subject(
         // Bounded helper avoids alignment-end overshoot, but for
         // equal-score paths the bidirectional X-drop tends to land on
         // the NCBI-matching identity-rich alignment.
-        let bounded_gr_opt = if let Some((q_start, m_start, q_extent, s_extent, target_score)) =
-            sw_bounded
-        {
-            crate::protein::protein_sw_bounded_xdrop_align(
-                query_aa,
-                subj_aa,
-                q_start,
-                m_start,
-                q_extent,
-                s_extent,
-                target_score,
-                adj_mat,
-                scaled_gap_open,
-                scaled_gap_extend,
-                scaled_x_drop_final,
-            )
-        } else {
-            None
-        };
+        let bounded_gr_opt =
+            if let Some((q_start, m_start, q_extent, s_extent, target_score)) = sw_bounded {
+                crate::protein::protein_sw_bounded_xdrop_align(
+                    query_aa,
+                    subj_aa,
+                    q_start,
+                    m_start,
+                    q_extent,
+                    s_extent,
+                    target_score,
+                    adj_mat,
+                    scaled_gap_open,
+                    scaled_gap_extend,
+                    scaled_x_drop_final,
+                )
+            } else {
+                None
+            };
         {
             for ph in &phits {
+                // NCBI's `s_RedoOneAlignment` uses `hsp->query.gapped_start`
+                // (seed) — NOT alignment `query.offset` — when re-running
+                // rescaled gapped DP under composition adjustment.
+                // (`blast_kappa.c:1924-1926`).
                 let bidir_gr = crate::protein::protein_gapped_align(
                     query_aa,
                     subj_aa,
-                    ph.query_start,
-                    ph.subject_start,
+                    ph.gapped_start_q,
+                    ph.gapped_start_s,
                     adj_mat,
                     scaled_gap_open,
                     scaled_gap_extend,
@@ -3774,6 +4000,8 @@ fn apply_compositional_adjustment_per_subject(
                         qseq: Some(qs),
                         sseq: Some(ss),
                         scaled_score: Some(gr.score),
+                        gapped_start_q: ph.gapped_start_q,
+                        gapped_start_s: ph.gapped_start_s,
                     });
                 }
             }
@@ -4068,8 +4296,16 @@ pub struct BlastDefLine {
 
 /// Apply SEG masking on NCBIstdaa-encoded sequence in place.
 pub fn apply_seg_ncbistdaa(seq: &mut [u8]) {
-    let mask = crate::filter::seg_filter_ncbistdaa(seq, 12, 2.2, 2.5);
     let masked = AMINOACID_TO_NCBISTDAA[b'X' as usize & 0x7F];
+    if is_single_residue_low_complexity(seq) {
+        for aa in seq {
+            if *aa != masked {
+                *aa = masked;
+            }
+        }
+        return;
+    }
+    let mask = crate::filter::seg_filter_ncbistdaa(seq, 12, 2.2, 2.5);
     for r in &mask.regions {
         let start = r.start.max(0) as usize;
         let end = (r.end as usize).min(seq.len());
@@ -4079,6 +4315,27 @@ pub fn apply_seg_ncbistdaa(seq: &mut [u8]) {
             }
         }
     }
+}
+
+fn is_single_residue_low_complexity(seq: &[u8]) -> bool {
+    if seq.len() < 12 {
+        return false;
+    }
+    let mut residue = None;
+    let mut true_count = 0usize;
+    for &aa in seq {
+        let is_true = crate::composition::TRUE_CHAR_POSITIONS.contains(&(aa as usize)) || aa == 24;
+        if !is_true {
+            continue;
+        }
+        true_count += 1;
+        match residue {
+            Some(prev) if prev != aa => return false,
+            None => residue = Some(aa),
+            _ => {}
+        }
+    }
+    true_count >= 12
 }
 
 /// Compute a boolean mask indicating which positions are lowercase.
@@ -4428,7 +4685,11 @@ fn ascii_to_ncbi4na(seq: &[u8]) -> Vec<u8> {
             b'U' | b'u' => 8,
             _ if (b as usize) < crate::encoding::IUPACNA_TO_NCBI4NA.len() => {
                 let v = crate::encoding::IUPACNA_TO_NCBI4NA[b as usize];
-                if v == 0 { 15 } else { v }
+                if v == 0 {
+                    15
+                } else {
+                    v
+                }
             }
             _ => 15,
         })
@@ -4458,6 +4719,34 @@ fn encode_protein_query(sequence: &[u8], filter_low_complexity: bool) -> Vec<u8>
     query_aa
 }
 
+#[cfg(test)]
+mod low_complexity_tests {
+    use super::*;
+
+    #[test]
+    fn seg_masks_short_protein_homopolymer_completely() {
+        let mut seq = encode_protein_query_nomask(b"AAAAAAAAAAAAAAAAAAAA");
+        apply_seg_ncbistdaa(&mut seq);
+        assert_eq!(crate::composition::read_composition(&seq, AA_SIZE).1, 0);
+    }
+
+    #[test]
+    fn blastp_filtered_homopolymer_query_returns_no_hits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("db");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "db");
+        builder.add(SequenceEntry {
+            title: "s1".to_string(),
+            accession: "s1".to_string(),
+            sequence: b"AAAAAAAAAAAAAAAAAAAA".to_vec(),
+            taxid: None,
+        });
+        builder.write(&base).unwrap();
+        let db = BlastDb::open(&base).unwrap();
+        let params = SearchParams::blastp();
+        assert!(blastp(&db, b"AAAAAAAAAAAAAAAAAAAA", &params).is_empty());
+    }
+}
 
 fn build_midline(qseq: &str, sseq: &str) -> Vec<u8> {
     qseq.bytes()

@@ -58,8 +58,8 @@ impl IntervalTree {
     /// callers pre-sort by score and feed per-strand, per-query
     /// batches, so this function only performs the 2D coord check and
     /// the optional min-diag separation rule.
-    pub fn is_contained(&self, query: Interval, subject: Interval) -> bool {
-        self.is_contained_with_min_diag_separation(query, subject, 0)
+    pub fn is_contained(&self, query: Interval, subject: Interval, score: i32) -> bool {
+        self.is_contained_with_min_diag_separation(query, subject, score, 0)
     }
 
     /// Check if a new HSP is contained within any existing interval, using
@@ -68,10 +68,12 @@ impl IntervalTree {
         &self,
         query: Interval,
         subject: Interval,
+        score: i32,
         min_diag_separation: i32,
     ) -> bool {
         for existing in &self.intervals {
-            if existing.query.contains(&query)
+            if score <= existing.score
+                && existing.query.contains(&query)
                 && existing.subject.contains(&subject)
                 && intervals_are_close_on_diagonal(
                     existing.query,
@@ -147,8 +149,72 @@ impl IntervalTree {
         false
     }
 
-    /// Add an interval to the tree.
+    /// Add an interval to the tree, mirroring NCBI's `BlastIntervalTreeAddHSP`
+    /// (`blast_itree.c:511`). Before inserting, NCBI checks whether an
+    /// existing tree HSP shares the LEFT endpoint `(q.start, s.start)` or the
+    /// RIGHT endpoint `(q.end, s.end)` via `s_IntervalTreeHasHSPEndpoint` →
+    /// `s_HSPsHaveCommonEndpoint` (`blast_itree.c:242`). When such a sharing
+    /// exists:
+    ///  - if the tree HSP is higher-scoring, the new HSP is NOT inserted
+    ///    (return early);
+    ///  - if the new HSP is higher-scoring, the existing tree HSP is REMOVED
+    ///    and the new HSP is inserted;
+    ///  - on equal scores, the SHORTER HSP wins (by query length, then by
+    ///    subject length); ties favor the HSP already in the tree.
+    ///
+    /// Without this dedup our tree accumulates multiple HSPs sharing
+    /// endpoints, and the larger of them envelops legitimate seeds that
+    /// NCBI's tree wouldn't envelop.
     pub fn insert(&mut self, query: Interval, subject: Interval, score: i32) {
+        let in_q_len = query.end - query.start;
+        let in_s_len = subject.end - subject.start;
+        // Two passes: LEFT endpoint, then RIGHT endpoint. Same-pass logic.
+        // For each match, decide winner via NCBI's s_HSPsHaveCommonEndpoint.
+        for which_end in 0..2 {
+            let mut idx = 0;
+            while idx < self.intervals.len() {
+                let ex = &self.intervals[idx];
+                let same_endpoint = if which_end == 0 {
+                    ex.query.start == query.start && ex.subject.start == subject.start
+                } else {
+                    ex.query.end == query.end && ex.subject.end == subject.end
+                };
+                if !same_endpoint {
+                    idx += 1;
+                    continue;
+                }
+                // Compare per s_HSPsHaveCommonEndpoint.
+                if score < ex.score {
+                    // tree HSP wins, new HSP NOT inserted.
+                    return;
+                }
+                if score > ex.score {
+                    // new HSP wins, REMOVE existing.
+                    self.intervals.swap_remove(idx);
+                    // Don't advance idx — slot now holds last element.
+                    continue;
+                }
+                // Equal score: shorter HSP wins; ties favor existing tree HSP.
+                let ex_q_len = ex.query.end - ex.query.start;
+                let ex_s_len = ex.subject.end - ex.subject.start;
+                if in_q_len > ex_q_len {
+                    return; // tree wins (existing is shorter)
+                }
+                if in_q_len < ex_q_len {
+                    self.intervals.swap_remove(idx);
+                    continue;
+                }
+                if in_s_len > ex_s_len {
+                    return;
+                }
+                if in_s_len < ex_s_len {
+                    self.intervals.swap_remove(idx);
+                    continue;
+                }
+                // Identical bounds + score: favor existing.
+                return;
+            }
+        }
         self.intervals.push(Interval2D {
             query,
             subject,
@@ -199,8 +265,9 @@ mod tests {
         let mut tree = IntervalTree::new(100, 100);
         tree.insert(Interval::new(0, 50), Interval::new(0, 50), 100);
 
-        assert!(tree.is_contained(Interval::new(10, 40), Interval::new(10, 40)));
-        assert!(!tree.is_contained(Interval::new(0, 60), Interval::new(0, 50)));
+        assert!(tree.is_contained(Interval::new(10, 40), Interval::new(10, 40), 90));
+        assert!(!tree.is_contained(Interval::new(10, 40), Interval::new(10, 40), 110));
+        assert!(!tree.is_contained(Interval::new(0, 60), Interval::new(0, 50), 90));
     }
 
     #[test]
@@ -220,11 +287,13 @@ mod tests {
         assert!(!tree.is_contained_with_min_diag_separation(
             Interval::new(11, 40),
             Interval::new(3, 32),
+            30,
             6
         ));
         assert!(tree.is_contained_with_min_diag_separation(
             Interval::new(5, 35),
             Interval::new(5, 35),
+            30,
             6
         ));
     }

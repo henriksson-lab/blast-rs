@@ -101,9 +101,7 @@ pub fn get_reverse_nucl_sequence(sequence: &[u8], length: usize) -> Vec<u8> {
     // (`blast_util.c:814-819`. The C source comment says "blastna
     // encoding" but the table values are NCBI4na bit masks; see the
     // identities A(1)↔T(8), C(2)↔G(4), N(15)↔N(15).)
-    const CONVERSION_TABLE: [u8; 16] = [
-        0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15,
-    ];
+    const CONVERSION_TABLE: [u8; 16] = [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15];
     for index in 0..length {
         let b = sequence[index];
         rev[length - index] = if b == FENCE_SENTRY {
@@ -133,7 +131,11 @@ pub fn blast_get_translation(
     genetic_code: &[u8; 64],
 ) -> usize {
     // C: nucl_seq = (frame >= 0 ? query_seq : query_seq_rev + 1);
-    let nucl_seq: &[u8] = if frame >= 0 { query_seq } else { &query_seq_rev[1..] };
+    let nucl_seq: &[u8] = if frame >= 0 {
+        query_seq
+    } else {
+        &query_seq_rev[1..]
+    };
 
     // C: prot_seq[0] = NULLB; index_prot = 1;
     prot_seq[0] = NULLB;
@@ -526,33 +528,20 @@ mod tests {
         let seq: Vec<u8> = vec![1, 8, 4, 4, 2, 8];
         let rev = get_reverse_nucl_sequence(&seq, seq.len());
         let mut prot = vec![0u8; seq.len() / CODON_LENGTH + 2];
-        let n = blast_get_translation(
-            &seq,
-            &rev,
-            seq.len(),
-            1,
-            &mut prot,
-            &STANDARD_GENETIC_CODE,
-        );
+        let n = blast_get_translation(&seq, &rev, seq.len(), 1, &mut prot, &STANDARD_GENETIC_CODE);
         assert_eq!(n, 2);
         assert_eq!(prot[0], NULLB);
         assert_eq!(prot[1], 12); // Met
-        assert_eq!(prot[2], 1);  // Ala
+        assert_eq!(prot[2], 1); // Ala
         assert_eq!(prot[3], NULLB);
 
         // Frame -1 reads the reverse-complement of ATGGCT = AGCCAT, codon AGC = S(17)
         // and CAT = H(8).
-        let n_rev = blast_get_translation(
-            &seq,
-            &rev,
-            seq.len(),
-            -1,
-            &mut prot,
-            &STANDARD_GENETIC_CODE,
-        );
+        let n_rev =
+            blast_get_translation(&seq, &rev, seq.len(), -1, &mut prot, &STANDARD_GENETIC_CODE);
         assert_eq!(n_rev, 2);
         assert_eq!(prot[1], 17); // Ser
-        assert_eq!(prot[2], 8);  // His
+        assert_eq!(prot[2], 8); // His
     }
 
     #[test]
@@ -619,7 +608,11 @@ mod tests {
         let (_buf, offsets) =
             blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
         for ctx in 0..NUM_FRAMES {
-            assert_eq!(offsets[ctx + 1] - offsets[ctx], 1, "expected zero residues in ctx {ctx}");
+            assert_eq!(
+                offsets[ctx + 1] - offsets[ctx],
+                1,
+                "expected zero residues in ctx {ctx}"
+            );
         }
     }
 

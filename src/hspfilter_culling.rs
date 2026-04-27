@@ -59,10 +59,7 @@ impl<'a> BlastHSPCullingData<'a> {
     /// 1-1 port of `s_BlastHSPCullingNew` (`hspfilter_culling.c:666`).
     /// Allocates the writer-data struct and snapshots the
     /// `num_contexts = query_info.last_context + 1` derived value.
-    pub fn new(
-        params: BlastHSPCullingParams,
-        query_info: &'a crate::queryinfo::QueryInfo,
-    ) -> Self {
+    pub fn new(params: BlastHSPCullingParams, query_info: &'a crate::queryinfo::QueryInfo) -> Self {
         let num_contexts = query_info.contexts.len() as i32;
         Self {
             params,
@@ -110,8 +107,7 @@ impl<'a> BlastHSPCullingData<'a> {
             } else {
                 hsp.context
             };
-            let (begin, end) = if is_blastn
-                && (hsp.context % crate::util::NUM_STRANDS as i32) != 0
+            let (begin, end) = if is_blastn && (hsp.context % crate::util::NUM_STRANDS as i32) != 0
             {
                 (qlen - hsp.query_end, qlen - hsp.query_offset)
             } else {
@@ -162,10 +158,8 @@ impl<'a> BlastHSPCullingData<'a> {
             if tree_slot.is_none() {
                 continue;
             }
-            let qid = crate::queryinfo::blast_get_query_index_from_context(
-                cid,
-                self.params.program,
-            );
+            let qid =
+                crate::queryinfo::blast_get_query_index_from_context(cid, self.params.program);
             // Lazy-init per-query hitlist.
             let qid_idx = qid as usize;
             if qid_idx >= results.hitlists.len() {
@@ -252,16 +246,20 @@ pub fn blast_hsp_culling_pipe_run(
                 }
             }
             // C: `Blast_HitListSortByEvalue(...)`.
-            hitlist
-                .hsp_lists
-                .sort_by(|a, b| a.best_evalue.partial_cmp(&b.best_evalue).unwrap_or(std::cmp::Ordering::Equal));
+            hitlist.hsp_lists.sort_by(|a, b| {
+                a.best_evalue
+                    .partial_cmp(&b.best_evalue)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
     }
 
     // C step 2 + 3: run culling on every per-subject list, then drop
     // the now-empty hitlist so finalize can rebuild it.
     for hitlist_slot in results.hitlists.iter_mut() {
-        let Some(hitlist) = hitlist_slot.take() else { continue };
+        let Some(hitlist) = hitlist_slot.take() else {
+            continue;
+        };
         for mut list in hitlist.hsp_lists {
             data.run(&mut list);
         }
@@ -400,12 +398,8 @@ pub struct BlastHSPPipeInfo {
 }
 
 pub fn blast_hsp_culling_pipe_info_new(params: BlastHSPCullingParams) -> BlastHSPPipeInfo {
-    BlastHSPPipeInfo {
-        params,
-        next: None,
-    }
+    BlastHSPPipeInfo { params, next: None }
 }
-
 
 /// 1-1 port of `LinkedHSP` (`hspfilter_culling.c:52`). Singly-linked
 /// HSP node owning its `Hsp` payload, with culling bookkeeping
@@ -541,10 +535,7 @@ pub fn process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32
     // owned slot pattern to keep ownership clear.
     let mut cursor = list;
     while cursor.is_some() {
-        let head_is_y = cursor
-            .as_ref()
-            .map(|n| matches_y(n, y))
-            .unwrap_or(false);
+        let head_is_y = cursor.as_ref().map(|n| matches_y(n, y)).unwrap_or(false);
         // Decide whether to drop the head node based on dominance.
         let drop_head = if !head_is_y {
             if let Some(node) = cursor.as_mut() {
@@ -950,8 +941,8 @@ mod tests {
     #[test]
     fn process_hsp_list_drops_dominated_elements() {
         let mut list: Option<Box<LinkedHsp>> = None;
-        add_hsp_to_list(&mut list, mk(50, 10, 90, 1));   // dominated by y
-        add_hsp_to_list(&mut list, mk(60, 20, 80, 2));   // dominated by y
+        add_hsp_to_list(&mut list, mk(50, 10, 90, 1)); // dominated by y
+        add_hsp_to_list(&mut list, mk(60, 20, 80, 2)); // dominated by y
         let y = *mk(200, 0, 100, 0);
         let remaining = process_hsp_list(&mut list, &y);
         assert_eq!(remaining, 0);
@@ -992,14 +983,8 @@ mod tests {
         };
         let hit = crate::options::HitSavingOptions::default();
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
-        let params = blast_hsp_culling_params_new(
-            &hit,
-            &cull_opts,
-            10,
-            crate::program::BLASTP,
-            0,
-            true,
-        );
+        let params =
+            blast_hsp_culling_params_new(&hit, &cull_opts, 10, crate::program::BLASTP, 0, true);
         let mut data = blast_hsp_culling_pipe_new(params, &qi);
 
         // Pre-populate results: one hitlist with two HSPs in random
@@ -1054,14 +1039,8 @@ mod tests {
         };
         let hit = crate::options::HitSavingOptions::default();
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
-        let params = blast_hsp_culling_params_new(
-            &hit,
-            &cull_opts,
-            10,
-            crate::program::BLASTP,
-            0,
-            true,
-        );
+        let params =
+            blast_hsp_culling_params_new(&hit, &cull_opts, 10, crate::program::BLASTP, 0, true);
         let mut slot = Some(blast_hsp_culling_pipe_new(params, &qi));
         blast_hsp_culling_pipe_free(&mut slot);
         assert!(slot.is_none());
@@ -1085,14 +1064,8 @@ mod tests {
         };
         let hit = crate::options::HitSavingOptions::default();
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
-        let params = blast_hsp_culling_params_new(
-            &hit,
-            &cull_opts,
-            10,
-            crate::program::BLASTP,
-            0,
-            true,
-        );
+        let params =
+            blast_hsp_culling_params_new(&hit, &cull_opts, 10, crate::program::BLASTP, 0, true);
         let mut data = BlastHSPCullingData::new(params, &qi);
         data.init();
         // Build an HSP list with a few HSPs.
@@ -1220,7 +1193,7 @@ mod tests {
         // Now insert one whose merit is too low to survive.
         let mut bad = *mk(20, 0, 100, 9);
         bad.merit = 0; // already at zero → first dominator drops it
-        // Note: merit=0 plus full_pass decrement → drops on first match.
+                       // Note: merit=0 plus full_pass decrement → drops on first match.
         let _ = save_hsp(&mut tree, &mut bad);
     }
 

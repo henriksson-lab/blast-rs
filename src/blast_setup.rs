@@ -5,9 +5,7 @@
 
 use crate::options::{EffectiveLengthsOptions, ScoringOptions};
 use crate::parameters::EffectiveLengthsParameters;
-use crate::program::{
-    is_mapping, is_phi_blast, subject_is_translated, ProgramType, BLASTN,
-};
+use crate::program::{is_mapping, is_phi_blast, subject_is_translated, ProgramType, BLASTN};
 use crate::queryinfo::QueryInfo;
 use crate::stat::{
     compute_length_adjustment_exact, lookup_protein_params, nucl_alpha_beta, KarlinBlk,

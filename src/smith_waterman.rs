@@ -95,8 +95,7 @@ pub fn bl_basic_smith_waterman_score_only(
             }
 
             // Substitution: extend by one position in match_seq + query.
-            new_score = prev_score_no_gap_match_seq
-                + matrix_row[match_seq[match_seq_pos] as usize];
+            new_score = prev_score_no_gap_match_seq + matrix_row[match_seq[match_seq_pos] as usize];
             if new_score < 0 {
                 new_score = 0; // Smith-Waterman locality
             }
@@ -180,8 +179,7 @@ pub fn bl_smith_waterman_find_start(
                 continue_gap_score = new_score;
             }
 
-            new_score = prev_score_no_gap_match_seq
-                + matrix_row[match_seq[match_seq_pos] as usize];
+            new_score = prev_score_no_gap_match_seq + matrix_row[match_seq[match_seq_pos] as usize];
             if new_score < 0 {
                 new_score = 0;
             }
@@ -276,13 +274,7 @@ impl BlastForbiddenRanges {
     /// [match_start, match_end]` forbidden — for every query position
     /// in `[query_start, query_end)` we append one (matchStart,
     /// matchEnd) pair.
-    pub fn push(
-        &mut self,
-        query_start: i32,
-        query_end: i32,
-        match_start: i32,
-        match_end: i32,
-    ) {
+    pub fn push(&mut self, query_start: i32, query_end: i32, match_start: i32, match_end: i32) {
         let qs = query_start.max(0) as usize;
         let qe = query_end.max(0) as usize;
         if qe > self.num_forbidden.len() {
@@ -368,8 +360,7 @@ pub fn bl_special_smith_waterman_score_only(
             new_score = if is_forbidden {
                 COMPO_SCORE_MIN
             } else {
-                prev_score_no_gap_match_seq
-                    + matrix_row[match_seq[match_seq_pos] as usize]
+                prev_score_no_gap_match_seq + matrix_row[match_seq[match_seq_pos] as usize]
             };
             if new_score < 0 {
                 new_score = 0;
@@ -468,8 +459,7 @@ pub fn bl_special_smith_waterman_find_start(
             new_score = if is_forbidden {
                 COMPO_SCORE_MIN
             } else {
-                prev_score_no_gap_match_seq
-                    + matrix_row[match_seq[match_seq_pos] as usize]
+                prev_score_no_gap_match_seq + matrix_row[match_seq[match_seq_pos] as usize]
             };
             if new_score < 0 {
                 new_score = 0;
@@ -634,9 +624,8 @@ mod tests {
         let q = encode_aa(b"MKFLILLF");
         let s = encode_aa(b"MKFLILLF");
         let m = blosum62();
-        let (score, m_start, q_start) = blast_smith_waterman_find_start(
-            &s, &q, &m, 11, 1, 7, 7, 38,
-        );
+        let (score, m_start, q_start) =
+            blast_smith_waterman_find_start(&s, &q, &m, 11, 1, 7, 7, 38);
         assert_eq!(score, 38);
         assert_eq!(m_start, 0);
         assert_eq!(q_start, 0);
@@ -654,9 +643,8 @@ mod tests {
         assert_eq!(m_end, 12); // 5 + 7 = position of last F in subject
 
         // Reverse SW should find start at position 5 in subject
-        let (score2, m_start, q_start) = blast_smith_waterman_find_start(
-            &s, &q, &m, 11, 1, m_end, q_end, score,
-        );
+        let (score2, m_start, q_start) =
+            blast_smith_waterman_find_start(&s, &q, &m, 11, 1, m_end, q_end, score);
         assert_eq!(score2, 38);
         assert_eq!(q_start, 0);
         assert_eq!(m_start, 5);
@@ -699,10 +687,9 @@ mod tests {
         let (s1, m_end1, q_end1) =
             blast_smith_waterman_score_only_with_forbidden(&s, &q, &m, 11, 1, &fr);
         assert_eq!(s1, 38);
-        let (s1_back, m_start1, q_start1) =
-            blast_smith_waterman_find_start_with_forbidden(
-                &s, &q, &m, 11, 1, m_end1, q_end1, s1, &fr,
-            );
+        let (s1_back, m_start1, q_start1) = blast_smith_waterman_find_start_with_forbidden(
+            &s, &q, &m, 11, 1, m_end1, q_end1, s1, &fr,
+        );
         assert_eq!(s1_back, 38);
         assert_eq!(q_start1, 0);
 

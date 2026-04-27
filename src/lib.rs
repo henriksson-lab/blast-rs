@@ -21,9 +21,9 @@
 pub mod api;
 pub mod blast_kappa;
 pub mod blast_setup;
-pub mod hspfilter_culling;
 pub mod compo_mode_condition;
 pub mod composition;
+pub mod hspfilter_culling;
 pub mod nlm_linear_algebra;
 pub mod optimize_target_freq;
 pub mod semi_gapped_align;
@@ -86,15 +86,14 @@ pub use api::{
 
 // Re-export core types at crate root (matching old API)
 pub use db::BlastDb;
-pub use matrix::AA_FREQUENCIES as BACKGROUND_FREQ;
-pub use pssm::Pssm;
-pub use stat::KarlinBlk as KarlinAltschul;
 pub use link_hsps::{
-    BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
-    LinkScoreBlock,
+    BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters, LinkScoreBlock,
 };
+pub use matrix::AA_FREQUENCIES as BACKGROUND_FREQ;
 pub use program::BLASTN;
+pub use pssm::Pssm;
 pub use queryinfo::QueryInfo;
+pub use stat::KarlinBlk as KarlinAltschul;
 // blastn builder (BlastnSearch) is now in the api module.
 pub mod db;
 pub mod filter;

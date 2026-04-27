@@ -34,7 +34,7 @@ But:
 
 - **Pure Rust** -- zero C/C++ FFI calls, no unsafe dependencies
 - **Byte-identical output** to NCBI BLAST+ for blastn searches
-- **Low startup overhead** -- near-zero startup vs ~400ms for NCBI BLAST+ (see benchmarks)
+- **Low startup overhead** for CLI use, with a library API for avoiding repeated process and database setup
 - **All major programs**: blastn, blastp, blastx, tblastn, tblastx, psiblast
 - **High-level library API**: `blastp()`, `blastn_search()`, `blastx()`, `tblastn()`, `tblastx()` with builder-pattern `SearchParams`
 - **Database creation**: `BlastDbBuilder` for creating protein and nucleotide databases programmatically
@@ -273,6 +273,46 @@ Single crate `blast-rs` with modules:
 
 ## Benchmarks
 
+These numbers are only meant to track this translation against the local NCBI
+BLAST+ 2.17.0 reference binary. They are not general performance claims.
+
+Benchmark setup:
+
+- Rust binary: `target/release/blast-cli`
+- Reference binary: `ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin/blastn`
+- Build used for this run: release build, no LTO
+- Host date: 2026-04-26
+- Threads: 1
+- Output: tabular file output, then `cmp` against the reference output
+- Timing: median wall-clock seconds from 3 runs, using `/usr/bin/time`
+
+Command shape:
+
+```bash
+blast-cli blastn --task blastn-short --dust no --evalue 10 \
+    --query <query.fa> --db <db> \
+    --outfmt '6 qseqid sseqid pident length qstart qend sstart send bitscore evalue' \
+    --max_hsps 1 --num_threads 1 --out rust.tsv
+
+blastn -task blastn-short -dust no -evalue 10 \
+    -query <query.fa> -db <db> \
+    -outfmt '6 qseqid sseqid pident length qstart qend sstart send bitscore evalue' \
+    -max_hsps 1 -num_threads 1 -out ncbi.tsv
+```
+
+| Case | Query | Database | Output parity | Rows / bytes | Rust median | NCBI median | Speedup |
+|------|-------|----------|---------------|--------------|-------------|-------------|---------|
+| Short query vs yeast | `tests/fixtures/large_db/query_500.fa` | `tests/fixtures/large_db/yeast` | byte-identical (`cmp=0`) | 17 / 1260 | 0.33 s | 0.38 s | 1.15x |
+| Short query vs C. elegans | `tests/fixtures/large_db/query_500.fa` | `tests/fixtures/large_db/celegans` | byte-identical (`cmp=0`) | 6 / 466 | 4.48 s | 5.55 s | 1.24x |
+| Longer query vs C. elegans | `tests/fixtures/large_db/query_2000.fa` | `tests/fixtures/large_db/celegans` | byte-identical (`cmp=0`) | 7 / 566 | 11.61 s | 14.70 s | 1.27x |
+
+Raw timings:
+
+| Case | Rust runs | NCBI runs |
+|------|-----------|-----------|
+| Short query vs yeast | 0.34, 0.32, 0.33 s | 0.38, 0.39, 0.37 s |
+| Short query vs C. elegans | 4.38, 4.55, 4.48 s | 5.25, 5.55, 5.61 s |
+| Longer query vs C. elegans | 11.86, 11.61, 11.14 s | 14.79, 14.55, 14.70 s |
 
 
 ## Algorithms

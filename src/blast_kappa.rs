@@ -269,17 +269,8 @@ mod struct_tests {
 
     #[test]
     fn alignment_new_round_trip() {
-        let a = BlastCompoAlignment::new(
-            42,
-            MatrixAdjustRule::DontAdjust,
-            0,
-            10,
-            50,
-            20,
-            60,
-            1,
-            None,
-        );
+        let a =
+            BlastCompoAlignment::new(42, MatrixAdjustRule::DontAdjust, 0, 10, 50, 20, 60, 1, None);
         assert_eq!(a.score, 42);
         assert_eq!(a.matrix_adjust_rule, MatrixAdjustRule::DontAdjust);
         assert_eq!(a.query_start, 10);
@@ -291,13 +282,28 @@ mod struct_tests {
 
     #[test]
     fn compo_adjust_mode_from_u8() {
-        assert_eq!(CompoAdjustMode::from_u8(0), CompoAdjustMode::NoCompositionBasedStats);
-        assert_eq!(CompoAdjustMode::from_u8(1), CompoAdjustMode::CompositionBasedStats);
-        assert_eq!(CompoAdjustMode::from_u8(2), CompoAdjustMode::CompositionMatrixAdjust);
-        assert_eq!(CompoAdjustMode::from_u8(3), CompoAdjustMode::CompoForceFullMatrixAdjust);
+        assert_eq!(
+            CompoAdjustMode::from_u8(0),
+            CompoAdjustMode::NoCompositionBasedStats
+        );
+        assert_eq!(
+            CompoAdjustMode::from_u8(1),
+            CompoAdjustMode::CompositionBasedStats
+        );
+        assert_eq!(
+            CompoAdjustMode::from_u8(2),
+            CompoAdjustMode::CompositionMatrixAdjust
+        );
+        assert_eq!(
+            CompoAdjustMode::from_u8(3),
+            CompoAdjustMode::CompoForceFullMatrixAdjust
+        );
         // Anything > 3 saturates to the strongest mode (matches C's
         // raw enum cast — out-of-range becomes max).
-        assert_eq!(CompoAdjustMode::from_u8(99), CompoAdjustMode::CompoForceFullMatrixAdjust);
+        assert_eq!(
+            CompoAdjustMode::from_u8(99),
+            CompoAdjustMode::CompoForceFullMatrixAdjust
+        );
     }
 
     #[test]
@@ -317,10 +323,21 @@ mod struct_tests {
             data_offset: 0,
             length: 10,
         };
-        let qr = BlastCompoSequenceRange { begin: 0, end: 10, context: 0 };
-        let sr = BlastCompoSequenceRange { begin: 0, end: 10, context: 0 };
+        let qr = BlastCompoSequenceRange {
+            begin: 0,
+            end: 10,
+            context: 0,
+        };
+        let sr = BlastCompoSequenceRange {
+            begin: 0,
+            end: 10,
+            context: 0,
+        };
         let result = redo_one_alignment(
-            &query, &qr, &subject, &sr,
+            &query,
+            &qr,
+            &subject,
+            &sr,
             /* gapped_start_q */ 4,
             /* gapped_start_s */ 4,
             MatrixAdjustRule::DontAdjust,
@@ -359,7 +376,6 @@ mod struct_tests {
     fn sw_find_final_ends_using_xdrop_returns_target_score_on_full_match() {
         // Identity match should produce the maximum score with the
         // first X-drop pass. Use BLOSUM62 + ACGT-style residues.
-        let matrix = crate::matrix::BLOSUM62;
         // Convert i32 BLOSUM62 to the [[i32; 16]; 16] shape used by
         // align_ex (BLASTNA-style 16-by-16). align_ex expects a 16x16,
         // but BLOSUM62 is 28x28 — sw_find_final_ends_using_xdrop is
@@ -373,7 +389,17 @@ mod struct_tests {
         let q: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3];
         let s: Vec<u8> = q.clone();
         let (score, q_ext, s_ext, _ops) = sw_find_final_ends_using_xdrop(
-            &q, 0, q.len() - 1, &s, 0, s.len() - 1, &m, 5, 2, 20, /* target */ 40,
+            &q,
+            0,
+            q.len() - 1,
+            &s,
+            0,
+            s.len() - 1,
+            &m,
+            5,
+            2,
+            20,
+            /* target */ 40,
         );
         assert!(score >= 40);
         assert!(q_ext > 0);
@@ -450,12 +476,8 @@ mod struct_tests {
             false,
             0.0,
         );
-        let mut saved = BlastKappaSavedParameters::new(
-            0,
-            0,
-            CompoAdjustMode::NoCompositionBasedStats,
-            false,
-        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 0, CompoAdjustMode::NoCompositionBasedStats, false);
         let mut hsp_list = HspList::new(0);
         let mut results = crate::hspstream::HspResults::new(1);
         let rc = blast_redo_alignment_core(
@@ -527,9 +549,7 @@ mod struct_tests {
         let expected_xdrop = (25.0 * crate::math::NCBIMATH_LN2 / 0.267).round() as i32;
         assert_eq!(p.gapping_params.x_dropoff, expected_xdrop);
         // near_identical_cutoff = 1.74 * ln(2) / 0.267
-        let expected_nic = (NEAR_IDENTICAL_BITS_PER_POSITION
-            * crate::math::NCBIMATH_LN2)
-            / 0.267;
+        let expected_nic = (NEAR_IDENTICAL_BITS_PER_POSITION * crate::math::NCBIMATH_LN2) / 0.267;
         assert!((p.near_identical_cutoff - expected_nic).abs() < 1e-9);
         // Matrix info populated for BLOSUM62.
         assert_eq!(p.matrix_info.matrix_name, "BLOSUM62");
@@ -603,7 +623,10 @@ mod struct_tests {
             /* near_identical_cutoff */ 1.74,
         );
         assert_eq!(p.re_pseudocounts, K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS);
-        assert_eq!(p.compo_adjust_mode, CompoAdjustMode::CompositionMatrixAdjust);
+        assert_eq!(
+            p.compo_adjust_mode,
+            CompoAdjustMode::CompositionMatrixAdjust
+        );
         assert!(p.query_is_translated);
         assert!(!p.subject_is_translated);
         assert!(!p.position_based);
@@ -664,8 +687,8 @@ mod struct_tests {
         assert_eq!(rc, 0);
         assert_eq!(counts[0], 2); // two HSPs in frame index 0
         assert_eq!(counts[1], 1); // one HSP in frame index 1
-        // Walk frame 0's list — preserves insertion order (NCBI
-        // appends to tail, not head).
+                                  // Walk frame 0's list — preserves insertion order (NCBI
+                                  // appends to tail, not head).
         let head_0 = lists[0].as_ref().expect("head 0");
         assert_eq!(head_0.score, 100);
         let next_0 = head_0.next.as_ref().expect("second in list");
@@ -792,7 +815,11 @@ mod struct_tests {
             data_offset: 0,
             length: 5,
         };
-        let range = BlastCompoSequenceRange { begin: 0, end: 4, context: 0 };
+        let range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 4,
+            context: 0,
+        };
         let prepped = sequence_prep_query_range(&q, &range);
         // length = 4 (end - begin); buffer = length + 2 = 6.
         assert_eq!(prepped.length, 4);
@@ -841,7 +868,9 @@ mod struct_tests {
                 round_down: false,
             },
         ];
-        let params = gapping_params_new(&scoring, &kbp, 2, /* bits = */ 25.0, /* raw = */ 0);
+        let params = gapping_params_new(
+            &scoring, &kbp, 2, /* bits = */ 25.0, /* raw = */ 0,
+        );
         assert_eq!(params.gap_open, 11);
         assert_eq!(params.gap_extend, 1);
         // Expected x_dropoff = max(round(25 * ln(2) / 0.27), 0) ≈ 64.
@@ -915,7 +944,11 @@ mod struct_tests {
             },
         ];
         let matrix: Vec<Vec<i32>> = (0..crate::matrix::AA_SIZE)
-            .map(|r| (0..crate::matrix::AA_SIZE).map(|c| (r * 100 + c) as i32).collect())
+            .map(|r| {
+                (0..crate::matrix::AA_SIZE)
+                    .map(|c| (r * 100 + c) as i32)
+                    .collect()
+            })
             .collect();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
@@ -972,12 +1005,8 @@ mod struct_tests {
 
     #[test]
     fn saved_parameters_new_no_composition_skips_matrix() {
-        let sp = BlastKappaSavedParameters::new(
-            10,
-            3,
-            CompoAdjustMode::NoCompositionBasedStats,
-            false,
-        );
+        let sp =
+            BlastKappaSavedParameters::new(10, 3, CompoAdjustMode::NoCompositionBasedStats, false);
         assert_eq!(sp.num_queries, 3);
         assert_eq!(sp.kbp_gap_orig.len(), 3);
         // C: `if (compo_adjust_mode != eNoCompositionBasedStats) Nlm_Int4MatrixNew(...);`
@@ -987,12 +1016,8 @@ mod struct_tests {
 
     #[test]
     fn saved_parameters_new_compo_allocates_aa_matrix() {
-        let sp = BlastKappaSavedParameters::new(
-            5,
-            1,
-            CompoAdjustMode::CompositionBasedStats,
-            false,
-        );
+        let sp =
+            BlastKappaSavedParameters::new(5, 1, CompoAdjustMode::CompositionBasedStats, false);
         // Non-position-based: BLASTAA_SIZE × BLASTAA_SIZE.
         assert_eq!(sp.orig_matrix.len(), crate::matrix::AA_SIZE);
         assert_eq!(sp.orig_matrix[0].len(), crate::matrix::AA_SIZE);
@@ -1195,7 +1220,7 @@ mod struct_tests {
         ];
         let (n_ident, align_length, _) =
             blast_hsp_get_num_identities(&query, &subject, &hsp, Some(&ops), None);
-        assert_eq!(n_ident, 8);   // 4 A's + 4 C's all match across the gap
+        assert_eq!(n_ident, 8); // 4 A's + 4 C's all match across the gap
         assert_eq!(align_length, 9); // 4 + 1 + 4
     }
 
@@ -1251,11 +1276,11 @@ mod struct_tests {
             &mut list,
             1000, // subject_length
             crate::program::BLASTP,
-            100,  // query_length
-            10,   // length_adjustment
-            1e9,  // eff_searchsp
-            -1.0, // pvalue_for_this_pair: out of [0,1] → skip composition
-            0.1,  // max_evalue
+            100,   // query_length
+            10,    // length_adjustment
+            1e9,   // eff_searchsp
+            -1.0,  // pvalue_for_this_pair: out of [0,1] → skip composition
+            0.1,   // max_evalue
             false, // do_sum_stats
         );
         // Above-threshold HSP should be dropped.
@@ -1315,12 +1340,11 @@ mod struct_tests {
             num_gaps: 0,
         });
         adjust_evalues_for_composition(
-            &mut list,
-            0.5,    // comp_p_value
-            1000,   // subject_length
-            100,    // query_length
-            10,     // length_adjustment
-            1e9,    // eff_searchsp
+            &mut list, 0.5,  // comp_p_value
+            1000, // subject_length
+            100,  // query_length
+            10,   // length_adjustment
+            1e9,  // eff_searchsp
         );
         // Best evalue should equal the only HSP's evalue.
         assert_eq!(list.best_evalue, list.hsps[0].evalue);
@@ -1383,17 +1407,8 @@ mod struct_tests {
             data_offset: 0,
             length: s.len() as i32,
         };
-        let align = BlastCompoAlignment::new(
-            12,
-            MatrixAdjustRule::DontAdjust,
-            0,
-            0,
-            12,
-            0,
-            12,
-            0,
-            None,
-        );
+        let align =
+            BlastCompoAlignment::new(12, MatrixAdjustRule::DontAdjust, 0, 0, 12, 0, 12, 0, None);
         assert!(!test_near_identical(&sd, 0, &qd, 0, &q_words, &align));
     }
 
@@ -1401,18 +1416,35 @@ mod struct_tests {
     fn hsp_list_from_distinct_alignments_consumes_list() {
         // Build a 3-element linked list manually, in REVERSE-of-computation
         // order as NCBI stores them: third-best at head, best-scoring last.
-        let third = BlastCompoAlignment::new(
-            10, MatrixAdjustRule::DontAdjust, 0, 0, 10, 0, 10, 1, None);
+        let third =
+            BlastCompoAlignment::new(10, MatrixAdjustRule::DontAdjust, 0, 0, 10, 0, 10, 1, None);
         let mut second = BlastCompoAlignment::new(
-            50, MatrixAdjustRule::ScaleOldMatrix, 0, 20, 30, 20, 30, 1, None);
+            50,
+            MatrixAdjustRule::ScaleOldMatrix,
+            0,
+            20,
+            30,
+            20,
+            30,
+            1,
+            None,
+        );
         second.next = Some(Box::new(third));
         let mut first = BlastCompoAlignment::new(
-            100, MatrixAdjustRule::UnconstrainedRelEntropy, 0, 40, 60, 40, 60, 1, None);
+            100,
+            MatrixAdjustRule::UnconstrainedRelEntropy,
+            0,
+            40,
+            60,
+            40,
+            60,
+            1,
+            None,
+        );
         first.next = Some(Box::new(second));
         let mut head: Option<Box<BlastCompoAlignment>> = Some(Box::new(first));
         let mut hsp_list = HspList::new(0);
-        let (status, tags) =
-            hsp_list_from_distinct_alignments(&mut hsp_list, &mut head, 42, 1);
+        let (status, tags) = hsp_list_from_distinct_alignments(&mut hsp_list, &mut head, 42, 1);
         assert_eq!(status, 0);
         assert!(head.is_none(), "linked list consumed");
         assert_eq!(hsp_list.oid, 42);
@@ -1424,7 +1456,7 @@ mod struct_tests {
         // Tags emitted in pre-sort order (matching alignment list traversal).
         assert_eq!(tags.len(), 3);
         assert_eq!(tags[0], CompoAdjustMode::CompositionMatrixAdjust); // first/UnconstrainedRelEntropy
-        assert_eq!(tags[1], CompoAdjustMode::CompositionBasedStats);   // second/ScaleOldMatrix
+        assert_eq!(tags[1], CompoAdjustMode::CompositionBasedStats); // second/ScaleOldMatrix
         assert_eq!(tags[2], CompoAdjustMode::NoCompositionBasedStats); // third/DontAdjust
     }
 
@@ -1438,17 +1470,20 @@ mod struct_tests {
             subject_start: 10,
             subject_end: 30,
         };
-        let qr = BlastCompoSequenceRange { begin: 100, end: 200, context: 7 };
-        let sr = BlastCompoSequenceRange { begin: 1000, end: 2000, context: 3 };
+        let qr = BlastCompoSequenceRange {
+            begin: 100,
+            end: 200,
+            context: 7,
+        };
+        let sr = BlastCompoSequenceRange {
+            begin: 1000,
+            end: 2000,
+            context: 3,
+        };
         let mut script = Some(crate::gapinfo::GapEditScript::new());
-        let result = new_alignment_from_gap_align(
-            &tb,
-            &mut script,
-            &qr,
-            &sr,
-            MatrixAdjustRule::DontAdjust,
-        )
-        .expect("alignment");
+        let result =
+            new_alignment_from_gap_align(&tb, &mut script, &qr, &sr, MatrixAdjustRule::DontAdjust)
+                .expect("alignment");
         assert_eq!(result.score, 99);
         assert_eq!(result.query_start, 105);
         assert_eq!(result.query_end, 125);
@@ -1470,7 +1505,6 @@ mod struct_tests {
         assert_eq!(sd.data(), &[1, 2, 3, 4]);
     }
 }
-
 
 // ───────────────────────────────────────────────────────────────────────────
 // Macros (`blast_hits_priv.h`, `redo_alignment.h`).
@@ -1600,11 +1634,7 @@ pub fn get_hash(data: &[u8], word_size: usize) -> u64 {
 /// identical residues and tolerating up to `max_shift` mismatches/gaps
 /// when the very next two positions match. Returns
 /// `(num_identical, query_ext_len, subject_ext_len, align_len)`.
-pub fn extend_right(
-    query: &[u8],
-    subject: &[u8],
-    max_shift: i32,
-) -> (i32, i32, i32, i32) {
+pub fn extend_right(query: &[u8], subject: &[u8], max_shift: i32) -> (i32, i32, i32, i32) {
     let query_len = query.len() as i32;
     let subject_len = subject.len() as i32;
     let mut num_identical = 0i32;
@@ -1617,7 +1647,8 @@ pub fn extend_right(
         let mut matched = false;
 
         // Run of identities.
-        while q_pos < query_len && s_pos < subject_len
+        while q_pos < query_len
+            && s_pos < subject_len
             && query[q_pos as usize] == subject[s_pos as usize]
         {
             num_identical += 1;
@@ -1627,10 +1658,7 @@ pub fn extend_right(
 
         // Try to skip mismatches or gaps.
         let mut n = 1i32;
-        while n < max_shift
-            && q_pos + n + 1 < query_len
-            && s_pos + n + 1 < subject_len
-            && !matched
+        while n < max_shift && q_pos + n + 1 < query_len && s_pos + n + 1 < subject_len && !matched
         {
             // Mismatches: advance both by `n + 2` if the (n)th and (n+1)th
             // positions both match.
@@ -1690,11 +1718,7 @@ pub fn extend_right(
 /// where the extension lengths are measured from the end. NCBI's C
 /// version takes an `align_len` in/out parameter and *adds* the delta;
 /// the Rust signature returns the delta and lets the caller decide.
-pub fn extend_left(
-    query: &[u8],
-    subject: &[u8],
-    max_shift: i32,
-) -> (i32, i32, i32, i32) {
+pub fn extend_left(query: &[u8], subject: &[u8], max_shift: i32) -> (i32, i32, i32, i32) {
     let query_len = query.len() as i32;
     let subject_len = subject.len() as i32;
     let mut q_pos = query_len - 1;
@@ -1706,20 +1730,14 @@ pub fn extend_left(
     while q_pos >= 0 && s_pos >= 0 {
         let mut matched = false;
 
-        while q_pos > 0 && s_pos > 0
-            && query[q_pos as usize] == subject[s_pos as usize]
-        {
+        while q_pos > 0 && s_pos > 0 && query[q_pos as usize] == subject[s_pos as usize] {
             num_identical += 1;
             q_pos -= 1;
             s_pos -= 1;
         }
 
         let mut n = 1i32;
-        while n < max_shift
-            && q_pos - n - 1 > 0
-            && s_pos - n - 1 > 0
-            && !matched
-        {
+        while n < max_shift && q_pos - n - 1 > 0 && s_pos - n - 1 > 0 && !matched {
             if query[(q_pos - n) as usize] == subject[(s_pos - n) as usize]
                 && query[(q_pos - n - 1) as usize] == subject[(s_pos - n - 1) as usize]
             {
@@ -1897,8 +1915,10 @@ impl BlastKappaSavedParameters {
         // C: `for (i = 0; i < numQueries; i++) sp->kbp_gap_orig[i] = NULL;`
         // We initialize to default KarlinBlk values; the actual values
         // are filled in by `s_RecordInitialSearch` (TODO).
-        sp.kbp_gap_orig
-            .resize(num_queries.max(0) as usize, crate::stat::KarlinBlk::default());
+        sp.kbp_gap_orig.resize(
+            num_queries.max(0) as usize,
+            crate::stat::KarlinBlk::default(),
+        );
         if !matches!(compo_adjust_mode, CompoAdjustMode::NoCompositionBasedStats) {
             // Allocate the original-matrix backing store.
             let cols = crate::matrix::AA_SIZE;
@@ -2051,7 +2071,9 @@ pub fn redo_one_alignment(
 ///
 /// Output ratios are deep-copied (1-1 with NCBI's per-cell copy from
 /// `stdFreqRatios->data[i][j]`).
-pub fn get_start_freq_ratios(matrix_name: &str) -> Result<[[f64; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE], ()> {
+pub fn get_start_freq_ratios(
+    matrix_name: &str,
+) -> Result<[[f64; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE], ()> {
     if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
         return Ok(crate::matrix::get_blosum62_freq_ratios());
     }
@@ -2091,7 +2113,12 @@ pub fn sw_find_final_ends_using_xdrop(
     gap_extend: i32,
     mut gap_x_dropoff: i32,
     target_score: i32,
-) -> (i32, usize, usize, Vec<(crate::gapinfo::GapAlignOpType, i32)>) {
+) -> (
+    i32,
+    usize,
+    usize,
+    Vec<(crate::gapinfo::GapAlignOpType, i32)>,
+) {
     let q_len = query_end - query_start + 1;
     let s_len = match_end - match_start + 1;
     let mut doubling_count = 0;
@@ -2776,7 +2803,9 @@ pub fn record_initial_search(
         // Ensure orig_matrix has the right shape — `BlastKappaSavedParameters::new`
         // already allocated it, but defend against caller mismatch.
         if saved.orig_matrix.len() < rows {
-            saved.orig_matrix.resize(rows, vec![0i32; crate::matrix::AA_SIZE]);
+            saved
+                .orig_matrix
+                .resize(rows, vec![0i32; crate::matrix::AA_SIZE]);
         }
         for (i, row) in saved.orig_matrix.iter_mut().take(rows).enumerate() {
             if i < matrix.len() {
@@ -2820,7 +2849,9 @@ pub fn restore_search(
         };
         for (i, row) in matrix.iter_mut().take(rows).enumerate() {
             if i < saved.orig_matrix.len() {
-                let cols = crate::matrix::AA_SIZE.min(row.len()).min(saved.orig_matrix[i].len());
+                let cols = crate::matrix::AA_SIZE
+                    .min(row.len())
+                    .min(saved.orig_matrix[i].len());
                 row[..cols].copy_from_slice(&saved.orig_matrix[i][..cols]);
             }
         }
@@ -2870,7 +2901,11 @@ impl BlastCompoHeap {
             .map(|r| r.best_evalue)
             .fold(f64::NEG_INFINITY, f64::max)
             .max(f64::NEG_INFINITY)
-            .max(if self.records.is_empty() { f64::INFINITY } else { f64::NEG_INFINITY })
+            .max(if self.records.is_empty() {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            })
     }
 
     /// 1-1 port of `BlastCompo_HeapPop`. Removes and returns the
@@ -2915,9 +2950,7 @@ pub fn clear_heap(heap: &mut BlastCompoHeap) {
 /// allocates `Blast_HitListNew(hitlist_size)` per query; we let
 /// `HitList::new()` handle that and ignore the size cap (Rust's
 /// `Vec` is unbounded; truncate at the call site if needed).
-pub fn fill_results_from_compo_heaps(
-    heaps: &mut [BlastCompoHeap],
-) -> crate::hspstream::HspResults {
+pub fn fill_results_from_compo_heaps(heaps: &mut [BlastCompoHeap]) -> crate::hspstream::HspResults {
     let num_queries = heaps.len();
     let mut results = crate::hspstream::HspResults::new(num_queries as i32);
     for (q, heap) in heaps.iter_mut().enumerate() {
@@ -3202,8 +3235,7 @@ pub fn hitlist_evaluate_and_purge(
     // re-assignment to avoid double-applying.
 
     // Composition adjustment for blastp/blastx if the p-value is in [0, 1].
-    if (program_number == crate::program::BLASTP
-        || program_number == crate::program::BLASTX)
+    if (program_number == crate::program::BLASTP || program_number == crate::program::BLASTX)
         && (0.0..=1.0).contains(&pvalue_for_this_pair)
     {
         adjust_evalues_for_composition(
@@ -3421,7 +3453,7 @@ pub fn hsp_list_from_distinct_alignments(
             num_gaps: 0,
         };
         let _ = node.frame; // subject frame; carried via context tag below
-        // Translate matrix_adjust_rule → comp_adjustment_method.
+                            // Translate matrix_adjust_rule → comp_adjustment_method.
         let tag = match node.matrix_adjust_rule {
             MatrixAdjustRule::DontAdjust => CompoAdjustMode::NoCompositionBasedStats,
             MatrixAdjustRule::ScaleOldMatrix => CompoAdjustMode::CompositionBasedStats,
@@ -3625,7 +3657,7 @@ mod tests {
         // Apply lambda=0.3, logK=-2.0, divisor=2.0
         hsp_list_normalize_scores(&mut list, 0.3, -2.0, 2.0);
         assert_eq!(list.hsps[0].score, 100); // 200 / 2
-        // bit_score = (100*0.3*2 - (-2)) / ln2 = (60 + 2) / 0.6931 ≈ 89.45
+                                             // bit_score = (100*0.3*2 - (-2)) / ln2 = (60 + 2) / 0.6931 ≈ 89.45
         let expected = (100.0 * 0.3 * 2.0 - (-2.0)) / NCBIMATH_LN2;
         assert!((list.hsps[0].bit_score - expected).abs() < 1e-9);
     }
