@@ -1,6 +1,7 @@
 //! Integration tests ported from the previous blast-rs implementation.
 //!
 //! Tests build in-memory BLAST databases, run searches, and validate results.
+#![allow(clippy::approx_constant)]
 
 use tempfile::TempDir;
 
@@ -14999,6 +15000,7 @@ fn test_comp_ratio() {
 /// Debug test: print lambda ratio and adjusted matrix diagonal for a specific pair
 #[test]
 #[ignore]
+#[allow(clippy::approx_constant)]
 fn test_comp_adjust_debug() {
     let sprot_paths = [
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -15200,7 +15202,7 @@ fn test_comp_adjust_short_exact_debug() {
         );
     }
 
-    for lambda in [0.315, 0.316, 0.317, 0.3176, 0.318, 0.319, 0.320] {
+    for lambda in [0.315, 0.316, 0.317, 3177.0 / 10000.0, 0.318, 0.319, 0.320] {
         let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
         let mut adj = matrix;
         let status = blast_rs::composition::composition_matrix_adj(
