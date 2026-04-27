@@ -2602,24 +2602,30 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         "minus" => (&[] as &[u8], query_minus.as_slice()),
         _ => (query_plus.as_slice(), query_minus.as_slice()),
     };
-    let prepared_query = crate::search::PreparedBlastnQuery::new(q_plus, q_minus, params.word_size);
-    let mut last_hit_scratch = prepared_query.last_hit_scratch();
+    let prepared_query =
+        crate::search::PreparedBlastnQuery::new_megablast(q_plus, q_minus, params.word_size);
 
-    let mut results = Vec::new();
-    for oid in 0..db.num_oids {
+    let search_oid = |oid: u32| -> Option<SearchResult> {
         let subject_packed = db.get_sequence(oid);
         let subject_len = db.get_seq_len(oid) as usize;
         if subject_len < params.word_size {
-            continue;
+            return None;
         }
 
-        let hsps = crate::search::blastn_ungapped_search_packed_prepared_with_scratch(
+        let mut last_hit_scratch = prepared_query.last_hit_scratch();
+        let hsps = crate::search::blastn_gapped_search_packed_prepared_with_xdrops(
             &prepared_query,
+            q_plus,
+            q_minus,
             subject_packed,
             subject_len,
             reward,
             penalty,
+            params.gap_open,
+            params.gap_extend,
             x_dropoff,
+            params.x_drop_gapped,
+            params.x_drop_final,
             &kbp,
             search_space,
             params.evalue_threshold,
@@ -2627,7 +2633,7 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         );
 
         if hsps.is_empty() {
-            continue;
+            return None;
         }
 
         let accession = db
@@ -2667,15 +2673,46 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
             })
             .collect();
 
-        results.push(SearchResult {
+        Some(SearchResult {
             subject_oid: oid,
             subject_title: title,
             subject_accession: accession,
             subject_len,
             hsps: api_hsps,
             taxids: db.get_taxids(oid),
-        });
-    }
+        })
+    };
+
+    let mut results: Vec<SearchResult> = if params.thread_pool.is_none() && params.num_threads == 1
+    {
+        (0..db.num_oids).filter_map(search_oid).collect()
+    } else if let Some(pool) = params.thread_pool.as_deref() {
+        use rayon::prelude::*;
+        pool.install(|| {
+            (0..db.num_oids)
+                .into_par_iter()
+                .filter_map(search_oid)
+                .collect()
+        })
+    } else {
+        use rayon::prelude::*;
+        let num_threads = if params.num_threads == 0 {
+            rayon::current_num_threads()
+        } else {
+            params.num_threads
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .stack_size(64 * 1024 * 1024)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        pool.install(|| {
+            (0..db.num_oids)
+                .into_par_iter()
+                .filter_map(search_oid)
+                .collect()
+        })
+    };
 
     results.sort_by(compare_search_results);
     if results.len() > params.max_target_seqs {

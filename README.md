@@ -53,7 +53,7 @@ But:
 ## Installation
 
 ```bash
-cargo install blast-cli
+cargo install blast-rs
 ```
 
 Or build from source:
@@ -61,17 +61,32 @@ Or build from source:
 ```bash
 git clone https://github.com/henriksson-lab/blast-rs
 cd blast-rs
-cargo build --release
+cargo build --release --bin blast-cli
 # Binary at target/release/blast-cli
+```
+
+You can also run the CLI directly from a checkout without installing it:
+
+```bash
+cargo run --release --bin blast-cli -- blastn --query query.fa --subject reference.fa
 ```
 
 For maximum performance, compile for your native CPU:
 
 ```bash
-RUSTFLAGS="-C target-cpu=native" cargo build --release
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin blast-cli
 ```
 
 ## CLI Usage
+
+The installed command is `blast-cli`. Its first argument is the BLAST program
+to run, such as `blastn`, `blastp`, `blastx`, `tblastn`, `tblastx`, or
+`psiblast`.
+
+Use `--db` for an existing BLAST database prefix. The prefix is the path without
+the database extension; for example, pass `--db nt_subset` for files such as
+`nt_subset.nhr`, `nt_subset.nin`, and `nt_subset.nsq`. Use `--subject` for a
+plain FASTA file when you do not want to build a database first.
 
 ### Basic search against a BLAST database
 
@@ -83,6 +98,12 @@ blast-cli blastn --query query.fa --db mydb --word_size 11 --outfmt 6
 
 ```bash
 blast-cli blastn --query query.fa --subject reference.fa
+```
+
+### Write output to a file
+
+```bash
+blast-cli blastn --query query.fa --db mydb --out results.tsv --outfmt 6
 ```
 
 ### Short primer search
@@ -123,7 +144,7 @@ blast-cli blastn --query query.fa --db mydb \
 | `--db` | | BLAST database path (without extension) |
 | `--subject` | | Subject FASTA file (alternative to `--db`) |
 | `--out` | stdout | Output file |
-| `--outfmt` | `6` | Output format: 0=pairwise, 5=XML, 6=tabular, 17=SAM |
+| `--outfmt` | `6` | Output format. `blastn` supports 0=pairwise, 5=XML, 6=tabular, 7=commented tabular, 10=CSV, 17=SAM. Other CLI programs currently support tabular/CSV only. |
 | `--evalue` | `10.0` | E-value threshold |
 | `--word_size` | `11` | Word size for initial seed |
 | `--reward` | `1` | Match reward |
@@ -154,37 +175,106 @@ blast-cli tblastn --query protein.fa --subject nucleotide.fa
 blast-cli psiblast --query protein.fa --subject database.fa
 ```
 
+Protein and translated CLI programs currently support tabular output (`--outfmt`
+`6` or `10`). Pairwise, XML, commented tabular, and SAM writers are only wired
+for `blastn`; other programs fail explicitly for those formats until parity
+writers are implemented.
+
 ## Library Usage
+
+Add the crate to your `Cargo.toml`. The package name is `blast-rs`, while the
+Rust import path is `blast_rs`.
+
+```toml
+[dependencies]
+blast-rs = "0.12"
+```
+
+For local development against this checkout:
+
+```toml
+[dependencies]
+blast-rs = { path = "/home/mahogny/github/claude/newblast" }
+```
+
+The library API returns structured Rust values instead of formatted BLAST text.
+Open a database once, reuse it for many queries, and format results yourself or
+with `blast_rs::format`.
+
+### Search an existing nucleotide database
+
+```rust
+use blast_rs::{blastn, BlastDb, SearchParams};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Pass the BLAST database prefix, not a specific .nin/.nsq/.nhr file.
+    let db = BlastDb::open(Path::new("mydb"))?;
+
+    let params = SearchParams::blastn()
+        .evalue(1e-20)
+        .strand("both")
+        .filter_low_complexity(false);
+
+    let query = b"ACGTACGTACGTACGTACGTACGTACGT";
+    let results = blastn(&db, query, &params);
+
+    for hit in &results {
+        for hsp in &hit.hsps {
+            println!(
+                "{}\t{}..{}\t{}..{}\t{:.3}\t{:.2e}",
+                hit.subject_accession,
+                hsp.query_start,
+                hsp.query_end,
+                hsp.subject_start,
+                hsp.subject_end,
+                hsp.percent_identity(),
+                hsp.evalue
+            );
+        }
+    }
+
+    Ok(())
+}
+```
 
 ### High-level search API
 
 ```rust
-use blast_rs::api::{SearchParams, blastp, blastn_search, BlastDbBuilder, SequenceEntry};
+use blast_rs::{blastp, BlastDb, BlastDbBuilder, SearchParams, SequenceEntry};
 use blast_rs::db::DbType;
+use std::path::Path;
 
-// Build a protein database
-let mut builder = BlastDbBuilder::new(DbType::Protein, "my db");
-builder.add(SequenceEntry {
-    title: "target protein".into(),
-    accession: "P001".into(),
-    sequence: b"MKFLILLFNILCLFPVLAADNHGVSMNAS".to_vec(),
-    taxid: None,
-});
-builder.write(std::path::Path::new("mydb")).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a protein database programmatically.
+    let mut builder = BlastDbBuilder::new(DbType::Protein, "my db");
+    builder.add(SequenceEntry {
+        title: "target protein".into(),
+        accession: "P001".into(),
+        sequence: b"MKFLILLFNILCLFPVLAADNHGVSMNAS".to_vec(),
+        taxid: None,
+    });
+    builder.write(Path::new("mydb"))?;
 
-// Search
-let db = blast_rs::db::BlastDb::open(std::path::Path::new("mydb")).unwrap();
-let params = SearchParams::blastp()
-    .evalue(10.0)
-    .num_threads(1)
-    .filter_low_complexity(false);
+    let db = BlastDb::open(Path::new("mydb"))?;
+    let params = SearchParams::blastp()
+        .evalue(10.0)
+        .num_threads(1)
+        .filter_low_complexity(false);
 
-let results = blastp(&db, b"MKFLILLFNILCLFPVLAADNHGVSMNAS", &params);
-for r in &results {
-    for hsp in &r.hsps {
-        println!("score={} evalue={:.2e} identity={:.1}%",
-            hsp.score, hsp.evalue, hsp.percent_identity());
+    let results = blastp(&db, b"MKFLILLFNILCLFPVLAADNHGVSMNAS", &params);
+    for r in &results {
+        for hsp in &r.hsps {
+            println!(
+                "score={} evalue={:.2e} identity={:.1}%",
+                hsp.score,
+                hsp.evalue,
+                hsp.percent_identity()
+            );
+        }
     }
+
+    Ok(())
 }
 ```
 
@@ -352,7 +442,10 @@ This is a faithful port of the NCBI BLAST+ C engine algorithms:
 - Reads BLAST databases created by NCBI `makeblastdb` (v4 and v5 format), including taxonomy (`.nto` taxid files, `taxdb.bti`/`taxdb.btd` name database)
 - Output matches NCBI BLAST+ 2.17.0 byte-for-byte for blastn tabular format (`-outfmt 6`)
 - Supports scoring parameters: reward/penalty 1/-1 through 5/-4, gap costs 0/0 through 12/8
-- Protein programs (blastp/blastx/tblastn/tblastx) use BLOSUM62 with lookup-table seeding and gapped X-dropoff DP extension
+- Protein programs (blastp/blastx/tblastn/tblastx) use BLOSUM62 with lookup-table seeding and gapped X-dropoff DP extension; CLI output is currently limited to tabular/CSV formats.
+
+See [docs/parity.md](docs/parity.md) for the current program, output-format,
+database-feature, and option support matrix.
 
 ## What's not ported
 

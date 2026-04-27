@@ -1398,10 +1398,9 @@ fn asn1_value_bounds(
     let first_len = *buf.get(len_pos)?;
     if first_len == 0x80 {
         let start = pos + 2;
-        let end = start.saturating_add(fallback_limit).min(buf.len());
-        let after = find_eoc(buf, start)
-            .map(|eoc| eoc.saturating_add(2).min(buf.len()))
-            .unwrap_or(end);
+        let fallback_end = start.saturating_add(fallback_limit).min(buf.len());
+        let end = find_matching_eoc(buf, start, fallback_limit).unwrap_or(fallback_end);
+        let after = end.saturating_add(2).min(buf.len());
         return Some((start, end, after));
     }
     let (len, len_len) = read_ber_len(buf, len_pos)?;
@@ -1414,14 +1413,44 @@ fn asn1_value_bounds(
     }
 }
 
-fn find_eoc(buf: &[u8], start: usize) -> Option<usize> {
+fn find_matching_eoc(buf: &[u8], start: usize, fallback_limit: usize) -> Option<usize> {
+    let limit = start.saturating_add(fallback_limit).min(buf.len());
+    let mut depth = 1usize;
     let mut i = start;
-    while i + 1 < buf.len() {
+
+    while i + 1 < limit {
         if buf[i] == 0x00 && buf[i + 1] == 0x00 {
-            return Some(i);
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(i);
+            }
+            i += 2;
+            continue;
         }
-        i += 1;
+
+        let len_pos = i + 1;
+        let Some(&first_len) = buf.get(len_pos) else {
+            return None;
+        };
+        if first_len == 0x80 {
+            depth = depth.saturating_add(1);
+            i = len_pos + 1;
+            continue;
+        }
+
+        let Some((len, len_len)) = read_ber_len(buf, len_pos) else {
+            return None;
+        };
+        let value_start = len_pos + len_len;
+        let Some(next) = value_start.checked_add(len) else {
+            return None;
+        };
+        if next <= i || next > limit {
+            return None;
+        }
+        i = next;
     }
+
     None
 }
 
@@ -1592,7 +1621,12 @@ fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
             }
             // version [3]
             if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa3, 32) {
-                version = extract_small_integer(hdr, field_start, field_end);
+                if version.is_none() {
+                    version = extract_small_integer(hdr, field_start, field_end);
+                }
+                if version.is_some() && (acc.is_some() || name.is_some()) {
+                    break;
+                }
                 j = after;
                 continue;
             }
@@ -2045,6 +2079,47 @@ mod tests {
         assert_eq!(
             extract_accession_from_header(&hdr).as_deref(),
             Some("gnl|BL_ORD_ID|0")
+        );
+    }
+
+    #[test]
+    fn test_accession_indefinite_textseq_version_stays_inside_seqid() {
+        let hdr = [
+            // Seq-id.other Textseq-id with accession XR_154052 and version 2.
+            0xa9, 0x80, 0x30, 0x80, 0xa1, 0x80, 0x1a, 0x09, b'X', b'R', b'_', b'1', b'5', b'4',
+            b'0', b'5', b'2', 0x00, 0x00, 0xa3, 0x80, 0x02, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+            // Later defline metadata also uses tag [3] with value 4; it must
+            // not be attached to the preceding Textseq-id.
+            0xa2, 0x80, 0x02, 0x02, 0x77, 0x93, 0x00, 0x00, 0xa3, 0x80, 0x30, 0x80, 0x02, 0x01,
+            0x04, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("XR_154052.2")
+        );
+    }
+
+    #[test]
+    fn test_accession_keeps_first_textseq_version_before_defline_metadata() {
+        let hdr = [
+            0x30, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x1a, 0x5c, b'P', b'R', b'E', b'D', b'I', b'C',
+            b'T', b'E', b'D', b':', b' ', b'M', b'a', b'c', b'r', b'o', b't', b'i', b's', b' ',
+            b'l', b'a', b'g', b'o', b't', b'i', b's', b' ', b'B', b'R', b'C', b'A', b'1', b' ',
+            b'D', b'N', b'A', b' ', b'r', b'e', b'p', b'a', b'i', b'r', b' ', b'a', b's', b's',
+            b'o', b'c', b'i', b'a', b't', b'e', b'd', b' ', b'(', b'B', b'R', b'C', b'A', b'1',
+            b')', b',', b' ', b't', b'r', b'a', b'n', b's', b'c', b'r', b'i', b'p', b't', b' ',
+            b'v', b'a', b'r', b'i', b'a', b'n', b't', b' ', b'X', b'1', b',', b' ', b'm', b'R',
+            b'N', b'A', 0x00, 0x00, 0xa1, 0x80, 0x30, 0x80, 0xab, 0x80, 0x02, 0x05, 0x00, 0xb2,
+            0x3e, 0x6b, 0x28, 0x00, 0x00, 0xa9, 0x80, 0x30, 0x80, 0xa1, 0x80, 0x1a, 0x0c, b'X',
+            b'M', b'_', b'0', b'7', b'4', b'2', b'2', b'3', b'7', b'9', b'6', 0x00, 0x00, 0xa3,
+            0x80, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xa2, 0x80, 0x02, 0x03, 0x01, 0x69, 0xeb, 0x00, 0x00, 0xa3, 0x80, 0x30, 0x80, 0x02,
+            0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("XM_074223796.1")
         );
     }
 

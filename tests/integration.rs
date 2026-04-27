@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use blast_rs::db::DbType;
 use blast_rs::{
     blastn, blastp, blastx, parse_fasta, reverse_complement, six_frame_translate, tblastn, tblastx,
-    BlastDbBuilder, BlastnSearch, SearchParams, SequenceEntry, Strand,
+    BlastDbBuilder, BlastnSearch, SearchParams, SearchResult, SequenceEntry, Strand,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -14578,6 +14578,68 @@ fn test_blastn_self_search() {
     assert_eq!(hsp.num_gaps, 0, "perfect self alignment has no gaps");
 }
 
+#[test]
+fn test_blastn_search_api_finds_abricate_long_contig_hit() {
+    let abricate_root = std::path::Path::new("/data/henriksson/github/claude/abricate-rs");
+    let db_path = abricate_root.join("abricate/db/ncbi/sequences");
+    let query_path = abricate_root.join("abricate/test/assembly.fa");
+    if !db_path.exists() || !query_path.exists() {
+        eprintln!("Skipping: ABRicate ncbi database fixture not present");
+        return;
+    }
+
+    let db_fasta = std::fs::read(&db_path).expect("read ABRicate ncbi db FASTA");
+    let (subject_title, subject_seq) = parse_fasta(&db_fasta)
+        .into_iter()
+        .find(|(id, _)| id.contains("NG_055999.1"))
+        .expect("NG_055999.1 in ABRicate ncbi db");
+    let (_tmp, db) = build_nucleotide_db(vec![nt_entry(
+        "NG_055999.1",
+        &subject_title,
+        std::str::from_utf8(&subject_seq).expect("subject is UTF-8 DNA"),
+    )]);
+    let assembly = std::fs::read(&query_path).expect("read ABRicate assembly");
+    let query = parse_fasta(&assembly)
+        .into_iter()
+        .find(|(id, _)| {
+            id.split_whitespace()
+                .next()
+                .is_some_and(|id| id == "LGJG01000038")
+        })
+        .map(|(_, seq)| seq)
+        .expect("LGJG01000038 in assembly fixture");
+    let params = SearchParams::blastn()
+        .filter_low_complexity(false)
+        .evalue(1e-20)
+        .max_target_seqs(10000)
+        .num_threads(1)
+        .culling_limit(Some(1))
+        .match_score(1)
+        .mismatch(-3);
+
+    let results = blastn(&db, &query, &params);
+    let hit = results
+        .iter()
+        .find(|result| result.subject_title.contains("NG_055999.1"))
+        .and_then(|result| result.hsps.first().map(|hsp| (result, hsp)));
+    let Some((result, hsp)) = hit else {
+        panic!("blastn_search API did not find the long-contig blaZ hit");
+    };
+
+    assert!(
+        result.subject_title.contains("blaZ"),
+        "unexpected subject title: {}",
+        result.subject_title
+    );
+    assert_eq!((hsp.query_start + 1, hsp.query_end), (64650, 65495));
+    assert_eq!((hsp.subject_start + 1, hsp.subject_end), (1, 846));
+    assert!(
+        (hsp.percent_identity() - 96.809).abs() < 0.01,
+        "unexpected identity {:.3}",
+        hsp.percent_identity()
+    );
+}
+
 /// Search completely unrelated sequences and verify no hits at strict evalue.
 #[test]
 fn test_blastn_no_hit() {
@@ -15522,6 +15584,69 @@ fn test_blastn_short_primer_multithreaded() {
     assert!(
         !results.is_empty(),
         "Multithreaded blastn-short should find hits"
+    );
+}
+
+#[test]
+fn test_blastn_search_api_multithreaded_matches_single_threaded() {
+    let query = b"ACGTACGTGACCTTGGAACTACGTACGTGACCTTGGAACT";
+
+    let mut entries = Vec::new();
+    for i in 0..80u64 {
+        let mut seq = random_nt_seq(1200, i * 131 + 17);
+        if i % 7 == 0 {
+            let pos = (i as usize * 29) % (seq.len() - query.len());
+            seq[pos..pos + query.len()].copy_from_slice(query);
+        }
+        entries.push(nt_entry(
+            &format!("parity_{}", i),
+            &format!("blastn API parallel parity seq {}", i),
+            &String::from_utf8(seq).unwrap(),
+        ));
+    }
+    let (_tmp, db) = build_nucleotide_db(entries);
+
+    let base = SearchParams::blastn()
+        .word_size(7)
+        .evalue(5.0)
+        .max_target_seqs(10000)
+        .num_threads(1)
+        .filter_low_complexity(false);
+    let parallel = SearchParams {
+        num_threads: 4,
+        ..base.clone()
+    };
+
+    let signature = |results: Vec<SearchResult>| {
+        results
+            .into_iter()
+            .map(|result| {
+                (
+                    result.subject_accession,
+                    result
+                        .hsps
+                        .into_iter()
+                        .map(|hsp| {
+                            (
+                                hsp.score,
+                                hsp.query_start,
+                                hsp.query_end,
+                                hsp.subject_start,
+                                hsp.subject_end,
+                                hsp.num_identities,
+                                hsp.alignment_length,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        signature(blastn(&db, query, &base)),
+        signature(blastn(&db, query, &parallel)),
+        "parallel blastn API results must match single-threaded results"
     );
 }
 
