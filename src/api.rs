@@ -135,19 +135,9 @@ where
     }
 }
 
-fn nearly_equal_evalues(a: f64, b: f64) -> bool {
-    if a == b {
-        return true;
-    }
-    let scale = a.abs().max(b.abs()).max(1.0e-300);
-    ((a - b).abs() / scale) <= 0.02
-}
-
 fn compare_tblastx_hsps(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
-    let rendered_equal =
-        crate::format::format_evalue(a.evalue) == crate::format::format_evalue(b.evalue);
     let by_evalue =
-        if a.score == b.score || rendered_equal || nearly_equal_evalues(a.evalue, b.evalue) {
+        if crate::format::format_evalue(a.evalue) == crate::format::format_evalue(b.evalue) {
             std::cmp::Ordering::Equal
         } else {
             crate::hspstream::evalue_comp(a.evalue, b.evalue)
@@ -158,6 +148,14 @@ fn compare_tblastx_hsps(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
         .then_with(|| b.query_frame.cmp(&a.query_frame))
         .then_with(|| a.subject_frame.abs().cmp(&b.subject_frame.abs()))
         .then_with(|| b.subject_frame.cmp(&a.subject_frame))
+        .then_with(|| a.query_start.cmp(&b.query_start))
+        .then_with(|| a.query_end.cmp(&b.query_end))
+        .then_with(|| a.subject_start.cmp(&b.subject_start))
+        .then_with(|| a.subject_end.cmp(&b.subject_end))
+        .then_with(|| b.num_identities.cmp(&a.num_identities))
+        .then_with(|| a.num_gaps.cmp(&b.num_gaps))
+        .then_with(|| a.query_aln.cmp(&b.query_aln))
+        .then_with(|| a.subject_aln.cmp(&b.subject_aln))
 }
 
 struct TranslatedContextStats {
@@ -219,14 +217,7 @@ fn apply_tblastx_linked_sum_stats(
         kbp: kbps.clone(),
         kbp_gap: kbps,
     };
-    let link_params = LinkHSPParameters {
-        gap_prob: 1.0,
-        gap_decay_rate: crate::stat::BLAST_GAP_DECAY_RATE_GAPPED,
-        cutoff_small_gap: 0,
-        cutoff_big_gap: 0,
-        longest_intron: (122 - 2) / 3,
-        ..LinkHSPParameters::default()
-    };
+    let link_params = LinkHSPParameters::default();
 
     for (oid, result) in results.iter_mut().enumerate() {
         let Some(result) = result.as_mut() else {
@@ -333,6 +324,124 @@ fn apply_tblastx_linked_sum_stats(
     }
 }
 
+fn apply_blastx_linked_sum_stats(
+    results: &mut [SearchResult],
+    query_info: &crate::queryinfo::QueryInfo,
+    prot_kbp: &KarlinBlk,
+) {
+    use crate::link_hsps::{
+        BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
+        LinkScoreBlock,
+    };
+    use crate::program::BLASTX;
+
+    fn translated_coord_to_protein(coord: usize, frame: i32) -> i32 {
+        let offset = frame.unsigned_abs().saturating_sub(1) as usize;
+        ((coord.saturating_sub(offset)) / 3) as i32
+    }
+
+    let score_block = LinkScoreBlock {
+        kbp: vec![prot_kbp.clone(); query_info.contexts.len()],
+        kbp_gap: vec![prot_kbp.clone(); query_info.contexts.len()],
+    };
+    let link_params = LinkHSPParameters {
+        gap_prob: crate::stat::BLAST_GAP_PROB_GAPPED,
+        gap_decay_rate: crate::stat::BLAST_GAP_DECAY_RATE_GAPPED,
+        longest_intron: ((crate::stat::DEFAULT_LONGEST_INTRON as i32) - 2) / 3,
+        ..LinkHSPParameters::default()
+    };
+
+    for (oid, result) in results.iter_mut().enumerate() {
+        if result.hsps.is_empty() {
+            continue;
+        }
+        let mut hsp_list = LinkBlastHspList {
+            oid: oid as i32,
+            query_index: 0,
+            hsp_array: result
+                .hsps
+                .iter()
+                .map(|hsp| {
+                    let context = query_info
+                        .contexts
+                        .iter()
+                        .position(|ctx| ctx.frame == hsp.query_frame)
+                        .unwrap_or(0) as i32;
+                    LinkBlastHsp {
+                        score: hsp.score,
+                        num_ident: hsp.num_identities as i32,
+                        bit_score: hsp.bit_score,
+                        evalue: hsp.evalue,
+                        query: LinkBlastSeg {
+                            frame: hsp.query_frame,
+                            offset: translated_coord_to_protein(hsp.query_start, hsp.query_frame),
+                            end: translated_coord_to_protein(hsp.query_end, hsp.query_frame),
+                            gapped_start: translated_coord_to_protein(
+                                hsp.query_start,
+                                hsp.query_frame,
+                            ),
+                        },
+                        subject: LinkBlastSeg {
+                            frame: 0,
+                            offset: hsp.subject_start as i32,
+                            end: hsp.subject_end as i32,
+                            gapped_start: hsp.subject_start as i32,
+                        },
+                        context,
+                        num: 1,
+                    }
+                })
+                .collect(),
+            best_evalue: result.best_evalue(),
+        };
+        let original_keys: Vec<(i32, i32, i32, i32)> = result
+            .hsps
+            .iter()
+            .map(|hsp| {
+                (
+                    hsp.score,
+                    hsp.query_frame,
+                    translated_coord_to_protein(hsp.query_start, hsp.query_frame),
+                    hsp.subject_start as i32,
+                )
+            })
+            .collect();
+
+        BLAST_LinkHsps(
+            BLASTX,
+            &mut hsp_list,
+            query_info,
+            result.subject_len as i32,
+            &score_block,
+            &link_params,
+            true,
+        );
+
+        let mut linked_evalues: std::collections::HashMap<(i32, i32, i32, i32), Vec<f64>> =
+            std::collections::HashMap::new();
+        for linked in &hsp_list.hsp_array {
+            linked_evalues
+                .entry((
+                    linked.score,
+                    linked.query.frame,
+                    linked.query.offset,
+                    linked.subject.offset,
+                ))
+                .or_default()
+                .push(linked.evalue);
+        }
+
+        for (hsp, key) in result.hsps.iter_mut().zip(original_keys) {
+            if let Some(evalues) = linked_evalues.get_mut(&key) {
+                if let Some(evalue) = evalues.pop() {
+                    hsp.evalue = evalue;
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn apply_tblastn_linked_sum_stats(
     results: &mut [SearchResult],
     query_info: &crate::queryinfo::QueryInfo,
@@ -3305,7 +3414,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 
     let mut results: Vec<SearchResult> = results.into_iter().flatten().collect();
     if params.sum_stats {
-        apply_tblastn_linked_sum_stats(&mut results, &query_info, &prot_kbp);
+        apply_blastx_linked_sum_stats(&mut results, &query_info, &prot_kbp);
     }
     for result in &mut results {
         prune_translated_hsp_variants(&mut result.hsps);
