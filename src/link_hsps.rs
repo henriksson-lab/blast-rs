@@ -30,7 +30,6 @@
 //! `ncbi-blast-2.17.0+-src/c++/src/algo/blast/core/link_hsps.c` so
 //! `ccc-rs` can diff the port against the C reference.
 
-#![allow(dead_code)]
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 

@@ -1500,85 +1500,319 @@ fn extract_small_integer(buf: &[u8], start: usize, end: usize) -> Option<u32> {
     None
 }
 
+fn extract_integer_value_bytes(buf: &[u8], start: usize, end: usize) -> Option<u32> {
+    let bytes = buf.get(start..end)?;
+    if bytes.is_empty() || bytes.len() > 4 {
+        return None;
+    }
+    let mut value = 0u32;
+    for &b in bytes {
+        value = (value << 8) | u32::from(b);
+    }
+    Some(value)
+}
+
+fn extract_primitive_integer_seqid_accession(hdr: &[u8]) -> Option<String> {
+    let seqids = [
+        (0x81, "bbs"), // gibbsq
+        (0x82, "bbm"), // gibbmt
+        (0x8b, "gi"),  // GenInfo integrated id
+    ];
+    let mut i = 0;
+    while i < hdr.len() {
+        for &(tag, prefix) in &seqids {
+            if hdr[i] != tag {
+                continue;
+            }
+            if let Some((start, end, _after)) = asn1_value_bounds(hdr, i, tag, 16) {
+                if let Some(value) = extract_integer_value_bytes(hdr, start, end) {
+                    return Some(format!("{}|{}", prefix, value));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_pdb_accession_from_seqid(hdr: &[u8], pos: usize) -> Option<(String, usize)> {
+    let (mut j, seq_id_end, after_seq_id) = asn1_value_bounds(hdr, pos, 0xae, 512)?;
+    let mut scan_end = seq_id_end;
+    if let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) {
+        j = seq_start;
+        scan_end = seq_end;
+    }
+
+    let mut mol: Option<String> = None;
+    let mut chain: Option<String> = None;
+    while j < scan_end {
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa0, 128) {
+            mol = extract_visible_string(hdr, field_start, field_end);
+            j = after;
+            continue;
+        }
+        if chain.is_none() {
+            if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa3, 128) {
+                chain = extract_visible_string(hdr, field_start, field_end);
+                j = after;
+                continue;
+            }
+        }
+        if chain.is_none() {
+            if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa1, 32) {
+                chain = extract_small_integer(hdr, field_start, field_end).and_then(|value| {
+                    let byte = value as u8;
+                    (byte.is_ascii_alphanumeric() || byte == b'|')
+                        .then(|| (byte as char).to_string())
+                });
+                j = after;
+                continue;
+            }
+        }
+        j += 1;
+    }
+
+    let mol = mol?;
+    if let Some(chain) = chain.filter(|s| !s.is_empty()) {
+        Some((format!("{}_{}", mol, chain), after_seq_id))
+    } else {
+        Some((mol, after_seq_id))
+    }
+}
+
+fn extract_object_id_value(buf: &[u8], start: usize, end: usize) -> Option<String> {
+    if let Some((field_start, field_end, _)) = asn1_value_bounds(buf, start, 0xa0, 64) {
+        if let Some(value) = extract_small_integer(buf, field_start, field_end) {
+            return Some(value.to_string());
+        }
+    }
+    if let Some((field_start, field_end, _)) = asn1_value_bounds(buf, start, 0xa1, 128) {
+        if let Some(value) = extract_visible_string(buf, field_start, field_end) {
+            return Some(value);
+        }
+    }
+    extract_small_integer(buf, start, end)
+        .map(|value| value.to_string())
+        .or_else(|| extract_visible_string(buf, start, end))
+}
+
+fn extract_giim_accession_from_seqid(hdr: &[u8], pos: usize) -> Option<(String, usize)> {
+    let (j, seq_id_end, after_seq_id) = asn1_value_bounds(hdr, pos, 0xa3, 256)?;
+    let (mut j, scan_end, _) = asn1_value_bounds(hdr, j, 0x30, 256)?;
+    if scan_end > seq_id_end {
+        return None;
+    }
+
+    while j < scan_end {
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa0, 64) {
+            if let Some(value) = extract_small_integer(hdr, field_start, field_end) {
+                return Some((format!("gim|{}", value), after_seq_id));
+            }
+            j = after;
+            continue;
+        }
+        j += 1;
+    }
+    None
+}
+
+fn extract_giim_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i < hdr.len() {
+        if hdr[i] == 0xa3 {
+            if let Some((acc, _after)) = extract_giim_accession_from_seqid(hdr, i) {
+                return Some(acc);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_patent_accession_from_seqid(hdr: &[u8], pos: usize) -> Option<(String, usize)> {
+    let (mut j, seq_id_end, after_seq_id) = asn1_value_bounds(hdr, pos, 0xa8, 768)?;
+    let mut scan_end = seq_id_end;
+    if let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 768) {
+        j = seq_start;
+        scan_end = seq_end;
+    }
+
+    let mut seqid: Option<u32> = None;
+    let mut cit_bounds: Option<(usize, usize)> = None;
+    while j < scan_end {
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa0, 64) {
+            seqid = extract_small_integer(hdr, field_start, field_end);
+            j = after;
+            continue;
+        }
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa1, 384) {
+            cit_bounds = Some((field_start, field_end));
+            j = after;
+            continue;
+        }
+        j += 1;
+    }
+
+    let seqid = seqid?;
+    let (cit_start, cit_end) = cit_bounds?;
+    let (country, ident, doc_type) = extract_id_pat_fields(hdr, cit_start, cit_end)?;
+    Some((
+        format!(
+            "pat|{}|{}{}|{}",
+            country,
+            ident,
+            doc_type.unwrap_or_default(),
+            seqid
+        ),
+        after_seq_id,
+    ))
+}
+
+fn extract_id_pat_fields(
+    hdr: &[u8],
+    start: usize,
+    end: usize,
+) -> Option<(String, String, Option<String>)> {
+    let mut j = start;
+    let mut scan_end = end;
+    if let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) {
+        j = seq_start;
+        scan_end = seq_end.min(end);
+    }
+
+    let mut country: Option<String> = None;
+    let mut ident: Option<String> = None;
+    let mut doc_type: Option<String> = None;
+    while j < scan_end {
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa0, 128) {
+            country = extract_visible_string(hdr, field_start, field_end);
+            j = after;
+            continue;
+        }
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa1, 192) {
+            ident = extract_patent_id_choice(hdr, field_start, field_end);
+            j = after;
+            continue;
+        }
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa2, 128) {
+            doc_type = extract_visible_string(hdr, field_start, field_end);
+            j = after;
+            continue;
+        }
+        j += 1;
+    }
+
+    Some((country?, ident?, doc_type))
+}
+
+fn extract_patent_id_choice(hdr: &[u8], start: usize, end: usize) -> Option<String> {
+    let mut j = start;
+    while j < end {
+        if let Some((field_start, field_end, _after)) = asn1_value_bounds(hdr, j, 0xa0, 128) {
+            if let Some(value) = extract_visible_string(hdr, field_start, field_end) {
+                return Some(value);
+            }
+        }
+        if let Some((field_start, field_end, _after)) = asn1_value_bounds(hdr, j, 0xa1, 128) {
+            if let Some(value) = extract_visible_string(hdr, field_start, field_end) {
+                return Some(value);
+            }
+        }
+        j += 1;
+    }
+    extract_visible_string(hdr, start, end)
+}
+
+fn extract_patent_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i < hdr.len() {
+        if hdr[i] == 0xa8 {
+            if let Some((acc, _after)) = extract_patent_accession_from_seqid(hdr, i) {
+                return Some(acc);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_general_accession_from_seqid(hdr: &[u8], pos: usize) -> Option<(String, usize)> {
+    let (mut j, seq_id_end, after_seq_id) = asn1_value_bounds(hdr, pos, 0xaa, 512)?;
+    let mut scan_end = seq_id_end;
+    if let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) {
+        j = seq_start;
+        scan_end = seq_end;
+    }
+
+    let mut db: Option<String> = None;
+    let mut tag: Option<String> = None;
+    while j < scan_end {
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa0, 128) {
+            db = extract_visible_string(hdr, field_start, field_end);
+            j = after;
+            continue;
+        }
+        if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa1, 128) {
+            tag = extract_object_id_value(hdr, field_start, field_end);
+            j = after;
+            continue;
+        }
+        j += 1;
+    }
+
+    let db = db?;
+    let tag = tag?;
+    Some((format!("gnl|{}|{}", db, tag), after_seq_id))
+}
+
+fn extract_general_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i < hdr.len() {
+        if hdr[i] == 0xaa {
+            if let Some((acc, _after)) = extract_general_accession_from_seqid(hdr, i) {
+                return Some(acc);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_pdb_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i < hdr.len() {
+        if hdr[i] == 0xae {
+            if let Some((acc, _after)) = extract_pdb_accession_from_seqid(hdr, i) {
+                return Some(acc);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_local_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i < hdr.len() {
+        if hdr[i] == 0xa0 {
+            if let Some((field_start, field_end, _after)) = asn1_value_bounds(hdr, i, 0xa0, 128) {
+                if let Some(value) = extract_object_id_value(hdr, field_start, field_end) {
+                    return Some(value);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Walk the binary header, find the first Seq-id whose CHOICE arm wraps a
 /// Textseq-id, and extract the `accession` (field [1]) plus optional `version`
-/// (field [3]). Returns `accession.version` if both present. Also handles
-/// PDB seq-ids (`[14]=0xae`) which carry a `mol` VisibleString + `chain` INTEGER
-/// — formatted as `MOL_<chain-letter>` to match NCBI's `1MC7_A` style.
+/// (field [3]). Returns `accession.version` if both present.
 fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
     let n = hdr.len();
     let mut i = 0;
     while i < n {
-        // PDB seq-id [14] = 0xae — different inner shape from Textseq-id.
-        if hdr[i] == 0xae && i + 1 < n && hdr[i + 1] == 0x80 {
-            let mut j = i + 2;
-            if j + 1 < n && hdr[j] == 0x30 && hdr[j + 1] == 0x80 {
-                j += 2;
-            }
-            let scan_end = (j + 64).min(n);
-            let mut mol: Option<String> = None;
-            let mut chain: Option<u8> = None;
-            while j + 1 < scan_end {
-                // mol field [0]
-                if hdr[j] == 0xa0 && hdr[j + 1] == 0x80 {
-                    let mut k = j + 2;
-                    while k + 1 < scan_end {
-                        if hdr[k] == 0x1a {
-                            let len = hdr[k + 1] as usize;
-                            let s = k + 2;
-                            let e = s.saturating_add(len);
-                            if len > 0 && e <= n {
-                                let bytes = &hdr[s..e];
-                                if bytes.iter().all(|&b| b.is_ascii_alphanumeric()) {
-                                    mol = Some(String::from_utf8_lossy(bytes).to_string());
-                                }
-                            }
-                            j = e;
-                            break;
-                        }
-                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) {
-                            break;
-                        }
-                        k += 1;
-                    }
-                    continue;
-                }
-                // chain field [1] = INTEGER (ASCII code of chain letter)
-                if hdr[j] == 0xa1 && hdr[j + 1] == 0x80 {
-                    let mut k = j + 2;
-                    while k + 2 < scan_end {
-                        if hdr[k] == 0x02 && hdr[k + 1] == 0x01 {
-                            chain = Some(hdr[k + 2]);
-                            j = k + 3;
-                            break;
-                        }
-                        if hdr[k] == 0x00 && hdr.get(k + 1) == Some(&0x00) {
-                            break;
-                        }
-                        k += 1;
-                    }
-                    continue;
-                }
-                if hdr[j] == 0x00
-                    && hdr.get(j + 1) == Some(&0x00)
-                    && hdr.get(j + 2) == Some(&0x00)
-                    && hdr.get(j + 3) == Some(&0x00)
-                {
-                    break; // end of pdb seq-id
-                }
-                j += 1;
-            }
-            if let Some(m) = mol {
-                if let Some(c) = chain {
-                    if c.is_ascii_alphanumeric() || c == b'|' {
-                        return Some(format!("{}_{}", m, c as char));
-                    }
-                }
-                return Some(m);
-            }
-            i = j.max(i + 2);
-            continue;
-        }
         if !TEXTSEQ_ID_TAGS.contains(&hdr[i]) {
             i += 1;
             continue;
@@ -1660,13 +1894,32 @@ fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
     if let Some(acc) = extract_textseq_accession_from_asn(hdr) {
         return Some(acc);
     }
+    if let Some(acc) = extract_pdb_accession_from_asn(hdr) {
+        return Some(acc);
+    }
+    if let Some(acc) = extract_giim_accession_from_asn(hdr) {
+        return Some(acc);
+    }
+    if let Some(acc) = extract_patent_accession_from_asn(hdr) {
+        return Some(acc);
+    }
+    if let Some(acc) = extract_primitive_integer_seqid_accession(hdr) {
+        return Some(acc);
+    }
     if let Some(acc) = extract_accession_from_visible_strings(hdr) {
         return Some(acc);
+    }
+    let structured_general = extract_general_accession_from_asn(hdr);
+    if let Some(acc) = structured_general.as_deref() {
+        if !acc.starts_with("gnl|BL_ORD_ID|") {
+            return Some(acc.to_string());
+        }
     }
     let mut i = 0;
     let mut first_text_versioned = None;
     let mut first_unversioned = None;
     let mut first_local = None;
+    let mut first_bl_ord_id = structured_general;
     while i < hdr.len() {
         if hdr[i] == 0x1a && i + 1 < hdr.len() {
             let len = hdr[i + 1] as usize;
@@ -1677,16 +1930,17 @@ fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
                 && hdr[start..end]
                     .iter()
                     .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'|'))
-                && first_local.is_none()
             {
                 let local = String::from_utf8_lossy(&hdr[start..end]).to_string();
-                first_local = if local == "BL_ORD_ID" {
-                    extract_following_small_integer(&hdr[end..])
-                        .map(|ord| format!("gnl|BL_ORD_ID|{ord}"))
-                        .or(Some(local))
-                } else {
-                    Some(local)
-                };
+                if local == "BL_ORD_ID" {
+                    if first_bl_ord_id.is_none() {
+                        first_bl_ord_id = extract_following_small_integer(&hdr[end..])
+                            .map(|ord| format!("gnl|BL_ORD_ID|{ord}"))
+                            .or(Some(local));
+                    }
+                } else if first_local.is_none() {
+                    first_local = Some(local);
+                }
             }
         }
 
@@ -1777,7 +2031,11 @@ fn extract_accession_from_header(hdr: &[u8]) -> Option<String> {
             return Some(uniprot);
         }
     }
-    first_text_versioned.or(first_unversioned).or(first_local)
+    first_text_versioned
+        .or(first_unversioned)
+        .or(first_local)
+        .or(first_bl_ord_id)
+        .or_else(|| extract_local_accession_from_asn(hdr))
 }
 
 fn extract_accession_from_visible_strings(hdr: &[u8]) -> Option<String> {
@@ -2083,6 +2341,154 @@ mod tests {
     }
 
     #[test]
+    fn test_accession_reads_structured_general_dbtag_string_id() {
+        let hdr = [
+            // Seq-id.general Dbtag { db "TRACE_ASSM", tag str "ti12345" }
+            0xaa, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x1a, 0x0a, b'T', b'R', b'A', b'C', b'E', b'_',
+            b'A', b'S', b'S', b'M', 0x00, 0x00, 0xa1, 0x80, 0xa1, 0x80, 0x1a, 0x07, b't', b'i',
+            b'1', b'2', b'3', b'4', b'5', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("gnl|TRACE_ASSM|ti12345")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_structured_general_dbtag_integer_id() {
+        let hdr = [
+            // Seq-id.general Dbtag { db "BL_ORD_ID", tag id 42 }
+            0xaa, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x1a, 0x09, b'B', b'L', b'_', b'O', b'R', b'D',
+            b'_', b'I', b'D', 0x00, 0x00, 0xa1, 0x80, 0xa0, 0x80, 0x02, 0x01, 0x2a, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("gnl|BL_ORD_ID|42")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_pdb_chain_id_visible_string() {
+        let hdr = [
+            // Seq-id.pdb PDB-seq-id { mol "1ABC", chain-id "AB" }
+            0xae, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x1a, 0x04, b'1', b'A', b'B', b'C', 0x00, 0x00,
+            0xa3, 0x80, 0x1a, 0x02, b'A', b'B', 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("1ABC_AB")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_pdb_legacy_integer_chain() {
+        let hdr = [
+            // Seq-id.pdb PDB-seq-id { mol "1ABC", chain 'A' }
+            0xae, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x1a, 0x04, b'1', b'A', b'B', b'C', 0x00, 0x00,
+            0xa1, 0x80, 0x02, 0x01, b'A', 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("1ABC_A")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_structured_giimport_id() {
+        let hdr = [
+            // Seq-id.giim Giimport-id { id 12345 }
+            0xa3, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x02, 0x02, 0x30, 0x39, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("gim|12345")
+        );
+    }
+
+    #[test]
+    fn test_accession_prefers_structured_giimport_over_title_text() {
+        let hdr = [
+            // Seq-id.giim Giimport-id { id 42 }
+            0xa3, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x02, 0x01, 0x2a, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // Later title/local text that should not override the Seq-id.
+            0x1a, 0x0d, b'l', b'o', b'c', b'a', b'l', b'_', b's', b'u', b'b', b'j', b'e', b'c',
+            b't',
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("gim|42")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_structured_patent_number_id() {
+        let hdr = [
+            // Seq-id.patent Patent-seq-id { seqid 7, cit { country "US", number "123" } }
+            0xa8, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x02, 0x01, 0x07, 0x00, 0x00, 0xa1, 0x80, 0x30,
+            0x80, 0xa0, 0x80, 0x1a, 0x02, b'U', b'S', 0x00, 0x00, 0xa1, 0x80, 0xa0, 0x80, 0x1a,
+            0x03, b'1', b'2', b'3', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("pat|US|123|7")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_structured_patent_application_id_with_doc_type() {
+        let hdr = [
+            // Seq-id.patent Patent-seq-id { seqid 8, cit { country "US",
+            // app-number "456", doc-type "B" } }
+            0xa8, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x02, 0x01, 0x08, 0x00, 0x00, 0xa1, 0x80, 0x30,
+            0x80, 0xa0, 0x80, 0x1a, 0x02, b'U', b'S', 0x00, 0x00, 0xa1, 0x80, 0xa1, 0x80, 0x1a,
+            0x03, b'4', b'5', b'6', 0x00, 0x00, 0x00, 0x00, 0xa2, 0x80, 0x1a, 0x01, b'B', 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("pat|US|456B|8")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_primitive_gi_seqid() {
+        let hdr = [
+            // Seq-id.gi 123456
+            0x8b, 0x03, 0x01, 0xe2, 0x40,
+            // Later visible title/local text should not override structured gi.
+            0x1a, 0x0d, b'l', b'o', b'c', b'a', b'l', b'_', b's', b'u', b'b', b'j', b'e', b'c',
+            b't',
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("gi|123456")
+        );
+    }
+
+    #[test]
+    fn test_accession_reads_primitive_geninfo_backbone_seqids() {
+        let gibbsq = [
+            // Seq-id.gibbsq 17
+            0x81, 0x01, 0x11,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&gibbsq).as_deref(),
+            Some("bbs|17")
+        );
+
+        let gibbmt = [
+            // Seq-id.gibbmt 18
+            0x82, 0x01, 0x12,
+        ];
+        assert_eq!(
+            extract_accession_from_header(&gibbmt).as_deref(),
+            Some("bbm|18")
+        );
+    }
+
+    #[test]
     fn test_accession_indefinite_textseq_version_stays_inside_seqid() {
         let hdr = [
             // Seq-id.other Textseq-id with accession XR_154052 and version 2.
@@ -2161,6 +2567,31 @@ mod tests {
             0xa1, 0x80, 0x1a, 0x03, b's', b'1', b'9', 0x00,
         ];
         assert_eq!(extract_accession_from_header(&hdr).as_deref(), Some("s19"));
+    }
+
+    #[test]
+    fn test_accession_reads_structured_local_integer_object_id() {
+        let hdr = [
+            // Seq-id.local Object-id { id 99 }
+            0xa0, 0x80, 0xa0, 0x80, 0x02, 0x01, 0x63, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(extract_accession_from_header(&hdr).as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn test_accession_prefers_versioned_title_token_over_structured_local_string() {
+        let hdr = [
+            // Seq-id.local Object-id { str "local_subject" }
+            0xa0, 0x80, 0xa1, 0x80, 0x1a, 0x0d, b'l', b'o', b'c', b'a', b'l', b'_', b's', b'u',
+            b'b', b'j', b'e', b'c', b't', 0x00, 0x00, 0x00, 0x00,
+            // Later defline/title text carries the accession.version NCBI
+            // displays for BLAST output.
+            0x1a, 0x0b, b'N', b'M', b'_', b'0', b'0', b'1', b'2', b'5', b'6', b'.', b'1',
+        ];
+        assert_eq!(
+            extract_accession_from_header(&hdr).as_deref(),
+            Some("NM_001256.1")
+        );
     }
 
     #[test]

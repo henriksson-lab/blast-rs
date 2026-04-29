@@ -17,6 +17,25 @@
 //! - [`matrix`] — Scoring matrices (BLOSUM62, nucleotide)
 //! - [`util`] — Translation utilities (six-frame, genetic code)
 
+#![allow(clippy::doc_overindented_list_items)]
+#![allow(clippy::duplicated_attributes)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::if_same_then_else)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::iter_cloned_collect)]
+#![allow(clippy::manual_div_ceil)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::mut_range_bound)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::question_mark)]
+#![allow(clippy::result_unit_err)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::unusual_byte_groupings)]
+
 // Public API modules
 pub mod api;
 pub mod blast_kappa;

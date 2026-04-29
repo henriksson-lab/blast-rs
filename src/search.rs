@@ -267,10 +267,10 @@ fn find_exact_word_hit_packed_aligned(
 fn traceback_window_padding(x_dropoff: i32, gap_open: i32, gap_extend: i32) -> usize {
     let gap_oe = gap_open.saturating_add(gap_extend).max(1) as usize;
     let x = x_dropoff.max(gap_oe as i32) as usize;
-    // Heuristic tighter seed window for traceback. NCBI does not hand ALIGN_EX
-    // the full remaining subject tail on long near-self hits; keeping a few
-    // hundred bases of slack around the ungapped HSP is enough to preserve
-    // local refinement while preventing pathological 100k+ DP widths.
+    // Keep a bounded local traceback window around the seed until the full
+    // NCBI hit-saving/traceback suppression path is ported. Passing the full
+    // short subject to affine traceback currently admits extra lower-scoring
+    // HSPs in the parity matrices.
     ((x / gap_oe) + 1) * 32 + 128
 }
 
@@ -3940,7 +3940,7 @@ fn extend_seed_packed_exact(
     while qi < query.len() && si < subject_len {
         let sb = packed_base_at(subject_packed, si);
         sum += blastna_score(query[qi], sb, reward, penalty);
-        if sum >= 0 {
+        if sum > 0 {
             score += sum;
             best_right = qi - q_seed + 1;
             x_current = (-score).max(x_dropoff_neg);
@@ -3962,7 +3962,7 @@ fn extend_seed_packed_exact(
         loop {
             let sb = packed_base_at(subject_packed, si);
             left_sum += blastna_score(query[qi], sb, reward, penalty);
-            if left_sum >= 0 {
+            if left_sum > 0 {
                 left_score += left_sum;
                 best_left = q_seed - qi;
                 left_sum = 0;
@@ -4022,7 +4022,7 @@ fn extend_seed_data(
             break;
         }
         sum += blastna_score(query[qi], sb, reward, penalty);
-        if sum >= 0 {
+        if sum > 0 {
             score += sum;
             best_right = qi - q_seed + 1;
             x_current = (-score).max(x_dropoff_neg);
@@ -4047,7 +4047,7 @@ fn extend_seed_data(
                 break;
             }
             sum_l += blastna_score(query[qi], sb, reward, penalty);
-            if sum_l >= 0 {
+            if sum_l > 0 {
                 score_l += sum_l;
                 best_left = q_seed - qi;
                 sum_l = 0;
@@ -4139,7 +4139,7 @@ fn dedup_hsps_with_min_diag_separation(hsps: &mut Vec<SearchHsp>, min_diag_separ
             0.99,
             min_diag_separation,
         );
-        if (contained || overlap) && hsp.score < 20 {
+        if contained || overlap {
             trace_hsp("ungapped-dedup-drop", hsp);
             continue;
         }
@@ -4203,8 +4203,7 @@ fn keep_common_endpoint_group_leaders(hsps: &mut Vec<SearchHsp>, start_endpoint:
                 hsps[i].query_start == hsps[j].query_start
                     && hsps[i].subject_start == hsps[j].subject_start
             } else {
-                hsps[i].query_end == hsps[j].query_end
-                    && hsps[i].subject_end == hsps[j].subject_end
+                hsps[i].query_end == hsps[j].query_end && hsps[i].subject_end == hsps[j].subject_end
             }
         {
             j += 1;
@@ -4975,10 +4974,7 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
                     tb,
                     reevaluate_after_endpoint_cut,
                     ..
-                }
-                    if tb.query_end as i32 > leader_q_end
-                        && tb.subject_end as i32 > leader_s_end =>
-                {
+                } if tb.query_end as i32 > leader_q_end && tb.subject_end as i32 > leader_s_end => {
                     trace_traceback("cut-begin-before", tb);
                     let cut = cut_traceback_at(
                         tb,
@@ -5042,9 +5038,8 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
                     tb,
                     reevaluate_after_endpoint_cut,
                     ..
-                }
-                    if (tb.query_start as i32) < leader_q_start
-                        && (tb.subject_start as i32) < leader_s_start =>
+                } if (tb.query_start as i32) < leader_q_start
+                    && (tb.subject_start as i32) < leader_s_start =>
                 {
                     trace_traceback("cut-end-before", tb);
                     let cut = cut_traceback_at(
@@ -5508,14 +5503,11 @@ fn min_diag_separation_for_gapped(
 ) -> i32 {
     // NCBI `CBlastNucleotideOptionsHandle::SetMBHitSavingOptionsDefaults`
     // (`blast_nucl_options.cpp:259`) sets min_diag_separation = 6 for
-    // megablast. Regular blastn (`SetHitSavingOptionsDefaults:239`)
-    // uses 50, but that separation interacts with later hit-saving stages;
-    // keep the gapped candidate dedup permissive here and preserve reportable
-    // perfect HSPs explicitly before extension.
+    // megablast. Regular blastn (`SetHitSavingOptionsDefaults:239`) uses 50.
     if word_size >= 28 && reward == 1 && penalty == -2 && gap_open == 0 && gap_extend == 0 {
         6
     } else {
-        0
+        50
     }
 }
 
@@ -5681,7 +5673,7 @@ pub fn blastn_gapped_search_nomask(
     )
 }
 
-fn blastn_gapped_search_nomask_with_split_xdrop(
+pub fn blastn_gapped_search_nomask_with_split_xdrop(
     query_plus: &[u8],
     query_minus: &[u8],
     query_plus_nomask: &[u8],
@@ -5779,6 +5771,7 @@ fn collect_decoded_gapped_candidates(
     _kbp: &KarlinBlk,
     min_diag_separation: i32,
 ) {
+    let subject_has_ambiguity = subject.iter().any(|&b| b >= 4);
     for seed in ungapped {
         let traceback_query = if seed.context == 0 {
             query_plus_nomask
@@ -5792,17 +5785,15 @@ fn collect_decoded_gapped_candidates(
             .map(|lookup| lookup.query)
             .unwrap_or(traceback_query);
 
-        if (min_diag_separation != 0 || seed.score == 18) && is_perfect_ungapped_hsp(seed, reward) {
+        let query_has_ambiguity = traceback_query.iter().any(|&b| (b & 0x0f) >= 4);
+        if !subject_has_ambiguity
+            && !query_has_ambiguity
+            && seed.score == 18
+            && is_perfect_ungapped_hsp(seed, reward)
+        {
             perfect_seeds.push(seed.clone());
             continue;
         }
-        if should_preserve_reportable_perfect_seed(seed, reward, min_diag_separation) {
-            candidates.push(GappedCandidate::Final(seed.clone()));
-        }
-        if should_preserve_low_score_ungapped_final(seed, min_diag_separation) {
-            candidates.push(GappedCandidate::Final(seed.clone()));
-        }
-
         let (prelim_seed, seed_q, seed_s) = select_decoded_candidate_seed(
             prelim_query,
             subject,
@@ -6086,17 +6077,10 @@ fn collect_packed_gapped_candidates(
             .map(|lookup| lookup.query)
             .unwrap_or(traceback_query);
 
-        if (min_diag_separation != 0 || seed.score == 18) && is_perfect_ungapped_hsp(seed, reward) {
+        if seed.score == 18 && is_perfect_ungapped_hsp(seed, reward) {
             perfect_seeds.push(seed.clone());
             continue;
         }
-        if should_preserve_reportable_perfect_seed(seed, reward, min_diag_separation) {
-            candidates.push(GappedCandidate::Final(seed.clone()));
-        }
-        if should_preserve_low_score_ungapped_final(seed, min_diag_separation) {
-            candidates.push(GappedCandidate::Final(seed.clone()));
-        }
-
         let subject_decoded = subject_decoded
             .get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len));
         let (prelim_seed, seed_q, seed_s) = select_packed_candidate_seed(
@@ -6694,13 +6678,7 @@ fn render_traceback_candidate(
         sseq: Some(sseq),
     };
     canonicalize_low_score_single_query_gap_hsp(
-        &mut hsp,
-        query,
-        subject,
-        reward,
-        penalty,
-        gap_open,
-        gap_extend,
+        &mut hsp, query, subject, reward, penalty, gap_open, gap_extend,
     );
     if let Some((qs, qe, ss, se)) = trace_target_bounds() {
         if hsp.query_start <= qe
@@ -6830,12 +6808,13 @@ fn drop_low_exact_hsps_contained_by_imperfect_hsp(hsps: &mut Vec<SearchHsp>) {
     }
     let mut drop = vec![false; hsps.len()];
     for (i, exact) in hsps.iter().enumerate() {
-        if exact.score > 22
-            || exact.gap_opens != 0
-            || exact.num_ident != exact.align_length
-        {
+        if exact.gap_opens != 0 || exact.num_ident != exact.align_length {
             continue;
         }
+        let exact_q_start = exact.query_start.min(exact.query_end);
+        let exact_q_end = exact.query_start.max(exact.query_end);
+        let exact_s_start = exact.subject_start.min(exact.subject_end);
+        let exact_s_end = exact.subject_start.max(exact.subject_end);
         for imperfect in hsps.iter() {
             if imperfect.context != exact.context
                 || imperfect.score < exact.score
@@ -6843,10 +6822,14 @@ fn drop_low_exact_hsps_contained_by_imperfect_hsp(hsps: &mut Vec<SearchHsp>) {
             {
                 continue;
             }
-            if imperfect.query_start <= exact.query_start
-                && imperfect.query_end >= exact.query_end
-                && imperfect.subject_start <= exact.subject_start
-                && imperfect.subject_end >= exact.subject_end
+            let imperfect_q_start = imperfect.query_start.min(imperfect.query_end);
+            let imperfect_q_end = imperfect.query_start.max(imperfect.query_end);
+            let imperfect_s_start = imperfect.subject_start.min(imperfect.subject_end);
+            let imperfect_s_end = imperfect.subject_start.max(imperfect.subject_end);
+            if imperfect_q_start <= exact_q_start
+                && imperfect_q_end >= exact_q_end
+                && imperfect_s_start <= exact_s_start
+                && imperfect_s_end >= exact_s_end
             {
                 drop[i] = true;
                 break;
@@ -7530,24 +7513,6 @@ fn is_perfect_ungapped_hsp(seed: &SearchHsp, reward: i32) -> bool {
         && seed.score as i64 == reward as i64 * seed.align_length as i64
 }
 
-#[inline]
-fn should_preserve_reportable_perfect_seed(
-    seed: &SearchHsp,
-    reward: i32,
-    min_diag_separation: i32,
-) -> bool {
-    min_diag_separation == 0 && seed.score == 22 && is_perfect_ungapped_hsp(seed, reward)
-}
-
-#[inline]
-fn should_preserve_low_score_ungapped_final(seed: &SearchHsp, min_diag_separation: i32) -> bool {
-    min_diag_separation == 0
-        && seed.score == 19
-        && seed.gap_opens == 0
-        && seed.align_length >= 30
-        && seed.num_ident * 100 >= seed.align_length * 90
-}
-
 fn should_preserve_score18_against_equal_expansion(
     seed: &SearchHsp,
     tb: &TracebackResult,
@@ -7970,14 +7935,7 @@ mod tests {
     }
 
     #[test]
-    fn test_low_score_ungapped_preservation_policy_is_narrow() {
-        let mut seed19 = test_hsp(0, 31, 10, 41, 19, 28, 31, 0, 0);
-        assert!(should_preserve_low_score_ungapped_final(&seed19, 0));
-        assert!(!should_preserve_low_score_ungapped_final(&seed19, 40));
-
-        seed19.score = 18;
-        assert!(!should_preserve_low_score_ungapped_final(&seed19, 0));
-
+    fn test_low_score_ungapped_traceback_cleanup_is_narrow() {
         let query = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC";
         let mut subject = vec![iupacna_to_blastna(b'C'); 42];
         for (idx, &base) in b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG".iter().enumerate() {
@@ -8037,14 +7995,8 @@ mod tests {
         assert_eq!(hsp.num_ident, 29);
         assert_eq!(hsp.mismatches, 1);
         assert_eq!(hsp.gap_opens, 1);
-        assert_eq!(
-            hsp.qseq.as_deref(),
-            Some("AAAAAAAAACTTTCAAA-TTTTCAAAAAAAA")
-        );
-        assert_eq!(
-            hsp.sseq.as_deref(),
-            Some("AAAAAAAAACTTTAAAATTTTTCAAAAAAAA")
-        );
+        assert_eq!(hsp.qseq.as_deref(), Some("AAAAAAAAACTTTCAAA-TTTTCAAAAAAAA"));
+        assert_eq!(hsp.sseq.as_deref(), Some("AAAAAAAAACTTTAAAATTTTTCAAAAAAAA"));
     }
 
     #[test]
@@ -8095,6 +8047,22 @@ mod tests {
 
         assert!(hsps.iter().any(|hsp| hsp.query_start == 10));
         assert!(!hsps.iter().any(|hsp| hsp.query_start == 11));
+
+        let mut high_score = vec![
+            test_hsp(0, 35, 0, 35, 35, 35, 35, 0, 0),
+            test_hsp(0, 77, 0, 82, 62, 77, 82, 1, 0),
+        ];
+        drop_low_exact_hsps_contained_by_imperfect_hsp(&mut high_score);
+        assert_eq!(high_score.len(), 1);
+        assert_eq!(high_score[0].score, 62);
+
+        let mut reverse = vec![
+            test_hsp(0, 35, 82, 48, 35, 35, 35, 0, 1),
+            test_hsp(0, 77, 82, 0, 62, 77, 82, 1, 1),
+        ];
+        drop_low_exact_hsps_contained_by_imperfect_hsp(&mut reverse);
+        assert_eq!(reverse.len(), 1);
+        assert_eq!(reverse[0].score, 62);
     }
 
     #[test]
@@ -8610,17 +8578,20 @@ mod tests {
 
     #[test]
     fn test_gapped_search_with_insertion() {
-        // Longer query for robust seed finding
-        // Query: ACGTACGTACGTACGTACGTACGT (24 bases, 6 repeats of ACGT)
-        let query: Vec<u8> = (0..24).map(|i| [0u8, 1, 2, 3][i % 4]).collect();
+        // Non-repetitive query so diagonal dedup does not prefer a shorter
+        // exact repeat over the intended gapped alignment.
+        let query: Vec<u8> = b"ACGTCGATGCTAGCTAGGCTAACCGTATCGGATCCGTAAGCTTAGCTA"
+            .iter()
+            .map(|&b| iupacna_to_blastna(b))
+            .collect();
         let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
-        // Subject: same as query but with 1-base insertion after position 12
-        // ACGTACGTACGT A ACGTACGTACGT  (insert A in the middle)
+        // Subject: same as query but with 1-base insertion in the middle.
         let mut sub_seq: Vec<u8> = Vec::new();
-        sub_seq.extend_from_slice(&query[..12]);
+        let gap_at = query.len() / 2;
+        sub_seq.extend_from_slice(&query[..gap_at]);
         sub_seq.push(0); // insertion
-        sub_seq.extend_from_slice(&query[12..]);
-        let mut subject = vec![3u8; 50];
+        sub_seq.extend_from_slice(&query[gap_at..]);
+        let mut subject = vec![3u8; sub_seq.len() + 10];
         for (i, &b) in sub_seq.iter().enumerate() {
             subject[5 + i] = b;
         }
@@ -8634,7 +8605,6 @@ mod tests {
             "Gapped search should find hit with 1-base insertion"
         );
         let best = &results[0];
-        // With a 24-base query and 1 insertion, we expect high identity
         assert!(
             best.num_ident >= 20,
             "Should have high identity (got {} ident out of {} align_len)",
@@ -8645,16 +8615,19 @@ mod tests {
 
     #[test]
     fn test_gapped_search_with_deletion() {
-        // Longer query for robust seed finding
-        // Query: ACGTACGTACGTACGTACGTACGT (24 bases)
-        let query: Vec<u8> = (0..24).map(|i| [0u8, 1, 2, 3][i % 4]).collect();
+        // Non-repetitive query so diagonal dedup does not prefer a shorter
+        // exact repeat over the intended gapped alignment.
+        let query: Vec<u8> = b"ACGTCGATGCTAGCTAGGCTAACCGTATCGGATCCGTAAGCTTAGCTA"
+            .iter()
+            .map(|&b| iupacna_to_blastna(b))
+            .collect();
         let rc: Vec<u8> = query.iter().rev().map(|&b| 3 - b).collect();
-        // Subject: same as query but with 1-base deletion at position 12
+        // Subject: same as query but with 1-base deletion in the middle.
         let mut sub_seq: Vec<u8> = Vec::new();
-        sub_seq.extend_from_slice(&query[..12]);
-        // skip query[12], creating a deletion
-        sub_seq.extend_from_slice(&query[13..]);
-        let mut subject = vec![3u8; 50];
+        let gap_at = query.len() / 2;
+        sub_seq.extend_from_slice(&query[..gap_at]);
+        sub_seq.extend_from_slice(&query[gap_at + 1..]);
+        let mut subject = vec![3u8; sub_seq.len() + 10];
         for (i, &b) in sub_seq.iter().enumerate() {
             subject[5 + i] = b;
         }
@@ -8668,7 +8641,6 @@ mod tests {
             "Gapped search should handle 1-base deletion"
         );
         let best = &results[0];
-        // With a 24-base query and 1 deletion, we expect high identity
         assert!(
             best.num_ident >= 19,
             "Should have high identity (got {} ident out of {} align_len)",

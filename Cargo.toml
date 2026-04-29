@@ -37,8 +37,6 @@ rayon = "1"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 
 [profile.release]
-lto = true
-codegen-units = 1
 opt-level = 3
 
 [lints.clippy]

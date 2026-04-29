@@ -682,6 +682,60 @@ pub struct GumbelBlk {
     pub db_length: i64, // total database length
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MatrixStatRow {
+    gap_open: i32,
+    gap_extend: i32,
+    lambda: f64,
+    k: f64,
+    h: f64,
+    alpha: f64,
+    beta: f64,
+    _theta: f64,
+    alpha_v: f64,
+    sigma: f64,
+}
+
+impl MatrixStatRow {
+    const fn new(
+        gap_open: i32,
+        gap_extend: i32,
+        lambda: f64,
+        k: f64,
+        h: f64,
+        alpha: f64,
+        beta: f64,
+        _theta: f64,
+        alpha_v: f64,
+        sigma: f64,
+    ) -> Self {
+        Self {
+            gap_open,
+            gap_extend,
+            lambda,
+            k,
+            h,
+            alpha,
+            beta,
+            _theta,
+            alpha_v,
+            sigma,
+        }
+    }
+
+    fn gapped_params(self) -> GappedParams {
+        GappedParams {
+            gap_open: self.gap_open,
+            gap_extend: self.gap_extend,
+            lambda: self.lambda,
+            k: self.k,
+            h: self.h,
+            alpha: self.alpha,
+            beta: self.beta,
+        }
+    }
+}
+
 /// Compute Spouge finite-size correction e-value.
 /// Port of BLAST_SpougeStoE from blast_stat.c:5176.
 /// Uses per-subject lengths for more accurate e-values than simple Karlin formula.
@@ -816,56 +870,39 @@ pub fn spouge_etos(e0: f64, kbp: &KarlinBlk, gbp: &GumbelBlk, m: i32, n: i32) ->
 /// Build Gumbel block for protein BLOSUM62 with given gap costs.
 /// Port of Blast_GumbelBlkLoadFromTables from blast_stat.c:3696.
 pub fn protein_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Option<GumbelBlk> {
-    // Ungapped params (index 0 in BLOSUM62 table)
-    let a_un = 0.7916;
-    let alpha_un = 4.964660;
+    matrix_gumbel_blk("BLOSUM62", gap_open, gap_extend, db_length)
+}
 
-    // Find gapped params
-    let gp = lookup_protein_params(gap_open, gap_extend)?;
-
-    // Gapped params from table
-    // Format: (go, ge, lambda, K, H, alpha, beta)
-    // But we also need alpha_v and sigma from the extended table
-    // These are stored in BLOSUM62_EXTENDED_PARAMS
-    let (alpha_v, sigma) = lookup_blosum62_extended(gap_open, gap_extend)?;
-
+/// Build Gumbel block for the named protein scoring matrix.
+/// Port of `Blast_GumbelBlkLoadFromTables` using NCBI `blast_stat.c`
+/// matrix value rows.
+pub fn matrix_gumbel_blk(
+    matrix_name: &str,
+    gap_open: i32,
+    gap_extend: i32,
+    db_length: i64,
+) -> Option<GumbelBlk> {
+    let rows = matrix_stat_rows(matrix_name)?;
+    let ungapped = rows.first()?;
+    let row = lookup_matrix_stat_row(matrix_name, gap_open, gap_extend)?;
     let g = (gap_open + gap_extend) as f64;
 
     Some(GumbelBlk {
-        lambda: gp.lambda,
-        a: gp.alpha, // 'a' = alpha from the basic table (position 6 in C array)
-        b: 2.0 * g * (a_un - gp.alpha),
-        alpha: alpha_v,
-        beta: 2.0 * g * (alpha_un - alpha_v),
-        sigma,
-        tau: 2.0 * g * (alpha_un - sigma),
+        lambda: row.lambda,
+        a: row.alpha,
+        b: 2.0 * g * (ungapped.alpha - row.alpha),
+        alpha: row.alpha_v,
+        beta: 2.0 * g * (ungapped.alpha_v - row.alpha_v),
+        sigma: row.sigma,
+        tau: 2.0 * g * (ungapped.alpha_v - row.sigma),
         db_length,
     })
 }
 
-/// Extended BLOSUM62 params: (gap_open, gap_extend, alpha_v, sigma)
-/// From NCBI blast_stat.c blosum62_values positions [9] and [10].
-const BLOSUM62_EXTENDED: &[(i32, i32, f64, f64)] = &[
-    (11, 2, 12.6738, 12.7576),
-    (10, 2, 16.4740, 16.6026),
-    (9, 2, 22.7519, 22.9500),
-    (8, 2, 35.4838, 35.8213),
-    (7, 2, 61.2383, 61.8860),
-    (6, 2, 140.417, 141.882),
-    (13, 1, 19.5063, 19.8931),
-    (12, 1, 27.8562, 28.4699),
-    (11, 1, 42.6028, 43.6362),
-    (10, 1, 83.1787, 85.0656),
-    (9, 1, 210.333, 214.842),
-];
-
-fn lookup_blosum62_extended(gap_open: i32, gap_extend: i32) -> Option<(f64, f64)> {
-    for &(go, ge, alpha_v, sigma) in BLOSUM62_EXTENDED {
-        if go == gap_open && ge == gap_extend {
-            return Some((alpha_v, sigma));
-        }
-    }
-    None
+/// Build Gumbel block for NCBI's IDENTITY matrix.
+/// Port of `Blast_GumbelBlkLoadFromTables` using `prot_idenity_values[]`.
+pub fn identity_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Option<GumbelBlk> {
+    matrix_gumbel_blk("IDENTITY", gap_open, gap_extend, db_length)
 }
 
 /// Compute ungapped Karlin-Altschul lambda parameter for nucleotide scoring.
@@ -961,6 +998,366 @@ pub fn compute_length_adjustment(
     adj
 }
 
+const I2MAX: i32 = i16::MAX as i32;
+
+/// NCBI `blast_stat.c` protein matrix value rows. The first row is the
+/// ungapped row; remaining rows are supported gapped costs.
+const BLOSUM45_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.2291, 0.0924, 0.2514, 0.9113, -5.7, 0.641318, 9.611060, 9.611060,
+    ),
+    MatrixStatRow::new(
+        13, 3, 0.207, 0.049, 0.14, 1.5, -22.0, 0.671128, 35.855900, 35.963900,
+    ),
+    MatrixStatRow::new(
+        12, 3, 0.199, 0.039, 0.11, 1.8, -34.0, 0.691530, 45.693600, 45.851700,
+    ),
+    MatrixStatRow::new(
+        11, 3, 0.190, 0.031, 0.095, 2.0, -38.0, 0.691181, 62.874100, 63.103700,
+    ),
+    MatrixStatRow::new(
+        10, 3, 0.179, 0.023, 0.075, 2.4, -51.0, 0.710529, 88.286800, 88.639100,
+    ),
+    MatrixStatRow::new(
+        16, 2, 0.210, 0.051, 0.14, 1.5, -24.0, 0.666680, 36.279800, 36.452400,
+    ),
+    MatrixStatRow::new(
+        15, 2, 0.203, 0.041, 0.12, 1.7, -31.0, 0.673871, 44.825700, 45.060400,
+    ),
+    MatrixStatRow::new(
+        14, 2, 0.195, 0.032, 0.10, 1.9, -36.0, 0.685753, 60.736200, 61.102300,
+    ),
+    MatrixStatRow::new(
+        13, 2, 0.185, 0.024, 0.084, 2.2, -45.0, 0.698480, 85.148100, 85.689400,
+    ),
+    MatrixStatRow::new(
+        12, 2, 0.171, 0.016, 0.061, 2.8, -65.0, 0.713429, 127.758000, 128.582000,
+    ),
+    MatrixStatRow::new(
+        19, 1, 0.205, 0.040, 0.11, 1.9, -43.0, 0.672302, 53.071400, 53.828200,
+    ),
+    MatrixStatRow::new(
+        18, 1, 0.198, 0.032, 0.10, 2.0, -43.0, 0.682580, 72.342400, 73.403900,
+    ),
+    MatrixStatRow::new(
+        17, 1, 0.189, 0.024, 0.079, 2.4, -57.0, 0.695035, 103.055000, 104.721000,
+    ),
+    MatrixStatRow::new(
+        16, 1, 0.176, 0.016, 0.063, 2.8, -67.0, 0.712966, 170.100000, 173.003000,
+    ),
+];
+
+const BLOSUM50_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.2318, 0.112, 0.3362, 0.6895, -4.0, 0.609639, 5.388310, 5.388310,
+    ),
+    MatrixStatRow::new(
+        13, 3, 0.212, 0.063, 0.19, 1.1, -16.0, 0.639287, 18.113800, 18.202800,
+    ),
+    MatrixStatRow::new(
+        12, 3, 0.206, 0.055, 0.17, 1.2, -18.0, 0.644715, 22.654600, 22.777700,
+    ),
+    MatrixStatRow::new(
+        11, 3, 0.197, 0.042, 0.14, 1.4, -25.0, 0.656327, 29.861100, 30.045700,
+    ),
+    MatrixStatRow::new(
+        10, 3, 0.186, 0.031, 0.11, 1.7, -34.0, 0.671150, 42.393800, 42.674000,
+    ),
+    MatrixStatRow::new(
+        9, 3, 0.172, 0.022, 0.082, 2.1, -48.0, 0.694326, 66.069600, 66.516400,
+    ),
+    MatrixStatRow::new(
+        16, 2, 0.215, 0.066, 0.20, 1.05, -15.0, 0.633899, 17.951800, 18.092100,
+    ),
+    MatrixStatRow::new(
+        15, 2, 0.210, 0.058, 0.17, 1.2, -20.0, 0.641985, 21.940100, 22.141800,
+    ),
+    MatrixStatRow::new(
+        14, 2, 0.202, 0.045, 0.14, 1.4, -27.0, 0.650682, 28.681200, 28.961900,
+    ),
+    MatrixStatRow::new(
+        13, 2, 0.193, 0.035, 0.12, 1.6, -32.0, 0.660984, 42.059500, 42.471600,
+    ),
+    MatrixStatRow::new(
+        12, 2, 0.181, 0.025, 0.095, 1.9, -41.0, 0.678090, 63.747600, 64.397300,
+    ),
+    MatrixStatRow::new(
+        19, 1, 0.212, 0.057, 0.18, 1.2, -21.0, 0.635714, 26.311200, 26.923300,
+    ),
+    MatrixStatRow::new(
+        18, 1, 0.207, 0.050, 0.15, 1.4, -28.0, 0.643523, 34.903700, 35.734800,
+    ),
+    MatrixStatRow::new(
+        17, 1, 0.198, 0.037, 0.12, 1.6, -33.0, 0.654504, 48.895800, 50.148600,
+    ),
+    MatrixStatRow::new(
+        16, 1, 0.186, 0.025, 0.10, 1.9, -42.0, 0.667750, 76.469100, 78.443000,
+    ),
+    MatrixStatRow::new(
+        15, 1, 0.171, 0.015, 0.063, 2.7, -76.0, 0.694575, 140.053000, 144.160000,
+    ),
+];
+
+const BLOSUM62_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.3176, 0.134, 0.4012, 0.7916, -3.2, 0.623757, 4.964660, 4.964660,
+    ),
+    MatrixStatRow::new(
+        11, 2, 0.297, 0.082, 0.27, 1.1, -10.0, 0.641766, 12.673800, 12.757600,
+    ),
+    MatrixStatRow::new(
+        10, 2, 0.291, 0.075, 0.23, 1.3, -15.0, 0.649362, 16.474000, 16.602600,
+    ),
+    MatrixStatRow::new(
+        9, 2, 0.279, 0.058, 0.19, 1.5, -19.0, 0.659245, 22.751900, 22.950000,
+    ),
+    MatrixStatRow::new(
+        8, 2, 0.264, 0.045, 0.15, 1.8, -26.0, 0.672692, 35.483800, 35.821300,
+    ),
+    MatrixStatRow::new(
+        7, 2, 0.239, 0.027, 0.10, 2.5, -46.0, 0.702056, 61.238300, 61.886000,
+    ),
+    MatrixStatRow::new(
+        6, 2, 0.201, 0.012, 0.061, 3.3, -58.0, 0.740802, 140.417000, 141.882000,
+    ),
+    MatrixStatRow::new(
+        13, 1, 0.292, 0.071, 0.23, 1.2, -11.0, 0.647715, 19.506300, 19.893100,
+    ),
+    MatrixStatRow::new(
+        12, 1, 0.283, 0.059, 0.19, 1.5, -19.0, 0.656391, 27.856200, 28.469900,
+    ),
+    MatrixStatRow::new(
+        11, 1, 0.267, 0.041, 0.14, 1.9, -30.0, 0.669720, 42.602800, 43.636200,
+    ),
+    MatrixStatRow::new(
+        10, 1, 0.243, 0.024, 0.10, 2.5, -44.0, 0.693267, 83.178700, 85.065600,
+    ),
+    MatrixStatRow::new(
+        9, 1, 0.206, 0.010, 0.052, 4.0, -87.0, 0.731887, 210.333000, 214.842000,
+    ),
+];
+
+const BLOSUM80_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.3430, 0.177, 0.6568, 0.5222, -1.6, 0.564057, 1.918130, 1.918130,
+    ),
+    MatrixStatRow::new(
+        25, 2, 0.342, 0.17, 0.66, 0.52, -1.6, 0.563956, 1.731000, 1.731300,
+    ),
+    MatrixStatRow::new(
+        13, 2, 0.336, 0.15, 0.57, 0.59, -3.0, 0.570979, 2.673470, 2.692300,
+    ),
+    MatrixStatRow::new(
+        9, 2, 0.319, 0.11, 0.42, 0.76, -6.0, 0.587837, 5.576090, 5.667860,
+    ),
+    MatrixStatRow::new(
+        8, 2, 0.308, 0.090, 0.35, 0.89, -9.0, 0.597556, 7.536950, 7.686230,
+    ),
+    MatrixStatRow::new(
+        7, 2, 0.293, 0.070, 0.27, 1.1, -14.0, 0.615254, 11.586600, 11.840400,
+    ),
+    MatrixStatRow::new(
+        6, 2, 0.268, 0.045, 0.19, 1.4, -19.0, 0.644054, 19.958100, 20.441200,
+    ),
+    MatrixStatRow::new(
+        11, 1, 0.314, 0.095, 0.35, 0.90, -9.0, 0.590702, 8.808610, 9.223320,
+    ),
+    MatrixStatRow::new(
+        10, 1, 0.299, 0.071, 0.27, 1.1, -14.0, 0.609620, 13.833800, 14.533400,
+    ),
+    MatrixStatRow::new(
+        9, 1, 0.279, 0.048, 0.20, 1.4, -19.0, 0.623800, 24.252000, 25.490400,
+    ),
+];
+
+const BLOSUM90_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.3346, 0.190, 0.7547, 0.4434, -1.4, 0.544178, 1.377760, 1.377760,
+    ),
+    MatrixStatRow::new(
+        9, 2, 0.310, 0.12, 0.46, 0.67, -6.0, 0.570267, 4.232290, 4.334170,
+    ),
+    MatrixStatRow::new(
+        8, 2, 0.300, 0.099, 0.39, 0.76, -7.0, 0.581580, 5.797020, 5.961420,
+    ),
+    MatrixStatRow::new(
+        7, 2, 0.283, 0.072, 0.30, 0.93, -11.0, 0.600024, 9.040880, 9.321600,
+    ),
+    MatrixStatRow::new(
+        6, 2, 0.259, 0.048, 0.22, 1.2, -16.0, 0.629344, 16.024400, 16.531600,
+    ),
+    MatrixStatRow::new(
+        11, 1, 0.302, 0.093, 0.39, 0.78, -8.0, 0.576919, 7.143250, 7.619190,
+    ),
+    MatrixStatRow::new(
+        10, 1, 0.290, 0.075, 0.28, 1.04, -15.0, 0.591366, 11.483900, 12.269800,
+    ),
+    MatrixStatRow::new(
+        9, 1, 0.265, 0.044, 0.20, 1.3, -19.0, 0.613013, 21.408300, 22.840900,
+    ),
+];
+
+const PAM250_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.2252, 0.0868, 0.2223, 0.98, -5.0, 0.660059, 11.754300, 11.754300,
+    ),
+    MatrixStatRow::new(
+        15, 3, 0.205, 0.049, 0.13, 1.6, -23.0, 0.687656, 34.578400, 34.928000,
+    ),
+    MatrixStatRow::new(
+        14, 3, 0.200, 0.043, 0.12, 1.7, -26.0, 0.689768, 43.353000, 43.443800,
+    ),
+    MatrixStatRow::new(
+        13, 3, 0.194, 0.036, 0.10, 1.9, -31.0, 0.697431, 50.948500, 51.081700,
+    ),
+    MatrixStatRow::new(
+        12, 3, 0.186, 0.029, 0.085, 2.2, -41.0, 0.704565, 69.606500, 69.793600,
+    ),
+    MatrixStatRow::new(
+        11, 3, 0.174, 0.020, 0.070, 2.5, -48.0, 0.722438, 98.653500, 98.927100,
+    ),
+    MatrixStatRow::new(
+        17, 2, 0.204, 0.047, 0.12, 1.7, -28.0, 0.684799, 41.583800, 41.735800,
+    ),
+    MatrixStatRow::new(
+        16, 2, 0.198, 0.038, 0.11, 1.8, -29.0, 0.691098, 51.635200, 51.843900,
+    ),
+    MatrixStatRow::new(
+        15, 2, 0.191, 0.031, 0.087, 2.2, -44.0, 0.699051, 67.256700, 67.558500,
+    ),
+    MatrixStatRow::new(
+        14, 2, 0.182, 0.024, 0.073, 2.5, -53.0, 0.714103, 96.315100, 96.756800,
+    ),
+    MatrixStatRow::new(
+        13, 2, 0.171, 0.017, 0.059, 2.9, -64.0, 0.728738, 135.653000, 136.339000,
+    ),
+    MatrixStatRow::new(
+        21, 1, 0.205, 0.045, 0.11, 1.8, -34.0, 0.683265, 48.728200, 49.218800,
+    ),
+    MatrixStatRow::new(
+        20, 1, 0.199, 0.037, 0.10, 1.9, -35.0, 0.689380, 60.832000, 61.514100,
+    ),
+    MatrixStatRow::new(
+        19, 1, 0.192, 0.029, 0.083, 2.3, -52.0, 0.696344, 84.019700, 84.985600,
+    ),
+    MatrixStatRow::new(
+        18, 1, 0.183, 0.021, 0.070, 2.6, -60.0, 0.710525, 113.829000, 115.184000,
+    ),
+    MatrixStatRow::new(
+        17, 1, 0.171, 0.014, 0.052, 3.3, -86.0, 0.727000, 175.071000, 177.196000,
+    ),
+];
+
+const PAM30_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.3400, 0.283, 1.754, 0.1938, -0.3, 0.436164, 0.161818, 0.161818,
+    ),
+    MatrixStatRow::new(
+        7, 2, 0.305, 0.15, 0.87, 0.35, -3.0, 0.479087, 1.014010, 1.162730,
+    ),
+    MatrixStatRow::new(
+        6, 2, 0.287, 0.11, 0.68, 0.42, -4.0, 0.499980, 1.688060, 1.951430,
+    ),
+    MatrixStatRow::new(
+        5, 2, 0.264, 0.079, 0.45, 0.59, -7.0, 0.533009, 3.377010, 3.871950,
+    ),
+    MatrixStatRow::new(
+        10, 1, 0.309, 0.15, 0.88, 0.35, -3.0, 0.474741, 1.372050, 1.788770,
+    ),
+    MatrixStatRow::new(
+        9, 1, 0.294, 0.11, 0.61, 0.48, -6.0, 0.492716, 2.463920, 3.186150,
+    ),
+    MatrixStatRow::new(
+        8, 1, 0.270, 0.072, 0.40, 0.68, -10.0, 0.521286, 5.368130, 6.763480,
+    ),
+    MatrixStatRow::new(
+        15, 3, 0.339, 0.28, 1.70, 0.20, -0.5, 0.437688, 0.157089, 0.155299,
+    ),
+    MatrixStatRow::new(
+        14, 2, 0.337, 0.27, 1.62, 0.21, -0.8, 0.440010, 0.206970, 0.198524,
+    ),
+    MatrixStatRow::new(
+        14, 1, 0.333, 0.27, 1.43, 0.23, -1.4, 0.444817, 0.436301, 0.361947,
+    ),
+    MatrixStatRow::new(
+        13, 3, 0.338, 0.27, 1.69, 0.20, -0.5, 0.439086, 0.178973, 0.175436,
+    ),
+];
+
+const PAM70_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.3345, 0.229, 1.029, 0.3250, -0.7, 0.511296, 0.633439, 0.633439,
+    ),
+    MatrixStatRow::new(
+        8, 2, 0.301, 0.12, 0.54, 0.56, -5.0, 0.549019, 2.881650, 3.025710,
+    ),
+    MatrixStatRow::new(
+        7, 2, 0.286, 0.093, 0.43, 0.67, -7.0, 0.565659, 4.534540, 4.785780,
+    ),
+    MatrixStatRow::new(
+        6, 2, 0.264, 0.064, 0.29, 0.90, -12.0, 0.596330, 7.942630, 8.402720,
+    ),
+    MatrixStatRow::new(
+        11, 1, 0.305, 0.12, 0.52, 0.59, -6.0, 0.543514, 3.681400, 4.108020,
+    ),
+    MatrixStatRow::new(
+        10, 1, 0.291, 0.091, 0.41, 0.71, -9.0, 0.560723, 6.002970, 6.716570,
+    ),
+    MatrixStatRow::new(
+        9, 1, 0.270, 0.060, 0.28, 0.97, -14.0, 0.585186, 11.360800, 12.636700,
+    ),
+    MatrixStatRow::new(
+        11, 2, 0.323, 0.186, 0.80, 1.32, -27.0, 0.524062, 1.321301, 1.281671,
+    ),
+    MatrixStatRow::new(
+        12, 3, 0.330, 0.219, 0.93, 0.82, -16.0, 0.516845, 0.818768, 0.811240,
+    ),
+];
+
+const IDENTITY_ROWS: &[MatrixStatRow] = &[
+    MatrixStatRow::new(
+        I2MAX, I2MAX, 0.28768, 0.282, 1.69, 0.1703, -0.3, 0.43828, 0.16804, 0.16804,
+    ),
+    MatrixStatRow::new(
+        15, 2, 0.2835, 0.255, 1.49, 0.19, -1.0, 0.44502, 0.24613, 0.22743,
+    ),
+];
+
+fn matrix_stat_rows(matrix_name: &str) -> Option<&'static [MatrixStatRow]> {
+    if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
+        Some(BLOSUM45_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM50") {
+        Some(BLOSUM50_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
+        Some(BLOSUM62_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM80") {
+        Some(BLOSUM80_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM90") {
+        Some(BLOSUM90_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("PAM30") {
+        Some(PAM30_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("PAM70") {
+        Some(PAM70_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("PAM250") {
+        Some(PAM250_ROWS)
+    } else if matrix_name.eq_ignore_ascii_case("IDENTITY") {
+        Some(IDENTITY_ROWS)
+    } else {
+        None
+    }
+}
+
+fn lookup_matrix_stat_row(
+    matrix_name: &str,
+    gap_open: i32,
+    gap_extend: i32,
+) -> Option<MatrixStatRow> {
+    matrix_stat_rows(matrix_name)?
+        .iter()
+        .copied()
+        .find(|row| row.gap_open == gap_open && row.gap_extend == gap_extend)
+}
+
 /// Precomputed Karlin-Altschul parameters for BLOSUM62 with various gap costs.
 /// Values from NCBI blast_stat.c blosum62_values[].
 /// Format: (gap_open, gap_extend, lambda, K, H, alpha, beta)
@@ -978,33 +1375,58 @@ pub const BLOSUM62_PARAMS: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
     (9, 1, 0.206, 0.010, 0.052, 4.0, -87.0),
 ];
 
+/// Precomputed Karlin-Altschul parameters for NCBI's IDENTITY matrix.
+/// Values from `blast_stat.c` `prot_idenity_values[]`.
+pub const IDENTITY_PARAMS: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
+    (
+        i16::MAX as i32,
+        i16::MAX as i32,
+        0.28768,
+        0.282,
+        1.69,
+        0.1703,
+        -0.3,
+    ),
+    (15, 2, 0.2835, 0.255, 1.49, 0.19, -1.0),
+];
+
 /// Look up gapped KBP for protein scoring (BLOSUM62).
 pub fn lookup_protein_params(gap_open: i32, gap_extend: i32) -> Option<GappedParams> {
-    for &(go, ge, lambda, k, h, alpha, beta) in BLOSUM62_PARAMS {
-        if go == gap_open && ge == gap_extend {
-            return Some(GappedParams {
-                gap_open: go,
-                gap_extend: ge,
-                lambda,
-                k,
-                h,
-                alpha,
-                beta,
-            });
-        }
-    }
-    None
+    lookup_matrix_params("BLOSUM62", gap_open, gap_extend)
+}
+
+/// Look up gapped KBP for a named protein scoring matrix.
+pub fn lookup_matrix_params(
+    matrix_name: &str,
+    gap_open: i32,
+    gap_extend: i32,
+) -> Option<GappedParams> {
+    lookup_matrix_stat_row(matrix_name, gap_open, gap_extend).map(MatrixStatRow::gapped_params)
+}
+
+/// Look up gapped KBP for NCBI's IDENTITY matrix.
+pub fn lookup_identity_params(gap_open: i32, gap_extend: i32) -> Option<GappedParams> {
+    lookup_matrix_params("IDENTITY", gap_open, gap_extend)
 }
 
 /// Compute ungapped KBP for protein BLOSUM62. Values match NCBI
 /// `blosum62_values[0]` (ungapped entry) from `blast_stat.c:259`:
 /// Lambda = 0.3176, K = 0.134, H = 0.4012.
 pub fn protein_ungapped_kbp() -> KarlinBlk {
+    protein_ungapped_kbp_for_matrix("BLOSUM62")
+}
+
+/// Compute ungapped KBP for the named protein matrix from NCBI's standard
+/// `blast_stat.c` row 0 table values.
+pub fn protein_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
+    let row = matrix_stat_rows(matrix_name)
+        .and_then(|rows| rows.first().copied())
+        .unwrap_or(BLOSUM62_ROWS[0]);
     KarlinBlk {
-        lambda: 0.3176,
-        k: 0.134,
-        log_k: 0.134_f64.ln(),
-        h: 0.4012,
+        lambda: row.lambda,
+        k: row.k,
+        log_k: row.k.ln(),
+        h: row.h,
         round_down: false,
     }
 }

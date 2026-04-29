@@ -8,7 +8,7 @@ use crate::parameters::EffectiveLengthsParameters;
 use crate::program::{is_mapping, is_phi_blast, subject_is_translated, ProgramType, BLASTN};
 use crate::queryinfo::QueryInfo;
 use crate::stat::{
-    compute_length_adjustment_exact, lookup_protein_params, nucl_alpha_beta, KarlinBlk,
+    compute_length_adjustment_exact, lookup_matrix_params, nucl_alpha_beta, KarlinBlk,
 };
 
 /// `BLAST_REWARD` (`blast_options.h:152`).
@@ -47,9 +47,8 @@ pub fn is_search_space_set(options: &EffectiveLengthsOptions) -> bool {
         .any(|&s| s != 0)
 }
 
-/// Port of `BLAST_GetAlphaBeta` (`blast_stat.c:3094`) for the matrices we
-/// currently support (BLOSUM62 — extend `lookup_protein_params` for more).
-/// Used by `blast_calc_eff_lengths` for protein-on-protein scoring.
+/// Port of `BLAST_GetAlphaBeta` (`blast_stat.c:3094`) for supported protein
+/// matrices. Used by `blast_calc_eff_lengths` for protein-on-protein scoring.
 fn blast_get_alpha_beta(
     matrix_name: &str,
     gap_open: i32,
@@ -60,12 +59,13 @@ fn blast_get_alpha_beta(
     if !gapped {
         // Ungapped path in NCBI uses `alpha_arr[0]` / `beta_arr[0]` for
         // the matrix; if no entry exists fall back to Lambda/H.
+        if matrix_name.eq_ignore_ascii_case("IDENTITY") {
+            return (0.1703, -0.3);
+        }
         return (kbp_ungapped.lambda / kbp_ungapped.h, 0.0);
     }
-    if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
-        if let Some(p) = lookup_protein_params(gap_open, gap_extend) {
-            return (p.alpha, p.beta);
-        }
+    if let Some(p) = lookup_matrix_params(matrix_name, gap_open, gap_extend) {
+        return (p.alpha, p.beta);
     }
     (kbp_ungapped.lambda / kbp_ungapped.h, 0.0)
 }

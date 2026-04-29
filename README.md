@@ -192,7 +192,7 @@ For local development against this checkout:
 
 ```toml
 [dependencies]
-blast-rs = { path = "/home/mahogny/github/claude/newblast" }
+blast-rs = { path = "../blast-rs" }
 ```
 
 The library API returns structured Rust values instead of formatted BLAST text.

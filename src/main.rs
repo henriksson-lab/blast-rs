@@ -1,5 +1,8 @@
 //! BLAST command-line interface.
 
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::type_complexity)]
+
 use blast_rs::db::{BlastDb, DbType};
 use blast_rs::format::{format_tabular, TabularHit};
 use blast_rs::input::{iupacna_to_blastna, parse_fasta_with_default_id, FastaRecord};
@@ -108,9 +111,41 @@ struct BlastnArgs {
     #[arg(long = "comp_based_stats", alias = "comp-based-stats")]
     comp_based_stats: Option<String>,
 
+    /// Protein scoring matrix.
+    #[arg(long = "matrix")]
+    matrix: Option<String>,
+
+    /// Neighboring word score threshold.
+    #[arg(long = "threshold")]
+    threshold: Option<String>,
+
+    /// Genetic code for translated nucleotide query.
+    #[arg(long = "query_gencode", alias = "query-gencode")]
+    query_gencode: Option<String>,
+
+    /// Genetic code for translated nucleotide database/subject.
+    #[arg(long = "db_gencode", alias = "db-gencode")]
+    db_gencode: Option<String>,
+
+    /// Maximum intron length for linking translated HSPs.
+    #[arg(long = "max_intron_length", alias = "max-intron-length")]
+    max_intron_length: Option<String>,
+
+    /// Use Smith-Waterman traceback.
+    #[arg(long = "use_sw_tback", alias = "use-sw-tback", default_value = "false")]
+    use_sw_tback: bool,
+
+    /// PSSM checkpoint input.
+    #[arg(long = "in_pssm", alias = "in-pssm")]
+    in_pssm: Option<PathBuf>,
+
     /// DUST low-complexity filtering: yes/no
     #[arg(long = "dust", default_value = "yes")]
     dust: String,
+
+    /// SEG low-complexity filtering for translated/protein queries: yes/no
+    #[arg(long = "seg")]
+    seg: Option<String>,
 
     /// X-dropoff for ungapped extensions (bits)
     #[arg(long = "xdrop_ungap")]
@@ -652,6 +687,385 @@ fn maybe_emit_blast_help_or_version_and_exit() {
     }
 }
 
+fn maybe_emit_program_filter_option_error() {
+    let mut args = std::env::args();
+    let _program = args.next();
+    let Some(command) = args.next() else {
+        return;
+    };
+    let rest: Vec<String> = args.collect();
+    let blastn_protein_option = (command == "blastn")
+        .then(|| {
+            rest.iter()
+                .filter_map(|arg| cli_option_name(arg))
+                .find(|name| {
+                    matches!(
+                        *name,
+                        "seg"
+                            | "matrix"
+                            | "threshold"
+                            | "comp_based_stats"
+                            | "query_gencode"
+                            | "db_gencode"
+                            | "use_sw_tback"
+                            | "in_pssm"
+                    )
+                })
+        })
+        .flatten();
+    if let Some(unknown_option) = blastn_protein_option {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        emit_blastn_usage_constraint_error(&error, &detail);
+    }
+    let protein_filtering_option = matches!(
+        command.as_str(),
+        "blastp" | "blastx" | "tblastn" | "tblastx"
+    )
+    .then(|| {
+        rest.iter()
+            .filter_map(|arg| cli_option_name(arg))
+            .find(|name| {
+                matches!(
+                    *name,
+                    "dust" | "filtering_db" | "window_masker_db" | "window_masker_taxid"
+                ) || matches!(*name, "query_gencode" if command == "blastp" || command == "tblastn")
+                    || matches!(*name, "db_gencode" if command == "blastp" || command == "blastx")
+                    || matches!(*name, "max_intron_length" if command == "blastp")
+                    || matches!(*name, "in_pssm" if command != "tblastn")
+                    || matches!(*name, "comp_based_stats" if command == "tblastx")
+                    || matches!(*name, "use_sw_tback" if command == "tblastx")
+            })
+    })
+    .flatten();
+    if let Some(unknown_option) = protein_filtering_option {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        if command == "blastp" {
+            emit_blastp_usage_constraint_error(&error, &detail);
+        } else if command == "blastx" {
+            emit_blastx_usage_constraint_error(&error, &detail);
+        } else if command == "tblastn" {
+            emit_tblastn_usage_constraint_error(&error, &detail);
+        } else if command == "tblastx" {
+            emit_tblastx_usage_constraint_error(&error, &detail);
+        } else {
+            eprintln!("Error: {error}");
+            eprintln!("Error:  {detail}");
+            std::process::exit(1);
+        }
+    }
+    maybe_emit_protein_word_size_constraint_error(&command, &rest);
+    maybe_emit_threshold_constraint_error(&command, &rest);
+    maybe_emit_genetic_code_constraint_error(&command, &rest);
+}
+
+fn cli_option_name(arg: &str) -> Option<&str> {
+    arg.strip_prefix("--")
+        .or_else(|| arg.strip_prefix('-'))
+        .map(|option| option.split_once('=').map_or(option, |(name, _)| name))
+}
+
+fn maybe_emit_genetic_code_constraint_error(command: &str, rest: &[String]) {
+    for name in genetic_code_option_names_for_program(command) {
+        if let Some(value) = cli_option_value(rest, name) {
+            let Ok(code) = value.parse::<i32>() else {
+                continue;
+            };
+            if !is_valid_ncbi_genetic_code(code) {
+                emit_genetic_code_constraint_error(command, name, code);
+            }
+        }
+    }
+}
+
+fn maybe_emit_threshold_constraint_error(command: &str, rest: &[String]) {
+    if !matches!(
+        command,
+        "blastp" | "blastx" | "tblastn" | "tblastx" | "psiblast"
+    ) {
+        return;
+    }
+    let Some(value) = cli_option_value(rest, "threshold") else {
+        return;
+    };
+    match parse_preparse_threshold(value) {
+        Ok(threshold) if threshold < 0.0 => emit_threshold_constraint_error(command, threshold),
+        Ok(_) => {}
+        Err(error_pos) => emit_threshold_conversion_error(command, value, error_pos),
+    }
+}
+
+fn maybe_emit_protein_word_size_constraint_error(command: &str, rest: &[String]) {
+    if !matches!(
+        command,
+        "blastp" | "blastx" | "tblastn" | "tblastx" | "psiblast"
+    ) {
+        return;
+    }
+    let Some(value) = cli_option_value(rest, "word_size") else {
+        return;
+    };
+    let Ok(word_size) = value.parse::<i32>() else {
+        return;
+    };
+    if word_size < 2 {
+        emit_program_integer_constraint_error(command, "word_size", ">=2", word_size);
+    }
+}
+
+fn parse_preparse_threshold(value: &str) -> Result<f64, usize> {
+    match value.parse::<f64>() {
+        Ok(parsed) if parsed.is_finite() => Ok(parsed),
+        Ok(_) => Err(0),
+        Err(_) => {
+            if let Some(prefix) = value.strip_suffix(['e', 'E']) {
+                if let Ok(parsed) = prefix.parse::<f64>() {
+                    if parsed.is_finite() {
+                        return Ok(parsed);
+                    }
+                }
+            }
+            Err(ncbi_float_error_pos(value))
+        }
+    }
+}
+
+fn emit_threshold_constraint_error(program: &str, value: f64) -> ! {
+    let display_value = if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        value.to_string()
+    };
+    let error = format!("Argument \"threshold\". Illegal value, expected >=0:  `{display_value}'");
+    let detail = format!("(CArgException::eConstraint) {error}");
+    emit_program_usage_constraint_error(program, &error, &detail);
+}
+
+fn emit_threshold_conversion_error(program: &str, value: &str, error_pos: usize) -> ! {
+    let suffix = if value.is_empty() {
+        String::new()
+    } else {
+        format!(":  `{value}'")
+    };
+    let error = format!(
+        "Cannot convert string '{value}' to double (m_Pos = {error_pos})\nError: Argument \"threshold\". Argument cannot be converted{suffix}"
+    );
+    let detail = format!(
+        "(CArgException::eConvert) Argument \"threshold\". Argument cannot be converted{suffix}"
+    );
+    emit_program_usage_constraint_error(program, &error, &detail);
+}
+
+fn genetic_code_option_names_for_program(command: &str) -> &'static [&'static str] {
+    match command {
+        "blastx" => &["query_gencode"],
+        "tblastn" => &["db_gencode"],
+        "tblastx" => &["query_gencode", "db_gencode"],
+        _ => &[],
+    }
+}
+
+fn cli_option_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(option) = cli_option_name(arg) {
+            if option == name {
+                if let Some((_, value)) = arg.split_once('=') {
+                    return Some(value);
+                }
+                return iter.next().map(String::as_str);
+            }
+        }
+    }
+    None
+}
+
+fn normalize_ncbi_single_dash_long_args() -> Vec<String> {
+    std::env::args()
+        .map(|arg| {
+            if let Some(option) = arg.strip_prefix('-') {
+                if !option.starts_with('-')
+                    && option.len() > 1
+                    && option
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|byte| byte.is_ascii_alphabetic())
+                {
+                    return format!("--{option}");
+                }
+            }
+            arg
+        })
+        .collect()
+}
+
+fn emit_blastp_usage_constraint_error(error: &str, detail: &str) -> ! {
+    eprint!(
+        r#"USAGE
+  blastp [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_ipglist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-parse_deflines] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-ungapped] [-remote]
+    [-comp_based_stats compo] [-use_sw_tback] [-version]
+
+DESCRIPTION
+   Protein-Protein BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+========================================================================
+
+Error: {error}
+Error:  {detail}
+"#
+    );
+    std::process::exit(1);
+}
+
+fn emit_blastx_usage_constraint_error(error: &str, detail: &str) -> ! {
+    eprint!(
+        r#"USAGE
+  blastx [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_ipglist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-max_intron_length length] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-ungapped] [-lcase_masking]
+    [-query_loc range] [-strand strand] [-parse_deflines]
+    [-query_gencode int_value] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-remote]
+    [-comp_based_stats compo] [-use_sw_tback] [-version]
+
+DESCRIPTION
+   Translated Query-Protein Subject BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+========================================================================
+
+Error: {error}
+Error:  {detail}
+"#
+    );
+    std::process::exit(1);
+}
+
+fn emit_tblastn_usage_constraint_error(error: &str, detail: &str) -> ! {
+    eprint!(
+        r#"USAGE
+  tblastn [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-db_gencode int_value] [-ungapped]
+    [-max_intron_length length] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-parse_deflines] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-remote]
+    [-comp_based_stats compo] [-use_sw_tback] [-in_pssm psi_chkpt_file]
+    [-version]
+
+DESCRIPTION
+   Protein Query-Translated Subject BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+========================================================================
+
+Error: {error}
+Error:  {detail}
+"#
+    );
+    std::process::exit(1);
+}
+
+fn emit_tblastx_usage_constraint_error(error: &str, detail: &str) -> ! {
+    eprint!(
+        r#"USAGE
+  tblastx [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-searchsp int_value] [-sum_stats bool_value]
+    [-max_intron_length length] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-strand strand] [-parse_deflines]
+    [-query_gencode int_value] [-db_gencode int_value] [-outfmt format]
+    [-show_gis] [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-remote] [-version]
+
+DESCRIPTION
+   Translated Query-Translated Subject BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+========================================================================
+
+Error: {error}
+Error:  {detail}
+"#
+    );
+    std::process::exit(1);
+}
+
 fn emit_blastn_help_stdout(detailed: bool) {
     print!(
         r#"USAGE
@@ -744,8 +1158,9 @@ fn blastn_value_option_name(option: &str) -> Option<&'static str> {
 
 fn main_inner() {
     maybe_emit_blast_help_or_version_and_exit();
+    maybe_emit_program_filter_option_error();
     maybe_emit_blastn_missing_option_value_and_exit();
-    let cli = Cli::try_parse().unwrap_or_else(|err| {
+    let cli = Cli::try_parse_from(normalize_ncbi_single_dash_long_args()).unwrap_or_else(|err| {
         if let Some(value) = blastn_unexpected_positional_arg(&err) {
             emit_blastn_usage_too_many_positional_error(&value);
         }
@@ -785,7 +1200,8 @@ fn main_inner() {
     validate_choice_options(&args);
     validate_outfmt_options(&args);
     validate_program_outfmt_options(program, &args);
-    validate_numeric_constraint_options(&args);
+    validate_numeric_constraint_options(program, &args);
+    validate_genetic_code_options(program, &args);
     validate_thread_relationships(&args);
     validate_template_relationships(&args);
     validate_evalue_options(&args);
@@ -1180,10 +1596,18 @@ fn validate_db_mask_options(args: &BlastnArgs) {
 }
 
 fn validate_filtering_options(args: &BlastnArgs) {
-    if is_valid_dust_option(&args.dust) {
-        return;
+    if !is_valid_dust_option(&args.dust) {
+        emit_filtering_option_error(&args.dust);
     }
-    let message = if args.dust.split_whitespace().count() == 3 {
+    if let Some(seg) = args.seg.as_deref() {
+        if !is_valid_seg_option(seg) {
+            emit_filtering_option_error(seg);
+        }
+    }
+}
+
+fn emit_filtering_option_error(value: &str) -> ! {
+    let message = if value.split_whitespace().count() == 3 {
         "Invalid input for filtering parameters"
     } else {
         "Invalid number of arguments to filtering option"
@@ -1206,6 +1630,19 @@ fn is_valid_dust_option(value: &str) -> bool {
     level.parse::<f64>().is_ok()
         && window.parse::<usize>().is_ok()
         && linker.parse::<usize>().is_ok()
+}
+
+fn is_valid_seg_option(value: &str) -> bool {
+    if value == "yes" || value == "no" {
+        return true;
+    }
+    let mut parts = value.split_whitespace();
+    let (Some(window), Some(locut), Some(hicut), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    window.parse::<i32>().is_ok() && locut.parse::<f64>().is_ok() && hicut.parse::<f64>().is_ok()
 }
 
 fn validate_query_masking_options(program: &str, args: &BlastnArgs) {
@@ -1438,7 +1875,7 @@ fn ncbi_float_error_pos(value: &str) -> usize {
     i
 }
 
-fn validate_numeric_constraint_options(args: &BlastnArgs) {
+fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
     let num_threads = args.num_threads();
     if num_threads < 1 {
         emit_integer_constraint_error("num_threads", ">=1", num_threads);
@@ -1459,8 +1896,14 @@ fn validate_numeric_constraint_options(args: &BlastnArgs) {
         .as_deref()
         .map(|value| parse_validated_i32("word_size", value))
     {
-        if word_size < 4 {
-            emit_integer_constraint_error("word_size", ">=4", word_size);
+        let min_word_size = if program == "blastn" { 4 } else { 2 };
+        if word_size < min_word_size {
+            emit_program_integer_constraint_error(
+                program,
+                "word_size",
+                &format!(">={min_word_size}"),
+                word_size,
+            );
         }
     }
     if !(0.0..=100.0).contains(&perc_identity) {
@@ -1573,14 +2016,64 @@ fn validate_numeric_constraint_options(args: &BlastnArgs) {
     }
 }
 
+fn validate_genetic_code_options(program: &str, args: &BlastnArgs) {
+    if matches!(program, "blastx" | "tblastx") {
+        if let Some(value) = args.query_gencode.as_deref() {
+            let code = parse_validated_i32("query_gencode", value);
+            if !is_valid_ncbi_genetic_code(code) {
+                emit_genetic_code_constraint_error(program, "query_gencode", code);
+            }
+        }
+    }
+    if matches!(program, "tblastn" | "tblastx") {
+        if let Some(value) = args.db_gencode.as_deref() {
+            let code = parse_validated_i32("db_gencode", value);
+            if !is_valid_ncbi_genetic_code(code) {
+                emit_genetic_code_constraint_error(program, "db_gencode", code);
+            }
+        }
+    }
+}
+
+fn is_valid_ncbi_genetic_code(code: i32) -> bool {
+    (1..=6).contains(&code) || (9..=16).contains(&code) || (21..=31).contains(&code) || code == 33
+}
+
+fn emit_genetic_code_constraint_error(program: &str, argument: &str, value: i32) -> ! {
+    let error = format!(
+        "Argument \"{argument}\". Illegal value, expected values between: 1-6, 9-16, 21-31, 33:  `{value}'"
+    );
+    let detail = format!("(CArgException::eConstraint) {error}");
+    emit_program_usage_constraint_error(program, &error, &detail);
+}
+
+fn emit_program_usage_constraint_error(program: &str, error: &str, detail: &str) -> ! {
+    match program {
+        "blastp" => emit_blastp_usage_constraint_error(error, detail),
+        "blastx" => emit_blastx_usage_constraint_error(error, detail),
+        "tblastn" => emit_tblastn_usage_constraint_error(error, detail),
+        "tblastx" => emit_tblastx_usage_constraint_error(error, detail),
+        _ => emit_blastn_usage_constraint_error(error, detail),
+    }
+}
+
 fn emit_integer_constraint_error<T: std::fmt::Display>(
+    argument: &str,
+    expected: &str,
+    value: T,
+) -> ! {
+    emit_program_integer_constraint_error("blastn", argument, expected, value)
+}
+
+fn emit_program_integer_constraint_error<T: std::fmt::Display>(
+    program: &str,
     argument: &str,
     expected: &str,
     value: T,
 ) -> ! {
     let error = format!("Argument \"{argument}\". Illegal value, expected {expected}:  `{value}'");
     let detail = format!("(CArgException::eConstraint) {error}");
-    emit_blastn_usage_constraint_error(&error, &detail);
+    emit_program_usage_constraint_error(program, &error, &detail);
 }
 
 fn validate_gap_cost_options(args: &BlastnArgs) {
@@ -2252,6 +2745,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         builder.write(&base)?;
         let db = BlastDb::open(&base)?;
         let params = build_blastp_params(args);
+        emit_identity_comp_stats_warnings("blastp", args, &queries);
 
         let mut hits = Vec::new();
         for qrec in &queries {
@@ -2340,6 +2834,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let params = build_blastp_params(args);
+    emit_identity_comp_stats_warnings("blastp", args, &queries);
 
     let mut all_hits = Vec::new();
     for qrec in &queries {
@@ -2640,6 +3135,17 @@ fn apply_blastn_linked_sum_stats_to_hsps(
 }
 
 fn build_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
+    build_blastp_params_with_seg_default(args, false)
+}
+
+fn build_translated_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
+    build_blastp_params_with_seg_default(args, true)
+}
+
+fn build_blastp_params_with_seg_default(
+    args: &BlastnArgs,
+    default_seg_filtering: bool,
+) -> blast_rs::api::SearchParams {
     let parsed_num_threads = args.num_threads();
     let mut params = blast_rs::api::SearchParams::blastp()
         .evalue(args.evalue())
@@ -2679,12 +3185,197 @@ fn build_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
     {
         params.comp_adjust = comp as u8;
     }
+    if let Some(matrix) = args.matrix.as_deref() {
+        params.matrix = parse_matrix_type(matrix);
+        apply_protein_matrix_gap_defaults(args, &mut params);
+        if params.matrix == blast_rs::api::MatrixType::Identity {
+            params.comp_adjust = 0;
+        }
+    }
+    if let Some(threshold) = args.threshold.as_deref() {
+        params.word_threshold = Some(parse_validated_f64("threshold", threshold));
+    }
+    if let Some(query_gencode) = args
+        .query_gencode
+        .as_deref()
+        .map(|value| parse_validated_i32("query_gencode", value))
+    {
+        params.query_gencode = query_gencode as u8;
+    }
+    if let Some(db_gencode) = args
+        .db_gencode
+        .as_deref()
+        .map(|value| parse_validated_i32("db_gencode", value))
+    {
+        params.db_gencode = db_gencode as u8;
+    }
     if let Some(xdrop_ungap) = args.xdrop_ungap.as_deref() {
         params.x_drop_ungapped = parse_validated_f64("xdrop_ungap", xdrop_ungap) as i32;
     }
+    params.filter_low_complexity = match args.seg.as_deref() {
+        Some("no") => false,
+        Some("yes") => true,
+        None => default_seg_filtering,
+        Some(seg) => {
+            let mut parts = seg.split_whitespace();
+            let window = parts.next().unwrap().parse::<i32>().unwrap();
+            let locut = parts.next().unwrap().parse::<f64>().unwrap();
+            let hicut = parts.next().unwrap().parse::<f64>().unwrap();
+            if window > 0 {
+                params.seg_window = window as usize;
+            }
+            if locut > 0.0 {
+                params.seg_locut = locut;
+            }
+            if hicut > 0.0 {
+                params.seg_hicut = hicut;
+            }
+            true
+        }
+    };
     params.max_target_seqs = args.effective_max_target_seqs() as usize;
     params.max_hsps = args.max_hsps_value().map(|max| max as usize);
     params
+}
+
+fn apply_protein_matrix_gap_defaults(args: &BlastnArgs, params: &mut blast_rs::api::SearchParams) {
+    if params.matrix == blast_rs::api::MatrixType::Identity {
+        apply_identity_gap_defaults(args, params);
+        return;
+    }
+    let (default_open, default_extend) = match params.matrix {
+        blast_rs::api::MatrixType::Blosum45 => (14, 2),
+        blast_rs::api::MatrixType::Blosum50 => (13, 2),
+        blast_rs::api::MatrixType::Blosum62 => (11, 1),
+        blast_rs::api::MatrixType::Blosum80 => (10, 1),
+        blast_rs::api::MatrixType::Blosum90 => (10, 1),
+        blast_rs::api::MatrixType::Pam30 => (9, 1),
+        blast_rs::api::MatrixType::Pam70 => (10, 1),
+        blast_rs::api::MatrixType::Pam250 => (14, 2),
+        blast_rs::api::MatrixType::Identity => unreachable!(),
+    };
+    if args.gapopen.is_none() {
+        params.gap_open = default_open;
+    }
+    if args.gapextend.is_none() {
+        params.gap_extend = default_extend;
+    }
+}
+
+fn apply_identity_gap_defaults(args: &BlastnArgs, params: &mut blast_rs::api::SearchParams) {
+    const GAP_INF: i32 = i16::MAX as i32;
+    let parsed_open = args
+        .gapopen
+        .as_deref()
+        .map(|value| parse_validated_i32("gapopen", value));
+    let parsed_extend = args
+        .gapextend
+        .as_deref()
+        .map(|value| parse_validated_i32("gapextend", value));
+
+    match (parsed_open, parsed_extend) {
+        (None, None) => {
+            params.gap_open = 15;
+            params.gap_extend = 2;
+        }
+        (Some(15), None) | (None, Some(2)) | (Some(15), Some(2)) => {
+            params.gap_open = 15;
+            params.gap_extend = 2;
+        }
+        (Some(GAP_INF), None) | (None, Some(GAP_INF)) | (Some(GAP_INF), Some(GAP_INF)) => {
+            params.gap_open = GAP_INF;
+            params.gap_extend = GAP_INF;
+        }
+        (Some(open), Some(extend)) => emit_unsupported_identity_gap_error(open, extend),
+        (Some(open), None) => emit_unsupported_identity_gap_error(open, GAP_INF),
+        (None, Some(extend)) => emit_unsupported_identity_gap_error(GAP_INF, extend),
+    }
+}
+
+fn emit_unsupported_identity_gap_error(open: i32, extend: i32) -> ! {
+    eprintln!(
+        "BLAST query/options error: Gap existence and extension values of {open} and {extend} not supported for IDENTITY"
+    );
+    eprintln!("supported values are:");
+    eprintln!("32767, 32767");
+    eprintln!("15, 2");
+    eprintln!();
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
+fn identity_matrix_resets_comp_stats(args: &BlastnArgs) -> bool {
+    args.matrix
+        .as_deref()
+        .is_some_and(|matrix| matrix.eq_ignore_ascii_case("IDENTITY"))
+        && args
+            .comp_based_stats
+            .as_deref()
+            .map(|value| parse_validated_i32("comp_based_stats", value) > 0)
+            .unwrap_or(true)
+}
+
+fn emit_identity_comp_stats_warnings(program: &str, args: &BlastnArgs, queries: &[FastaRecord]) {
+    if !identity_matrix_resets_comp_stats(args) {
+        return;
+    }
+    for (idx, qrec) in queries.iter().enumerate() {
+        eprintln!(
+            "Warning: [{program}] Query_{} {}: Composition-based statistics cannot be used with the IDENTITY matrix, resetting the composition-based statistics option to 0 ",
+            idx + 1,
+            qrec.id
+        );
+    }
+}
+
+fn parse_matrix_type(value: &str) -> blast_rs::api::MatrixType {
+    match value.to_ascii_uppercase().as_str() {
+        "BLOSUM45" => blast_rs::api::MatrixType::Blosum45,
+        "BLOSUM50" => blast_rs::api::MatrixType::Blosum50,
+        "BLOSUM62" => blast_rs::api::MatrixType::Blosum62,
+        "BLOSUM80" => blast_rs::api::MatrixType::Blosum80,
+        "BLOSUM90" => blast_rs::api::MatrixType::Blosum90,
+        "PAM30" => blast_rs::api::MatrixType::Pam30,
+        "PAM70" => blast_rs::api::MatrixType::Pam70,
+        "PAM250" => blast_rs::api::MatrixType::Pam250,
+        "IDENTITY" => blast_rs::api::MatrixType::Identity,
+        _ => emit_unsupported_matrix_error(value),
+    }
+}
+
+fn emit_unsupported_matrix_error(value: &str) -> ! {
+    eprintln!(
+        "BLAST query/options error: {value} is not a supported matrix, supported matrices are:"
+    );
+    eprintln!("BLOSUM80 ");
+    eprintln!("BLOSUM62 ");
+    eprintln!("BLOSUM50 ");
+    eprintln!("BLOSUM45 ");
+    eprintln!("PAM250 ");
+    eprintln!("BLOSUM90 ");
+    eprintln!("PAM30 ");
+    eprintln!("PAM70 ");
+    eprintln!("IDENTITY ");
+    eprintln!();
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
+fn emit_unsupported_standard_matrix_error(value: &str) -> ! {
+    eprintln!(
+        "BLAST query/options error: {value} is not a supported matrix, supported matrices are:"
+    );
+    eprintln!("BLOSUM80 ");
+    eprintln!("BLOSUM62 ");
+    eprintln!("BLOSUM50 ");
+    eprintln!("BLOSUM45 ");
+    eprintln!("PAM250 ");
+    eprintln!("BLOSUM90 ");
+    eprintln!("PAM30 ");
+    eprintln!("PAM70 ");
+    eprintln!();
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
 }
 
 fn mask_cli_protein_query(seq: &mut [u8]) {
@@ -2697,8 +3388,16 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     if queries.is_empty() {
         return Err("No sequences found in query file".into());
     }
+    if args
+        .matrix
+        .as_deref()
+        .is_some_and(|matrix| matrix.eq_ignore_ascii_case("IDENTITY"))
+    {
+        emit_unsupported_standard_matrix_error("IDENTITY");
+    }
 
-    let params = build_blastp_params(args);
+    let params = build_translated_blastp_params(args);
+    emit_identity_comp_stats_warnings("blastx", args, &queries);
     let mut all_hits = Vec::new();
 
     if let Some(subject_path) = args.subject.as_ref() {
@@ -2748,7 +3447,8 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", &args.query);
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
-    let params = build_blastp_params(args);
+    let params = build_translated_blastp_params(args);
+    emit_identity_comp_stats_warnings("tblastn", args, &queries);
     let mut all_hits = Vec::new();
 
     if let Some(subject_path) = args.subject.as_ref() {
@@ -2971,7 +3671,7 @@ fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", &args.query);
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
-    let mut params = build_blastp_params(args);
+    let mut params = build_translated_blastp_params(args);
     params.comp_adjust = 0;
     let mut all_hits = Vec::new();
 
@@ -3614,7 +4314,7 @@ fn run_blastn_rust(
     {
         let mut profile_db_oid_count = 0usize;
         let mut profile_packed_search_ms = 0u128;
-        let mut profile_ambiguity_check_ms = 0u128;
+        let profile_ambiguity_check_ms = 0u128;
         let mut profile_ambiguity_rerun_ms = 0u128;
         let mut profile_ambiguity_rerun_count = 0usize;
         let prepared_queries: Vec<_> = encoded_queries
@@ -3725,56 +4425,78 @@ fn run_blastn_rust(
                             };
                             if !hsps.is_empty() {
                                 if let Some(amb) = ambiguity_data {
-                                    let ambiguity_check_start = if profile_enabled {
+                                    let subject_decoded =
+                                        blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                            packed, seq_len, amb,
+                                        );
+                                    let ambiguity_rerun_start = if profile_enabled {
                                         Some(Instant::now())
                                     } else {
                                         None
                                     };
-                                    let overlaps =
-                                        blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps);
-                                    if let Some(start) = ambiguity_check_start {
-                                        profile_ambiguity_check_ms += start.elapsed().as_millis();
-                                    }
-                                    if overlaps {
-                                        let subject_decoded =
-                                            blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                                packed, seq_len, amb,
-                                            );
-                                        let ambiguity_rerun_start = if profile_enabled {
-                                            Some(Instant::now())
-                                        } else {
-                                            None
-                                        };
-                                        let mut decoded_last_hit_scratch =
-                                            prepared_queries[qi].decoded_last_hit_scratch();
-                                        hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
-                                            &prepared_queries[qi],
-                                            &subject_decoded,
-                                            reward,
-                                            penalty,
-                                            ungapped_x_dropoff,
-                                            kbp,
-                                            search_space,
-                                            evalue,
-                                            &mut decoded_last_hit_scratch,
-                                        );
-                                        if let Some(start) = ambiguity_rerun_start {
-                                            profile_ambiguity_rerun_ms +=
-                                                start.elapsed().as_millis();
-                                            profile_ambiguity_rerun_count += 1;
-                                        }
+                                    hsps = blast_rs::search::blastn_ungapped_search_no_dedup_nomask(
+                                        &eq.plus_masked,
+                                        &eq.minus_masked,
+                                        &eq.plus_nomask,
+                                        &eq.minus_nomask,
+                                        &subject_decoded,
+                                        word_size,
+                                        reward,
+                                        penalty,
+                                        ungapped_x_dropoff,
+                                        kbp,
+                                        search_space,
+                                        evalue,
+                                    );
+                                    if let Some(start) = ambiguity_rerun_start {
+                                        profile_ambiguity_rerun_ms += start.elapsed().as_millis();
+                                        profile_ambiguity_rerun_count += 1;
                                     }
                                 }
                             }
                             hsps
                         }
                     } else {
-                        let packed_search_start = if profile_enabled {
-                            Some(Instant::now())
-                        } else {
-                            None
-                        };
-                        let mut hsps = if seq_len > 5_000_000 {
+                        let hsps = if let Some(amb) = ambiguity_data {
+                            let subject_decoded =
+                                blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                    packed, seq_len, amb,
+                                );
+                            let ambiguity_rerun_start = if profile_enabled {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
+                            let hsps =
+                                blast_rs::search::blastn_gapped_search_nomask_with_split_xdrop(
+                                    &eq.plus_masked,
+                                    &eq.minus_masked,
+                                    &eq.plus_nomask,
+                                    &eq.minus_nomask,
+                                    &subject_decoded,
+                                    word_size,
+                                    reward,
+                                    penalty,
+                                    gapopen,
+                                    gapextend,
+                                    ungapped_x_dropoff,
+                                    gapped_x_dropoff,
+                                    gapped_x_dropoff_final,
+                                    kbp,
+                                    search_space,
+                                    evalue,
+                                );
+                            if let Some(start) = ambiguity_rerun_start {
+                                profile_ambiguity_rerun_ms += start.elapsed().as_millis();
+                                profile_ambiguity_rerun_count += 1;
+                            }
+                            hsps
+                        } else if seq_len > 5_000_000 {
+                            let packed_search_start = if profile_enabled {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
                             let mut combined = Vec::new();
                             for (chunk_start, chunk_end) in blast_db_subject_chunks(seq_len) {
                                 let chunk_packed =
@@ -3800,77 +4522,40 @@ fn run_blastn_rust(
                                         );
                                 combined.extend(offset_subject_hsps(chunk_hsps, chunk_start));
                             }
+                            if let Some(start) = packed_search_start {
+                                profile_packed_search_ms += start.elapsed().as_millis();
+                            }
                             combined
                         } else {
-                            blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
-                                &prepared_queries[qi],
-                                &eq.plus_nomask,
-                                &eq.minus_nomask,
-                                packed,
-                                seq_len,
-                                reward,
-                                penalty,
-                                gapopen,
-                                gapextend,
-                                ungapped_x_dropoff,
-                                gapped_x_dropoff,
-                                gapped_x_dropoff_final,
-                                kbp,
-                                search_space,
-                                evalue,
-                                &mut scratch[qi],
-                            )
-                        };
-                        if let Some(start) = packed_search_start {
-                            profile_packed_search_ms += start.elapsed().as_millis();
-                        }
-                        if !hsps.is_empty() {
-                            if let Some(amb) = ambiguity_data {
-                                let ambiguity_check_start = if profile_enabled {
-                                    Some(Instant::now())
-                                } else {
-                                    None
-                                };
-                                let overlaps =
-                                    blast_rs::search::ambiguity_data_overlaps_hsps(amb, &hsps);
-                                if let Some(start) = ambiguity_check_start {
-                                    profile_ambiguity_check_ms += start.elapsed().as_millis();
-                                }
-                                if overlaps {
-                                    let subject_decoded =
-                                        blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                            packed, seq_len, amb,
-                                        );
-                                    let ambiguity_rerun_start = if profile_enabled {
-                                        Some(Instant::now())
-                                    } else {
-                                        None
-                                    };
-                                    hsps =
-                                        blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
-                                            &eq.plus_masked,
-                                            &eq.minus_masked,
-                                            &eq.plus_nomask,
-                                            &eq.minus_nomask,
-                                            &subject_decoded,
-                                            word_size,
-                                            reward,
-                                            penalty,
-                                            gapopen,
-                                            gapextend,
-                                            gapped_x_dropoff,
-                                            gapped_x_dropoff_final,
-                                            kbp,
-                                            search_space,
-                                            evalue,
-                                        );
-                                    if let Some(start) = ambiguity_rerun_start {
-                                        profile_ambiguity_rerun_ms += start.elapsed().as_millis();
-                                        profile_ambiguity_rerun_count += 1;
-                                    }
-                                }
+                            let packed_search_start = if profile_enabled {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
+                            let hsps =
+                                blast_rs::search::blastn_gapped_search_packed_prepared_with_xdrops(
+                                    &prepared_queries[qi],
+                                    &eq.plus_nomask,
+                                    &eq.minus_nomask,
+                                    packed,
+                                    seq_len,
+                                    reward,
+                                    penalty,
+                                    gapopen,
+                                    gapextend,
+                                    ungapped_x_dropoff,
+                                    gapped_x_dropoff,
+                                    gapped_x_dropoff_final,
+                                    kbp,
+                                    search_space,
+                                    evalue,
+                                    &mut scratch[qi],
+                                );
+                            if let Some(start) = packed_search_start {
+                                profile_packed_search_ms += start.elapsed().as_millis();
                             }
-                        }
+                            hsps
+                        };
                         hsps
                     };
                     let active_cutoff = if args.ungapped {
@@ -4050,32 +4735,51 @@ fn run_blastn_rust(
                                             };
                                             if !hsps.is_empty() {
                                                 if let Some(amb) = ambiguity_data {
-                                                    if blast_rs::search::ambiguity_data_overlaps_hsps(
-                                                        amb, &hsps,
-                                                    ) {
-                                                        let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                                            packed, seq_len, amb,
-                                                        );
-                                                        let mut decoded_last_hit_scratch =
-                                                            prepared_queries[qi].decoded_last_hit_scratch();
-                                                        hsps = blast_rs::search::blastn_ungapped_search_decoded_prepared_with_scratch_no_dedup(
-                                                            &prepared_queries[qi],
-                                                            &subject_decoded,
-                                                            reward,
-                                                            penalty,
-                                                            ungapped_x_dropoff,
-                                                            kbp,
-                                                            search_space,
-                                                            evalue,
-                                                            &mut decoded_last_hit_scratch,
-                                                        );
-                                                    }
+                                                    let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                                        packed, seq_len, amb,
+                                                    );
+                                                    hsps = blast_rs::search::blastn_ungapped_search_no_dedup_nomask(
+                                                        &eq.plus_masked,
+                                                        &eq.minus_masked,
+                                                        &eq.plus_nomask,
+                                                        &eq.minus_nomask,
+                                                        &subject_decoded,
+                                                        word_size,
+                                                        reward,
+                                                        penalty,
+                                                        ungapped_x_dropoff,
+                                                        kbp,
+                                                        search_space,
+                                                        evalue,
+                                                    );
                                                 }
                                             }
                                             hsps
                                         }
                                     } else {
-                                        let mut hsps = if seq_len > 5_000_000 {
+                                        let hsps = if let Some(amb) = ambiguity_data {
+                                            let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                                packed, seq_len, amb,
+                                            );
+                                            blast_rs::search::blastn_gapped_search_nomask_with_split_xdrop(
+                                                &eq.plus_masked,
+                                                &eq.minus_masked,
+                                                &eq.plus_nomask,
+                                                &eq.minus_nomask,
+                                                &subject_decoded,
+                                                word_size,
+                                                reward,
+                                                penalty,
+                                                gapopen,
+                                                gapextend,
+                                                ungapped_x_dropoff,
+                                                gapped_x_dropoff,
+                                                gapped_x_dropoff_final,
+                                                kbp,
+                                                search_space,
+                                                evalue,
+                                            )
+                                        } else if seq_len > 5_000_000 {
                                             let mut combined = Vec::new();
                                             for (chunk_start, chunk_end) in
                                                 blast_db_subject_chunks(seq_len)
@@ -4130,34 +4834,6 @@ fn run_blastn_rust(
                                                 &mut scratch[qi],
                                             )
                                         };
-                                        if !hsps.is_empty() {
-                                            if let Some(amb) = ambiguity_data {
-                                                if blast_rs::search::ambiguity_data_overlaps_hsps(
-                                                    amb, &hsps,
-                                                ) {
-                                                    let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
-                                                        packed, seq_len, amb,
-                                                    );
-                                                    hsps = blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
-                                                        &eq.plus_masked,
-                                                        &eq.minus_masked,
-                                                        &eq.plus_nomask,
-                                                        &eq.minus_nomask,
-                                                        &subject_decoded,
-                                                        word_size,
-                                                        reward,
-                                                        penalty,
-                                                        gapopen,
-                                                        gapextend,
-                                                        gapped_x_dropoff,
-                                                        gapped_x_dropoff_final,
-                                                        kbp,
-                                                        search_space,
-                                                        evalue,
-                                                    );
-                                                }
-                                            }
-                                        }
                                         hsps
                                     };
                                     let active_cutoff = if args.ungapped {
@@ -4313,7 +4989,7 @@ fn run_blastn_rust(
                         } else if let Some(subject_decoded) =
                             subject_decoded_with_ambiguity.as_ref()
                         {
-                            blast_rs::search::blastn_gapped_search_nomask_with_xdrops(
+                            blast_rs::search::blastn_gapped_search_nomask_with_split_xdrop(
                                 &eq.plus_masked,
                                 &eq.minus_masked,
                                 &eq.plus_nomask,
@@ -4324,6 +5000,7 @@ fn run_blastn_rust(
                                 penalty,
                                 gapopen,
                                 gapextend,
+                                ungapped_x_dropoff,
                                 gapped_x_dropoff,
                                 gapped_x_dropoff_final,
                                 kbp,
@@ -4591,10 +5268,10 @@ fn run_blastn_rust(
                             .then_with(|| a.sframe.cmp(&b.sframe))
                     } else {
                         score_order
-                            .then_with(|| a.sframe.cmp(&b.sframe))
                             .then_with(|| a_subject_lo.cmp(&b_subject_lo))
-                            .then_with(|| b_subject_hi.cmp(&a_subject_hi))
                             .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
+                            .then_with(|| b.sframe.cmp(&a.sframe))
+                            .then_with(|| b_subject_hi.cmp(&a_subject_hi))
                     }
                 });
             }
@@ -5153,9 +5830,7 @@ fn run_blastn_subject(
     profile_start: Instant,
     profile_last: &mut Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::search::{
-        blastn_gapped_search_nomask_with_xdrops, blastn_ungapped_search_no_dedup_nomask,
-    };
+    use blast_rs::search::blastn_ungapped_search_no_dedup_nomask;
 
     let total_subj_len: usize = subjects
         .iter()
@@ -5228,7 +5903,7 @@ fn run_blastn_subject(
                     args.evalue(),
                 )
             } else {
-                blastn_gapped_search_nomask_with_xdrops(
+                blast_rs::search::blastn_gapped_search_nomask_with_split_xdrop(
                     &query_plus,
                     &query_minus,
                     &query_plus_nomask,
@@ -5239,6 +5914,7 @@ fn run_blastn_subject(
                     args.penalty(),
                     args.gapopen(),
                     args.gapextend(),
+                    ungapped_x_dropoff,
                     gapped_x_dropoff,
                     gapped_x_dropoff_final,
                     &kbp,
@@ -5353,10 +6029,10 @@ fn run_blastn_subject(
                 a_rank.cmp(&b_rank)
             })
             .then_with(|| b.subject_id.cmp(&a.subject_id))
-            .then_with(|| a.sframe.cmp(&b.sframe))
             .then_with(|| a_subject_lo.cmp(&b_subject_lo))
             .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
-            .then_with(|| a_subject_hi.cmp(&b_subject_hi))
+            .then_with(|| b.sframe.cmp(&a.sframe))
+            .then_with(|| b_subject_hi.cmp(&a_subject_hi))
     });
     let query_len = queries
         .first()
@@ -7863,14 +8539,22 @@ fn compare_hsps_for_max_hsps(a: &TabularHit, b: &TabularHit) -> std::cmp::Orderi
                 .cmp(&a.subject_start.max(a.subject_end))
         })
         .then_with(|| {
-            a.query_start
-                .min(a.query_end)
-                .cmp(&b.query_start.min(b.query_end))
+            let a_query_lo = a.query_start.min(a.query_end);
+            let b_query_lo = b.query_start.min(b.query_end);
+            if a.sframe < 0 && b.sframe < 0 {
+                b_query_lo.cmp(&a_query_lo)
+            } else {
+                a_query_lo.cmp(&b_query_lo)
+            }
         })
         .then_with(|| {
-            b.query_start
-                .max(b.query_end)
-                .cmp(&a.query_start.max(a.query_end))
+            let a_query_hi = a.query_start.max(a.query_end);
+            let b_query_hi = b.query_start.max(b.query_end);
+            if a.sframe < 0 && b.sframe < 0 {
+                a_query_hi.cmp(&b_query_hi)
+            } else {
+                b_query_hi.cmp(&a_query_hi)
+            }
         })
 }
 
@@ -8031,10 +8715,13 @@ fn apply_best_hit_filter(hits: &mut Vec<TabularHit>, overhang: f64, score_edge: 
     let param_s = 1.0 - score_edge;
     let mut by_query: std::collections::BTreeMap<String, Vec<BestHitNode>> =
         std::collections::BTreeMap::new();
+    let mut by_query_subject: std::collections::BTreeMap<(String, String), Vec<BestHitNode>> =
+        std::collections::BTreeMap::new();
 
     for hit in hits.drain(..) {
         let query_id = hit.query_id.clone();
-        let nodes = by_query.entry(query_id).or_default();
+        let subject_id = hit.subject_id.clone();
+        let subject_key = (query_id.clone(), subject_id);
         let begin = hsp_query_order_start(&hit) - 1;
         let len = (hit.query_end - hit.query_start).abs() + 1;
         if len <= 0 {
@@ -8045,13 +8732,22 @@ fn apply_best_hit_filter(hits: &mut Vec<TabularHit>, overhang: f64, score_edge: 
         let evalue = hit.evalue;
         let new_bad_density = score as f64 / len as f64 / param_s;
 
-        let is_bad = nodes.iter().any(|node| {
+        let query_nodes = by_query.entry(query_id).or_default();
+        let subject_nodes = by_query_subject.entry(subject_key.clone()).or_default();
+
+        let is_bad_density = query_nodes.iter().any(|node| {
             node.end >= end
                 && node.begin <= begin
                 && node.hit.evalue <= evalue
                 && node.hit.raw_score as f64 / node.len as f64 > new_bad_density
         });
-        if is_bad {
+        let is_bad_same_subject = subject_nodes.iter().any(|node| {
+            node.end >= end
+                && node.begin <= begin
+                && node.hit.evalue <= evalue
+                && node.hit.raw_score > score
+        });
+        if is_bad_density || is_bad_same_subject {
             continue;
         }
 
@@ -8063,7 +8759,7 @@ fn apply_best_hit_filter(hits: &mut Vec<TabularHit>, overhang: f64, score_edge: 
         let stored_end = end + stored_overhang;
         let old_bad_density = score as f64 / len as f64 * param_s;
 
-        nodes.retain(|node| {
+        query_nodes.retain(|node| {
             if node.begin < allowed_begin || node.begin >= allowed_end {
                 return true;
             }
@@ -8074,19 +8770,23 @@ fn apply_best_hit_filter(hits: &mut Vec<TabularHit>, overhang: f64, score_edge: 
                 && node.hit.raw_score as f64 / (node.len as f64) < old_bad_density)
         });
 
-        let insert_at = nodes
+        let node = BestHitNode {
+            hit,
+            begin: stored_begin,
+            end: stored_end,
+            len,
+        };
+        let insert_at = query_nodes
             .iter()
             .position(|node| node.begin >= stored_begin)
-            .unwrap_or(nodes.len());
-        nodes.insert(
-            insert_at,
-            BestHitNode {
-                hit,
-                begin: stored_begin,
-                end: stored_end,
-                len,
-            },
-        );
+            .unwrap_or(query_nodes.len());
+        query_nodes.insert(insert_at, node.clone());
+        let subject_nodes = by_query_subject.entry(subject_key).or_default();
+        let insert_at = subject_nodes
+            .iter()
+            .position(|node| node.begin >= stored_begin)
+            .unwrap_or(subject_nodes.len());
+        subject_nodes.insert(insert_at, node);
     }
 
     hits.extend(
@@ -8339,6 +9039,110 @@ mod tests {
 
         assert_eq!(params.gap_open, 11);
         assert_eq!(params.gap_extend, 1);
+    }
+
+    #[test]
+    fn test_blastp_cli_default_seg_is_off() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert!(!params.filter_low_complexity);
+    }
+
+    #[test]
+    fn test_translated_cli_default_seg_is_on() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "tblastn",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/query_random_200.fa",
+        ]);
+        let Commands::Tblastn(args) = cli.command else {
+            panic!("expected tblastn command");
+        };
+
+        let params = build_translated_blastp_params(&args);
+
+        assert!(params.filter_low_complexity);
+    }
+
+    #[test]
+    fn test_blastp_cli_honors_explicit_seg_yes() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--seg",
+            "yes",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert!(params.filter_low_complexity);
+    }
+
+    #[test]
+    fn test_blastp_cli_honors_custom_seg_options() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--seg",
+            "10 1.8 2.1",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert!(params.filter_low_complexity);
+        assert_eq!(params.seg_window, 10);
+        assert_eq!(params.seg_locut, 1.8);
+        assert_eq!(params.seg_hicut, 2.1);
+    }
+
+    #[test]
+    fn test_blastp_cli_honors_custom_word_threshold() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--threshold",
+            "13",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(params.word_threshold, Some(13.0));
     }
 
     #[test]
