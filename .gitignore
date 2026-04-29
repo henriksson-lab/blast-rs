@@ -1,4 +1,10 @@
 /target
+.claude/
+.codex
+CLAUDE.md
+Makefile
+TODO.md
+docs/
 .tmp/
 scratch/
 target-trace/
