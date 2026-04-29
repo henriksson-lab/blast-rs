@@ -1376,10 +1376,24 @@ fn program_supports_outfmt(program: &str, outfmt_num: i32) -> bool {
     if program == "blastn" {
         return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10 | 17);
     }
+    if program == "blastp" {
+        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+    }
+    if matches!(program, "blastx" | "tblastx") {
+        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+    }
+    if program == "tblastn" {
+        return matches!(outfmt_num, 0 | 6 | 7 | 10);
+    }
     matches!(outfmt_num, 6 | 10)
 }
 
 fn emit_program_outfmt_error(program: &str, outfmt_num: i32) -> ! {
+    if outfmt_num == 17 && program != "blastn" {
+        eprintln!("BLAST query/options error: SAM format is only applicable to blastn");
+        eprintln!("Please refer to the BLAST+ user manual.");
+        std::process::exit(1);
+    }
     eprintln!(
         "BLAST query/options error: Output format {outfmt_num} is not currently supported for {program}"
     );
@@ -2724,6 +2738,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref subject_path) = args.subject {
         let subject_file = open_input_file("subject", subject_path);
         let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
+        let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
         let scratch = std::env::temp_dir().join(format!(
             "blast-cli-subject-db-{}-{}",
             std::process::id(),
@@ -2749,6 +2764,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         let mut hits = Vec::new();
         for qrec in &queries {
+            let query_ids = fasta_record_ids(qrec, args.parse_deflines);
             let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
             for sr in results {
                 let subject_id = if sr.subject_accession.is_empty()
@@ -2762,16 +2778,17 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     sr.subject_accession.clone()
                 };
+                let subject_ids = parsed_fasta_id(&subject_id);
                 for hsp in sr.hsps {
                     hits.push(TabularHit {
-                        query_id: qrec.id.clone(),
-                        query_gi: None,
-                        query_acc: None,
-                        query_accver: None,
+                        query_id: query_ids.id.clone(),
+                        query_gi: query_ids.gi.clone(),
+                        query_acc: query_ids.acc.clone(),
+                        query_accver: query_ids.accver.clone(),
                         subject_id: subject_id.clone(),
-                        subject_gi: None,
-                        subject_acc: None,
-                        subject_accver: None,
+                        subject_gi: subject_ids.gi.clone(),
+                        subject_acc: subject_ids.acc.clone(),
+                        subject_accver: subject_ids.accver.clone(),
                         subject_title: sr.subject_title.clone(),
                         pct_identity: hsp.percent_identity(),
                         align_len: hsp.alignment_length as i32,
@@ -2818,7 +2835,49 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Box::new(BufWriter::new(stdout.lock()))
         };
-        write_tabular_output(&mut writer, &hits, &args.outfmt)?;
+        if outfmt_number(&args.outfmt) == 0 {
+            write_blastp_pairwise_subject_output(
+                &mut writer,
+                &queries,
+                &subjects,
+                &hits,
+                args,
+                &params,
+                total_subj_len as i64,
+            )?;
+        } else if outfmt_number(&args.outfmt) == 5 {
+            let hit_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
+            write_blastp_xml_output(
+                &mut writer,
+                &hits,
+                &queries,
+                args,
+                "",
+                0,
+                0,
+                total_subj_len as i64,
+                subjects.len().min(i32::MAX as usize) as i32,
+                &hit_metadata,
+            )?;
+        } else if outfmt_number(&args.outfmt) == 7 {
+            let database_label = args
+                .subject
+                .as_ref()
+                .map(|path| format!("User specified sequence set (Input: {})", path.display()))
+                .unwrap_or_else(|| "User specified sequence set".to_string());
+            write_commented_tabular_output(
+                &mut writer,
+                "BLASTP",
+                &hits,
+                &args.outfmt,
+                &queries,
+                &database_label,
+                args.parse_deflines,
+                args.parse_deflines,
+            )?;
+        } else {
+            write_tabular_output(&mut writer, &hits, &args.outfmt)?;
+        }
         writer.flush()?;
         return Ok(());
     }
@@ -2837,16 +2896,30 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     emit_identity_comp_stats_warnings("blastp", args, &queries);
 
     let mut all_hits = Vec::new();
+    let mut subject_deflines = std::collections::HashMap::new();
+    let mut xml_hit_metadata = std::collections::HashMap::new();
     for qrec in &queries {
+        let query_ids = fasta_record_ids(qrec, args.parse_deflines);
         let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
         for sr in results {
+            let subject_id = db_output_subject_id(&db, sr.subject_oid, &sr.subject_accession);
+            xml_hit_metadata
+                .entry(subject_id.clone())
+                .or_insert_with(|| {
+                    blastp_db_xml_hit_metadata(&db, sr.subject_oid, &sr.subject_accession)
+                });
+            if let Some(defline) = db_pairwise_subject_defline(&db, sr.subject_oid, &subject_id) {
+                subject_deflines
+                    .entry(subject_id.clone())
+                    .or_insert(defline);
+            }
             for hsp in sr.hsps {
                 all_hits.push(TabularHit {
-                    query_id: qrec.id.clone(),
-                    query_gi: None,
-                    query_acc: None,
-                    query_accver: None,
-                    subject_id: sr.subject_accession.clone(),
+                    query_id: query_ids.id.clone(),
+                    query_gi: query_ids.gi.clone(),
+                    query_acc: query_ids.acc.clone(),
+                    query_accver: query_ids.accver.clone(),
+                    subject_id: subject_id.clone(),
                     subject_gi: None,
                     subject_acc: None,
                     subject_accver: None,
@@ -2895,7 +2968,53 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    write_tabular_output(&mut writer, &all_hits, &args.outfmt)?;
+    if outfmt_number(&args.outfmt) == 0 {
+        write_blastp_pairwise_db_output(
+            &mut writer,
+            &queries,
+            &db,
+            &all_hits,
+            &subject_deflines,
+            args,
+            &params,
+        )?;
+    } else if outfmt_number(&args.outfmt) == 5 {
+        let database_label = args
+            .db
+            .as_ref()
+            .map(|db| db.display().to_string())
+            .unwrap_or_default();
+        write_blastp_xml_output(
+            &mut writer,
+            &all_hits,
+            &queries,
+            args,
+            &database_label,
+            db.stats_num_oids,
+            db.total_length,
+            db.total_length.min(i64::MAX as u64) as i64,
+            db.stats_num_oids.min(i32::MAX as u64) as i32,
+            &xml_hit_metadata,
+        )?;
+    } else if outfmt_number(&args.outfmt) == 7 {
+        let database_label = args
+            .db
+            .as_ref()
+            .map(|db| db.display().to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        write_commented_tabular_output(
+            &mut writer,
+            "BLASTP",
+            &all_hits,
+            &args.outfmt,
+            &queries,
+            &database_label,
+            args.parse_deflines,
+            false,
+        )?;
+    } else {
+        write_tabular_output(&mut writer, &all_hits, &args.outfmt)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -3003,6 +3122,53 @@ fn search_result_hsps_to_tabular_hits(
         }
     }
     hits
+}
+
+fn search_result_hsps_to_db_tabular_hits(
+    query_id: &str,
+    query_len: usize,
+    db: &BlastDb,
+    mut results: Vec<blast_rs::api::SearchResult>,
+) -> Vec<TabularHit> {
+    for result in &mut results {
+        result.subject_accession =
+            db_output_subject_id(db, result.subject_oid, &result.subject_accession);
+    }
+    search_result_hsps_to_tabular_hits(query_id, query_len, &[], results)
+}
+
+fn annotate_parse_defline_tabular_hits(
+    hits: &mut [TabularHit],
+    queries: &[blast_rs::input::FastaRecord],
+    subjects: Option<&[blast_rs::input::FastaRecord]>,
+    parse_deflines: bool,
+) {
+    if !parse_deflines {
+        return;
+    }
+
+    let query_ids: std::collections::HashMap<&str, FastaDisplayIds> = queries
+        .iter()
+        .map(|query| (query.id.as_str(), fasta_record_ids(query, true)))
+        .collect();
+    let subject_ids: std::collections::HashMap<&str, FastaDisplayIds> = subjects
+        .unwrap_or(&[])
+        .iter()
+        .map(|subject| (subject.id.as_str(), fasta_record_ids(subject, true)))
+        .collect();
+
+    for hit in hits {
+        if let Some(ids) = query_ids.get(hit.query_id.as_str()) {
+            hit.query_gi = ids.gi.clone();
+            hit.query_acc = ids.acc.clone();
+            hit.query_accver = ids.accver.clone();
+        }
+        if let Some(ids) = subject_ids.get(hit.subject_id.as_str()) {
+            hit.subject_gi = ids.gi.clone();
+            hit.subject_acc = ids.acc.clone();
+            hit.subject_accver = ids.accver.clone();
+        }
+    }
 }
 
 fn translated_display_coords(start: usize, end: usize, frame: i32, seq_len: usize) -> (i32, i32) {
@@ -3399,10 +3565,22 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let params = build_translated_blastp_params(args);
     emit_identity_comp_stats_warnings("blastx", args, &queries);
     let mut all_hits = Vec::new();
+    let mut db_for_pairwise: Option<BlastDb> = None;
+    let mut subject_deflines = std::collections::HashMap::new();
+    let mut xml_hit_metadata = std::collections::HashMap::new();
+    let mut subject_xml_metadata = std::collections::HashMap::new();
+    let mut subject_search_len = 0i64;
+    let mut subject_search_count = 0i32;
 
     if let Some(subject_path) = args.subject.as_ref() {
         let subject_file = open_input_file("subject", subject_path);
         let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
+        subject_search_len = subjects
+            .iter()
+            .map(|subject| subject.sequence.len() as i64)
+            .sum();
+        subject_search_count = subjects.len().min(i32::MAX as usize) as i32;
+        subject_xml_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
         let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Protein)?;
         for qrec in &queries {
             let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
@@ -3413,6 +3591,12 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 results,
             ));
         }
+        annotate_parse_defline_tabular_hits(
+            &mut all_hits,
+            &queries,
+            Some(&subjects),
+            args.parse_deflines,
+        );
     } else {
         let db_path = args
             .db
@@ -3424,13 +3608,27 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         for qrec in &queries {
             let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
-            all_hits.extend(search_result_hsps_to_tabular_hits(
+            for result in &results {
+                let subject_id =
+                    db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
+                xml_hit_metadata
+                    .entry(subject_id.clone())
+                    .or_insert_with(|| translated_db_xml_hit_metadata(&db, result.subject_oid));
+                if let Some(defline) =
+                    db_pairwise_subject_defline(&db, result.subject_oid, &subject_id)
+                {
+                    subject_deflines.entry(subject_id).or_insert(defline);
+                }
+            }
+            all_hits.extend(search_result_hsps_to_db_tabular_hits(
                 &qrec.id,
                 qrec.sequence.len(),
-                &[],
+                &db,
                 results,
             ));
         }
+        annotate_parse_defline_tabular_hits(&mut all_hits, &queries, None, args.parse_deflines);
+        db_for_pairwise = Some(db);
     }
 
     let stdout = io::stdout();
@@ -3439,7 +3637,88 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    write_tabular_output(&mut writer, &all_hits, &args.outfmt)?;
+    if outfmt_number(&args.outfmt) == 0 {
+        let subjects = if let Some(subject_path) = args.subject.as_ref() {
+            let subject_file = open_input_file("subject", subject_path);
+            Some(parse_fasta_with_default_id(subject_file, "Subject_1"))
+        } else {
+            None
+        };
+        if let Some(subjects) = subjects.as_ref() {
+            let total_subject_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
+            write_translated_pairwise_subject_output(
+                &mut writer,
+                "BLASTX",
+                &queries,
+                subjects,
+                &all_hits,
+                args,
+                &params,
+                total_subject_len as i64,
+                true,
+                false,
+            )?;
+        } else if let Some(db) = db_for_pairwise.as_ref() {
+            write_translated_pairwise_db_output(
+                &mut writer,
+                "BLASTX",
+                &queries,
+                db,
+                &all_hits,
+                &subject_deflines,
+                args,
+                &params,
+                true,
+                false,
+            )?;
+        } else {
+            emit_program_outfmt_error("blastx", 0);
+        }
+    } else if outfmt_number(&args.outfmt) == 5 {
+        if args.subject.is_some() {
+            write_translated_xml_output(
+                &mut writer,
+                "blastx",
+                "BLASTX",
+                &all_hits,
+                &queries,
+                args,
+                "",
+                0,
+                0,
+                subject_search_len,
+                subject_search_count,
+                &subject_xml_metadata,
+                true,
+                false,
+            )?;
+        } else if let Some(db) = db_for_pairwise.as_ref() {
+            write_translated_xml_output(
+                &mut writer,
+                "blastx",
+                "BLASTX",
+                &all_hits,
+                &queries,
+                args,
+                &args
+                    .db
+                    .as_ref()
+                    .map(|db| db.display().to_string())
+                    .unwrap_or_default(),
+                db.stats_num_oids,
+                db.total_length,
+                db.total_length.min(i64::MAX as u64) as i64,
+                db.stats_num_oids.min(i32::MAX as u64) as i32,
+                &xml_hit_metadata,
+                true,
+                false,
+            )?;
+        } else {
+            emit_program_outfmt_error("blastx", 5);
+        }
+    } else {
+        write_translated_tabular_output(&mut writer, "BLASTX", &all_hits, &queries, args)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -3450,10 +3729,22 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let params = build_translated_blastp_params(args);
     emit_identity_comp_stats_warnings("tblastn", args, &queries);
     let mut all_hits = Vec::new();
+    let mut db_for_pairwise: Option<BlastDb> = None;
+    let mut subject_deflines = std::collections::HashMap::new();
+    let mut xml_hit_metadata = std::collections::HashMap::new();
+    let mut subject_xml_metadata = std::collections::HashMap::new();
+    let mut subject_search_len = 0i64;
+    let mut subject_search_count = 0i32;
 
     if let Some(subject_path) = args.subject.as_ref() {
         let subject_file = open_input_file("subject", subject_path);
         let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
+        subject_search_len = subjects
+            .iter()
+            .map(|subject| subject.sequence.len() as i64)
+            .sum();
+        subject_search_count = subjects.len().min(i32::MAX as usize) as i32;
+        subject_xml_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
         let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
         for qrec in &queries {
             let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
@@ -3464,6 +3755,12 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 results,
             ));
         }
+        annotate_parse_defline_tabular_hits(
+            &mut all_hits,
+            &queries,
+            Some(&subjects),
+            args.parse_deflines,
+        );
     } else {
         let db_path = args
             .db
@@ -3475,13 +3772,27 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         for qrec in &queries {
             let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
-            all_hits.extend(search_result_hsps_to_tabular_hits(
+            for result in &results {
+                let subject_id =
+                    db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
+                xml_hit_metadata
+                    .entry(subject_id.clone())
+                    .or_insert_with(|| translated_db_xml_hit_metadata(&db, result.subject_oid));
+                if let Some(defline) =
+                    db_pairwise_subject_defline(&db, result.subject_oid, &subject_id)
+                {
+                    subject_deflines.entry(subject_id).or_insert(defline);
+                }
+            }
+            all_hits.extend(search_result_hsps_to_db_tabular_hits(
                 &qrec.id,
                 qrec.sequence.len(),
-                &[],
+                &db,
                 results,
             ));
         }
+        annotate_parse_defline_tabular_hits(&mut all_hits, &queries, None, args.parse_deflines);
+        db_for_pairwise = Some(db);
     }
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -3489,7 +3800,88 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    write_tabular_output(&mut writer, &all_hits, &args.outfmt)?;
+    if outfmt_number(&args.outfmt) == 0 {
+        let subjects = if let Some(subject_path) = args.subject.as_ref() {
+            let subject_file = open_input_file("subject", subject_path);
+            Some(parse_fasta_with_default_id(subject_file, "Subject_1"))
+        } else {
+            None
+        };
+        if let Some(subjects) = subjects.as_ref() {
+            let total_subject_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
+            write_translated_pairwise_subject_output(
+                &mut writer,
+                "TBLASTN",
+                &queries,
+                subjects,
+                &all_hits,
+                args,
+                &params,
+                total_subject_len as i64,
+                false,
+                true,
+            )?;
+        } else if let Some(db) = db_for_pairwise.as_ref() {
+            write_translated_pairwise_db_output(
+                &mut writer,
+                "TBLASTN",
+                &queries,
+                db,
+                &all_hits,
+                &subject_deflines,
+                args,
+                &params,
+                false,
+                true,
+            )?;
+        } else {
+            emit_program_outfmt_error("tblastn", 0);
+        }
+    } else if outfmt_number(&args.outfmt) == 5 {
+        if args.subject.is_some() {
+            write_translated_xml_output(
+                &mut writer,
+                "tblastn",
+                "TBLASTN",
+                &all_hits,
+                &queries,
+                args,
+                "",
+                0,
+                0,
+                subject_search_len,
+                subject_search_count,
+                &subject_xml_metadata,
+                false,
+                true,
+            )?;
+        } else if let Some(db) = db_for_pairwise.as_ref() {
+            write_translated_xml_output(
+                &mut writer,
+                "tblastn",
+                "TBLASTN",
+                &all_hits,
+                &queries,
+                args,
+                &args
+                    .db
+                    .as_ref()
+                    .map(|db| db.display().to_string())
+                    .unwrap_or_default(),
+                db.stats_num_oids,
+                db.total_length,
+                db.total_length.min(i64::MAX as u64) as i64,
+                db.stats_num_oids.min(i32::MAX as u64) as i32,
+                &xml_hit_metadata,
+                false,
+                true,
+            )?;
+        } else {
+            emit_program_outfmt_error("tblastn", 5);
+        }
+    } else {
+        write_translated_tabular_output(&mut writer, "TBLASTN", &all_hits, &queries, args)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -3674,10 +4066,22 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut params = build_translated_blastp_params(args);
     params.comp_adjust = 0;
     let mut all_hits = Vec::new();
+    let mut db_for_pairwise: Option<BlastDb> = None;
+    let mut subject_deflines = std::collections::HashMap::new();
+    let mut xml_hit_metadata = std::collections::HashMap::new();
+    let mut subject_xml_metadata = std::collections::HashMap::new();
+    let mut subject_search_len = 0i64;
+    let mut subject_search_count = 0i32;
 
     if let Some(subject_path) = args.subject.as_ref() {
         let subject_file = open_input_file("subject", subject_path);
         let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
+        subject_search_len = subjects
+            .iter()
+            .map(|subject| subject.sequence.len() as i64)
+            .sum();
+        subject_search_count = subjects.len().min(i32::MAX as usize) as i32;
+        subject_xml_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
         let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
         for qrec in &queries {
             let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
@@ -3688,6 +4092,12 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 results,
             ));
         }
+        annotate_parse_defline_tabular_hits(
+            &mut all_hits,
+            &queries,
+            Some(&subjects),
+            args.parse_deflines,
+        );
     } else {
         let db_path = args
             .db
@@ -3699,13 +4109,27 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         for qrec in &queries {
             let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
-            all_hits.extend(search_result_hsps_to_tabular_hits(
+            for result in &results {
+                let subject_id =
+                    db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
+                xml_hit_metadata
+                    .entry(subject_id.clone())
+                    .or_insert_with(|| translated_db_xml_hit_metadata(&db, result.subject_oid));
+                if let Some(defline) =
+                    db_pairwise_subject_defline(&db, result.subject_oid, &subject_id)
+                {
+                    subject_deflines.entry(subject_id).or_insert(defline);
+                }
+            }
+            all_hits.extend(search_result_hsps_to_db_tabular_hits(
                 &qrec.id,
                 qrec.sequence.len(),
-                &[],
+                &db,
                 results,
             ));
         }
+        annotate_parse_defline_tabular_hits(&mut all_hits, &queries, None, args.parse_deflines);
+        db_for_pairwise = Some(db);
     }
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -3713,7 +4137,88 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    write_tabular_output(&mut writer, &all_hits, &args.outfmt)?;
+    if outfmt_number(&args.outfmt) == 0 {
+        let subjects = if let Some(subject_path) = args.subject.as_ref() {
+            let subject_file = open_input_file("subject", subject_path);
+            Some(parse_fasta_with_default_id(subject_file, "Subject_1"))
+        } else {
+            None
+        };
+        if let Some(subjects) = subjects.as_ref() {
+            let total_subject_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
+            write_translated_pairwise_subject_output(
+                &mut writer,
+                "TBLASTX",
+                &queries,
+                subjects,
+                &all_hits,
+                args,
+                &params,
+                total_subject_len as i64,
+                true,
+                true,
+            )?;
+        } else if let Some(db) = db_for_pairwise.as_ref() {
+            write_translated_pairwise_db_output(
+                &mut writer,
+                "TBLASTX",
+                &queries,
+                db,
+                &all_hits,
+                &subject_deflines,
+                args,
+                &params,
+                true,
+                true,
+            )?;
+        } else {
+            emit_program_outfmt_error("tblastx", 0);
+        }
+    } else if outfmt_number(&args.outfmt) == 5 {
+        if args.subject.is_some() {
+            write_translated_xml_output(
+                &mut writer,
+                "tblastx",
+                "TBLASTX",
+                &all_hits,
+                &queries,
+                args,
+                "",
+                0,
+                0,
+                subject_search_len,
+                subject_search_count,
+                &subject_xml_metadata,
+                true,
+                true,
+            )?;
+        } else if let Some(db) = db_for_pairwise.as_ref() {
+            write_translated_xml_output(
+                &mut writer,
+                "tblastx",
+                "TBLASTX",
+                &all_hits,
+                &queries,
+                args,
+                &args
+                    .db
+                    .as_ref()
+                    .map(|db| db.display().to_string())
+                    .unwrap_or_default(),
+                db.stats_num_oids,
+                db.total_length,
+                db.total_length.min(i64::MAX as u64) as i64,
+                db.stats_num_oids.min(i32::MAX as u64) as i32,
+                &xml_hit_metadata,
+                true,
+                true,
+            )?;
+        } else {
+            emit_program_outfmt_error("tblastx", 5);
+        }
+    } else {
+        write_translated_tabular_output(&mut writer, "TBLASTX", &all_hits, &queries, args)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -5484,7 +5989,14 @@ fn run_blastn_rust(
             .as_ref()
             .map(|db| db.display().to_string())
             .unwrap_or_else(|| "N/A".to_string());
-        write_blastn_tabular_output(&mut writer, &hits, &args.outfmt, records, &database_label)?;
+        write_commented_or_plain_tabular_output(
+            &mut writer,
+            "BLASTN",
+            &hits,
+            &args.outfmt,
+            records,
+            &database_label,
+        )?;
     }
     writer.flush()?;
     blastn_profile_mark(profile_enabled, profile_start, profile_last, "output");
@@ -5517,8 +6029,9 @@ fn write_tabular_output<W: Write>(
     }
 }
 
-fn write_blastn_tabular_output<W: Write>(
+fn write_commented_or_plain_tabular_output<W: Write>(
     writer: &mut W,
+    program_label: &str,
     hits: &[TabularHit],
     outfmt: &str,
     queries: &[blast_rs::input::FastaRecord],
@@ -5532,7 +6045,29 @@ fn write_blastn_tabular_output<W: Write>(
     if outfmt_num != 7 {
         return write_tabular_output(writer, hits, outfmt);
     }
+    write_commented_tabular_output(
+        writer,
+        program_label,
+        hits,
+        outfmt,
+        queries,
+        database_label,
+        false,
+        false,
+    )
+}
 
+fn write_commented_tabular_output<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    hits: &[TabularHit],
+    outfmt: &str,
+    queries: &[blast_rs::input::FastaRecord],
+    database_label: &str,
+    parse_deflines: bool,
+    parse_subject_deflines: bool,
+) -> std::io::Result<()> {
+    let outfmt_parts: Vec<&str> = outfmt.split_whitespace().collect();
     let cols = if outfmt_parts.len() > 1 {
         outfmt_parts[1..].join(" ")
     } else {
@@ -5551,8 +6086,34 @@ fn write_blastn_tabular_output<W: Write>(
             .filter(|hit| hit.query_id == query.id)
             .cloned()
             .collect();
-        writeln!(writer, "# BLASTN 2.12.0+")?;
-        writeln!(writer, "# Query: {}", query.defline)?;
+        let query_hits = if parse_deflines {
+            let query_ids = fasta_record_ids(query, true);
+            query_hits
+                .into_iter()
+                .map(|mut hit| {
+                    hit.query_id = query_ids.id.clone();
+                    hit.query_gi = query_ids.gi.clone();
+                    hit.query_acc = query_ids.acc.clone();
+                    hit.query_accver = query_ids.accver.clone();
+                    if parse_subject_deflines {
+                        let subject_ids = parsed_fasta_id(&hit.subject_id);
+                        hit.subject_id = subject_ids.id;
+                        hit.subject_gi = subject_ids.gi;
+                        hit.subject_acc = subject_ids.acc;
+                        hit.subject_accver = subject_ids.accver;
+                    }
+                    hit
+                })
+                .collect()
+        } else {
+            query_hits
+        };
+        writeln!(writer, "# {} 2.12.0+", program_label)?;
+        writeln!(
+            writer,
+            "# Query: {}",
+            fasta_pairwise_display_defline(query, parse_deflines)
+        )?;
         writeln!(writer, "# Database: {}", database_label)?;
         if !query_hits.is_empty() {
             writeln!(writer, "# Fields: {}", field_names)?;
@@ -5564,6 +6125,34 @@ fn write_blastn_tabular_output<W: Write>(
     }
     writeln!(writer, "# BLAST processed {} queries", queries.len())?;
     Ok(())
+}
+
+fn write_translated_tabular_output<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    hits: &[TabularHit],
+    queries: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
+) -> std::io::Result<()> {
+    if outfmt_number(&args.outfmt) != 7 {
+        return write_tabular_output(writer, hits, &args.outfmt);
+    }
+    let database_label = args
+        .subject
+        .as_ref()
+        .map(|path| format!("User specified sequence set (Input: {})", path.display()))
+        .or_else(|| args.db.as_ref().map(|db| db.display().to_string()))
+        .unwrap_or_else(|| "N/A".to_string());
+    write_commented_tabular_output(
+        writer,
+        program_label,
+        hits,
+        &args.outfmt,
+        queries,
+        &database_label,
+        args.parse_deflines,
+        args.subject.is_some(),
+    )
 }
 
 fn apply_blastn_dust_mask(seq: &mut [u8]) {
@@ -5801,6 +6390,18 @@ fn fasta_pairwise_display_defline(
 fn fasta_display_label(record: &blast_rs::input::FastaRecord, parse_deflines: bool) -> String {
     let ids = fasta_record_ids(record, parse_deflines);
     ids.accver.unwrap_or(ids.id)
+}
+
+fn xml_query_id_and_def(
+    record: &blast_rs::input::FastaRecord,
+    index: usize,
+    parse_deflines: bool,
+) -> (String, String) {
+    if parse_deflines {
+        (fasta_display_label(record, true), fasta_defline_title(record))
+    } else {
+        (format!("Query_{}", index + 1), record.defline.clone())
+    }
 }
 
 fn fasta_defline_title(record: &blast_rs::input::FastaRecord) -> String {
@@ -6148,8 +6749,9 @@ fn run_blastn_subject(
                 args.parse_deflines,
             );
         }
-        write_blastn_tabular_output(
+        write_commented_or_plain_tabular_output(
             &mut writer,
+            "BLASTN",
             &tabular_hits,
             &args.outfmt,
             queries,
@@ -6395,6 +6997,55 @@ fn compare_pairwise_hsps(a: &TabularHit, b: &TabularHit, sorthsps: i32) -> std::
         .then_with(|| b.sframe.cmp(&a.sframe))
 }
 
+fn sort_translated_pairwise_alignment_hits(
+    hits: Vec<&TabularHit>,
+    sorthsps: i32,
+) -> Vec<&TabularHit> {
+    if hits.len() <= 1 || sorthsps != 0 {
+        return hits;
+    }
+
+    let mut sorted_hits = Vec::with_capacity(hits.len());
+    let mut start = 0;
+    while start < hits.len() {
+        let subject_id = hits[start].subject_id.as_str();
+        let mut end = start + 1;
+        while end < hits.len() && hits[end].subject_id == subject_id {
+            end += 1;
+        }
+        let mut group = hits[start..end].to_vec();
+        group.sort_by(compare_translated_pairwise_alignment_hsps);
+        sorted_hits.extend(group);
+        start = end;
+    }
+    sorted_hits
+}
+
+fn compare_translated_pairwise_alignment_hsps(
+    a: &&TabularHit,
+    b: &&TabularHit,
+) -> std::cmp::Ordering {
+    b.raw_score
+        .cmp(&a.raw_score)
+        .then_with(|| {
+            b.bit_score
+                .partial_cmp(&a.bit_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            a.subject_start
+                .min(a.subject_end)
+                .cmp(&b.subject_start.min(b.subject_end))
+        })
+        .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
+        .then_with(|| b.sframe.cmp(&a.sframe))
+        .then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
+        .then_with(|| a.subject_start.cmp(&b.subject_start))
+        .then_with(|| a.subject_end.cmp(&b.subject_end))
+        .then_with(|| a.query_start.cmp(&b.query_start))
+        .then_with(|| a.query_end.cmp(&b.query_end))
+}
+
 fn pairwise_best_hit<'a>(hits: &'a [&'a TabularHit]) -> &'a TabularHit {
     hits.iter()
         .copied()
@@ -6524,16 +7175,27 @@ fn limit_pairwise_hits_by_subject(
         .collect()
 }
 
-fn write_pairwise_hit_summary_header<W: Write>(writer: &mut W, sorthits: i32) -> io::Result<()> {
+fn write_pairwise_hit_summary_header<W: Write>(
+    writer: &mut W,
+    sorthits: i32,
+    show_num_hsps: bool,
+) -> io::Result<()> {
     if sorthits == 0 {
         writeln!(
             writer,
             "                                                                      Score     E"
         )?;
-        writeln!(
-            writer,
-            "Sequences producing significant alignments:                          (Bits)  Value"
-        )?;
+        if show_num_hsps {
+            writeln!(
+                writer,
+                "Sequences producing significant alignments:                          (Bits)  Value  N"
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "Sequences producing significant alignments:                          (Bits)  Value"
+            )?;
+        }
     } else {
         writeln!(
             writer,
@@ -6552,16 +7214,28 @@ fn write_pairwise_hit_summary_row<W: Write>(
     desc: &str,
     hits: &[&TabularHit],
     sorthits: i32,
+    show_num_hsps: bool,
 ) -> io::Result<()> {
     let best = pairwise_best_hit(hits);
     if sorthits == 0 {
-        writeln!(
-            writer,
-            "{:<68}  {:>4}    {}",
-            desc,
-            blast_rs::format::format_bitscore(best.bit_score),
-            blast_rs::format::format_pairwise_evalue(best.evalue),
-        )
+        if show_num_hsps {
+            writeln!(
+                writer,
+                "{:<68}  {:>4}    {}  {}",
+                desc,
+                blast_rs::format::format_bitscore(best.bit_score),
+                blast_rs::format::format_pairwise_evalue(best.evalue),
+                1,
+            )
+        } else {
+            writeln!(
+                writer,
+                "{:<68}  {:>4}    {}",
+                desc,
+                blast_rs::format::format_bitscore(best.bit_score),
+                blast_rs::format::format_pairwise_evalue(best.evalue),
+            )
+        }
     } else {
         fn pad_to_column(line: &mut String, column: usize) {
             if line.len() < column {
@@ -6587,6 +7261,2054 @@ fn write_pairwise_hit_summary_row<W: Write>(
         pad_to_column(&mut line, 110);
         writeln!(writer, "{line}")
     }
+}
+
+fn write_blastp_pairwise_subject_output<W: Write>(
+    writer: &mut W,
+    queries: &[blast_rs::input::FastaRecord],
+    subjects: &[blast_rs::input::FastaRecord],
+    hits: &[TabularHit],
+    args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
+    total_subject_len: i64,
+) -> io::Result<()> {
+    write_blastp_pairwise_subject_preamble(writer, subjects, args, total_subject_len)?;
+    for query in queries {
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let has_query_hits = !query_hits.is_empty();
+        write_blastp_pairwise_query_header(writer, query, subjects, &query_hits, args, false)?;
+        let limited_hits =
+            limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+        let has_alignments = !limited_hits.is_empty();
+        let mut last_pairwise_subject: Option<&str> = None;
+        for hit in limited_hits {
+            let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
+            last_pairwise_subject = Some(hit.subject_id.as_str());
+            let subject_display = subjects
+                .iter()
+                .find(|subject| subject.id == hit.subject_id)
+                .map(|subject| fasta_pairwise_display_defline(subject, args.parse_deflines))
+                .unwrap_or_else(|| hit.subject_id.clone());
+            write_blastp_pairwise_alignment(
+                writer,
+                hit,
+                show_subject_header,
+                &subject_display,
+                pairwise_line_length(args),
+                if args.parse_deflines { ">" } else { "> " },
+            )?;
+        }
+        write_blastp_pairwise_query_stats(
+            writer,
+            query,
+            params,
+            total_subject_len.max(0),
+            subjects.len().min(i32::MAX as usize) as i32,
+            blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+        )?;
+    }
+    write_blastp_pairwise_subject_database_footer(writer, subjects, args, total_subject_len)
+}
+
+fn write_blastp_pairwise_subject_preamble<W: Write>(
+    writer: &mut W,
+    subjects: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
+    total_subject_len: i64,
+) -> io::Result<()> {
+    writeln!(writer, "BLASTP 2.12.0+")?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blast_reference(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_composition_based_stats_reference(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blastp_pairwise_subject_database_line(writer, "", args.subject.as_ref())?;
+    writeln!(
+        writer,
+        "           {} sequences; {} total letters",
+        format_with_commas(subjects.len() as u64),
+        format_with_commas(total_subject_len.max(0) as u64),
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn write_blastp_pairwise_db_output<W: Write>(
+    writer: &mut W,
+    queries: &[blast_rs::input::FastaRecord],
+    db: &BlastDb,
+    hits: &[TabularHit],
+    subject_deflines: &std::collections::HashMap<String, String>,
+    args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
+) -> io::Result<()> {
+    write_blastp_pairwise_db_preamble(writer, db)?;
+    for query in queries {
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let has_query_hits = !query_hits.is_empty();
+        write_blastp_pairwise_db_query_header(
+            writer,
+            query,
+            &query_hits,
+            subject_deflines,
+            args,
+            false,
+        )?;
+        let limited_hits =
+            limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+        let has_alignments = !limited_hits.is_empty();
+        let mut last_pairwise_subject: Option<&str> = None;
+        for hit in limited_hits {
+            let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
+            last_pairwise_subject = Some(hit.subject_id.as_str());
+            let subject_display = subject_deflines
+                .get(&hit.subject_id)
+                .map(String::as_str)
+                .unwrap_or(hit.subject_id.as_str());
+            write_blastp_pairwise_alignment(
+                writer,
+                hit,
+                show_subject_header,
+                subject_display,
+                pairwise_line_length(args),
+                ">",
+            )?;
+        }
+        write_blastp_pairwise_query_stats(
+            writer,
+            query,
+            params,
+            db.total_length.min(i64::MAX as u64) as i64,
+            db.stats_num_oids.min(i32::MAX as u64) as i32,
+            blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+        )?;
+    }
+    write_blastp_pairwise_db_database_footer(writer, db, args)
+}
+
+fn write_translated_pairwise_subject_output<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    queries: &[blast_rs::input::FastaRecord],
+    subjects: &[blast_rs::input::FastaRecord],
+    hits: &[TabularHit],
+    args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
+    total_subject_len: i64,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+) -> io::Result<()> {
+    write_translated_pairwise_subject_preamble(
+        writer,
+        program_label,
+        subjects,
+        args,
+        total_subject_len,
+    )?;
+    for query in queries {
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let has_query_hits = !query_hits.is_empty();
+        write_blastp_pairwise_query_header(
+            writer,
+            query,
+            subjects,
+            &query_hits,
+            args,
+            program_label == "TBLASTX",
+        )?;
+        let limited_hits =
+            limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+        let limited_hits = sort_translated_pairwise_alignment_hits(limited_hits, args.sorthsps());
+        let has_alignments = !limited_hits.is_empty();
+        let mut last_pairwise_subject: Option<&str> = None;
+        for hit in limited_hits {
+            let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
+            last_pairwise_subject = Some(hit.subject_id.as_str());
+            let subject_display = subjects
+                .iter()
+                .find(|subject| subject.id == hit.subject_id)
+                .map(|subject| fasta_pairwise_display_defline(subject, args.parse_deflines))
+                .unwrap_or_else(|| hit.subject_id.clone());
+            write_translated_pairwise_alignment(
+                writer,
+                hit,
+                show_subject_header,
+                &subject_display,
+                pairwise_line_length(args),
+                params,
+                query_is_translated,
+                subject_is_translated,
+                if args.parse_deflines { ">" } else { "> " },
+            )?;
+        }
+        write_translated_pairwise_query_stats(
+            writer,
+            program_label,
+            query,
+            params,
+            total_subject_len.max(0),
+            subjects.len().min(i32::MAX as usize) as i32,
+            query_is_translated,
+            subject_is_translated,
+            blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+        )?;
+    }
+    write_translated_pairwise_subject_database_footer(
+        writer,
+        subjects,
+        args,
+        total_subject_len,
+        program_label,
+        params,
+    )
+}
+
+fn write_translated_pairwise_db_output<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    queries: &[blast_rs::input::FastaRecord],
+    db: &BlastDb,
+    hits: &[TabularHit],
+    subject_deflines: &std::collections::HashMap<String, String>,
+    args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+) -> io::Result<()> {
+    write_translated_pairwise_db_preamble(writer, program_label, db)?;
+    for query in queries {
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let has_query_hits = !query_hits.is_empty();
+        write_blastp_pairwise_db_query_header(
+            writer,
+            query,
+            &query_hits,
+            subject_deflines,
+            args,
+            program_label == "TBLASTX",
+        )?;
+        let limited_hits =
+            limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+        let limited_hits = sort_translated_pairwise_alignment_hits(limited_hits, args.sorthsps());
+        let has_alignments = !limited_hits.is_empty();
+        let mut last_pairwise_subject: Option<&str> = None;
+        for hit in limited_hits {
+            let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
+            last_pairwise_subject = Some(hit.subject_id.as_str());
+            let subject_display = subject_deflines
+                .get(&hit.subject_id)
+                .map(String::as_str)
+                .unwrap_or(hit.subject_id.as_str());
+            write_translated_pairwise_alignment(
+                writer,
+                hit,
+                show_subject_header,
+                subject_display,
+                pairwise_line_length(args),
+                params,
+                query_is_translated,
+                subject_is_translated,
+                ">",
+            )?;
+        }
+        write_translated_pairwise_query_stats(
+            writer,
+            program_label,
+            query,
+            params,
+            db.total_length.min(i64::MAX as u64) as i64,
+            db.stats_num_oids.min(i32::MAX as u64) as i32,
+            query_is_translated,
+            subject_is_translated,
+            blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+        )?;
+    }
+    write_translated_pairwise_db_database_footer(writer, db, args, program_label, params)
+}
+
+fn write_translated_pairwise_subject_preamble<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    subjects: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
+    total_subject_len: i64,
+) -> io::Result<()> {
+    writeln!(writer, "{} 2.12.0+", program_label)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blast_reference(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blastp_pairwise_subject_database_line(writer, "", args.subject.as_ref())?;
+    writeln!(
+        writer,
+        "           {} sequences; {} total letters",
+        format_with_commas(subjects.len() as u64),
+        format_with_commas(total_subject_len.max(0) as u64),
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn write_translated_pairwise_db_preamble<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    db: &BlastDb,
+) -> io::Result<()> {
+    writeln!(writer, "{} 2.12.0+", program_label)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blast_reference(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Database: {}", db.title)?;
+    writeln!(
+        writer,
+        "           {} sequences; {} total letters",
+        format_with_commas(db.stats_num_oids),
+        format_with_commas(db.total_length),
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn write_blastp_pairwise_db_preamble<W: Write>(writer: &mut W, db: &BlastDb) -> io::Result<()> {
+    writeln!(writer, "BLASTP 2.12.0+")?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blast_reference(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_composition_based_stats_reference(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Database: {}", db.title)?;
+    writeln!(
+        writer,
+        "           {} sequences; {} total letters",
+        format_with_commas(db.stats_num_oids),
+        format_with_commas(db.total_length),
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn write_blastp_pairwise_db_database_footer<W: Write>(
+    writer: &mut W,
+    db: &BlastDb,
+    args: &BlastnArgs,
+) -> io::Result<()> {
+    writeln!(writer, "  Database: {}", db.title)?;
+    writeln!(writer, "    Posted date:  {}", db.date)?;
+    writeln!(
+        writer,
+        "  Number of letters in database: {}",
+        format_with_commas(db.total_length)
+    )?;
+    writeln!(
+        writer,
+        "  Number of sequences in database:  {}",
+        format_with_commas(db.stats_num_oids)
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blastp_pairwise_options_footer(writer, args)
+}
+
+fn write_blast_reference<W: Write>(writer: &mut W) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A."
+    )?;
+    writeln!(
+        writer,
+        "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J."
+    )?;
+    writeln!(
+        writer,
+        "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of"
+    )?;
+    writeln!(
+        writer,
+        "protein database search programs\", Nucleic Acids Res. 25:3389-3402."
+    )
+}
+
+fn write_composition_based_stats_reference<W: Write>(writer: &mut W) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Reference for composition-based statistics: Alejandro A. Schaffer,"
+    )?;
+    writeln!(
+        writer,
+        "L. Aravind, Thomas L. Madden, Sergei Shavirin, John L. Spouge, Yuri"
+    )?;
+    writeln!(
+        writer,
+        "I. Wolf, Eugene V. Koonin, and Stephen F. Altschul (2001),"
+    )?;
+    writeln!(
+        writer,
+        "\"Improving the accuracy of PSI-BLAST protein database searches with"
+    )?;
+    writeln!(
+        writer,
+        "composition-based statistics and other refinements\", Nucleic Acids"
+    )?;
+    writeln!(writer, "Res. 29:2994-3005.")
+}
+
+fn write_blastp_pairwise_query_header<W: Write>(
+    writer: &mut W,
+    query: &blast_rs::input::FastaRecord,
+    subjects: &[blast_rs::input::FastaRecord],
+    hits: &[&TabularHit],
+    args: &BlastnArgs,
+    show_num_hsps: bool,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Query= {}",
+        fasta_pairwise_display_defline(query, args.parse_deflines)
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "Length={}", query.sequence.len())?;
+    if hits.is_empty() {
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer, "***** No hits found *****")?;
+        writeln!(writer)?;
+        return Ok(());
+    }
+    let description_limit = pairwise_num_descriptions(args);
+    if description_limit == 0 {
+        writeln!(writer)?;
+        writeln!(writer)?;
+        return Ok(());
+    }
+    write_pairwise_hit_summary_header(writer, args.sorthits(), show_num_hsps)?;
+    writeln!(writer)?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut written = 0usize;
+    for hit in hits {
+        if !seen.insert(hit.subject_id.as_str()) {
+            continue;
+        }
+        if written >= description_limit {
+            break;
+        }
+        let desc = subjects
+            .iter()
+            .find(|subject| subject.id == hit.subject_id)
+            .map(|subject| fasta_pairwise_display_defline(subject, args.parse_deflines))
+            .unwrap_or_else(|| hit.subject_id.clone());
+        let subject_hits: Vec<&TabularHit> = hits
+            .iter()
+            .copied()
+            .filter(|h| h.subject_id == hit.subject_id)
+            .collect();
+        write_pairwise_hit_summary_row(
+            writer,
+            &truncate_description(&desc, 68),
+            &subject_hits,
+            args.sorthits(),
+            show_num_hsps,
+        )?;
+        written += 1;
+    }
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn write_blastp_pairwise_db_query_header<W: Write>(
+    writer: &mut W,
+    query: &blast_rs::input::FastaRecord,
+    hits: &[&TabularHit],
+    subject_deflines: &std::collections::HashMap<String, String>,
+    args: &BlastnArgs,
+    show_num_hsps: bool,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Query= {}",
+        fasta_pairwise_display_defline(query, args.parse_deflines)
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "Length={}", query.sequence.len())?;
+    if hits.is_empty() {
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer, "***** No hits found *****")?;
+        writeln!(writer)?;
+        return Ok(());
+    }
+    let description_limit = pairwise_num_descriptions(args);
+    if description_limit == 0 {
+        writeln!(writer)?;
+        writeln!(writer)?;
+        return Ok(());
+    }
+    write_pairwise_hit_summary_header(writer, args.sorthits(), show_num_hsps)?;
+    writeln!(writer)?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut written = 0usize;
+    for hit in hits {
+        if !seen.insert(hit.subject_id.as_str()) {
+            continue;
+        }
+        if written >= description_limit {
+            break;
+        }
+        let desc = subject_deflines
+            .get(&hit.subject_id)
+            .map(String::as_str)
+            .unwrap_or(hit.subject_id.as_str());
+        let subject_hits: Vec<&TabularHit> = hits
+            .iter()
+            .copied()
+            .filter(|h| h.subject_id == hit.subject_id)
+            .collect();
+        write_pairwise_hit_summary_row(
+            writer,
+            &truncate_description(desc, 68),
+            &subject_hits,
+            args.sorthits(),
+            show_num_hsps,
+        )?;
+        written += 1;
+    }
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn write_blastp_pairwise_alignment<W: Write>(
+    writer: &mut W,
+    hit: &TabularHit,
+    show_subject_header: bool,
+    subject_display: &str,
+    line_width: usize,
+    subject_header_prefix: &str,
+) -> io::Result<()> {
+    if show_subject_header {
+        write_wrapped_subject_header(writer, subject_display, subject_header_prefix)?;
+        writeln!(writer, "Length={}", hit.subject_len)?;
+    }
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        " Score = {} bits ({}),  Expect = {}",
+        blast_rs::format::format_bitscore(hit.bit_score),
+        hit.raw_score,
+        blast_rs::format::format_pairwise_evalue(hit.evalue)
+    )?;
+    let positives = hit.num_ident;
+    let gap_count = pairwise_alignment_gap_count(hit);
+    writeln!(
+        writer,
+        " Identities = {}/{} ({}%), Positives = {}/{} ({}%), Gaps = {}/{} ({}%)",
+        hit.num_ident,
+        hit.align_len,
+        ((hit.num_ident as f64 * 100.0 / hit.align_len.max(1) as f64) + 0.5) as i32,
+        positives,
+        hit.align_len,
+        ((positives as f64 * 100.0 / hit.align_len.max(1) as f64) + 0.5) as i32,
+        gap_count,
+        hit.align_len,
+        ((gap_count as f64 * 100.0 / hit.align_len.max(1) as f64) + 0.5) as i32,
+    )?;
+    writeln!(writer)?;
+
+    let qseq = hit.qseq.as_deref().unwrap_or("");
+    let sseq = hit.sseq.as_deref().unwrap_or("");
+    let line_width = line_width.max(1);
+    let coord_width = hit
+        .query_start
+        .abs()
+        .max(hit.query_end.abs())
+        .max(hit.subject_start.abs())
+        .max(hit.subject_end.abs())
+        .to_string()
+        .len();
+    let sequence_column = 5 + 2 + coord_width + 2;
+    let mut pos = 0usize;
+    let mut qi = hit.query_start;
+    let mut si = hit.subject_start;
+    let qbytes = qseq.as_bytes();
+    let sbytes = sseq.as_bytes();
+    while pos < qbytes.len().max(sbytes.len()) {
+        let chunk = line_width.min(qbytes.len().max(sbytes.len()) - pos);
+        let q_chunk = &qbytes[pos..qbytes.len().min(pos + chunk)];
+        let s_chunk = &sbytes[pos..sbytes.len().min(pos + chunk)];
+        let q_letters = q_chunk.iter().filter(|&&b| b != b'-').count() as i32;
+        let s_letters = s_chunk.iter().filter(|&&b| b != b'-').count() as i32;
+
+        write!(writer, "Query  {:<width$}  ", qi, width = coord_width)?;
+        writer.write_all(q_chunk)?;
+        writeln!(writer, "  {}", qi + q_letters - 1)?;
+
+        for _ in 0..sequence_column {
+            write!(writer, " ")?;
+        }
+        for i in 0..chunk {
+            let q = qbytes.get(pos + i).copied().unwrap_or(b' ');
+            let s = sbytes.get(pos + i).copied().unwrap_or(b' ');
+            let c = if q == s && q != b'-' { q } else { b' ' };
+            write!(writer, "{}", c as char)?;
+        }
+        writeln!(writer)?;
+
+        write!(writer, "Sbjct  {:<width$}  ", si, width = coord_width)?;
+        writer.write_all(s_chunk)?;
+        writeln!(writer, "  {}", si + s_letters - 1)?;
+        writeln!(writer)?;
+
+        qi += q_letters;
+        si += s_letters;
+        pos += chunk;
+    }
+    Ok(())
+}
+
+fn write_translated_pairwise_alignment<W: Write>(
+    writer: &mut W,
+    hit: &TabularHit,
+    show_subject_header: bool,
+    subject_display: &str,
+    line_width: usize,
+    params: &blast_rs::api::SearchParams,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+    subject_header_prefix: &str,
+) -> io::Result<()> {
+    if show_subject_header {
+        write_wrapped_subject_header(writer, subject_display, subject_header_prefix)?;
+        writeln!(writer, "Length={}", hit.subject_len)?;
+    }
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        " Score = {} bits ({}),  Expect = {}",
+        blast_rs::format::format_bitscore(hit.bit_score),
+        hit.raw_score,
+        blast_rs::format::format_pairwise_evalue(hit.evalue)
+    )?;
+    let positives = pairwise_protein_positive_count(hit, params.matrix);
+    let gap_count = pairwise_alignment_gap_count(hit);
+    writeln!(
+        writer,
+        " Identities = {}/{} ({}%), Positives = {}/{} ({}%), Gaps = {}/{} ({}%)",
+        hit.num_ident,
+        hit.align_len,
+        ((hit.num_ident as f64 * 100.0 / hit.align_len.max(1) as f64) + 0.5) as i32,
+        positives,
+        hit.align_len,
+        ((positives as f64 * 100.0 / hit.align_len.max(1) as f64) + 0.5) as i32,
+        gap_count,
+        hit.align_len,
+        ((gap_count as f64 * 100.0 / hit.align_len.max(1) as f64) + 0.5) as i32,
+    )?;
+    if query_is_translated && subject_is_translated {
+        writeln!(
+            writer,
+            " Frame = {}/{}",
+            format_pairwise_frame(hit.qframe),
+            format_pairwise_frame(hit.sframe)
+        )?;
+    } else if query_is_translated {
+        writeln!(writer, " Frame = {}", format_pairwise_frame(hit.qframe))?;
+    } else if subject_is_translated {
+        writeln!(writer, " Frame = {}", format_pairwise_frame(hit.sframe))?;
+    }
+    writeln!(writer)?;
+
+    let qseq = hit.qseq.as_deref().unwrap_or("");
+    let sseq = hit.sseq.as_deref().unwrap_or("");
+    let line_width = line_width.max(1);
+    let coord_width = hit
+        .query_start
+        .abs()
+        .max(hit.query_end.abs())
+        .max(hit.subject_start.abs())
+        .max(hit.subject_end.abs())
+        .to_string()
+        .len();
+    let sequence_column = 5 + 2 + coord_width + 2;
+    let mut pos = 0usize;
+    let mut qi = hit.query_start;
+    let mut si = hit.subject_start;
+    let qbytes = qseq.as_bytes();
+    let sbytes = sseq.as_bytes();
+    while pos < qbytes.len().max(sbytes.len()) {
+        let chunk = line_width.min(qbytes.len().max(sbytes.len()) - pos);
+        let q_chunk = &qbytes[pos..qbytes.len().min(pos + chunk)];
+        let s_chunk = &sbytes[pos..sbytes.len().min(pos + chunk)];
+        let q_letters = q_chunk.iter().filter(|&&b| b != b'-').count() as i32;
+        let s_letters = s_chunk.iter().filter(|&&b| b != b'-').count() as i32;
+        let q_end = translated_pairwise_chunk_end(qi, q_letters, hit.qframe, query_is_translated);
+        let s_end = translated_pairwise_chunk_end(si, s_letters, hit.sframe, subject_is_translated);
+
+        write!(writer, "Query  {:<width$}  ", qi, width = coord_width)?;
+        writer.write_all(q_chunk)?;
+        writeln!(writer, "  {}", q_end)?;
+
+        for _ in 0..sequence_column {
+            write!(writer, " ")?;
+        }
+        for i in 0..chunk {
+            let q = qbytes.get(pos + i).copied().unwrap_or(b' ');
+            let s = sbytes.get(pos + i).copied().unwrap_or(b' ');
+            let c = pairwise_protein_midline_char(q, s, params.matrix);
+            write!(writer, "{}", c as char)?;
+        }
+        writeln!(writer)?;
+
+        write!(writer, "Sbjct  {:<width$}  ", si, width = coord_width)?;
+        writer.write_all(s_chunk)?;
+        writeln!(writer, "  {}", s_end)?;
+        writeln!(writer)?;
+
+        qi = translated_pairwise_next_start(q_end, hit.qframe, query_is_translated);
+        si = translated_pairwise_next_start(s_end, hit.sframe, subject_is_translated);
+        pos += chunk;
+    }
+    Ok(())
+}
+
+fn format_pairwise_frame(frame: i32) -> String {
+    if frame > 0 {
+        format!("+{frame}")
+    } else {
+        frame.to_string()
+    }
+}
+
+fn translated_pairwise_chunk_end(start: i32, letters: i32, frame: i32, translated: bool) -> i32 {
+    if letters <= 0 {
+        return start;
+    }
+    let span = if translated {
+        3 * letters - 1
+    } else {
+        letters - 1
+    };
+    if frame < 0 {
+        start - span
+    } else {
+        start + span
+    }
+}
+
+fn translated_pairwise_next_start(end: i32, frame: i32, _translated: bool) -> i32 {
+    if frame < 0 {
+        end - 1
+    } else {
+        end + 1
+    }
+}
+
+fn pairwise_alignment_gap_count(hit: &TabularHit) -> i32 {
+    hit.qseq
+        .as_deref()
+        .unwrap_or("")
+        .bytes()
+        .chain(hit.sseq.as_deref().unwrap_or("").bytes())
+        .filter(|&b| b == b'-')
+        .count()
+        .try_into()
+        .unwrap_or(hit.gap_opens)
+}
+
+fn pairwise_protein_positive_count(
+    hit: &TabularHit,
+    matrix_type: blast_rs::api::MatrixType,
+) -> i32 {
+    let qseq = hit.qseq.as_deref().unwrap_or("").as_bytes();
+    let sseq = hit.sseq.as_deref().unwrap_or("").as_bytes();
+    qseq.iter()
+        .zip(sseq.iter())
+        .filter(|(&q, &s)| pairwise_protein_midline_char(q, s, matrix_type) != b' ')
+        .count()
+        .try_into()
+        .unwrap_or(hit.num_ident)
+}
+
+fn blastp_args_matrix_type(args: &BlastnArgs) -> blast_rs::api::MatrixType {
+    args.matrix
+        .as_deref()
+        .map(parse_matrix_type)
+        .unwrap_or(blast_rs::api::MatrixType::Blosum62)
+}
+
+fn pairwise_protein_midline_char(q: u8, s: u8, matrix_type: blast_rs::api::MatrixType) -> u8 {
+    if q == b'-' || s == b'-' || q == b' ' || s == b' ' {
+        return b' ';
+    }
+    if q == s {
+        return q;
+    }
+    let q_encoded = blast_rs::input::aminoacid_to_ncbistdaa(q);
+    let s_encoded = blast_rs::input::aminoacid_to_ncbistdaa(s);
+    let matrix = blast_rs::api::get_matrix(matrix_type);
+    if matrix[q_encoded as usize][s_encoded as usize] > 0 {
+        b'+'
+    } else {
+        b' '
+    }
+}
+
+fn blastp_pairwise_effective_search_space(
+    query_len: usize,
+    total_subject_len: i64,
+    num_subjects: i32,
+    params: &blast_rs::api::SearchParams,
+) -> f64 {
+    let matrix_name = blastp_matrix_name(params.matrix);
+    let gapped_params =
+        blast_rs::stat::lookup_matrix_params(matrix_name, params.gap_open, params.gap_extend);
+    let kbp = gapped_params
+        .as_ref()
+        .map(|gp| blast_rs::stat::KarlinBlk {
+            lambda: gp.lambda,
+            k: gp.k,
+            log_k: gp.k.ln(),
+            h: gp.h,
+            round_down: false,
+        })
+        .unwrap_or_else(|| blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name));
+    let len_adj = if let Some(gp) = gapped_params {
+        let alpha_d_lambda = gp.alpha / kbp.lambda;
+        blast_rs::stat::compute_length_adjustment_exact(
+            kbp.k,
+            kbp.log_k,
+            alpha_d_lambda,
+            gp.beta,
+            query_len as i32,
+            total_subject_len,
+            num_subjects,
+        )
+        .0
+    } else {
+        blast_rs::stat::compute_length_adjustment(
+            query_len as i32,
+            total_subject_len,
+            num_subjects,
+            &kbp,
+        )
+    };
+    blast_rs::stat::compute_search_space(query_len as i64, total_subject_len, num_subjects, len_adj)
+}
+
+fn blastp_matrix_name(matrix: blast_rs::api::MatrixType) -> &'static str {
+    match matrix {
+        blast_rs::api::MatrixType::Blosum45 => "BLOSUM45",
+        blast_rs::api::MatrixType::Blosum50 => "BLOSUM50",
+        blast_rs::api::MatrixType::Blosum62 => "BLOSUM62",
+        blast_rs::api::MatrixType::Blosum80 => "BLOSUM80",
+        blast_rs::api::MatrixType::Blosum90 => "BLOSUM90",
+        blast_rs::api::MatrixType::Pam30 => "PAM30",
+        blast_rs::api::MatrixType::Pam70 => "PAM70",
+        blast_rs::api::MatrixType::Pam250 => "PAM250",
+        blast_rs::api::MatrixType::Identity => "IDENTITY",
+    }
+}
+
+fn write_wrapped_subject_header<W: Write>(
+    writer: &mut W,
+    subject_id: &str,
+    prefix: &str,
+) -> io::Result<()> {
+    const WIDTH: usize = 78;
+    if prefix.len() + subject_id.len() <= WIDTH {
+        writeln!(writer, "{prefix}{subject_id}")?;
+        return Ok(());
+    }
+    let first_width = WIDTH.saturating_sub(prefix.len()).max(1);
+    writeln!(writer, "{}{}", prefix, &subject_id[..first_width])?;
+    let mut remaining = &subject_id[first_width..];
+    while !remaining.is_empty() {
+        let take = remaining.len().min(WIDTH);
+        writeln!(writer, "{}", &remaining[..take])?;
+        remaining = &remaining[take..];
+    }
+    Ok(())
+}
+
+fn write_blastp_pairwise_query_stats<W: Write>(
+    writer: &mut W,
+    query: &blast_rs::input::FastaRecord,
+    params: &blast_rs::api::SearchParams,
+    total_subject_len: i64,
+    num_subjects: i32,
+    leading_blank_lines: usize,
+) -> io::Result<()> {
+    let query_aa: Vec<u8> = query
+        .sequence
+        .iter()
+        .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
+        .collect();
+    let matrix = *blast_rs::api::get_matrix(params.matrix);
+    let ungapped_kbp = blast_rs::stat::query_specific_protein_ungapped_kbp(&query_aa, &matrix);
+    let effective_search_space = blastp_pairwise_effective_search_space(
+        query.sequence.len(),
+        total_subject_len,
+        num_subjects,
+        params,
+    );
+    for _ in 0..leading_blank_lines {
+        writeln!(writer)?;
+    }
+    writeln!(writer, "Lambda      K        H        a         alpha")?;
+    writeln!(
+        writer,
+        "{:8.3}{:9.3}{:9.3}    0.792     4.96 ",
+        ungapped_kbp.lambda, ungapped_kbp.k, ungapped_kbp.h
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "Gapped")?;
+    writeln!(
+        writer,
+        "Lambda      K        H        a         alpha    sigma"
+    )?;
+    writeln!(
+        writer,
+        "   0.267   0.0410    0.140     1.90     42.6     43.6 "
+    )?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Effective search space used: {}",
+        effective_search_space.round().max(0.0) as u64
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn write_translated_pairwise_query_stats<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    query: &blast_rs::input::FastaRecord,
+    params: &blast_rs::api::SearchParams,
+    total_subject_len: i64,
+    num_subjects: i32,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+    leading_blank_lines: usize,
+) -> io::Result<()> {
+    let query_for_stats: Vec<u8> = if query_is_translated {
+        best_frame_translation_for_stats(&query.sequence, params.query_gencode)
+    } else {
+        query
+            .sequence
+            .iter()
+            .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
+            .collect()
+    };
+    let matrix = *blast_rs::api::get_matrix(params.matrix);
+    let ungapped_kbp = if program_label == "BLASTX" || program_label == "TBLASTX" {
+        blast_rs::stat::protein_ungapped_kbp()
+    } else {
+        blast_rs::stat::query_specific_protein_ungapped_kbp(&query_for_stats, &matrix)
+    };
+    let effective_query_len = if query_is_translated {
+        query_for_stats.len().max(1)
+    } else {
+        query.sequence.len().max(1)
+    };
+    let effective_subject_len = if subject_is_translated {
+        (total_subject_len / 3).max(1)
+    } else {
+        total_subject_len.max(1)
+    };
+    let effective_search_space = blastp_pairwise_effective_search_space(
+        effective_query_len,
+        effective_subject_len,
+        num_subjects,
+        params,
+    );
+    for _ in 0..leading_blank_lines {
+        writeln!(writer)?;
+    }
+    if program_label == "TBLASTX" {
+        writeln!(writer, "Lambda      K        H")?;
+        writeln!(
+            writer,
+            "{:8.3}{:9.3}{:9.3} ",
+            ungapped_kbp.lambda, ungapped_kbp.k, ungapped_kbp.h
+        )?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(
+            writer,
+            "Effective search space used: {}",
+            effective_search_space.round().max(0.0) as u64
+        )?;
+        writeln!(writer)?;
+        return writeln!(writer);
+    }
+    writeln!(writer, "Lambda      K        H        a         alpha")?;
+    writeln!(
+        writer,
+        "{:8.3}{:9.3}{:9.3}    0.792     4.96 ",
+        ungapped_kbp.lambda, ungapped_kbp.k, ungapped_kbp.h
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "Gapped")?;
+    writeln!(
+        writer,
+        "Lambda      K        H        a         alpha    sigma"
+    )?;
+    writeln!(
+        writer,
+        "   0.267   0.0410    0.140     1.90     42.6     43.6 "
+    )?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Effective search space used: {}",
+        effective_search_space.round().max(0.0) as u64
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)
+}
+
+fn best_frame_translation_for_stats(query: &[u8], gencode: u8) -> Vec<u8> {
+    let query_ncbi4na = ascii_to_ncbi4na_for_translation(query);
+    let (translation, offsets) = blast_rs::util::blast_get_all_translations_ncbi4na(
+        &query_ncbi4na,
+        query_ncbi4na.len(),
+        blast_rs::util::lookup_genetic_code(gencode),
+    );
+    let mut best = &[][..];
+    for ctx in 0..blast_rs::util::NUM_FRAMES {
+        let begin = (offsets[ctx] + 1) as usize;
+        let end = offsets[ctx + 1] as usize;
+        if begin < end && end <= translation.len() && end - begin > best.len() {
+            best = &translation[begin..end];
+        }
+    }
+    best.to_vec()
+}
+
+fn ascii_to_ncbi4na_for_translation(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .map(|&b| match b {
+            b'U' | b'u' => 8,
+            _ if (b as usize) < blast_rs::encoding::IUPACNA_TO_NCBI4NA.len() => {
+                let v = blast_rs::encoding::IUPACNA_TO_NCBI4NA[b as usize];
+                if v == 0 {
+                    15
+                } else {
+                    v
+                }
+            }
+            _ => 15,
+        })
+        .collect()
+}
+
+fn blastp_pairwise_stats_leading_blank_lines(has_query_hits: bool, has_alignments: bool) -> usize {
+    if has_query_hits && !has_alignments {
+        1
+    } else {
+        2
+    }
+}
+
+fn write_blastp_pairwise_subject_database_footer<W: Write>(
+    writer: &mut W,
+    subjects: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
+    total_subject_len: i64,
+) -> io::Result<()> {
+    write_blastp_pairwise_subject_database_line(writer, "  ", args.subject.as_ref())?;
+    writeln!(writer, "    Posted date:  Unknown")?;
+    writeln!(
+        writer,
+        "  Number of letters in database: {}",
+        format_with_commas(total_subject_len.max(0) as u64)
+    )?;
+    writeln!(
+        writer,
+        "  Number of sequences in database:  {}",
+        format_with_commas(subjects.len() as u64)
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_blastp_pairwise_options_footer(writer, args)
+}
+
+fn write_translated_pairwise_subject_database_footer<W: Write>(
+    writer: &mut W,
+    subjects: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
+    total_subject_len: i64,
+    program_label: &str,
+    params: &blast_rs::api::SearchParams,
+) -> io::Result<()> {
+    write_blastp_pairwise_subject_database_line(writer, "  ", args.subject.as_ref())?;
+    writeln!(writer, "    Posted date:  Unknown")?;
+    writeln!(
+        writer,
+        "  Number of letters in database: {}",
+        format_with_commas(total_subject_len.max(0) as u64)
+    )?;
+    writeln!(
+        writer,
+        "  Number of sequences in database:  {}",
+        format_with_commas(subjects.len() as u64)
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_translated_pairwise_options_footer(writer, args, program_label, params)
+}
+
+fn write_translated_pairwise_db_database_footer<W: Write>(
+    writer: &mut W,
+    db: &BlastDb,
+    args: &BlastnArgs,
+    program_label: &str,
+    params: &blast_rs::api::SearchParams,
+) -> io::Result<()> {
+    writeln!(writer, "  Database: {}", db.title)?;
+    writeln!(writer, "    Posted date:  {}", db.date)?;
+    writeln!(
+        writer,
+        "  Number of letters in database: {}",
+        format_with_commas(db.total_length)
+    )?;
+    writeln!(
+        writer,
+        "  Number of sequences in database:  {}",
+        format_with_commas(db.stats_num_oids)
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    write_translated_pairwise_options_footer(writer, args, program_label, params)
+}
+
+fn write_translated_pairwise_options_footer<W: Write>(
+    writer: &mut W,
+    args: &BlastnArgs,
+    program_label: &str,
+    params: &blast_rs::api::SearchParams,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Matrix: {}",
+        args.matrix
+            .as_deref()
+            .unwrap_or("BLOSUM62")
+            .to_ascii_uppercase()
+    )?;
+    if program_label != "TBLASTX" {
+        writeln!(
+            writer,
+            "Gap Penalties: Existence: {}, Extension: {}",
+            args.gapopen
+                .as_deref()
+                .map(|value| parse_validated_i32("gapopen", value))
+                .unwrap_or(11),
+            args.gapextend
+                .as_deref()
+                .map(|value| parse_validated_i32("gapextend", value))
+                .unwrap_or(1)
+        )?;
+    }
+    writeln!(
+        writer,
+        "Neighboring words threshold: {}",
+        args.threshold
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| params
+                .word_threshold
+                .unwrap_or(if program_label == "BLASTX" {
+                    12.0
+                } else {
+                    13.0
+                })
+                .to_string())
+    )?;
+    writeln!(writer, "Window for multiple hits: 40")
+}
+
+fn write_blastp_pairwise_options_footer<W: Write>(
+    writer: &mut W,
+    args: &BlastnArgs,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Matrix: {}",
+        args.matrix
+            .as_deref()
+            .unwrap_or("BLOSUM62")
+            .to_ascii_uppercase()
+    )?;
+    writeln!(
+        writer,
+        "Gap Penalties: Existence: {}, Extension: {}",
+        args.gapopen
+            .as_deref()
+            .map(|value| parse_validated_i32("gapopen", value))
+            .unwrap_or(11),
+        args.gapextend
+            .as_deref()
+            .map(|value| parse_validated_i32("gapextend", value))
+            .unwrap_or(1)
+    )?;
+    writeln!(
+        writer,
+        "Neighboring words threshold: {}",
+        args.threshold.as_deref().unwrap_or("11")
+    )?;
+    writeln!(writer, "Window for multiple hits: 40")
+}
+
+fn write_blastp_pairwise_subject_database_line<W: Write>(
+    writer: &mut W,
+    prefix: &str,
+    subject_path: Option<&PathBuf>,
+) -> io::Result<()> {
+    if let Some(path) = subject_path {
+        writeln!(
+            writer,
+            "{prefix}Database: User specified sequence set (Input:"
+        )?;
+        writeln!(writer, "{}).", path.display())
+    } else {
+        writeln!(writer, "{prefix}Database: User specified sequence set.")
+    }
+}
+
+#[derive(Clone)]
+struct BlastpXmlHitMetadata {
+    hit_id: String,
+    hit_def: String,
+    accession: String,
+    length: i32,
+}
+
+fn blastp_subject_xml_hit_metadata(
+    subjects: &[blast_rs::input::FastaRecord],
+    parse_deflines: bool,
+) -> std::collections::HashMap<String, BlastpXmlHitMetadata> {
+    subjects
+        .iter()
+        .enumerate()
+        .map(|(index, subject)| {
+            let ids = fasta_record_ids(subject, parse_deflines);
+            let key = ids.id.clone();
+            let hit_def = if parse_deflines {
+                fasta_defline_title(subject)
+            } else {
+                subject.defline.clone()
+            };
+            let accession = if parse_deflines {
+                ids.acc.unwrap_or_else(|| ids.id.clone())
+            } else {
+                format!("Subject_{}", index + 1)
+            };
+            (
+                key.clone(),
+                BlastpXmlHitMetadata {
+                    hit_id: key,
+                    hit_def,
+                    accession,
+                    length: subject.sequence.len().min(i32::MAX as usize) as i32,
+                },
+            )
+        })
+        .collect()
+}
+
+fn blastp_db_xml_hit_metadata(db: &BlastDb, oid: u32, raw_accession: &str) -> BlastpXmlHitMetadata {
+    let hit_def = extract_header_title(db.get_header(oid)).unwrap_or_else(|| raw_accession.into());
+    let accession = raw_accession
+        .rsplit('|')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(raw_accession)
+        .to_string();
+    BlastpXmlHitMetadata {
+        hit_id: raw_accession.to_string(),
+        hit_def,
+        accession,
+        length: db.get_seq_len(oid).min(i32::MAX as u32) as i32,
+    }
+}
+
+fn translated_db_xml_hit_metadata(db: &BlastDb, oid: u32) -> BlastpXmlHitMetadata {
+    let accession = oid.to_string();
+    let hit_id = format!("gnl|BL_ORD_ID|{oid}");
+    BlastpXmlHitMetadata {
+        hit_def: db_pairwise_subject_defline(db, oid, &hit_id)
+            .or_else(|| db.get_defline(oid))
+            .or_else(|| extract_header_title(db.get_header(oid)))
+            .unwrap_or_else(|| accession.clone()),
+        hit_id,
+        accession,
+        length: db.get_seq_len(oid).min(i32::MAX as u32) as i32,
+    }
+}
+
+fn write_blastp_xml_output<W: Write>(
+    writer: &mut W,
+    hits: &[TabularHit],
+    queries: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
+    database_label: &str,
+    stats_db_num: u64,
+    stats_db_len: u64,
+    search_subject_len: i64,
+    search_subject_count: i32,
+    hit_metadata: &std::collections::HashMap<String, BlastpXmlHitMetadata>,
+) -> std::io::Result<()> {
+    writeln!(writer, "<?xml version=\"1.0\"?>")?;
+    writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
+    writeln!(writer, "<BlastOutput>")?;
+    writeln!(
+        writer,
+        "  <BlastOutput_program>blastp</BlastOutput_program>"
+    )?;
+    writeln!(
+        writer,
+        "  <BlastOutput_version>BLASTP 2.12.0+</BlastOutput_version>"
+    )?;
+    writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
+    writeln!(
+        writer,
+        "  <BlastOutput_db>{}</BlastOutput_db>",
+        xml_escape(database_label)
+    )?;
+    if let Some(query) = queries.first() {
+        let (query_id, query_def) = xml_query_id_and_def(query, 0, args.parse_deflines);
+        writeln!(
+            writer,
+            "  <BlastOutput_query-ID>{}</BlastOutput_query-ID>",
+            xml_escape(&query_id)
+        )?;
+        writeln!(
+            writer,
+            "  <BlastOutput_query-def>{}</BlastOutput_query-def>",
+            xml_escape(&query_def)
+        )?;
+        writeln!(
+            writer,
+            "  <BlastOutput_query-len>{}</BlastOutput_query-len>",
+            query.sequence.len()
+        )?;
+    }
+    writeln!(writer, "  <BlastOutput_param>")?;
+    writeln!(writer, "    <Parameters>")?;
+    writeln!(
+        writer,
+        "      <Parameters_matrix>{}</Parameters_matrix>",
+        args.matrix
+            .as_deref()
+            .unwrap_or("BLOSUM62")
+            .to_ascii_uppercase()
+    )?;
+    writeln!(
+        writer,
+        "      <Parameters_expect>{}</Parameters_expect>",
+        format_sam_float(args.evalue())
+    )?;
+    writeln!(
+        writer,
+        "      <Parameters_gap-open>{}</Parameters_gap-open>",
+        args.gapopen
+            .as_deref()
+            .map(|value| parse_validated_i32("gapopen", value))
+            .unwrap_or(11)
+    )?;
+    writeln!(
+        writer,
+        "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
+        args.gapextend
+            .as_deref()
+            .map(|value| parse_validated_i32("gapextend", value))
+            .unwrap_or(1)
+    )?;
+    writeln!(writer, "      <Parameters_filter>F</Parameters_filter>")?;
+    writeln!(writer, "    </Parameters>")?;
+    writeln!(writer, "  </BlastOutput_param>")?;
+    writeln!(writer, "<BlastOutput_iterations>")?;
+
+    for (query_index, query) in queries.iter().enumerate() {
+        let (query_id, query_def) = xml_query_id_and_def(query, query_index, args.parse_deflines);
+        writeln!(writer, "<Iteration>")?;
+        writeln!(
+            writer,
+            "  <Iteration_iter-num>{}</Iteration_iter-num>",
+            query_index + 1
+        )?;
+        writeln!(
+            writer,
+            "  <Iteration_query-ID>{}</Iteration_query-ID>",
+            xml_escape(&query_id)
+        )?;
+        writeln!(
+            writer,
+            "  <Iteration_query-def>{}</Iteration_query-def>",
+            xml_escape(&query_def)
+        )?;
+        writeln!(
+            writer,
+            "  <Iteration_query-len>{}</Iteration_query-len>",
+            query.sequence.len()
+        )?;
+        writeln!(writer, "<Iteration_hits>")?;
+
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let mut seen = std::collections::HashSet::new();
+        let mut hit_num = 0usize;
+        for hit in &query_hits {
+            if !seen.insert(hit.subject_id.as_str()) {
+                continue;
+            }
+            hit_num += 1;
+            let subject_hsps: Vec<&TabularHit> = hits
+                .iter()
+                .filter(|h| h.query_id == query.id && h.subject_id == hit.subject_id)
+                .collect();
+            let fallback = BlastpXmlHitMetadata {
+                hit_id: hit.subject_id.clone(),
+                hit_def: hit.subject_id.clone(),
+                accession: hit.subject_id.clone(),
+                length: hit.subject_len,
+            };
+            let meta = hit_metadata.get(&hit.subject_id).unwrap_or(&fallback);
+            writeln!(writer, "<Hit>")?;
+            writeln!(writer, "  <Hit_num>{}</Hit_num>", hit_num)?;
+            writeln!(writer, "  <Hit_id>{}</Hit_id>", xml_escape(&meta.hit_id))?;
+            writeln!(writer, "  <Hit_def>{}</Hit_def>", xml_escape(&meta.hit_def))?;
+            writeln!(
+                writer,
+                "  <Hit_accession>{}</Hit_accession>",
+                xml_escape(&meta.accession)
+            )?;
+            writeln!(writer, "  <Hit_len>{}</Hit_len>", meta.length)?;
+            writeln!(writer, "  <Hit_hsps>")?;
+            let matrix_type = blastp_args_matrix_type(args);
+            for (hsp_num, hsp) in subject_hsps.iter().enumerate() {
+                write_blastp_xml_hsp(writer, hsp_num + 1, hsp, matrix_type)?;
+            }
+            writeln!(writer, "  </Hit_hsps>")?;
+            writeln!(writer, "</Hit>")?;
+        }
+
+        let (_lambda, _k, _h, len_adj, eff_space) = blastp_xml_statistics(
+            query.sequence.len(),
+            search_subject_len,
+            search_subject_count,
+            args,
+        );
+        writeln!(writer, "</Iteration_hits>")?;
+        writeln!(writer, "  <Iteration_stat>")?;
+        writeln!(writer, "    <Statistics>")?;
+        writeln!(
+            writer,
+            "      <Statistics_db-num>{}</Statistics_db-num>",
+            stats_db_num
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_db-len>{}</Statistics_db-len>",
+            stats_db_len
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_hsp-len>{}</Statistics_hsp-len>",
+            len_adj
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_eff-space>{}</Statistics_eff-space>",
+            eff_space.round().max(0.0) as u64
+        )?;
+        writeln!(writer, "      <Statistics_kappa>0.041</Statistics_kappa>")?;
+        writeln!(writer, "      <Statistics_lambda>0.267</Statistics_lambda>")?;
+        writeln!(
+            writer,
+            "      <Statistics_entropy>0.14</Statistics_entropy>"
+        )?;
+        writeln!(writer, "    </Statistics>")?;
+        writeln!(writer, "  </Iteration_stat>")?;
+        if query_hits.is_empty() {
+            writeln!(
+                writer,
+                "  <Iteration_message>No hits found</Iteration_message>"
+            )?;
+        }
+        writeln!(writer, "</Iteration>")?;
+    }
+    writeln!(writer, "</BlastOutput_iterations>")?;
+    writeln!(writer, "</BlastOutput>")?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+fn write_blastp_xml_hsp<W: Write>(
+    writer: &mut W,
+    hsp_num: usize,
+    hit: &TabularHit,
+    matrix_type: blast_rs::api::MatrixType,
+) -> std::io::Result<()> {
+    writeln!(writer, "    <Hsp>")?;
+    writeln!(writer, "      <Hsp_num>{}</Hsp_num>", hsp_num)?;
+    writeln!(
+        writer,
+        "      <Hsp_bit-score>{}</Hsp_bit-score>",
+        format_blastp_xml_score(hit.bit_score)
+    )?;
+    writeln!(writer, "      <Hsp_score>{}</Hsp_score>", hit.raw_score)?;
+    writeln!(
+        writer,
+        "      <Hsp_evalue>{}</Hsp_evalue>",
+        format_blastp_xml_evalue(hit.evalue)
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_query-from>{}</Hsp_query-from>",
+        hit.query_start
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_query-to>{}</Hsp_query-to>",
+        hit.query_end
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_hit-from>{}</Hsp_hit-from>",
+        hit.subject_start
+    )?;
+    writeln!(writer, "      <Hsp_hit-to>{}</Hsp_hit-to>", hit.subject_end)?;
+    writeln!(writer, "      <Hsp_query-frame>0</Hsp_query-frame>")?;
+    writeln!(writer, "      <Hsp_hit-frame>0</Hsp_hit-frame>")?;
+    writeln!(
+        writer,
+        "      <Hsp_identity>{}</Hsp_identity>",
+        hit.num_ident
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_positive>{}</Hsp_positive>",
+        pairwise_protein_positive_count(hit, matrix_type)
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_gaps>{}</Hsp_gaps>",
+        pairwise_alignment_gap_count(hit)
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_align-len>{}</Hsp_align-len>",
+        hit.align_len
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_qseq>{}</Hsp_qseq>",
+        xml_escape(hit.qseq.as_deref().unwrap_or(""))
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_hseq>{}</Hsp_hseq>",
+        xml_escape(hit.sseq.as_deref().unwrap_or(""))
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_midline>{}</Hsp_midline>",
+        xml_escape(&blastp_xml_midline(hit, matrix_type))
+    )?;
+    writeln!(writer, "    </Hsp>")
+}
+
+fn write_translated_xml_output<W: Write>(
+    writer: &mut W,
+    program_name: &str,
+    program_label: &str,
+    hits: &[TabularHit],
+    queries: &[blast_rs::input::FastaRecord],
+    args: &BlastnArgs,
+    database_label: &str,
+    stats_db_num: u64,
+    stats_db_len: u64,
+    search_subject_len: i64,
+    search_subject_count: i32,
+    hit_metadata: &std::collections::HashMap<String, BlastpXmlHitMetadata>,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+) -> std::io::Result<()> {
+    writeln!(writer, "<?xml version=\"1.0\"?>")?;
+    writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
+    writeln!(writer, "<BlastOutput>")?;
+    writeln!(
+        writer,
+        "  <BlastOutput_program>{}</BlastOutput_program>",
+        program_name
+    )?;
+    writeln!(
+        writer,
+        "  <BlastOutput_version>{} 2.12.0+</BlastOutput_version>",
+        program_label
+    )?;
+    writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
+    writeln!(
+        writer,
+        "  <BlastOutput_db>{}</BlastOutput_db>",
+        xml_escape(database_label)
+    )?;
+    if let Some(query) = queries.first() {
+        let (query_id, query_def) = xml_query_id_and_def(query, 0, args.parse_deflines);
+        writeln!(
+            writer,
+            "  <BlastOutput_query-ID>{}</BlastOutput_query-ID>",
+            xml_escape(&query_id)
+        )?;
+        writeln!(
+            writer,
+            "  <BlastOutput_query-def>{}</BlastOutput_query-def>",
+            xml_escape(&query_def)
+        )?;
+        writeln!(
+            writer,
+            "  <BlastOutput_query-len>{}</BlastOutput_query-len>",
+            query.sequence.len()
+        )?;
+    }
+    writeln!(writer, "  <BlastOutput_param>")?;
+    writeln!(writer, "    <Parameters>")?;
+    writeln!(
+        writer,
+        "      <Parameters_matrix>{}</Parameters_matrix>",
+        args.matrix
+            .as_deref()
+            .unwrap_or("BLOSUM62")
+            .to_ascii_uppercase()
+    )?;
+    writeln!(
+        writer,
+        "      <Parameters_expect>{}</Parameters_expect>",
+        format_sam_float(args.evalue())
+    )?;
+    writeln!(
+        writer,
+        "      <Parameters_gap-open>{}</Parameters_gap-open>",
+        args.gapopen
+            .as_deref()
+            .map(|value| parse_validated_i32("gapopen", value))
+            .unwrap_or(11)
+    )?;
+    writeln!(
+        writer,
+        "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
+        args.gapextend
+            .as_deref()
+            .map(|value| parse_validated_i32("gapextend", value))
+            .unwrap_or(1)
+    )?;
+    writeln!(writer, "      <Parameters_filter>F</Parameters_filter>")?;
+    writeln!(writer, "    </Parameters>")?;
+    writeln!(writer, "  </BlastOutput_param>")?;
+    writeln!(writer, "<BlastOutput_iterations>")?;
+
+    for (query_index, query) in queries.iter().enumerate() {
+        let (query_id, query_def) = xml_query_id_and_def(query, query_index, args.parse_deflines);
+        writeln!(writer, "<Iteration>")?;
+        writeln!(
+            writer,
+            "  <Iteration_iter-num>{}</Iteration_iter-num>",
+            query_index + 1
+        )?;
+        writeln!(
+            writer,
+            "  <Iteration_query-ID>{}</Iteration_query-ID>",
+            xml_escape(&query_id)
+        )?;
+        writeln!(
+            writer,
+            "  <Iteration_query-def>{}</Iteration_query-def>",
+            xml_escape(&query_def)
+        )?;
+        writeln!(
+            writer,
+            "  <Iteration_query-len>{}</Iteration_query-len>",
+            query.sequence.len()
+        )?;
+        writeln!(writer, "<Iteration_hits>")?;
+
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let mut seen = std::collections::HashSet::new();
+        let mut hit_num = 0usize;
+        for hit in &query_hits {
+            if !seen.insert(hit.subject_id.as_str()) {
+                continue;
+            }
+            hit_num += 1;
+            let subject_hsps: Vec<&TabularHit> = hits
+                .iter()
+                .filter(|h| h.query_id == query.id && h.subject_id == hit.subject_id)
+                .collect();
+            let fallback = BlastpXmlHitMetadata {
+                hit_id: hit.subject_id.clone(),
+                hit_def: hit.subject_id.clone(),
+                accession: hit.subject_id.clone(),
+                length: hit.subject_len,
+            };
+            let meta = hit_metadata.get(&hit.subject_id).unwrap_or(&fallback);
+            writeln!(writer, "<Hit>")?;
+            writeln!(writer, "  <Hit_num>{}</Hit_num>", hit_num)?;
+            writeln!(writer, "  <Hit_id>{}</Hit_id>", xml_escape(&meta.hit_id))?;
+            writeln!(writer, "  <Hit_def>{}</Hit_def>", xml_escape(&meta.hit_def))?;
+            writeln!(
+                writer,
+                "  <Hit_accession>{}</Hit_accession>",
+                xml_escape(&meta.accession)
+            )?;
+            writeln!(writer, "  <Hit_len>{}</Hit_len>", meta.length)?;
+            writeln!(writer, "  <Hit_hsps>")?;
+            let matrix_type = blastp_args_matrix_type(args);
+            for (hsp_num, hsp) in subject_hsps.iter().enumerate() {
+                write_translated_xml_hsp(writer, hsp_num + 1, hsp, matrix_type)?;
+            }
+            writeln!(writer, "  </Hit_hsps>")?;
+            writeln!(writer, "</Hit>")?;
+        }
+
+        let query_len = translated_xml_effective_query_len(query, args, query_is_translated);
+        let subject_len = if subject_is_translated {
+            (search_subject_len / 3).max(1)
+        } else {
+            search_subject_len.max(1)
+        };
+        let (_lambda, _k, _h, len_adj, eff_space) =
+            blastp_xml_statistics(query_len, subject_len, search_subject_count, args);
+        let (kappa, lambda, entropy) = if program_label == "TBLASTX" {
+            let kbp = blast_rs::stat::protein_ideal_ungapped_kbp_for_matrix(
+                args.matrix.as_deref().unwrap_or("BLOSUM62"),
+            );
+            (kbp.k, kbp.lambda, kbp.h)
+        } else {
+            (0.041, 0.267, 0.14)
+        };
+        writeln!(writer, "</Iteration_hits>")?;
+        writeln!(writer, "  <Iteration_stat>")?;
+        writeln!(writer, "    <Statistics>")?;
+        writeln!(
+            writer,
+            "      <Statistics_db-num>{}</Statistics_db-num>",
+            stats_db_num
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_db-len>{}</Statistics_db-len>",
+            stats_db_len
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_hsp-len>{}</Statistics_hsp-len>",
+            len_adj
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_eff-space>{}</Statistics_eff-space>",
+            eff_space.round().max(0.0) as u64
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_kappa>{}</Statistics_kappa>",
+            format_translated_xml_stat(kappa)
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_lambda>{}</Statistics_lambda>",
+            format_translated_xml_stat(lambda)
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_entropy>{}</Statistics_entropy>",
+            format_translated_xml_stat(entropy)
+        )?;
+        writeln!(writer, "    </Statistics>")?;
+        writeln!(writer, "  </Iteration_stat>")?;
+        if query_hits.is_empty() {
+            writeln!(
+                writer,
+                "  <Iteration_message>No hits found</Iteration_message>"
+            )?;
+        }
+        writeln!(writer, "</Iteration>")?;
+    }
+    writeln!(writer, "</BlastOutput_iterations>")?;
+    writeln!(writer, "</BlastOutput>")?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+fn translated_xml_effective_query_len(
+    query: &blast_rs::input::FastaRecord,
+    args: &BlastnArgs,
+    query_is_translated: bool,
+) -> usize {
+    if query_is_translated {
+        let gencode = args
+            .query_gencode
+            .as_deref()
+            .map(|value| parse_validated_i32("query_gencode", value) as u8)
+            .unwrap_or(1);
+        best_frame_translation_for_stats(&query.sequence, gencode)
+            .len()
+            .max(1)
+    } else {
+        query.sequence.len().max(1)
+    }
+}
+
+fn write_translated_xml_hsp<W: Write>(
+    writer: &mut W,
+    hsp_num: usize,
+    hit: &TabularHit,
+    matrix_type: blast_rs::api::MatrixType,
+) -> std::io::Result<()> {
+    writeln!(writer, "    <Hsp>")?;
+    writeln!(writer, "      <Hsp_num>{}</Hsp_num>", hsp_num)?;
+    writeln!(
+        writer,
+        "      <Hsp_bit-score>{}</Hsp_bit-score>",
+        format_blastp_xml_score(hit.bit_score)
+    )?;
+    writeln!(writer, "      <Hsp_score>{}</Hsp_score>", hit.raw_score)?;
+    writeln!(
+        writer,
+        "      <Hsp_evalue>{}</Hsp_evalue>",
+        format_translated_xml_evalue(hit.evalue)
+    )?;
+    let query_from = hit.query_start.min(hit.query_end);
+    let query_to = hit.query_start.max(hit.query_end);
+    let subject_from = hit.subject_start.min(hit.subject_end);
+    let subject_to = hit.subject_start.max(hit.subject_end);
+    writeln!(
+        writer,
+        "      <Hsp_query-from>{}</Hsp_query-from>",
+        query_from
+    )?;
+    writeln!(writer, "      <Hsp_query-to>{}</Hsp_query-to>", query_to)?;
+    writeln!(
+        writer,
+        "      <Hsp_hit-from>{}</Hsp_hit-from>",
+        subject_from
+    )?;
+    writeln!(writer, "      <Hsp_hit-to>{}</Hsp_hit-to>", subject_to)?;
+    writeln!(
+        writer,
+        "      <Hsp_query-frame>{}</Hsp_query-frame>",
+        hit.qframe
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_hit-frame>{}</Hsp_hit-frame>",
+        hit.sframe
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_identity>{}</Hsp_identity>",
+        hit.num_ident
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_positive>{}</Hsp_positive>",
+        pairwise_protein_positive_count(hit, matrix_type)
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_gaps>{}</Hsp_gaps>",
+        pairwise_alignment_gap_count(hit)
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_align-len>{}</Hsp_align-len>",
+        hit.align_len
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_qseq>{}</Hsp_qseq>",
+        xml_escape(hit.qseq.as_deref().unwrap_or(""))
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_hseq>{}</Hsp_hseq>",
+        xml_escape(hit.sseq.as_deref().unwrap_or(""))
+    )?;
+    writeln!(
+        writer,
+        "      <Hsp_midline>{}</Hsp_midline>",
+        xml_escape(&blastp_xml_midline(hit, matrix_type))
+    )?;
+    writeln!(writer, "    </Hsp>")
+}
+
+fn format_translated_xml_evalue(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    if value.abs() < 1e-4 {
+        let s = format!("{value:.5e}");
+        if let Some((mantissa, exponent)) = s.split_once('e') {
+            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+            return format!("{mantissa}e{}", pad_xml_exponent(exponent));
+        }
+        return s;
+    }
+    let mut s = format!("{value:.8}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
+}
+
+fn pad_xml_exponent(exponent: &str) -> String {
+    let (sign, digits) = exponent
+        .strip_prefix('-')
+        .map(|digits| ("-", digits))
+        .or_else(|| exponent.strip_prefix('+').map(|digits| ("+", digits)))
+        .unwrap_or(("", exponent));
+    if digits.len() == 1 {
+        format!("{sign}0{digits}")
+    } else {
+        format!("{sign}{digits}")
+    }
+}
+
+fn format_translated_xml_stat(value: f64) -> String {
+    let mut s = format!("{value:.15}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
+}
+
+fn blastp_xml_midline(hit: &TabularHit, matrix_type: blast_rs::api::MatrixType) -> String {
+    let qseq = hit.qseq.as_deref().unwrap_or("");
+    let sseq = hit.sseq.as_deref().unwrap_or("");
+    qseq.bytes()
+        .zip(sseq.bytes())
+        .map(|(q, s)| pairwise_protein_midline_char(q, s, matrix_type) as char)
+        .collect()
+}
+
+fn format_blastp_xml_score(value: f64) -> String {
+    let mut s = format!("{value:.4}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
+}
+
+fn format_blastp_xml_evalue(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let s = format!("{value:.5e}");
+    if let Some((mantissa, exponent)) = s.split_once('e') {
+        let mantissa = mantissa
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
+        let exponent = exponent
+            .trim_start_matches('+')
+            .trim_start_matches('0')
+            .replace("-0", "-");
+        format!("{mantissa}e{exponent}")
+    } else {
+        s
+    }
+}
+
+fn blastp_xml_statistics(
+    query_len: usize,
+    total_subject_len: i64,
+    num_subjects: i32,
+    args: &BlastnArgs,
+) -> (f64, f64, f64, i32, f64) {
+    let matrix = args
+        .matrix
+        .as_deref()
+        .unwrap_or("BLOSUM62")
+        .to_ascii_uppercase();
+    let gap_open = args
+        .gapopen
+        .as_deref()
+        .map(|value| parse_validated_i32("gapopen", value))
+        .unwrap_or(11);
+    let gap_extend = args
+        .gapextend
+        .as_deref()
+        .map(|value| parse_validated_i32("gapextend", value))
+        .unwrap_or(1);
+    let gp = blast_rs::stat::lookup_matrix_params(&matrix, gap_open, gap_extend);
+    let kbp = gp
+        .as_ref()
+        .map(|gp| blast_rs::stat::KarlinBlk {
+            lambda: gp.lambda,
+            k: gp.k,
+            log_k: gp.k.ln(),
+            h: gp.h,
+            round_down: false,
+        })
+        .unwrap_or_else(|| blast_rs::stat::protein_ungapped_kbp_for_matrix(&matrix));
+    let len_adj = if let Some(gp) = gp {
+        let alpha_d_lambda = gp.alpha / kbp.lambda;
+        blast_rs::stat::compute_length_adjustment_exact(
+            kbp.k,
+            kbp.log_k,
+            alpha_d_lambda,
+            gp.beta,
+            query_len as i32,
+            total_subject_len,
+            num_subjects,
+        )
+        .0
+    } else {
+        blast_rs::stat::compute_length_adjustment(
+            query_len as i32,
+            total_subject_len,
+            num_subjects,
+            &kbp,
+        )
+    };
+    let eff_space = blast_rs::stat::compute_search_space(
+        query_len as i64,
+        total_subject_len,
+        num_subjects,
+        len_adj,
+    );
+    (kbp.lambda, kbp.k, kbp.h, len_adj, eff_space)
 }
 
 fn write_blastn_subject_xml_output<W: Write>(
@@ -7865,6 +10587,16 @@ fn db_pairwise_subject_defline(db: &BlastDb, oid: u32, subject_id: &str) -> Opti
     }
 }
 
+fn db_output_subject_id(db: &BlastDb, oid: u32, accession: &str) -> String {
+    if !(accession == "BL_ORD_ID" || accession.starts_with("gnl|BL_ORD_ID|")) {
+        return accession.to_string();
+    }
+    extract_header_title(db.get_header(oid))
+        .and_then(|title| title.split_whitespace().next().map(str::to_string))
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| accession.to_string())
+}
+
 fn extract_header_title(hdr: &[u8]) -> Option<String> {
     let mut i = 0;
     while i + 1 < hdr.len() {
@@ -8002,7 +10734,7 @@ fn write_pairwise_subject_query_header<W: Write>(
         writeln!(writer)?;
         return Ok(());
     }
-    write_pairwise_hit_summary_header(writer, args.sorthits())?;
+    write_pairwise_hit_summary_header(writer, args.sorthits(), false)?;
     writeln!(writer)?;
 
     let mut seen = std::collections::HashSet::new();
@@ -8027,7 +10759,7 @@ fn write_pairwise_subject_query_header<W: Write>(
             .copied()
             .filter(|h| h.subject_id == hit.subject_id)
             .collect();
-        write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits())?;
+        write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits(), false)?;
         written += 1;
     }
     writeln!(writer)?;
@@ -8198,7 +10930,7 @@ fn write_pairwise_db_query_header<W: Write>(
         writeln!(writer)?;
         return Ok(());
     }
-    write_pairwise_hit_summary_header(writer, args.sorthits())?;
+    write_pairwise_hit_summary_header(writer, args.sorthits(), false)?;
     writeln!(writer)?;
 
     let mut seen = std::collections::HashSet::new();
@@ -8220,7 +10952,7 @@ fn write_pairwise_db_query_header<W: Write>(
             .copied()
             .filter(|h| h.subject_id == hit.subject_id)
             .collect();
-        write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits())?;
+        write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits(), false)?;
         written += 1;
     }
     writeln!(writer)?;
@@ -9247,15 +11979,45 @@ mod tests {
 
     #[test]
     fn non_blastn_program_outfmt_support_is_explicitly_limited() {
-        for program in ["blastp", "blastx", "tblastn", "tblastx", "psiblast"] {
+        assert!(program_supports_outfmt("blastp", 0));
+        assert!(program_supports_outfmt("blastp", 5));
+        assert!(program_supports_outfmt("blastp", 6));
+        assert!(program_supports_outfmt("blastp", 7));
+        assert!(program_supports_outfmt("blastp", 10));
+        assert!(
+            !program_supports_outfmt("blastp", 17),
+            "blastp outfmt 17 should fail instead of emitting non-parity output"
+        );
+
+        for program in ["blastx", "tblastx"] {
+            assert!(program_supports_outfmt(program, 0));
+            assert!(program_supports_outfmt(program, 5));
             assert!(program_supports_outfmt(program, 6));
+            assert!(program_supports_outfmt(program, 7));
             assert!(program_supports_outfmt(program, 10));
-            for outfmt in [0, 5, 7, 17] {
-                assert!(
-                    !program_supports_outfmt(program, outfmt),
-                    "{program} outfmt {outfmt} should fail instead of emitting non-parity output"
-                );
-            }
+            assert!(
+                !program_supports_outfmt(program, 17),
+                "{program} outfmt 17 should fail instead of emitting non-parity output"
+            );
+        }
+        assert!(program_supports_outfmt("tblastn", 0));
+        assert!(program_supports_outfmt("tblastn", 6));
+        assert!(program_supports_outfmt("tblastn", 7));
+        assert!(program_supports_outfmt("tblastn", 10));
+        for outfmt in [5, 17] {
+            assert!(
+                !program_supports_outfmt("tblastn", outfmt),
+                "tblastn outfmt {outfmt} should fail instead of emitting non-parity output"
+            );
+        }
+
+        assert!(program_supports_outfmt("psiblast", 6));
+        assert!(program_supports_outfmt("psiblast", 10));
+        for outfmt in [0, 5, 7, 17] {
+            assert!(
+                !program_supports_outfmt("psiblast", outfmt),
+                "psiblast outfmt {outfmt} should fail instead of emitting non-parity output"
+            );
         }
 
         for outfmt in [0, 5, 6, 7, 10, 17] {

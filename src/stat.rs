@@ -1431,6 +1431,66 @@ pub fn protein_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
     }
 }
 
+/// Compute NCBI's `sbp->kbp_ideal` for a protein matrix.
+///
+/// `Blast_ScoreBlkKbpIdealCalc` builds a score-frequency distribution from
+/// standard residue composition on both axes and runs
+/// `Blast_KarlinBlkUngappedCalc`; it does not copy the rounded row-0 matrix
+/// table. Translated-query programs use this ideal block when the
+/// query-specific lambda is too high.
+pub fn protein_ideal_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
+    if !matrix_name.eq_ignore_ascii_case("BLOSUM62") && !matrix_name.is_empty() {
+        return protein_ungapped_kbp_for_matrix(matrix_name);
+    }
+
+    let std_freq = protein_std_freq_ncbistdaa();
+    let matrix = crate::matrix::BLOSUM62;
+    let mut sfp = SfDist::new(-4, 11);
+    for i in 0..crate::matrix::AA_SIZE {
+        for j in 0..crate::matrix::AA_SIZE {
+            let s = matrix[i][j];
+            if (-4..=11).contains(&s) {
+                *sfp.p_mut(s) += std_freq[i] * std_freq[j];
+            }
+        }
+    }
+
+    let mut obs_min = i32::MAX;
+    let mut obs_max = i32::MIN;
+    let mut psum = 0.0;
+    for s in -4..=11 {
+        if sfp.p(s) > 0.0 {
+            psum += sfp.p(s);
+            obs_min = obs_min.min(s);
+            obs_max = obs_max.max(s);
+        }
+    }
+    sfp.obs_min = obs_min;
+    sfp.obs_max = obs_max;
+    let mut savg = 0.0;
+    if psum > 0.0 {
+        for s in obs_min..=obs_max {
+            *sfp.p_mut(s) /= psum;
+            savg += s as f64 * sfp.p(s);
+        }
+    }
+    sfp.score_avg = savg;
+
+    let lambda = compute_lambda(&sfp);
+    let h = compute_h(&sfp, lambda);
+    let k = compute_k(&sfp, lambda, h);
+    if lambda < 0.0 || h < 0.0 || k < 0.0 {
+        return protein_ungapped_kbp_for_matrix(matrix_name);
+    }
+    KarlinBlk {
+        lambda,
+        k,
+        log_k: k.ln(),
+        h,
+        round_down: false,
+    }
+}
+
 /// Compute the query-specific ungapped Karlin block for a protein query.
 /// Mirrors NCBI's `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`):
 /// `Blast_ResFreqString` over the query → `BlastScoreFreqCalc` →
@@ -3378,6 +3438,49 @@ mod tests {
         assert!((kbp.lambda - 0.3176).abs() < 0.01);
         assert!((kbp.k - 0.134).abs() < 0.01);
         assert!((kbp.h - 0.401).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_protein_ideal_ungapped_kbp_is_computed_not_rounded_table_row() {
+        let ideal = protein_ideal_ungapped_kbp_for_matrix("BLOSUM62");
+        let table = protein_ungapped_kbp_for_matrix("BLOSUM62");
+
+        assert!(ideal.is_valid());
+        assert!((ideal.lambda - 0.317605957635731).abs() < 1e-12);
+        assert!((ideal.k - 0.133956144488482).abs() < 1e-12);
+        assert!((ideal.h - 0.401214524497119).abs() < 1e-12);
+        assert_ne!(ideal.log_k, table.log_k);
+
+        let ideal_evalue = ideal.raw_to_evalue(38, 64.0) / gap_decay_divisor(0.5, 1);
+        assert_eq!(format_evalue_for_test(ideal_evalue), "9.83e-05");
+    }
+
+    fn format_evalue_for_test(val: f64) -> String {
+        if val < 0.001 {
+            let s = format!("{:.2e}", val);
+            if let Some(e_pos) = s.find('e') {
+                let (mantissa, exp_part) = s.split_at(e_pos);
+                let exp_str = &exp_part[1..];
+                let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
+                    ("-", rest)
+                } else if let Some(rest) = exp_str.strip_prefix('+') {
+                    ("", rest)
+                } else {
+                    ("", exp_str)
+                };
+                if digits.len() < 2 {
+                    return format!(
+                        "{}e{}{:02}",
+                        mantissa,
+                        sign,
+                        digits.parse::<u32>().unwrap_or(0)
+                    );
+                }
+            }
+            s
+        } else {
+            format!("{val}")
+        }
     }
 
     /// Verify ungapped KBP calc produces valid results for context-based computation.

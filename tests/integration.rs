@@ -306,6 +306,105 @@ fn assert_blastp_subject_outfmt_matches_ncbi(
     );
 }
 
+fn assert_blastp_db_outfmt_matches_ncbi(
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastp").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastp or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.txt");
+    let ncbi_out = tmp.path().join("ncbi.txt");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg("prot")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastp")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli blastp DB parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli blastp exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastp");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastp DB parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastp exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust blastp DB output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
 fn assert_translated_subject_outfmt_matches_ncbi(
     program: &str,
     ncbi_program: &str,
@@ -12683,6 +12782,86 @@ fn tblastx_ncbi_parity_dust_is_unknown_argument() {
 }
 
 #[test]
+fn non_blastn_sam_outfmt_rejection_matches_ncbi() {
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    for (program, query_fasta, subject_fasta) in [
+        (
+            "blastp",
+            ">q\nMKFLIFALILFATVALAPKSSSHEI\n",
+            ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        ),
+        ("blastx", ">q\nATGAAATTTCTTATTCTTCTTTTC\n", ">s\nMKFLILLF\n"),
+        (
+            "tblastn",
+            ">q\nMKFLILLF\n",
+            ">s\nATGAAATTTCTTATTCTTCTTTTC\n",
+        ),
+        (
+            "tblastx",
+            ">q\nATGAAATTTCTTATTCTTCTTTTC\n",
+            ">s\nATGAAATTTCTTATTCTTCTTTTC\n",
+        ),
+    ] {
+        let ncbi_bin = format!("/usr/bin/{program}");
+        if !std::path::Path::new(&ncbi_bin).exists() {
+            eprintln!("Skipping: {ncbi_bin} not found");
+            continue;
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let query = tmp.path().join("query.fa");
+        let subject = tmp.path().join("subject.fa");
+        std::fs::write(&query, query_fasta).expect("write query");
+        std::fs::write(&subject, subject_fasta).expect("write subject");
+
+        let rust = std::process::Command::new(&blast_cli)
+            .arg(program)
+            .arg("--query")
+            .arg(&query)
+            .arg("--subject")
+            .arg(&subject)
+            .arg("--outfmt")
+            .arg("17")
+            .arg("--seg")
+            .arg("no")
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli {program} SAM rejection: {err}"));
+        let ncbi = std::process::Command::new(&ncbi_bin)
+            .arg("-query")
+            .arg(&query)
+            .arg("-subject")
+            .arg(&subject)
+            .arg("-outfmt")
+            .arg("17")
+            .arg("-seg")
+            .arg("no")
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI {program} SAM rejection: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli {program} should reject SAM"
+        );
+        assert!(!ncbi.status.success(), "NCBI {program} should reject SAM");
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "{program} status differs"
+        );
+        assert_eq!(rust.stdout, ncbi.stdout, "{program} stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "{program} stderr differs"
+        );
+    }
+}
+
+#[test]
 fn protein_programs_ncbi_parity_nucleotide_filtering_options_are_unknown_arguments() {
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
         eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
@@ -13036,6 +13215,546 @@ fn blastp_subject_ncbi_parity_identity_matrix_scores_mismatch() {
             "-evalue",
             "1000",
         ],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_exact_hit() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_no_hits() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_multiple_queries() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n>q2 unrelated query\nACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_gapped_alignment() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 gapped query\nACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 gapped subject\nACDEFGHIKXXLMNPQRSTVWY\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--word_size",
+            "2",
+            "--threshold",
+            "1",
+            "--evalue",
+            "1000",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-word_size",
+            "2",
+            "-threshold",
+            "1",
+            "-evalue",
+            "1000",
+        ],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_length_adjusted_stats() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 repeat query\nACDEFGHIKLMNPQRSTVWYGGGGGGGGGGACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 repeat subject\nACDEFGHIKLMNPQRSTVWYTTTTTTTTTTACDEFGHIKLMNPQRSTVWY\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--word_size",
+            "2",
+            "--threshold",
+            "1",
+            "--evalue",
+            "1000",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-word_size",
+            "2",
+            "-threshold",
+            "1",
+            "-evalue",
+            "1000",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_zero_alignments() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_alignments",
+            "0",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_alignments",
+            "0",
+        ],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_zero_descriptions() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_descriptions",
+            "0",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_descriptions",
+            "0",
+        ],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_line_length() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--line_length",
+            "10",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-line_length", "10"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_commented_tabular_exact_hit() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "7",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_pairwise_parse_deflines() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_tabular_parse_deflines() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "7 qaccver saccver pident length bitscore",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_xml_exact_hit() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_xml_positive_substitution() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLILLFNILCLFPVLAADNHGVSMNAS\n",
+        ">s1 related protein\nMKFLILLFNILCLFPVLAADNHGVSINAS\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_xml_no_hits() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_xml_multiple_queries() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n>q2 unrelated query\nACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_subject_ncbi_parity_xml_parse_deflines() {
+    assert_blastp_subject_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_exact_hit() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_parse_deflines() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_tabular_parse_deflines() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_commented_tabular_exact_hit() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "7",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "7 qaccver saccver pident length bitscore",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_xml_exact_hit() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_xml_positive_substitution() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLILLFNILCLFPVLAADNHGVSMNAS\n",
+        ">s1 related protein\nMKFLILLFNILCLFPVLAADNHGVSINAS\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_xml_no_hits() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_xml_multiple_queries() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n>q2 unrelated query\nACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_xml_parse_deflines() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">gi|123|ref|QPROT.1| query protein\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLIFALILFATVALAPKSSSHEIHH\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_no_hits() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_multiple_queries() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n>q2 unrelated query\nACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMNPQRSTVWY\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_gapped_alignment() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 gapped query\nACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 gapped subject\nACDEFGHIKXXLMNPQRSTVWY\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--word_size",
+            "2",
+            "--threshold",
+            "1",
+            "--evalue",
+            "1000",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-word_size",
+            "2",
+            "-threshold",
+            "1",
+            "-evalue",
+            "1000",
+        ],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_length_adjusted_stats() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 repeat query\nACDEFGHIKLMNPQRSTVWYGGGGGGGGGGACDEFGHIKLMNPQRSTVWY\n",
+        ">s1 repeat subject\nACDEFGHIKLMNPQRSTVWYTTTTTTTTTTACDEFGHIKLMNPQRSTVWY\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--word_size",
+            "2",
+            "--threshold",
+            "1",
+            "--evalue",
+            "1000",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-word_size",
+            "2",
+            "-threshold",
+            "1",
+            "-evalue",
+            "1000",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_zero_alignments() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_alignments",
+            "0",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_alignments",
+            "0",
+        ],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_zero_descriptions() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_descriptions",
+            "0",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_descriptions",
+            "0",
+        ],
+    );
+}
+
+#[test]
+fn blastp_db_ncbi_parity_pairwise_line_length() {
+    assert_blastp_db_outfmt_matches_ncbi(
+        ">q1 protein query\nMKFLIFALILFATVALAPKSSSHEI\n",
+        ">s1 protein subject\nMKFLIFALILFATVALAPKSSSHEIHH\n>s2 unrelated\nACDEFGHIKLMN\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--line_length",
+            "10",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-line_length", "10"],
     );
 }
 
@@ -13395,6 +14114,504 @@ fn tblastx_subject_ncbi_parity_indel_remains_ungapped() {
 }
 
 #[test]
+fn blastx_subject_ncbi_parity_commented_tabular_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "7",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "7",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_xml_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_xml_positive_substitution() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTTCCTGTTCTGGCTGCTGATAACCATGGTGTTTCTATGAACGCTTCT\n",
+        ">s1\nMKFLILLFNILCLFPVLAADNHGVSINAS\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_xml_no_hits() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 unrelated\nPPPPPPPPPPPP\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_xml_multiple_queries() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n>q2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        ">s1\nMKFLILLF\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_xml_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_pairwise_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_pairwise_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_tabular_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_pairwise_no_hits() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nGGGGGGGG\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1e-100",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1e-100"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_pairwise_line_length() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--line_length",
+            "5",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-line_length", "5"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_pairwise_num_alignments() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 first\nMKFLILLF\n>s2 second\nMKFLILLF\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_alignments",
+            "1",
+            "--num_descriptions",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_alignments",
+            "1",
+            "-num_descriptions",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_pairwise_multi_hsp_same_subject() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 multi\nMKFLILLFQQQQGMKFLILLF\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0", "--evalue", "1000"],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_commented_tabular_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7 qaccver saccver pident length bitscore",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_pairwise_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_tabular_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver pident length bitscore",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_pairwise_no_hits() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLF\n",
+        ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1e-100",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1e-100"],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_pairwise_line_length() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--line_length",
+            "5",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-line_length", "5"],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_pairwise_num_alignments() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLF\n",
+        ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_alignments",
+            "1",
+            "--num_descriptions",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_alignments",
+            "1",
+            "-num_descriptions",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_commented_tabular_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_xml_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "5",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_xml_no_hits() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 unrelated\nCCACCTCCACCTCCACCTCCACCT\n",
+        "5",
+        &["--seg", "no"],
+        &["-seg", "no"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_xml_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "5",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_pairwise_exact_hit() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_pairwise_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_tabular_parse_deflines() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver pident length bitscore",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_pairwise_no_hits() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
+        "0",
+        &["--seg", "no", "--evalue", "1e-100"],
+        &["-seg", "no", "-evalue", "1e-100"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_pairwise_line_length() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--evalue", "1000", "--line_length", "5"],
+        &["-seg", "no", "-evalue", "1000", "-line_length", "5"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_pairwise_num_alignments() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--evalue",
+            "1000",
+            "--num_alignments",
+            "1",
+            "--num_descriptions",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-evalue",
+            "1000",
+            "-num_alignments",
+            "1",
+            "-num_descriptions",
+            "1",
+        ],
+    );
+}
+
+#[test]
 fn blastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "blastx",
@@ -13433,6 +14650,522 @@ fn tblastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
         "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
         &[],
         &[],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_commented_tabular_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "7",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "7",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_xml_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_xml_positive_substitution() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTTCCTGTTCTGGCTGCTGATAACCATGGTGTTTCTATGAACGCTTCT\n",
+        ">s1\nMKFLILLFNILCLFPVLAADNHGVSINAS\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_xml_no_hits() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 unrelated\nPPPPPPPPPPPP\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_xml_multiple_queries() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n>q2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        ">s1\nMKFLILLF\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_xml_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "5",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_pairwise_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_pairwise_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_tabular_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_pairwise_no_hits() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nGGGGGGGG\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1e-100",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1e-100"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_pairwise_line_length() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLF\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--line_length",
+            "5",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-line_length", "5"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_pairwise_num_alignments() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 first\nMKFLILLF\n>s2 second\nMKFLILLF\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_alignments",
+            "1",
+            "--num_descriptions",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_alignments",
+            "1",
+            "-num_descriptions",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_commented_tabular_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7 qaccver saccver pident length bitscore",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_pairwise_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--comp_based_stats", "0"],
+        &["-seg", "no", "-comp_based_stats", "0"],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_tabular_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver pident length bitscore",
+        &["--seg", "no", "--comp_based_stats", "0", "--parse_deflines"],
+        &["-seg", "no", "-comp_based_stats", "0", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_pairwise_no_hits() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1e-100",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1e-100"],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_pairwise_line_length() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--line_length",
+            "5",
+        ],
+        &["-seg", "no", "-comp_based_stats", "0", "-line_length", "5"],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_pairwise_num_alignments() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--num_alignments",
+            "1",
+            "--num_descriptions",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-num_alignments",
+            "1",
+            "-num_descriptions",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_commented_tabular_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_commented_tabular_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "7",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_xml_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "5",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_xml_no_hits() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 unrelated\nCCACCTCCACCTCCACCTCCACCT\n",
+        "5",
+        &["--seg", "no"],
+        &["-seg", "no"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_xml_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "5",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_pairwise_exact_hit() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_pairwise_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_tabular_parse_deflines() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid qacc qaccver sseqid sacc saccver pident length bitscore",
+        &["--seg", "no", "--evalue", "1000", "--parse_deflines"],
+        &["-seg", "no", "-evalue", "1000", "-parse_deflines"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_pairwise_no_hits() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
+        "0",
+        &["--seg", "no", "--evalue", "1e-100"],
+        &["-seg", "no", "-evalue", "1e-100"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_pairwise_line_length() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &["--seg", "no", "--evalue", "1000", "--line_length", "5"],
+        &["-seg", "no", "-evalue", "1000", "-line_length", "5"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_pairwise_num_alignments() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
+        "0",
+        &[
+            "--seg",
+            "no",
+            "--evalue",
+            "1000",
+            "--num_alignments",
+            "1",
+            "--num_descriptions",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-evalue",
+            "1000",
+            "-num_alignments",
+            "1",
+            "-num_descriptions",
+            "1",
+        ],
     );
 }
 

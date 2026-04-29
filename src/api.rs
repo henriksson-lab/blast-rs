@@ -462,14 +462,19 @@ fn apply_tblastn_linked_sum_stats(
         kbp: vec![prot_kbp.clone()],
         kbp_gap: vec![prot_kbp.clone()],
     };
-    let link_params = LinkHSPParameters::default();
+    let link_params = LinkHSPParameters {
+        gap_prob: crate::stat::BLAST_GAP_PROB_GAPPED,
+        gap_decay_rate: crate::stat::BLAST_GAP_DECAY_RATE_GAPPED,
+        longest_intron: ((crate::stat::DEFAULT_LONGEST_INTRON as i32) - 2) / 3,
+        ..LinkHSPParameters::default()
+    };
 
-    for (oid, result) in results.iter_mut().enumerate() {
+    for result in results.iter_mut() {
         if result.hsps.is_empty() {
             continue;
         }
         let mut hsp_list = LinkBlastHspList {
-            oid: oid as i32,
+            oid: result.subject_oid as i32,
             query_index: 0,
             hsp_array: result
                 .hsps
@@ -3476,8 +3481,11 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     const BLAST_SEQSRC_MINLENGTH_TBLASTN: i32 = 10;
     let min_subject_length: i32 = BLAST_SEQSRC_MINLENGTH_TBLASTN / 3;
     // BLAST_CalcEffLengths handles `db_length /= 3` internally for tblastn,
-    // so we pass the raw total. For Gumbel-block lookup we still need the
-    // translated total ourselves.
+    // so effective search space uses translated subject letters. The
+    // no-composition Spouge path keeps the raw database length in the Gumbel
+    // block for the covered subject-mode parity fixtures; the
+    // composition-adjusted path preserves the translated DB length used by the
+    // existing parity fixtures.
     let translated_total_subj_len = (total_subj_len / 3).max(1);
     let avg_subject_length = (translated_total_subj_len / db.num_oids.max(1) as usize).max(1);
     let mut query_info = crate::queryinfo::QueryInfo {
@@ -3523,7 +3531,11 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         params.matrix,
         params.gap_open,
         params.gap_extend,
-        translated_total_subj_len as i64,
+        if params.comp_adjust == 0 {
+            total_subj_len as i64
+        } else {
+            translated_total_subj_len as i64
+        },
     );
     let max_hsps = params.max_hsps;
 
@@ -3574,6 +3586,11 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 continue;
             }
             let subj_prot_len = prot.len();
+            let tblastn_spouge_subject_len = if params.comp_adjust == 0 {
+                (subject_len / 3).max(1)
+            } else {
+                subj_prot_len
+            };
             let tblastn_seed_cutoff = protein_prelim_seed_cutoff(
                 gap_trigger_raw,
                 params.evalue_threshold,
@@ -3602,13 +3619,23 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 .iter()
                 .map(|ph| {
                     if let Some(ref gbp) = gumbel_blk {
-                        crate::stat::spouge_evalue_with_gap_decay(
-                            ph.score,
-                            &prot_kbp,
-                            gbp,
-                            query_aa.len() as i32,
-                            subj_prot_len as i32,
-                        )
+                        if params.comp_adjust == 0 {
+                            crate::stat::spouge_evalue(
+                                ph.score,
+                                &prot_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                tblastn_spouge_subject_len as i32,
+                            )
+                        } else {
+                            crate::stat::spouge_evalue_with_gap_decay(
+                                ph.score,
+                                &prot_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                subj_prot_len as i32,
+                            )
+                        }
                     } else {
                         prot_kbp.raw_to_evalue(ph.score, search_space)
                     }
@@ -3661,13 +3688,23 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     round_down: prot_kbp.round_down,
                 };
                 let evalue = if let Some(ref gbp) = gumbel_blk {
-                    let base_ev = crate::stat::spouge_evalue_with_gap_decay(
-                        e_score_i32,
-                        &e_kbp,
-                        gbp,
-                        query_aa.len() as i32,
-                        subj_prot_len as i32,
-                    );
+                    let base_ev = if params.comp_adjust == 0 {
+                        crate::stat::spouge_evalue(
+                            e_score_i32,
+                            &e_kbp,
+                            gbp,
+                            query_aa.len() as i32,
+                            tblastn_spouge_subject_len as i32,
+                        )
+                    } else {
+                        crate::stat::spouge_evalue_with_gap_decay(
+                            e_score_i32,
+                            &e_kbp,
+                            gbp,
+                            query_aa.len() as i32,
+                            subj_prot_len as i32,
+                        )
+                    };
                     if use_adj_matrix {
                         base_ev
                     } else if let Some(lr) = lambda_ratio_opt {
@@ -3678,13 +3715,23 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                             h: e_kbp.h,
                             round_down: e_kbp.round_down,
                         };
-                        crate::stat::spouge_evalue_with_gap_decay(
-                            e_score_i32,
-                            &scaled_kbp,
-                            gbp,
-                            query_aa.len() as i32,
-                            subj_prot_len as i32,
-                        )
+                        if params.comp_adjust == 0 {
+                            crate::stat::spouge_evalue(
+                                e_score_i32,
+                                &scaled_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                tblastn_spouge_subject_len as i32,
+                            )
+                        } else {
+                            crate::stat::spouge_evalue_with_gap_decay(
+                                e_score_i32,
+                                &scaled_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                subj_prot_len as i32,
+                            )
+                        }
                     } else {
                         base_ev
                     }
@@ -3761,6 +3808,9 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     });
 
     let mut results: Vec<SearchResult> = results.into_iter().flatten().collect();
+    if params.sum_stats {
+        apply_tblastn_linked_sum_stats(&mut results, &query_info, &prot_kbp);
+    }
     for result in &mut results {
         prune_translated_hsp_variants(&mut result.hsps);
         result.hsps.sort_by(compare_hsps_by_evalue_then_coords);
@@ -3965,7 +4015,7 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 &std_freq,
                 &matrix_fn,
             );
-            let ideal = crate::stat::protein_ungapped_kbp();
+            let ideal = crate::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name);
             let ctx_kbp = match ctx_kbp_results.into_iter().next().flatten() {
                 Some(mut k) => {
                     // For translated queries: substitute ideal when computed

@@ -142,7 +142,7 @@ blast-cli blastn --query query.fa --db mydb \
 | `--db` | | BLAST database path (without extension) |
 | `--subject` | | Subject FASTA file (alternative to `--db`) |
 | `--out` | stdout | Output file |
-| `--outfmt` | `6` | Output format. `blastn` supports 0=pairwise, 5=XML, 6=tabular, 7=commented tabular, 10=CSV, 17=SAM. Other CLI programs currently support tabular/CSV only. |
+| `--outfmt` | `6` | Output format. `blastn` supports 0=pairwise, 5=XML, 6=tabular, 7=commented tabular, 10=CSV, 17=SAM. `blastp`, `blastx`, and `tblastx` also support parity-tested pairwise/XML/commented tabular subsets; `tblastn` supports pairwise/commented tabular subsets. Unsupported formats fail explicitly. |
 | `--evalue` | `10.0` | E-value threshold |
 | `--word_size` | `11` | Word size for initial seed |
 | `--reward` | `1` | Match reward |
@@ -173,10 +173,10 @@ blast-cli tblastn --query protein.fa --subject nucleotide.fa
 blast-cli psiblast --query protein.fa --subject database.fa
 ```
 
-Protein and translated CLI programs currently support tabular output (`--outfmt`
-`6` or `10`). Pairwise, XML, commented tabular, and SAM writers are only wired
-for `blastn`; other programs fail explicitly for those formats until parity
-writers are implemented.
+Protein and translated CLI programs support tabular/CSV output (`--outfmt` `6`
+or `10`). Parity-tested pairwise, XML, and commented-tabular subsets are wired
+for `blastp`, `blastx`, `tblastn`, and `tblastx`; unsupported formats and
+unverified edge cases fail explicitly instead of emitting best-effort output.
 
 ## Library Usage
 
@@ -440,7 +440,7 @@ This is a faithful port of the NCBI BLAST+ C engine algorithms:
 - Reads BLAST databases created by NCBI `makeblastdb` (v4 and v5 format), including taxonomy (`.nto` taxid files, `taxdb.bti`/`taxdb.btd` name database)
 - Output matches NCBI BLAST+ 2.17.0 byte-for-byte for blastn tabular format (`-outfmt 6`)
 - Supports scoring parameters: reward/penalty 1/-1 through 5/-4, gap costs 0/0 through 12/8
-- Protein programs (blastp/blastx/tblastn/tblastx) use BLOSUM62 with lookup-table seeding and gapped X-dropoff DP extension; CLI output is currently limited to tabular/CSV formats.
+- Protein programs (blastp/blastx/tblastn/tblastx) use BLOSUM62 with lookup-table seeding and gapped X-dropoff DP extension; CLI output includes tabular/CSV plus parity-tested pairwise, XML, and commented-tabular subsets, with unsupported formats rejected explicitly.
 
 See [docs/parity.md](docs/parity.md) for the current program, output-format,
 database-feature, and option support matrix.
