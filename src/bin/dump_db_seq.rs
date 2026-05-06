@@ -21,18 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(out, ">{}", defline)?;
     for chunk_start in (0..seq_len).step_by(60) {
         let chunk_end = (chunk_start + 60).min(seq_len);
-        for pos in chunk_start..chunk_end {
-            let base = packed[pos >> 2];
-            let code = (base >> (6 - 2 * (pos & 3))) & 3;
-            let ch = match code {
-                0 => b'A',
-                1 => b'C',
-                2 => b'G',
-                3 => b'T',
-                _ => b'N',
-            };
-            out.write_all(&[ch])?;
-        }
+        let codes: Vec<u8> = (chunk_start..chunk_end)
+            .map(|pos| blast_rs::encoding::ncbi2na_base_at(packed, pos))
+            .collect();
+        out.write_all(&blast_rs::encoding::blastna_to_iupacna_sequence(&codes))?;
         writeln!(out)?;
     }
 

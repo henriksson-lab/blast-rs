@@ -3,12 +3,10 @@
 //! 2000;7(1-2):293-302). Used as a `BlastHSPWriter` in NCBI's pipeline
 //! to drop HSPs dominated by overlapping higher-quality ones.
 //!
-//! This module is the **skeleton port**: data structures and leaf
-//! utilities are ported 1-1 with their NCBI C counterparts. The
-//! umbrella driver (`s_BlastHSPCullingRun`, `s_BlastHSPCullingFinal`,
-//! `s_BlastHSPCullingPipeRun`) and the parameter/info containers
-//! (`BlastHSPCullingParams`, `BlastHSPCullingInfo`,
-//! `BlastHSPCullingPipeInfo`) come in subsequent iterations.
+//! This module ports the culling writer/pipe and its interval-tree
+//! utilities 1-1 with their NCBI C counterparts. API and CLI culling
+//! filters reuse the same dominance rule so rendered-result filtering
+//! follows NCBI's score/length overlap semantics.
 //!
 //! Status (counted from the audit's missing-functions list):
 //!
@@ -24,21 +22,21 @@
 //! | `s_GetNode` / `s_RetNode` | 5 | (Rust `Box` handles it) |
 //! | `s_CTreeNodeNew` | 14 | ✅ |
 //! | `s_CTreeNodeFree` | 5 | (Rust `Drop` handles it) |
-//! | `s_ForkChildren` | 28 | TODO |
-//! | `s_MarkDownCTree` | 9 | TODO |
-//! | `s_ProcessCTree` | 23 | TODO |
-//! | `s_CTreeNew` / `s_CTreeFree` | 12 | TODO |
-//! | `s_RipHSPOffCTree` | 16 | TODO |
-//! | `s_SaveHSP` | 22 | TODO |
-//! | `s_BlastHSPCullingInit` | 4 | TODO |
-//! | `s_BlastHSPCullingFinal` | 66 | TODO |
-//! | `s_BlastHSPCullingRun` | 26 | TODO |
-//! | `s_BlastHSPCullingFree` / `s_BlastHSPCullingNew` | 24 | TODO |
-//! | `s_BlastHSPCullingPipeRun` / `Free` / `New` | 46 | TODO |
-//! | `BlastHSPCullingParamsNew` / `Free` | 21 | TODO |
-//! | `BlastHSPCullingInfoNew` / `BlastHSPCullingPipeInfoNew` | 15 | TODO |
+//! | `s_ForkChildren` | 28 | ✅ |
+//! | `s_MarkDownCTree` | 9 | ✅ |
+//! | `s_ProcessCTree` | 23 | ✅ |
+//! | `s_CTreeNew` / `s_CTreeFree` | 12 | ✅ / Rust `Drop` |
+//! | `s_RipHSPOffCTree` | 16 | ✅ |
+//! | `s_SaveHSP` | 22 | ✅ |
+//! | `s_BlastHSPCullingInit` | 4 | ✅ |
+//! | `s_BlastHSPCullingFinal` | 66 | ✅ |
+//! | `s_BlastHSPCullingRun` | 26 | ✅ |
+//! | `s_BlastHSPCullingFree` / `s_BlastHSPCullingNew` | 24 | ✅ / ✅ |
+//! | `s_BlastHSPCullingPipeRun` / `Free` / `New` | 46 | ✅ |
+//! | `BlastHSPCullingParamsNew` / `Free` | 21 | ✅ |
+//! | `BlastHSPCullingInfoNew` / `BlastHSPCullingPipeInfoNew` | 15 | ✅ |
 
-use crate::hspstream::Hsp;
+pub use crate::hspstream::Hsp;
 use crate::program::ProgramType;
 
 /// 1-1 port of `BlastHSPCullingData` (`hspfilter_culling.c:476`).
@@ -874,10 +872,16 @@ mod tests {
                 evalue: 0.0,
                 query_offset: begin,
                 query_end: end,
+                query_gapped_start: begin,
                 subject_offset: 0,
                 subject_end: end - begin,
+                subject_gapped_start: 0,
                 context: 0,
+                query_frame: 0,
+                subject_frame: 0,
                 num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
             },
             context_id: 0,
             subject_id: sid,
@@ -998,10 +1002,16 @@ mod tests {
             evalue: 1e-20,
             query_offset: 0,
             query_end: 100,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 100,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         list.add_hsp(Hsp {
             score: 50,
@@ -1010,10 +1020,16 @@ mod tests {
             evalue: 0.5, // higher e-value, will be re-sorted
             query_offset: 200,
             query_end: 300,
+            query_gapped_start: 200,
             subject_offset: 200,
             subject_end: 300,
+            subject_gapped_start: 200,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         let mut hitlist = crate::hspstream::HitList::new();
         hitlist.hsp_lists.push(list);
@@ -1077,10 +1093,16 @@ mod tests {
             evalue: 1e-10,
             query_offset: 0,
             query_end: 100,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 100,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         list.add_hsp(Hsp {
             score: 50,
@@ -1089,10 +1111,16 @@ mod tests {
             evalue: 1e-5,
             query_offset: 200,
             query_end: 300,
+            query_gapped_start: 200,
             subject_offset: 200,
             subject_end: 300,
+            subject_gapped_start: 200,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         data.run(&mut list);
         // Finalize and check the shape.
@@ -1277,10 +1305,16 @@ mod tests {
                 evalue: 0.0,
                 query_offset: 0,
                 query_end: 100,
+                query_gapped_start: 0,
                 subject_offset: 0,
                 subject_end: 100,
+                subject_gapped_start: 0,
                 context: 0,
+                query_frame: 0,
+                subject_frame: 0,
                 num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
             },
             context_id: 0,
             subject_id: 5,

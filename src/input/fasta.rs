@@ -363,17 +363,11 @@ ACGTACGT
     /// Verify BLASTNA encoding of parsed nucleotide sequences.
     #[test]
     fn test_parse_fasta_encoding_nucleotide() {
-        use crate::input::iupacna_to_blastna;
-
         let input = b">nuc\nACGTNRY\n";
         let records = parse_fasta(&input[..]);
         assert_eq!(records.len(), 1);
 
-        let encoded: Vec<u8> = records[0]
-            .sequence
-            .iter()
-            .map(|&b| iupacna_to_blastna(b))
-            .collect();
+        let encoded = crate::encoding::encode_blastna_sequence(&records[0].sequence);
         // A=0, C=1, G=2, T=3, N=14, R=4, Y=5
         assert_eq!(encoded, vec![0, 1, 2, 3, 14, 4, 5]);
     }
@@ -381,17 +375,11 @@ ACGTACGT
     /// Verify NCBIstdaa encoding of parsed protein sequences.
     #[test]
     fn test_parse_fasta_encoding_protein() {
-        use crate::input::aminoacid_to_ncbistdaa;
-
         let input = b">prot\nMKFLAG\n";
         let records = parse_fasta(&input[..]);
         assert_eq!(records.len(), 1);
 
-        let encoded: Vec<u8> = records[0]
-            .sequence
-            .iter()
-            .map(|&b| aminoacid_to_ncbistdaa(b))
-            .collect();
+        let encoded = crate::encoding::encode_ncbistdaa_sequence(&records[0].sequence);
         // M=12, K=10, F=6, L=11, A=1, G=7
         assert_eq!(encoded, vec![12, 10, 6, 11, 1, 7]);
     }

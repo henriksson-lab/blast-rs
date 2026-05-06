@@ -180,27 +180,6 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
     )?;
     writeln!(writer)?;
 
-    let blastna_to_char = |b: u8| -> char {
-        match b {
-            0 => 'A',
-            1 => 'C',
-            2 => 'G',
-            3 => 'T',
-            4 => 'R',
-            5 => 'Y',
-            6 => 'M',
-            7 => 'K',
-            8 => 'W',
-            9 => 'S',
-            10 => 'B',
-            11 => 'D',
-            12 => 'H',
-            13 => 'V',
-            14 => 'N',
-            _ => '-',
-        }
-    };
-
     let line_width = line_width.max(1);
     let coord_width = q_start
         .abs()
@@ -227,7 +206,11 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
         write!(writer, "Query  {:<width$}  ", qi, width = coord_width)?;
         for i in 0..chunk {
             if pos + i < query_seq.len() {
-                write!(writer, "{}", blastna_to_char(query_seq[pos + i]))?;
+                write!(
+                    writer,
+                    "{}",
+                    crate::encoding::blastna_to_iupacna_char(query_seq[pos + i])
+                )?;
             }
         }
         writeln!(writer, "  {}", qi + chunk as i32 - 1)?;
@@ -252,7 +235,11 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
         write!(writer, "Sbjct  {:<width$}  ", si, width = coord_width)?;
         for i in 0..chunk {
             if pos + i < subject_seq.len() {
-                write!(writer, "{}", blastna_to_char(subject_seq[pos + i]))?;
+                write!(
+                    writer,
+                    "{}",
+                    crate::encoding::blastna_to_iupacna_char(subject_seq[pos + i])
+                )?;
             }
         }
         let s_end_pos = si + s_dir * (chunk as i32 - 1);

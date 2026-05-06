@@ -46,7 +46,7 @@ But:
 - **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `sstrand`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, BTOP, commented tabular, CSV, and all standard columns
 - FASTA-vs-FASTA search (`--subject` mode) without pre-built database
 - Multi-threaded search via rayon
-- **711 passing release tests**: 406 library unit tests + 13 CLI unit tests + 287 integration tests + 4 stress tests + 1 harness test, plus ignored parity tests
+- **Broad passing test coverage**: latest local verification covers 552 library unit tests, 39 CLI unit tests, 565 integration tests, 4 stress tests, and 1 doc test, plus ignored large-fixture parity tests
 
 ## Installation
 
@@ -142,7 +142,7 @@ blast-cli blastn --query query.fa --db mydb \
 | `--db` | | BLAST database path (without extension) |
 | `--subject` | | Subject FASTA file (alternative to `--db`) |
 | `--out` | stdout | Output file |
-| `--outfmt` | `6` | Output format. `blastn` supports 0=pairwise, 5=XML, 6=tabular, 7=commented tabular, 10=CSV, 17=SAM. `blastp`, `blastx`, and `tblastx` also support parity-tested pairwise/XML/commented tabular subsets; `tblastn` supports pairwise/commented tabular subsets. Unsupported formats fail explicitly. |
+| `--outfmt` | `6` | Output format. `blastn` supports 0=pairwise, 5=XML, 6=tabular, 7=commented tabular, 10=CSV, 17=SAM. `blastp`, `blastx`, `tblastn`, and `tblastx` also support parity-tested pairwise/XML/commented tabular subsets. Unsupported formats fail explicitly. |
 | `--evalue` | `10.0` | E-value threshold |
 | `--word_size` | `11` | Word size for initial seed |
 | `--reward` | `1` | Match reward |

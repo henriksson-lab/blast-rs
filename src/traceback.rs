@@ -18,24 +18,6 @@
 //! `blast_gapalign.c:363-371` and `gapinfo.h:45-51`.
 
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
-use std::time::Instant;
-
-// Tracehash emission for `align_ex` — dev-only, used for parity debugging
-// against NCBI's `ALIGN_EX` in `blast_gapalign.c`. See
-// `tests/parity/align_ex.md` for the C side's matching emission schema.
-#[cfg(test)]
-pub(crate) static ALIGN_EX_TRACEHASH_ENABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-fn trace_target_bounds() -> Option<(i32, i32, i32, i32)> {
-    let raw = std::env::var("BLAST_RS_TRACE_TARGET").ok()?;
-    let mut parts = raw.split(',').map(str::trim);
-    let qs = parts.next()?.parse().ok()?;
-    let qe = parts.next()?.parse().ok()?;
-    let ss = parts.next()?.parse().ok()?;
-    let se = parts.next()?.parse().ok()?;
-    Some((qs, qe, ss, se))
-}
 
 /// Perform traceback alignment between query and subject sequences.
 /// This is the full dynamic programming alignment that produces
@@ -285,12 +267,6 @@ pub(crate) fn align_ex(
     mut x_dropoff: i32,
     reverse: bool,
 ) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
-    let profile_enabled = std::env::var_os("BLAST_RS_PROFILE").is_some();
-    let align_start = if profile_enabled {
-        Some(Instant::now())
-    } else {
-        None
-    };
     let gap_oe = gap_open + gap_extend;
     if x_dropoff < gap_oe {
         x_dropoff = gap_oe;
@@ -345,19 +321,13 @@ pub(crate) fn align_ex(
     let mut first_b = 0usize;
     let mut a_off = 0usize;
     let mut b_off = 0usize;
-    let mut row_count = 0usize;
-    let mut max_b_size = b_size;
-    let mut max_row_script_len = scripts[0].len();
 
     for ai in 1..=m {
-        row_count += 1;
         let a_letter = if reverse { a[m - ai] } else { a[ai] };
         let mrow = &matrix[a_letter as usize & 0x0F];
 
         let row_start = first_b;
         let mut row_script = vec![0u8; (b_size - row_start) + extra + 10];
-        max_b_size = max_b_size.max(b_size);
-        max_row_script_len = max_row_script_len.max(row_script.len());
         let mut sc = MININT;
         let mut sgr = MININT; // score_gap_row
         let mut last_b = first_b;
@@ -442,35 +412,6 @@ pub(crate) fn align_ex(
             }
         }
 
-        // Dev-only tracehash emission: one event per DP row. The C-side
-        // `ALIGN_EX` should emit the same-named event with the same fields
-        // in the same order for a row-by-row diff.
-        #[cfg(test)]
-        if ALIGN_EX_TRACEHASH_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-            let mut th = tracehash::th_call!("align_ex_row");
-            th.input_u64(ai as u64);
-            th.input_u64(first_b as u64);
-            th.input_u64(last_b as u64);
-            th.input_u64(b_size as u64);
-            th.input_i64(best_score as i64);
-            th.input_i64(a_off as i64);
-            th.input_i64(b_off as i64);
-            // score_array slice: pack best/best_gap as interleaved i32 little-endian.
-            let mut buf = Vec::with_capacity(b_size * 8);
-            for cell in &sa[..b_size.min(sa.len())] {
-                buf.extend_from_slice(&cell.best.to_le_bytes());
-                buf.extend_from_slice(&cell.best_gap.to_le_bytes());
-            }
-            th.input_bytes(&buf);
-            // Only the [first_b..b_size) range of the row script is written
-            // inside the inner loop; the prefix [0..first_b) is uninitialized
-            // in NCBI (pointer arithmetic trick on `edit_script_row`). Hash
-            // the same range on both sides so the two traces are comparable.
-            let used = b_size.saturating_sub(row_start).min(row_script.len());
-            th.input_bytes(&row_script[..used]);
-            th.finish();
-        }
-
         if first_b >= b_size {
             scripts.push(row_script);
             row_starts.push(row_start);
@@ -510,12 +451,8 @@ pub(crate) fn align_ex(
     let mut ai = a_off;
     let mut bi = b_off;
     let mut cur_script = SCRIPT_SUB;
-    let mut traceback_steps = 0usize;
-    #[cfg(test)]
-    let mut tb_step: u64 = 0;
 
     while ai > 0 || bi > 0 {
-        traceback_steps += 1;
         if ai >= scripts.len() {
             break;
         }
@@ -546,17 +483,6 @@ pub(crate) fn align_ex(
             }
             _ => s & SCRIPT_OP_MASK,
         };
-
-        #[cfg(test)]
-        if ALIGN_EX_TRACEHASH_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-            let mut th = tracehash::th_call!("align_ex_tb");
-            th.input_u64(tb_step);
-            th.input_u64(ai as u64);
-            th.input_u64(bi as u64);
-            th.input_u64(cur_script as u64);
-            th.finish();
-            tb_step += 1;
-        }
 
         let op = script_to_op(cur_script);
         match cur_script & SCRIPT_OP_MASK {
@@ -590,62 +516,19 @@ pub(crate) fn align_ex(
             ops.push((op, 1));
         }
     }
-    if let Some(start) = align_start {
-        eprintln!(
-            "[blastn-profile] align_ex reverse={} m={} n={} xdrop={} rows={} max_b_size={} max_row_script_len={} traceback_steps={} best_score={} total_ms={}",
-            reverse,
-            m,
-            n,
-            x_dropoff,
-            row_count,
-            max_b_size,
-            max_row_script_len,
-            traceback_steps,
-            best_score,
-            start.elapsed().as_millis()
-        );
-    }
-
     (best_score, a_off, b_off, ops)
 }
 
 /// Build full BLASTNA scoring matrix — verbatim port of NCBI
 /// `BlastScoreBlkNuclMatrixCreate` (`blast_stat.c:1060`).
 pub fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
-    use crate::encoding::{BLASTNA_SIZE, BLASTNA_TO_NCBI4NA};
-    const K_NUMBER_NON_AMBIG_BP: usize = 4;
+    use crate::encoding::{blastna_pair_score, BLASTNA_SIZE};
 
     let mut matrix = [[0i32; 16]; BLASTNA_SIZE];
 
-    // `degeneracy[i]` counts how many unambiguous bases (A,C,G,T) the
-    // residue `i` can represent. NCBI `blast_stat.c:1087-1099`.
-    let mut degeneracy = [0i32; BLASTNA_SIZE];
-    for index1 in 0..K_NUMBER_NON_AMBIG_BP {
-        degeneracy[index1] = 1;
-    }
-    for index1 in K_NUMBER_NON_AMBIG_BP..BLASTNA_SIZE {
-        let mut degen = 0;
-        for index2 in 0..K_NUMBER_NON_AMBIG_BP {
-            if BLASTNA_TO_NCBI4NA[index1] & BLASTNA_TO_NCBI4NA[index2] != 0 {
-                degen += 1;
-            }
-        }
-        degeneracy[index1] = degen;
-    }
-
     for index1 in 0..BLASTNA_SIZE {
         for index2 in index1..BLASTNA_SIZE {
-            let s = if BLASTNA_TO_NCBI4NA[index1] & BLASTNA_TO_NCBI4NA[index2] != 0 {
-                // NCBI `blast_stat.c:1107`:
-                //   (Int4)BLAST_Nint((double)((degeneracy[index2]-1)*penalty + reward)
-                //                    / (double)degeneracy[index2])
-                crate::math::nint(
-                    ((degeneracy[index2] - 1) * penalty + reward) as f64
-                        / degeneracy[index2] as f64,
-                ) as i32
-            } else {
-                penalty
-            };
+            let s = blastna_pair_score(index1 as u8, index2 as u8, reward, penalty);
             matrix[index1][index2] = s;
             if index1 != index2 {
                 matrix[index2][index1] = s;
@@ -709,12 +592,6 @@ pub fn blast_gapped_score_only(
     };
 
     score_l + score_r
-}
-
-#[inline]
-fn unpack_ncbi2na_base(packed: &[u8], pos: usize) -> u8 {
-    let byte = packed[pos >> 2];
-    (byte >> (6 - 2 * (pos & 3))) & 0x03
 }
 
 /// Score-only port of BLASTN's packed-subject preliminary DP path
@@ -1052,7 +929,7 @@ fn gapped_score_one_dir_packed_subject(
     let mut first_b = 0usize;
 
     for ai in 1..=m {
-        let subj_base = unpack_ncbi2na_base(
+        let subj_base = crate::encoding::ncbi2na_base_at(
             subject_packed,
             subject_base_offset + if reverse { m - ai } else { ai - 1 },
         );
@@ -1430,25 +1307,6 @@ pub fn blast_gapped_align(
     // ALIGN_EX traceback ended on a gap state.
     let query_end = seed_q + qr + 1;
     let subject_end = seed_s + sr + 1;
-    if let Some((qs, qe, ss, se)) = trace_target_bounds() {
-        let q_start_i = q_start as i32;
-        let s_start_i = s_start as i32;
-        let q_end_i = query_end as i32;
-        let s_end_i = subject_end as i32;
-        if q_start_i <= qe && q_end_i >= qs && s_start_i <= se && s_end_i >= ss {
-            eprintln!(
-                "[traceback-combine] seed=({}, {}) left_score={} right_score={} total={} left_ops={:?} right_ops={:?} combined={:?}",
-                seed_q,
-                seed_s,
-                score_l,
-                score_r,
-                total_score,
-                left_ops,
-                right_ops,
-                esp.ops
-            );
-        }
-    }
 
     Some(TracebackResult {
         score: total_score,
@@ -1463,145 +1321,36 @@ pub fn blast_gapped_align(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::pack_ncbi2na_bases;
 
     #[test]
-    #[ignore = "parameter-sweep probe: find (seed, x_dropoff) that reproduces NCBI's BTOP"]
-    fn probe_align_ex_adjacent_del_ins_params() {
-        fn encode(s: &[u8]) -> Vec<u8> {
-            s.iter()
-                .map(|&c| match c {
-                    b'A' => 0,
-                    b'C' => 1,
-                    b'G' => 2,
-                    b'T' => 3,
-                    _ => 15,
-                })
-                .collect()
-        }
-        let q = encode(
-            b"ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAGGGTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT",
-        );
-        let s = encode(
-            b"ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT",
-        );
-        let seeds = [0, 10, 17, 20, 27, 30, 34];
-        let xdrops = [10, 12, 14, 16, 18, 20, 22, 25, 30, 35, 40, 50];
-        // NCBI reference: [(Sub, 35), (Ins, 5), (Sub, 42)]
-        for &sp in &seeds {
-            for &x in &xdrops {
-                if let Some(rr) = blast_gapped_align(&q, &s, sp, sp, 1, -3, 5, 2, x) {
-                    let ops: Vec<_> = rr.edit_script.ops.clone();
-                    // Collapse consecutive same-op runs to match BTOP shape.
-                    let mut collapsed: Vec<(GapAlignOpType, i32)> = Vec::new();
-                    for (op, n) in ops {
-                        if let Some(last) = collapsed.last_mut() {
-                            if last.0 == op {
-                                last.1 += n;
-                                continue;
-                            }
-                        }
-                        collapsed.push((op, n));
-                    }
-                    let is_ncbi = collapsed.len() == 3
-                        && collapsed[0] == (GapAlignOpType::Sub, 35)
-                        && collapsed[1] == (GapAlignOpType::Ins, 5)
-                        && collapsed[2] == (GapAlignOpType::Sub, 42);
-                    eprintln!(
-                        "seed={:2} xdrop={:3} score={} {} ops={:?}",
-                        sp,
-                        x,
-                        rr.score,
-                        if is_ncbi { "== NCBI" } else { "" },
-                        collapsed,
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "parity probe: emits a tracehash-rs trace for comparison against NCBI ALIGN_EX"]
-    fn trace_align_ex_adjacent_del_ins() {
-        // This test dumps the DP state of each row from blast_gapped_align
-        // into a tracehash-rs trace file so it can be diffed row-by-row
-        // against an NCBI C build that emits the same `align_ex_row` events.
-        // Run with:
-        //   TRACEHASH_OUT=/tmp/rust.tsv TRACEHASH_SIDE=rust \
-        //   TRACEHASH_RUN_ID=adj_del_ins \
-        //   cargo test --release --lib trace_align_ex_adjacent_del_ins \
-        //     -- --ignored --nocapture
-        fn encode(s: &[u8]) -> Vec<u8> {
-            s.iter()
-                .map(|&c| match c {
-                    b'A' => 0,
-                    b'C' => 1,
-                    b'G' => 2,
-                    b'T' => 3,
-                    _ => 15,
-                })
-                .collect()
-        }
-        let q = encode(
-            b"ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAGGGTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT",
-        );
-        let s = encode(
-            b"ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT",
-        );
-        ALIGN_EX_TRACEHASH_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
-        let r =
-            blast_gapped_align(&q, &s, 17, 17, 1, -3, 5, 2, 16).expect("alignment should succeed");
-        ALIGN_EX_TRACEHASH_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
-        eprintln!(
-            "alignment: score={} q=[{}..{}] s=[{}..{}] ops={:?}",
-            r.score, r.query_start, r.query_end, r.subject_start, r.subject_end, r.edit_script.ops,
-        );
-    }
-
-    #[test]
-    #[ignore = "low-level reproducer: output depends on which ungapped HSP's seed is picked. \
-                The end-to-end parity test `blastn_subject_ncbi_parity_gapped_traceback_edge_matrix` \
-                covers this fixture via the CLI path and is the authoritative regression guard."]
     fn test_adjacent_del_ins_gap_position_matches_ncbi() {
         // Historic reproducer (adjacent_del_ins). NCBI places the 5-gap block
         // after position 35 of the query (BTOP "35G-G-G-T-A-42"). Fixed on
         // 2026-04-18 by routing `x_dropoff_final` through the `_with_xdrops`
-        // wrappers; see TODO.md for the investigation.
+        // wrappers.
         //
         // At this low level the output depends on which seed from which
-        // ungapped HSP you pick: seed=10 (first HSP, diagonal 0) yields
-        // 33+5+44; seed=(81,76) (second HSP, diagonal 5) yields 35+5+42.
-        // The CLI picks the latter after dedup, so end-to-end matches NCBI.
+        // ungapped HSP you pick: early diagonal-0 seeds can yield 33+5+44,
+        // while the CLI's selected seed for the NCBI-shaped HSP yields
+        // 35+5+42.
         //
         // Sequences from tests/integration.rs:3341-3345.
-        fn encode(s: &[u8]) -> Vec<u8> {
-            s.iter()
-                .map(|&c| match c {
-                    b'A' => 0,
-                    b'C' => 1,
-                    b'G' => 2,
-                    b'T' => 3,
-                    _ => 15,
-                })
-                .collect()
-        }
-        let q = encode(
+        let q = crate::encoding::encode_blastna_sequence(
             b"ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAGGGTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT",
         );
-        let s = encode(
+        let s = crate::encoding::encode_blastna_sequence(
             b"ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT",
         );
         assert_eq!(q.len(), 82);
         assert_eq!(s.len(), 77);
-        // Seed = 10, matching what `blast_get_offsets_for_gapped_alignment`
-        // (port of NCBI `BlastGetOffsetsForGappedAlignment`) returns for
-        // this uniform-match ungapped HSP: the first sliding-window maxes
-        // at index 10 (right edge of window [0..11]), strict `>` keeps the
-        // first max.
+        // Seed = 34, matching the ungapped HSP that survives CLI dedup for
+        // this fixture and reproduces NCBI's BTOP.
         // x_dropoff=50 models blastn-short `xdrop_gap_final=100` bits after
         // `BlastExtensionParametersNew` converts with lambda≈1.374:
         // `(int)(100 * ln2 / 1.374) = 50`.
-        let seed_q = 10;
-        let seed_s = 10;
+        let seed_q = 34;
+        let seed_s = 34;
         let r = blast_gapped_align(&q, &s, seed_q, seed_s, 1, -3, 5, 2, 50)
             .expect("alignment should succeed");
         assert_eq!(r.score, 62, "score should be 62");
@@ -1816,10 +1565,6 @@ mod tests {
         let r = blast_gapped_align(&q, &s, 4, 4, 1, -3, 5, 2, 30);
         assert!(r.is_some(), "Should find alignment");
         let r = r.unwrap();
-        eprintln!(
-            "blast_gapped: score={} q={}..{} s={}..{} ops={:?}",
-            r.score, r.query_start, r.query_end, r.subject_start, r.subject_end, r.edit_script.ops
-        );
         assert!(r.score > 0, "score={}", r.score);
         // Check edit script has content
         let total_ops: i32 = r.edit_script.ops.iter().map(|(_, n)| *n).sum();
@@ -1832,16 +1577,9 @@ mod tests {
 
     #[test]
     fn test_blast_gapped_align_exact_match_extends_to_edges() {
-        let q = b"GAATCCATGCTGTGGGCCAGCAAGAGTTAAGGTGCTCATGGTTTTGAGAAAACATCTGAGGACTCTGACAGCACTCTCCCATCCTTGGTCTCCACAGTCT"
-            .iter()
-            .map(|b| match b {
-                b'A' => 0,
-                b'C' => 1,
-                b'G' => 2,
-                b'T' => 3,
-                _ => 15,
-            })
-            .collect::<Vec<u8>>();
+        let q = crate::encoding::encode_blastna_sequence(
+            b"GAATCCATGCTGTGGGCCAGCAAGAGTTAAGGTGCTCATGGTTTTGAGAAAACATCTGAGGACTCTGACAGCACTCTCCCATCCTTGGTCTCCACAGTCT",
+        );
         let r =
             blast_gapped_align(&q, &q, 50, 50, 1, -3, 5, 2, 20).expect("exact match should align");
         assert_eq!(r.score, 100);
@@ -1862,10 +1600,6 @@ mod tests {
 
         let r = blast_gapped_align(&q, &s, 12, 12, 2, -3, 3, 1, 30)
             .expect("single-gap alignment should succeed");
-        eprintln!(
-            "blast_gapped_gap: score={} q={}..{} s={}..{} ops={:?}",
-            r.score, r.query_start, r.query_end, r.subject_start, r.subject_end, r.edit_script.ops
-        );
         assert!(
             r.edit_script.ops.iter().any(|(op, _)| matches!(
                 op,
@@ -2055,19 +1789,11 @@ mod tests {
         assert!(score >= 8, "should get at least 4 bases * 2, got {}", score);
     }
 
-    fn pack_ncbi2na(bases: &[u8]) -> Vec<u8> {
-        let mut packed = vec![0u8; bases.len().div_ceil(4)];
-        for (i, &base) in bases.iter().enumerate() {
-            packed[i >> 2] |= (base & 0x03) << (6 - 2 * (i & 3));
-        }
-        packed
-    }
-
     #[test]
     fn test_gapped_score_one_dir_packed_subject_matches_decoded_basic() {
         let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let subject = vec![0u8, 1, 2, 3, 0, 1, 3, 3, 0, 1, 2, 3];
-        let packed = pack_ncbi2na(&subject);
+        let packed = pack_ncbi2na_bases(&subject);
         let matrix = build_blastna_matrix(1, -3);
         let left_decoded =
             gapped_score_one_dir(&query[..6], &subject[..6], 6, 6, &matrix, 7, 2, 12, true);

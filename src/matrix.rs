@@ -1,6 +1,9 @@
 //! Scoring matrices and frequency ratios for BLAST.
 //! Rust equivalent of matrix_freq_ratios.c and parts of blast_stat.c.
 
+#[path = "matrix_freq_ratios_generated.rs"]
+mod matrix_freq_ratios_generated;
+
 /// Standard amino acid alphabet size. Aliases `encoding::BLASTAA_SIZE`
 /// (NCBI `blast_encoding.h:BLASTAA_SIZE = 28`) for legacy call sites
 /// that import from `matrix` rather than `encoding`.
@@ -186,6 +189,71 @@ pub static NT_FREQUENCIES: [f64; 4] = [0.25, 0.25, 0.25, 0.25];
 /// Row/column order: *ABCDEFGHIKLMNPQRSTVWXYZU*gap*J
 pub fn get_blosum62_freq_ratios() -> [[f64; AA_SIZE]; AA_SIZE] {
     BLOSUM62_FREQ_RATIOS
+}
+
+/// Rust equivalent of NCBI `SFreqRatios` from `matrix_freq_ratios.h`.
+#[derive(Debug, Clone)]
+pub struct MatrixFreqRatios {
+    pub data: [[f64; AA_SIZE]; AA_SIZE],
+    pub bit_scale_factor: i32,
+}
+
+/// Frequency-ratio matrix for NCBI's standard protein matrices.
+///
+/// Mirrors `_PSIMatrixFrequencyRatiosNew` for the matrix names whose tables are
+/// ported into this crate. `BLOSUM62_20A` and `BLOSUM62_20B` are NCBI's scaled
+/// BLOSUM62 variants.
+pub fn get_matrix_freq_ratios_with_scale(matrix_name: &str) -> Option<MatrixFreqRatios> {
+    let (mut ratios, bit_scale_factor) = if matrix_name.eq_ignore_ascii_case("BLOSUM62")
+        || matrix_name.eq_ignore_ascii_case("BLOSUM62_20")
+        || matrix_name.is_empty()
+    {
+        (BLOSUM62_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
+        (matrix_freq_ratios_generated::BLOSUM45_FREQ_RATIOS, 3)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM50") {
+        (matrix_freq_ratios_generated::BLOSUM50_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM80") {
+        (matrix_freq_ratios_generated::BLOSUM80_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM90") {
+        (matrix_freq_ratios_generated::BLOSUM90_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("PAM30") {
+        (matrix_freq_ratios_generated::PAM30_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("PAM70") {
+        (matrix_freq_ratios_generated::PAM70_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("PAM250") {
+        (matrix_freq_ratios_generated::PAM250_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62_20A") {
+        (BLOSUM62_FREQ_RATIOS, 2)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62_20B") {
+        (BLOSUM62_FREQ_RATIOS, 2)
+    } else {
+        return None;
+    };
+
+    let multiplier = if matrix_name.eq_ignore_ascii_case("BLOSUM62_20A") {
+        Some(0.9666)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62_20B") {
+        Some(0.9344)
+    } else {
+        None
+    };
+    if let Some(multiplier) = multiplier {
+        for row in &mut ratios {
+            for cell in row {
+                *cell *= multiplier;
+            }
+        }
+    }
+    Some(MatrixFreqRatios {
+        data: ratios,
+        bit_scale_factor,
+    })
+}
+
+/// Frequency-ratio matrix for NCBI's standard protein matrices.
+pub fn get_matrix_freq_ratios(matrix_name: &str) -> Option<[[f64; AA_SIZE]; AA_SIZE]> {
+    get_matrix_freq_ratios_with_scale(matrix_name).map(|ratios| ratios.data)
 }
 
 /// Verbatim NCBI BLOSUM62_FREQRATIOS[BLASTAA_SIZE][BLASTAA_SIZE]
@@ -1881,9 +1949,10 @@ mod tests {
     #[test]
     fn test_blosum62_has_positive_diagonal() {
         // The BLOSUM62 matrix should have positive self-scores for all standard
-        // amino acids. NCBIstdaa indices 1-20 are the standard 20 amino acids.
+        // amino acids. NCBIstdaa reserves 21 for X, so Y lives at 22.
         // If this test fails, the BLOSUM62 matrix is not properly initialized.
-        for i in 1..=20 {
+        for &i in crate::encoding::NCBISTDAA_STANDARD_RESIDUES.iter() {
+            let i = i as usize;
             assert!(
                 BLOSUM62[i][i] > 0,
                 "BLOSUM62 diagonal for NCBIstdaa index {} should be positive, got {}. \
@@ -1941,6 +2010,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_matrix_freq_ratios_bit_scale_factors_match_ncbi() {
+        let b45 = get_matrix_freq_ratios_with_scale("BLOSUM45").expect("BLOSUM45 ratios");
+        let b62 = get_matrix_freq_ratios_with_scale("BLOSUM62").expect("BLOSUM62 ratios");
+        let pam30 = get_matrix_freq_ratios_with_scale("PAM30").expect("PAM30 ratios");
+
+        assert_eq!(b45.bit_scale_factor, 3);
+        assert_eq!(b62.bit_scale_factor, 2);
+        assert_eq!(pam30.bit_scale_factor, 2);
+        assert_eq!(b45.data[1][1], 2.95043377);
+        assert_eq!(pam30.data[1][1], 7.78912912);
     }
 
     #[test]

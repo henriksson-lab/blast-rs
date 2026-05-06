@@ -42,12 +42,6 @@ const PSEUDO_SMALL_INITIAL: f64 = 5.5;
 /// Arbitrary constant for columns with zero observations.
 const ZERO_OBS_PSEUDO: f64 = 30.0;
 
-/// NCBIstdaa code for gap.
-const GAP_RESIDUE: u8 = 0;
-
-/// NCBIstdaa code for X (unknown).
-const X_RESIDUE: u8 = 21;
-
 /// Mapping from the 20-element effective alphabet index to NCBIstdaa residue
 /// codes. This is the `charOrder` array from the NCBI C code
 /// (s_fillColumnProbabilities in blast_psi_priv.c).
@@ -76,11 +70,9 @@ const CHAR_ORDER: [u8; EFFECTIVE_ALPHABET] = [
 
 /// The 20 standard amino acid residue codes in NCBIstdaa encoding.
 /// These are the residues that participate in scoring (indices 1..=20 and 22,
-/// but excluding 21=X, so we list the actual standard 20).
+/// but excluding X, so we list the actual standard 20).
 #[cfg(test)]
-const STD_RESIDUES: [u8; EFFECTIVE_ALPHABET] = [
-    1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22,
-];
+const STD_RESIDUES: [u8; EFFECTIVE_ALPHABET] = crate::encoding::NCBISTDAA_STANDARD_RESIDUES;
 
 /// BLOSUM62 underlying frequency ratios (28x28, NCBIstdaa order).
 /// Copied from matrix_freq_ratios.c in the NCBI BLAST C core.
@@ -316,17 +308,17 @@ static BLOSUM62_FREQ_RATIOS: [[f64; AA_SIZE]; AA_SIZE] = [
 /// The standard 20 amino acid background probabilities from Robinson & Robinson
 /// are placed at their NCBIstdaa positions; all other positions are 0.
 ///
-/// The AA_FREQUENCIES in matrix.rs are in alphabetical order (A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y),
-/// corresponding to NCBIstdaa codes [1,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,22].
+/// The AA_FREQUENCIES in matrix.rs are in alphabetical order
+/// (A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y), corresponding to
+/// [`crate::encoding::NCBISTDAA_STANDARD_RESIDUES`].
 fn std_prob_ncbistdaa() -> [f64; AA_SIZE] {
     use crate::matrix::AA_FREQUENCIES;
     let mut prob = [0.0f64; AA_SIZE];
-    // Map from AA_FREQUENCIES (alphabetical) to NCBIstdaa codes
-    let aa_to_stdaa: [usize; 20] = [
-        1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22,
-    ];
-    for (i, &code) in aa_to_stdaa.iter().enumerate() {
-        prob[code] = AA_FREQUENCIES[i];
+    for (freq, &code) in AA_FREQUENCIES
+        .iter()
+        .zip(crate::encoding::NCBISTDAA_STANDARD_RESIDUES.iter())
+    {
+        prob[code as usize] = *freq;
     }
     prob
 }
@@ -382,8 +374,10 @@ impl Pssm {
             return None;
         }
         let row = &self.scores[position];
-        // Only consider standard amino acids (indices 1-20 in NCBIstdaa)
-        let (best_aa, _) = (1u8..=20)
+        // Only consider the 20 standard amino acids in NCBIstdaa.
+        let (best_aa, _) = crate::encoding::NCBISTDAA_STANDARD_RESIDUES
+            .iter()
+            .copied()
             .map(|aa| (aa, row[aa as usize]))
             .max_by_key(|&(_, s)| s)?;
         Some(best_aa)
@@ -391,7 +385,7 @@ impl Pssm {
 
     /// Update the PSSM from a set of aligned sequences (PSI-BLAST iteration).
     ///
-    /// This implements the full NCBI PSI-BLAST PSSM computation:
+    /// This implements the NCBI PSI-BLAST PSSM computation for BLOSUM62:
     ///   1. Henikoff position-based sequence weighting
     ///   2. Weighted residue frequency computation
     ///   3. Pseudocount blending via BLOSUM62 frequency ratios
@@ -400,24 +394,57 @@ impl Pssm {
     /// # Arguments
     /// * `aligned_seqs` - Aligned subject sequences in NCBIstdaa encoding.
     ///   Each sequence should be the same length as the query (self.length).
-    ///   Gaps are represented as 0, unknown as 21.
+    ///   Gaps are represented as [`crate::encoding::NCBISTDAA_GAP`], unknown
+    ///   as [`crate::encoding::NCBISTDAA_X`].
     /// * `bg_freqs` - Background amino acid frequencies (20 values in alphabetical
     ///   order: A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y). Used for reference
     ///   but the actual NCBIstdaa-indexed probabilities are computed internally.
-    /// * `_pseudocount_weight` - Legacy parameter (ignored; column-specific
-    ///   pseudocounts are computed automatically per NCBI algorithm).
+    /// * `pseudocount_weight` - Fixed pseudocount weight when positive;
+    ///   non-positive values use NCBI column-specific pseudocounts.
     pub fn update_from_alignment(
         &mut self,
         aligned_seqs: &[Vec<u8>],
         _bg_freqs: &[f64; 20],
-        _pseudocount_weight: f64,
+        pseudocount_weight: f64,
+    ) {
+        self.update_from_alignment_with_matrix_and_pseudocount(
+            aligned_seqs,
+            "BLOSUM62",
+            (pseudocount_weight > 0.0).then_some(pseudocount_weight),
+        );
+    }
+
+    /// Update the PSSM using frequency-ratio and ungapped lambda tables for the
+    /// named NCBI protein matrix.
+    pub fn update_from_alignment_with_matrix(
+        &mut self,
+        aligned_seqs: &[Vec<u8>],
+        matrix_name: &str,
+    ) {
+        self.update_from_alignment_with_matrix_and_pseudocount(aligned_seqs, matrix_name, None);
+    }
+
+    /// Update the PSSM with a named matrix and optional fixed pseudocount.
+    ///
+    /// When `fixed_pseudocount` is `None` or non-positive, the NCBI
+    /// column-specific pseudocount method is used.
+    pub fn update_from_alignment_with_matrix_and_pseudocount(
+        &mut self,
+        aligned_seqs: &[Vec<u8>],
+        matrix_name: &str,
+        fixed_pseudocount: Option<f64>,
     ) {
         if aligned_seqs.is_empty() {
             return;
         }
 
         let std_prob = std_prob_ncbistdaa();
-        let lambda = 0.3176; // BLOSUM62 ungapped lambda
+        let freq_ratios = crate::matrix::get_matrix_freq_ratios_with_scale(matrix_name)
+            .unwrap_or_else(|| crate::matrix::MatrixFreqRatios {
+                data: BLOSUM62_FREQ_RATIOS,
+                bit_scale_factor: 2,
+            });
+        let lambda = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name).lambda;
 
         // Step 1: Compute Henikoff position-based sequence weights
         let match_weights = compute_sequence_weights_and_match_weights(aligned_seqs, self.length);
@@ -439,9 +466,11 @@ impl Pssm {
             let observations =
                 compute_effective_observations(aligned_seqs, pos, self.length, &std_prob);
 
-            // Compute column-specific pseudocounts
-            let pseudo_weight =
-                compute_column_pseudocounts(&match_weights[pos], &std_prob, observations);
+            let pseudo_weight = fixed_pseudocount
+                .filter(|weight| *weight > 0.0)
+                .unwrap_or_else(|| {
+                    compute_column_pseudocounts(&match_weights[pos], &std_prob, observations)
+                });
 
             // Compute frequency ratios with pseudocount blending
             for r in 0..AA_SIZE {
@@ -453,7 +482,7 @@ impl Pssm {
                 // pseudo = beta * sum_i(match_weights[pos][i] * freq_ratio[r][i])
                 let mut pseudo = 0.0;
                 for i in 0..AA_SIZE {
-                    pseudo += match_weights[pos][i] * BLOSUM62_FREQ_RATIOS[r][i];
+                    pseudo += match_weights[pos][i] * freq_ratios.data[r][i];
                 }
                 pseudo *= pseudo_weight;
 
@@ -486,27 +515,32 @@ impl Pssm {
 
 /// Compute Henikoff position-based sequence weights and match weights.
 ///
-/// For each column, count distinct residues (ignoring gaps and X),
-/// then weight each sequence's contribution inversely proportional to
-/// the number of distinct residues and count of that residue type.
-/// Finally, normalize weights per column so they sum to 1, and
-/// accumulate into match_weights[pos][residue].
+/// Each aligned row first receives one Henikoff sequence weight by summing
+/// `1 / (distinct residues in column * count of this residue in column)` over
+/// the row's aligned extent. The final per-column match weights are then the
+/// normalized sequence weights for rows that contain a standard residue in that
+/// column.
 fn compute_sequence_weights_and_match_weights(
     aligned_seqs: &[Vec<u8>],
     query_length: usize,
 ) -> Vec<[f64; AA_SIZE]> {
     let num_seqs = aligned_seqs.len();
     let mut match_weights = vec![[0.0f64; AA_SIZE]; query_length];
+    let extents: Vec<Option<(usize, usize)>> = aligned_seqs
+        .iter()
+        .map(|seq| aligned_sequence_extent(seq, query_length))
+        .collect();
+    let mut seq_weights = vec![0.0f64; num_seqs];
 
     for pos in 0..query_length {
         // Count occurrences of each residue at this position
         let mut residue_counts = [0u32; AA_SIZE];
         let mut num_aligned = 0u32;
 
-        for seq in aligned_seqs.iter() {
-            if pos < seq.len() {
+        for (seq, extent) in aligned_seqs.iter().zip(extents.iter()) {
+            if extent_contains(*extent, pos) && pos < seq.len() {
                 let r = seq[pos] as usize;
-                if r < AA_SIZE {
+                if is_effective_residue(seq[pos]) {
                     residue_counts[r] += 1;
                     num_aligned += 1;
                 }
@@ -517,13 +551,10 @@ fn compute_sequence_weights_and_match_weights(
             continue;
         }
 
-        // Count distinct residues (excluding gap=0 and X=21)
+        // Count distinct standard residues.
         let mut num_distinct = 0u32;
         for r in 0..AA_SIZE {
-            if r == GAP_RESIDUE as usize || r == X_RESIDUE as usize {
-                continue;
-            }
-            if residue_counts[r] > 0 {
+            if residue_counts[r] > 0 && is_effective_residue(r as u8) {
                 num_distinct += 1;
             }
         }
@@ -533,19 +564,25 @@ fn compute_sequence_weights_and_match_weights(
             continue;
         }
 
-        // Compute per-sequence weight contributions for this column
-        // using simplified Henikoff weighting (without alignment extents)
-        let mut seq_weights = vec![0.0f64; num_seqs];
-        let mut weight_sum = 0.0;
-
         for (si, seq) in aligned_seqs.iter().enumerate() {
-            if pos < seq.len() {
+            if extent_contains(extents[si], pos) && pos < seq.len() {
                 let r = seq[pos] as usize;
-                if r < AA_SIZE && r != GAP_RESIDUE as usize && r != X_RESIDUE as usize {
+                if is_effective_residue(seq[pos]) {
                     let w = 1.0 / (num_distinct as f64 * residue_counts[r] as f64);
-                    seq_weights[si] = w;
-                    weight_sum += w;
+                    seq_weights[si] += w;
                 }
+            }
+        }
+    }
+
+    for pos in 0..query_length {
+        let mut weight_sum = 0.0;
+        for (si, seq) in aligned_seqs.iter().enumerate() {
+            if extent_contains(extents[si], pos)
+                && pos < seq.len()
+                && is_effective_residue(seq[pos])
+            {
+                weight_sum += seq_weights[si];
             }
         }
 
@@ -555,9 +592,9 @@ fn compute_sequence_weights_and_match_weights(
 
         // Normalize and accumulate match weights
         for (si, seq) in aligned_seqs.iter().enumerate() {
-            if pos < seq.len() && seq_weights[si] > 0.0 {
+            if extent_contains(extents[si], pos) && pos < seq.len() && seq_weights[si] > 0.0 {
                 let r = seq[pos] as usize;
-                if r < AA_SIZE {
+                if is_effective_residue(seq[pos]) {
                     let norm_weight = seq_weights[si] / weight_sum;
                     match_weights[pos][r] += norm_weight;
                 }
@@ -568,79 +605,183 @@ fn compute_sequence_weights_and_match_weights(
     match_weights
 }
 
+fn aligned_sequence_extent(seq: &[u8], query_length: usize) -> Option<(usize, usize)> {
+    let end = seq.len().min(query_length);
+    let left = seq
+        .iter()
+        .take(end)
+        .position(|&r| r != crate::encoding::NCBISTDAA_X)?;
+    let right = seq
+        .iter()
+        .take(end)
+        .rposition(|&r| r != crate::encoding::NCBISTDAA_X)?;
+    Some((left, right))
+}
+
+fn extent_contains(extent: Option<(usize, usize)>, pos: usize) -> bool {
+    extent.is_some_and(|(left, right)| left <= pos && pos <= right)
+}
+
 /// Compute the effective number of independent observations at a column.
 ///
-/// This is a simplified version of the NCBI s_effectiveObservations function.
-/// It estimates how many independent sequences contribute to a column based
-/// on the average number of distinct amino acid types seen.
+/// Port of NCBI `s_effectiveObservations` (`blast_psi_priv.c`). The C code
+/// uses the aligned block spanning `columnNumber`; the compact Rust MSA rows
+/// infer that block from non-X row extents.
 fn compute_effective_observations(
     aligned_seqs: &[Vec<u8>],
     pos: usize,
-    _query_length: usize,
+    query_length: usize,
     bg_prob: &[f64; AA_SIZE],
 ) -> f64 {
-    // Count distinct residues at this position (excluding gaps and X)
-    let mut residue_seen = [false; AA_SIZE];
-    let mut num_participating = 0u32;
-
-    for seq in aligned_seqs.iter() {
-        if pos < seq.len() {
-            let r = seq[pos] as usize;
-            if r < AA_SIZE && r != GAP_RESIDUE as usize && r != X_RESIDUE as usize {
-                residue_seen[r] = true;
-                num_participating += 1;
-            }
-        }
-    }
-
-    let num_distinct: usize = residue_seen.iter().filter(|&&v| v).count();
-
-    if num_distinct == 0 || num_participating == 0 {
+    if pos >= query_length {
         return 0.0;
     }
 
-    // Build the expno table: expected number of distinct amino acids
-    // as a function of number of independent trials
-    // expno[j] = EFFECTIVE_ALPHABET - sum_k(exp(j * ln(1 - bg_prob[k])))
-    // where bg_prob is over the 20 standard amino acids
     let bg20 = effective_bg_probs(bg_prob);
+    let expno = initialize_exp_num_observations(&bg20);
+    let Some((left, right)) = aligned_block_extents(aligned_seqs, pos, query_length) else {
+        return 0.0;
+    };
+    let pos_distinct_distrib = position_distinct_distribution(aligned_seqs, left, right);
+    let num_participating = num_participating_at_position(aligned_seqs, pos) as f64;
+    if num_participating <= 0.0 {
+        return 0.0;
+    }
 
-    // Find the number of independent observations that would give
-    // the observed number of distinct residues
-    let ave_distinct = num_distinct as f64;
-    let mut indep = 0.0f64;
+    let ave_distinct = average_top_half_distinct_count(&pos_distinct_distrib, left, right);
+    if ave_distinct <= 0.0 {
+        return 0.0;
+    }
 
-    // Binary/linear search through expected values
-    for j in 1..=MAX_IND_OBSERVATIONS {
-        let mut weighted_sum = 0.0;
-        for k in 0..EFFECTIVE_ALPHABET {
-            weighted_sum += (j as f64 * (1.0 - bg20[k]).ln()).exp();
-        }
-        let expected = EFFECTIVE_ALPHABET as f64 - weighted_sum;
+    let indep = interpolate_independent_observations(ave_distinct, &expno);
+    (indep.min(num_participating) - 1.0).max(0.0)
+}
 
-        if expected >= ave_distinct {
-            // Interpolate
-            if j == 1 {
-                indep = j as f64;
-            } else {
-                let mut prev_weighted_sum = 0.0;
-                for k in 0..EFFECTIVE_ALPHABET {
-                    prev_weighted_sum += ((j - 1) as f64 * (1.0 - bg20[k]).ln()).exp();
-                }
-                let prev_expected = EFFECTIVE_ALPHABET as f64 - prev_weighted_sum;
-                indep = j as f64 - (expected - ave_distinct) / (expected - prev_expected);
-            }
-            break;
-        }
-        if j == MAX_IND_OBSERVATIONS {
-            indep = MAX_IND_OBSERVATIONS as f64;
+fn aligned_block_extents(
+    aligned_seqs: &[Vec<u8>],
+    pos: usize,
+    query_length: usize,
+) -> Option<(usize, usize)> {
+    let mut left = usize::MAX;
+    let mut right = 0usize;
+    let mut found = false;
+
+    for seq in aligned_seqs {
+        let Some((seq_left, seq_right)) = aligned_sequence_extent(seq, query_length) else {
+            continue;
+        };
+        if seq_left <= pos && pos <= seq_right {
+            left = left.min(seq_left);
+            right = right.max(seq_right);
+            found = true;
         }
     }
 
-    // Cap at number of participating sequences, then subtract 1
-    indep = indep.min(num_participating as f64);
-    indep = (indep - 1.0).max(0.0);
-    indep
+    found.then_some((left, right))
+}
+
+/// Port of `s_initializeExpNumObservations`.
+fn initialize_exp_num_observations(
+    bg20: &[f64; EFFECTIVE_ALPHABET],
+) -> [f64; MAX_IND_OBSERVATIONS + 1] {
+    let mut expno = [0.0f64; MAX_IND_OBSERVATIONS + 1];
+    for (j, slot) in expno
+        .iter_mut()
+        .enumerate()
+        .take(MAX_IND_OBSERVATIONS)
+        .skip(1)
+    {
+        let mut weighted_sum = 0.0;
+        for &p in bg20 {
+            weighted_sum += (j as f64 * (1.0 - p).ln()).exp();
+        }
+        *slot = EFFECTIVE_ALPHABET as f64 - weighted_sum;
+    }
+    expno
+}
+
+fn position_distinct_distribution(
+    aligned_seqs: &[Vec<u8>],
+    left: usize,
+    right: usize,
+) -> [i32; EFFECTIVE_ALPHABET + 1] {
+    let mut distrib = [0i32; EFFECTIVE_ALPHABET + 1];
+    for col in left..=right {
+        let distinct = count_distinct_standard_residues_at(aligned_seqs, col);
+        distrib[distinct] += 1;
+    }
+    distrib
+}
+
+fn count_distinct_standard_residues_at(aligned_seqs: &[Vec<u8>], pos: usize) -> usize {
+    let mut residue_seen = [false; AA_SIZE];
+    for seq in aligned_seqs {
+        if let Some(&r) = seq.get(pos) {
+            if is_effective_residue(r) {
+                residue_seen[r as usize] = true;
+            }
+        }
+    }
+    residue_seen.iter().filter(|&&v| v).count()
+}
+
+fn num_participating_at_position(aligned_seqs: &[Vec<u8>], pos: usize) -> usize {
+    aligned_seqs
+        .iter()
+        .filter(|seq| seq.get(pos).copied().is_some_and(is_effective_residue))
+        .count()
+}
+
+fn is_effective_residue(r: u8) -> bool {
+    crate::encoding::is_ncbistdaa_standard_residue(r)
+}
+
+fn average_top_half_distinct_count(
+    pos_distinct_distrib: &[i32; EFFECTIVE_ALPHABET + 1],
+    left: usize,
+    right: usize,
+) -> f64 {
+    let half_num_columns = 1.max(((right as i32 - left as i32) + 2) / 2);
+    let mut columns_accounted_for = 0i32;
+    let mut total_distinct_counts = 0i32;
+    let mut k = EFFECTIVE_ALPHABET as i32;
+
+    while columns_accounted_for < half_num_columns && k >= 0 {
+        let count = pos_distinct_distrib[k as usize];
+        total_distinct_counts += count * k;
+        columns_accounted_for += count;
+        if columns_accounted_for > half_num_columns {
+            total_distinct_counts -= (columns_accounted_for - half_num_columns) * k;
+            columns_accounted_for = half_num_columns;
+        }
+        k -= 1;
+    }
+
+    if columns_accounted_for == 0 {
+        0.0
+    } else {
+        total_distinct_counts as f64 / columns_accounted_for as f64
+    }
+}
+
+fn interpolate_independent_observations(
+    ave_distinct_aa: f64,
+    expno: &[f64; MAX_IND_OBSERVATIONS + 1],
+) -> f64 {
+    let mut i = 1usize;
+    while i < MAX_IND_OBSERVATIONS && expno[i] <= ave_distinct_aa {
+        i += 1;
+    }
+    if i == MAX_IND_OBSERVATIONS {
+        i as f64
+    } else {
+        let denom = expno[i] - expno[i - 1];
+        if denom.abs() < f64::EPSILON {
+            i as f64
+        } else {
+            i as f64 - (expno[i] - ave_distinct_aa) / denom
+        }
+    }
 }
 
 /// Extract the 20 standard background probabilities in charOrder for
@@ -753,71 +894,230 @@ fn compute_information_content(
 
 /// Run one iteration of PSI-BLAST.
 /// Takes a query, a set of subject sequences, and the current PSSM.
-/// Returns hits that pass the inclusion threshold.
+/// Returns hits that pass the search e-value threshold.
 /// Result of a PSI-BLAST hit.
 #[derive(Debug, Clone)]
 pub struct PsiBlastHit {
     pub subject_id: String,
     pub score: i32,
     pub evalue: f64,
+    /// Start offset in query/PSSM where the best alignment begins.
+    pub query_start: usize,
+    /// End offset in query/PSSM, exclusive.
+    pub query_end: usize,
     /// Start offset in subject where the best alignment begins.
     pub subject_start: usize,
-    /// Length of the aligned region.
+    /// End offset in subject, exclusive.
+    pub subject_end: usize,
+    /// Length of the aligned query region, excluding query gaps.
     pub align_len: usize,
     /// Subject sequence length.
     pub subject_len: usize,
+    /// Gapped query alignment, in ASCII amino-acid letters.
+    pub query_aln: Vec<u8>,
+    /// Gapped subject alignment, in ASCII amino-acid letters.
+    pub subject_aln: Vec<u8>,
 }
 
 pub fn psi_blast_iteration(
     pssm: &Pssm,
+    query: &[u8],
     subjects: &[(String, Vec<u8>)], // (id, NCBIstdaa sequence)
-    inclusion_evalue: f64,
+    evalue_threshold: f64,
     search_space: f64,
     kbp_lambda: f64,
     kbp_k: f64,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    seed_cutoff: i32,
 ) -> Vec<PsiBlastHit> {
     let mut results = Vec::new();
+    let pssm_rows = pssm_rows_for_alignment(pssm);
+    let seed_cutoff = seed_cutoff.max(1);
 
     for (subj_id, subj_seq) in subjects {
-        if subj_seq.len() < 3 || pssm.length < 3 {
+        if subj_seq.is_empty() || pssm.length == 0 || query.len() < pssm.length {
             continue;
         }
 
-        let mut best_score = 0i32;
-        let mut best_start = 0usize;
-        // Simple scan: try each subject position
-        for si in 0..=(subj_seq.len().saturating_sub(pssm.length)) {
-            let mut score = 0i32;
-            let len = pssm.length.min(subj_seq.len() - si);
-            for k in 0..len {
-                score += pssm.score_at(k, subj_seq[si + k]);
+        let candidates = pssm_ungapped_diagonal_candidates(pssm, subj_seq);
+        let mut subject_hits = Vec::new();
+
+        for candidate in candidates {
+            if candidate.score < seed_cutoff {
+                continue;
             }
-            if score > best_score {
-                best_score = score;
-                best_start = si;
+            let gapped = crate::protein::protein_gapped_align_pssm(
+                &query[..pssm.length],
+                subj_seq,
+                candidate.seed_query,
+                candidate.seed_subject,
+                0,
+                &pssm_rows,
+                gap_open,
+                gap_extend,
+                x_dropoff,
+            );
+            let (score, query_start, query_end, subject_start, subject_end, query_aln, subject_aln) =
+                if let Some(gapped) = gapped {
+                    let (query_aln, subject_aln) = gapped.edit_script.render_alignment(
+                        &query[gapped.query_start..gapped.query_end],
+                        &subj_seq[gapped.subject_start..gapped.subject_end],
+                        crate::encoding::ncbistdaa_to_aminoacid_char,
+                    );
+                    (
+                        gapped.score,
+                        gapped.query_start,
+                        gapped.query_end,
+                        gapped.subject_start,
+                        gapped.subject_end,
+                        query_aln.into_bytes(),
+                        subject_aln.into_bytes(),
+                    )
+                } else {
+                    let query_end = candidate.query_start + candidate.align_len;
+                    let subject_end = candidate.subject_start + candidate.align_len;
+                    (
+                        candidate.score,
+                        candidate.query_start,
+                        query_end,
+                        candidate.subject_start,
+                        subject_end,
+                        crate::encoding::ncbistdaa_to_aminoacid_sequence(
+                            &query[candidate.query_start..query_end],
+                        ),
+                        crate::encoding::ncbistdaa_to_aminoacid_sequence(
+                            &subj_seq[candidate.subject_start..subject_end],
+                        ),
+                    )
+                };
+
+            let evalue = kbp_k * search_space * (-kbp_lambda * score as f64).exp();
+            if evalue <= evalue_threshold {
+                let hit = PsiBlastHit {
+                    subject_id: subj_id.clone(),
+                    score,
+                    evalue,
+                    query_start,
+                    query_end,
+                    subject_start,
+                    subject_end,
+                    align_len: query_end.saturating_sub(query_start),
+                    subject_len: subj_seq.len(),
+                    query_aln,
+                    subject_aln,
+                };
+                if !subject_hits
+                    .iter()
+                    .any(|existing| same_pssm_hit(existing, &hit))
+                {
+                    subject_hits.push(hit);
+                }
             }
         }
 
-        if best_score > 0 {
-            let evalue = kbp_k * search_space * (-kbp_lambda * best_score as f64).exp();
-            if evalue <= inclusion_evalue {
-                let align_len = pssm.length.min(subj_seq.len() - best_start);
-                results.push(PsiBlastHit {
-                    subject_id: subj_id.clone(),
-                    score: best_score,
-                    evalue,
-                    subject_start: best_start,
-                    align_len,
-                    subject_len: subj_seq.len(),
-                });
-            }
-        }
+        subject_hits.sort_by(compare_pssm_hits);
+        results.extend(subject_hits);
     }
 
     // Sort by evalue with NCBI `s_EvalueComp` denormal-region equivalence
     // (values < 1e-180 compare equal) — same helper used by HSP-list sorts.
-    results.sort_by(|a, b| crate::hspstream::evalue_comp(a.evalue, b.evalue));
+    results.sort_by(compare_pssm_hits);
     results
+}
+
+fn same_pssm_hit(a: &PsiBlastHit, b: &PsiBlastHit) -> bool {
+    a.score == b.score
+        && a.query_start == b.query_start
+        && a.query_end == b.query_end
+        && a.subject_start == b.subject_start
+        && a.subject_end == b.subject_end
+        && a.query_aln == b.query_aln
+        && a.subject_aln == b.subject_aln
+}
+
+fn compare_pssm_hits(a: &PsiBlastHit, b: &PsiBlastHit) -> std::cmp::Ordering {
+    crate::hspstream::evalue_comp(a.evalue, b.evalue)
+        .then_with(|| b.score.cmp(&a.score))
+        .then_with(|| a.query_start.cmp(&b.query_start))
+        .then_with(|| a.subject_start.cmp(&b.subject_start))
+        .then_with(|| a.query_end.cmp(&b.query_end))
+        .then_with(|| a.subject_end.cmp(&b.subject_end))
+}
+
+#[derive(Debug, Clone)]
+struct PssmUngappedCandidate {
+    score: i32,
+    query_start: usize,
+    subject_start: usize,
+    align_len: usize,
+    seed_query: usize,
+    seed_subject: usize,
+}
+
+fn pssm_ungapped_diagonal_candidates(pssm: &Pssm, subj_seq: &[u8]) -> Vec<PssmUngappedCandidate> {
+    let mut candidates = Vec::new();
+    for diag_start_q in 0..pssm.length {
+        collect_pssm_diagonal_candidate(pssm, subj_seq, diag_start_q, 0, &mut candidates);
+    }
+    for diag_start_s in 1..subj_seq.len() {
+        collect_pssm_diagonal_candidate(pssm, subj_seq, 0, diag_start_s, &mut candidates);
+    }
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.query_start.cmp(&b.query_start))
+            .then_with(|| a.subject_start.cmp(&b.subject_start))
+    });
+    candidates
+}
+
+fn collect_pssm_diagonal_candidate(
+    pssm: &Pssm,
+    subj_seq: &[u8],
+    diag_start_q: usize,
+    diag_start_s: usize,
+    candidates: &mut Vec<PssmUngappedCandidate>,
+) {
+    let diag_len = (pssm.length - diag_start_q).min(subj_seq.len() - diag_start_s);
+    let mut score = 0i32;
+    let mut run_query_start = diag_start_q;
+    let mut run_subject_start = diag_start_s;
+    let mut best: Option<PssmUngappedCandidate> = None;
+
+    for offset in 0..diag_len {
+        let q = diag_start_q + offset;
+        let s = diag_start_s + offset;
+        score += pssm.score_at(q, subj_seq[s]);
+        if score <= 0 {
+            if let Some(candidate) = best.take() {
+                candidates.push(candidate);
+            }
+            score = 0;
+            run_query_start = q + 1;
+            run_subject_start = s + 1;
+        } else if best
+            .as_ref()
+            .is_none_or(|candidate| score > candidate.score)
+        {
+            best = Some(PssmUngappedCandidate {
+                score,
+                query_start: run_query_start,
+                subject_start: run_subject_start,
+                align_len: q - run_query_start + 1,
+                seed_query: q,
+                seed_subject: s,
+            });
+        }
+    }
+    if let Some(candidate) = best {
+        candidates.push(candidate);
+    }
+}
+
+fn pssm_rows_for_alignment(pssm: &Pssm) -> Vec<Vec<i32>> {
+    pssm.scores.iter().map(|row| row.to_vec()).collect()
 }
 
 #[cfg(test)]
@@ -860,11 +1160,156 @@ mod tests {
             ("mismatch".to_string(), vec![10u8, 11, 12, 13, 14]),
         ];
 
-        let results = psi_blast_iteration(&pssm, &subjects, 1.0, 1000.0, 0.3176, 0.134);
+        let results = psi_blast_iteration(
+            &pssm, &query, &subjects, 1.0, 1000.0, 0.3176, 0.134, 11, 1, 50, 1,
+        );
         assert!(!results.is_empty(), "Should find matching subject");
         assert_eq!(results[0].subject_id, "match");
+        assert_eq!(results[0].query_start, 0);
         assert_eq!(results[0].subject_start, 0);
         assert_eq!(results[0].align_len, 5);
+    }
+
+    #[test]
+    fn test_psi_blast_iteration_reports_query_offset_for_local_match() {
+        let query = vec![1u8, 2, 3, 4, 5, 6];
+        let matrix = simple_matrix();
+        let pssm = Pssm::from_sequence(&query, &matrix);
+
+        let subjects = vec![("suffix".to_string(), vec![3u8, 4, 5, 6])];
+        let results = psi_blast_iteration(
+            &pssm, &query, &subjects, 1.0, 1000.0, 0.3176, 0.134, 11, 1, 50, 1,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].subject_id, "suffix");
+        assert_eq!(results[0].query_start, 2);
+        assert_eq!(results[0].subject_start, 0);
+        assert_eq!(results[0].align_len, 4);
+    }
+
+    #[test]
+    fn test_psi_blast_iteration_allows_single_residue_query() {
+        let query = vec![crate::encoding::NCBISTDAA_A];
+        let matrix = simple_matrix();
+        let pssm = Pssm::from_sequence(&query, &matrix);
+        let subjects = vec![("single".to_string(), query.clone())];
+
+        let results = psi_blast_iteration(
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 11, 1, 50, 1,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].subject_id, "single");
+        assert_eq!(results[0].query_start, 0);
+        assert_eq!(results[0].query_end, 1);
+        assert_eq!(results[0].subject_start, 0);
+        assert_eq!(results[0].subject_end, 1);
+        assert_eq!(results[0].align_len, 1);
+        assert_eq!(results[0].query_aln, b"A");
+        assert_eq!(results[0].subject_aln, b"A");
+    }
+
+    #[test]
+    fn test_psi_blast_iteration_applies_seed_cutoff_before_gapping() {
+        let query = vec![1u8, 2, 3, 4, 5];
+        let matrix = simple_matrix();
+        let pssm = Pssm::from_sequence(&query, &matrix);
+        let subjects = vec![("match".to_string(), query.clone())];
+
+        let passing = psi_blast_iteration(
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 11, 1, 50, 1,
+        );
+        let filtered = psi_blast_iteration(
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 11, 1, 50, 10_000,
+        );
+
+        assert_eq!(passing.len(), 1);
+        assert!(
+            filtered.is_empty(),
+            "gap-trigger seed cutoff should filter low ungapped-scoring candidates"
+        );
+    }
+
+    #[test]
+    fn test_psi_blast_iteration_keeps_multiple_diagonal_candidates() {
+        let query = vec![
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+            crate::encoding::NCBISTDAA_D,
+            crate::encoding::NCBISTDAA_E,
+        ];
+        let matrix = simple_matrix();
+        let pssm = Pssm::from_sequence(&query, &matrix);
+        let subject = vec![
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+            19, // V
+            crate::encoding::NCBISTDAA_D,
+            crate::encoding::NCBISTDAA_E,
+        ];
+
+        let candidates = pssm_ungapped_diagonal_candidates(&pssm, &subject);
+
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.query_start == 0 && c.subject_start == 0 && c.align_len == 2),
+            "first positive diagonal run should be retained: {:?}",
+            candidates
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.query_start == 2 && c.subject_start == 3 && c.align_len == 2),
+            "later positive diagonal run should also be retained: {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_psi_blast_iteration_reports_multiple_hsps_per_subject() {
+        let query = vec![
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+            crate::encoding::NCBISTDAA_D,
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+            crate::encoding::NCBISTDAA_D,
+        ];
+        let matrix = simple_matrix();
+        let pssm = Pssm::from_sequence(&query, &matrix);
+        let y = crate::encoding::aminoacid_to_ncbistdaa_base(b'Y');
+        let subject = vec![
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+            crate::encoding::NCBISTDAA_D,
+            y,
+            y,
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+            crate::encoding::NCBISTDAA_D,
+        ];
+        let subjects = vec![("two_blocks".to_string(), subject)];
+
+        let results = psi_blast_iteration(
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 100, 10, 10, 1,
+        );
+        let coords: Vec<(usize, usize, usize, usize)> = results
+            .iter()
+            .map(|h| (h.query_start, h.query_end, h.subject_start, h.subject_end))
+            .collect();
+
+        assert!(
+            coords.contains(&(0, 3, 0, 3)),
+            "first local block should be reported: {:?}",
+            coords
+        );
+        assert!(
+            coords.contains(&(3, 6, 5, 8)),
+            "second local block should be reported: {:?}",
+            coords
+        );
     }
 
     #[test]
@@ -899,11 +1344,16 @@ mod tests {
         let mw = compute_sequence_weights_and_match_weights(&seqs, 2);
         // At position 0: all have A, so weight should go to A=1
         assert!(mw[0][1] > 0.9, "All-A column should have weight ~1 on A");
-        // At position 1: D appears 2x, E appears 1x
-        // Henikoff: D seqs get 1/(2*2) = 0.25 each, E seq gets 1/(2*1) = 0.5
-        // normalized: D total = 0.5, E total = 0.5
-        assert!((mw[1][4] - 0.5).abs() < 0.1, "D weight should be ~0.5");
-        assert!((mw[1][5] - 0.5).abs() < 0.1, "E weight should be ~0.5");
+        // Sequence-level Henikoff weights include the conserved A column, so
+        // the two D rows remain slightly heavier than the one E row.
+        assert!(
+            (mw[1][4] - 7.0 / 12.0).abs() < 0.01,
+            "D weight should be ~0.583"
+        );
+        assert!(
+            (mw[1][5] - 5.0 / 12.0).abs() < 0.01,
+            "E weight should be ~0.417"
+        );
     }
 
     #[test]
@@ -965,6 +1415,57 @@ mod tests {
     }
 
     #[test]
+    fn test_update_from_alignment_uses_named_matrix_tables() {
+        let query = vec![1u8, 4, 7, 10, 13]; // A, D, G, K, N
+        let aligned = vec![
+            vec![1u8, 4, 7, 10, 13],
+            vec![1u8, 5, 7, 10, 13],
+            vec![3u8, 4, 8, 11, 13],
+        ];
+        let mut blosum62_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        let mut blosum45_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+
+        blosum62_pssm.update_from_alignment_with_matrix(&aligned, "BLOSUM62");
+        blosum45_pssm.update_from_alignment_with_matrix(&aligned, "BLOSUM45");
+
+        assert_ne!(
+            blosum62_pssm.scores, blosum45_pssm.scores,
+            "PSSM update should use the selected matrix frequency ratios and lambda"
+        );
+    }
+
+    #[test]
+    fn test_update_from_alignment_fixed_pseudocount_changes_scores() {
+        let query = vec![1u8, 4, 7, 10, 13]; // A, D, G, K, N
+        let aligned = vec![
+            vec![1u8, 4, 7, 10, 13],
+            vec![1u8, 5, 7, 10, 13],
+            vec![3u8, 4, 8, 11, 13],
+            vec![1u8, 4, 7, 10, 4],
+        ];
+        let mut dynamic_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        let mut fixed_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        let mut legacy_fixed_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+
+        dynamic_pssm.update_from_alignment_with_matrix(&aligned, "BLOSUM62");
+        fixed_pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &aligned,
+            "BLOSUM62",
+            Some(50.0),
+        );
+        legacy_fixed_pssm.update_from_alignment(&aligned, &crate::matrix::AA_FREQUENCIES, 50.0);
+
+        assert_ne!(
+            dynamic_pssm.scores, fixed_pssm.scores,
+            "fixed pseudocount should use a distinct scoring path"
+        );
+        assert_eq!(
+            fixed_pssm.scores, legacy_fixed_pssm.scores,
+            "legacy PSSM update parameter should select the fixed pseudocount path"
+        );
+    }
+
+    #[test]
     fn test_effective_observations() {
         let std_prob = std_prob_ncbistdaa();
 
@@ -973,6 +1474,90 @@ mod tests {
 
         let obs = compute_effective_observations(&seqs, 0, 1, &std_prob);
         assert!(obs > 0.0, "Should have positive effective observations");
+    }
+
+    #[test]
+    fn test_henikoff_weights_ignore_non_standard_residues() {
+        let seqs = vec![
+            vec![crate::encoding::NCBISTDAA_A],
+            vec![crate::encoding::NCBISTDAA_B],
+            vec![crate::encoding::NCBISTDAA_X],
+            vec![crate::encoding::NCBISTDAA_U],
+            vec![crate::encoding::NCBISTDAA_STOP],
+        ];
+
+        let mw = compute_sequence_weights_and_match_weights(&seqs, 1);
+
+        assert!((mw[0][crate::encoding::NCBISTDAA_A as usize] - 1.0).abs() < 1e-12);
+        assert_eq!(mw[0][crate::encoding::NCBISTDAA_B as usize], 0.0);
+        assert_eq!(mw[0][crate::encoding::NCBISTDAA_X as usize], 0.0);
+        assert_eq!(mw[0][crate::encoding::NCBISTDAA_U as usize], 0.0);
+        assert_eq!(mw[0][crate::encoding::NCBISTDAA_STOP as usize], 0.0);
+    }
+
+    #[test]
+    fn test_henikoff_weights_use_aligned_row_extents() {
+        let seqs = vec![
+            vec![
+                crate::encoding::NCBISTDAA_A,
+                crate::encoding::NCBISTDAA_C,
+                crate::encoding::NCBISTDAA_X,
+            ],
+            vec![
+                crate::encoding::NCBISTDAA_X,
+                crate::encoding::NCBISTDAA_C,
+                crate::encoding::NCBISTDAA_D,
+            ],
+        ];
+
+        let mw = compute_sequence_weights_and_match_weights(&seqs, 3);
+
+        assert_eq!(mw[0][crate::encoding::NCBISTDAA_A as usize], 1.0);
+        assert_eq!(mw[2][crate::encoding::NCBISTDAA_D as usize], 1.0);
+        assert!((mw[1][crate::encoding::NCBISTDAA_C as usize] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_effective_observation_counts_ignore_non_standard_residues() {
+        let seqs = vec![
+            vec![crate::encoding::NCBISTDAA_A],
+            vec![crate::encoding::NCBISTDAA_B],
+            vec![crate::encoding::NCBISTDAA_X],
+            vec![crate::encoding::NCBISTDAA_U],
+            vec![crate::encoding::NCBISTDAA_STOP],
+        ];
+
+        assert_eq!(count_distinct_standard_residues_at(&seqs, 0), 1);
+        assert_eq!(num_participating_at_position(&seqs, 0), 1);
+    }
+
+    #[test]
+    fn test_effective_observations_use_spanning_alignment_block() {
+        let seqs = vec![
+            vec![
+                crate::encoding::NCBISTDAA_A,
+                crate::encoding::NCBISTDAA_C,
+                crate::encoding::NCBISTDAA_X,
+                crate::encoding::NCBISTDAA_X,
+            ],
+            vec![
+                crate::encoding::NCBISTDAA_X,
+                crate::encoding::NCBISTDAA_C,
+                crate::encoding::NCBISTDAA_D,
+                crate::encoding::NCBISTDAA_X,
+            ],
+            vec![
+                crate::encoding::NCBISTDAA_X,
+                crate::encoding::NCBISTDAA_X,
+                crate::encoding::NCBISTDAA_D,
+                crate::encoding::NCBISTDAA_E,
+            ],
+        ];
+
+        assert_eq!(aligned_block_extents(&seqs, 0, 4), Some((0, 1)));
+        assert_eq!(aligned_block_extents(&seqs, 1, 4), Some((0, 2)));
+        assert_eq!(aligned_block_extents(&seqs, 2, 4), Some((1, 3)));
+        assert_eq!(aligned_block_extents(&seqs, 3, 4), Some((2, 3)));
     }
 
     // ---- Tests ported from pssmcreate_unit_test.cpp / pssmenginefreqratios_unit_test.cpp ----
@@ -1260,6 +1845,23 @@ mod tests {
             "10 diverse residues should yield substantial observations, got {}",
             obs_diverse
         );
+    }
+
+    #[test]
+    fn test_effective_observations_uses_ncbi_top_half_distinct_columns() {
+        let seqs = vec![
+            vec![1u8, 1, 1, 1],
+            vec![1u8, 3, 3, 3],
+            vec![1u8, 1, 4, 4],
+            vec![1u8, 3, 4, 5],
+        ];
+        let distrib = position_distinct_distribution(&seqs, 0, 3);
+
+        assert_eq!(distrib[1], 1);
+        assert_eq!(distrib[2], 1);
+        assert_eq!(distrib[3], 1);
+        assert_eq!(distrib[4], 1);
+        assert_eq!(average_top_half_distinct_count(&distrib, 0, 3), 3.5);
     }
 
     #[test]

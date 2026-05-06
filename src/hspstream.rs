@@ -12,10 +12,16 @@ pub struct Hsp {
     pub evalue: f64,
     pub query_offset: i32,
     pub query_end: i32,
+    pub query_gapped_start: i32,
     pub subject_offset: i32,
     pub subject_end: i32,
+    pub subject_gapped_start: i32,
     pub context: i32,
+    pub query_frame: i32,
+    pub subject_frame: i32,
     pub num_gaps: i32,
+    pub comp_adjustment_method: i32,
+    pub edit_script: Option<crate::gapinfo::GapEditScript>,
 }
 
 /// A list of HSPs for one query-subject pair.
@@ -185,10 +191,16 @@ mod tests {
             evalue: 1e-20,
             query_offset: 0,
             query_end: 50,
+            query_gapped_start: 0,
             subject_offset: 76,
             subject_end: 126,
+            subject_gapped_start: 76,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         stream.write(0, list1);
 
@@ -200,10 +212,16 @@ mod tests {
             evalue: 1.7,
             query_offset: 10,
             query_end: 22,
+            query_gapped_start: 10,
             subject_offset: 100,
             subject_end: 112,
+            subject_gapped_start: 100,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         stream.write(0, list2);
 
@@ -225,10 +243,16 @@ mod tests {
             evalue,
             query_offset: 0,
             query_end: score,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: score,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         }
     }
 

@@ -17,18 +17,17 @@ pub fn translate_codon(b1: u8, b2: u8, b3: u8, genetic_code: &[u8; 64]) -> u8 {
 /// Port of NCBI `s_CodonToAA` (`blast_util.c:369`). When an input base
 /// is an ambiguity code matching multiple unambiguous bases, enumerates
 /// every compatible codon; returns the unique amino acid if they all
-/// agree, otherwise returns NCBIstdaa `X` (21). Bytes > 15 (malformed
+/// agree, otherwise returns NCBIstdaa `X`. Bytes > 15 (malformed
 /// or FENCE_SENTRY) also yield `X`.
 ///
 /// NCBI's C iterates `mapping[4] = {T=8, C=2, A=1, G=4}` so its
 /// `codes` table is TCAG-ordered. Our [`STANDARD_GENETIC_CODE`] is
 /// ACGT-ordered, so `MAPPING` here is `[A=1, C=2, G=4, T=8]`.
 pub fn codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
-    const X_RESIDUE: u8 = 21;
     const MAPPING: [u8; 4] = [1, 2, 4, 8];
 
     if (codon[0] | codon[1] | codon[2]) > 15 {
-        return X_RESIDUE;
+        return crate::encoding::NCBISTDAA_X;
     }
 
     let mut aa: u8 = 0;
@@ -44,7 +43,7 @@ pub fn codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
                             if aa == 0 {
                                 aa = taa;
                             } else if taa != aa {
-                                return X_RESIDUE;
+                                return crate::encoding::NCBISTDAA_X;
                             }
                         }
                     }
@@ -97,17 +96,12 @@ pub fn get_reverse_nucl_sequence(sequence: &[u8], length: usize) -> Vec<u8> {
     // C: rev_sequence = malloc(length + 2);
     //    rev_sequence[0] = rev_sequence[length+1] = NULLB;
     let mut rev = vec![NULLB; length + 2];
-    // Conversion table from forward to reverse strand residue (NCBI4na).
-    // (`blast_util.c:814-819`. The C source comment says "blastna
-    // encoding" but the table values are NCBI4na bit masks; see the
-    // identities A(1)↔T(8), C(2)↔G(4), N(15)↔N(15).)
-    const CONVERSION_TABLE: [u8; 16] = [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15];
     for index in 0..length {
         let b = sequence[index];
         rev[length - index] = if b == FENCE_SENTRY {
             FENCE_SENTRY
         } else {
-            CONVERSION_TABLE[b as usize & 0x0f]
+            crate::encoding::complement_ncbi4na_base(b)
         };
     }
     rev
@@ -263,6 +257,8 @@ pub static GENETIC_CODE_25: [u8; 64] = make_code(&[(56, 7)]);
 pub static GENETIC_CODE_26: [u8; 64] = make_code(&[(30, 1)]);
 /// Code 27: Karyorelictea Nuclear (TAA=Q, TAG=Q, TGA=W)
 pub static GENETIC_CODE_27: [u8; 64] = make_code(&[(48, 15), (50, 15), (56, 20)]);
+/// Code 28: Condylostoma Nuclear (TAA=Q, TAG=Q, TGA=W)
+pub static GENETIC_CODE_28: [u8; 64] = make_code(&[(48, 15), (50, 15), (56, 20)]);
 /// Code 29: Mesodinium Nuclear (TAA=Y, TAG=Y)
 pub static GENETIC_CODE_29: [u8; 64] = make_code(&[(48, 22), (50, 22)]);
 /// Code 30: Peritrich Nuclear (TAA=E, TAG=E)
@@ -295,6 +291,7 @@ pub fn lookup_genetic_code(code: u8) -> &'static [u8; 64] {
         25 => &GENETIC_CODE_25,
         26 => &GENETIC_CODE_26,
         27 => &GENETIC_CODE_27,
+        28 => &GENETIC_CODE_28,
         29 => &GENETIC_CODE_29,
         30 => &GENETIC_CODE_30,
         31 => &GENETIC_CODE_31,
@@ -362,9 +359,12 @@ mod tests {
 
     #[test]
     fn test_translate_codon_stop() {
-        // TAA = stop (* = 25 in NCBIstdaa)
+        // TAA = stop.
         // T=3, A=0, A=0 → idx = 3*16 + 0*4 + 0 = 48
-        assert_eq!(translate_codon(3, 0, 0, &STANDARD_GENETIC_CODE), 25);
+        assert_eq!(
+            translate_codon(3, 0, 0, &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_STOP
+        );
     }
 
     #[test]
@@ -457,20 +457,32 @@ mod tests {
 
     #[test]
     fn test_translate_codon_stop_codons() {
-        // TAA (25): T=3, A=0, A=0 -> idx=48
-        assert_eq!(translate_codon(3, 0, 0, &STANDARD_GENETIC_CODE), 25);
-        // TAG (25): T=3, A=0, G=2 -> idx=50
-        assert_eq!(translate_codon(3, 0, 2, &STANDARD_GENETIC_CODE), 25);
-        // TGA (25): T=3, G=2, A=0 -> idx=56
-        assert_eq!(translate_codon(3, 2, 0, &STANDARD_GENETIC_CODE), 25);
+        // TAA: T=3, A=0, A=0 -> idx=48
+        assert_eq!(
+            translate_codon(3, 0, 0, &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_STOP
+        );
+        // TAG: T=3, A=0, G=2 -> idx=50
+        assert_eq!(
+            translate_codon(3, 0, 2, &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_STOP
+        );
+        // TGA: T=3, G=2, A=0 -> idx=56
+        assert_eq!(
+            translate_codon(3, 2, 0, &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_STOP
+        );
     }
 
     #[test]
     fn test_codon_to_aa_unambiguous() {
         // ATG -> M (12): NCBI4na A=1, T=8, G=4
         assert_eq!(codon_to_aa([1, 8, 4], &STANDARD_GENETIC_CODE), 12);
-        // TAA -> * (25)
-        assert_eq!(codon_to_aa([8, 1, 1], &STANDARD_GENETIC_CODE), 25);
+        // TAA -> *.
+        assert_eq!(
+            codon_to_aa([8, 1, 1], &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_STOP
+        );
         // GCT -> A (1)
         assert_eq!(codon_to_aa([4, 2, 8], &STANDARD_GENETIC_CODE), 1);
     }
@@ -481,27 +493,39 @@ mod tests {
         // CTN with N=15
         assert_eq!(codon_to_aa([2, 8, 15], &STANDARD_GENETIC_CODE), 11);
 
-        // ATN: ATA=I, ATC=I, ATG=M, ATT=I — mixed, must return X (21).
-        assert_eq!(codon_to_aa([1, 8, 15], &STANDARD_GENETIC_CODE), 21);
+        // ATN: ATA=I, ATC=I, ATG=M, ATT=I — mixed, must return X.
+        assert_eq!(
+            codon_to_aa([1, 8, 15], &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_X
+        );
 
         // YTA (Y=C|T=10): CTA=L, TTA=L — both L, so resolves to L (11).
         assert_eq!(codon_to_aa([10, 8, 1], &STANDARD_GENETIC_CODE), 11);
 
         // RTA (R=A|G=5): ATA=I, GTA=V — mixed, X.
-        assert_eq!(codon_to_aa([5, 8, 1], &STANDARD_GENETIC_CODE), 21);
+        assert_eq!(
+            codon_to_aa([5, 8, 1], &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_X
+        );
     }
 
     #[test]
     fn test_codon_to_aa_n_in_first_position_mixed() {
         // NCT (N=15): all four first-base options. ACT=T, CCT=P, GCT=A, TCT=S.
         // Mixed → X.
-        assert_eq!(codon_to_aa([15, 2, 8], &STANDARD_GENETIC_CODE), 21);
+        assert_eq!(
+            codon_to_aa([15, 2, 8], &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_X
+        );
     }
 
     #[test]
     fn test_codon_to_aa_malformed_returns_x() {
         // Any byte > 15 (e.g. FENCE_SENTRY) → X.
-        assert_eq!(codon_to_aa([1, 8, 200], &STANDARD_GENETIC_CODE), 21);
+        assert_eq!(
+            codon_to_aa([1, 8, 200], &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_X
+        );
     }
 
     #[test]
@@ -566,10 +590,16 @@ mod tests {
 
     #[test]
     fn test_genetic_code_2_vertebrate_mito() {
-        // AGA -> * (stop, 25) instead of R
-        assert_eq!(translate_codon(0, 2, 0, &GENETIC_CODE_2), 25);
-        // AGG -> * (stop, 25) instead of R
-        assert_eq!(translate_codon(0, 2, 2, &GENETIC_CODE_2), 25);
+        // AGA -> * instead of R
+        assert_eq!(
+            translate_codon(0, 2, 0, &GENETIC_CODE_2),
+            crate::encoding::NCBISTDAA_STOP
+        );
+        // AGG -> * instead of R
+        assert_eq!(
+            translate_codon(0, 2, 2, &GENETIC_CODE_2),
+            crate::encoding::NCBISTDAA_STOP
+        );
         // ATA -> M (12) instead of I
         assert_eq!(translate_codon(0, 3, 0, &GENETIC_CODE_2), 12);
         // TGA -> W (20) instead of * (stop)
@@ -583,7 +613,10 @@ mod tests {
         // TAG -> Q (15) instead of * (stop)
         assert_eq!(translate_codon(3, 0, 2, &GENETIC_CODE_6), 15);
         // TGA should still be stop
-        assert_eq!(translate_codon(3, 2, 0, &GENETIC_CODE_6), 25);
+        assert_eq!(
+            translate_codon(3, 2, 0, &GENETIC_CODE_6),
+            crate::encoding::NCBISTDAA_STOP
+        );
     }
 
     #[test]
@@ -678,5 +711,13 @@ mod tests {
     fn test_genetic_code_25_sr1() {
         // TGA -> G (7) instead of stop
         assert_eq!(translate_codon(3, 2, 0, &GENETIC_CODE_25), 7);
+    }
+
+    #[test]
+    fn test_genetic_code_28_condylostoma() {
+        // TAA/TAG -> Q and TGA -> W.
+        assert_eq!(translate_codon(3, 0, 0, lookup_genetic_code(28)), 15);
+        assert_eq!(translate_codon(3, 0, 2, lookup_genetic_code(28)), 15);
+        assert_eq!(translate_codon(3, 2, 0, lookup_genetic_code(28)), 20);
     }
 }

@@ -1,19 +1,11 @@
 //! Protein BLAST (blastp) support.
 //! Implements scoring matrices and protein word finding.
 
-use crate::encoding::NCBISTDAA_TO_AMINOACID;
+#[cfg(test)]
+use crate::encoding::ncbistdaa_to_aminoacid_char;
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
 use crate::matrix::AA_SIZE;
 use crate::stat::MININT;
-
-/// Convert an NCBIstdaa-encoded amino acid to its single-letter IUPAC character.
-pub fn ncbistdaa_to_char(b: u8) -> char {
-    if (b as usize) < NCBISTDAA_TO_AMINOACID.len() {
-        NCBISTDAA_TO_AMINOACID[b as usize] as u8 as char
-    } else {
-        'X'
-    }
-}
 
 /// Score two amino acids using a scoring matrix.
 #[inline]
@@ -134,26 +126,55 @@ pub fn find_neighboring_words(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     threshold: f64,
 ) -> Vec<Vec<u8>> {
-    // For word_size=3 (standard blastp), enumerate all 20^3 = 8000 possible words
-    // and keep those scoring above threshold
     let mut neighbors = Vec::new();
-    let aa_count = 20u8; // standard amino acids
-
-    if word_size == 3 {
-        for a in 0..aa_count {
-            for b in 0..aa_count {
-                for c in 0..aa_count {
-                    let s = score_aa(matrix, query_word[0], a + 1)
-                        + score_aa(matrix, query_word[1], b + 1)
-                        + score_aa(matrix, query_word[2], c + 1);
-                    if s as f64 >= threshold {
-                        neighbors.push(vec![a + 1, b + 1, c + 1]);
-                    }
-                }
-            }
-        }
+    if query_word.len() < word_size {
+        return neighbors;
     }
+
+    let mut word = vec![0u8; word_size];
+    find_neighboring_words_core(
+        query_word,
+        word_size,
+        matrix,
+        threshold,
+        0,
+        0.0,
+        &mut word,
+        &mut neighbors,
+    );
     neighbors
+}
+
+fn find_neighboring_words_core(
+    query_word: &[u8],
+    word_size: usize,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    threshold: f64,
+    pos: usize,
+    score: f64,
+    word: &mut [u8],
+    neighbors: &mut Vec<Vec<u8>>,
+) {
+    if pos == word_size {
+        if score >= threshold {
+            neighbors.push(word.to_vec());
+        }
+        return;
+    }
+
+    for &aa in crate::encoding::NCBISTDAA_STANDARD_RESIDUES.iter() {
+        word[pos] = aa;
+        find_neighboring_words_core(
+            query_word,
+            word_size,
+            matrix,
+            threshold,
+            pos + 1,
+            score + score_aa(matrix, query_word[pos], aa) as f64,
+            word,
+            neighbors,
+        );
+    }
 }
 
 /// Result of a protein gapped alignment.
@@ -199,12 +220,39 @@ fn script_to_op(s: u8) -> GapAlignOpType {
     }
 }
 
-pub(crate) fn protein_align_ex(
+#[derive(Clone, Copy)]
+enum ProteinScoreSource<'a> {
+    Square(&'a [[i32; AA_SIZE]; AA_SIZE]),
+    Pssm(&'a [Vec<i32>]),
+}
+
+impl ProteinScoreSource<'_> {
+    #[inline]
+    fn score(self, query_pos: usize, query_aa: u8, subject_aa: u8) -> i32 {
+        match self {
+            ProteinScoreSource::Square(matrix) => {
+                if (query_aa as usize) < AA_SIZE && (subject_aa as usize) < AA_SIZE {
+                    matrix[query_aa as usize][subject_aa as usize]
+                } else {
+                    -4
+                }
+            }
+            ProteinScoreSource::Pssm(pssm) => pssm
+                .get(query_pos)
+                .and_then(|row| row.get(subject_aa as usize))
+                .copied()
+                .unwrap_or(-4),
+        }
+    }
+}
+
+fn protein_align_ex_scored(
     a: &[u8],
     b: &[u8],
     m: usize,
     n: usize,
-    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    scores: ProteinScoreSource<'_>,
+    query_offset: usize,
     gap_open: i32,
     gap_extend: i32,
     mut x_dropoff: i32,
@@ -260,8 +308,8 @@ pub(crate) fn protein_align_ex(
         if a_idx >= a.len() {
             break;
         }
-        let a_letter = a[a_idx] as usize;
-        let matrix_row = &matrix[a_letter];
+        let a_letter = a[a_idx];
+        let query_pos = query_offset + a_idx;
 
         let mut row_script = vec![0u8; b_size + extra + 10];
         let mut sc = MININT;
@@ -278,7 +326,7 @@ pub(crate) fn protein_align_ex(
             let b_in_range = b_idx < b.len();
             let sgc = sa[bi].best_gap;
             let next_sc = if b_in_range {
-                sa[bi].best + matrix_row[b[b_idx] as usize]
+                sa[bi].best + scores.score(query_pos, a_letter, b[b_idx])
             } else {
                 MININT
             };
@@ -447,6 +495,31 @@ pub(crate) fn protein_align_ex(
     }
 
     (best_score, a_off, b_off, ops)
+}
+
+pub(crate) fn protein_align_ex(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
+    protein_align_ex_scored(
+        a,
+        b,
+        m,
+        n,
+        ProteinScoreSource::Square(matrix),
+        0,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+        reverse,
+    )
 }
 
 /// Score-only gapped extension in one direction (left or right from seed).
@@ -850,11 +923,108 @@ pub fn protein_gapped_align(
     for &(op, cnt) in right_ops.iter().rev() {
         edit_script.push(op, cnt);
     }
-    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
-        edit_script.ops.remove(0);
+    // Match NCBI `Blast_PrelimEditBlockToGapEditScript`: concatenate the
+    // reverse half as-is and the forward half reversed, preserving all ops.
+    // Downstream length/gap accounting walks the full script.
+    if edit_script.ops.is_empty() {
+        return None;
     }
-    while !edit_script.ops.is_empty() && edit_script.ops.last().unwrap().0 != GapAlignOpType::Sub {
-        edit_script.ops.pop();
+
+    let final_q_start = q_start;
+    let final_q_end = seed_q + qr + 1;
+    let final_s_start = s_start;
+    let final_s_end = seed_s + sr + 1;
+    let local_q = &query[final_q_start..final_q_end];
+    let local_s = &subject[final_s_start..final_s_end];
+    let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
+    let mismatches = (align_length - num_ident - gap_opens).max(0);
+
+    Some(ProteinGappedResult {
+        query_start: final_q_start,
+        query_end: final_q_end,
+        subject_start: final_s_start,
+        subject_end: final_s_end,
+        score: total_score,
+        num_ident,
+        align_length,
+        mismatches,
+        gap_opens,
+        edit_script,
+    })
+}
+
+/// Perform gapped protein alignment from a seed position using query-position
+/// specific scores. `pssm[position][subject_residue]` is used for substitution
+/// scoring, matching PSI-BLAST's query-position scoring model.
+pub fn protein_gapped_align_pssm(
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    query_offset: usize,
+    pssm: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<ProteinGappedResult> {
+    if query.is_empty()
+        || subject.is_empty()
+        || pssm.len() < query_offset.saturating_add(query.len())
+        || pssm
+            .iter()
+            .skip(query_offset)
+            .take(query.len())
+            .any(|row| row.len() < AA_SIZE)
+    {
+        return None;
+    }
+
+    let seed_q = seed_q.min(query.len().saturating_sub(1));
+    let seed_s = seed_s.min(subject.len().saturating_sub(1));
+
+    let (score_l, ql, sl, left_ops) = protein_align_ex_scored(
+        &query[..seed_q + 1],
+        &subject[..seed_s + 1],
+        seed_q + 1,
+        seed_s + 1,
+        ProteinScoreSource::Pssm(pssm),
+        query_offset,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+        true,
+    );
+    let q_start = seed_q + 1 - ql;
+    let s_start = seed_s + 1 - sl;
+
+    let (score_r, qr, sr, right_ops) = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
+        protein_align_ex_scored(
+            &query[seed_q..],
+            &subject[seed_s..],
+            query.len() - seed_q - 1,
+            subject.len() - seed_s - 1,
+            ProteinScoreSource::Pssm(pssm),
+            query_offset + seed_q,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            false,
+        )
+    } else {
+        (0, 0, 0, Vec::new())
+    };
+
+    let total_score = score_l + score_r;
+    if total_score <= 0 {
+        return None;
+    }
+
+    let mut edit_script = GapEditScript::new();
+    for &(op, cnt) in &left_ops {
+        edit_script.push(op, cnt);
+    }
+    for &(op, cnt) in right_ops.iter().rev() {
+        edit_script.push(op, cnt);
     }
     if edit_script.ops.is_empty() {
         return None;
@@ -869,22 +1039,6 @@ pub fn protein_gapped_align(
     let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
     let mismatches = (align_length - num_ident - gap_opens).max(0);
 
-    if std::env::var("NB_TRACE_EDIT").is_ok() {
-        let mut ops_str = String::new();
-        for (op, cnt) in &edit_script.ops {
-            let code = match op {
-                GapAlignOpType::Sub => 3,
-                GapAlignOpType::Del => 0,
-                GapAlignOpType::Ins => 6,
-                _ => 99,
-            };
-            ops_str.push_str(&format!(" {}:{}", code, cnt));
-        }
-        eprintln!(
-            "[ours-edit] qstart={} qstop={} sstart={} sstop={} score={} ops:{}",
-            final_q_start, final_q_end, final_s_start, final_s_end, total_score, ops_str
-        );
-    }
     Some(ProteinGappedResult {
         query_start: final_q_start,
         query_end: final_q_end,
@@ -986,11 +1140,126 @@ pub fn protein_sw_bounded_xdrop_align(
     for &(op, cnt) in &ops {
         edit_script.push(op, cnt);
     }
-    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
-        edit_script.ops.remove(0);
+    // Preserve the full ALIGN_EX script. NCBI does not trim leading or
+    // trailing gap ops when converting preliminary traceback to GapEditScript.
+    if edit_script.ops.is_empty() {
+        return None;
     }
-    while !edit_script.ops.is_empty() && edit_script.ops.last().unwrap().0 != GapAlignOpType::Sub {
-        edit_script.ops.pop();
+
+    let final_q_start = seed_q;
+    let final_q_end = seed_q + qr;
+    let final_s_start = seed_s;
+    let final_s_end = seed_s + sr;
+    let local_q = &query[final_q_start..final_q_end];
+    let local_s = &subject[final_s_start..final_s_end];
+    let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
+    let mismatches = (align_length - num_ident - gap_opens).max(0);
+
+    Some(ProteinGappedResult {
+        query_start: final_q_start,
+        query_end: final_q_end,
+        subject_start: final_s_start,
+        subject_end: final_s_end,
+        score,
+        num_ident,
+        align_length,
+        mismatches,
+        gap_opens,
+        edit_script,
+    })
+}
+
+/// Position-specific counterpart of [`protein_sw_bounded_xdrop_align`].
+///
+/// Scores come from `pssm[query_offset + query_pos][subject_residue]`, while
+/// the bounded forward X-drop retry loop is identical to the square-matrix
+/// Smith-Waterman finalization path.
+#[allow(clippy::too_many_arguments)]
+pub fn protein_sw_bounded_xdrop_align_pssm(
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    q_extent: usize,
+    s_extent: usize,
+    target_score: i32,
+    query_offset: usize,
+    pssm: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<ProteinGappedResult> {
+    if seed_q >= query.len() || seed_s >= subject.len() {
+        return None;
+    }
+    let q_end = (seed_q + q_extent + 1).min(query.len());
+    let s_end = (seed_s + s_extent + 1).min(subject.len());
+    if q_end <= seed_q || s_end <= seed_s {
+        return None;
+    }
+    let abs_seed_q = query_offset.checked_add(seed_q)?;
+    let abs_q_end = query_offset.checked_add(q_end)?;
+    if pssm.len() < abs_q_end
+        || pssm[abs_seed_q..abs_q_end]
+            .iter()
+            .any(|row| row.len() < AA_SIZE)
+    {
+        return None;
+    }
+
+    let mut q_padded: Vec<u8> = Vec::with_capacity(q_end - seed_q + 1);
+    q_padded.push(0);
+    q_padded.extend_from_slice(&query[seed_q..q_end]);
+    let mut s_padded: Vec<u8> = Vec::with_capacity(s_end - seed_s + 1);
+    s_padded.push(0);
+    s_padded.extend_from_slice(&subject[seed_s..s_end]);
+
+    // `protein_align_ex_scored` scores row `query_offset + ai`; use a
+    // local PSSM with a sentinel row so ai=1 maps to the SW start cell.
+    let mut local_pssm = Vec::with_capacity(q_end - seed_q + 1);
+    local_pssm.push(vec![-4; AA_SIZE]);
+    local_pssm.extend_from_slice(&pssm[abs_seed_q..abs_q_end]);
+
+    let m = q_padded.len().saturating_sub(1);
+    let n = s_padded.len().saturating_sub(1);
+    if m == 0 || n == 0 {
+        return None;
+    }
+
+    let mut current_xdrop = x_dropoff;
+    let mut score = 0i32;
+    let mut qr: usize = 0;
+    let mut sr: usize = 0;
+    let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
+    for _ in 0..3 {
+        let (s, q_extent_out, s_extent_out, ops_out) = protein_align_ex_scored(
+            &q_padded,
+            &s_padded,
+            m,
+            n,
+            ProteinScoreSource::Pssm(&local_pssm),
+            0,
+            gap_open,
+            gap_extend,
+            current_xdrop,
+            false,
+        );
+        score = s;
+        qr = q_extent_out;
+        sr = s_extent_out;
+        ops = ops_out;
+        if score >= target_score {
+            break;
+        }
+        current_xdrop = current_xdrop.saturating_mul(2);
+    }
+    if score <= 0 {
+        return None;
+    }
+
+    let mut edit_script = GapEditScript::new();
+    for &(op, cnt) in &ops {
+        edit_script.push(op, cnt);
     }
     if edit_script.ops.is_empty() {
         return None;
@@ -1084,12 +1353,26 @@ mod tests {
     #[test]
     fn test_neighboring_words() {
         let m = simple_blosum62();
-        let word = vec![1u8, 2, 3]; // A, B, C
+        let word = vec![1u8, 3, 4]; // A, C, D
         let neighbors = find_neighboring_words(&word, 3, &m, 11.0);
-        // The exact match (1,2,3) scores 4+4+4=12 >= 11, so it should be included
+        // The exact match (1,3,4) scores 4+4+4=12 >= 11, so it should be included.
         assert!(
-            neighbors.iter().any(|w| w == &vec![1u8, 2, 3]),
+            neighbors.iter().any(|w| w == &vec![1u8, 3, 4]),
             "Exact match should be a neighbor"
+        );
+        assert!(
+            neighbors.iter().all(|w| w
+                .iter()
+                .copied()
+                .all(crate::encoding::is_ncbistdaa_standard_residue)),
+            "neighbors should only contain standard NCBIstdaa residues"
+        );
+
+        let two_mer = vec![1u8, 3];
+        let two_mer_neighbors = find_neighboring_words(&two_mer, 2, &m, 8.0);
+        assert!(
+            two_mer_neighbors.iter().any(|w| w == &two_mer),
+            "word_size=2 exact match should be a neighbor"
         );
     }
 
@@ -1105,7 +1388,7 @@ mod tests {
         let (qseq, sseq) = r.edit_script.render_alignment(
             &query[r.query_start..r.query_end],
             &subject[r.subject_start..r.subject_end],
-            ncbistdaa_to_char,
+            ncbistdaa_to_aminoacid_char,
         );
         assert!(!qseq.is_empty());
         assert!(!sseq.is_empty());
@@ -1117,6 +1400,46 @@ mod tests {
             qseq,
             sseq
         );
+    }
+
+    #[test]
+    fn test_protein_gapped_align_pssm_uses_absolute_query_offset() {
+        let query = vec![1u8, 2, 3];
+        let subject = query.clone();
+        let mut pssm = vec![vec![-20; AA_SIZE]; 8];
+        for (pos, &aa) in query.iter().enumerate() {
+            pssm[4 + pos][aa as usize] = 8;
+        }
+
+        let result = protein_gapped_align_pssm(&query, &subject, 1, 1, 4, &pssm, 11, 1, 50)
+            .expect("offset PSSM alignment");
+
+        assert_eq!(result.score, 24);
+        assert_eq!(result.query_start, 0);
+        assert_eq!(result.query_end, query.len());
+        assert_eq!(result.num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn test_protein_sw_bounded_xdrop_align_pssm_uses_absolute_query_offset() {
+        let query = vec![1u8, 2, 3, 4];
+        let subject = query.clone();
+        let mut pssm = vec![vec![-20; AA_SIZE]; 9];
+        for (pos, &aa) in query.iter().enumerate() {
+            pssm[3 + pos][aa as usize] = 7;
+        }
+
+        let result = protein_sw_bounded_xdrop_align_pssm(
+            &query, &subject, 0, 0, 3, 3, 28, 3, &pssm, 11, 1, 30,
+        )
+        .expect("PSSM bounded SW X-drop alignment");
+
+        assert_eq!(result.score, 28);
+        assert_eq!(result.query_start, 0);
+        assert_eq!(result.query_end, query.len());
+        assert_eq!(result.subject_start, 0);
+        assert_eq!(result.subject_end, subject.len());
+        assert_eq!(result.num_ident, query.len() as i32);
     }
 
     #[test]
@@ -1132,7 +1455,7 @@ mod tests {
         let (qseq, sseq) = r.edit_script.render_alignment(
             &query[r.query_start..r.query_end],
             &subject[r.subject_start..r.subject_end],
-            ncbistdaa_to_char,
+            ncbistdaa_to_aminoacid_char,
         );
         assert_eq!(
             qseq.len(),
@@ -1149,7 +1472,7 @@ mod tests {
         let m = simple_blosum62();
         let seq = vec![1u8, 2, 3, 4, 5];
         let (esp, _, _, _, _, _) = protein_nw_traceback(&seq, &seq, &m, 11, 1);
-        let (qseq, sseq) = esp.render_alignment(&seq, &seq, ncbistdaa_to_char);
+        let (qseq, sseq) = esp.render_alignment(&seq, &seq, ncbistdaa_to_aminoacid_char);
         assert_eq!(qseq, sseq);
         assert!(!qseq.contains('-'));
     }
@@ -1164,7 +1487,7 @@ mod tests {
         assert!(score > 0, "Should have positive score");
         let q_slice = &query[qs..qe];
         let s_slice = &subject[ss..se];
-        let (qseq, sseq) = esp.render_alignment(q_slice, s_slice, ncbistdaa_to_char);
+        let (qseq, sseq) = esp.render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
         assert!(
             !qseq.is_empty(),
             "alignment should not be empty: qseq={}, sseq={}",
@@ -1178,11 +1501,10 @@ mod tests {
         // Use real BLOSUM62 matrix. Build sequences that match for a stretch
         // then diverge so the X-dropoff terminates extension.
         let matrix = crate::matrix::BLOSUM62;
-        // NCBIstdaa: A=1, R=2, N=3, D=4, C=5
         // Query:   ARNDCARND (9 residues, all match subject for first 5, then differ)
-        let query = vec![1u8, 2, 3, 4, 5, 1, 2, 3, 4];
-        // Subject: ARNDC + XXXXX (first 5 match, last 4 are very different: W=17)
-        let subject = vec![1u8, 2, 3, 4, 5, 17, 17, 17, 17];
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ARNDCARND");
+        // Subject: ARNDC + WWWW (first 5 match, last 4 are very different)
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"ARNDCWWWW");
 
         let result = protein_ungapped_extend(&query, &subject, 2, 2, &matrix, 15);
         assert!(result.is_some());
@@ -1206,14 +1528,14 @@ mod tests {
         assert!(score > 0);
 
         // Two residues, seed at 0.
-        let q2 = vec![1u8, 2]; // A, R
-        let s2 = vec![1u8, 2]; // A, R
+        let q2 = crate::encoding::encode_ncbistdaa_sequence(b"AR");
+        let s2 = crate::encoding::encode_ncbistdaa_sequence(b"AR");
         let result2 = protein_ungapped_extend(&q2, &s2, 0, 0, &matrix, 20);
         assert!(result2.is_some());
 
         // Empty-like: query length 1, subject length 1, mismatching.
-        let q3 = vec![5u8]; // C
-        let s3 = vec![17u8]; // W
+        let q3 = crate::encoding::encode_ncbistdaa_sequence(b"C");
+        let s3 = crate::encoding::encode_ncbistdaa_sequence(b"W");
         let result3 = protein_ungapped_extend(&q3, &s3, 0, 0, &matrix, 5);
         // This should return None since the score is negative.
         assert!(result3.is_none());
@@ -1223,7 +1545,7 @@ mod tests {
     fn test_protein_gapped_align_identical() {
         let matrix = crate::matrix::BLOSUM62;
         // Identical sequences should produce a perfect alignment with no gaps.
-        let seq = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10]; // A R N D C Q E G H I
+        let seq = crate::encoding::encode_ncbistdaa_sequence(b"ARNDCQEGHI");
         let result = protein_gapped_align(&seq, &seq, 5, 5, &matrix, 11, 1, 100);
         assert!(result.is_some());
         let r = result.unwrap();
@@ -1239,7 +1561,7 @@ mod tests {
 
     #[test]
     fn test_protein_gapped_align_with_multiple_gaps() {
-        use crate::encoding::AMINOACID_TO_NCBISTDAA;
+        use crate::encoding::encode_ncbistdaa_sequence;
         let matrix = crate::matrix::BLOSUM62;
         // Query has two insertions relative to subject.
         // Query:   ARNDCQ--EGHIKLM--NQRST
@@ -1247,14 +1569,8 @@ mod tests {
         // We encode so that alignment requires two gaps.
         let q_raw = b"ARNDCQEGHIKLMNQRST";
         let s_raw = b"ARNDCQWWEGHIKLMPPNQRST";
-        let query: Vec<u8> = q_raw
-            .iter()
-            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-            .collect();
-        let subject: Vec<u8> = s_raw
-            .iter()
-            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-            .collect();
+        let query = encode_ncbistdaa_sequence(q_raw);
+        let subject = encode_ncbistdaa_sequence(s_raw);
 
         let result = protein_gapped_align(&query, &subject, 3, 3, &matrix, 11, 1, 100);
         assert!(result.is_some());
@@ -1269,20 +1585,14 @@ mod tests {
 
     #[test]
     fn test_protein_gapped_align_score_vs_ungapped() {
-        use crate::encoding::AMINOACID_TO_NCBISTDAA;
+        use crate::encoding::encode_ncbistdaa_sequence;
         let matrix = crate::matrix::BLOSUM62;
         // Two sequences that are mostly similar but have a gap.
         // Gapped alignment should score >= ungapped for the same pair.
         let q_raw = b"ARNDCQEGHIKLMNPQRSTVWY";
         let s_raw = b"ARNDCQXXEGHIKLMNPQRSTVWY"; // two insertions after Q
-        let query: Vec<u8> = q_raw
-            .iter()
-            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-            .collect();
-        let subject: Vec<u8> = s_raw
-            .iter()
-            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-            .collect();
+        let query = encode_ncbistdaa_sequence(q_raw);
+        let subject = encode_ncbistdaa_sequence(s_raw);
 
         // Ungapped extension
         let ug = protein_ungapped_extend(&query, &subject, 3, 3, &matrix, 100);
@@ -1303,20 +1613,14 @@ mod tests {
 
     #[test]
     fn test_gapped_align_srta_vs_p0dpq5() {
-        use crate::encoding::AMINOACID_TO_NCBISTDAA;
+        use crate::encoding::encode_ncbistdaa_sequence;
         let matrix = crate::matrix::BLOSUM62;
 
         // srtA query vs P0DPQ5 sortase A (NCBI BLAST+ gets score 183)
         let q_raw = b"MIIRHPKKKRIMGKWIIAFWLLSAVGVLLLMPAEASVAKYQQNQQIAAIDRTGTAAETDSSLDVAKIELGDPVGILTIPSISLKLPIYDGTSDKILENGVGITEGTGDITGGNGKNPLIAGHSGLYKDNLFDDLPSVKKGEKFYIKVDGEQHAYQIDRIEEVQKDELQRNFVTYLEPNPNEDRVTLMTCTPKGINTHRFLVYGKRVTFTKSELKDEENKKQKLSWKWLLGSTVFLSVMIIGSLFVYKKKK";
         let s_raw = b"MNKQRIYSIVAILLFVVGGVLIGKPFYDGYQAEKKQTENVQAVQKMDYEKHETEFVDASKIDQPDLAEVANASLDKKQVIGRISIPSVSLELPVLKSSTEKNLLSGAATVKENQVMGKGNYALAGHNMSKKGVLFSDIASLKKGDKIYLYDNENEYEYAVTGVSEVTPDKWEVVEDHGKDEITLITCVSVKDNSKRYVVAGDLVGTKAKK";
-        let query: Vec<u8> = q_raw
-            .iter()
-            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-            .collect();
-        let subject: Vec<u8> = s_raw
-            .iter()
-            .map(|&b| AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-            .collect();
+        let query = encode_ncbistdaa_sequence(q_raw);
+        let subject = encode_ncbistdaa_sequence(s_raw);
 
         // Gapped alignment from a seed in the middle of the alignment
         let result = protein_gapped_align(&query, &subject, 50, 45, &matrix, 11, 1, 260);

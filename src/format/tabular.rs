@@ -84,6 +84,7 @@ pub struct TabularHit {
     pub subject_blast_name: String,
     pub subject_kingdom: String,
     pub num_ident: i32,
+    pub num_positives: i32,
 }
 
 /// Format an e-value matching BLAST tabular output (-outfmt 6).
@@ -261,7 +262,7 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
         "bitscore" => format_bitscore(hit.bit_score),
         "score" => hit.raw_score.to_string(),
         "nident" => hit.num_ident.to_string(),
-        "positive" => hit.num_ident.to_string(),
+        "positive" => hit.num_positives.to_string(),
         "gaps" => {
             if let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) {
                 qseq.bytes()
@@ -276,16 +277,11 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             }
         }
         "ppos" => {
-            // NCBI `s_Blast_HSPGetNumIdentitiesAndPositives` (`blast_hits.c:746`)
-            // counts `num_pos` by testing `matrix[q][s] > 0` for protein
-            // mismatches. For nucleotide programs no substitution gives a
-            // positive score, so `num_pos == num_ident`. Rust currently
-            // reports `num_ident` here, which is exact for blastn but a
-            // divergence for blastp/blastx/tblastn/tblastx (protein match
-            // outputs often show positives > identities). Proper parity
-            // requires threading the scoring matrix through HSP traceback.
             if hit.align_len > 0 {
-                format!("{:.2}", 100.0 * hit.num_ident as f64 / hit.align_len as f64)
+                format!(
+                    "{:.2}",
+                    100.0 * hit.num_positives as f64 / hit.align_len as f64
+                )
             } else {
                 "0.00".to_string()
             }
@@ -457,15 +453,17 @@ pub fn format_tabular_custom_with_delimiter<W: Write>(
     default_delimiter: &str,
 ) -> std::io::Result<()> {
     let mut delimiter = default_delimiter;
+    let mut delimiter_seen = false;
     let mut cols = Vec::new();
     for col in columns.split_whitespace() {
         if let Some(value) = col.strip_prefix("delim=") {
-            delimiter = match value {
-                r"\t" | "tab" => "\t",
-                "space" => " ",
-                "" => default_delimiter,
-                value => value,
-            };
+            if !delimiter_seen {
+                delimiter = match value {
+                    "" => default_delimiter,
+                    value => value,
+                };
+                delimiter_seen = true;
+            }
         } else {
             expand_column_token(col, &mut cols);
         }
@@ -541,6 +539,7 @@ mod tests {
             subject_blast_name: "primates".to_string(),
             subject_kingdom: "E".to_string(),
             num_ident: 47,
+            num_positives: 47,
         }
     }
 
@@ -576,6 +575,88 @@ mod tests {
         format_tabular_custom(&mut buf, &hits, "qseqid qseq sseq").unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert_eq!(output.trim(), "q1\tAAACCC\tAAA-CC");
+    }
+
+    #[test]
+    fn test_custom_delimiter_values_are_literal() {
+        let hit = make_hit(None, None);
+        let hits = vec![hit];
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "delim=tab qseqid sseqid length").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1tabs1tab50");
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, r"delim=\t qseqid sseqid length").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), r"q1\ts1\t50");
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "delim=space qseqid sseqid length").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1spaces1space50");
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "delim= qseqid sseqid length").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1\ts1\t50");
+
+        let mut buf = Vec::new();
+        format_tabular_custom_with_delimiter(&mut buf, &hits, "delim= qseqid sseqid length", ",")
+            .unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1,s1,50");
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "delim=, delim=tab qseqid sseqid length").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1,s1,50");
+
+        let mut buf = Vec::new();
+        format_tabular_custom_with_delimiter(
+            &mut buf,
+            &hits,
+            "delim=tab delim=, qseqid sseqid length",
+            ",",
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1tabs1tab50");
+    }
+
+    #[test]
+    fn test_custom_columns_match_blast_parser_edges() {
+        let hit = make_hit(None, None);
+        let hits = vec![hit];
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "qseqid bogus sseqid qseqid length length").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1\ts1\t50");
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "bogus").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = output.trim().split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            DEFAULT_TABULAR_COLUMNS.split_whitespace().count()
+        );
+        assert_eq!(fields[0], "q1");
+        assert_eq!(fields[1], "s1");
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "std qlen").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = output.trim().split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            DEFAULT_TABULAR_COLUMNS.split_whitespace().count() + 1
+        );
+        assert_eq!(fields.last().copied(), Some("100"));
+
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "std qaccver saccver qlen").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = output.trim().split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            DEFAULT_TABULAR_COLUMNS.split_whitespace().count() + 1
+        );
+        assert_eq!(fields.last().copied(), Some("100"));
     }
 
     #[test]
@@ -674,6 +755,18 @@ mod tests {
         assert_eq!(fields[3], "0"); // sframe
         assert_eq!(fields[4], "120"); // score
         assert_eq!(fields[5], "9606"); // staxid
+    }
+
+    #[test]
+    fn test_positive_fields_use_positive_count_not_identity_count() {
+        let mut hit = make_hit(Some("ARND"), Some("AKND"));
+        hit.align_len = 4;
+        hit.num_ident = 3;
+        hit.num_positives = 4;
+
+        assert_eq!(get_field(&hit, "nident"), "3");
+        assert_eq!(get_field(&hit, "positive"), "4");
+        assert_eq!(get_field(&hit, "ppos"), "100.00");
     }
 
     #[test]

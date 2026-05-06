@@ -1,12 +1,9 @@
 //! Rust port of `blast_kappa.c` — Smith-Waterman / composition-based
 //! scoring for the traceback stage of blastp / blastx / tblastn / RPS.
 //!
-//! This is the **skeleton** module: only the leaf utilities that are pure
-//! byte/numeric processing have been ported so far. The composition
-//! adjustment driver `Blast_RedoAlignmentCore_MT` (669 LOC, cyclomatic
-//! 120) and its support layer (`BlastCompo_*` types in
-//! `composition_adjustment/redo_alignment.h`) require porting the
-//! surrounding C structs and are tracked as TODOs below.
+//! Most leaf utilities and redo-alignment support helpers are ported here.
+//! The remaining gaps are narrower integration points around full program
+//! orchestration and fixture-level parity rather than the core redo helpers.
 //!
 //! Status (from `scratch/ccc/missing-names.txt` audit):
 //!
@@ -22,47 +19,66 @@
 //! | macro | `CONTAINED_IN_HSP` | 1 | ✅ |
 //! | macro | `GET_NUCL_LENGTH` | 1 | ✅ |
 //! | leaf | `s_CalcLambda` | 13 | ✅ |
-//! | comp adj | `s_GetPosBasedStartFreqRatios` | 24 | TODO — needs SFreqRatios |
-//! | comp adj | `s_GetStartFreqRatios` | 12 | TODO — needs SFreqRatios |
-//! | comp adj | `s_ScalePosMatrix` | 44 | TODO — needs PSI types |
-//! | redo adj | `s_NewAlignmentFromGapAlign` | 20 | TODO — needs BlastCompo_Alignment |
-//! | redo adj | `s_NewAlignmentUsingXdrop` | 44 | TODO |
-//! | redo adj | `s_HSPListFromDistinctAlignments` | 33 | TODO |
-//! | redo adj | `s_RedoOneAlignment` | 33 | TODO |
-//! | redo adj | `s_TestNearIdentical` | 55 | TODO — needs BlastCompo_SequenceData |
-//! | redo adj | `s_HitlistEvaluateAndPurge` | 36 | TODO |
-//! | redo adj | `s_ComputeNumIdentities` | 60 | TODO |
-//! | redo adj | `s_AdjustEvaluesForComposition` | 75 | TODO |
-//! | redo adj | `s_ResultHspToDistinctAlign` | 25 | TODO |
-//! | redo adj | `s_SWFindFinalEndsUsingXdrop` | 30 | TODO |
-//! | redo adj | `s_MatchingSequenceRelease` | 10 | TODO |
-//! | redo adj | `s_MatchingSequenceInitialize` | 33 | TODO |
-//! | redo adj | `s_DoSegSequenceData` | 22 | TODO |
-//! | redo adj | `s_SequenceGetTranslatedRange` | 51 | TODO |
-//! | redo adj | `s_SequenceGetProteinRange` | 52 | TODO |
-//! | redo adj | `s_SequenceGetRange` | 31 | TODO |
-//! | redo adj | `s_SavedParametersFree` | 13 | TODO |
-//! | redo adj | `s_SavedParametersNew` | 26 | TODO |
-//! | redo adj | `s_RecordInitialSearch` | 27 | TODO |
-//! | redo adj | `s_RestoreSearch` | 23 | TODO |
-//! | redo adj | `s_MatrixInfoInit` | 28 | TODO |
-//! | redo adj | `s_CreateWordArray` | 16 | TODO |
-//! | redo adj | `s_FreeBlastCompo_QueryInfoArray` | 10 | TODO |
-//! | redo adj | `s_GetQueryInfo` | 22 | TODO |
-//! | redo adj | `s_GappingParamsNew` | 23 | TODO |
-//! | redo adj | `s_GetAlignParams` | 48 | TODO |
-//! | redo adj | `s_FillResultsFromCompoHeaps` | 13 | TODO |
-//! | redo adj | `s_ClearHeap` | 3 | TODO |
-//! | redo adj | `s_BlastGapAlignStruct_Free` | 29 | TODO |
-//! | redo adj | `s_BlastGapAlignStruct_Copy` | 95 | TODO |
-//! | redo adj | `s_BlastScoreBlk_Copy` | 131 | TODO |
-//! | driver | `Blast_RedoAlignmentCore` | 31 | TODO (thin wrapper) |
-//! | driver | `Blast_RedoAlignmentCore_MT` | 669 | TODO (the big one) |
+//! | comp adj | `s_GetPosBasedStartFreqRatios` | 24 | ✅ (BLOSUM62 family) |
+//! | comp adj | `s_GetStartFreqRatios` | 12 | ✅ |
+//! | comp adj | `s_ScalePosMatrix` | 44 | ✅ (position rows + scaled PSI scores + Lambda-ratio stat hook) |
+//! | redo adj | `s_NewAlignmentFromGapAlign` | 20 | ✅ |
+//! | redo adj | `s_NewAlignmentUsingXdrop` | 44 | ✅ |
+//! | redo adj | `s_HSPListFromDistinctAlignments` | 33 | ✅ |
+//! | redo adj | `s_RedoOneAlignment` | 33 | ✅ |
+//! | redo adj | `Blast_RedoOneMatch` | 200 | ✅ callback + in-memory ordinary composition paths |
+//! | redo adj | SW significance gate in `Blast_RedoOneMatchSmithWaterman` | 16 | ✅ |
+//! | redo adj | `Blast_RedoOneMatchSmithWaterman` | 241 | ✅ callback + materialized ordinary/SW composition paths; BLASTN composition SW rejected |
+//! | redo adj | `s_TestNearIdentical` | 55 | ✅ |
+//! | redo adj | `s_HitlistEvaluateAndPurge` | 36 | ✅ (link-HSPs when context supplied) |
+//! | redo adj | `s_ComputeNumIdentities` | 60 | ✅ (protein / in-memory translated subject) |
+//! | redo adj | `s_AdjustEvaluesForComposition` | 75 | ✅ |
+//! | redo adj | `s_ResultHspToDistinctAlign` | 25 | ✅ |
+//! | redo adj | `s_WithDistinctEnds` | 86 | ✅ |
+//! | redo adj | `s_WindowsFromProteinAligns` | 63 | ✅ |
+//! | redo adj | `s_WindowsFromTranslatedAligns` | 122 | ✅ |
+//! | redo adj | `s_WindowsFromAligns` | 31 | ✅ |
+//! | redo adj | `s_DistinctAlignmentsSort` | 58 | ✅ |
+//! | redo adj | `s_GetComposition` | 39 | ✅ |
+//! | redo adj | `s_EvalueFromScore` | 4 | ✅ |
+//! | redo adj | `s_preliminaryTestNearIdentical` | 42 | ✅ |
+//! | redo adj | `BlastCompo_EarlyTermination` | 21 | ✅ |
+//! | redo adj | `BlastCompo_AlignmentsFree` | 16 | ✅ |
+//! | redo adj | `s_SequenceDataRelease` | 6 | ✅ |
+//! | redo adj | `s_WindowInfoFree` | 8 | ✅ |
+//! | redo adj | `s_SWFindFinalEndsUsingXdrop` | 30 | ✅ |
+//! | redo adj | `s_MatchingSequenceRelease` | 10 | ✅ |
+//! | redo adj | `s_MatchingSequenceInitialize` | 33 | ✅ |
+//! | redo adj | `s_DoSegSequenceData` | 22 | ✅ |
+//! | redo adj | `s_SequenceGetTranslatedRange` | 51 | ✅ (in-memory NCBI4na source) |
+//! | redo adj | `s_SequenceGetProteinRange` | 52 | ✅ (byte-slice source) |
+//! | redo adj | `s_SequenceGetRange` | 31 | ✅ (in-memory source) |
+//! | redo adj | `s_SavedParametersFree` | 13 | ✅ |
+//! | redo adj | `s_SavedParametersNew` | 26 | ✅ |
+//! | redo adj | `s_RecordInitialSearch` | 27 | ✅ |
+//! | redo adj | `s_RestoreSearch` | 23 | ✅ |
+//! | redo adj | `s_MatrixInfoInit` | 28 | ✅ non-position + PSI setup, including private scaled rows and Lambda-ratio stat update hook |
+//! | redo adj | `s_CreateWordArray` | 16 | ✅ |
+//! | redo adj | `s_FreeBlastCompo_QueryInfoArray` | 10 | ✅ |
+//! | redo adj | `s_GetQueryInfo` | 22 | ✅ |
+//! | redo adj | `s_GappingParamsNew` | 23 | ✅ |
+//! | redo adj | `s_GetAlignParams` | 48 | ✅ |
+//! | redo adj | `s_FillResultsFromCompoHeaps` | 13 | ✅ |
+//! | redo adj | `s_ClearHeap` | 3 | ✅ |
+//! | redo adj | `s_BlastGapAlignStruct_Free` | 29 | ✅ |
+//! | redo adj | `s_BlastGapAlignStruct_Copy` | 95 | ✅ |
+//! | redo adj | `s_BlastScoreBlk_Copy` | 131 | ✅ (modeled fields) |
+//! | redo adj | `Blast_RedoAlignCallbacks` | header struct | ✅ |
+//! | driver | `Blast_RedoAlignmentCore` | 31 | ✅ thin wrapper |
+//! | driver | `Blast_RedoAlignmentCore_MT` | 669 | ✅ materialized/stream/SeqSrc/callback redo, heap merge, sum-stat, translated, PSSM, and SW branches represented |
 
 use crate::compo_mode_condition::MatrixAdjustRule;
 use crate::hspstream::{Hsp, HspList};
 use crate::math::NCBIMATH_LN2;
 use crate::program::{ProgramType, RPS_BLAST};
+
+/// `kWindowBorder` (`redo_alignment.c:112`).
+pub const K_WINDOW_BORDER: i32 = 200;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Struct ports from `composition_adjustment/redo_alignment.h` and
@@ -71,9 +87,9 @@ use crate::program::{ProgramType, RPS_BLAST};
 // These are 1-1 ports of the C structs used by `Blast_RedoAlignmentCore_MT`
 // and its helpers. Function-pointer fields in C (`Blast_RedoAlignCallbacks`)
 // are represented as Rust function-pointer types so the dispatch table
-// translates directly. Implementations of these callbacks (and the
-// `Blast_RedoAlignParams` driver wrapper that owns them) come in later
-// iterations of this loop.
+// translates directly. Executable callback implementations still live in the
+// concrete in-memory helpers until the full external callback context is
+// available to the driver.
 // ───────────────────────────────────────────────────────────────────────────
 
 /// `ECompoAdjustModes` (`composition_constants.h:59`). Permissible
@@ -116,8 +132,10 @@ pub struct BlastCompoAlignment {
     pub query_index: i32,
     pub query_start: i32,
     pub query_end: i32,
+    pub query_gapped_start: i32,
     pub match_start: i32,
     pub match_end: i32,
+    pub match_gapped_start: i32,
     pub frame: i32,
     pub context: Option<crate::gapinfo::GapEditScript>,
     pub next: Option<Box<BlastCompoAlignment>>,
@@ -144,8 +162,10 @@ impl BlastCompoAlignment {
             query_index,
             query_start,
             query_end,
+            query_gapped_start: query_start,
             match_start,
             match_end,
+            match_gapped_start: match_start,
             frame,
             context,
             next: None,
@@ -176,6 +196,84 @@ pub struct BlastCompoSequenceRange {
     pub context: i32,
 }
 
+/// `s_WindowInfo` (`redo_alignment.c:118`). A subject/query range pair plus
+/// the list of alignments assigned to that window.
+#[derive(Debug, Clone)]
+pub struct BlastCompoWindowInfo {
+    pub query_range: BlastCompoSequenceRange,
+    pub subject_range: BlastCompoSequenceRange,
+    pub align: Option<Box<BlastCompoAlignment>>,
+    pub hspcnt: i32,
+}
+
+impl BlastCompoWindowInfo {
+    pub fn new(
+        begin: i32,
+        end: i32,
+        context: i32,
+        query_origin: i32,
+        query_length: i32,
+        query_index: i32,
+        align: Option<Box<BlastCompoAlignment>>,
+    ) -> Self {
+        let hspcnt = alignment_list_len(align.as_deref()) as i32;
+        Self {
+            query_range: BlastCompoSequenceRange {
+                begin: query_origin,
+                end: query_origin + query_length,
+                context: query_index,
+            },
+            subject_range: BlastCompoSequenceRange {
+                begin,
+                end,
+                context,
+            },
+            align,
+            hspcnt,
+        }
+    }
+
+    /// 1-1 port of `s_WindowSwapRange`.
+    pub fn swap_range(&mut self) {
+        std::mem::swap(&mut self.query_range, &mut self.subject_range);
+    }
+
+    /// 1-1 ownership-safe port of `s_WindowInfoJoin`.
+    ///
+    /// Appends `other.align` to the tail of `self.align`, expands the subject
+    /// range, and adds HSP counts. The caller is responsible for ensuring the
+    /// subject/query contexts match, as NCBI asserts.
+    pub fn join(&mut self, mut other: BlastCompoWindowInfo) {
+        assert_eq!(self.subject_range.context, other.subject_range.context);
+        assert_eq!(self.query_range.context, other.query_range.context);
+
+        self.subject_range.begin = self.subject_range.begin.min(other.subject_range.begin);
+        self.subject_range.end = self.subject_range.end.max(other.subject_range.end);
+        self.hspcnt += other.hspcnt;
+
+        if self.align.is_none() {
+            self.align = other.align.take();
+            return;
+        }
+        let mut cursor = self.align.as_mut().unwrap();
+        while cursor.next.is_some() {
+            cursor = cursor.next.as_mut().unwrap();
+        }
+        cursor.next = other.align.take();
+    }
+}
+
+/// 1-1 port of `s_WindowInfoFree` (`redo_alignment.c:552`).
+///
+/// Rust frees the window and its alignment list automatically. This parity
+/// hook clears the caller's slot to mirror C's `*window = NULL`.
+pub fn window_info_free(window: &mut Option<BlastCompoWindowInfo>) {
+    if let Some(window) = window.as_mut() {
+        alignments_free(&mut window.align);
+    }
+    *window = None;
+}
+
 /// `BlastCompo_SequenceData` (`redo_alignment.h:131`). Owns the residue
 /// buffer and a shadow byte at `data[-1]` (NCBI uses a sentinel zero
 /// before the start). Rust models this by allocating with one leading
@@ -202,6 +300,17 @@ impl BlastCompoSequenceData {
     }
 }
 
+/// 1-1 port of `s_SequenceDataRelease` (`redo_alignment.c:486`).
+///
+/// In C this frees `buffer`, then nulls both `data` and `buffer`. In Rust the
+/// buffer owns the data; clearing it and resetting the offset/length gives the
+/// same observable postcondition for later parity call sites.
+pub fn sequence_data_release(self_: &mut BlastCompoSequenceData) {
+    self_.buffer.clear();
+    self_.data_offset = 0;
+    self_.length = 0;
+}
+
 /// `BlastCompo_MatchingSequence` (`redo_alignment.h:156`). Identifies
 /// one subject sequence and provides a hook for callbacks to access
 /// the underlying database/translation. NCBI's `local_data` is a
@@ -214,11 +323,29 @@ pub struct BlastCompoMatchingSequence {
     pub local_data_index: i32,
 }
 
+/// 1-1 port of `s_MatchingSequenceInitialize` (`blast_kappa.c:874`).
+///
+/// NCBI fills a small stack struct for the current database sequence before
+/// invoking the redo-alignment callbacks. The C `local_data` pointer is modeled
+/// as `local_data_index`; callers that need richer state keep it externally and
+/// use this index as the lookup key.
+pub fn matching_sequence_initialize(
+    length: i32,
+    index: i32,
+    local_data_index: i32,
+) -> BlastCompoMatchingSequence {
+    BlastCompoMatchingSequence {
+        length,
+        index,
+        local_data_index,
+    }
+}
+
 /// `BlastCompo_QueryInfo` (`redo_alignment.h:166`). Per-query metadata
 /// consumed by the redo-alignment driver. `composition` (the
 /// `Blast_AminoAcidComposition` struct) and `words` (Uint8 array of
 /// hashed query k-mers) are filled in by `s_GetQueryInfo` /
-/// `s_CreateWordArray`; both are TODO until those helpers land.
+/// `s_CreateWordArray`.
 #[derive(Debug, Clone, Default)]
 pub struct BlastCompoQueryInfo {
     pub origin: i32,
@@ -231,27 +358,157 @@ pub struct BlastCompoQueryInfo {
 /// Port of `Blast_MatrixInfo` (`composition_adjustment.h`). Holds the
 /// scoring matrix used for the redo-alignment pass, plus its
 /// dimensions, name, and the rounding/scale parameters used by
-/// composition adjustment. Currently empty placeholder; populated when
-/// `s_MatrixInfoInit` is ported.
+/// composition adjustment.
 #[derive(Debug, Clone, Default)]
 pub struct BlastMatrixInfo {
     pub matrix_name: String,
     pub rows: i32,
     pub cols: i32,
     pub positional: bool,
+    pub bit_scale_factor: i32,
     pub ungapped_lambda: f64,
     pub matrix: Vec<Vec<i32>>,
+    pub scaled_matrix: Vec<Vec<i32>>,
     pub start_freq_ratios: Vec<Vec<f64>>,
 }
 
-/// `Blast_RedoAlignParams` (`redo_alignment.h:328`). Parameter block
-/// owned by the kappa driver. Callback function pointers
-/// (`Blast_RedoAlignCallbacks`) are ported in the next iteration.
+/// Rust-owned port boundary for `Blast_CompositionWorkspace`
+/// (`composition_adjustment.c:1285`).
+///
+/// NCBI stores `first_standard_freq`, `second_standard_freq`, and `mat_b`
+/// inside this workspace after `Blast_CompositionWorkspaceInit`. The local
+/// composition module currently exposes the BLOSUM62 initialization data, so
+/// this wrapper carries those same fields for relative-entropy adjustment.
+#[derive(Debug, Clone)]
+pub struct BlastCompositionWorkspace {
+    pub joint_probs:
+        [[f64; crate::composition::COMPO_NUM_TRUE_AA]; crate::composition::COMPO_NUM_TRUE_AA],
+    pub first_standard_freq: [f64; crate::composition::COMPO_NUM_TRUE_AA],
+    pub second_standard_freq: [f64; crate::composition::COMPO_NUM_TRUE_AA],
+}
+
+impl BlastCompositionWorkspace {
+    /// Port boundary for `Blast_CompositionWorkspaceInit` with BLOSUM62.
+    pub fn blosum62() -> Self {
+        let (joint_probs, first_standard_freq, second_standard_freq) =
+            crate::composition::blosum62_workspace();
+        Self {
+            joint_probs,
+            first_standard_freq,
+            second_standard_freq,
+        }
+    }
+}
+
+/// Rust-owned subset of NCBI `BlastScoreBlk` used by the kappa/composition
+/// pipeline.
+///
+/// The C `s_BlastScoreBlk_Copy` deep-copies many optional fields from
+/// `BlastScoreBlk` before composition adjustment mutates the live score
+/// block. This crate does not model every C-side score-block member, so this
+/// struct carries the fields that are represented locally and can be restored:
+/// matrix data, PSI matrix data when present, per-context Karlin blocks, the
+/// active matrix name, and scale/rounding metadata.
+#[derive(Debug, Clone, Default)]
+pub struct BlastScoreBlkSnapshot {
+    pub matrix_name: String,
+    pub matrix: Vec<Vec<i32>>,
+    pub psi_matrix: Option<Vec<Vec<i32>>>,
+    pub kbp: Vec<crate::stat::KarlinBlk>,
+    pub kbp_gap: Vec<crate::stat::KarlinBlk>,
+    pub scale_factor: f64,
+    pub round_down: bool,
+}
+
+/// 1-1 port boundary for `s_BlastScoreBlk_Copy` (`blast_kappa.c:2609`).
+///
+/// Rust's `Clone` performs the deep copies that NCBI does field-by-field with
+/// `Blast_KarlinBlkCopy`, matrix allocation/copy, and PSI-matrix row copies.
+/// Keeping this wrapper makes call sites mirror the C flow and protects the
+/// important semantic: mutating the returned snapshot must not alias the source.
+pub fn blast_score_blk_copy(src: &BlastScoreBlkSnapshot) -> BlastScoreBlkSnapshot {
+    src.clone()
+}
+
+/// Rust representation of `calc_lambda_type` (`redo_alignment.h:220`).
+pub type BlastCalcLambdaFn = fn(probs: &[f64], min_score: i32, max_score: i32, lambda0: f64) -> f64;
+
+/// Rust representation of `get_range_type` (`redo_alignment.h:247`).
+///
+/// NCBI's callback receives C pointers to sequence buffers plus the caller's
+/// external context through `BlastCompo_MatchingSequence.local_data`. Rust
+/// keeps the context outside this function pointer and passes owned wrapper
+/// structs/slices directly.
+pub type BlastGetRangeFn = fn(
+    sequence: &BlastCompoMatchingSequence,
+    range: &BlastCompoSequenceRange,
+    data: &mut BlastCompoSequenceData,
+    orig_query: &BlastCompoSequenceData,
+    q_range: &BlastCompoSequenceRange,
+    q_data: &mut BlastCompoSequenceData,
+    query_words: &[u64],
+    align: &BlastCompoAlignment,
+    should_test_identical: bool,
+    compo_adjust_mode: CompoAdjustMode,
+    is_smith_waterman: bool,
+    subject_maybe_biased: &mut bool,
+) -> i32;
+
+/// Rust representation of `redo_one_alignment_type`
+/// (`redo_alignment.h:286`).
+pub type BlastRedoOneAlignmentFn = fn(
+    in_align: &BlastCompoAlignment,
+    matrix_adjust_rule: MatrixAdjustRule,
+    query_data: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    ccat_query_length: i32,
+    subject_data: &BlastCompoSequenceData,
+    subject_range: &BlastCompoSequenceRange,
+    full_subject_length: i32,
+    gapping_params: &BlastCompoGappingParams,
+) -> Option<BlastCompoAlignment>;
+
+/// Rust representation of `new_xdrop_align_type`
+/// (`redo_alignment.h:321`).
+pub type BlastNewXdropAlignFn = fn(
+    align: &mut Option<BlastCompoAlignment>,
+    query_end: &mut i32,
+    match_end: &mut i32,
+    query_start: i32,
+    match_start: i32,
+    score: i32,
+    query: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    ccat_query_length: i32,
+    subject: &BlastCompoSequenceData,
+    subject_range: &BlastCompoSequenceRange,
+    full_subject_length: i32,
+    gapping_params: &BlastCompoGappingParams,
+    matrix_adjust_rule: MatrixAdjustRule,
+) -> i32;
+
+/// Rust representation of `free_align_traceback_type`
+/// (`redo_alignment.h:339`).
+pub type BlastFreeAlignTracebackFn = fn(traceback_data: &mut Option<crate::gapinfo::GapEditScript>);
+
+/// `Blast_RedoAlignCallbacks` (`redo_alignment.h:344`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlastRedoAlignCallbacks {
+    pub calc_lambda: Option<BlastCalcLambdaFn>,
+    pub get_range: Option<BlastGetRangeFn>,
+    pub redo_one_alignment: Option<BlastRedoOneAlignmentFn>,
+    pub new_xdrop_align: Option<BlastNewXdropAlignFn>,
+    pub free_align_traceback: Option<BlastFreeAlignTracebackFn>,
+}
+
+/// `Blast_RedoAlignParams` (`redo_alignment.h:360`). Parameter block
+/// owned by the kappa driver.
 #[derive(Debug, Clone)]
 pub struct BlastRedoAlignParams {
     pub matrix_info: BlastMatrixInfo,
     pub gapping_params: BlastCompoGappingParams,
     pub compo_adjust_mode: CompoAdjustMode,
+    pub local_scaling_factor: f64,
     pub position_based: bool,
     pub re_pseudocounts: i32,
     pub subject_is_translated: bool,
@@ -260,6 +517,7 @@ pub struct BlastRedoAlignParams {
     pub cutoff_s: i32,
     pub cutoff_e: f64,
     pub do_link_hsps: bool,
+    pub callbacks: Option<BlastRedoAlignCallbacks>,
     pub near_identical_cutoff: f64,
 }
 
@@ -278,6 +536,125 @@ mod struct_tests {
         assert_eq!(a.match_start, 20);
         assert_eq!(a.match_end, 60);
         assert!(a.next.is_none());
+    }
+
+    #[test]
+    fn alignments_free_clears_entire_list() {
+        let mut head = Some(Box::new(BlastCompoAlignment::new(
+            42,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            10,
+            50,
+            20,
+            60,
+            1,
+            None,
+        )));
+        head.as_mut().unwrap().next = Some(Box::new(BlastCompoAlignment::new(
+            41,
+            MatrixAdjustRule::ScaleOldMatrix,
+            0,
+            11,
+            49,
+            21,
+            59,
+            1,
+            None,
+        )));
+
+        alignments_free(&mut head);
+        assert!(head.is_none());
+    }
+
+    #[test]
+    fn alignments_free_array_clears_prefix() {
+        let mut alignments = vec![
+            Some(Box::new(BlastCompoAlignment::new(
+                42,
+                MatrixAdjustRule::DontAdjust,
+                0,
+                10,
+                50,
+                20,
+                60,
+                1,
+                None,
+            ))),
+            Some(Box::new(BlastCompoAlignment::new(
+                41,
+                MatrixAdjustRule::ScaleOldMatrix,
+                1,
+                11,
+                49,
+                21,
+                59,
+                1,
+                None,
+            ))),
+        ];
+
+        alignments_free_array(&mut alignments, 1);
+
+        assert!(alignments[0].is_none());
+        assert!(alignments[1].is_some());
+    }
+
+    fn test_calc_lambda(_: &[f64], _: i32, _: i32, lambda0: f64) -> f64 {
+        lambda0
+    }
+
+    #[test]
+    fn redo_align_params_new_with_callbacks_preserves_callback_table() {
+        let callbacks = BlastRedoAlignCallbacks {
+            calc_lambda: Some(test_calc_lambda),
+            ..Default::default()
+        };
+
+        let params = blast_redo_align_params_new_with_callbacks(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: 0,
+                x_dropoff: 20,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            10,
+            1,
+            10.0,
+            false,
+            Some(callbacks),
+            0.0,
+        );
+
+        let stored = params.callbacks.expect("callbacks stored");
+        assert!(stored.calc_lambda.is_some());
+        assert!(stored.get_range.is_none());
+        assert_eq!(params.re_pseudocounts, K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS);
+    }
+
+    #[test]
+    fn window_info_free_clears_slot_and_alignment() {
+        let align = Some(Box::new(BlastCompoAlignment::new(
+            42,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            10,
+            50,
+            20,
+            60,
+            1,
+            None,
+        )));
+        let mut window = Some(BlastCompoWindowInfo::new(20, 60, 1, 0, 100, 0, align));
+
+        window_info_free(&mut window);
+        assert!(window.is_none());
     }
 
     #[test]
@@ -355,6 +732,1588 @@ mod struct_tests {
         assert_eq!(aln.match_end, 10);
     }
 
+    fn redo_one_match_test_params(compo_adjust_mode: CompoAdjustMode) -> BlastRedoAlignParams {
+        BlastRedoAlignParams {
+            matrix_info: BlastMatrixInfo::default(),
+            gapping_params: BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: 0,
+                x_dropoff: 30,
+            },
+            compo_adjust_mode,
+            local_scaling_factor: 1.0,
+            position_based: false,
+            re_pseudocounts: K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS,
+            subject_is_translated: false,
+            query_is_translated: false,
+            ccat_query_length: 10,
+            cutoff_s: 1,
+            cutoff_e: 10.0,
+            do_link_hsps: false,
+            callbacks: None,
+            near_identical_cutoff: 0.0,
+        }
+    }
+
+    fn callback_test_get_range(
+        _sequence: &BlastCompoMatchingSequence,
+        range: &BlastCompoSequenceRange,
+        data: &mut BlastCompoSequenceData,
+        orig_query: &BlastCompoSequenceData,
+        _q_range: &BlastCompoSequenceRange,
+        q_data: &mut BlastCompoSequenceData,
+        _query_words: &[u64],
+        _align: &BlastCompoAlignment,
+        _should_test_identical: bool,
+        _compo_adjust_mode: CompoAdjustMode,
+        _is_smith_waterman: bool,
+        subject_maybe_biased: &mut bool,
+    ) -> i32 {
+        let length = (range.end - range.begin).max(0) as usize;
+        data.buffer = vec![0; length];
+        data.data_offset = 0;
+        data.length = length as i32;
+        *q_data = orig_query.clone();
+        *subject_maybe_biased = false;
+        0
+    }
+
+    fn callback_test_get_range_alanine(
+        _sequence: &BlastCompoMatchingSequence,
+        range: &BlastCompoSequenceRange,
+        data: &mut BlastCompoSequenceData,
+        orig_query: &BlastCompoSequenceData,
+        _q_range: &BlastCompoSequenceRange,
+        q_data: &mut BlastCompoSequenceData,
+        _query_words: &[u64],
+        _align: &BlastCompoAlignment,
+        _should_test_identical: bool,
+        _compo_adjust_mode: CompoAdjustMode,
+        _is_smith_waterman: bool,
+        subject_maybe_biased: &mut bool,
+    ) -> i32 {
+        let length = (range.end - range.begin).max(0) as usize;
+        data.buffer = vec![1; length];
+        data.data_offset = 0;
+        data.length = length as i32;
+        *q_data = orig_query.clone();
+        *subject_maybe_biased = false;
+        0
+    }
+
+    fn callback_test_redo_one_alignment(
+        in_align: &BlastCompoAlignment,
+        matrix_adjust_rule: MatrixAdjustRule,
+        _query_data: &BlastCompoSequenceData,
+        _query_range: &BlastCompoSequenceRange,
+        _ccat_query_length: i32,
+        _subject_data: &BlastCompoSequenceData,
+        _subject_range: &BlastCompoSequenceRange,
+        _full_subject_length: i32,
+        _gapping_params: &BlastCompoGappingParams,
+    ) -> Option<BlastCompoAlignment> {
+        Some(BlastCompoAlignment::new(
+            in_align.score + 1,
+            matrix_adjust_rule,
+            in_align.query_index,
+            in_align.query_start,
+            in_align.query_end,
+            in_align.match_start,
+            in_align.match_end,
+            in_align.frame,
+            None,
+        ))
+    }
+
+    fn callback_test_new_xdrop_align(
+        align: &mut Option<BlastCompoAlignment>,
+        query_end: &mut i32,
+        match_end: &mut i32,
+        query_start: i32,
+        match_start: i32,
+        score: i32,
+        _query: &BlastCompoSequenceData,
+        query_range: &BlastCompoSequenceRange,
+        _ccat_query_length: i32,
+        _subject: &BlastCompoSequenceData,
+        subject_range: &BlastCompoSequenceRange,
+        _full_subject_length: i32,
+        _gapping_params: &BlastCompoGappingParams,
+        matrix_adjust_rule: MatrixAdjustRule,
+    ) -> i32 {
+        *query_end += 1;
+        *match_end += 1;
+        *align = Some(BlastCompoAlignment::new(
+            score,
+            matrix_adjust_rule,
+            query_range.context,
+            query_range.begin + query_start,
+            query_range.begin + *query_end,
+            subject_range.begin + match_start,
+            subject_range.begin + *match_end,
+            subject_range.context,
+            None,
+        ));
+        0
+    }
+
+    #[test]
+    fn blast_redo_one_match_with_callbacks_redoes_no_composition() {
+        let query_source = vec![0u8; 8];
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source,
+                data_offset: 0,
+                length: 8,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            8,
+            0,
+            8,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range),
+            redo_one_alignment: Some(callback_test_redo_one_alignment),
+            ..Default::default()
+        });
+        let matching_seq = matching_sequence_initialize(8, 7, 0);
+        let mut alignments = vec![None];
+
+        let status = blast_redo_one_match_with_callbacks(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("callback alignment");
+        assert_eq!(aln.score, 11);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.match_end, 8);
+    }
+
+    #[test]
+    fn blast_redo_one_match_with_callbacks_rejects_missing_callbacks() {
+        let query_info = vec![BlastCompoQueryInfo {
+            seq: BlastCompoSequenceData {
+                buffer: vec![0u8; 4],
+                data_offset: 0,
+                length: 4,
+            },
+            ..Default::default()
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            4,
+            0,
+            4,
+            0,
+            None,
+        )));
+        let params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        let matching_seq = matching_sequence_initialize(4, 7, 0);
+        let mut alignments = vec![Some(Box::new(BlastCompoAlignment::new(
+            9,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            4,
+            0,
+            4,
+            0,
+            None,
+        )))];
+
+        let status = blast_redo_one_match_with_callbacks(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+        );
+
+        assert_eq!(status, -1);
+        assert!(alignments[0].is_none());
+    }
+
+    #[test]
+    fn blast_redo_one_match_with_callbacks_redoes_composition_adjusted() {
+        let query_source = vec![1u8; 8];
+        let (query_composition, _) =
+            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source,
+                data_offset: 0,
+                length: 8,
+            },
+            composition: query_composition,
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            8,
+            0,
+            8,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::CompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range_alanine),
+            redo_one_alignment: Some(callback_test_redo_one_alignment),
+            ..Default::default()
+        });
+        let matching_seq = matching_sequence_initialize(8, 7, 0);
+        let mut alignments = vec![None];
+        let mut matrix = square_matrix_from_vec(&params.matrix_info.matrix).expect("matrix");
+        let mut pvalue = -1.0;
+        let mut lambda_ratio = 0.0;
+
+        let status = blast_redo_one_match_with_callbacks_and_adjustment(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            &mut matrix,
+            None,
+            &mut pvalue,
+            0,
+            &mut lambda_ratio,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("callback alignment");
+        assert_eq!(aln.score, 11);
+        assert_eq!(aln.matrix_adjust_rule, MatrixAdjustRule::ScaleOldMatrix);
+        assert!((0.5..=1.0).contains(&lambda_ratio));
+        assert_eq!(pvalue, -1.0);
+    }
+
+    #[test]
+    fn blast_redo_one_match_with_callbacks_redoes_position_based_composition_adjusted() {
+        let query_source = vec![1u8; 8];
+        let (query_composition, _) =
+            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: query_composition,
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            query_source.len() as i32,
+            0,
+            query_source.len() as i32,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::CompositionBasedStats);
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query_source.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut params.matrix_info,
+                &query_source,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        params.position_based = true;
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.cutoff_s = 1;
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range_alanine),
+            ..Default::default()
+        });
+        let matching_seq = matching_sequence_initialize(query_source.len() as i32, 7, 0);
+        let mut alignments = vec![None];
+        let mut matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut pvalue = -1.0;
+        let mut lambda_ratio = 0.0;
+
+        let status = blast_redo_one_match_with_callbacks_and_adjustment(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            &mut matrix,
+            None,
+            &mut pvalue,
+            0,
+            &mut lambda_ratio,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("callback PSSM alignment");
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, query_source.len() as i32);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, query_source.len() as i32);
+        assert_eq!(aln.matrix_adjust_rule, MatrixAdjustRule::ScaleOldMatrix);
+        assert!((0.5..=1.0).contains(&lambda_ratio));
+        assert_eq!(pvalue, -1.0);
+    }
+
+    #[test]
+    fn blast_redo_one_match_smith_waterman_with_callbacks_redoes_no_composition() {
+        let query_source = vec![0u8; 8];
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source,
+                data_offset: 0,
+                length: 8,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            8,
+            0,
+            8,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range),
+            new_xdrop_align: Some(callback_test_new_xdrop_align),
+            ..Default::default()
+        });
+        let matching_seq = matching_sequence_initialize(8, 7, 0);
+        let mut alignments = vec![None];
+        let heaps = vec![BlastCompoHeap::new(10, 10.0)];
+        let mut sw_matrix = [[-3i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        sw_matrix[0][0] = 2;
+
+        let status = blast_redo_one_match_smith_waterman_with_callbacks(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            0.041_f64.ln(),
+            &matching_seq,
+            &query_info,
+            &heaps,
+            &sw_matrix,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("callback SW alignment");
+        assert_eq!(aln.score, 16);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, 8);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, 8);
+    }
+
+    #[test]
+    fn blast_redo_one_match_smith_waterman_with_callbacks_redoes_composition_adjusted() {
+        let query_source = vec![1u8; 8];
+        let (query_composition, _) =
+            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source,
+                data_offset: 0,
+                length: 8,
+            },
+            composition: query_composition,
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            8,
+            0,
+            8,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::CompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range_alanine),
+            new_xdrop_align: Some(callback_test_new_xdrop_align),
+            ..Default::default()
+        });
+        let matching_seq = matching_sequence_initialize(8, 7, 0);
+        let mut alignments = vec![None];
+        let heaps = vec![BlastCompoHeap::new(10, 10.0)];
+        let mut matrix = square_matrix_from_vec(&params.matrix_info.matrix).expect("matrix");
+        let mut pvalue = -1.0;
+        let mut lambda_ratio = 0.0;
+
+        let status = blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            0.041_f64.ln(),
+            &matching_seq,
+            &query_info,
+            &heaps,
+            &mut matrix,
+            None,
+            &mut pvalue,
+            0,
+            &mut lambda_ratio,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("callback SW alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.matrix_adjust_rule, MatrixAdjustRule::ScaleOldMatrix);
+        assert!((0.5..=1.0).contains(&lambda_ratio));
+        assert_eq!(pvalue, -1.0);
+    }
+
+    #[test]
+    fn blast_redo_one_match_smith_waterman_with_callbacks_redoes_position_based_composition_adjusted(
+    ) {
+        let query_source = vec![1u8; 8];
+        let (query_composition, _) =
+            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: query_composition,
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            query_source.len() as i32,
+            0,
+            query_source.len() as i32,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::CompositionBasedStats);
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query_source.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut params.matrix_info,
+                &query_source,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        params.position_based = true;
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.cutoff_s = 1;
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range_alanine),
+            ..Default::default()
+        });
+        let matching_seq = matching_sequence_initialize(query_source.len() as i32, 7, 0);
+        let mut alignments = vec![None];
+        let heaps = vec![BlastCompoHeap::new(10, 10.0)];
+        let mut matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut pvalue = -1.0;
+        let mut lambda_ratio = 0.0;
+
+        let status = blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            0.041_f64.ln(),
+            &matching_seq,
+            &query_info,
+            &heaps,
+            &mut matrix,
+            None,
+            &mut pvalue,
+            0,
+            &mut lambda_ratio,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("callback PSSM SW alignment");
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, query_source.len() as i32);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, query_source.len() as i32);
+        assert_eq!(aln.matrix_adjust_rule, MatrixAdjustRule::ScaleOldMatrix);
+        assert!(aln.context.is_some());
+        assert!((0.5..=1.0).contains(&lambda_ratio));
+        assert_eq!(pvalue, -1.0);
+    }
+
+    #[test]
+    fn blast_adjust_scores_scale_old_matrix_updates_matrix_and_ratio() {
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut matrix = square_matrix_from_vec(&matrix_info.matrix).expect("start matrix");
+        let original = matrix;
+        let mut query_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        let mut subject_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS {
+            query_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+            subject_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+        }
+        subject_prob[crate::composition::TRUE_CHAR_POSITIONS[0]] += 0.19;
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS[1..] {
+            subject_prob[idx] -= 0.01;
+        }
+        let mut pvalue = 0.0;
+        let mut ratio = 0.0;
+
+        let rule = blast_adjust_scores_scale_old_matrix(
+            &mut matrix,
+            &query_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &subject_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &matrix_info,
+            CompoAdjustMode::CompositionBasedStats,
+            0,
+            &mut pvalue,
+            &mut ratio,
+        )
+        .expect("scale old matrix");
+
+        assert_eq!(rule, MatrixAdjustRule::ScaleOldMatrix);
+        assert!((0.5..=1.0).contains(&ratio));
+        assert_ne!(matrix, original);
+        assert_eq!(pvalue, 0.0);
+    }
+
+    #[test]
+    fn blast_adjust_scores_pvalue_test_computes_pvalue_and_scales_matrix() {
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut matrix = square_matrix_from_vec(&matrix_info.matrix).expect("start matrix");
+        let original = matrix;
+        let mut query_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        let mut subject_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS {
+            query_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+            subject_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+        }
+        query_prob[crate::composition::TRUE_CHAR_POSITIONS[4]] += 0.095;
+        query_prob[crate::composition::TRUE_CHAR_POSITIONS[0]] -= 0.005;
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS[1..4] {
+            query_prob[idx] -= 0.03;
+        }
+        let mut pvalue = 0.0;
+        let mut ratio = 0.0;
+
+        let rule = blast_adjust_scores_with_workspace(
+            &mut matrix,
+            &query_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &subject_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &matrix_info,
+            CompoAdjustMode::CompositionBasedStats,
+            0,
+            None,
+            1,
+            &mut pvalue,
+            &mut ratio,
+        )
+        .expect("p-value test scale old matrix");
+
+        assert_eq!(rule, MatrixAdjustRule::ScaleOldMatrix);
+        assert!((0.0..=1.0).contains(&pvalue));
+        assert!(pvalue > 0.0);
+        assert!((0.5..=1.0).contains(&ratio));
+        assert_ne!(matrix, original);
+    }
+
+    #[test]
+    fn blast_adjust_position_based_scores_scales_pssm_rows() {
+        let query = [1u8, 20u8];
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut matrix_info,
+                &query,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        let original = matrix_info.matrix.clone();
+        let mut matrix = original.clone();
+        let mut query_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        let mut subject_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS {
+            query_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+            subject_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+        }
+        subject_prob[crate::composition::TRUE_CHAR_POSITIONS[0]] += 0.19;
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS[1..] {
+            subject_prob[idx] -= 0.01;
+        }
+        let mut pvalue = 0.0;
+        let mut ratio = 0.0;
+
+        let rule = blast_adjust_position_based_scores(
+            &mut matrix,
+            &query_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &subject_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &matrix_info,
+            1,
+            &mut pvalue,
+            &mut ratio,
+        )
+        .expect("position-based adjustment");
+
+        assert_eq!(rule, MatrixAdjustRule::ScaleOldMatrix);
+        assert_eq!(matrix.len(), query.len());
+        assert_eq!(
+            matrix[0][crate::encoding::NCBISTDAA_STOP as usize],
+            original[0][crate::encoding::NCBISTDAA_STOP as usize]
+        );
+        assert_eq!(
+            matrix[0][crate::encoding::NCBISTDAA_U as usize],
+            matrix[0][crate::encoding::NCBISTDAA_C as usize]
+        );
+        assert!(matrix[0][crate::encoding::NCBISTDAA_X as usize] <= -1);
+        assert!(pvalue > 0.0 && pvalue <= 1.0);
+        assert!(ratio >= 0.5);
+    }
+
+    #[test]
+    fn blast_adjust_scores_scale_old_matrix_returns_one_for_empty_composition() {
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut matrix = square_matrix_from_vec(&matrix_info.matrix).expect("start matrix");
+        let probs = vec![0.0f64; crate::matrix::AA_SIZE];
+        let mut pvalue = 0.0;
+        let mut ratio = 0.0;
+
+        let status = blast_adjust_scores_scale_old_matrix(
+            &mut matrix,
+            &probs,
+            0,
+            &probs,
+            0,
+            &matrix_info,
+            CompoAdjustMode::CompositionBasedStats,
+            0,
+            &mut pvalue,
+            &mut ratio,
+        )
+        .expect_err("empty composition skips adjustment");
+
+        assert_eq!(status, 1);
+    }
+
+    #[test]
+    fn blast_adjust_scores_with_workspace_runs_re_optimization() {
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut matrix = square_matrix_from_vec(&matrix_info.matrix).expect("start matrix");
+        let original = matrix;
+        let mut query_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        let mut subject_prob = vec![0.0f64; crate::matrix::AA_SIZE];
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS {
+            query_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+            subject_prob[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+        }
+        let workspace = BlastCompositionWorkspace::blosum62();
+        let mut pvalue = 0.0;
+        let mut ratio = 0.0;
+
+        let rule = blast_adjust_scores_with_workspace(
+            &mut matrix,
+            &query_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &subject_prob,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &matrix_info,
+            CompoAdjustMode::CompoForceFullMatrixAdjust,
+            K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS,
+            Some(&workspace),
+            0,
+            &mut pvalue,
+            &mut ratio,
+        )
+        .expect("RE matrix adjustment");
+
+        assert_eq!(rule, MatrixAdjustRule::UserSpecifiedRelEntropy);
+        assert_eq!(ratio, 1.0);
+        assert_ne!(matrix, original);
+        assert_eq!(pvalue, 0.0);
+    }
+
+    #[test]
+    fn blast_adjust_scores_with_workspace_requires_workspace_for_re_mode() {
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut matrix = square_matrix_from_vec(&matrix_info.matrix).expect("start matrix");
+        let mut probs = vec![0.0f64; crate::matrix::AA_SIZE];
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS {
+            probs[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+        }
+        let mut pvalue = 0.0;
+        let mut ratio = 0.0;
+
+        let status = blast_adjust_scores_with_workspace(
+            &mut matrix,
+            &probs,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &probs,
+            crate::composition::COMPO_NUM_TRUE_AA,
+            &matrix_info,
+            CompoAdjustMode::CompoForceFullMatrixAdjust,
+            K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS,
+            None,
+            0,
+            &mut pvalue,
+            &mut ratio,
+        )
+        .expect_err("missing workspace");
+
+        assert_eq!(status, -1);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_no_composition_redoes_alignment() {
+        let query_source = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject_source = query_source.clone();
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            10,
+            0,
+            10,
+            0,
+            None,
+        )));
+        let params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::BLASTN,
+            &subject_source,
+            1,
+            -3,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("redone alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, 10);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, 10);
+        assert_eq!(aln.frame, 0);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_no_composition_redoes_protein_alignment() {
+        let query_source = vec![12u8, 1, 12, 1, 12, 1, 12, 1];
+        let subject_source = query_source.clone();
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            query_source.len() as i32,
+            0,
+            subject_source.len() as i32,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.gapping_params.decline_align = i32::MIN;
+        params.ccat_query_length = query_source.len() as i32;
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::BLASTP,
+            &subject_source,
+            0,
+            0,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("redone protein alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, query_source.len() as i32);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, subject_source.len() as i32);
+        assert_eq!(aln.frame, 0);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_no_composition_redoes_tblastn_alignment() {
+        let query_source = vec![12u8, 1, 12, 1];
+        let subject_source = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            query_source.len() as i32,
+            0,
+            query_source.len() as i32,
+            1,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.gapping_params.decline_align = i32::MIN;
+        params.subject_is_translated = true;
+        params.ccat_query_length = query_source.len() as i32;
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::TBLASTN,
+            &subject_source,
+            0,
+            0,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0]
+            .as_ref()
+            .expect("redone translated-subject alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, query_source.len() as i32);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, query_source.len() as i32);
+        assert_eq!(aln.frame, 1);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_no_composition_redoes_blastx_alignment() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        let query_info = get_query_info(&query_source, &qi, true);
+        let subject_source = vec![12u8, 1, 12, 1];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            subject_source.len() as i32,
+            0,
+            subject_source.len() as i32,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.gapping_params.decline_align = i32::MIN;
+        params.query_is_translated = true;
+        params.ccat_query_length = query_ncbi4na.len() as i32;
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None; query_info.len()];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::BLASTX,
+            &subject_source,
+            0,
+            0,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("redone blastx alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, subject_source.len() as i32);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, subject_source.len() as i32);
+        assert_eq!(aln.frame, 0);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_no_composition_redoes_blastx_second_context() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        let query_info = get_query_info(&query_source, &qi, true);
+        let subject_source = query_info[1].seq.data().to_vec();
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            1,
+            0,
+            subject_source.len() as i32,
+            0,
+            subject_source.len() as i32,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.gapping_params.decline_align = i32::MIN;
+        params.query_is_translated = true;
+        params.ccat_query_length = query_ncbi4na.len() as i32;
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None; query_info.len()];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::BLASTX,
+            &subject_source,
+            0,
+            0,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        assert!(alignments[0].is_none());
+        let aln = alignments[1]
+            .as_ref()
+            .expect("redone second-context blastx alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, subject_source.len() as i32);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, subject_source.len() as i32);
+        assert_eq!(aln.frame, 0);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_no_composition_redoes_tblastx_alignment() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        let query_info = get_query_info(&query_source, &qi, true);
+        let subject_source = query_ncbi4na.clone();
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            4,
+            0,
+            4,
+            1,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.gapping_params.decline_align = i32::MIN;
+        params.query_is_translated = true;
+        params.subject_is_translated = true;
+        params.ccat_query_length = query_ncbi4na.len() as i32;
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None; query_info.len()];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::TBLASTX,
+            &subject_source,
+            0,
+            0,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("redone tblastx alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, 4);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, 4);
+        assert_eq!(aln.frame, 1);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_no_composition_redoes_tblastx_second_context() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        let query_info = get_query_info(&query_source, &qi, true);
+        let subject_source = query_ncbi4na.clone();
+        let query_len = query_info[1].seq.length;
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            1,
+            0,
+            query_len,
+            0,
+            query_len,
+            2,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        params.gapping_params.decline_align = i32::MIN;
+        params.query_is_translated = true;
+        params.subject_is_translated = true;
+        params.ccat_query_length = query_ncbi4na.len() as i32;
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None; query_info.len()];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::TBLASTX,
+            &subject_source,
+            0,
+            0,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        assert!(alignments[0].is_none());
+        let aln = alignments[1]
+            .as_ref()
+            .expect("redone second-context tblastx alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, query_len);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, query_len);
+        assert_eq!(aln.frame, 2);
+    }
+
+    #[test]
+    fn blast_redo_one_match_in_memory_rejects_composition_adjusted_path() {
+        let query_source = vec![0u8, 1, 2, 3];
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            4,
+            0,
+            4,
+            0,
+            None,
+        )));
+        let params = redo_one_match_test_params(CompoAdjustMode::CompositionBasedStats);
+        let matching_seq = matching_sequence_initialize(query_source.len() as i32, 7, 0);
+        let mut alignments = vec![Some(Box::new(BlastCompoAlignment::new(
+            9,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            4,
+            0,
+            4,
+            0,
+            None,
+        )))];
+
+        let status = blast_redo_one_match_in_memory(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            &matching_seq,
+            &query_info,
+            crate::program::BLASTN,
+            &query_source,
+            1,
+            -3,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, -1);
+        assert!(alignments[0].is_none());
+    }
+
+    #[test]
+    fn blast_redo_one_match_smith_waterman_in_memory_nucl_redoes_alignment() {
+        let query_source = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject_source = query_source.clone();
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            10,
+            0,
+            10,
+            0,
+            None,
+        )));
+        let params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None];
+        let heaps = vec![BlastCompoHeap::new(10, 10.0)];
+        let matrix = crate::matrix::nucleotide_matrix(1, -3);
+
+        let status = blast_redo_one_match_smith_waterman_in_memory_nucl(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            0.041_f64.ln(),
+            &matching_seq,
+            &query_info,
+            &subject_source,
+            &heaps,
+            &matrix,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("redone SW alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, 10);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, 10);
+        assert!(aln.context.is_some());
+    }
+
+    #[test]
+    fn blast_redo_one_match_smith_waterman_in_memory_protein_redoes_alignment() {
+        let query_source = vec![1u8; 8];
+        let subject_source = query_source.clone();
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            query_source.len() as i32,
+            0,
+            subject_source.len() as i32,
+            0,
+            None,
+        )));
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        params.gapping_params.gap_open = 11;
+        params.gapping_params.gap_extend = 1;
+        assert_eq!(
+            matrix_info_init_blastp(&mut params.matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let matching_seq = matching_sequence_initialize(subject_source.len() as i32, 7, 0);
+        let mut alignments = vec![None];
+        let heaps = vec![BlastCompoHeap::new(10, 10.0)];
+
+        let status = blast_redo_one_match_smith_waterman_in_memory_protein(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            0.041_f64.ln(),
+            &matching_seq,
+            &query_info,
+            crate::program::BLASTP,
+            &subject_source,
+            &heaps,
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+
+        assert_eq!(status, 0);
+        let aln = alignments[0].as_ref().expect("redone protein SW alignment");
+        assert!(aln.score > 0);
+        assert_eq!(aln.query_start, 0);
+        assert_eq!(aln.query_end, query_source.len() as i32);
+        assert_eq!(aln.match_start, 0);
+        assert_eq!(aln.match_end, subject_source.len() as i32);
+        assert!(aln.context.is_some());
+    }
+
+    #[test]
+    fn blast_redo_one_match_smith_waterman_in_memory_nucl_rejects_adjusted_path() {
+        let query_source = vec![0u8, 1, 2, 3];
+        let query_info = vec![BlastCompoQueryInfo {
+            origin: 0,
+            seq: BlastCompoSequenceData {
+                buffer: query_source.clone(),
+                data_offset: 0,
+                length: query_source.len() as i32,
+            },
+            composition: Vec::new(),
+            eff_search_space: 100.0,
+            words: Vec::new(),
+        }];
+        let incoming = Some(Box::new(BlastCompoAlignment::new(
+            10,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            4,
+            0,
+            4,
+            0,
+            None,
+        )));
+        let params = redo_one_match_test_params(CompoAdjustMode::CompositionBasedStats);
+        let matching_seq = matching_sequence_initialize(query_source.len() as i32, 7, 0);
+        let mut alignments = vec![Some(Box::new(BlastCompoAlignment::new(
+            9,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            0,
+            4,
+            0,
+            4,
+            0,
+            None,
+        )))];
+        let heaps = vec![BlastCompoHeap::new(10, 10.0)];
+        let matrix = crate::matrix::nucleotide_matrix(1, -3);
+
+        let status = blast_redo_one_match_smith_waterman_in_memory_nucl(
+            &mut alignments,
+            &params,
+            &incoming,
+            1,
+            0.267,
+            0.041_f64.ln(),
+            &matching_seq,
+            &query_info,
+            &query_source,
+            &heaps,
+            &matrix,
+        );
+
+        assert_eq!(status, -1);
+        assert!(alignments[0].is_none());
+    }
+
+    #[test]
+    fn smith_waterman_significance_link_hsps_uses_raw_score_cutoff() {
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        params.do_link_hsps = true;
+        params.cutoff_s = 50;
+        let heap = BlastCompoHeap::new(1, 1e-10);
+
+        assert!(smith_waterman_alignment_is_significant(
+            50, 0.267, -3.0, 1000.0, &params, None, &heap, 7
+        ));
+        assert!(!smith_waterman_alignment_is_significant(
+            49, 0.267, -3.0, 1000.0, &params, None, &heap, 7
+        ));
+    }
+
+    #[test]
+    fn smith_waterman_significance_first_alignment_checks_heap() {
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        params.cutoff_e = 1.0;
+        let mut heap = BlastCompoHeap::new(1, 1e-10);
+        assert!(heap.insert(heap_hsp_list(1, 1e-10, 100)).is_none());
+
+        // E-value is below cutoff_e, but the full heap would reject it, so the
+        // first redone alignment for this query is not significant.
+        assert!(!smith_waterman_alignment_is_significant(
+            10,
+            0.267,
+            0.041_f64.ln(),
+            1.0,
+            &params,
+            None,
+            &heap,
+            7,
+        ));
+
+        // Once a query already has an alignment, NCBI skips the heap gate.
+        let existing =
+            BlastCompoAlignment::new(100, MatrixAdjustRule::DontAdjust, 0, 0, 10, 0, 10, 0, None);
+        assert!(smith_waterman_alignment_is_significant(
+            10,
+            0.267,
+            0.041_f64.ln(),
+            1.0,
+            &params,
+            Some(&existing),
+            &heap,
+            7,
+        ));
+    }
+
+    #[test]
+    fn smith_waterman_significance_non_link_uses_strict_evalue_cutoff() {
+        let mut params = redo_one_match_test_params(CompoAdjustMode::NoCompositionBasedStats);
+        let heap = BlastCompoHeap::new(10, 1.0);
+        params.cutoff_e = evalue_from_score(20, 0.267, 0.041_f64.ln(), 1.0);
+
+        assert!(!smith_waterman_alignment_is_significant(
+            20,
+            0.267,
+            0.041_f64.ln(),
+            1.0,
+            &params,
+            None,
+            &heap,
+            7,
+        ));
+        assert!(smith_waterman_alignment_is_significant(
+            21,
+            0.267,
+            0.041_f64.ln(),
+            1.0,
+            &params,
+            None,
+            &heap,
+            7,
+        ));
+    }
+
     #[test]
     fn get_start_freq_ratios_blosum62_matches_matrix_module() {
         let ratios = get_start_freq_ratios("BLOSUM62").expect("BLOSUM62 ratios");
@@ -368,8 +2327,222 @@ mod struct_tests {
     }
 
     #[test]
+    fn get_start_freq_ratios_blosum62_aliases_match_ncbi_scaling() {
+        let canonical = crate::matrix::get_blosum62_freq_ratios();
+        let b20 = get_start_freq_ratios("BLOSUM62_20").expect("BLOSUM62_20 ratios");
+        let b20a = get_start_freq_ratios("BLOSUM62_20A").expect("BLOSUM62_20A ratios");
+        let b20b = get_start_freq_ratios("BLOSUM62_20B").expect("BLOSUM62_20B ratios");
+
+        assert_eq!(b20[1][1], canonical[1][1]);
+        assert_eq!(b20a[1][1], canonical[1][1] * 0.9666);
+        assert_eq!(b20b[1][1], canonical[1][1] * 0.9344);
+    }
+
+    #[test]
+    fn get_start_freq_ratios_standard_matrices_are_ported() {
+        let cases = [
+            ("BLOSUM45", 2.95043377),
+            ("BLOSUM50", 3.27354473),
+            ("BLOSUM80", 4.77313697),
+            ("BLOSUM90", 5.49812903),
+            ("PAM30", 7.78912912),
+            ("PAM70", 4.89972946),
+            ("PAM250", 1.51578006),
+        ];
+        for (name, aa_ratio) in cases {
+            let ratios = get_start_freq_ratios(name).expect(name);
+            assert_eq!(ratios[1][1], aa_ratio);
+        }
+    }
+
+    #[test]
+    fn get_pos_based_start_freq_ratios_overlays_start_numerator() {
+        let query = [1u8, 20u8]; // A, W in NCBIstdaa.
+        let mut start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        start_numerator[0][3] = 0.25; // C column; standard C prob > epsilon.
+        start_numerator[1][crate::encoding::NCBISTDAA_STOP as usize] = 99.0; // Stop column must not be overlaid.
+        let ratios = get_pos_based_start_freq_ratios(&query, "BLOSUM62", &start_numerator)
+            .expect("position ratios");
+        let canonical = crate::matrix::get_blosum62_freq_ratios();
+        let std_prob = crate::stat::protein_std_freq_ncbistdaa();
+
+        assert_eq!(ratios[0][1], canonical[1][1]);
+        assert_eq!(ratios[0][3], 0.25 / std_prob[3]);
+        assert_eq!(
+            ratios[1][crate::encoding::NCBISTDAA_STOP as usize],
+            canonical[20][crate::encoding::NCBISTDAA_STOP as usize]
+        );
+    }
+
+    #[test]
+    fn get_pos_based_start_freq_ratios_rejects_short_numerator() {
+        let query = [1u8, 20u8];
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]];
+        assert!(get_pos_based_start_freq_ratios(&query, "BLOSUM62", &start_numerator).is_err());
+    }
+
+    #[test]
+    fn pos_freq_ratios_to_pssm_converts_log_odds_rows() {
+        let ratios = vec![crate::matrix::get_blosum62_freq_ratios()[1].to_vec()];
+        let pssm = pos_freq_ratios_to_pssm(&ratios, 0.3176).expect("pssm rows");
+        assert_eq!(pssm.len(), 1);
+        assert_eq!(pssm[0][1], 4);
+        assert_eq!(pssm[0][3], 0);
+        assert_eq!(pssm[0][4], -2);
+    }
+
+    #[test]
+    fn pos_freq_ratios_to_scaled_pssm_uses_psi_private_scale() {
+        let ratios = vec![crate::matrix::get_blosum62_freq_ratios()[1].to_vec()];
+        let scaled = pos_freq_ratios_to_scaled_pssm(&ratios).expect("scaled pssm rows");
+        assert_eq!(scaled.len(), 1);
+        assert_eq!(scaled[0][1], 272);
+        assert_eq!(scaled[0][3], -28);
+        assert_eq!(scaled[0][4], -122);
+    }
+
+    #[test]
+    fn scale_pos_matrix_populates_public_and_private_rows() {
+        let ratios = vec![crate::matrix::get_blosum62_freq_ratios()[1].to_vec()];
+        let mut info = BlastMatrixInfo {
+            ungapped_lambda: 0.3176,
+            ..Default::default()
+        };
+        let rc = scale_pos_matrix(&mut info, &ratios);
+        assert_eq!(rc, 0);
+        assert_eq!(info.matrix.len(), 1);
+        assert_eq!(info.scaled_matrix.len(), 1);
+        assert_eq!(info.matrix[0][1], 4);
+        assert_eq!(info.scaled_matrix[0][1], 272);
+    }
+
+    #[test]
+    fn scale_pos_matrix_rejects_invalid_lambda_or_short_rows() {
+        let ratios = vec![crate::matrix::get_blosum62_freq_ratios()[1].to_vec()];
+        let mut bad_lambda = BlastMatrixInfo::default();
+        assert_eq!(scale_pos_matrix(&mut bad_lambda, &ratios), -1);
+
+        let mut info = BlastMatrixInfo {
+            ungapped_lambda: 0.3176,
+            ..Default::default()
+        };
+        assert_eq!(scale_pos_matrix(&mut info, &[vec![1.0; 2]]), -1);
+    }
+
+    #[test]
+    fn psi_private_update_lambda_statistics_applies_ratio_to_valid_blocks() {
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            },
+            crate::stat::KarlinBlk {
+                lambda: -1.0,
+                k: -1.0,
+                log_k: 0.0,
+                h: -1.0,
+                round_down: false,
+            },
+        ];
+
+        assert_eq!(psi_private_update_lambda_statistics(&mut kbp, 0.75), 0);
+        assert!((kbp[0].lambda - 0.267 * 0.75).abs() < 1e-12);
+        assert_eq!(kbp[0].k, 0.041);
+        assert_eq!(kbp[0].log_k, 0.041_f64.ln());
+        assert_eq!(kbp[1].lambda, -1.0);
+        assert_eq!(psi_private_update_lambda_statistics(&mut kbp, 0.0), -1);
+        assert_eq!(psi_private_update_lambda_statistics(&mut kbp, f64::NAN), -1);
+    }
+
+    #[test]
+    fn position_based_scaling_ratio_updates_private_lambda_statistics() {
+        let query = vec![1u8, 20u8];
+        let mut info = BlastMatrixInfo::default();
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut info,
+                &query,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        let mut query_composition = vec![0.0f64; crate::matrix::AA_SIZE];
+        let mut subject_composition = vec![0.0f64; crate::matrix::AA_SIZE];
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS {
+            query_composition[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+            subject_composition[idx] = 1.0 / crate::composition::COMPO_NUM_TRUE_AA as f64;
+        }
+        subject_composition[crate::composition::TRUE_CHAR_POSITIONS[0]] += 0.19;
+        for &idx in &crate::composition::TRUE_CHAR_POSITIONS[1..] {
+            subject_composition[idx] -= 0.01;
+        }
+        let mut adjusted = Vec::new();
+        let mut pvalue = -1.0;
+        let mut ratio = 0.0;
+        assert_eq!(
+            blast_adjust_position_based_scores(
+                &mut adjusted,
+                &query_composition,
+                crate::composition::COMPO_NUM_TRUE_AA,
+                &subject_composition,
+                crate::composition::COMPO_NUM_TRUE_AA,
+                &info,
+                1,
+                &mut pvalue,
+                &mut ratio,
+            ),
+            Ok(MatrixAdjustRule::ScaleOldMatrix)
+        );
+
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        assert_eq!(psi_private_update_lambda_statistics(&mut kbp, ratio), 0);
+        assert!((0.5..=1.0).contains(&ratio));
+        assert!((kbp[0].lambda - 0.267 * ratio).abs() < 1e-12);
+    }
+
+    #[test]
+    fn matrix_info_init_psiblast_from_start_numerator_builds_position_rows() {
+        let query = [1u8, 20u8];
+        let mut start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        start_numerator[0][3] = 0.25;
+        let mut info = BlastMatrixInfo::default();
+        let rc = matrix_info_init_psiblast_from_start_numerator(
+            &mut info,
+            &query,
+            "BLOSUM62",
+            &start_numerator,
+            0.3176,
+            1.0,
+        );
+        assert_eq!(rc, 0);
+        assert!(info.positional);
+        assert_eq!(info.rows, 2);
+        assert_eq!(info.cols, crate::matrix::AA_SIZE as i32);
+        assert_eq!(info.bit_scale_factor, 2);
+        assert_eq!(
+            info.start_freq_ratios[0][3],
+            0.25 / crate::stat::protein_std_freq_ncbistdaa()[3]
+        );
+        assert_eq!(info.matrix[1][20], 11);
+        assert_eq!(info.scaled_matrix[1][20], 728);
+    }
+
+    #[test]
     fn get_start_freq_ratios_unknown_matrix_errs() {
-        assert!(get_start_freq_ratios("PAM30").is_err());
+        assert!(get_start_freq_ratios("UNKNOWN").is_err());
     }
 
     #[test]
@@ -436,12 +2609,59 @@ mod struct_tests {
     }
 
     #[test]
+    fn blast_score_blk_copy_is_deep_copy_for_modeled_fields() {
+        let src = BlastScoreBlkSnapshot {
+            matrix_name: "BLOSUM62".to_string(),
+            matrix: vec![vec![1, 2], vec![3, 4]],
+            psi_matrix: Some(vec![vec![5, 6, 7]]),
+            kbp: vec![crate::stat::KarlinBlk {
+                lambda: 0.3,
+                k: 0.04,
+                log_k: 0.04_f64.ln(),
+                h: 0.14,
+                round_down: false,
+            }],
+            kbp_gap: vec![crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            }],
+            scale_factor: 32.0,
+            round_down: true,
+        };
+
+        let mut copy = blast_score_blk_copy(&src);
+        copy.matrix[0][0] = 99;
+        copy.psi_matrix.as_mut().unwrap()[0][0] = 88;
+        copy.kbp[0].lambda = 1.0;
+        copy.kbp_gap[0].round_down = false;
+
+        assert_eq!(src.matrix[0][0], 1);
+        assert_eq!(src.psi_matrix.as_ref().unwrap()[0][0], 5);
+        assert_eq!(src.kbp[0].lambda, 0.3);
+        assert!(src.kbp_gap[0].round_down);
+        assert_eq!(copy.matrix_name, "BLOSUM62");
+        assert_eq!(copy.scale_factor, 32.0);
+        assert!(copy.round_down);
+    }
+
+    #[test]
     fn blast_redo_alignment_core_delegates_to_mt() {
-        // Fully-stubbed inputs — both functions return -1 until the
-        // MT driver body lands. This test pins the surface API.
+        // No-composition path: the wrapper delegates to the MT driver,
+        // which preserves the incoming HSP list in per-query results.
         let qi = crate::queryinfo::QueryInfo {
             num_queries: 1,
-            contexts: vec![],
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 10,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
             max_length: 0,
         };
         let mut kbp = vec![];
@@ -467,6 +2687,7 @@ mod struct_tests {
                 x_dropoff: 0,
             },
             CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
             false,
             false,
             false,
@@ -478,7 +2699,25 @@ mod struct_tests {
         );
         let mut saved =
             BlastKappaSavedParameters::new(0, 0, CompoAdjustMode::NoCompositionBasedStats, false);
-        let mut hsp_list = HspList::new(0);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 42,
+            num_ident: 10,
+            bit_score: 12.0,
+            evalue: 1.0e-6,
+            query_offset: 0,
+            query_end: 10,
+            query_gapped_start: 0,
+            subject_offset: 3,
+            subject_end: 13,
+            subject_gapped_start: 3,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
         let mut results = crate::hspstream::HspResults::new(1);
         let rc = blast_redo_alignment_core(
             crate::program::BLASTP,
@@ -492,8 +2731,6573 @@ mod struct_tests {
             &mut hsp_list,
             &mut results,
         );
-        // Wrapper delegates → MT driver returns -1 (not yet implemented).
+        assert_eq!(rc, 0);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 42);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_restores_after_scaled_composition_setup() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 10,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: 10,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        mtx[1][1] = 4;
+        let original_matrix_value = mtx[1][1];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let original_gap_open = scoring.gap_open;
+        let original_gap_extend = scoring.gap_extend;
+        let original_scale_factor = scoring.scale_factor;
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 352,
+                gap_extend: 32,
+                decline_align: i32::MIN,
+                x_dropoff: 2078,
+            },
+            CompoAdjustMode::CompositionMatrixAdjust,
+            SCALING_FACTOR,
+            false,
+            false,
+            false,
+            0,
+            0,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::CompositionMatrixAdjust, false);
+        let mut hsp_list = HspList::new(7);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt(
+            crate::program::BLASTP,
+            1,
+            &[],
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+        );
+
         assert_eq!(rc, -1);
+        assert_eq!(scoring.gap_open, original_gap_open);
+        assert_eq!(scoring.gap_extend, original_gap_extend);
+        assert_eq!(scoring.scale_factor, original_scale_factor);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(kbp[0].log_k, original_kbp.log_k);
+        assert_eq!(mtx[1][1], original_matrix_value);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_with_callbacks_redoes_position_based_matches() {
+        let query = vec![1u8; 8];
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut matrix_info = BlastMatrixInfo::default();
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut matrix_info,
+                &query,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        let mut params = blast_redo_align_params_new(
+            matrix_info.clone(),
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            true,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range_alanine),
+            ..Default::default()
+        });
+        let make_hsp_list = || {
+            let mut list = HspList::new(7);
+            list.add_hsp(Hsp {
+                score: 10,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: 1.0,
+                query_offset: 0,
+                query_end: query.len() as i32,
+                query_gapped_start: 0,
+                subject_offset: 0,
+                subject_end: query.len() as i32,
+                subject_gapped_start: 0,
+                context: 0,
+                query_frame: 0,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+            });
+            list
+        };
+        let run = |smith_waterman: bool| {
+            let mut kbp = vec![original_kbp.clone()];
+            let mut mtx = matrix_info.matrix.clone();
+            let original_mtx = mtx.clone();
+            let mut scoring = crate::parameters::ScoringParameters::from_options(
+                &crate::options::ScoringOptions {
+                    reward: 0,
+                    penalty: 0,
+                    gap_open: 11,
+                    gap_extend: 1,
+                    gapped_calculation: true,
+                    matrix_name: Some("BLOSUM62".to_string()),
+                    is_ooframe: false,
+                },
+                1.0,
+            );
+            let mut saved = BlastKappaSavedParameters::new(
+                query.len() as i32,
+                1,
+                CompoAdjustMode::CompositionBasedStats,
+                true,
+            );
+            let mut hsp_list = make_hsp_list();
+            let mut results = crate::hspstream::HspResults::new(1);
+
+            let rc = blast_redo_alignment_core_mt_with_callbacks(
+                crate::program::PSI_BLAST,
+                1,
+                &query,
+                &qi,
+                &mut kbp,
+                &mut mtx,
+                &mut scoring,
+                &params,
+                &mut saved,
+                &mut hsp_list,
+                BlastRedoCallbackSubjectConfig {
+                    subject_length: query.len() as i32,
+                    smith_waterman,
+                    expect_value: 10.0,
+                    hitlist_size: 10,
+                    inclusion_ethresh: 10.0,
+                    link_context: None,
+                },
+                &mut results,
+            );
+
+            assert_eq!(rc, 0);
+            assert_eq!(kbp[0].lambda, original_kbp.lambda);
+            assert_eq!(mtx, original_mtx);
+            assert_eq!(
+                hsp_list.hsps[0].comp_adjustment_method,
+                CompoAdjustMode::CompositionBasedStats as i32
+            );
+            assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+            assert!(hsp_list.hsps[0].edit_script.is_some());
+            let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+            assert_eq!(hitlist.hsp_lists.len(), 1);
+            assert_eq!(hitlist.hsp_lists[0].oid, 7);
+            assert_eq!(
+                hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+                CompoAdjustMode::CompositionBasedStats as i32
+            );
+            assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+        };
+
+        run(false);
+        run(true);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_with_callbacks_uses_link_hsp_context() {
+        let query = vec![0u8; 8];
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let karlin = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![karlin.clone()];
+        let score_block = crate::link_hsps::LinkScoreBlock {
+            kbp: vec![karlin],
+            kbp_gap: Vec::new(),
+            ..Default::default()
+        };
+        let link_params = crate::link_hsps::LinkHSPParameters::default();
+        let link_context = HitlistLinkContext {
+            query_info: &qi,
+            score_block: &score_block,
+            link_params: &link_params,
+            gapped_calculation: false,
+        };
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            true,
+            0.0,
+        );
+        params.callbacks = Some(BlastRedoAlignCallbacks {
+            get_range: Some(callback_test_get_range),
+            redo_one_alignment: Some(callback_test_redo_one_alignment),
+            ..Default::default()
+        });
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_with_callbacks(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            BlastRedoCallbackSubjectConfig {
+                subject_length: query.len() as i32,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: Some(&link_context),
+            },
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_single_match() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 2,
+            query_end: 6,
+            query_gapped_start: 4,
+            subject_offset: 2,
+            subject_end: 6,
+            subject_gapped_start: 4,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(hsp_list.oid, 7);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_offset, 0);
+        assert_eq!(hsp_list.hsps[0].subject_offset, 0);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].query_end, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_smith_waterman_match() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 2,
+            query_end: 6,
+            query_gapped_start: 4,
+            subject_offset: 2,
+            subject_end: 6,
+            subject_gapped_start: 4,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_offset, 0);
+        assert_eq!(hsp_list.hsps[0].subject_offset, 0);
+        assert_eq!(hsp_list.hsps[0].query_end, query.len() as i32);
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_rejects_blastn_composition_smith_waterman() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let make_hsp_list = || {
+            let mut list = HspList::new(7);
+            list.add_hsp(Hsp {
+                score: 10,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: 1.0,
+                query_offset: 2,
+                query_end: 6,
+                query_gapped_start: 4,
+                subject_offset: 2,
+                subject_end: 6,
+                subject_gapped_start: 4,
+                context: 0,
+                query_frame: 0,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+            });
+            list
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut hsp_list = make_hsp_list();
+        let original_hsp_list = hsp_list.clone();
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, -1);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(
+            hsp_list.hsps[0].query_offset,
+            original_hsp_list.hsps[0].query_offset
+        );
+        assert!(results.hitlists[0].is_none());
+
+        let mut stream_matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list: make_hsp_list(),
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved_stream = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_stream = crate::hspstream::HspResults::new(1);
+
+        let rc_stream = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTN,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved_stream,
+            &mut stream_matches,
+            &mut results_stream,
+        );
+
+        assert_eq!(rc_stream, -1);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(stream_matches[0].hsp_list.hsps[0].query_offset, 2);
+        assert!(results_stream.hitlists[0].is_none());
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_protein_match() {
+        let query = vec![1u8; 8];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 8,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 8,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.oid, 7);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_offset, 0);
+        assert_eq!(hsp_list.hsps[0].subject_offset, 0);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_protein_composition_adjusted_match() {
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(
+            hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        let mut hsp_list_sw = HspList::new(7);
+        hsp_list_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_sw = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list: hsp_list_sw,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved_sw = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_sw = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTP,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved_sw,
+            &mut matches_sw,
+            &mut results_sw,
+        );
+
+        assert_eq!(rc_sw, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(matches_sw[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches_sw[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        let hitlist_sw = results_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_sw.hsp_lists.len(), 1);
+        assert_eq!(hitlist_sw.hsp_lists[0].oid, 7);
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].num_ident,
+            query.len() as i32
+        );
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_position_based_composition_adjusted_match(
+    ) {
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut matrix_info,
+                &query,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            true,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::new(
+            query.len() as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::PSI_BLAST,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_position_based_smith_waterman_match() {
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut matrix_info,
+                &query,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            true,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::new(
+            query.len() as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::PSI_BLAST,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_protein_composition_adjusted_smith_waterman_match(
+    ) {
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_protein_smith_waterman_match() {
+        let query = vec![1u8; 8];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 8,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 8,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_tblastn_match() {
+        let query = vec![12u8, 1, 12, 1];
+        let subject = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            true,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_tblastn_smith_waterman_match() {
+        let query = vec![12u8, 1, 12, 1];
+        let subject = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            true,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_tblastn_composition_adjusted_smith_waterman_match(
+    ) {
+        let query = vec![12u8, 1, 12, 1];
+        let subject = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            false,
+            true,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_blastx_match() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let subject = vec![12u8, 1, 12, 1];
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            true,
+            false,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: subject.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 0);
+        assert_eq!(hsp_list.hsps[0].num_ident, subject.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, subject.len() as i32);
+
+        let mut hsp_list = HspList::new(8);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: subject.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.oid, 8);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, subject.len() as i32);
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_blastx_composition_adjusted_match() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let frame_len = qi.contexts[0].query_length;
+        let frame_begin = qi.contexts[0].query_offset as usize;
+        let subject = query[frame_begin..frame_begin + frame_len as usize].to_vec();
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            true,
+            false,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: frame_len,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: frame_len,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, frame_len);
+        assert_eq!(
+            hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(
+            hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        let mut hsp_list_sw = HspList::new(7);
+        hsp_list_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: frame_len,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: frame_len,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_sw = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list_sw,
+            &mut results_sw,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc_sw, 0);
+        assert_eq!(hsp_list_sw.hsps.len(), 1);
+        assert_eq!(hsp_list_sw.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list_sw.hsps[0].num_ident, frame_len);
+        assert_eq!(
+            hsp_list_sw.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list_sw.hsps[0].edit_script.is_some());
+        let hitlist_sw = results_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_sw.hsp_lists.len(), 1);
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_second_blastx_context() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let frame_len = qi.contexts[1].query_length;
+        let frame_begin = qi.contexts[1].query_offset as usize;
+        let subject = query[frame_begin..frame_begin + frame_len as usize].to_vec();
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            true,
+            false,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: frame_len,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: frame_len,
+            subject_gapped_start: 0,
+            context: 1,
+            query_frame: 2,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].context, 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, 2);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 0);
+        assert_eq!(hsp_list.hsps[0].num_ident, frame_len);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].context, 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, frame_len);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_tblastx_match() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let subject = query_ncbi4na.clone();
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            true,
+            true,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, 4);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, 4);
+
+        let mut hsp_list = HspList::new(8);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.oid, 8);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, 4);
+        assert!(hsp_list.hsps[0].edit_script.is_some());
+
+        let mut matrix_info_comp = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info_comp, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx_comp = matrix_info_comp.matrix.clone();
+        let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params_comp = blast_redo_align_params_new(
+            matrix_info_comp,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            true,
+            true,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut kbp_comp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut saved_comp = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut hsp_list_comp = HspList::new(9);
+        hsp_list_comp.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results_comp = crate::hspstream::HspResults::new(1);
+
+        let rc_comp = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp_comp,
+            &mut mtx_comp,
+            &mut scoring_comp,
+            &params_comp,
+            &mut saved_comp,
+            &mut hsp_list_comp,
+            &mut results_comp,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc_comp, 0);
+        assert_eq!(hsp_list_comp.oid, 9);
+        assert_eq!(hsp_list_comp.hsps.len(), 1);
+        assert_eq!(hsp_list_comp.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list_comp.hsps[0].subject_frame, 1);
+        assert_eq!(hsp_list_comp.hsps[0].num_ident, 4);
+        assert_eq!(
+            hsp_list_comp.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list_comp.hsps[0].edit_script.is_some());
+        let hitlist_comp = results_comp.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_comp.hsp_lists.len(), 1);
+        assert_eq!(
+            hitlist_comp.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        let mut hsp_list_comp_sw = HspList::new(10);
+        hsp_list_comp_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results_comp_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_comp_sw = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp_comp,
+            &mut mtx_comp,
+            &mut scoring_comp,
+            &params_comp,
+            &mut saved_comp,
+            &mut hsp_list_comp_sw,
+            &mut results_comp_sw,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc_comp_sw, 0);
+        assert_eq!(hsp_list_comp_sw.oid, 10);
+        assert_eq!(hsp_list_comp_sw.hsps.len(), 1);
+        assert_eq!(hsp_list_comp_sw.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list_comp_sw.hsps[0].subject_frame, 1);
+        assert_eq!(hsp_list_comp_sw.hsps[0].num_ident, 4);
+        assert_eq!(
+            hsp_list_comp_sw.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(hsp_list_comp_sw.hsps[0].edit_script.is_some());
+        let hitlist_comp_sw = results_comp_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_comp_sw.hsp_lists.len(), 1);
+        assert_eq!(
+            hitlist_comp_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_second_tblastx_context() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let frame_len = qi.contexts[1].query_length;
+        let subject = query_ncbi4na.clone();
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            true,
+            true,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: frame_len,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: frame_len,
+            subject_gapped_start: 0,
+            context: 1,
+            query_frame: 2,
+            subject_frame: 2,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::TBLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].context, 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, 2);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 2);
+        assert_eq!(hsp_list.hsps[0].num_ident, frame_len);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].context, 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, frame_len);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_keeps_heap_best() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject1 = query.clone();
+        let subject2 = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let make_hsp_list = |oid| {
+            let mut list = HspList::new(oid);
+            list.add_hsp(Hsp {
+                score: 10,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: 1.0,
+                query_offset: 2,
+                query_end: 6,
+                query_gapped_start: 4,
+                subject_offset: 2,
+                subject_end: 6,
+                subject_gapped_start: 4,
+                context: 0,
+                query_frame: 0,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+            });
+            list
+        };
+        let mut matches = vec![
+            BlastRedoInMemorySubjectMatch {
+                hsp_list: make_hsp_list(1),
+                subject: BlastRedoInMemorySubject {
+                    subject_source: &subject1,
+                    reward: 1,
+                    penalty: -3,
+                    genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                    smith_waterman: false,
+                    expect_value: 10.0,
+                    hitlist_size: 1,
+                    inclusion_ethresh: 0.0,
+                    link_context: None,
+                },
+            },
+            BlastRedoInMemorySubjectMatch {
+                hsp_list: make_hsp_list(2),
+                subject: BlastRedoInMemorySubject {
+                    subject_source: &subject2,
+                    reward: 1,
+                    penalty: -3,
+                    genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                    smith_waterman: false,
+                    expect_value: 10.0,
+                    hitlist_size: 1,
+                    inclusion_ethresh: 0.0,
+                    link_context: None,
+                },
+            },
+        ];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTN,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 2);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_early_terminates_late_match() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject1 = query.clone();
+        let subject2 = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let make_hsp_list = |oid, evalue| {
+            let mut list = HspList::new(oid);
+            list.add_hsp(Hsp {
+                score: 10,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue,
+                query_offset: 2,
+                query_end: 6,
+                query_gapped_start: 4,
+                subject_offset: 2,
+                subject_end: 6,
+                subject_gapped_start: 4,
+                context: 0,
+                query_frame: 0,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+            });
+            list
+        };
+        let mut matches = vec![
+            BlastRedoInMemorySubjectMatch {
+                hsp_list: make_hsp_list(1, 1.0),
+                subject: BlastRedoInMemorySubject {
+                    subject_source: &subject1,
+                    reward: 1,
+                    penalty: -3,
+                    genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                    smith_waterman: false,
+                    expect_value: 100.0,
+                    hitlist_size: 1,
+                    inclusion_ethresh: 100.0,
+                    link_context: None,
+                },
+            },
+            BlastRedoInMemorySubjectMatch {
+                hsp_list: make_hsp_list(2, 1000.0),
+                subject: BlastRedoInMemorySubject {
+                    subject_source: &subject2,
+                    reward: 1,
+                    penalty: -3,
+                    genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                    smith_waterman: false,
+                    expect_value: 100.0,
+                    hitlist_size: 1,
+                    inclusion_ethresh: 100.0,
+                    link_context: None,
+                },
+            },
+        ];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(matches[1].hsp_list.hsps[0].query_offset, 2);
+        assert_eq!(matches[1].hsp_list.hsps[0].num_ident, 0);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_smith_waterman_matches() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let subject1 = query.clone();
+        let subject2 = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let make_hsp_list = |oid| {
+            let mut list = HspList::new(oid);
+            list.add_hsp(Hsp {
+                score: 10,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: 1.0,
+                query_offset: 2,
+                query_end: 6,
+                query_gapped_start: 4,
+                subject_offset: 2,
+                subject_end: 6,
+                subject_gapped_start: 4,
+                context: 0,
+                query_frame: 0,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+            });
+            list
+        };
+        let mut matches = vec![
+            BlastRedoInMemorySubjectMatch {
+                hsp_list: make_hsp_list(1),
+                subject: BlastRedoInMemorySubject {
+                    subject_source: &subject1,
+                    reward: 1,
+                    penalty: -3,
+                    genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                    smith_waterman: true,
+                    expect_value: 10.0,
+                    hitlist_size: 1,
+                    inclusion_ethresh: 0.0,
+                    link_context: None,
+                },
+            },
+            BlastRedoInMemorySubjectMatch {
+                hsp_list: make_hsp_list(2),
+                subject: BlastRedoInMemorySubject {
+                    subject_source: &subject2,
+                    reward: 1,
+                    penalty: -3,
+                    genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                    smith_waterman: true,
+                    expect_value: 10.0,
+                    hitlist_size: 1,
+                    inclusion_ethresh: 0.0,
+                    link_context: None,
+                },
+            },
+        ];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(matches[0].hsp_list.hsps[0].query_offset, 0);
+        assert_eq!(matches[1].hsp_list.hsps[0].query_offset, 0);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 2);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+        assert!(hitlist.hsp_lists[0].hsps[0].edit_script.is_some());
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_protein_stream_match() {
+        let query = vec![1u8; 8];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(matches[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_protein_composition_adjusted_stream_match(
+    ) {
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTP,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(matches[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        let mut hsp_list_sw = HspList::new(7);
+        hsp_list_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_sw = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list: hsp_list_sw,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved_sw = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_sw = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTP,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved_sw,
+            &mut matches_sw,
+            &mut results_sw,
+        );
+
+        assert_eq!(rc_sw, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(matches_sw[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches_sw[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(matches_sw[0].hsp_list.hsps[0].edit_script.is_some());
+        let hitlist_sw = results_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_sw.hsp_lists.len(), 1);
+        assert_eq!(hitlist_sw.hsp_lists[0].oid, 7);
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].num_ident,
+            query.len() as i32
+        );
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_position_based_composition_adjusted_stream_match(
+    ) {
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut matrix_info,
+                &query,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            true,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved = BlastKappaSavedParameters::new(
+            query.len() as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::PSI_BLAST,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(matches[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        let mut kbp_sw = vec![original_kbp.clone()];
+        let mut mtx_sw = original_mtx.clone();
+        let mut scoring_sw = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut hsp_list_sw = HspList::new(8);
+        hsp_list_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_sw = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list: hsp_list_sw,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved_sw = BlastKappaSavedParameters::new(
+            query.len() as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        let mut results_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_sw = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::PSI_BLAST,
+            2,
+            &query,
+            &qi,
+            &mut kbp_sw,
+            &mut mtx_sw,
+            &mut scoring_sw,
+            &params,
+            &mut saved_sw,
+            &mut matches_sw,
+            &mut results_sw,
+        );
+
+        assert_eq!(rc_sw, 0);
+        assert_eq!(kbp_sw[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx_sw, original_mtx);
+        assert_eq!(matches_sw[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches_sw[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(matches_sw[0].hsp_list.hsps[0].edit_script.is_some());
+        let hitlist_sw = results_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_sw.hsp_lists.len(), 1);
+        assert_eq!(hitlist_sw.hsp_lists[0].oid, 8);
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].num_ident,
+            query.len() as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_tblastn_stream_match() {
+        let query = vec![12u8, 1, 12, 1];
+        let subject = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            true,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::TBLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(matches[0].hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(matches[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_use_link_hsp_context() {
+        let query = vec![1u8; 8];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let karlin = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![karlin.clone()];
+        let score_block = crate::link_hsps::LinkScoreBlock {
+            kbp: vec![karlin],
+            kbp_gap: Vec::new(),
+            ..Default::default()
+        };
+        let link_params = crate::link_hsps::LinkHSPParameters::default();
+        let link_context = HitlistLinkContext {
+            query_info: &qi,
+            score_block: &score_block,
+            link_params: &link_params,
+            gapped_calculation: false,
+        };
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            true,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: Some(&link_context),
+            },
+        }];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(matches[0].hsp_list.hsps[0].num_ident, query.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_blastx_stream_match() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let subject = vec![12u8, 1, 12, 1];
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            true,
+            false,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: subject.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(matches[0].hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(matches[0].hsp_list.hsps[0].num_ident, subject.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, subject.len() as i32);
+
+        let mut matrix_info_comp = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info_comp, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx_comp = matrix_info_comp.matrix.clone();
+        let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params_comp = blast_redo_align_params_new(
+            matrix_info_comp,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            true,
+            false,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list_sw = HspList::new(7);
+        hsp_list_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: subject.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_sw = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list: hsp_list_sw,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut kbp_comp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut saved_comp = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_sw = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTX,
+            2,
+            &query,
+            &qi,
+            &mut kbp_comp,
+            &mut mtx_comp,
+            &mut scoring_comp,
+            &params_comp,
+            &mut saved_comp,
+            &mut matches_sw,
+            &mut results_sw,
+        );
+
+        assert_eq!(rc_sw, 0);
+        assert_eq!(matches_sw[0].hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(
+            matches_sw[0].hsp_list.hsps[0].num_ident,
+            subject.len() as i32
+        );
+        assert_eq!(
+            matches_sw[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(matches_sw[0].hsp_list.hsps[0].edit_script.is_some());
+        let hitlist_sw = results_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_sw.hsp_lists.len(), 1);
+        assert_eq!(hitlist_sw.hsp_lists[0].oid, 7);
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_tblastx_stream_match() {
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let subject = query_ncbi4na.clone();
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            true,
+            true,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::TBLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(matches[0].hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(matches[0].hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(matches[0].hsp_list.hsps[0].num_ident, 4);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, 4);
+
+        let mut matrix_info_comp = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info_comp, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx_comp = matrix_info_comp.matrix.clone();
+        let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params_comp = blast_redo_align_params_new(
+            matrix_info_comp,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            true,
+            true,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list_comp = HspList::new(9);
+        hsp_list_comp.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_comp = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list: hsp_list_comp,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut kbp_comp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut saved_comp = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_comp = crate::hspstream::HspResults::new(1);
+
+        let rc_comp = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::TBLASTX,
+            2,
+            &query,
+            &qi,
+            &mut kbp_comp,
+            &mut mtx_comp,
+            &mut scoring_comp,
+            &params_comp,
+            &mut saved_comp,
+            &mut matches_comp,
+            &mut results_comp,
+        );
+
+        assert_eq!(rc_comp, 0);
+        assert_eq!(matches_comp[0].hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(matches_comp[0].hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(matches_comp[0].hsp_list.hsps[0].num_ident, 4);
+        assert_eq!(
+            matches_comp[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        let hitlist_comp = results_comp.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_comp.hsp_lists.len(), 1);
+        assert_eq!(hitlist_comp.hsp_lists[0].oid, 9);
+        assert_eq!(
+            hitlist_comp.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        let mut hsp_list_comp_sw = HspList::new(10);
+        hsp_list_comp_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_comp_sw = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list: hsp_list_comp_sw,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut results_comp_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_comp_sw = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::TBLASTX,
+            2,
+            &query,
+            &qi,
+            &mut kbp_comp,
+            &mut mtx_comp,
+            &mut scoring_comp,
+            &params_comp,
+            &mut saved_comp,
+            &mut matches_comp_sw,
+            &mut results_comp_sw,
+        );
+
+        assert_eq!(rc_comp_sw, 0);
+        assert_eq!(matches_comp_sw[0].hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(matches_comp_sw[0].hsp_list.hsps[0].subject_frame, 1);
+        assert_eq!(matches_comp_sw[0].hsp_list.hsps[0].num_ident, 4);
+        assert_eq!(
+            matches_comp_sw[0].hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(matches_comp_sw[0].hsp_list.hsps[0].edit_script.is_some());
+        let hitlist_comp_sw = results_comp_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_comp_sw.hsp_lists.len(), 1);
+        assert_eq!(hitlist_comp_sw.hsp_lists[0].oid, 10);
+        assert_eq!(
+            hitlist_comp_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subjects_routes_by_query_index() {
+        let query0 = vec![3u8, 3, 2, 2, 1, 1, 0, 0];
+        let query1 = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let mut query = query0.clone();
+        query.extend_from_slice(&query1);
+        let subject = query1.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 2,
+            contexts: vec![
+                crate::queryinfo::ContextInfo {
+                    query_offset: 0,
+                    query_length: query0.len() as i32,
+                    eff_searchsp: 80,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 0,
+                    is_valid: true,
+                },
+                crate::queryinfo::ContextInfo {
+                    query_offset: query0.len() as i32,
+                    query_length: query1.len() as i32,
+                    eff_searchsp: 100,
+                    length_adjustment: 0,
+                    query_index: 1,
+                    frame: 0,
+                    is_valid: true,
+                },
+            ],
+            max_length: query1.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let context1_kbp = crate::stat::KarlinBlk {
+            lambda: 0.321,
+            k: 0.057,
+            log_k: 0.057_f64.ln(),
+            h: 0.16,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone(), context1_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query1.len() as i32,
+            2,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(11);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query1.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 1,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![BlastRedoInMemorySubjectMatch {
+            hsp_list,
+            subject: BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        }];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 2, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(2);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subjects(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut matches,
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert!(results.hitlists[0]
+            .as_ref()
+            .expect("query 0 hitlist")
+            .hsp_lists
+            .is_empty());
+        let hitlist = results.hitlists[1].as_ref().expect("query 1 hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 11);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].query_offset, 0);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query1.len() as i32);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_seqsrc_subjects_fetches_and_redoes_blastn_match() {
+        struct TestSeqSrc {
+            seqs: Vec<Vec<u8>>,
+            encodings: std::sync::Mutex<Vec<crate::seqsrc::SeqEncoding>>,
+        }
+        impl crate::seqsrc::BlastSeqSource for TestSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                self.seqs.len() as i32
+            }
+            fn total_length(&self) -> i64 {
+                self.seqs.iter().map(|seq| seq.len() as i64).sum()
+            }
+            fn max_seq_len(&self) -> i32 {
+                self.seqs
+                    .iter()
+                    .map(|seq| seq.len() as i32)
+                    .max()
+                    .unwrap_or(0)
+            }
+            fn avg_seq_len(&self) -> i32 {
+                if self.seqs.is_empty() {
+                    0
+                } else {
+                    (self.total_length() / self.num_seqs() as i64) as i32
+                }
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn is_protein(&self) -> bool {
+                false
+            }
+            fn seq_len(&self, oid: i32) -> i32 {
+                self.seqs[oid as usize].len() as i32
+            }
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                self.encodings.lock().unwrap().push(arg.encoding);
+                let sequence = self.seqs.get(arg.oid as usize)?.clone();
+                Some(crate::seqsrc::SeqData {
+                    length: sequence.len() as i32,
+                    sequence,
+                })
+            }
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(0..self.num_seqs())
+            }
+        }
+
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let seqsrc = TestSeqSrc {
+            seqs: vec![query.clone()],
+            encodings: std::sync::Mutex::new(Vec::new()),
+        };
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(0);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 2,
+            query_end: 6,
+            query_gapped_start: 4,
+            subject_offset: 2,
+            subject_end: 6,
+            subject_gapped_start: 4,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![hsp_list];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &seqsrc,
+            &mut matches,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Nucleotide]
+        );
+        assert_eq!(matches[0].hsps[0].num_ident, query.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 0);
+
+        seqsrc.encodings.lock().unwrap().clear();
+        let params_adjusted = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list_adjusted = HspList::new(0);
+        hsp_list_adjusted.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 2,
+            query_end: 6,
+            query_gapped_start: 4,
+            subject_offset: 2,
+            subject_end: 6,
+            subject_gapped_start: 4,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut adjusted_matches = vec![hsp_list_adjusted];
+        let mut saved_adjusted = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut adjusted_results = crate::hspstream::HspResults::new(1);
+
+        let rc_adjusted = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::BLASTN,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params_adjusted,
+            &mut saved_adjusted,
+            &seqsrc,
+            &mut adjusted_matches,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut adjusted_results,
+        );
+
+        assert_eq!(rc_adjusted, -1);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Nucleotide]
+        );
+        assert_eq!(adjusted_matches[0].hsps[0].query_offset, 2);
+        assert!(adjusted_results.hitlists[0].is_none());
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_seqsrc_subjects_fetches_and_redoes_protein_composition_adjusted_match(
+    ) {
+        struct TestSeqSrc {
+            seqs: Vec<Vec<u8>>,
+            encodings: std::sync::Mutex<Vec<crate::seqsrc::SeqEncoding>>,
+        }
+        impl crate::seqsrc::BlastSeqSource for TestSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                self.seqs.len() as i32
+            }
+            fn total_length(&self) -> i64 {
+                self.seqs.iter().map(|seq| seq.len() as i64).sum()
+            }
+            fn max_seq_len(&self) -> i32 {
+                self.seqs
+                    .iter()
+                    .map(|seq| seq.len() as i32)
+                    .max()
+                    .unwrap_or(0)
+            }
+            fn avg_seq_len(&self) -> i32 {
+                if self.seqs.is_empty() {
+                    0
+                } else {
+                    (self.total_length() / self.num_seqs() as i64) as i32
+                }
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn is_protein(&self) -> bool {
+                true
+            }
+            fn seq_len(&self, oid: i32) -> i32 {
+                self.seqs[oid as usize].len() as i32
+            }
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                self.encodings.lock().unwrap().push(arg.encoding);
+                let sequence = self.seqs.get(arg.oid as usize)?.clone();
+                Some(crate::seqsrc::SeqData {
+                    length: sequence.len() as i32,
+                    sequence,
+                })
+            }
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(0..self.num_seqs())
+            }
+        }
+
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let seqsrc = TestSeqSrc {
+            seqs: vec![query.clone()],
+            encodings: std::sync::Mutex::new(Vec::new()),
+        };
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(0);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![hsp_list];
+        let mut saved = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::BLASTP,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &seqsrc,
+            &mut matches,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Protein]
+        );
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(matches[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 0);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        seqsrc.encodings.lock().unwrap().clear();
+        let mut hsp_list_sw = HspList::new(0);
+        hsp_list_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_sw = vec![hsp_list_sw];
+        let mut saved_sw = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_sw = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::BLASTP,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved_sw,
+            &seqsrc,
+            &mut matches_sw,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results_sw,
+        );
+
+        assert_eq!(rc_sw, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Protein]
+        );
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(matches_sw[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches_sw[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(matches_sw[0].hsps[0].edit_script.is_some());
+        let hitlist_sw = results_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_sw.hsp_lists.len(), 1);
+        assert_eq!(hitlist_sw.hsp_lists[0].oid, 0);
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].num_ident,
+            query.len() as i32
+        );
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_seqsrc_subjects_fetches_and_redoes_position_based_composition_adjusted_match(
+    ) {
+        struct TestSeqSrc {
+            seqs: Vec<Vec<u8>>,
+            encodings: std::sync::Mutex<Vec<crate::seqsrc::SeqEncoding>>,
+        }
+        impl crate::seqsrc::BlastSeqSource for TestSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                self.seqs.len() as i32
+            }
+            fn total_length(&self) -> i64 {
+                self.seqs.iter().map(|seq| seq.len() as i64).sum()
+            }
+            fn max_seq_len(&self) -> i32 {
+                self.seqs
+                    .iter()
+                    .map(|seq| seq.len() as i32)
+                    .max()
+                    .unwrap_or(0)
+            }
+            fn avg_seq_len(&self) -> i32 {
+                if self.seqs.is_empty() {
+                    0
+                } else {
+                    (self.total_length() / self.num_seqs() as i64) as i32
+                }
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn is_protein(&self) -> bool {
+                true
+            }
+            fn seq_len(&self, oid: i32) -> i32 {
+                self.seqs[oid as usize].len() as i32
+            }
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                self.encodings.lock().unwrap().push(arg.encoding);
+                let sequence = self.seqs.get(arg.oid as usize)?.clone();
+                Some(crate::seqsrc::SeqData {
+                    length: sequence.len() as i32,
+                    sequence,
+                })
+            }
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(0..self.num_seqs())
+            }
+        }
+
+        let query = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let seqsrc = TestSeqSrc {
+            seqs: vec![query.clone()],
+            encodings: std::sync::Mutex::new(Vec::new()),
+        };
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut matrix_info = BlastMatrixInfo::default();
+        let start_numerator = vec![vec![0.0; crate::matrix::AA_SIZE]; query.len()];
+        assert_eq!(
+            matrix_info_init_psiblast_from_start_numerator(
+                &mut matrix_info,
+                &query,
+                "BLOSUM62",
+                &start_numerator,
+                0.3176,
+                1.0,
+            ),
+            0
+        );
+        let mut mtx = matrix_info.matrix.clone();
+        let original_mtx = mtx.clone();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            true,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(0);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![hsp_list];
+        let mut saved = BlastKappaSavedParameters::new(
+            query.len() as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::PSI_BLAST,
+            2,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &seqsrc,
+            &mut matches,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Protein]
+        );
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx, original_mtx);
+        assert_eq!(matches[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 0);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            hitlist.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        seqsrc.encodings.lock().unwrap().clear();
+        let mut kbp_sw = vec![original_kbp.clone()];
+        let mut mtx_sw = original_mtx.clone();
+        let mut scoring_sw = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut hsp_list_sw = HspList::new(0);
+        hsp_list_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: query.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_sw = vec![hsp_list_sw];
+        let mut saved_sw = BlastKappaSavedParameters::new(
+            query.len() as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        let mut results_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_sw = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::PSI_BLAST,
+            2,
+            &query,
+            &qi,
+            &mut kbp_sw,
+            &mut mtx_sw,
+            &mut scoring_sw,
+            &params,
+            &mut saved_sw,
+            &seqsrc,
+            &mut matches_sw,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results_sw,
+        );
+
+        assert_eq!(rc_sw, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Protein]
+        );
+        assert_eq!(kbp_sw[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx_sw, original_mtx);
+        assert_eq!(matches_sw[0].hsps[0].num_ident, query.len() as i32);
+        assert_eq!(
+            matches_sw[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(matches_sw[0].hsps[0].edit_script.is_some());
+        let hitlist_sw = results_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_sw.hsp_lists.len(), 1);
+        assert_eq!(
+            hitlist_sw.hsp_lists[0].hsps[0].num_ident,
+            query.len() as i32
+        );
+    }
+
+    #[test]
+    fn seqsrc_encoding_for_redo_program_matches_subject_space() {
+        assert_eq!(
+            seqsrc_encoding_for_redo_program(crate::program::BLASTN),
+            crate::seqsrc::SeqEncoding::Nucleotide
+        );
+        assert_eq!(
+            seqsrc_encoding_for_redo_program(crate::program::BLASTP),
+            crate::seqsrc::SeqEncoding::Protein
+        );
+        assert_eq!(
+            seqsrc_encoding_for_redo_program(crate::program::BLASTX),
+            crate::seqsrc::SeqEncoding::Protein
+        );
+        assert_eq!(
+            seqsrc_encoding_for_redo_program(crate::program::PSI_BLAST),
+            crate::seqsrc::SeqEncoding::Protein
+        );
+        assert_eq!(
+            seqsrc_encoding_for_redo_program(crate::program::TBLASTN),
+            crate::seqsrc::SeqEncoding::Ncbi4na
+        );
+        assert_eq!(
+            seqsrc_encoding_for_redo_program(crate::program::TBLASTX),
+            crate::seqsrc::SeqEncoding::Ncbi4na
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_seqsrc_subjects_fetches_and_redoes_tblastx_match() {
+        struct TestSeqSrc {
+            seqs: Vec<Vec<u8>>,
+            encodings: std::sync::Mutex<Vec<crate::seqsrc::SeqEncoding>>,
+        }
+        impl crate::seqsrc::BlastSeqSource for TestSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                self.seqs.len() as i32
+            }
+            fn total_length(&self) -> i64 {
+                self.seqs.iter().map(|seq| seq.len() as i64).sum()
+            }
+            fn max_seq_len(&self) -> i32 {
+                self.seqs
+                    .iter()
+                    .map(|seq| seq.len() as i32)
+                    .max()
+                    .unwrap_or(0)
+            }
+            fn avg_seq_len(&self) -> i32 {
+                if self.seqs.is_empty() {
+                    0
+                } else {
+                    (self.total_length() / self.num_seqs() as i64) as i32
+                }
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn is_protein(&self) -> bool {
+                false
+            }
+            fn seq_len(&self, oid: i32) -> i32 {
+                self.seqs[oid as usize].len() as i32
+            }
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                self.encodings.lock().unwrap().push(arg.encoding);
+                let sequence = self.seqs.get(arg.oid as usize)?.clone();
+                Some(crate::seqsrc::SeqData {
+                    length: sequence.len() as i32,
+                    sequence,
+                })
+            }
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(0..self.num_seqs())
+            }
+        }
+
+        let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
+        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &query_ncbi4na,
+            query_ncbi4na.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let mut qi = crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&offsets);
+        for ctx in &mut qi.contexts {
+            ctx.eff_searchsp = 100;
+        }
+        let seqsrc = TestSeqSrc {
+            seqs: vec![query_ncbi4na.clone()],
+            encodings: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut kbp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            true,
+            true,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list = HspList::new(0);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches = vec![hsp_list];
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::TBLASTX,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &seqsrc,
+            &mut matches,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Ncbi4na]
+        );
+        assert_eq!(matches[0].hsps[0].query_frame, 1);
+        assert_eq!(matches[0].hsps[0].subject_frame, 1);
+        assert_eq!(matches[0].hsps[0].num_ident, 4);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 0);
+
+        seqsrc.encodings.lock().unwrap().clear();
+        let mut matrix_info_comp = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info_comp, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let mut mtx_comp = matrix_info_comp.matrix.clone();
+        let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params_comp = blast_redo_align_params_new(
+            matrix_info_comp,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::CompositionBasedStats,
+            1.0,
+            false,
+            true,
+            true,
+            query_ncbi4na.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut hsp_list_comp = HspList::new(0);
+        hsp_list_comp.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_comp = vec![hsp_list_comp];
+        let mut kbp_comp = vec![
+            crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: true,
+            };
+            qi.contexts.len()
+        ];
+        let mut saved_comp = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_comp = crate::hspstream::HspResults::new(1);
+
+        let rc_comp = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::TBLASTX,
+            2,
+            &query,
+            &qi,
+            &mut kbp_comp,
+            &mut mtx_comp,
+            &mut scoring_comp,
+            &params_comp,
+            &mut saved_comp,
+            &seqsrc,
+            &mut matches_comp,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results_comp,
+        );
+
+        assert_eq!(rc_comp, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Ncbi4na]
+        );
+        assert_eq!(matches_comp[0].hsps[0].query_frame, 1);
+        assert_eq!(matches_comp[0].hsps[0].subject_frame, 1);
+        assert_eq!(matches_comp[0].hsps[0].num_ident, 4);
+        assert_eq!(
+            matches_comp[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        let hitlist_comp = results_comp.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_comp.hsp_lists.len(), 1);
+        assert_eq!(hitlist_comp.hsp_lists[0].oid, 0);
+        assert_eq!(
+            hitlist_comp.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+
+        seqsrc.encodings.lock().unwrap().clear();
+        let mut hsp_list_comp_sw = HspList::new(0);
+        hsp_list_comp_sw.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: 4,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 4,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut matches_comp_sw = vec![hsp_list_comp_sw];
+        let mut saved_comp_sw = BlastKappaSavedParameters::new(
+            crate::matrix::AA_SIZE as i32,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            false,
+        );
+        let mut results_comp_sw = crate::hspstream::HspResults::new(1);
+
+        let rc_comp_sw = blast_redo_alignment_core_mt_seqsrc_subjects(
+            crate::program::TBLASTX,
+            2,
+            &query,
+            &qi,
+            &mut kbp_comp,
+            &mut mtx_comp,
+            &mut scoring_comp,
+            &params_comp,
+            &mut saved_comp_sw,
+            &seqsrc,
+            &mut matches_comp_sw,
+            BlastRedoSeqSrcSubjectConfig {
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: true,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+            },
+            &mut results_comp_sw,
+        );
+
+        assert_eq!(rc_comp_sw, 0);
+        assert_eq!(
+            *seqsrc.encodings.lock().unwrap(),
+            vec![crate::seqsrc::SeqEncoding::Ncbi4na]
+        );
+        assert_eq!(matches_comp_sw[0].hsps[0].query_frame, 1);
+        assert_eq!(matches_comp_sw[0].hsps[0].subject_frame, 1);
+        assert_eq!(matches_comp_sw[0].hsps[0].num_ident, 4);
+        assert_eq!(
+            matches_comp_sw[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert!(matches_comp_sw[0].hsps[0].edit_script.is_some());
+        let hitlist_comp_sw = results_comp_sw.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist_comp_sw.hsp_lists.len(), 1);
+        assert_eq!(hitlist_comp_sw.hsp_lists[0].oid, 0);
+        assert_eq!(
+            hitlist_comp_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_redoes_second_blastn_context() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![
+                crate::queryinfo::ContextInfo {
+                    query_offset: 0,
+                    query_length: query.len() as i32,
+                    eff_searchsp: 100,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 1,
+                    is_valid: true,
+                },
+                crate::queryinfo::ContextInfo {
+                    query_offset: 0,
+                    query_length: query.len() as i32,
+                    eff_searchsp: 100,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: -1,
+                    is_valid: true,
+                },
+            ],
+            max_length: query.len() as u32,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let context1_kbp = crate::stat::KarlinBlk {
+            lambda: 0.321,
+            k: 0.057,
+            log_k: 0.057_f64.ln(),
+            h: 0.16,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone(), context1_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: None,
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 5,
+                gap_extend: 2,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 2, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 2,
+            query_end: 6,
+            query_gapped_start: 4,
+            subject_offset: 2,
+            subject_end: 6,
+            subject_gapped_start: 4,
+            context: 1,
+            query_frame: -1,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTN,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 1,
+                penalty: -3,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(kbp[1].lambda, context1_kbp.lambda);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].context, 1);
+        assert_eq!(hsp_list.hsps[0].query_frame, -1);
+        assert_eq!(hsp_list.hsps[0].query_offset, 0);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        let expected_bits = (hsp_list.hsps[0].score as f64 * context1_kbp.lambda
+            - context1_kbp.log_k)
+            / crate::math::NCBIMATH_LN2;
+        assert!((hsp_list.hsps[0].bit_score - expected_bits).abs() < 1e-9);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].context, 1);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_rejects_link_hsps_without_context() {
+        let query = vec![1u8; 8];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            true,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, -1);
+        assert!(results.hitlists[0].is_none());
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_uses_link_hsp_context() {
+        let query = vec![1u8; 8];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let karlin = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![karlin.clone()];
+        let score_block = crate::link_hsps::LinkScoreBlock {
+            kbp: vec![karlin],
+            kbp_gap: Vec::new(),
+            ..Default::default()
+        };
+        let link_params = crate::link_hsps::LinkHSPParameters::default();
+        let link_context = HitlistLinkContext {
+            query_info: &qi,
+            score_block: &score_block,
+            link_params: &link_params,
+            gapped_calculation: false,
+        };
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let mut matrix_info = BlastMatrixInfo::default();
+        assert_eq!(
+            matrix_info_init_blastp(&mut matrix_info, "BLOSUM62", 0.3176, 1.0),
+            0
+        );
+        let params = blast_redo_align_params_new(
+            matrix_info,
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            true,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: Some(&link_context),
+            },
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].num_ident, query.len() as i32);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_in_memory_subject_rejects_protein_without_matrix() {
+        let query = vec![1u8; 8];
+        let subject = query.clone();
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: query.len() as i32,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: query.len() as u32,
+        };
+        let mut kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        }];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 30,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
+            false,
+            false,
+            false,
+            query.len() as i32,
+            1,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved =
+            BlastKappaSavedParameters::new(0, 1, CompoAdjustMode::NoCompositionBasedStats, false);
+        let mut hsp_list = HspList::new(7);
+        hsp_list.add_hsp(Hsp {
+            score: 10,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0,
+            query_offset: 0,
+            query_end: query.len() as i32,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: subject.len() as i32,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt_in_memory_subject(
+            crate::program::BLASTP,
+            1,
+            &query,
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            &mut results,
+            BlastRedoInMemorySubject {
+                subject_source: &subject,
+                reward: 0,
+                penalty: 0,
+                genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+                smith_waterman: false,
+                expect_value: 10.0,
+                hitlist_size: 10,
+                inclusion_ethresh: 10.0,
+                link_context: None,
+            },
+        );
+
+        assert_eq!(rc, -1);
+        assert!(results.hitlists[0].is_none());
     }
 
     #[test]
@@ -601,6 +9405,51 @@ mod struct_tests {
     }
 
     #[test]
+    fn get_align_params_preserves_position_based_matrix_flag() {
+        let scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+        let kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.140,
+            round_down: false,
+        }];
+        let p = get_align_params(
+            crate::program::PSI_BLAST,
+            "BLOSUM62",
+            &scoring,
+            &kbp,
+            0.267,
+            0.3176,
+            1.0,
+            50,
+            1e-3,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+            false,
+            1000,
+            1,
+            25.0,
+            0,
+        )
+        .expect("params");
+
+        assert!(p.position_based);
+        assert!(p.matrix_info.positional);
+    }
+
+    #[test]
     fn blast_redo_align_params_new_sets_pseudocounts() {
         let matrix_info = BlastMatrixInfo::default();
         let gapping = BlastCompoGappingParams {
@@ -613,6 +9462,7 @@ mod struct_tests {
             matrix_info,
             gapping,
             CompoAdjustMode::CompositionMatrixAdjust,
+            32.0,
             /* position_based */ false,
             /* query_is_translated */ true,
             /* subject_is_translated */ false,
@@ -633,6 +9483,7 @@ mod struct_tests {
         assert_eq!(p.ccat_query_length, 1234);
         assert_eq!(p.cutoff_s, 50);
         assert_eq!(p.cutoff_e, 1e-3);
+        assert_eq!(p.local_scaling_factor, 32.0);
         assert!(!p.do_link_hsps);
         assert_eq!(p.near_identical_cutoff, 1.74);
         assert_eq!(p.gapping_params.gap_open, 11);
@@ -652,6 +9503,7 @@ mod struct_tests {
             matrix_info,
             gapping,
             CompoAdjustMode::NoCompositionBasedStats,
+            1.0,
             false,
             false,
             false,
@@ -675,10 +9527,16 @@ mod struct_tests {
             evalue: 0.0,
             query_offset: q,
             query_end: q + 10,
+            query_gapped_start: q + 4,
             subject_offset: s,
             subject_end: s + 10,
+            subject_gapped_start: s + 5,
             context,
+            query_frame: context,
+            subject_frame: context + 1,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         };
         let hsps = vec![mk(100, 0, 0, 0), mk(80, 1, 30, 30), mk(60, 0, 60, 60)];
         let mut lists: [Option<Box<BlastCompoAlignment>>; 6] = Default::default();
@@ -691,11 +9549,16 @@ mod struct_tests {
                                   // appends to tail, not head).
         let head_0 = lists[0].as_ref().expect("head 0");
         assert_eq!(head_0.score, 100);
+        assert_eq!(head_0.query_gapped_start, 4);
+        assert_eq!(head_0.match_gapped_start, 5);
         let next_0 = head_0.next.as_ref().expect("second in list");
         assert_eq!(next_0.score, 60);
+        assert_eq!(next_0.query_gapped_start, 64);
+        assert_eq!(next_0.match_gapped_start, 65);
         // Frame 1's list has just the single 80-score HSP.
         let head_1 = lists[1].as_ref().expect("head 1");
         assert_eq!(head_1.score, 80);
+        assert_eq!(head_1.frame, 2);
         assert!(head_1.next.is_none());
     }
 
@@ -708,10 +9571,16 @@ mod struct_tests {
             evalue: 0.0,
             query_offset: 0,
             query_end: 10,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 10,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: -2,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         }];
         let mut lists: [Option<Box<BlastCompoAlignment>>; 6] = Default::default();
         let mut counts = [0i32; 6];
@@ -719,6 +9588,7 @@ mod struct_tests {
         // C: `(int)(hsp->score * localScalingFactor)` — Rust uses
         // `.round() as i32` for nearest-integer behavior.
         assert_eq!(lists[0].as_ref().unwrap().score, 3200);
+        assert_eq!(lists[0].as_ref().unwrap().frame, -2);
     }
 
     #[test]
@@ -755,18 +9625,22 @@ mod struct_tests {
         let (status, was_biased) = do_seg_sequence_data(&mut seq);
         assert_eq!(status, 0);
         assert!(was_biased);
-        // Some residue should now be NCBIstdaa X (21).
-        let masked_count = seq.data().iter().filter(|&&b| b == 21).count();
+        // Some residue should now be NCBIstdaa X.
+        let masked_count = seq
+            .data()
+            .iter()
+            .filter(|&&b| b == crate::encoding::NCBISTDAA_X)
+            .count();
         assert!(masked_count > 0);
     }
 
     #[test]
     fn matching_sequence_release_resets_state() {
-        let mut s = BlastCompoMatchingSequence {
-            length: 1234,
-            index: 5,
-            local_data_index: 7,
-        };
+        let mut s = matching_sequence_initialize(1234, 5, 7);
+        assert_eq!(s.length, 1234);
+        assert_eq!(s.index, 5);
+        assert_eq!(s.local_data_index, 7);
+
         matching_sequence_release(&mut s);
         assert_eq!(s.local_data_index, -1);
         assert_eq!(s.length, 0);
@@ -808,10 +9682,10 @@ mod struct_tests {
 
     #[test]
     fn sequence_prep_query_range_copies_with_sentinels_and_substitutes_u_to_c() {
-        // Query: A=1, U=24, G=4, T=8, plus a context pad. Range covers
-        // idx 0..4 inclusive.
+        // Query uses NCBIstdaa residues, including U so the prep step can
+        // exercise NCBI's U-to-C substitution. Range covers idx 0..4 inclusive.
         let q = BlastCompoSequenceData {
-            buffer: vec![1, 24, 4, 8, 9],
+            buffer: vec![1, crate::encoding::NCBISTDAA_U, 4, 8, 9],
             data_offset: 0,
             length: 5,
         };
@@ -826,15 +9700,165 @@ mod struct_tests {
         assert_eq!(prepped.buffer.len(), 6);
         // Sentinel at index 0 stays zero.
         assert_eq!(prepped.buffer[0], 0);
-        // Selenocysteine (24) replaced by Cysteine (3).
+        // Selenocysteine replaced by cysteine.
         assert_eq!(prepped.buffer[1], 1);
-        assert_eq!(prepped.buffer[2], 3); // was 24 (U) → 3 (C)
+        assert_eq!(prepped.buffer[2], crate::encoding::NCBISTDAA_C);
         assert_eq!(prepped.buffer[3], 4);
         assert_eq!(prepped.buffer[4], 8);
         // Trailing sentinel at length+1 = 5.
         assert_eq!(prepped.buffer[5], 0);
         // data() returns the slice starting at offset 1.
         assert_eq!(prepped.data(), &[1, 3, 4, 8]);
+    }
+
+    #[test]
+    fn sequence_get_protein_range_copies_subject_with_sentinels() {
+        let source = vec![9u8, 8, 7, 6, 5, 4, 3];
+        let range = BlastCompoSequenceRange {
+            begin: 2,
+            end: 6,
+            context: 0,
+        };
+        let seq = sequence_get_protein_range(&source, &range);
+
+        assert_eq!(seq.length, 4);
+        assert_eq!(seq.data_offset, 1);
+        assert_eq!(seq.buffer, vec![0, 7, 6, 5, 4, 0]);
+        assert_eq!(seq.data(), &[7, 6, 5, 4]);
+    }
+
+    #[test]
+    fn sequence_get_translated_range_uses_subject_frame_and_protein_range() {
+        // NCBI4na: ATG GCT translates to M A in frame +1.
+        let source = vec![1u8, 8, 4, 4, 2, 8];
+        let range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 2,
+            context: 1,
+        };
+        let seq =
+            sequence_get_translated_range(&source, &range, &crate::util::STANDARD_GENETIC_CODE)
+                .expect("frame +1");
+
+        assert_eq!(seq.length, 2);
+        assert_eq!(seq.data_offset, 1);
+        assert_eq!(seq.buffer, vec![0, 12, 1, 0]);
+        assert_eq!(seq.data(), &[12, 1]);
+    }
+
+    #[test]
+    fn sequence_get_translated_range_uses_minus_frame_translation() {
+        // NCBI4na: ATG GCT reverse-complements to AGC CAT, so frame -1
+        // translates to S H.
+        let source = vec![1u8, 8, 4, 4, 2, 8];
+        let range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 2,
+            context: -1,
+        };
+        let seq =
+            sequence_get_translated_range(&source, &range, &crate::util::STANDARD_GENETIC_CODE)
+                .expect("frame -1");
+
+        assert_eq!(seq.buffer, vec![0, 17, 8, 0]);
+        assert_eq!(seq.data(), &[17, 8]);
+    }
+
+    #[test]
+    fn sequence_get_translated_range_honors_explicit_genetic_code() {
+        // NCBI4na: TGA is Stop(25) in code 1 and W(20) in code 4.
+        let source = vec![8u8, 4, 1];
+        let range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 1,
+            context: 1,
+        };
+        let standard =
+            sequence_get_translated_range(&source, &range, &crate::util::STANDARD_GENETIC_CODE)
+                .expect("standard code");
+        let code4 =
+            sequence_get_translated_range(&source, &range, crate::util::lookup_genetic_code(4))
+                .expect("code 4");
+
+        assert_eq!(standard.data(), &[crate::encoding::NCBISTDAA_STOP]);
+        assert_eq!(code4.data(), &[20]);
+    }
+
+    #[test]
+    fn sequence_get_range_in_memory_dispatches_non_translated_subject() {
+        let query = BlastCompoSequenceData {
+            buffer: vec![1, crate::encoding::NCBISTDAA_U, 4, 8, 9],
+            data_offset: 0,
+            length: 5,
+        };
+        let q_range = BlastCompoSequenceRange {
+            begin: 1,
+            end: 4,
+            context: 0,
+        };
+        let subject = vec![9u8, 8, 7, 6, 5, 4];
+        let s_range = BlastCompoSequenceRange {
+            begin: 2,
+            end: 5,
+            context: 0,
+        };
+
+        let (q_seq, s_seq) = sequence_get_range_in_memory(
+            crate::program::BLASTP,
+            &query,
+            &q_range,
+            &subject,
+            &s_range,
+        )
+        .expect("non-translated subject");
+
+        assert_eq!(q_seq.data(), &[crate::encoding::NCBISTDAA_C, 4, 8]);
+        assert_eq!(s_seq.data(), &[7, 6, 5]);
+        assert_eq!(q_seq.buffer[0], 0);
+        assert_eq!(s_seq.buffer[0], 0);
+    }
+
+    #[test]
+    fn sequence_get_range_in_memory_dispatches_translated_subject() {
+        let query = BlastCompoSequenceData {
+            buffer: vec![1, crate::encoding::NCBISTDAA_U, 4],
+            data_offset: 0,
+            length: 3,
+        };
+        let q_range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 3,
+            context: 0,
+        };
+        let s_range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 2,
+            context: 1,
+        };
+        let (q_seq, s_seq) = sequence_get_range_in_memory(
+            crate::program::TBLASTN,
+            &query,
+            &q_range,
+            &[1, 8, 4, 4, 2, 8],
+            &s_range,
+        )
+        .expect("translated subject");
+
+        assert_eq!(q_seq.data(), &[1, 3, 4]);
+        assert_eq!(s_seq.data(), &[12, 1]);
+    }
+
+    #[test]
+    fn sequence_get_translated_range_rejects_invalid_frame() {
+        let range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 1,
+            context: 0,
+        };
+        let err =
+            sequence_get_translated_range(&[1, 8, 4], &range, &crate::util::STANDARD_GENETIC_CODE)
+                .expect_err("invalid frame");
+        assert_eq!(err, "invalid translated subject frame");
     }
 
     #[test]
@@ -905,18 +9929,40 @@ mod struct_tests {
         assert!(!info.positional);
         assert_eq!(info.rows, crate::matrix::AA_SIZE as i32);
         assert_eq!(info.cols, crate::matrix::AA_SIZE as i32);
+        assert_eq!(info.bit_scale_factor, 2);
         assert_eq!(info.ungapped_lambda, 0.3176);
         assert_eq!(info.matrix.len(), crate::matrix::AA_SIZE);
         assert_eq!(info.matrix[0].len(), crate::matrix::AA_SIZE);
+        assert!(info.scaled_matrix.is_empty());
     }
 
     #[test]
     fn matrix_info_init_blastp_unknown_matrix_returns_error() {
         let mut info = BlastMatrixInfo::default();
-        let rc = matrix_info_init_blastp(&mut info, "PAM30", 0.34, 1.0);
-        // NCBI returns non-zero from `s_GetStartFreqRatios` for matrices
-        // it doesn't have ratios for. Our TODO range mirrors that.
+        let rc = matrix_info_init_blastp(&mut info, "UNKNOWN", 0.34, 1.0);
+        // NCBI returns non-zero from `s_GetStartFreqRatios` for unknown
+        // matrix names.
         assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn matrix_info_init_blastp_supports_pam30_freq_ratios() {
+        let mut info = BlastMatrixInfo::default();
+        let rc = matrix_info_init_blastp(&mut info, "PAM30", 0.34, 1.0);
+        assert_eq!(rc, 0);
+        assert_eq!(info.start_freq_ratios[1][1], 7.78912912);
+        assert_eq!(info.bit_scale_factor, 2);
+        assert_eq!(info.rows, crate::matrix::AA_SIZE as i32);
+        assert_eq!(info.cols, crate::matrix::AA_SIZE as i32);
+    }
+
+    #[test]
+    fn matrix_info_init_blastp_carries_blosum45_bit_scale() {
+        let mut info = BlastMatrixInfo::default();
+        let rc = matrix_info_init_blastp(&mut info, "BLOSUM45", 0.34, 1.0);
+        assert_eq!(rc, 0);
+        assert_eq!(info.start_freq_ratios[1][1], 2.95043377);
+        assert_eq!(info.bit_scale_factor, 3);
     }
 
     #[test]
@@ -1004,6 +10050,76 @@ mod struct_tests {
     }
 
     #[test]
+    fn record_and_restore_position_based_round_trips_pssm_rows() {
+        let query_length = 4;
+        let mut saved = BlastKappaSavedParameters::new(
+            query_length,
+            1,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        let kbp = vec![crate::stat::KarlinBlk {
+            lambda: 0.21,
+            k: 0.03,
+            log_k: 0.03_f64.ln(),
+            h: 0.11,
+            round_down: false,
+        }];
+        let matrix: Vec<Vec<i32>> = (0..query_length as usize)
+            .map(|r| {
+                (0..crate::matrix::AA_SIZE)
+                    .map(|c| (1000 + r * 100 + c) as i32)
+                    .collect()
+            })
+            .collect();
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                reward: 0,
+                penalty: 0,
+                gap_open: 9,
+                gap_extend: 2,
+                gapped_calculation: true,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+            },
+            1.0,
+        );
+
+        record_initial_search(
+            &mut saved,
+            &kbp,
+            &matrix,
+            &scoring,
+            query_length,
+            CompoAdjustMode::CompositionBasedStats,
+            true,
+        );
+        assert_eq!(saved.orig_matrix.len(), query_length as usize);
+        assert_eq!(saved.orig_matrix[3][7], 1307);
+
+        scoring.gap_open = 99;
+        scoring.gap_extend = 99;
+        let mut live_kbp = vec![crate::stat::KarlinBlk::default()];
+        let mut live_matrix = vec![vec![-1i32; crate::matrix::AA_SIZE]; 6];
+        restore_search(
+            &saved,
+            &mut live_kbp,
+            &mut live_matrix,
+            &mut scoring,
+            query_length,
+            true,
+            CompoAdjustMode::CompositionBasedStats,
+        );
+
+        assert_eq!(scoring.gap_open, 9);
+        assert_eq!(scoring.gap_extend, 2);
+        assert_eq!(live_kbp[0].lambda, 0.21);
+        assert_eq!(live_matrix[0][0], 1000);
+        assert_eq!(live_matrix[3][7], 1307);
+        assert_eq!(live_matrix[4][7], -1);
+    }
+
+    #[test]
     fn saved_parameters_new_no_composition_skips_matrix() {
         let sp =
             BlastKappaSavedParameters::new(10, 3, CompoAdjustMode::NoCompositionBasedStats, false);
@@ -1071,6 +10187,116 @@ mod struct_tests {
         assert!(heap.pop_worst().is_none());
     }
 
+    fn heap_hsp_list(oid: i32, evalue: f64, score: i32) -> HspList {
+        let mut list = HspList::new(oid);
+        list.best_evalue = evalue;
+        list.add_hsp(Hsp {
+            score,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue,
+            query_offset: 0,
+            query_end: 1,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 1,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        list.best_evalue = evalue;
+        list
+    }
+
+    #[test]
+    fn blast_compo_heap_insert_replaces_only_worse_full_record() {
+        let mut heap = BlastCompoHeap::new(2, 1e-5);
+        assert!(heap.insert(heap_hsp_list(1, 1e-3, 10)).is_none());
+        assert!(heap.insert(heap_hsp_list(2, 1e-2, 20)).is_none());
+
+        assert!(!heap.would_insert(1e-1, 100, 99));
+        let discarded = heap
+            .insert(heap_hsp_list(99, 1e-1, 100))
+            .expect("candidate discarded");
+        assert_eq!(discarded.oid, 99);
+
+        assert!(heap.would_insert(5e-4, 5, 3));
+        let discarded = heap
+            .insert(heap_hsp_list(3, 5e-4, 5))
+            .expect("old worst discarded");
+        assert_eq!(discarded.oid, 2);
+        assert!(heap.records.iter().any(|record| record.oid == 3));
+    }
+
+    #[test]
+    fn blast_compo_heap_ties_use_score_then_subject_index() {
+        let mut heap = BlastCompoHeap::new(1, 0.0);
+        assert!(heap.insert(heap_hsp_list(1, 1e-3, 10)).is_none());
+
+        assert!(heap.would_insert(1e-3, 11, 0));
+        let discarded = heap
+            .insert(heap_hsp_list(0, 1e-3, 11))
+            .expect("lower score record discarded");
+        assert_eq!(discarded.oid, 1);
+
+        assert!(heap.would_insert(1e-3, 11, 5));
+        let discarded = heap
+            .insert(heap_hsp_list(5, 1e-3, 11))
+            .expect("lower subject-index record discarded");
+        assert_eq!(discarded.oid, 0);
+
+        assert!(!heap.would_insert(1e-3, 11, 2));
+    }
+
+    #[test]
+    fn blast_compo_heap_keeps_all_records_once_filled_to_cutoff() {
+        let mut heap = BlastCompoHeap::new(1, 1e-2);
+        assert!(heap.insert(heap_hsp_list(1, 1e-3, 10)).is_none());
+        assert!(heap.filled_to_cutoff());
+        assert!(heap.insert(heap_hsp_list(2, 5e-3, 5)).is_none());
+        assert_eq!(heap.records.len(), 2);
+    }
+
+    #[test]
+    fn blast_compo_early_termination_requires_all_heaps_filled_to_cutoff() {
+        let mut filled = BlastCompoHeap::new(1, 1e-3);
+        assert!(filled.insert(heap_hsp_list(1, 1e-4, 10)).is_none());
+        let unfilled = BlastCompoHeap::new(1, 1e-3);
+        assert!(!blast_compo_early_termination(1e-2, &[filled, unfilled], 2));
+    }
+
+    #[test]
+    fn blast_compo_early_termination_keeps_near_cutoff_candidates() {
+        let mut heap = BlastCompoHeap::new(1, 1e-3);
+        assert!(heap.insert(heap_hsp_list(1, 1e-4, 10)).is_none());
+        assert!(!blast_compo_early_termination(5e-3, &[heap], 1));
+    }
+
+    #[test]
+    fn blast_compo_early_termination_returns_true_past_stretched_cutoff() {
+        let mut heap = BlastCompoHeap::new(1, 1e-3);
+        assert!(heap.insert(heap_hsp_list(1, 1e-4, 10)).is_none());
+        assert!(blast_compo_early_termination(6e-3, &[heap], 1));
+    }
+
+    #[test]
+    fn blast_compo_early_termination_respects_num_queries() {
+        let mut filled = BlastCompoHeap::new(1, 1e-3);
+        assert!(filled.insert(heap_hsp_list(1, 1e-4, 10)).is_none());
+        let extra_unfilled = BlastCompoHeap::new(1, 1e-3);
+
+        assert!(blast_compo_early_termination(
+            6e-3,
+            &[filled.clone(), extra_unfilled],
+            1
+        ));
+        assert!(!blast_compo_early_termination(6e-3, &[filled], 2));
+    }
+
     #[test]
     fn clear_heap_drains_records() {
         let mut heap = BlastCompoHeap::new(10, 1e-5);
@@ -1097,6 +10323,35 @@ mod struct_tests {
         assert_eq!(hl.hsp_lists.len(), 2);
         assert_eq!(hl.hsp_lists[0].oid, 1); // best evalue first
         assert_eq!(hl.hsp_lists[1].oid, 2);
+    }
+
+    #[test]
+    fn merge_compo_thread_heaps_uses_destination_heap_retention_and_order() {
+        let mut global = vec![BlastCompoHeap::new(2, 0.0)];
+        let mut worker_heaps = vec![
+            {
+                let mut heaps = vec![BlastCompoHeap::new(2, 0.0)];
+                assert!(heaps[0].insert(heap_hsp_list(10, 1e-2, 10)).is_none());
+                assert!(heaps[0].insert(heap_hsp_list(20, 1e-4, 8)).is_none());
+                heaps
+            },
+            {
+                let mut heaps = vec![BlastCompoHeap::new(2, 0.0)];
+                assert!(heaps[0].insert(heap_hsp_list(30, 1e-3, 100)).is_none());
+                assert!(heaps[0].insert(heap_hsp_list(40, 1e-5, 5)).is_none());
+                heaps
+            },
+        ];
+
+        merge_compo_thread_heaps(&mut global, &mut worker_heaps);
+
+        assert!(worker_heaps
+            .iter()
+            .all(|worker| worker.iter().all(|heap| heap.records.is_empty())));
+        let results = fill_results_from_compo_heaps(&mut global);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        let oids: Vec<i32> = hitlist.hsp_lists.iter().map(|list| list.oid).collect();
+        assert_eq!(oids, vec![40, 20]);
     }
 
     #[test]
@@ -1183,10 +10438,16 @@ mod struct_tests {
             evalue: 0.0,
             query_offset: 0,
             query_end: 8,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 8,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         };
         let (n_ident, align_length, _) =
             blast_hsp_get_num_identities(&query, &subject, &hsp, None, None);
@@ -1208,10 +10469,16 @@ mod struct_tests {
             evalue: 0.0,
             query_offset: 0,
             query_end: 8,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 9,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         };
         let ops = vec![
             (crate::gapinfo::GapAlignOpType::Sub, 4),
@@ -1236,13 +10503,94 @@ mod struct_tests {
             evalue: 0.0,
             query_offset: 0,
             query_end: 8,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 8,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         compute_num_identities_blastp(&query, &subject, &mut list, &[None], None);
         assert_eq!(list.hsps[0].num_ident, 8);
+    }
+
+    #[test]
+    fn compute_num_identities_translated_subject_uses_subject_frame() {
+        // NCBI4na: ATG GCT translates to M A in frame +1.
+        let query = vec![12u8, 1];
+        let subject = vec![1u8, 8, 4, 4, 2, 8];
+        let mut list = HspList::new(0);
+        list.add_hsp(Hsp {
+            score: 20,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 0.0,
+            query_offset: 0,
+            query_end: 2,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 2,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+
+        compute_num_identities_translated_subject(
+            &query,
+            &subject,
+            &mut list,
+            &[None],
+            None,
+            &crate::util::STANDARD_GENETIC_CODE,
+        )
+        .expect("translated subject");
+        assert_eq!(list.hsps[0].num_ident, 2);
+    }
+
+    #[test]
+    fn compute_num_identities_translated_subject_supports_minus_frame() {
+        // NCBI4na: ATG GCT reverse-complements to AGC CAT, so frame -1
+        // translates to S H.
+        let query = vec![17u8, 8];
+        let subject = vec![1u8, 8, 4, 4, 2, 8];
+        let mut list = HspList::new(0);
+        list.add_hsp(Hsp {
+            score: 20,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 0.0,
+            query_offset: 0,
+            query_end: 2,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 2,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: -1,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+
+        compute_num_identities_translated_subject(
+            &query,
+            &subject,
+            &mut list,
+            &[None],
+            None,
+            &crate::util::STANDARD_GENETIC_CODE,
+        )
+        .expect("minus frame");
+        assert_eq!(list.hsps[0].num_ident, 2);
     }
 
     #[test]
@@ -1255,10 +10603,16 @@ mod struct_tests {
             evalue: 1e-10,
             query_offset: 0,
             query_end: 100,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 100,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         list.add_hsp(Hsp {
             score: 50,
@@ -1267,10 +10621,16 @@ mod struct_tests {
             evalue: 1.0, // above default threshold
             query_offset: 0,
             query_end: 50,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 50,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         let (best_score, best_evalue) = hitlist_evaluate_and_purge(
             &mut list,
@@ -1279,6 +10639,8 @@ mod struct_tests {
             100,   // query_length
             10,    // length_adjustment
             1e9,   // eff_searchsp
+            None,  // caller already populated e-values
+            None,  // no link-HSP context
             -1.0,  // pvalue_for_this_pair: out of [0,1] → skip composition
             0.1,   // max_evalue
             false, // do_sum_stats
@@ -1299,10 +10661,16 @@ mod struct_tests {
             evalue: 1.0,
             query_offset: 0,
             query_end: 50,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 50,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         let (best_score, best_evalue) = hitlist_evaluate_and_purge(
             &mut list,
@@ -1311,6 +10679,8 @@ mod struct_tests {
             100,
             10,
             1e9,
+            None,
+            None,
             -1.0,
             0.01, // strict threshold
             false,
@@ -1318,6 +10688,242 @@ mod struct_tests {
         assert!(list.hsps.is_empty());
         assert_eq!(best_score, 0);
         assert_eq!(best_evalue, f64::MAX);
+    }
+
+    #[test]
+    fn hitlist_evaluate_and_purge_recomputes_single_hsp_evalues_when_kbp_given() {
+        let mut list = HspList::new(0);
+        list.add_hsp(Hsp {
+            score: 70,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 999.0,
+            query_offset: 0,
+            query_end: 20,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 20,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: false,
+        };
+        let search_space = 10_000.0;
+        let expected_evalue = kbp.raw_to_evalue(70, search_space);
+        let expected_bits = kbp.raw_to_bit(70);
+
+        let (best_score, best_evalue) = hitlist_evaluate_and_purge(
+            &mut list,
+            1000,
+            crate::program::BLASTP,
+            100,
+            10,
+            search_space,
+            Some(&kbp),
+            None,
+            -1.0,
+            10.0,
+            false,
+        );
+
+        assert_eq!(best_score, 70);
+        assert_eq!(best_evalue, expected_evalue);
+        assert_eq!(list.best_evalue, expected_evalue);
+        assert_eq!(list.hsps[0].evalue, expected_evalue);
+        assert_eq!(list.hsps[0].bit_score, expected_bits);
+    }
+
+    #[test]
+    fn blast_link_hsps_for_kappa_preserves_frames_and_updates_best_evalue() {
+        let mut list = HspList::new(7);
+        list.add_hsp(Hsp {
+            score: 50,
+            num_ident: 10,
+            bit_score: 20.0,
+            evalue: 1e-4,
+            query_offset: 0,
+            query_end: 10,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 10,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 1,
+            subject_frame: -2,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let mut linked_script = crate::gapinfo::GapEditScript::new();
+        linked_script.push(crate::gapinfo::GapAlignOpType::Sub, 12);
+        list.add_hsp(Hsp {
+            score: 70,
+            num_ident: 12,
+            bit_score: 30.0,
+            evalue: 1e-8,
+            query_offset: 20,
+            query_end: 32,
+            query_gapped_start: 24,
+            subject_offset: 40,
+            subject_end: 52,
+            subject_gapped_start: 44,
+            context: 0,
+            query_frame: 1,
+            subject_frame: -2,
+            num_gaps: 0,
+            comp_adjustment_method: CompoAdjustMode::CompositionBasedStats as i32,
+            edit_script: Some(linked_script),
+        });
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 10_000,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 1,
+                is_valid: true,
+            }],
+            max_length: 100,
+        };
+        let score_block = crate::link_hsps::LinkScoreBlock {
+            kbp: vec![crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: false,
+            }],
+            kbp_gap: vec![],
+            ..Default::default()
+        };
+        let rc = blast_link_hsps_for_kappa(
+            &mut list,
+            crate::program::BLASTP,
+            200,
+            &qi,
+            &score_block,
+            &crate::link_hsps::LinkHSPParameters::default(),
+            false,
+        );
+
+        assert_eq!(rc, 0);
+        assert_eq!(list.oid, 7);
+        assert!(list.best_evalue > 1e-8);
+        assert_eq!(list.hsps[0].score, 70);
+        assert_eq!(list.hsps[0].evalue, list.best_evalue);
+        assert_eq!(list.hsps[0].query_frame, 1);
+        assert_eq!(list.hsps[0].subject_frame, -2);
+        assert_eq!(list.hsps[0].query_gapped_start, 24);
+        assert_eq!(list.hsps[0].subject_gapped_start, 44);
+        assert_eq!(
+            list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert_eq!(list.hsps[0].edit_script.as_ref().unwrap().ops.len(), 1);
+        assert_eq!(list.hsps[1].subject_frame, -2);
+    }
+
+    #[test]
+    fn hitlist_evaluate_and_purge_takes_link_hsp_branch_when_context_supplied() {
+        let mut list = HspList::new(7);
+        list.add_hsp(Hsp {
+            score: 50,
+            num_ident: 10,
+            bit_score: 20.0,
+            evalue: 1e-4,
+            query_offset: 0,
+            query_end: 10,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 10,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        list.add_hsp(Hsp {
+            score: 70,
+            num_ident: 12,
+            bit_score: 30.0,
+            evalue: 1e-8,
+            query_offset: 20,
+            query_end: 32,
+            query_gapped_start: 20,
+            subject_offset: 40,
+            subject_end: 52,
+            subject_gapped_start: 40,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        });
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 10_000,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+            }],
+            max_length: 100,
+        };
+        let score_block = crate::link_hsps::LinkScoreBlock {
+            kbp: vec![crate::stat::KarlinBlk {
+                lambda: 0.267,
+                k: 0.041,
+                log_k: 0.041_f64.ln(),
+                h: 0.14,
+                round_down: false,
+            }],
+            kbp_gap: vec![],
+            ..Default::default()
+        };
+        let link_params = crate::link_hsps::LinkHSPParameters::default();
+        let link_context = HitlistLinkContext {
+            query_info: &qi,
+            score_block: &score_block,
+            link_params: &link_params,
+            gapped_calculation: false,
+        };
+
+        let (best_score, best_evalue) = hitlist_evaluate_and_purge(
+            &mut list,
+            200,
+            crate::program::BLASTP,
+            100,
+            0,
+            10_000.0,
+            None,
+            Some(&link_context),
+            -1.0,
+            10.0,
+            true,
+        );
+
+        assert_eq!(best_score, 70);
+        assert!(best_evalue > 1e-8);
+        assert_eq!(best_evalue, list.best_evalue);
+        assert_eq!(list.hsps[0].score, 70);
     }
 
     #[test]
@@ -1334,10 +10940,16 @@ mod struct_tests {
             evalue: 1e-10,
             query_offset: 0,
             query_end: 100,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 100,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         adjust_evalues_for_composition(
             &mut list, 0.5,  // comp_p_value
@@ -1417,7 +11029,7 @@ mod struct_tests {
         // Build a 3-element linked list manually, in REVERSE-of-computation
         // order as NCBI stores them: third-best at head, best-scoring last.
         let third =
-            BlastCompoAlignment::new(10, MatrixAdjustRule::DontAdjust, 0, 0, 10, 0, 10, 1, None);
+            BlastCompoAlignment::new(10, MatrixAdjustRule::DontAdjust, 0, 0, 10, 0, 10, -1, None);
         let mut second = BlastCompoAlignment::new(
             50,
             MatrixAdjustRule::ScaleOldMatrix,
@@ -1426,10 +11038,14 @@ mod struct_tests {
             30,
             20,
             30,
-            1,
+            -2,
             None,
         );
         second.next = Some(Box::new(third));
+        let mut first_script = crate::gapinfo::GapEditScript::new();
+        first_script.push(crate::gapinfo::GapAlignOpType::Sub, 10);
+        first_script.push(crate::gapinfo::GapAlignOpType::Del, 2);
+        first_script.push(crate::gapinfo::GapAlignOpType::Sub, 8);
         let mut first = BlastCompoAlignment::new(
             100,
             MatrixAdjustRule::UnconstrainedRelEntropy,
@@ -1438,9 +11054,11 @@ mod struct_tests {
             60,
             40,
             60,
-            1,
-            None,
+            3,
+            Some(first_script),
         );
+        first.query_gapped_start = 47;
+        first.match_gapped_start = 49;
         first.next = Some(Box::new(second));
         let mut head: Option<Box<BlastCompoAlignment>> = Some(Box::new(first));
         let mut hsp_list = HspList::new(0);
@@ -1453,11 +11071,479 @@ mod struct_tests {
         assert_eq!(hsp_list.hsps[0].score, 100);
         assert_eq!(hsp_list.hsps[1].score, 50);
         assert_eq!(hsp_list.hsps[2].score, 10);
+        assert_eq!(hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 3);
+        assert_eq!(hsp_list.hsps[0].query_gapped_start, 47);
+        assert_eq!(hsp_list.hsps[0].subject_gapped_start, 49);
+        assert_eq!(hsp_list.hsps[1].subject_frame, -2);
+        assert_eq!(hsp_list.hsps[2].subject_frame, -1);
+        assert_eq!(
+            hsp_list.hsps[0].comp_adjustment_method,
+            CompoAdjustMode::CompositionMatrixAdjust as i32
+        );
+        assert_eq!(
+            hsp_list.hsps[1].comp_adjustment_method,
+            CompoAdjustMode::CompositionBasedStats as i32
+        );
+        assert_eq!(
+            hsp_list.hsps[2].comp_adjustment_method,
+            CompoAdjustMode::NoCompositionBasedStats as i32
+        );
+        assert_eq!(hsp_list.hsps[0].edit_script.as_ref().unwrap().ops.len(), 3);
+        assert_eq!(hsp_list.hsps[0].num_gaps, 1);
+        assert!(hsp_list.hsps[1].edit_script.is_none());
         // Tags emitted in pre-sort order (matching alignment list traversal).
         assert_eq!(tags.len(), 3);
         assert_eq!(tags[0], CompoAdjustMode::CompositionMatrixAdjust); // first/UnconstrainedRelEntropy
         assert_eq!(tags[1], CompoAdjustMode::CompositionBasedStats); // second/ScaleOldMatrix
         assert_eq!(tags[2], CompoAdjustMode::NoCompositionBasedStats); // third/DontAdjust
+    }
+
+    fn linked_scores(head: &Option<Box<BlastCompoAlignment>>) -> Vec<i32> {
+        let mut out = Vec::new();
+        let mut cursor = head.as_deref();
+        while let Some(node) = cursor {
+            out.push(node.score);
+            cursor = node.next.as_deref();
+        }
+        out
+    }
+
+    #[test]
+    fn with_distinct_ends_discards_equal_or_lower_duplicate() {
+        let old =
+            BlastCompoAlignment::new(80, MatrixAdjustRule::DontAdjust, 0, 10, 30, 50, 70, 1, None);
+        let mut head = Some(Box::new(old));
+        let new_equal_end =
+            BlastCompoAlignment::new(80, MatrixAdjustRule::DontAdjust, 0, 10, 35, 50, 75, 1, None);
+
+        assert!(!with_distinct_ends(new_equal_end, &mut head, true));
+        assert_eq!(linked_scores(&head), vec![80]);
+    }
+
+    #[test]
+    fn with_distinct_ends_replaces_lower_duplicate_and_preserves_tail_order() {
+        let mut second = BlastCompoAlignment::new(
+            70,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            40,
+            60,
+            80,
+            100,
+            1,
+            None,
+        );
+        second.next = Some(Box::new(BlastCompoAlignment::new(
+            60,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            90,
+            110,
+            130,
+            150,
+            1,
+            None,
+        )));
+        let mut first =
+            BlastCompoAlignment::new(50, MatrixAdjustRule::DontAdjust, 0, 10, 30, 50, 70, 1, None);
+        first.next = Some(Box::new(second));
+        let mut head = Some(Box::new(first));
+        let new_higher = BlastCompoAlignment::new(
+            90,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            10,
+            60,
+            50,
+            100,
+            1,
+            None,
+        );
+
+        assert!(with_distinct_ends(new_higher, &mut head, true));
+        assert_eq!(linked_scores(&head), vec![90, 60]);
+        let kept = head.as_ref().unwrap().next.as_ref().unwrap();
+        assert_eq!((kept.query_start, kept.match_start), (90, 130));
+    }
+
+    #[test]
+    fn with_distinct_ends_keeps_same_endpoint_in_different_frame() {
+        let old = BlastCompoAlignment::new(
+            100,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            10,
+            30,
+            50,
+            70,
+            2,
+            None,
+        );
+        let mut head = Some(Box::new(old));
+        let new_same_coords =
+            BlastCompoAlignment::new(90, MatrixAdjustRule::DontAdjust, 0, 10, 30, 50, 70, 1, None);
+
+        assert!(with_distinct_ends(new_same_coords, &mut head, true));
+        assert_eq!(linked_scores(&head), vec![90, 100]);
+    }
+
+    #[test]
+    fn with_distinct_ends_uses_similar_endpoint_for_mixed_adjustment_gate() {
+        let old = BlastCompoAlignment::new(
+            100,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            10,
+            50,
+            30,
+            70,
+            1,
+            None,
+        );
+        let mut head = Some(Box::new(old));
+        // Starts inside the old alignment on the same diagonal
+        // (q - s == -20), but does not share an exact endpoint.
+        let new_similar =
+            BlastCompoAlignment::new(95, MatrixAdjustRule::DontAdjust, 0, 20, 60, 40, 80, 1, None);
+
+        assert!(!with_distinct_ends(new_similar, &mut head, false));
+        assert_eq!(linked_scores(&head), vec![100]);
+    }
+
+    #[test]
+    fn windows_from_protein_aligns_groups_by_query_and_preserves_order() {
+        let mut first_q1 =
+            BlastCompoAlignment::new(10, MatrixAdjustRule::DontAdjust, 1, 0, 10, 5, 15, 0, None);
+        let mut second_q0 =
+            BlastCompoAlignment::new(20, MatrixAdjustRule::DontAdjust, 0, 0, 10, 20, 30, 0, None);
+        let third_q1 =
+            BlastCompoAlignment::new(30, MatrixAdjustRule::DontAdjust, 1, 20, 30, 40, 50, 0, None);
+        second_q0.next = Some(Box::new(third_q1));
+        first_q1.next = Some(Box::new(second_q0));
+        let alignments = Some(Box::new(first_q1));
+        let query_info = vec![
+            BlastCompoQueryInfo {
+                seq: BlastCompoSequenceData {
+                    buffer: vec![0; 11],
+                    data_offset: 0,
+                    length: 11,
+                },
+                ..Default::default()
+            },
+            BlastCompoQueryInfo {
+                seq: BlastCompoSequenceData {
+                    buffer: vec![0; 17],
+                    data_offset: 0,
+                    length: 17,
+                },
+                ..Default::default()
+            },
+        ];
+
+        let windows =
+            windows_from_protein_aligns(&alignments, &query_info, 123).expect("protein windows");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].query_range.context, 0);
+        assert_eq!(windows[0].query_range.end, 11);
+        assert_eq!(windows[0].subject_range.begin, 0);
+        assert_eq!(windows[0].subject_range.end, 123);
+        assert_eq!(windows[0].hspcnt, 1);
+        assert_eq!(linked_scores(&windows[0].align), vec![20]);
+
+        assert_eq!(windows[1].query_range.context, 1);
+        assert_eq!(windows[1].query_range.end, 17);
+        assert_eq!(windows[1].hspcnt, 2);
+        // NCBI prepends copies then reverses per window.
+        assert_eq!(linked_scores(&windows[1].align), vec![10, 30]);
+        // The source list was copied, not consumed.
+        assert_eq!(linked_scores(&alignments), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn windows_from_protein_aligns_rejects_bad_query_index() {
+        let align =
+            BlastCompoAlignment::new(10, MatrixAdjustRule::DontAdjust, 2, 0, 10, 5, 15, 0, None);
+        let query_info = vec![BlastCompoQueryInfo::default()];
+        let err = windows_from_protein_aligns(&Some(Box::new(align)), &query_info, 50)
+            .expect_err("bad query index");
+        assert_eq!(err, "alignment query index out of range");
+    }
+
+    #[test]
+    fn translated_length_matches_ncbi_frame_formula() {
+        assert_eq!(get_translated_length(101, 1, false), 33);
+        assert_eq!(get_translated_length(101, 2, false), 33);
+        assert_eq!(get_translated_length(101, 3, false), 33);
+        assert_eq!(get_translated_length(100, -3, false), 32);
+        // Position-based lengths are packed by GET_NUCL_LENGTH first.
+        let packed = 2 * (101 - 2) + 5;
+        assert_eq!(get_translated_length(packed, 1, true), 33);
+    }
+
+    #[test]
+    fn distinct_alignments_sort_matches_ncbi_tie_order() {
+        let mut a =
+            BlastCompoAlignment::new(80, MatrixAdjustRule::DontAdjust, 0, 10, 20, 30, 45, 0, None);
+        let mut b =
+            BlastCompoAlignment::new(90, MatrixAdjustRule::DontAdjust, 0, 40, 50, 80, 90, 0, None);
+        let c =
+            BlastCompoAlignment::new(80, MatrixAdjustRule::DontAdjust, 0, 5, 30, 30, 50, 0, None);
+        b.next = Some(Box::new(c));
+        a.next = Some(Box::new(b));
+        let mut head = Some(Box::new(a));
+
+        distinct_alignments_sort(&mut head);
+
+        let mut values = Vec::new();
+        let mut cur = head.as_deref();
+        while let Some(node) = cur {
+            values.push((
+                node.score,
+                node.match_start,
+                node.match_end,
+                node.query_start,
+                node.query_end,
+            ));
+            cur = node.next.as_deref();
+        }
+        assert_eq!(
+            values,
+            vec![
+                (90, 80, 90, 40, 50),
+                (80, 30, 50, 5, 30),
+                (80, 30, 45, 10, 20)
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_from_translated_aligns_joins_overlapping_subject_windows() {
+        let mut first =
+            BlastCompoAlignment::new(50, MatrixAdjustRule::DontAdjust, 0, 0, 10, 20, 30, 1, None);
+        let second =
+            BlastCompoAlignment::new(70, MatrixAdjustRule::DontAdjust, 0, 30, 40, 34, 42, 1, None);
+        first.next = Some(Box::new(second));
+        let alignments = Some(Box::new(first));
+        let query_info = vec![BlastCompoQueryInfo {
+            seq: BlastCompoSequenceData {
+                buffer: vec![0; 100],
+                data_offset: 0,
+                length: 100,
+            },
+            ..Default::default()
+        }];
+
+        let windows = windows_from_translated_aligns(&alignments, &query_info, 5, 150, true, false)
+            .expect("translated windows");
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].subject_range.begin, 15);
+        assert_eq!(windows[0].subject_range.end, 47);
+        assert_eq!(windows[0].subject_range.context, 1);
+        assert_eq!(windows[0].query_range.begin, 0);
+        assert_eq!(windows[0].query_range.end, 100);
+        assert_eq!(windows[0].query_range.context, 0);
+        assert_eq!(windows[0].hspcnt, 2);
+        // Join appends current to next, then s_DistinctAlignmentsSort sorts by score.
+        assert_eq!(linked_scores(&windows[0].align), vec![70, 50]);
+        assert_eq!(linked_scores(&alignments), vec![50, 70]);
+    }
+
+    #[test]
+    fn windows_from_translated_aligns_swaps_ranges_for_query_translation() {
+        let align = BlastCompoAlignment::new(
+            60,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            12,
+            24,
+            40,
+            55,
+            -2,
+            None,
+        );
+        let query_info = vec![BlastCompoQueryInfo {
+            seq: BlastCompoSequenceData {
+                buffer: vec![0; 90],
+                data_offset: 0,
+                length: 90,
+            },
+            ..Default::default()
+        }];
+
+        let windows = windows_from_aligns(
+            &Some(Box::new(align)),
+            &query_info,
+            1,
+            4,
+            200,
+            true,
+            false,
+            false,
+        )
+        .expect("blastx windows");
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].query_range.begin, 8);
+        assert_eq!(windows[0].query_range.end, 28);
+        assert_eq!(windows[0].query_range.context, 0);
+        assert_eq!(windows[0].subject_range.begin, 0);
+        assert_eq!(windows[0].subject_range.end, 200);
+        assert_eq!(windows[0].subject_range.context, 0);
+    }
+
+    #[test]
+    fn get_composition_range_uses_stop_margin_like_ncbi() {
+        let mut seq = vec![1u8; 120];
+        seq[9] = NCBISTDAA_STOP_CHAR;
+        seq[100] = NCBISTDAA_STOP_CHAR;
+
+        assert_eq!(get_composition_range(&seq, 40, 70), (30, 80));
+        // Stops too close to the HSP boundary do not move the boundary.
+        assert_eq!(get_composition_range(&seq, 20, 90), (20, 90));
+    }
+
+    #[test]
+    fn get_composition_uses_full_range_for_non_translated_sequence() {
+        let seq = BlastCompoSequenceData {
+            buffer: vec![1, 1, 3, crate::encoding::NCBISTDAA_STOP, 4],
+            data_offset: 0,
+            length: 5,
+        };
+        let range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 5,
+            context: 0,
+        };
+        let align =
+            BlastCompoAlignment::new(10, MatrixAdjustRule::DontAdjust, 0, 1, 3, 1, 3, 0, None);
+
+        let (composition, num_true) =
+            get_composition(&seq, &range, &align, crate::matrix::AA_SIZE, false, false);
+        assert_eq!(num_true, 4);
+        assert_eq!(composition[1], 0.5);
+        assert_eq!(composition[3], 0.25);
+        assert_eq!(composition[4], 0.25);
+        assert_eq!(composition[crate::encoding::NCBISTDAA_STOP as usize], 0.0);
+    }
+
+    #[test]
+    fn get_composition_trims_translated_range_at_stop_margin() {
+        let mut data = vec![1u8; 120];
+        data[9] = NCBISTDAA_STOP_CHAR;
+        data[100] = NCBISTDAA_STOP_CHAR;
+        data[30] = 3;
+        data[79] = 4;
+        let seq = BlastCompoSequenceData {
+            buffer: data,
+            data_offset: 0,
+            length: 120,
+        };
+        let range = BlastCompoSequenceRange {
+            begin: 0,
+            end: 120,
+            context: 1,
+        };
+        let align =
+            BlastCompoAlignment::new(10, MatrixAdjustRule::DontAdjust, 0, 0, 10, 40, 70, 1, None);
+
+        let (composition, num_true) =
+            get_composition(&seq, &range, &align, crate::matrix::AA_SIZE, false, true);
+        assert_eq!(num_true, 50);
+        assert_eq!(composition[3], 1.0 / 50.0);
+        assert_eq!(composition[4], 1.0 / 50.0);
+        assert_eq!(composition[1], 48.0 / 50.0);
+    }
+
+    fn query_info_with_length(length: i32) -> Vec<BlastCompoQueryInfo> {
+        vec![BlastCompoQueryInfo {
+            seq: BlastCompoSequenceData {
+                buffer: vec![0; length.max(0) as usize],
+                data_offset: 0,
+                length,
+            },
+            ..Default::default()
+        }]
+    }
+
+    #[test]
+    fn preliminary_test_near_identical_positive_cutoff_uses_score_density() {
+        let query_info = query_info_with_length(80);
+        let window = BlastCompoWindowInfo::new(0, 120, 0, 0, 80, 0, None);
+        let high = BlastCompoAlignment::new(
+            120,
+            MatrixAdjustRule::DontAdjust,
+            0,
+            10,
+            70,
+            20,
+            80,
+            0,
+            None,
+        );
+        let low =
+            BlastCompoAlignment::new(90, MatrixAdjustRule::DontAdjust, 0, 10, 70, 20, 80, 0, None);
+
+        assert!(preliminary_test_near_identical(
+            &query_info,
+            &window,
+            &high,
+            1.9
+        ));
+        assert!(!preliminary_test_near_identical(
+            &query_info,
+            &window,
+            &low,
+            1.9
+        ));
+    }
+
+    #[test]
+    fn preliminary_test_near_identical_positive_cutoff_requires_min_length() {
+        let query_info = query_info_with_length(80);
+        let window = BlastCompoWindowInfo::new(0, 120, 0, 0, 80, 0, None);
+        let short =
+            BlastCompoAlignment::new(200, MatrixAdjustRule::DontAdjust, 0, 0, 40, 10, 58, 0, None);
+
+        assert!(!preliminary_test_near_identical(
+            &query_info,
+            &window,
+            &short,
+            1.0
+        ));
+    }
+
+    #[test]
+    fn preliminary_test_near_identical_legacy_requires_single_ungapped_equal_span() {
+        let query_info = query_info_with_length(80);
+        let mut single = BlastCompoWindowInfo::new(0, 120, 0, 0, 80, 0, None);
+        single.hspcnt = 1;
+        let mut multi = BlastCompoWindowInfo::new(0, 120, 0, 0, 80, 0, None);
+        multi.hspcnt = 2;
+        let equal =
+            BlastCompoAlignment::new(50, MatrixAdjustRule::DontAdjust, 0, 0, 60, 10, 70, 0, None);
+        let unequal =
+            BlastCompoAlignment::new(50, MatrixAdjustRule::DontAdjust, 0, 0, 60, 10, 80, 0, None);
+
+        assert!(preliminary_test_near_identical(
+            &query_info,
+            &single,
+            &equal,
+            0.0
+        ));
+        assert!(!preliminary_test_near_identical(
+            &query_info,
+            &multi,
+            &equal,
+            0.0
+        ));
+        assert!(!preliminary_test_near_identical(
+            &query_info,
+            &single,
+            &unequal,
+            0.0
+        ));
     }
 
     #[test]
@@ -1504,6 +11590,32 @@ mod struct_tests {
         sd.length = 4;
         assert_eq!(sd.data(), &[1, 2, 3, 4]);
     }
+
+    #[test]
+    fn sequence_data_release_resets_buffer_data_and_length() {
+        let mut sd = BlastCompoSequenceData {
+            buffer: vec![0, 1, 2, 3, 4],
+            data_offset: 1,
+            length: 4,
+        };
+
+        sequence_data_release(&mut sd);
+        assert!(sd.buffer.is_empty());
+        assert_eq!(sd.data_offset, 0);
+        assert_eq!(sd.length, 0);
+        assert!(sd.data().is_empty());
+    }
+
+    #[test]
+    fn evalue_from_score_matches_ncbi_formula() {
+        let score = 50;
+        let lambda = 0.267;
+        let log_k = 0.041_f64.ln();
+        let searchsp = 12345.0;
+        let expected = searchsp * (-(lambda * score as f64) + log_k).exp();
+
+        assert_eq!(evalue_from_score(score, lambda, log_k, searchsp), expected);
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1521,6 +11633,9 @@ pub fn contained_in_hsp(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> bool 
 /// previously-emitted alignment must score above the current candidate
 /// for [`is_contained`] to report containment.
 pub const KAPPA_BIT_TOL: f64 = 2.0;
+pub const COMPOSITION_MARGIN: i32 = 20;
+pub const NCBISTDAA_STOP_CHAR: u8 = crate::encoding::NCBISTDAA_STOP;
+pub const MINIMUM_LENGTH_NEAR_IDENTICAL: i32 = 50;
 
 /// 1-1 port of `s_IsContained` (`redo_alignment.c:965`).
 ///
@@ -1564,6 +11679,520 @@ pub fn is_contained(
         }
     }
     false
+}
+
+#[inline]
+fn is_same_endpoint(new_align: &BlastCompoAlignment, align: &BlastCompoAlignment) -> bool {
+    (align.query_start == new_align.query_start && align.match_start == new_align.match_start)
+        || (align.query_end == new_align.query_end && align.match_end == new_align.match_end)
+}
+
+#[inline]
+fn is_similar_endpoint(new_align: &BlastCompoAlignment, align: &BlastCompoAlignment) -> bool {
+    let start_contained = contained_in_hsp(
+        align.query_start,
+        align.query_end,
+        new_align.query_start,
+        align.match_start,
+        align.match_end,
+        new_align.match_start,
+    );
+    let end_contained = contained_in_hsp(
+        align.query_start,
+        align.query_end,
+        new_align.query_end,
+        align.match_start,
+        align.match_end,
+        new_align.match_end,
+    );
+
+    (start_contained
+        && new_align.query_start - new_align.match_start == align.query_start - align.match_start)
+        || (end_contained
+            && new_align.query_end - new_align.match_end == align.query_end - align.match_end)
+}
+
+fn alignment_list_len(mut head: Option<&BlastCompoAlignment>) -> usize {
+    let mut len = 0;
+    while let Some(node) = head {
+        len += 1;
+        head = node.next.as_deref();
+    }
+    len
+}
+
+fn alignment_copy_without_next(align: &BlastCompoAlignment) -> BlastCompoAlignment {
+    let mut copied = align.clone();
+    copied.next = None;
+    copied
+}
+
+fn alignments_rev(head: &mut Option<Box<BlastCompoAlignment>>) {
+    let mut prev = None;
+    let mut cur = head.take();
+    while let Some(mut node) = cur {
+        let next = node.next.take();
+        node.next = prev;
+        prev = Some(node);
+        cur = next;
+    }
+    *head = prev;
+}
+
+/// 1-1 port of `BlastCompo_AlignmentsFree` (`redo_alignment.c:160`).
+///
+/// Rust drops each node and its owned traceback context automatically. The C
+/// callback parameter is unnecessary because `GapEditScript` is owned, so this
+/// parity hook only takes and clears the list head.
+pub fn alignments_free(alignments: &mut Option<Box<BlastCompoAlignment>>) {
+    *alignments = None;
+}
+
+/// 1-1 port of the repeated `BlastCompo_AlignmentsFree` cleanup loops in
+/// `Blast_RedoOneMatch*`.
+pub fn alignments_free_array(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    num_queries: usize,
+) {
+    for slot in alignments.iter_mut().take(num_queries) {
+        alignments_free(slot);
+    }
+}
+
+fn alignment_cmp(a: &BlastCompoAlignment, b: &BlastCompoAlignment) -> std::cmp::Ordering {
+    b.score
+        .cmp(&a.score)
+        .then(a.match_start.cmp(&b.match_start))
+        .then(b.match_end.cmp(&a.match_end))
+        .then(a.query_start.cmp(&b.query_start))
+        .then(b.query_end.cmp(&a.query_end))
+}
+
+fn distinct_alignments_sort(head: &mut Option<Box<BlastCompoAlignment>>) {
+    let mut nodes = Vec::new();
+    let mut cur = head.take();
+    while let Some(mut node) = cur {
+        cur = node.next.take();
+        nodes.push(node);
+    }
+    nodes.sort_by(|a, b| alignment_cmp(a, b));
+
+    let mut out = None;
+    for mut node in nodes.into_iter().rev() {
+        node.next = out;
+        out = Some(node);
+    }
+    *head = out;
+}
+
+/// 1-1 ownership-safe port of `s_WithDistinctEnds` (`redo_alignment.c:395`).
+///
+/// The C routine conditionally inserts `new_align` at the head of a linked
+/// list. If an old same-frame alignment has a matching endpoint and an equal
+/// or higher score, the new alignment is discarded. Otherwise the new
+/// alignment becomes the head, and any old same-frame alignments sharing an
+/// exact start or end endpoint are removed while the remaining tail order is
+/// preserved.
+///
+/// When `is_same_adjustment` is false, NCBI uses the looser
+/// `s_IsSimilarEndPoint` only for the score gate because exact subjects can
+/// extend farther than segged subjects; the removal pass still uses exact
+/// endpoint equality. Returns true when `new_align` was inserted.
+pub fn with_distinct_ends(
+    mut new_align: BlastCompoAlignment,
+    old_alignments: &mut Option<Box<BlastCompoAlignment>>,
+    is_same_adjustment: bool,
+) -> bool {
+    new_align.next = None;
+
+    let mut cursor = old_alignments.as_deref();
+    while let Some(align) = cursor {
+        if align.frame == new_align.frame {
+            let shares_endpoint = if is_same_adjustment {
+                is_same_endpoint(&new_align, align)
+            } else {
+                is_similar_endpoint(&new_align, align)
+            };
+            if shares_endpoint && new_align.score <= align.score {
+                return false;
+            }
+        }
+        cursor = align.next.as_deref();
+    }
+
+    let mut kept: Vec<Box<BlastCompoAlignment>> = Vec::new();
+    let mut old = old_alignments.take();
+    while let Some(mut align) = old {
+        old = align.next.take();
+        if align.frame == new_align.frame && is_same_endpoint(&new_align, &align) {
+            continue;
+        }
+        kept.push(align);
+    }
+
+    let mut tail = None;
+    for mut align in kept.into_iter().rev() {
+        align.next = tail;
+        tail = Some(align);
+    }
+    new_align.next = tail;
+    *old_alignments = Some(Box::new(new_align));
+    true
+}
+
+fn subject_compare_windows(
+    a: &BlastCompoWindowInfo,
+    b: &BlastCompoWindowInfo,
+) -> std::cmp::Ordering {
+    a.subject_range
+        .begin
+        .cmp(&b.subject_range.begin)
+        .then(a.subject_range.end.cmp(&b.subject_range.end))
+        .then(a.subject_range.context.cmp(&b.subject_range.context))
+        .then(a.query_range.begin.cmp(&b.query_range.begin))
+        .then(a.query_range.end.cmp(&b.query_range.end))
+        .then(a.query_range.context.cmp(&b.query_range.context))
+}
+
+fn location_compare_windows(
+    a: &BlastCompoWindowInfo,
+    b: &BlastCompoWindowInfo,
+) -> std::cmp::Ordering {
+    a.query_range
+        .context
+        .cmp(&b.query_range.context)
+        .then(a.subject_range.context.cmp(&b.subject_range.context))
+        .then(a.subject_range.begin.cmp(&b.subject_range.begin))
+        .then(a.subject_range.end.cmp(&b.subject_range.end))
+        .then(a.query_range.begin.cmp(&b.query_range.begin))
+        .then(a.query_range.end.cmp(&b.query_range.end))
+}
+
+/// `s_GetTranslatedLength` (`redo_alignment.c:657`).
+pub fn get_translated_length(length: i32, frame: i32, is_pos_based: bool) -> i32 {
+    let nucl_length = if is_pos_based {
+        get_nucl_length(length)
+    } else {
+        length
+    };
+    let frame = frame.abs().max(1);
+    ((nucl_length - frame + 1) / 3).max(0)
+}
+
+/// 1-1 port of `s_WindowsFromTranslatedAligns` (`redo_alignment.c:676`).
+///
+/// Creates one bordered window per translated HSP, sorts by
+/// `s_LocationCompareWindows`, joins overlapping windows with identical query
+/// and subject contexts, swaps ranges for query-translated searches (blastx),
+/// sorts each window's alignment list by `s_AlignmentCmp`, then returns the
+/// subject-sorted window array.
+pub fn windows_from_translated_aligns(
+    alignments: &Option<Box<BlastCompoAlignment>>,
+    query_info: &[BlastCompoQueryInfo],
+    border: i32,
+    sequence_length: i32,
+    subject_is_translated: bool,
+    is_pos_based: bool,
+) -> Result<Vec<BlastCompoWindowInfo>, String> {
+    let mut windows = Vec::new();
+    let mut align = alignments.as_deref();
+    while let Some(node) = align {
+        let query_index = node.query_index;
+        if query_index < 0 || query_index as usize >= query_info.len() {
+            return Err("alignment query index out of range".to_string());
+        }
+        let query_index = query_index as usize;
+        let query_length = query_info[query_index].seq.length;
+        let translated_length = get_translated_length(sequence_length, node.frame, is_pos_based);
+        let align_copy = Some(Box::new(alignment_copy_without_next(node)));
+
+        let window = if subject_is_translated {
+            let begin = (node.match_start - border).max(0);
+            let end = (node.match_end + border).min(translated_length);
+            BlastCompoWindowInfo::new(
+                begin,
+                end,
+                node.frame,
+                0,
+                query_length,
+                query_index as i32,
+                align_copy,
+            )
+        } else {
+            let begin = (node.query_start - border).max(0);
+            let end = (node.query_end + border).min(query_length);
+            BlastCompoWindowInfo::new(
+                begin,
+                end,
+                query_index as i32,
+                0,
+                sequence_length,
+                0,
+                align_copy,
+            )
+        };
+        windows.push(window);
+        align = node.next.as_deref();
+    }
+
+    if windows.is_empty() {
+        return Err("no translated alignment windows".to_string());
+    }
+
+    windows.sort_by(location_compare_windows);
+    let mut joined: Vec<BlastCompoWindowInfo> = Vec::new();
+    let k = 0;
+    while k < windows.len() {
+        if k + 1 < windows.len()
+            && windows[k].subject_range.context == windows[k + 1].subject_range.context
+            && windows[k].query_range.context == windows[k + 1].query_range.context
+            && windows[k].subject_range.end >= windows[k + 1].subject_range.begin
+        {
+            let current = windows.remove(k);
+            windows[k].join(current);
+        } else {
+            joined.push(windows.remove(k));
+        }
+    }
+
+    if !subject_is_translated {
+        for window in &mut joined {
+            window.swap_range();
+        }
+    }
+    for window in &mut joined {
+        distinct_alignments_sort(&mut window.align);
+    }
+    joined.sort_by(subject_compare_windows);
+    Ok(joined)
+}
+
+/// 1-1 dispatch port of `s_WindowsFromAligns` (`redo_alignment.c:884`).
+pub fn windows_from_aligns(
+    alignments: &Option<Box<BlastCompoAlignment>>,
+    query_info: &[BlastCompoQueryInfo],
+    num_queries: usize,
+    border: i32,
+    sequence_length: i32,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+    is_pos_based: bool,
+) -> Result<Vec<BlastCompoWindowInfo>, String> {
+    if subject_is_translated || query_is_translated {
+        windows_from_translated_aligns(
+            alignments,
+            query_info,
+            border,
+            sequence_length,
+            subject_is_translated,
+            is_pos_based,
+        )
+    } else {
+        windows_from_protein_aligns(
+            alignments,
+            &query_info[..num_queries.min(query_info.len())],
+            sequence_length,
+        )
+    }
+}
+
+/// 1-1 port of `Blast_GetCompositionRange`
+/// (`composition_adjustment.c:1236`).
+pub fn get_composition_range(subject_data: &[u8], start: i32, finish: i32) -> (i32, i32) {
+    let length = subject_data.len() as i32;
+    let mut left = start.clamp(0, length);
+    let finish = finish.clamp(0, length);
+
+    let mut i = left;
+    while i > 0 {
+        if subject_data[(i - 1) as usize] == NCBISTDAA_STOP_CHAR {
+            if i + COMPOSITION_MARGIN < left {
+                left = i + COMPOSITION_MARGIN;
+            }
+            break;
+        }
+        i -= 1;
+    }
+    if i == 0 {
+        left = 0;
+    }
+
+    let mut right = finish;
+    i = right;
+    while i < length {
+        if subject_data[i as usize] == NCBISTDAA_STOP_CHAR {
+            if i - COMPOSITION_MARGIN > right {
+                right = i - COMPOSITION_MARGIN;
+            }
+            break;
+        }
+        i += 1;
+    }
+    if i == length {
+        right = length;
+    }
+    (left, right)
+}
+
+/// 1-1 port of `s_GetComposition` (`redo_alignment.c:930`).
+pub fn get_composition(
+    seq: &BlastCompoSequenceData,
+    range: &BlastCompoSequenceRange,
+    align: &BlastCompoAlignment,
+    alphsize: usize,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+) -> (Vec<f64>, usize) {
+    let data = seq.data();
+    let length = (range.end - range.begin).max(0) as usize;
+    let data = &data[..length.min(data.len())];
+    let (left, right) = if query_is_translated || subject_is_translated {
+        let start = if query_is_translated {
+            align.query_start
+        } else {
+            align.match_start
+        } - range.begin;
+        let end = if query_is_translated {
+            align.query_end
+        } else {
+            align.match_end
+        } - range.begin;
+        get_composition_range(data, start, end)
+    } else {
+        (0, data.len() as i32)
+    };
+    let left = left.max(0) as usize;
+    let right = right.max(left as i32) as usize;
+    crate::composition::read_composition(&data[left..right.min(data.len())], alphsize)
+}
+
+/// 1-1 port of `s_EvalueFromScore` (`redo_alignment.c:976`).
+pub fn evalue_from_score(score: i32, lambda: f64, log_k: f64, searchsp: f64) -> f64 {
+    searchsp * (-(lambda * score as f64) + log_k).exp()
+}
+
+/// Significance decision inside `Blast_RedoOneMatchSmithWaterman`
+/// (`redo_alignment.c:1488`).
+///
+/// Mirrors the C branch after `Blast_SmithWatermanScoreOnly`: link-HSP mode
+/// saves by raw score cutoff; non-link mode saves by e-value cutoff, and for
+/// the first alignment in a query it must also pass the significant-match heap
+/// retention test.
+pub fn smith_waterman_alignment_is_significant(
+    sw_score: i32,
+    lambda: f64,
+    log_k: f64,
+    searchsp: f64,
+    params: &BlastRedoAlignParams,
+    current_query_alignments: Option<&BlastCompoAlignment>,
+    significant_matches: &BlastCompoHeap,
+    subject_index: i32,
+) -> bool {
+    if params.do_link_hsps {
+        return sw_score >= params.cutoff_s;
+    }
+
+    let sw_evalue = evalue_from_score(sw_score, lambda, log_k, searchsp);
+    let mut significant = sw_evalue < params.cutoff_e;
+    if current_query_alignments.is_none() {
+        significant =
+            significant && significant_matches.would_insert(sw_evalue, sw_score, subject_index);
+    }
+    significant
+}
+
+/// 1-1 port of `s_preliminaryTestNearIdentical`
+/// (`redo_alignment.c:1087`).
+pub fn preliminary_test_near_identical(
+    query_info: &[BlastCompoQueryInfo],
+    window: &BlastCompoWindowInfo,
+    align: &BlastCompoAlignment,
+    cutoff: f64,
+) -> bool {
+    let query_index = align.query_index;
+    if query_index < 0 || query_index as usize >= query_info.len() {
+        return false;
+    }
+    let query_length = query_info[query_index as usize].seq.length;
+
+    if cutoff > 0.0 {
+        if align.match_end - align.match_start + 1 < query_length.min(MINIMUM_LENGTH_NEAR_IDENTICAL)
+        {
+            return false;
+        }
+        let align_len =
+            (align.query_end - align.query_start).min(align.match_end - align.match_start);
+        if align_len <= 0 {
+            return false;
+        }
+        if align.score as f64 / (align_len as f64) < cutoff {
+            return false;
+        }
+    } else {
+        if window.hspcnt > 1 || window.hspcnt < 1 {
+            return false;
+        }
+        if align.query_end - align.query_start != align.match_end - align.match_start {
+            return false;
+        }
+        if align.match_end - align.match_start + 1 < query_length.min(MINIMUM_LENGTH_NEAR_IDENTICAL)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// 1-1 port of `s_WindowsFromProteinAligns` (`redo_alignment.c:807`).
+///
+/// Protein searches create one full-subject window per query that has at
+/// least one alignment. Each alignment is copied into the window for its
+/// `query_index`; NCBI prepends then reverses each per-window list so the
+/// final order matches the incoming alignment order. The returned windows are
+/// sorted with `s_SubjectCompareWindows`.
+pub fn windows_from_protein_aligns(
+    alignments: &Option<Box<BlastCompoAlignment>>,
+    query_info: &[BlastCompoQueryInfo],
+    sequence_length: i32,
+) -> Result<Vec<BlastCompoWindowInfo>, String> {
+    let mut windows: Vec<Option<BlastCompoWindowInfo>> = vec![None; query_info.len()];
+    let mut align = alignments.as_deref();
+    while let Some(node) = align {
+        let query_index = node.query_index;
+        if query_index < 0 || query_index as usize >= query_info.len() {
+            return Err("alignment query index out of range".to_string());
+        }
+        let query_index = query_index as usize;
+        if windows[query_index].is_none() {
+            windows[query_index] = Some(BlastCompoWindowInfo::new(
+                0,
+                sequence_length,
+                0,
+                0,
+                query_info[query_index].seq.length,
+                query_index as i32,
+                None,
+            ));
+        }
+
+        let mut copied = Box::new(alignment_copy_without_next(node));
+        let window = windows[query_index].as_mut().unwrap();
+        copied.next = window.align.take();
+        window.align = Some(copied);
+        window.hspcnt += 1;
+        align = node.next.as_deref();
+    }
+
+    let mut compacted = Vec::new();
+    for mut window in windows.into_iter().flatten() {
+        alignments_rev(&mut window.align);
+        compacted.push(window);
+    }
+    if compacted.is_empty() {
+        return Err("no protein alignment windows".to_string());
+    }
+    compacted.sort_by(subject_compare_windows);
+    Ok(compacted)
 }
 
 /// `GET_NUCL_LENGTH(l)` macro — `redo_alignment.h:495`. Used by RPS-tblastn
@@ -1914,7 +12543,7 @@ impl BlastKappaSavedParameters {
         };
         // C: `for (i = 0; i < numQueries; i++) sp->kbp_gap_orig[i] = NULL;`
         // We initialize to default KarlinBlk values; the actual values
-        // are filled in by `s_RecordInitialSearch` (TODO).
+        // are filled in by `record_initial_search`.
         sp.kbp_gap_orig.resize(
             num_queries.max(0) as usize,
             crate::stat::KarlinBlk::default(),
@@ -2008,6 +12637,118 @@ pub fn new_alignment_using_xdrop(
     Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
 }
 
+/// Protein-space counterpart of [`new_alignment_using_xdrop`].
+///
+/// NCBI's Smith-Waterman redo path calls the caller-supplied X-drop callback
+/// after the SW score/start/end pass. For materialized protein and translated
+/// searches, the equivalent callback is the matrix-scored protein X-drop
+/// traceback over the SW-bounded rectangle.
+#[allow(clippy::too_many_arguments)]
+pub fn new_alignment_using_xdrop_protein(
+    query: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    subject: &BlastCompoSequenceData,
+    subject_range: &BlastCompoSequenceRange,
+    query_start: usize,
+    query_end: usize,
+    match_start: usize,
+    match_end: usize,
+    score: i32,
+    gapping_params: &BlastCompoGappingParams,
+    matrix_adjust_rule: MatrixAdjustRule,
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+) -> Option<(BlastCompoAlignment, i32, i32)> {
+    let q_extent = query_end.checked_sub(query_start)?;
+    let s_extent = match_end.checked_sub(match_start)?;
+    let tb = crate::protein::protein_sw_bounded_xdrop_align(
+        query.data(),
+        subject.data(),
+        query_start,
+        match_start,
+        q_extent,
+        s_extent,
+        score,
+        matrix,
+        gapping_params.gap_open,
+        gapping_params.gap_extend,
+        gapping_params.x_dropoff,
+    )?;
+
+    let q_end_xdrop = tb.query_end;
+    let s_end_xdrop = tb.subject_end;
+    let aquery_start = tb.query_start as i32 + query_range.begin;
+    let aquery_end = q_end_xdrop as i32 + query_range.begin;
+    let amatch_start = tb.subject_start as i32 + subject_range.begin;
+    let amatch_end = s_end_xdrop as i32 + subject_range.begin;
+
+    let new_align = BlastCompoAlignment::new(
+        tb.score,
+        matrix_adjust_rule,
+        query_range.context,
+        aquery_start,
+        aquery_end,
+        amatch_start,
+        amatch_end,
+        subject_range.context,
+        Some(tb.edit_script),
+    );
+    Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
+}
+
+/// Position-specific/PSSM counterpart of [`new_alignment_using_xdrop_protein`].
+#[allow(clippy::too_many_arguments)]
+pub fn new_alignment_using_xdrop_protein_pssm(
+    query: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    subject: &BlastCompoSequenceData,
+    subject_range: &BlastCompoSequenceRange,
+    query_start: usize,
+    query_end: usize,
+    match_start: usize,
+    match_end: usize,
+    score: i32,
+    gapping_params: &BlastCompoGappingParams,
+    matrix_adjust_rule: MatrixAdjustRule,
+    pssm: &[Vec<i32>],
+) -> Option<(BlastCompoAlignment, i32, i32)> {
+    let q_extent = query_end.checked_sub(query_start)?;
+    let s_extent = match_end.checked_sub(match_start)?;
+    let tb = crate::protein::protein_sw_bounded_xdrop_align_pssm(
+        query.data(),
+        subject.data(),
+        query_start,
+        match_start,
+        q_extent,
+        s_extent,
+        score,
+        query_range.begin.max(0) as usize,
+        pssm,
+        gapping_params.gap_open,
+        gapping_params.gap_extend,
+        gapping_params.x_dropoff,
+    )?;
+
+    let q_end_xdrop = tb.query_end;
+    let s_end_xdrop = tb.subject_end;
+    let aquery_start = tb.query_start as i32 + query_range.begin;
+    let aquery_end = q_end_xdrop as i32 + query_range.begin;
+    let amatch_start = tb.subject_start as i32 + subject_range.begin;
+    let amatch_end = s_end_xdrop as i32 + subject_range.begin;
+
+    let new_align = BlastCompoAlignment::new(
+        tb.score,
+        matrix_adjust_rule,
+        query_range.context,
+        aquery_start,
+        aquery_end,
+        amatch_start,
+        amatch_end,
+        subject_range.context,
+        Some(tb.edit_script),
+    );
+    Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
+}
+
 /// 1-1 port of `s_RedoOneAlignment` (`blast_kappa.c:1898`).
 ///
 /// X-drop alignment in BOTH directions from the seed `(gapped_start_q,
@@ -2060,24 +12801,335 @@ pub fn redo_one_alignment(
     )
 }
 
+fn matrix_info_to_aa_array(
+    matrix_info: &BlastMatrixInfo,
+) -> Option<[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
+    if matrix_info.matrix.len() < crate::matrix::AA_SIZE {
+        return None;
+    }
+    let mut matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+    for (i, row) in matrix.iter_mut().enumerate() {
+        let src = matrix_info.matrix.get(i)?;
+        if src.len() < crate::matrix::AA_SIZE {
+            return None;
+        }
+        row.copy_from_slice(&src[..crate::matrix::AA_SIZE]);
+    }
+    Some(matrix)
+}
+
+/// Matrix-scored counterpart of [`redo_one_alignment`] for protein-space
+/// searches. This is the materialized-subject analog of NCBI's
+/// `BLAST_GappedAlignmentWithTraceback` callback when the query and subject
+/// ranges are already protein residues, including translated-subject ranges.
+#[allow(clippy::too_many_arguments)]
+pub fn redo_one_alignment_protein(
+    query_data: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    subject_data: &BlastCompoSequenceData,
+    subject_range: &BlastCompoSequenceRange,
+    gapped_start_q: i32,
+    gapped_start_s: i32,
+    matrix_adjust_rule: MatrixAdjustRule,
+    matrix_info: &BlastMatrixInfo,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<BlastCompoAlignment> {
+    let q_start = (gapped_start_q - query_range.begin).max(0) as usize;
+    let s_start = (gapped_start_s - subject_range.begin).max(0) as usize;
+    let matrix = matrix_info_to_aa_array(matrix_info)?;
+    let tb = crate::protein::protein_gapped_align(
+        query_data.data(),
+        subject_data.data(),
+        q_start,
+        s_start,
+        &matrix,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+    )?;
+    let mut edit_script = Some(tb.edit_script.clone());
+    let shifted = crate::traceback::TracebackResult {
+        score: tb.score,
+        query_start: tb.query_start,
+        query_end: tb.query_end,
+        subject_start: tb.subject_start,
+        subject_end: tb.subject_end,
+        edit_script: tb.edit_script,
+    };
+    new_alignment_from_gap_align(
+        &shifted,
+        &mut edit_script,
+        query_range,
+        subject_range,
+        matrix_adjust_rule,
+    )
+}
+
+/// Matrix-scored protein redo when the caller already owns the adjusted
+/// square amino-acid matrix for this query/subject pair.
+#[allow(clippy::too_many_arguments)]
+pub fn redo_one_alignment_protein_with_matrix(
+    query_data: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    subject_data: &BlastCompoSequenceData,
+    subject_range: &BlastCompoSequenceRange,
+    gapped_start_q: i32,
+    gapped_start_s: i32,
+    matrix_adjust_rule: MatrixAdjustRule,
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<BlastCompoAlignment> {
+    let q_start = (gapped_start_q - query_range.begin).max(0) as usize;
+    let s_start = (gapped_start_s - subject_range.begin).max(0) as usize;
+    let tb = crate::protein::protein_gapped_align(
+        query_data.data(),
+        subject_data.data(),
+        q_start,
+        s_start,
+        matrix,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+    )?;
+    let mut edit_script = Some(tb.edit_script.clone());
+    let shifted = crate::traceback::TracebackResult {
+        score: tb.score,
+        query_start: tb.query_start,
+        query_end: tb.query_end,
+        subject_start: tb.subject_start,
+        subject_end: tb.subject_end,
+        edit_script: tb.edit_script,
+    };
+    new_alignment_from_gap_align(
+        &shifted,
+        &mut edit_script,
+        query_range,
+        subject_range,
+        matrix_adjust_rule,
+    )
+}
+
+/// Position-specific counterpart of [`redo_one_alignment_protein_with_matrix`]
+/// for PSI/PSSM searches. Scores are taken from
+/// `pssm[absolute_query_position][subject_residue]`.
+#[allow(clippy::too_many_arguments)]
+pub fn redo_one_alignment_protein_with_pssm(
+    query_data: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    subject_data: &BlastCompoSequenceData,
+    subject_range: &BlastCompoSequenceRange,
+    gapped_start_q: i32,
+    gapped_start_s: i32,
+    matrix_adjust_rule: MatrixAdjustRule,
+    pssm: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<BlastCompoAlignment> {
+    let q_start = (gapped_start_q - query_range.begin).max(0) as usize;
+    let s_start = (gapped_start_s - subject_range.begin).max(0) as usize;
+    let tb = crate::protein::protein_gapped_align_pssm(
+        query_data.data(),
+        subject_data.data(),
+        q_start,
+        s_start,
+        query_range.begin.max(0) as usize,
+        pssm,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+    )?;
+    let mut edit_script = Some(tb.edit_script.clone());
+    let shifted = crate::traceback::TracebackResult {
+        score: tb.score,
+        query_start: tb.query_start,
+        query_end: tb.query_end,
+        subject_start: tb.subject_start,
+        subject_end: tb.subject_end,
+        edit_script: tb.edit_script,
+    };
+    new_alignment_from_gap_align(
+        &shifted,
+        &mut edit_script,
+        query_range,
+        subject_range,
+        matrix_adjust_rule,
+    )
+}
+
 /// 1-1 port of `s_GetStartFreqRatios` (`blast_kappa.c:648`).
 ///
 /// Returns the BLASTAA_SIZE × BLASTAA_SIZE frequency-ratio matrix for
-/// the named scoring matrix. Currently supports BLOSUM62 (the only
-/// matrix whose frequency ratios are baked into our crate). NCBI's C
-/// version dispatches via `_PSIMatrixFrequencyRatiosNew`; that PSI
-/// matrix-table helper isn't ported yet, so other matrices return
-/// `Err(())` (matching NCBI's `-1` return on unknown matrix).
+/// the named scoring matrix. NCBI's C version dispatches via
+/// `_PSIMatrixFrequencyRatiosNew`; the same standard matrix names are routed
+/// through [`crate::matrix::get_matrix_freq_ratios`].
 ///
 /// Output ratios are deep-copied (1-1 with NCBI's per-cell copy from
 /// `stdFreqRatios->data[i][j]`).
 pub fn get_start_freq_ratios(
     matrix_name: &str,
 ) -> Result<[[f64; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE], ()> {
-    if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
-        return Ok(crate::matrix::get_blosum62_freq_ratios());
+    crate::matrix::get_matrix_freq_ratios(matrix_name).ok_or(())
+}
+
+/// 1-1 port of `s_GetPosBasedStartFreqRatios` (`blast_kappa.c:591`).
+///
+/// Builds the position-specific frequency-ratio rows underlying a PSSM. NCBI
+/// first copies the standard matrix row selected by each query residue, then
+/// overlays PSI `startNumerator[i][j] / standardProb[j]` when both standard
+/// probabilities and the numerator are above `kPosEpsilon`, excluding stop and
+/// X columns.
+pub fn get_pos_based_start_freq_ratios(
+    query: &[u8],
+    matrix_name: &str,
+    start_numerator: &[Vec<f64>],
+) -> Result<Vec<Vec<f64>>, ()> {
+    const K_POS_EPSILON: f64 = 0.0001;
+    const E_X_CHAR: usize = crate::encoding::NCBISTDAA_X as usize;
+    const E_STOP_CHAR: usize = crate::encoding::NCBISTDAA_STOP as usize;
+
+    if start_numerator.len() < query.len() {
+        return Err(());
     }
-    Err(())
+    let std_ratios = get_start_freq_ratios(matrix_name)?;
+    let standard_prob = crate::stat::protein_std_freq_ncbistdaa();
+    let mut return_ratios = vec![vec![0.0f64; crate::matrix::AA_SIZE]; query.len()];
+
+    for (i, &q) in query.iter().enumerate() {
+        let qi = q as usize;
+        if qi >= crate::matrix::AA_SIZE || start_numerator[i].len() < crate::matrix::AA_SIZE {
+            return Err(());
+        }
+        for j in 0..crate::matrix::AA_SIZE {
+            return_ratios[i][j] = std_ratios[qi][j];
+        }
+    }
+
+    for (i, &q) in query.iter().enumerate() {
+        let qi = q as usize;
+        for j in 0..crate::matrix::AA_SIZE {
+            if standard_prob[qi] > K_POS_EPSILON
+                && standard_prob[j] > K_POS_EPSILON
+                && j != E_STOP_CHAR
+                && j != E_X_CHAR
+                && start_numerator[i][j] > K_POS_EPSILON
+            {
+                return_ratios[i][j] = start_numerator[i][j] / standard_prob[j];
+            }
+        }
+    }
+
+    Ok(return_ratios)
+}
+
+/// Convert position-specific frequency-ratio rows to integer PSSM rows.
+///
+/// This is the unscaled log-odds conversion stage used before PSI's
+/// `_PSIScaleMatrix` / IMPALA scaling pass. It mirrors the same
+/// `ln(freq_ratio) / lambda` conversion used by `Blast_Int4MatrixFromFreq`,
+/// but works on `query_length × BLASTAA_SIZE` position-specific rows.
+pub fn pos_freq_ratios_to_pssm(freq_ratios: &[Vec<f64>], lambda: f64) -> Result<Vec<Vec<i32>>, ()> {
+    const COMPO_SCORE_MIN: i32 = -100_000;
+
+    if lambda <= 0.0 {
+        return Err(());
+    }
+
+    let mut pssm = Vec::with_capacity(freq_ratios.len());
+    for row in freq_ratios {
+        if row.len() < crate::matrix::AA_SIZE {
+            return Err(());
+        }
+        let mut out = vec![0i32; crate::matrix::AA_SIZE];
+        for j in 0..crate::matrix::AA_SIZE {
+            out[j] = if row[j] <= 0.0 {
+                COMPO_SCORE_MIN
+            } else {
+                crate::math::nint(row[j].ln() / lambda) as i32
+            };
+        }
+        pssm.push(out);
+    }
+    Ok(pssm)
+}
+
+/// PSI private scaled PSSM factor used by NCBI's
+/// `_PSIConvertFreqRatiosToPSSM`.
+pub const PSI_PSSM_SCALE_FACTOR: f64 = 200.0;
+
+/// Build the private scaled PSSM rows from position-specific frequency ratios.
+///
+/// NCBI keeps both an integer score matrix and `scaled_pssm` in
+/// `_PSIInternalPssmData`; the latter is the natural-log odds score multiplied
+/// by 200 for later PSI scaling/statistics routines.
+pub fn pos_freq_ratios_to_scaled_pssm(freq_ratios: &[Vec<f64>]) -> Result<Vec<Vec<i32>>, ()> {
+    const COMPO_SCORE_MIN: i32 = -100_000;
+
+    let mut scaled = Vec::with_capacity(freq_ratios.len());
+    for row in freq_ratios {
+        if row.len() < crate::matrix::AA_SIZE {
+            return Err(());
+        }
+        let mut out = vec![0i32; crate::matrix::AA_SIZE];
+        for j in 0..crate::matrix::AA_SIZE {
+            out[j] = if row[j] <= 0.0 {
+                COMPO_SCORE_MIN
+            } else {
+                crate::math::nint(row[j].ln() * PSI_PSSM_SCALE_FACTOR) as i32
+            };
+        }
+        scaled.push(out);
+    }
+    Ok(scaled)
+}
+
+/// 1-1 port boundary for `s_ScalePosMatrix` (`blast_kappa.c:676`).
+///
+/// NCBI allocates a temporary `SFreqRatios`, runs
+/// `_PSIConvertFreqRatiosToPSSM`, then copies the resulting public PSSM into
+/// `self->startMatrix`. The PSI-private `scaled_pssm` is kept here as
+/// `scaled_matrix` because later PSI scaling/statistics code consumes it in
+/// the C pipeline.
+pub fn scale_pos_matrix(self_: &mut BlastMatrixInfo, freq_ratios: &[Vec<f64>]) -> i32 {
+    let matrix = match pos_freq_ratios_to_pssm(freq_ratios, self_.ungapped_lambda) {
+        Ok(matrix) => matrix,
+        Err(()) => return -1,
+    };
+    let scaled_matrix = match pos_freq_ratios_to_scaled_pssm(freq_ratios) {
+        Ok(matrix) => matrix,
+        Err(()) => return -1,
+    };
+
+    self_.matrix = matrix;
+    self_.scaled_matrix = scaled_matrix;
+    0
+}
+
+/// PSI-private statistic update after PSSM scaling.
+///
+/// NCBI's PSI scaling/statistics path applies the Lambda ratio returned by the
+/// composition/PSSM scaling step to the active Karlin blocks
+/// (`kbp->Lambda *= lambdaRatio`). The matrix rows themselves are updated by
+/// [`scale_pos_matrix`] / [`composition_scale_pssm_with_ratio`]; this helper
+/// exposes the matching statistics side effect so callers can keep bit-score
+/// and e-value calculations tied to the scaled PSSM.
+pub fn psi_private_update_lambda_statistics(
+    kbp_gap: &mut [crate::stat::KarlinBlk],
+    lambda_ratio: f64,
+) -> i32 {
+    if !lambda_ratio.is_finite() || lambda_ratio <= 0.0 {
+        return -1;
+    }
+    for kbp in kbp_gap {
+        if kbp.lambda > 0.0 {
+            kbp.lambda *= lambda_ratio;
+        }
+    }
+    0
 }
 
 /// `SCALING_FACTOR` (`blast_kappa.c:676`). Multiplicative factor for
@@ -2224,12 +13276,12 @@ pub struct BlastKappaGappingParamsContext {
 ///
 /// Single-thread adapter that delegates to the multi-thread driver
 /// `Blast_RedoAlignmentCore_MT(num_threads = 1, ...)`. The MT driver
-/// itself is 669 LOC of dense composition-adjustment orchestration;
-/// it's tracked as TODO in the module status table.
+/// itself is 669 LOC of dense composition-adjustment orchestration; the
+/// no-composition single-match path is implemented in the MT function.
 ///
 /// This wrapper sets `num_threads = 1` and delegates, exactly
 /// mirroring the C control flow. Returns the same `Int2` status code
-/// the C function returns (currently `-1` until the MT body lands).
+/// the MT function returns.
 #[allow(clippy::too_many_arguments)]
 pub fn blast_redo_alignment_core(
     program: ProgramType,
@@ -2258,7 +13310,7 @@ pub fn blast_redo_alignment_core(
     )
 }
 
-/// Skeleton for `Blast_RedoAlignmentCore_MT` (`blast_kappa.c:2980`,
+/// Port boundary for `Blast_RedoAlignmentCore_MT` (`blast_kappa.c:2980`,
 /// 669 LOC, cyclomatic 120). The full driver orchestrates:
 /// 1. Save initial search state via [`record_initial_search`].
 /// 2. Rescale scoring via [`rescale_search`].
@@ -2271,34 +13323,4025 @@ pub fn blast_redo_alignment_core(
 /// 6. Collapse heaps into `results` via [`fill_results_from_compo_heaps`].
 /// 7. Restore initial search state via [`restore_search`].
 ///
-/// Each helper above is already ported in this loop; assembly into the
-/// full driver is a multi-iteration follow-up. For now this returns
-/// `-1` (NCBI's "not implemented / error" return).
+/// This compatibility wrapper implements the no-composition,
+/// already-materialized single-match forwarding path when no subject bytes are
+/// supplied. Use [`blast_redo_alignment_core_mt_in_memory_subject`] for the
+/// faithful materialized-subject branch that reruns `Blast_RedoOneMatch` before
+/// rebuilding the HSP list. Non-position protein-space composition-adjusted
+/// materialized redo is implemented there; position-specific/PSI full-core redo
+/// remains pending.
 #[allow(clippy::too_many_arguments)]
 pub fn blast_redo_alignment_core_mt(
-    _program: ProgramType,
+    program: ProgramType,
     _num_threads: u32,
     _query: &[u8],
-    _query_info: &crate::queryinfo::QueryInfo,
-    _kbp_gap: &mut [crate::stat::KarlinBlk],
-    _matrix: &mut [Vec<i32>],
-    _scoring: &mut crate::parameters::ScoringParameters,
-    _align_params: &BlastRedoAlignParams,
-    _saved: &mut BlastKappaSavedParameters,
-    _this_match: &mut HspList,
-    _results: &mut crate::hspstream::HspResults,
+    query_info: &crate::queryinfo::QueryInfo,
+    kbp_gap: &mut [crate::stat::KarlinBlk],
+    matrix: &mut [Vec<i32>],
+    scoring: &mut crate::parameters::ScoringParameters,
+    align_params: &BlastRedoAlignParams,
+    saved: &mut BlastKappaSavedParameters,
+    this_match: &mut HspList,
+    results: &mut crate::hspstream::HspResults,
 ) -> i32 {
-    // TODO: assemble from already-ported helpers. Each call site below
-    // already has its 1-1 port; the orchestration is the only piece
-    // missing.
-    //
-    // record_initial_search(saved, kbp_gap, matrix, scoring, ...);
-    // rescale_search(kbp_gap, scoring, num_queries, scale_factor);
-    // let qi = get_query_info(query, query_info, /* skip = */ false);
-    // let params = get_align_params(...);
-    // for each (hsp_list in stream): ...
-    // restore_search(saved, kbp_gap, matrix, scoring, ...);
-    -1
+    let query_length = query_info.max_length as i32;
+    let record_status = record_initial_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.compo_adjust_mode,
+        align_params.position_based,
+    );
+    if record_status != 0 {
+        return record_status;
+    }
+
+    // NCBI always rescales the search immediately after recording the
+    // original state (`Blast_RedoAlignmentCore_MT`, after
+    // `s_RecordInitialSearch`). For no-composition searches this factor is
+    // 1.0; for composition adjustment it is normally `SCALING_FACTOR`.
+    rescale_search(
+        kbp_gap,
+        scoring,
+        query_info.contexts.len() as i32,
+        align_params.local_scaling_factor,
+    );
+
+    let status = if matches!(
+        align_params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) {
+        if !this_match.hsps.is_empty() {
+            this_match.sort_by_score();
+            this_match.best_evalue = this_match
+                .hsps
+                .iter()
+                .map(|hsp| hsp.evalue)
+                .fold(f64::MAX, f64::min);
+
+            let context = this_match.hsps[0].context;
+            let query_index = query_info
+                .contexts
+                .get(context.max(0) as usize)
+                .map(|ctx| ctx.query_index)
+                .unwrap_or_else(|| {
+                    crate::queryinfo::blast_get_query_index_from_context(context, program)
+                });
+            if query_index >= 0 {
+                let idx = query_index as usize;
+                if idx >= results.hitlists.len() {
+                    results.hitlists.resize_with(idx + 1, || None);
+                }
+                let hitlist =
+                    results.hitlists[idx].get_or_insert_with(crate::hspstream::HitList::new);
+                hitlist.add_hsp_list(this_match.clone());
+                hitlist.sort_by_evalue();
+            }
+        }
+        0
+    } else {
+        -1
+    };
+
+    restore_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.position_based,
+        align_params.compo_adjust_mode,
+    );
+
+    status
+}
+
+/// Inputs for the materialized-subject branch of
+/// [`blast_redo_alignment_core_mt_in_memory_subject`].
+///
+/// This models the C `subjectBlk != NULL && hsp_stream == NULL` use case:
+/// the caller already owns the subject sequence bytes, so no `BlastSeqSrc`
+/// fetch/copy layer is needed.
+#[derive(Clone, Copy)]
+pub struct BlastRedoInMemorySubject<'a> {
+    pub subject_source: &'a [u8],
+    pub reward: i32,
+    pub penalty: i32,
+    pub genetic_code: &'a [u8; 64],
+    pub smith_waterman: bool,
+    pub expect_value: f64,
+    pub hitlist_size: i32,
+    pub inclusion_ethresh: f64,
+    pub link_context: Option<&'a HitlistLinkContext<'a>>,
+}
+
+/// One already-materialized subject/HSP-list pair for
+/// [`blast_redo_alignment_core_mt_in_memory_subjects`].
+pub struct BlastRedoInMemorySubjectMatch<'a> {
+    pub hsp_list: HspList,
+    pub subject: BlastRedoInMemorySubject<'a>,
+}
+
+/// Shared per-subject settings for the `BlastSeqSource` fetching branch of
+/// [`blast_redo_alignment_core_mt_seqsrc_subjects`].
+#[derive(Clone, Copy)]
+pub struct BlastRedoSeqSrcSubjectConfig<'a> {
+    pub reward: i32,
+    pub penalty: i32,
+    pub genetic_code: &'a [u8; 64],
+    pub smith_waterman: bool,
+    pub expect_value: f64,
+    pub hitlist_size: i32,
+    pub inclusion_ethresh: f64,
+}
+
+/// External callback-backed subject settings for
+/// [`blast_redo_alignment_core_mt_with_callbacks`].
+///
+/// This models the `Blast_RedoAlignmentCore_MT` branch where the redo driver
+/// does not own a materialized subject buffer and must retrieve query/subject
+/// windows through `Blast_RedoAlignCallbacks::get_range`.
+#[derive(Clone, Copy)]
+pub struct BlastRedoCallbackSubjectConfig<'a> {
+    pub subject_length: i32,
+    pub smith_waterman: bool,
+    pub expect_value: f64,
+    pub hitlist_size: i32,
+    pub inclusion_ethresh: f64,
+    pub link_context: Option<&'a HitlistLinkContext<'a>>,
+}
+
+fn materialized_redo_program_is_supported(program: ProgramType) -> bool {
+    matches!(
+        program,
+        crate::program::BLASTN
+            | crate::program::BLASTP
+            | crate::program::BLASTX
+            | crate::program::TBLASTN
+            | crate::program::TBLASTX
+            | crate::program::PSI_BLAST
+    )
+}
+
+fn materialized_num_contexts_per_query(
+    program: ProgramType,
+    query_info: &crate::queryinfo::QueryInfo,
+) -> usize {
+    if (program == crate::program::BLASTN || crate::program::query_is_translated(program))
+        && query_info.num_queries > 0
+    {
+        (query_info.contexts.len() / query_info.num_queries as usize).max(1)
+    } else {
+        1
+    }
+}
+
+fn seqsrc_encoding_for_redo_program(program: ProgramType) -> crate::seqsrc::SeqEncoding {
+    if crate::program::subject_is_translated(program) {
+        crate::seqsrc::SeqEncoding::Ncbi4na
+    } else if program == crate::program::BLASTN {
+        crate::seqsrc::SeqEncoding::Nucleotide
+    } else {
+        crate::seqsrc::SeqEncoding::Protein
+    }
+}
+
+/// Callback-backed branch of `Blast_RedoAlignmentCore_MT`.
+///
+/// The compatibility wrapper [`blast_redo_alignment_core_mt`] preserves the
+/// no-subject/no-composition pass-through. This helper covers the faithful
+/// external-driver branch once callers provide the C-style callback table in
+/// [`BlastRedoAlignParams::callbacks`]: convert the incoming HSP list to
+/// distinct alignments, run ordinary or Smith-Waterman callback redo, rebuild
+/// the HSP list, evaluate/purge, normalize, and feed the per-query results.
+/// Position-specific/PSSM ordinary and Smith-Waterman callback redo are routed
+/// through the already-ported PSSM helpers.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_alignment_core_mt_with_callbacks(
+    program: ProgramType,
+    _num_threads: u32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    kbp_gap: &mut [crate::stat::KarlinBlk],
+    matrix: &mut [Vec<i32>],
+    scoring: &mut crate::parameters::ScoringParameters,
+    align_params: &BlastRedoAlignParams,
+    saved: &mut BlastKappaSavedParameters,
+    this_match: &mut HspList,
+    subject: BlastRedoCallbackSubjectConfig<'_>,
+    results: &mut crate::hspstream::HspResults,
+) -> i32 {
+    let query_length = query_info.max_length as i32;
+    let record_status = record_initial_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.compo_adjust_mode,
+        align_params.position_based,
+    );
+    if record_status != 0 {
+        return record_status;
+    }
+
+    rescale_search(
+        kbp_gap,
+        scoring,
+        query_info.contexts.len() as i32,
+        align_params.local_scaling_factor,
+    );
+
+    let status = blast_redo_alignment_core_one_match_with_callbacks_inner(
+        program,
+        query,
+        query_info,
+        kbp_gap,
+        align_params,
+        this_match,
+        subject,
+        results,
+    );
+
+    restore_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.position_based,
+        align_params.compo_adjust_mode,
+    );
+
+    status
+}
+
+/// Materialized-subject branch of `Blast_RedoAlignmentCore_MT`.
+///
+/// This covers the single-match materialized-subject path for nucleotide,
+/// protein, and translated-subject protein-space searches. It
+/// follows the C loop shape for that use case:
+/// `s_ResultHspToDistinctAlign`, `Blast_RedoOneMatch`,
+/// `s_HSPListFromDistinctAlignments`, contained-HSP pruning,
+/// `s_HitlistEvaluateAndPurge`, `s_HSPListNormalizeScores`, and
+/// `s_ComputeNumIdentities`.
+///
+/// When `subject.smith_waterman` is true, this uses the in-memory nucleotide
+/// Smith-Waterman redo branch for BLASTN and the protein-space Smith-Waterman
+/// redo branch for BLASTP/BLASTX/TBLASTN/TBLASTX; otherwise it uses ordinary
+/// gapped traceback with nucleotide reward/penalty scoring for BLASTN and
+/// matrix scoring for protein-space searches, including materialized
+/// translated-query buffers for BLASTX/TBLASTX.
+/// Sum-stat/link-HSP evaluation is supported when
+/// [`BlastRedoInMemorySubject::link_context`] is supplied.
+/// Non-position protein-space, translated-subject protein-space, and
+/// position-specific/PSSM composition adjustment are supported for ordinary
+/// redo. Smith-Waterman redo covers no-composition materialized subjects,
+/// non-position protein-space composition adjustment, translated-subject
+/// composition adjustment, and position-specific/PSSM protein-space
+/// adjustment. BLASTN/nucleotide composition adjustment is rejected before
+/// Smith-Waterman redo because the adjusted redo branches operate in
+/// protein/PSSM score space.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_alignment_core_mt_in_memory_subject(
+    program: ProgramType,
+    _num_threads: u32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    kbp_gap: &mut [crate::stat::KarlinBlk],
+    matrix: &mut [Vec<i32>],
+    scoring: &mut crate::parameters::ScoringParameters,
+    align_params: &BlastRedoAlignParams,
+    saved: &mut BlastKappaSavedParameters,
+    this_match: &mut HspList,
+    results: &mut crate::hspstream::HspResults,
+    subject: BlastRedoInMemorySubject<'_>,
+) -> i32 {
+    let query_length = query_info.max_length as i32;
+    let record_status = record_initial_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.compo_adjust_mode,
+        align_params.position_based,
+    );
+    if record_status != 0 {
+        return record_status;
+    }
+
+    rescale_search(
+        kbp_gap,
+        scoring,
+        query_info.contexts.len() as i32,
+        align_params.local_scaling_factor,
+    );
+
+    let status = blast_redo_alignment_core_one_match_in_memory_inner(
+        program,
+        query,
+        query_info,
+        kbp_gap,
+        align_params,
+        this_match,
+        results,
+        subject,
+    );
+
+    restore_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.position_based,
+        align_params.compo_adjust_mode,
+    );
+
+    status
+}
+
+/// Materialized-subject list branch of `Blast_RedoAlignmentCore_MT`.
+///
+/// This models the `hsp_stream != NULL` control shape once the caller has
+/// already fetched every subject sequence into memory: redo each match through
+/// the single-subject helper, keep survivors in per-query `BlastCompo_Heap`
+/// structures, apply `BlastCompo_EarlyTermination`, then collapse heaps via
+/// [`fill_results_from_compo_heaps`]. The materialized branch supports
+/// BLASTN, BLASTP, BLASTX, TBLASTN, TBLASTX, and ordinary PSI/PSSM redo when
+/// translated-query callers supply the materialized flat translation buffer and
+/// matching translated-query [`crate::queryinfo::QueryInfo`].
+/// Sum-stat/link-HSP evaluation is supported per match when the subject entry
+/// carries a [`HitlistLinkContext`].
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_alignment_core_mt_in_memory_subjects(
+    program: ProgramType,
+    num_threads: u32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    kbp_gap: &mut [crate::stat::KarlinBlk],
+    matrix: &mut [Vec<i32>],
+    scoring: &mut crate::parameters::ScoringParameters,
+    align_params: &BlastRedoAlignParams,
+    saved: &mut BlastKappaSavedParameters,
+    matches: &mut [BlastRedoInMemorySubjectMatch<'_>],
+    results: &mut crate::hspstream::HspResults,
+) -> i32 {
+    let query_length = query_info.max_length as i32;
+    let record_status = record_initial_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.compo_adjust_mode,
+        align_params.position_based,
+    );
+    if record_status != 0 {
+        return record_status;
+    }
+
+    rescale_search(
+        kbp_gap,
+        scoring,
+        query_info.contexts.len() as i32,
+        align_params.local_scaling_factor,
+    );
+
+    let status = if matches.is_empty() {
+        *results = crate::hspstream::HspResults::new(query_info.num_queries as i32);
+        0
+    } else if !materialized_redo_program_is_supported(program) {
+        -1
+    } else {
+        let num_queries = query_info.num_queries.max(0) as usize;
+        let heap_cfg = matches[0].subject;
+        let num_workers = (num_threads.max(1) as usize).min(matches.len().max(1));
+        let mut worker_heaps =
+            vec![
+                vec![
+                    BlastCompoHeap::new(heap_cfg.hitlist_size, heap_cfg.inclusion_ethresh);
+                    num_queries
+                ];
+                num_workers
+            ];
+        let mut status = 0;
+
+        for (item_index, item) in matches.iter_mut().enumerate() {
+            let worker_index = item_index % num_workers;
+            let heaps = &mut worker_heaps[worker_index];
+            if blast_compo_early_termination(item.hsp_list.best_evalue, heaps, num_queries) {
+                continue;
+            }
+
+            let mut local_results = crate::hspstream::HspResults::new(num_queries as i32);
+            status = blast_redo_alignment_core_one_match_in_memory_inner(
+                program,
+                query,
+                query_info,
+                kbp_gap,
+                align_params,
+                &mut item.hsp_list,
+                &mut local_results,
+                item.subject,
+            );
+            if status != 0 {
+                break;
+            }
+
+            for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
+                if query_index >= heaps.len() {
+                    continue;
+                }
+                if let Some(hitlist) = hitlist {
+                    for hsp_list in hitlist.hsp_lists {
+                        let _discarded = heaps[query_index].insert(hsp_list);
+                    }
+                }
+            }
+        }
+
+        if status == 0 {
+            let mut heaps =
+                vec![
+                    BlastCompoHeap::new(heap_cfg.hitlist_size, heap_cfg.inclusion_ethresh);
+                    num_queries
+                ];
+            merge_compo_thread_heaps(&mut heaps, &mut worker_heaps);
+            *results = fill_results_from_compo_heaps(&mut heaps);
+        }
+        status
+    };
+
+    restore_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.position_based,
+        align_params.compo_adjust_mode,
+    );
+
+    status
+}
+
+/// `BlastSeqSrc` fetching branch of `Blast_RedoAlignmentCore_MT`.
+///
+/// This mirrors the C `hsp_stream != NULL && subjectBlk == NULL` shape for
+/// redo: each incoming subject HSP list names its database OID, the subject
+/// sequence is fetched from the sequence source with the program's native
+/// subject encoding, then the already-ported materialized one-match
+/// redo/evaluate path feeds the per-query composition heaps. Non-position
+/// protein-space and position-based/PSSM composition adjustment are handled by
+/// the shared materialized one-match redo path. Program/mode combinations that
+/// NCBI does not route through protein-space adjustment are rejected at that
+/// boundary.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
+    program: ProgramType,
+    num_threads: u32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    kbp_gap: &mut [crate::stat::KarlinBlk],
+    matrix: &mut [Vec<i32>],
+    scoring: &mut crate::parameters::ScoringParameters,
+    align_params: &BlastRedoAlignParams,
+    saved: &mut BlastKappaSavedParameters,
+    seqsrc: &dyn crate::seqsrc::BlastSeqSource,
+    matches: &mut [HspList],
+    subject_cfg: BlastRedoSeqSrcSubjectConfig<'_>,
+    results: &mut crate::hspstream::HspResults,
+) -> i32 {
+    let query_length = query_info.max_length as i32;
+    let record_status = record_initial_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.compo_adjust_mode,
+        align_params.position_based,
+    );
+    if record_status != 0 {
+        return record_status;
+    }
+
+    rescale_search(
+        kbp_gap,
+        scoring,
+        query_info.contexts.len() as i32,
+        align_params.local_scaling_factor,
+    );
+
+    let status = if matches.is_empty() {
+        *results = crate::hspstream::HspResults::new(query_info.num_queries as i32);
+        0
+    } else if !materialized_redo_program_is_supported(program) {
+        -1
+    } else {
+        let num_queries = query_info.num_queries.max(0) as usize;
+        let num_workers = (num_threads.max(1) as usize).min(matches.len().max(1));
+        let mut worker_heaps =
+            vec![
+                vec![
+                    BlastCompoHeap::new(subject_cfg.hitlist_size, subject_cfg.inclusion_ethresh);
+                    num_queries
+                ];
+                num_workers
+            ];
+        let encoding = seqsrc_encoding_for_redo_program(program);
+        let mut status = 0;
+
+        for (item_index, hsp_list) in matches.iter_mut().enumerate() {
+            let worker_index = item_index % num_workers;
+            let heaps = &mut worker_heaps[worker_index];
+            if blast_compo_early_termination(hsp_list.best_evalue, heaps, num_queries) {
+                continue;
+            }
+
+            let Some(seq_data) = seqsrc.get_sequence(&crate::seqsrc::GetSeqArg {
+                oid: hsp_list.oid,
+                encoding,
+            }) else {
+                status = -1;
+                break;
+            };
+            if seq_data.length < 0 || seq_data.length as usize > seq_data.sequence.len() {
+                status = -1;
+                break;
+            }
+            let subject_sequence = &seq_data.sequence[..seq_data.length as usize];
+            let mut local_results = crate::hspstream::HspResults::new(num_queries as i32);
+            status = blast_redo_alignment_core_one_match_in_memory_inner(
+                program,
+                query,
+                query_info,
+                kbp_gap,
+                align_params,
+                hsp_list,
+                &mut local_results,
+                BlastRedoInMemorySubject {
+                    subject_source: subject_sequence,
+                    reward: subject_cfg.reward,
+                    penalty: subject_cfg.penalty,
+                    genetic_code: subject_cfg.genetic_code,
+                    smith_waterman: subject_cfg.smith_waterman,
+                    expect_value: subject_cfg.expect_value,
+                    hitlist_size: subject_cfg.hitlist_size,
+                    inclusion_ethresh: subject_cfg.inclusion_ethresh,
+                    link_context: None,
+                },
+            );
+            if status != 0 {
+                break;
+            }
+
+            for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
+                if query_index >= heaps.len() {
+                    continue;
+                }
+                if let Some(hitlist) = hitlist {
+                    for hsp_list in hitlist.hsp_lists {
+                        let _discarded = heaps[query_index].insert(hsp_list);
+                    }
+                }
+            }
+        }
+
+        if status == 0 {
+            let mut heaps =
+                vec![
+                    BlastCompoHeap::new(subject_cfg.hitlist_size, subject_cfg.inclusion_ethresh);
+                    num_queries
+                ];
+            merge_compo_thread_heaps(&mut heaps, &mut worker_heaps);
+            *results = fill_results_from_compo_heaps(&mut heaps);
+        }
+        status
+    };
+
+    restore_search(
+        saved,
+        kbp_gap,
+        matrix,
+        scoring,
+        query_length,
+        align_params.position_based,
+        align_params.compo_adjust_mode,
+    );
+
+    status
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blast_redo_alignment_core_one_match_with_callbacks_inner(
+    program: ProgramType,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    kbp_gap: &[crate::stat::KarlinBlk],
+    align_params: &BlastRedoAlignParams,
+    this_match: &mut HspList,
+    subject: BlastRedoCallbackSubjectConfig<'_>,
+    results: &mut crate::hspstream::HspResults,
+) -> i32 {
+    if align_params.callbacks.is_none() {
+        return -1;
+    }
+    if this_match.hsps.is_empty() {
+        return 0;
+    }
+    if !materialized_redo_program_is_supported(program) {
+        return -1;
+    }
+    if !matches!(
+        align_params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) && program == crate::program::BLASTN
+    {
+        return -1;
+    }
+    if align_params.position_based
+        && (align_params.query_is_translated
+            || align_params.subject_is_translated
+            || program == crate::program::BLASTN)
+    {
+        return -1;
+    }
+
+    let num_contexts = query_info.contexts.len();
+    if num_contexts == 0 {
+        return -1;
+    }
+    let num_frames = materialized_num_contexts_per_query(program, query_info);
+    let first_context = this_match.hsps[0].context.max(0) as usize;
+    let query_index = query_info
+        .contexts
+        .get(first_context)
+        .map(|ctx| ctx.query_index)
+        .unwrap_or_else(|| {
+            crate::queryinfo::blast_get_query_index_from_context(
+                this_match.hsps[0].context,
+                program,
+            )
+        });
+    if query_index < 0 {
+        return -1;
+    }
+    let context_index = query_index as usize * num_frames;
+    if context_index >= num_contexts {
+        return -1;
+    }
+
+    let mut incoming_align_set: [Option<Box<BlastCompoAlignment>>; 6] = Default::default();
+    let mut num_aligns = [0i32; 6];
+    let rc = result_hsp_to_distinct_align(
+        &mut incoming_align_set,
+        &mut num_aligns,
+        &this_match.hsps,
+        context_index as i32,
+        align_params.local_scaling_factor,
+    );
+    if rc != 0 {
+        return rc;
+    }
+
+    let compo_query_info = get_query_info(query, query_info, program == crate::program::BLASTX);
+    let matching_seq = matching_sequence_initialize(subject.subject_length, this_match.oid, 0);
+    let mut alignments = vec![None; num_contexts];
+    let mut redone = HspList::new(this_match.oid);
+
+    for frame_index in 0..num_frames {
+        let incoming_aligns = &incoming_align_set[frame_index];
+        if incoming_aligns.is_none() {
+            continue;
+        }
+        let context = context_index + frame_index;
+        if context >= num_contexts || context >= kbp_gap.len() {
+            return -1;
+        }
+
+        let status = if subject.smith_waterman {
+            let significant_matches =
+                vec![
+                    BlastCompoHeap::new(subject.hitlist_size, subject.inclusion_ethresh);
+                    compo_query_info.len()
+                ];
+            let mut pvalue_for_this_pair = -1.0;
+            let mut lambda_ratio = 1.0;
+            if align_params.position_based {
+                let mut adjusted_pssm = Vec::new();
+                blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    &significant_matches,
+                    &mut adjusted_pssm,
+                    &mut pvalue_for_this_pair,
+                    0,
+                    &mut lambda_ratio,
+                )
+            } else {
+                let mut adjusted_matrix =
+                    match square_matrix_from_vec(&align_params.matrix_info.matrix) {
+                        Some(matrix) => matrix,
+                        None => [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+                    };
+                let workspace = if matches!(
+                    align_params.compo_adjust_mode,
+                    CompoAdjustMode::CompositionMatrixAdjust
+                ) {
+                    Some(BlastCompositionWorkspace::blosum62())
+                } else {
+                    None
+                };
+                blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    &significant_matches,
+                    &mut adjusted_matrix,
+                    workspace.as_ref(),
+                    &mut pvalue_for_this_pair,
+                    0,
+                    &mut lambda_ratio,
+                )
+            }
+        } else {
+            let mut pvalue_for_this_pair = -1.0;
+            let mut lambda_ratio = 1.0;
+            if align_params.position_based {
+                let mut adjusted_pssm = Vec::new();
+                blast_redo_one_match_with_callbacks_and_position_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    &matching_seq,
+                    &compo_query_info,
+                    &mut adjusted_pssm,
+                    &mut pvalue_for_this_pair,
+                    0,
+                    &mut lambda_ratio,
+                )
+            } else {
+                let mut adjusted_matrix =
+                    match square_matrix_from_vec(&align_params.matrix_info.matrix) {
+                        Some(matrix) => matrix,
+                        None => [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+                    };
+                let workspace = if matches!(
+                    align_params.compo_adjust_mode,
+                    CompoAdjustMode::CompositionMatrixAdjust
+                ) {
+                    Some(BlastCompositionWorkspace::blosum62())
+                } else {
+                    None
+                };
+                blast_redo_one_match_with_callbacks_and_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    &matching_seq,
+                    &compo_query_info,
+                    &mut adjusted_matrix,
+                    workspace.as_ref(),
+                    &mut pvalue_for_this_pair,
+                    0,
+                    &mut lambda_ratio,
+                )
+            }
+        };
+        if status != 0 {
+            return status;
+        }
+
+        if alignments[context].is_some() {
+            let qframe = if crate::program::query_is_translated(program) {
+                let f = frame_index as i32;
+                if f < 3 {
+                    f + 1
+                } else {
+                    2 - f
+                }
+            } else {
+                query_info.contexts[context].frame
+            };
+            let (status, _tags) = hsp_list_from_distinct_alignments(
+                &mut redone,
+                &mut alignments[context],
+                matching_seq.index,
+                qframe,
+            );
+            if status != 0 {
+                return status;
+            }
+        }
+    }
+
+    if redone.hsps.len() > 1 {
+        hitlist_reap_contained(&mut redone.hsps);
+    }
+    let eval_context = redone
+        .hsps
+        .first()
+        .and_then(|hsp| {
+            let context = hsp.context.max(0) as usize;
+            (context < query_info.contexts.len()).then_some(context)
+        })
+        .unwrap_or_else(|| context_index.min(query_info.contexts.len() - 1));
+    let ctx = &query_info.contexts[eval_context];
+    let (_best_score, best_evalue) = hitlist_evaluate_and_purge(
+        &mut redone,
+        subject.subject_length,
+        program,
+        ctx.query_length,
+        ctx.length_adjustment,
+        ctx.eff_searchsp as f64,
+        kbp_gap.get(eval_context),
+        subject.link_context,
+        -1.0,
+        subject.expect_value,
+        align_params.do_link_hsps,
+    );
+
+    if best_evalue <= subject.expect_value {
+        if let Some(kbp) = kbp_gap.get(eval_context) {
+            hsp_list_normalize_scores(
+                &mut redone,
+                kbp.lambda,
+                kbp.log_k,
+                align_params.local_scaling_factor,
+            );
+        }
+        if compute_num_identities_with_callbacks(
+            &mut redone,
+            align_params,
+            &matching_seq,
+            &compo_query_info,
+            subject.subject_length,
+        ) != 0
+        {
+            return -1;
+        }
+        *this_match = redone.clone();
+        let idx = query_index as usize;
+        if idx >= results.hitlists.len() {
+            results.hitlists.resize_with(idx + 1, || None);
+        }
+        let hitlist = results.hitlists[idx].get_or_insert_with(crate::hspstream::HitList::new);
+        if hitlist.hsp_lists.len() < subject.hitlist_size.max(0) as usize
+            || best_evalue <= subject.inclusion_ethresh
+        {
+            hitlist.add_hsp_list(redone);
+            hitlist.sort_by_evalue();
+        }
+    } else {
+        this_match.hsps.clear();
+        this_match.best_evalue = f64::MAX;
+    }
+
+    0
+}
+
+fn compute_num_identities_with_callbacks(
+    hsp_list: &mut HspList,
+    params: &BlastRedoAlignParams,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    subject_length: i32,
+) -> i32 {
+    let Some(callbacks) = params.callbacks else {
+        return -1;
+    };
+    let Some(get_range) = callbacks.get_range else {
+        return -1;
+    };
+
+    for hsp in &mut hsp_list.hsps {
+        let context = hsp.context.max(0) as usize;
+        let Some(query_context) = query_info.get(context) else {
+            return -1;
+        };
+        let query_range = BlastCompoSequenceRange {
+            begin: query_context.origin,
+            end: query_context.origin + query_context.seq.length,
+            context: hsp.context,
+        };
+        let subject_range = BlastCompoSequenceRange {
+            begin: 0,
+            end: subject_length,
+            context: hsp.subject_frame,
+        };
+        let align = BlastCompoAlignment::new(
+            hsp.score,
+            MatrixAdjustRule::DontAdjust,
+            hsp.context,
+            hsp.query_offset,
+            hsp.query_end,
+            hsp.subject_offset,
+            hsp.subject_end,
+            hsp.subject_frame,
+            hsp.edit_script.clone(),
+        );
+        let mut subject = BlastCompoSequenceData::default();
+        let mut query = BlastCompoSequenceData::default();
+        let mut subject_maybe_biased = false;
+        let status = get_range(
+            matching_seq,
+            &subject_range,
+            &mut subject,
+            &query_context.seq,
+            &query_range,
+            &mut query,
+            &query_context.words,
+            &align,
+            false,
+            params.compo_adjust_mode,
+            params.local_scaling_factor != 1.0,
+            &mut subject_maybe_biased,
+        );
+        if status != 0 {
+            sequence_data_release(&mut subject);
+            sequence_data_release(&mut query);
+            return status;
+        }
+
+        let mut local_hsp = hsp.clone();
+        local_hsp.query_offset -= query_range.begin;
+        local_hsp.query_end -= query_range.begin;
+        local_hsp.query_gapped_start -= query_range.begin;
+        local_hsp.subject_offset -= subject_range.begin;
+        local_hsp.subject_end -= subject_range.begin;
+        local_hsp.subject_gapped_start -= subject_range.begin;
+        let edit_ops = hsp.edit_script.as_ref().map(|script| script.ops.as_slice());
+        let (num_ident, _align_length, _num_pos) =
+            blast_hsp_get_num_identities(query.data(), subject.data(), &local_hsp, edit_ops, None);
+        hsp.num_ident = num_ident;
+        sequence_data_release(&mut subject);
+        sequence_data_release(&mut query);
+    }
+
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blast_redo_alignment_core_one_match_in_memory_inner(
+    program: ProgramType,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    kbp_gap: &[crate::stat::KarlinBlk],
+    align_params: &BlastRedoAlignParams,
+    this_match: &mut HspList,
+    results: &mut crate::hspstream::HspResults,
+    subject: BlastRedoInMemorySubject<'_>,
+) -> i32 {
+    let no_composition = matches!(
+        align_params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    );
+    if !no_composition && program == crate::program::BLASTN {
+        return -1;
+    }
+    if align_params.position_based
+        && (align_params.query_is_translated || program == crate::program::BLASTN)
+    {
+        return -1;
+    }
+    if align_params.do_link_hsps && subject.link_context.is_none() {
+        return -1;
+    }
+    if this_match.hsps.is_empty() {
+        return 0;
+    }
+    if !materialized_redo_program_is_supported(program) {
+        return -1;
+    }
+
+    let num_contexts = query_info.contexts.len();
+    if num_contexts == 0 {
+        return -1;
+    }
+    let num_frames = materialized_num_contexts_per_query(program, query_info);
+    let first_context = this_match.hsps[0].context.max(0) as usize;
+    let query_index = query_info
+        .contexts
+        .get(first_context)
+        .map(|ctx| ctx.query_index)
+        .unwrap_or_else(|| {
+            crate::queryinfo::blast_get_query_index_from_context(
+                this_match.hsps[0].context,
+                program,
+            )
+        });
+    if query_index < 0 {
+        return -1;
+    }
+    let context_index = query_index as usize * num_frames;
+    if context_index >= num_contexts {
+        return -1;
+    }
+
+    let mut incoming_align_set: [Option<Box<BlastCompoAlignment>>; 6] = Default::default();
+    let mut num_aligns = [0i32; 6];
+    let rc = result_hsp_to_distinct_align(
+        &mut incoming_align_set,
+        &mut num_aligns,
+        &this_match.hsps,
+        context_index as i32,
+        align_params.local_scaling_factor,
+    );
+    if rc != 0 {
+        return rc;
+    }
+
+    let compo_query_info = get_query_info(query, query_info, program == crate::program::BLASTX);
+    let matching_seq =
+        matching_sequence_initialize(subject.subject_source.len() as i32, this_match.oid, 0);
+    let mut alignments = vec![None; num_contexts];
+    let mut redone = HspList::new(this_match.oid);
+
+    for frame_index in 0..num_frames {
+        let incoming_aligns = &incoming_align_set[frame_index];
+        if incoming_aligns.is_none() {
+            continue;
+        }
+        let context = context_index + frame_index;
+        if context >= num_contexts || context >= kbp_gap.len() {
+            return -1;
+        }
+        let status = if subject.smith_waterman {
+            let significant_matches =
+                vec![
+                    BlastCompoHeap::new(subject.hitlist_size, subject.inclusion_ethresh);
+                    compo_query_info.len()
+                ];
+            if program == crate::program::BLASTN {
+                let nucleotide_matrix =
+                    crate::matrix::nucleotide_matrix(subject.reward, subject.penalty);
+                blast_redo_one_match_smith_waterman_in_memory_nucl(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    subject.subject_source,
+                    &significant_matches,
+                    &nucleotide_matrix,
+                )
+            } else if align_params.position_based {
+                let mut adjusted_pssm = Vec::new();
+                let mut pvalue_for_this_pair = -1.0;
+                let mut lambda_ratio = 1.0;
+                blast_redo_one_match_smith_waterman_in_memory_protein_position_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    program,
+                    subject.subject_source,
+                    &significant_matches,
+                    subject.genetic_code,
+                    &mut adjusted_pssm,
+                    &mut pvalue_for_this_pair,
+                    0,
+                    &mut lambda_ratio,
+                )
+            } else if no_composition {
+                blast_redo_one_match_smith_waterman_in_memory_protein(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    program,
+                    subject.subject_source,
+                    &significant_matches,
+                    subject.genetic_code,
+                )
+            } else {
+                let mut adjusted_matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+                let workspace = if matches!(
+                    align_params.compo_adjust_mode,
+                    CompoAdjustMode::CompositionMatrixAdjust
+                ) {
+                    Some(BlastCompositionWorkspace::blosum62())
+                } else {
+                    None
+                };
+                let mut pvalue_for_this_pair = -1.0;
+                let mut lambda_ratio = 1.0;
+                blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    program,
+                    subject.subject_source,
+                    &significant_matches,
+                    subject.genetic_code,
+                    &mut adjusted_matrix,
+                    workspace.as_ref(),
+                    &mut pvalue_for_this_pair,
+                    0,
+                    &mut lambda_ratio,
+                )
+            }
+        } else if no_composition {
+            blast_redo_one_match_in_memory(
+                &mut alignments,
+                align_params,
+                incoming_aligns,
+                num_aligns[frame_index],
+                kbp_gap[context].lambda,
+                &matching_seq,
+                &compo_query_info,
+                program,
+                subject.subject_source,
+                subject.reward,
+                subject.penalty,
+                subject.genetic_code,
+            )
+        } else if align_params.position_based {
+            let mut adjusted_pssm = Vec::new();
+            let mut pvalue_for_this_pair = -1.0;
+            let mut lambda_ratio = 1.0;
+            blast_redo_one_match_in_memory_with_position_adjustment(
+                &mut alignments,
+                align_params,
+                incoming_aligns,
+                num_aligns[frame_index],
+                kbp_gap[context].lambda,
+                &matching_seq,
+                &compo_query_info,
+                program,
+                subject.subject_source,
+                subject.genetic_code,
+                &mut adjusted_pssm,
+                &mut pvalue_for_this_pair,
+                0,
+                &mut lambda_ratio,
+            )
+        } else {
+            let mut adjusted_matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+            let workspace = if matches!(
+                align_params.compo_adjust_mode,
+                CompoAdjustMode::CompositionMatrixAdjust
+            ) {
+                Some(BlastCompositionWorkspace::blosum62())
+            } else {
+                None
+            };
+            let mut pvalue_for_this_pair = -1.0;
+            let mut lambda_ratio = 1.0;
+            blast_redo_one_match_in_memory_with_adjustment(
+                &mut alignments,
+                align_params,
+                incoming_aligns,
+                num_aligns[frame_index],
+                kbp_gap[context].lambda,
+                &matching_seq,
+                &compo_query_info,
+                program,
+                subject.subject_source,
+                subject.genetic_code,
+                &mut adjusted_matrix,
+                workspace.as_ref(),
+                &mut pvalue_for_this_pair,
+                0,
+                &mut lambda_ratio,
+            )
+        };
+        if status != 0 {
+            return status;
+        }
+
+        if alignments[context].is_some() {
+            let qframe = if crate::program::query_is_translated(program) {
+                let f = frame_index as i32;
+                if f < 3 {
+                    f + 1
+                } else {
+                    2 - f
+                }
+            } else {
+                query_info.contexts[context].frame
+            };
+            let (status, _tags) = hsp_list_from_distinct_alignments(
+                &mut redone,
+                &mut alignments[context],
+                matching_seq.index,
+                qframe,
+            );
+            if status != 0 {
+                return status;
+            }
+        }
+    }
+
+    if redone.hsps.len() > 1 {
+        hitlist_reap_contained(&mut redone.hsps);
+    }
+    let eval_context = redone
+        .hsps
+        .first()
+        .and_then(|hsp| {
+            let context = hsp.context.max(0) as usize;
+            (context < query_info.contexts.len()).then_some(context)
+        })
+        .unwrap_or_else(|| context_index.min(query_info.contexts.len() - 1));
+    let ctx = &query_info.contexts[eval_context];
+    let (best_score, best_evalue) = hitlist_evaluate_and_purge(
+        &mut redone,
+        subject.subject_source.len() as i32,
+        program,
+        ctx.query_length,
+        ctx.length_adjustment,
+        ctx.eff_searchsp as f64,
+        kbp_gap.get(eval_context),
+        subject.link_context,
+        -1.0,
+        subject.expect_value,
+        align_params.do_link_hsps,
+    );
+    let _ = best_score;
+
+    if best_evalue <= subject.expect_value {
+        if let Some(kbp) = kbp_gap.get(eval_context) {
+            hsp_list_normalize_scores(
+                &mut redone,
+                kbp.lambda,
+                kbp.log_k,
+                align_params.local_scaling_factor,
+            );
+        }
+        let edit_ops: Vec<Option<Vec<(crate::gapinfo::GapAlignOpType, i32)>>> = redone
+            .hsps
+            .iter()
+            .map(|hsp| hsp.edit_script.as_ref().map(|script| script.ops.clone()))
+            .collect();
+        let query_context = compo_query_info
+            .get(eval_context)
+            .map(|info| info.seq.data())
+            .unwrap_or(query);
+        if crate::program::subject_is_translated(program) {
+            if compute_num_identities_translated_subject(
+                query_context,
+                subject.subject_source,
+                &mut redone,
+                &edit_ops,
+                None,
+                subject.genetic_code,
+            )
+            .is_err()
+            {
+                return -1;
+            }
+        } else {
+            compute_num_identities_blastp(
+                query_context,
+                subject.subject_source,
+                &mut redone,
+                &edit_ops,
+                None,
+            );
+        }
+        *this_match = redone.clone();
+        let idx = query_index as usize;
+        if idx >= results.hitlists.len() {
+            results.hitlists.resize_with(idx + 1, || None);
+        }
+        let hitlist = results.hitlists[idx].get_or_insert_with(crate::hspstream::HitList::new);
+        if hitlist.hsp_lists.len() < subject.hitlist_size.max(0) as usize
+            || best_evalue <= subject.inclusion_ethresh
+        {
+            hitlist.add_hsp_list(redone);
+            hitlist.sort_by_evalue();
+        }
+    } else {
+        this_match.hsps.clear();
+        this_match.best_evalue = f64::MAX;
+    }
+
+    0
+}
+
+fn alignment_list_to_containment_tuples(
+    head: Option<&BlastCompoAlignment>,
+) -> Vec<(i32, i32, i32, i32, i32, i32)> {
+    let mut out = Vec::new();
+    let mut cursor = head;
+    while let Some(align) = cursor {
+        out.push((
+            align.query_start,
+            align.query_end,
+            align.match_start,
+            align.match_end,
+            align.score,
+            align.frame,
+        ));
+        cursor = align.next.as_deref();
+    }
+    out
+}
+
+/// In-memory no-composition port boundary for `Blast_RedoOneMatch`
+/// (`redo_alignment.c:1133`).
+///
+/// This covers the branch where no composition adjustment is requested, so the
+/// C callback calls reduce to already-ported Rust helpers:
+/// [`sequence_get_range_in_memory_with_code`], [`redo_one_alignment`],
+/// [`is_contained`], and [`with_distinct_ends`]. Use
+/// [`blast_redo_one_match_in_memory_with_adjustment`] for the non-position
+/// protein-space composition-adjusted materialized path.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_in_memory(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    program: ProgramType,
+    subject_source: &[u8],
+    reward: i32,
+    penalty: i32,
+    genetic_code: &[u8; 64],
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    if !matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) {
+        return -1;
+    }
+    if program != crate::program::BLASTN && matrix_info_to_aa_array(&params.matrix_info).is_none() {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = match window.align.as_ref() {
+            Some(align) if align.query_index >= 0 => align.query_index as usize,
+            _ => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        if query_index >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+
+        let (query, subject) = match sequence_get_range_in_memory_with_code(
+            program,
+            &query_info[query_index].seq,
+            &window.query_range,
+            subject_source,
+            &window.subject_range,
+            genetic_code,
+        ) {
+            Ok(pair) => pair,
+            Err(_) => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+
+        let mut in_align = window.align.as_deref();
+        while let Some(align) = in_align {
+            let existing = alignment_list_to_containment_tuples(alignments[query_index].as_deref());
+            if !is_contained(
+                align.query_start,
+                align.query_end,
+                align.match_start,
+                align.match_end,
+                align.score,
+                align.frame,
+                &existing,
+                lambda,
+            ) {
+                let new_align = if program == crate::program::BLASTN {
+                    redo_one_alignment(
+                        &query,
+                        &window.query_range,
+                        &subject,
+                        &window.subject_range,
+                        align.query_gapped_start,
+                        align.match_gapped_start,
+                        MatrixAdjustRule::DontAdjust,
+                        reward,
+                        penalty,
+                        params.gapping_params.gap_open,
+                        params.gapping_params.gap_extend,
+                        params.gapping_params.x_dropoff,
+                    )
+                } else {
+                    redo_one_alignment_protein(
+                        &query,
+                        &window.query_range,
+                        &subject,
+                        &window.subject_range,
+                        align.query_gapped_start,
+                        align.match_gapped_start,
+                        MatrixAdjustRule::DontAdjust,
+                        &params.matrix_info,
+                        params.gapping_params.gap_open,
+                        params.gapping_params.gap_extend,
+                        params.gapping_params.x_dropoff,
+                    )
+                };
+                if let Some(new_align) = new_align {
+                    if new_align.score >= params.cutoff_s {
+                        with_distinct_ends(new_align, &mut alignments[query_index], false);
+                    }
+                }
+            }
+            in_align = align.next.as_deref();
+        }
+    }
+
+    0
+}
+
+/// In-memory protein-space composition-adjusted counterpart of
+/// [`blast_redo_one_match_in_memory`].
+///
+/// This covers the materialized-subject ordinary redo branch once query and
+/// subject ranges can be copied locally: compute query/subject composition,
+/// run `Blast_AdjustScores`, redo the alignment with the adjusted matrix, and
+/// insert through `s_WithDistinctEnds`. Nucleotide composition adjustment is
+/// rejected by the caller; position-specific/PSSM redo uses
+/// [`blast_redo_one_match_in_memory_with_position_adjustment`].
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_in_memory_with_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    program: ProgramType,
+    subject_source: &[u8],
+    genetic_code: &[u8; 64],
+    matrix: &mut [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    workspace: Option<&BlastCompositionWorkspace>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    if matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || params.position_based
+        || program == crate::program::BLASTN
+    {
+        return -1;
+    }
+    if matrix_info_to_aa_array(&params.matrix_info).is_none() {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = match window.align.as_ref() {
+            Some(align) if align.query_index >= 0 => align.query_index as usize,
+            _ => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        if query_index >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+
+        let (query, subject) = match sequence_get_range_in_memory_with_code(
+            program,
+            &query_info[query_index].seq,
+            &window.query_range,
+            subject_source,
+            &window.subject_range,
+            genetic_code,
+        ) {
+            Ok(pair) => pair,
+            Err(_) => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+
+        let mut in_align = window.align.as_deref();
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+        while let Some(align) = in_align {
+            if params.query_is_translated || query_num_true == 0 {
+                let (composition, num_true) = get_composition(
+                    &query,
+                    &window.query_range,
+                    align,
+                    crate::matrix::AA_SIZE,
+                    true,
+                    false,
+                );
+                query_composition = composition;
+                query_num_true = num_true;
+            }
+
+            let existing = alignment_list_to_containment_tuples(alignments[query_index].as_deref());
+            if !is_contained(
+                align.query_start,
+                align.query_end,
+                align.match_start,
+                align.match_end,
+                align.score,
+                align.frame,
+                &existing,
+                lambda,
+            ) {
+                let (subject_composition, subject_num_true) = get_composition(
+                    &subject,
+                    &window.subject_range,
+                    align,
+                    crate::matrix::AA_SIZE,
+                    false,
+                    params.subject_is_translated,
+                );
+                let matrix_adjust_rule = match blast_adjust_scores_with_workspace(
+                    matrix,
+                    &query_composition,
+                    query_num_true,
+                    &subject_composition,
+                    subject_num_true,
+                    &params.matrix_info,
+                    params.compo_adjust_mode,
+                    params.re_pseudocounts,
+                    workspace,
+                    composition_test_index,
+                    pvalue_for_this_pair,
+                    lambda_ratio,
+                ) {
+                    Ok(rule) => rule,
+                    Err(status) if status < 0 => {
+                        alignments_free_array(alignments, num_queries);
+                        return status;
+                    }
+                    Err(_) => {
+                        in_align = align.next.as_deref();
+                        continue;
+                    }
+                };
+
+                if let Some(new_align) = redo_one_alignment_protein_with_matrix(
+                    &query,
+                    &window.query_range,
+                    &subject,
+                    &window.subject_range,
+                    align.query_gapped_start,
+                    align.match_gapped_start,
+                    matrix_adjust_rule,
+                    matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    params.gapping_params.x_dropoff,
+                ) {
+                    if new_align.score >= params.cutoff_s {
+                        with_distinct_ends(new_align, &mut alignments[query_index], false);
+                    }
+                }
+            }
+            in_align = align.next.as_deref();
+        }
+    }
+
+    0
+}
+
+/// Position-specific/PSSM composition-adjusted counterpart of
+/// [`blast_redo_one_match_in_memory_with_adjustment`].
+///
+/// This covers the ordinary PSI-style materialized redo branch: copy local
+/// query/subject windows, compute composition, run the position-based
+/// `Blast_AdjustScores` scaling branch, and redo traceback against the scaled
+/// PSSM rows.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_in_memory_with_position_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    program: ProgramType,
+    subject_source: &[u8],
+    genetic_code: &[u8; 64],
+    adjusted_pssm: &mut Vec<Vec<i32>>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    if matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || !params.position_based
+        || program == crate::program::BLASTN
+        || params.query_is_translated
+    {
+        return -1;
+    }
+    if !params.matrix_info.positional {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = match window.align.as_ref() {
+            Some(align) if align.query_index >= 0 => align.query_index as usize,
+            _ => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        if query_index >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+
+        let (query, subject) = match sequence_get_range_in_memory_with_code(
+            program,
+            &query_info[query_index].seq,
+            &window.query_range,
+            subject_source,
+            &window.subject_range,
+            genetic_code,
+        ) {
+            Ok(pair) => pair,
+            Err(_) => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+
+        let mut in_align = window.align.as_deref();
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+        while let Some(align) = in_align {
+            if query_num_true == 0 {
+                let (composition, num_true) = get_composition(
+                    &query,
+                    &window.query_range,
+                    align,
+                    crate::matrix::AA_SIZE,
+                    true,
+                    false,
+                );
+                query_composition = composition;
+                query_num_true = num_true;
+            }
+
+            let existing = alignment_list_to_containment_tuples(alignments[query_index].as_deref());
+            if !is_contained(
+                align.query_start,
+                align.query_end,
+                align.match_start,
+                align.match_end,
+                align.score,
+                align.frame,
+                &existing,
+                lambda,
+            ) {
+                let (subject_composition, subject_num_true) = get_composition(
+                    &subject,
+                    &window.subject_range,
+                    align,
+                    crate::matrix::AA_SIZE,
+                    false,
+                    params.subject_is_translated,
+                );
+                let matrix_adjust_rule = match blast_adjust_position_based_scores(
+                    adjusted_pssm,
+                    &query_composition,
+                    query_num_true,
+                    &subject_composition,
+                    subject_num_true,
+                    &params.matrix_info,
+                    composition_test_index,
+                    pvalue_for_this_pair,
+                    lambda_ratio,
+                ) {
+                    Ok(rule) => rule,
+                    Err(status) if status < 0 => {
+                        alignments_free_array(alignments, num_queries);
+                        return status;
+                    }
+                    Err(_) => {
+                        in_align = align.next.as_deref();
+                        continue;
+                    }
+                };
+
+                if let Some(new_align) = redo_one_alignment_protein_with_pssm(
+                    &query,
+                    &window.query_range,
+                    &subject,
+                    &window.subject_range,
+                    align.query_gapped_start,
+                    align.match_gapped_start,
+                    matrix_adjust_rule,
+                    adjusted_pssm,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    params.gapping_params.x_dropoff,
+                ) {
+                    if new_align.score >= params.cutoff_s {
+                        with_distinct_ends(new_align, &mut alignments[query_index], false);
+                    }
+                }
+            }
+            in_align = align.next.as_deref();
+        }
+    }
+
+    0
+}
+
+/// Callback-driven no-composition port boundary for `Blast_RedoOneMatch`
+/// (`redo_alignment.c:1133`).
+///
+/// This follows the generic C driver shape: clear output lists, build windows,
+/// rerun `get_range` when the near-identical state changes, skip HSPs already
+/// contained in better alignments, call `redo_one_alignment`, and insert via
+/// `s_WithDistinctEnds`. Use
+/// [`blast_redo_one_match_with_callbacks_and_adjustment`] for the
+/// callback-driven composition-adjusted path.
+pub fn blast_redo_one_match_with_callbacks(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+) -> i32 {
+    let mut matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+    let mut pvalue_for_this_pair = -1.0;
+    let mut lambda_ratio = 1.0;
+    blast_redo_one_match_with_callbacks_and_adjustment(
+        alignments,
+        params,
+        incoming_aligns,
+        _hspcnt,
+        lambda,
+        matching_seq,
+        query_info,
+        &mut matrix,
+        None,
+        &mut pvalue_for_this_pair,
+        0,
+        &mut lambda_ratio,
+    )
+}
+
+/// Callback-driven port boundary for `Blast_RedoOneMatch`
+/// (`redo_alignment.c:1133`) with the composition-adjusted score path wired.
+///
+/// The existing callback table supplies `get_range` and `redo_one_alignment`,
+/// while this function owns the translated `Blast_AdjustScores` call between
+/// them. This covers non-position square matrices and delegates
+/// position-based/PSSM scoring to
+/// [`blast_redo_one_match_with_callbacks_and_position_adjustment`].
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_with_callbacks_and_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    matrix: &mut [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    workspace: Option<&BlastCompositionWorkspace>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    let Some(callbacks) = params.callbacks else {
+        return -1;
+    };
+
+    if params.position_based {
+        let mut adjusted_pssm = Vec::new();
+        return blast_redo_one_match_with_callbacks_and_position_adjustment(
+            alignments,
+            params,
+            incoming_aligns,
+            _hspcnt,
+            lambda,
+            matching_seq,
+            query_info,
+            &mut adjusted_pssm,
+            pvalue_for_this_pair,
+            composition_test_index,
+            lambda_ratio,
+        );
+    }
+    let (Some(get_range), Some(redo_one_alignment_cb)) =
+        (callbacks.get_range, callbacks.redo_one_alignment)
+    else {
+        return -1;
+    };
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = match window.align.as_ref() {
+            Some(align) if align.query_index >= 0 => align.query_index as usize,
+            _ => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        if query_index >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+
+        let mut subject = BlastCompoSequenceData::default();
+        let mut query = BlastCompoSequenceData::default();
+        let mut near_identical_status = true;
+        let mut old_near_identical_status = false;
+        let mut subject_maybe_biased = true;
+        let mut num_adjustments = 0;
+        let mut hsp_index = 0;
+        let mut in_align = window.align.as_deref();
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+        while let Some(align) = in_align {
+            if hsp_index == 0 || subject_maybe_biased {
+                near_identical_status = preliminary_test_near_identical(
+                    query_info,
+                    window,
+                    align,
+                    params.near_identical_cutoff,
+                );
+            }
+
+            if hsp_index == 0
+                || (subject_maybe_biased && near_identical_status != old_near_identical_status)
+            {
+                sequence_data_release(&mut subject);
+                sequence_data_release(&mut query);
+                let status = get_range(
+                    matching_seq,
+                    &window.subject_range,
+                    &mut subject,
+                    &query_info[query_index].seq,
+                    &window.query_range,
+                    &mut query,
+                    &query_info[query_index].words,
+                    window.align.as_deref().unwrap(),
+                    near_identical_status,
+                    params.compo_adjust_mode,
+                    false,
+                    &mut subject_maybe_biased,
+                );
+                if status != 0 {
+                    alignments_free_array(alignments, num_queries);
+                    return status;
+                }
+            }
+
+            if params.query_is_translated {
+                let (composition, num_true) = get_composition(
+                    &query,
+                    &window.query_range,
+                    align,
+                    crate::matrix::AA_SIZE,
+                    true,
+                    false,
+                );
+                query_composition = composition;
+                query_num_true = num_true;
+            }
+
+            let existing = alignment_list_to_containment_tuples(alignments[query_index].as_deref());
+            if !is_contained(
+                align.query_start,
+                align.query_end,
+                align.match_start,
+                align.match_end,
+                align.score,
+                align.frame,
+                &existing,
+                lambda,
+            ) {
+                let mut matrix_adjust_rule = MatrixAdjustRule::DontAdjust;
+                let mut adjust_search_failed = 0;
+                if !matches!(
+                    params.compo_adjust_mode,
+                    CompoAdjustMode::NoCompositionBasedStats
+                ) && (params.subject_is_translated
+                    || hsp_index == 0
+                    || near_identical_status != old_near_identical_status)
+                {
+                    let (subject_composition, subject_num_true) = get_composition(
+                        &subject,
+                        &window.subject_range,
+                        align,
+                        crate::matrix::AA_SIZE,
+                        false,
+                        params.subject_is_translated,
+                    );
+                    match blast_adjust_scores_with_workspace(
+                        matrix,
+                        &query_composition,
+                        query_num_true,
+                        &subject_composition,
+                        subject_num_true,
+                        &params.matrix_info,
+                        params.compo_adjust_mode,
+                        params.re_pseudocounts,
+                        workspace,
+                        composition_test_index,
+                        pvalue_for_this_pair,
+                        lambda_ratio,
+                    ) {
+                        Ok(rule) => {
+                            matrix_adjust_rule = rule;
+                            num_adjustments += 1;
+                        }
+                        Err(status) if status < 0 => {
+                            alignments_free_array(alignments, num_queries);
+                            return status;
+                        }
+                        Err(_) => {
+                            adjust_search_failed = 1;
+                            num_adjustments += 1;
+                        }
+                    }
+                }
+
+                if adjust_search_failed == 0 {
+                    if let Some(new_align) = redo_one_alignment_cb(
+                        align,
+                        matrix_adjust_rule,
+                        &query,
+                        &window.query_range,
+                        params.ccat_query_length,
+                        &subject,
+                        &window.subject_range,
+                        matching_seq.length,
+                        &params.gapping_params,
+                    ) {
+                        if new_align.score >= params.cutoff_s {
+                            with_distinct_ends(
+                                new_align,
+                                &mut alignments[query_index],
+                                num_adjustments == 1,
+                            );
+                        }
+                    }
+                }
+            }
+
+            old_near_identical_status = near_identical_status;
+            hsp_index += 1;
+            in_align = align.next.as_deref();
+        }
+        sequence_data_release(&mut subject);
+        sequence_data_release(&mut query);
+    }
+
+    0
+}
+
+/// Callback-driven position-specific/PSSM counterpart of
+/// [`blast_redo_one_match_with_callbacks_and_adjustment`].
+///
+/// The callback table supplies the C-style range fetcher; after
+/// position-based score adjustment this helper runs the local PSSM traceback
+/// against the scaled rows.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_with_callbacks_and_position_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    adjusted_pssm: &mut Vec<Vec<i32>>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    let Some(callbacks) = params.callbacks else {
+        return -1;
+    };
+    let Some(get_range) = callbacks.get_range else {
+        return -1;
+    };
+
+    if matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || !params.position_based
+        || !params.matrix_info.positional
+        || params.query_is_translated
+        || params.subject_is_translated
+    {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = match window.align.as_ref() {
+            Some(align) if align.query_index >= 0 => align.query_index as usize,
+            _ => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        if query_index >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+
+        let mut subject = BlastCompoSequenceData::default();
+        let mut query = BlastCompoSequenceData::default();
+        let mut near_identical_status = true;
+        let mut old_near_identical_status = false;
+        let mut subject_maybe_biased = true;
+        let mut num_adjustments = 0;
+        let mut hsp_index = 0;
+        let mut in_align = window.align.as_deref();
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+
+        while let Some(align) = in_align {
+            if hsp_index == 0 || subject_maybe_biased {
+                near_identical_status = preliminary_test_near_identical(
+                    query_info,
+                    window,
+                    align,
+                    params.near_identical_cutoff,
+                );
+            }
+
+            if hsp_index == 0
+                || (subject_maybe_biased && near_identical_status != old_near_identical_status)
+            {
+                sequence_data_release(&mut subject);
+                sequence_data_release(&mut query);
+                let status = get_range(
+                    matching_seq,
+                    &window.subject_range,
+                    &mut subject,
+                    &query_info[query_index].seq,
+                    &window.query_range,
+                    &mut query,
+                    &query_info[query_index].words,
+                    window.align.as_deref().unwrap(),
+                    near_identical_status,
+                    params.compo_adjust_mode,
+                    false,
+                    &mut subject_maybe_biased,
+                );
+                if status != 0 {
+                    alignments_free_array(alignments, num_queries);
+                    return status;
+                }
+            }
+
+            if query_num_true == 0 {
+                let (composition, num_true) = get_composition(
+                    &query,
+                    &window.query_range,
+                    align,
+                    crate::matrix::AA_SIZE,
+                    true,
+                    false,
+                );
+                query_composition = composition;
+                query_num_true = num_true;
+            }
+
+            let existing = alignment_list_to_containment_tuples(alignments[query_index].as_deref());
+            if !is_contained(
+                align.query_start,
+                align.query_end,
+                align.match_start,
+                align.match_end,
+                align.score,
+                align.frame,
+                &existing,
+                lambda,
+            ) {
+                let mut matrix_adjust_rule = MatrixAdjustRule::DontAdjust;
+                let mut adjust_search_failed = 0;
+                if hsp_index == 0 || near_identical_status != old_near_identical_status {
+                    let (subject_composition, subject_num_true) = get_composition(
+                        &subject,
+                        &window.subject_range,
+                        align,
+                        crate::matrix::AA_SIZE,
+                        false,
+                        false,
+                    );
+                    match blast_adjust_position_based_scores(
+                        adjusted_pssm,
+                        &query_composition,
+                        query_num_true,
+                        &subject_composition,
+                        subject_num_true,
+                        &params.matrix_info,
+                        composition_test_index,
+                        pvalue_for_this_pair,
+                        lambda_ratio,
+                    ) {
+                        Ok(rule) => {
+                            matrix_adjust_rule = rule;
+                            num_adjustments += 1;
+                        }
+                        Err(status) if status < 0 => {
+                            alignments_free_array(alignments, num_queries);
+                            return status;
+                        }
+                        Err(_) => {
+                            adjust_search_failed = 1;
+                            num_adjustments += 1;
+                        }
+                    }
+                }
+
+                if adjust_search_failed == 0 {
+                    if let Some(new_align) = redo_one_alignment_protein_with_pssm(
+                        &query,
+                        &window.query_range,
+                        &subject,
+                        &window.subject_range,
+                        align.query_gapped_start,
+                        align.match_gapped_start,
+                        matrix_adjust_rule,
+                        adjusted_pssm,
+                        params.gapping_params.gap_open,
+                        params.gapping_params.gap_extend,
+                        params.gapping_params.x_dropoff,
+                    ) {
+                        if new_align.score >= params.cutoff_s {
+                            with_distinct_ends(
+                                new_align,
+                                &mut alignments[query_index],
+                                num_adjustments == 1,
+                            );
+                        }
+                    }
+                }
+            }
+
+            old_near_identical_status = near_identical_status;
+            hsp_index += 1;
+            in_align = align.next.as_deref();
+        }
+        sequence_data_release(&mut subject);
+        sequence_data_release(&mut query);
+    }
+
+    0
+}
+
+fn nucleotide_sw_matrix_from_xdrop_matrix(
+    matrix: &[[i32; 16]; 16],
+) -> [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE] {
+    let mut out = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+    for i in 0..16 {
+        for j in 0..16 {
+            out[i][j] = matrix[i][j];
+        }
+    }
+    out
+}
+
+/// In-memory no-composition nucleotide port boundary for
+/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`).
+///
+/// This mirrors the executable SW loop once sequence ranges are already
+/// materialized locally: build windows, retrieve query/subject ranges, clear
+/// forbidden ranges, run score-only SW, apply the NCBI significance gate, find
+/// the start with reverse SW, finalize with the X-drop callback, prepend the
+/// redone alignment, and mark the accepted rectangle forbidden when the input
+/// window has multiple HSPs. Composition adjustment and translated subjects
+/// are intentionally routed through the protein-space SW helpers instead.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_smith_waterman_in_memory_nucl(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    log_k: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    subject_source: &[u8],
+    significant_matches: &[BlastCompoHeap],
+    matrix: &[[i32; 16]; 16],
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries || significant_matches.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    if !matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || params.query_is_translated
+        || params.subject_is_translated
+        || params.position_based
+    {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        false,
+        false,
+        false,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    let sw_matrix = nucleotide_sw_matrix_from_xdrop_matrix(matrix);
+    for window in &windows {
+        let query_index = window.query_range.context;
+        if query_index < 0 || query_index as usize >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+        let query_index = query_index as usize;
+
+        let (query, subject) = match sequence_get_range_in_memory(
+            crate::program::BLASTN,
+            &query_info[query_index].seq,
+            &window.query_range,
+            subject_source,
+            &window.subject_range,
+        ) {
+            Ok(pair) => pair,
+            Err(_) => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        let searchsp = query_info[query_index].eff_search_space;
+        let mut forbidden = crate::smith_waterman::BlastForbiddenRanges::new(query.length);
+
+        loop {
+            let (sw_score, match_end, query_end) =
+                crate::smith_waterman::blast_smith_waterman_score_only_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    &sw_matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    &forbidden,
+                );
+            let significant = smith_waterman_alignment_is_significant(
+                sw_score,
+                lambda,
+                log_k,
+                searchsp,
+                params,
+                alignments[query_index].as_deref(),
+                &significant_matches[query_index],
+                matching_seq.index,
+            );
+            if !significant {
+                break;
+            }
+
+            let (_updated_score, match_start, query_start) =
+                crate::smith_waterman::blast_smith_waterman_find_start_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    &sw_matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    match_end,
+                    query_end,
+                    sw_score,
+                    &forbidden,
+                );
+
+            let Some((mut new_align, query_end_xdrop, match_end_xdrop)) = new_alignment_using_xdrop(
+                &query,
+                &window.query_range,
+                &subject,
+                &window.subject_range,
+                query_start,
+                query_end,
+                match_start,
+                match_end,
+                sw_score,
+                &params.gapping_params,
+                MatrixAdjustRule::DontAdjust,
+                matrix,
+            ) else {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            };
+            new_align.next = alignments[query_index].take();
+            alignments[query_index] = Some(Box::new(new_align));
+
+            if window.hspcnt > 1 {
+                forbidden.push(
+                    query_start as i32,
+                    query_end_xdrop + 1,
+                    match_start as i32,
+                    match_end_xdrop,
+                );
+            }
+            if !(significant && window.hspcnt > 1) {
+                break;
+            }
+        }
+    }
+
+    0
+}
+
+/// In-memory no-composition protein-space port boundary for
+/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`).
+///
+/// This mirrors [`blast_redo_one_match_smith_waterman_in_memory_nucl`] after
+/// sequence ranges have been materialized as protein residues. It covers
+/// BLASTP plus translated-query/translated-subject protein-space searches.
+/// Composition-adjusted and position-specific matrix redo use the dedicated
+/// materialized adjustment helpers.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_smith_waterman_in_memory_protein(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    log_k: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    program: ProgramType,
+    subject_source: &[u8],
+    significant_matches: &[BlastCompoHeap],
+    genetic_code: &[u8; 64],
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries || significant_matches.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    if !matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || params.position_based
+        || program == crate::program::BLASTN
+    {
+        return -1;
+    }
+    let Some(sw_matrix) = matrix_info_to_aa_array(&params.matrix_info) else {
+        return -1;
+    };
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = window.query_range.context;
+        if query_index < 0 || query_index as usize >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+        let query_index = query_index as usize;
+
+        let (query, subject) = match sequence_get_range_in_memory_with_code(
+            program,
+            &query_info[query_index].seq,
+            &window.query_range,
+            subject_source,
+            &window.subject_range,
+            genetic_code,
+        ) {
+            Ok(pair) => pair,
+            Err(_) => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        let searchsp = query_info[query_index].eff_search_space;
+        let mut forbidden = crate::smith_waterman::BlastForbiddenRanges::new(query.length);
+
+        loop {
+            let (sw_score, match_end, query_end) =
+                crate::smith_waterman::blast_smith_waterman_score_only_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    &sw_matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    &forbidden,
+                );
+            let significant = smith_waterman_alignment_is_significant(
+                sw_score,
+                lambda,
+                log_k,
+                searchsp,
+                params,
+                alignments[query_index].as_deref(),
+                &significant_matches[query_index],
+                matching_seq.index,
+            );
+            if !significant {
+                break;
+            }
+
+            let (_updated_score, match_start, query_start) =
+                crate::smith_waterman::blast_smith_waterman_find_start_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    &sw_matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    match_end,
+                    query_end,
+                    sw_score,
+                    &forbidden,
+                );
+
+            let Some((mut new_align, query_end_xdrop, match_end_xdrop)) =
+                new_alignment_using_xdrop_protein(
+                    &query,
+                    &window.query_range,
+                    &subject,
+                    &window.subject_range,
+                    query_start,
+                    query_end,
+                    match_start,
+                    match_end,
+                    sw_score,
+                    &params.gapping_params,
+                    MatrixAdjustRule::DontAdjust,
+                    &sw_matrix,
+                )
+            else {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            };
+            new_align.next = alignments[query_index].take();
+            alignments[query_index] = Some(Box::new(new_align));
+
+            if window.hspcnt > 1 {
+                forbidden.push(
+                    query_start as i32,
+                    query_end_xdrop + 1,
+                    match_start as i32,
+                    match_end_xdrop,
+                );
+            }
+            if !(significant && window.hspcnt > 1) {
+                break;
+            }
+        }
+    }
+
+    0
+}
+
+/// In-memory non-position composition-adjusted protein-space port boundary for
+/// `Blast_RedoOneMatchSmithWaterman`.
+///
+/// This is the materialized-subject counterpart of the callback adjusted SW
+/// path: copy protein-space query/subject ranges, compute compositions, run
+/// square-matrix `Blast_AdjustScores`, then execute score-only SW, reverse
+/// start finding, and bounded X-drop finalization with the adjusted matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    log_k: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    program: ProgramType,
+    subject_source: &[u8],
+    significant_matches: &[BlastCompoHeap],
+    genetic_code: &[u8; 64],
+    matrix: &mut [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    workspace: Option<&BlastCompositionWorkspace>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries || significant_matches.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    if matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || params.position_based
+        || program == crate::program::BLASTN
+    {
+        return -1;
+    }
+    if matrix_info_to_aa_array(&params.matrix_info).is_none() {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = window.query_range.context;
+        if query_index < 0 || query_index as usize >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+        let query_index = query_index as usize;
+        let Some(window_align) = window.align.as_deref() else {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        };
+
+        let (query, subject) = match sequence_get_range_in_memory_with_code(
+            program,
+            &query_info[query_index].seq,
+            &window.query_range,
+            subject_source,
+            &window.subject_range,
+            genetic_code,
+        ) {
+            Ok(pair) => pair,
+            Err(_) => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+        if params.query_is_translated || query_num_true == 0 {
+            let (composition, num_true) = get_composition(
+                &query,
+                &window.query_range,
+                window_align,
+                crate::matrix::AA_SIZE,
+                true,
+                false,
+            );
+            query_composition = composition;
+            query_num_true = num_true;
+        }
+
+        let (subject_composition, subject_num_true) = get_composition(
+            &subject,
+            &window.subject_range,
+            window_align,
+            crate::matrix::AA_SIZE,
+            false,
+            params.subject_is_translated,
+        );
+        let matrix_adjust_rule = match blast_adjust_scores_with_workspace(
+            matrix,
+            &query_composition,
+            query_num_true,
+            &subject_composition,
+            subject_num_true,
+            &params.matrix_info,
+            params.compo_adjust_mode,
+            params.re_pseudocounts,
+            workspace,
+            composition_test_index,
+            pvalue_for_this_pair,
+            lambda_ratio,
+        ) {
+            Ok(rule) => rule,
+            Err(status) if status < 0 => {
+                alignments_free_array(alignments, num_queries);
+                return status;
+            }
+            Err(_) => continue,
+        };
+
+        let searchsp = query_info[query_index].eff_search_space;
+        let mut forbidden = crate::smith_waterman::BlastForbiddenRanges::new(query.length);
+
+        loop {
+            let (sw_score, match_end, query_end) =
+                crate::smith_waterman::blast_smith_waterman_score_only_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    &forbidden,
+                );
+            let significant = smith_waterman_alignment_is_significant(
+                sw_score,
+                lambda,
+                log_k,
+                searchsp,
+                params,
+                alignments[query_index].as_deref(),
+                &significant_matches[query_index],
+                matching_seq.index,
+            );
+            if !significant {
+                break;
+            }
+
+            let (_updated_score, match_start, query_start) =
+                crate::smith_waterman::blast_smith_waterman_find_start_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    match_end,
+                    query_end,
+                    sw_score,
+                    &forbidden,
+                );
+
+            let Some((mut new_align, query_end_xdrop, match_end_xdrop)) =
+                new_alignment_using_xdrop_protein(
+                    &query,
+                    &window.query_range,
+                    &subject,
+                    &window.subject_range,
+                    query_start,
+                    query_end,
+                    match_start,
+                    match_end,
+                    sw_score,
+                    &params.gapping_params,
+                    matrix_adjust_rule,
+                    matrix,
+                )
+            else {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            };
+            new_align.next = alignments[query_index].take();
+            alignments[query_index] = Some(Box::new(new_align));
+
+            if window.hspcnt > 1 {
+                forbidden.push(
+                    query_start as i32,
+                    query_end_xdrop + 1,
+                    match_start as i32,
+                    match_end_xdrop,
+                );
+            }
+            if !(significant && window.hspcnt > 1) {
+                break;
+            }
+        }
+    }
+
+    0
+}
+
+/// In-memory position-specific/PSSM protein-space port boundary for
+/// `Blast_RedoOneMatchSmithWaterman`.
+///
+/// This mirrors the protein Smith-Waterman materialized loop, but adjusts the
+/// position-specific rows for the current query/subject window before running
+/// score-only SW, reverse start finding, and bounded X-drop finalization.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_smith_waterman_in_memory_protein_position_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    log_k: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    program: ProgramType,
+    subject_source: &[u8],
+    significant_matches: &[BlastCompoHeap],
+    genetic_code: &[u8; 64],
+    adjusted_pssm: &mut Vec<Vec<i32>>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries || significant_matches.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    if matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || !params.position_based
+        || !params.matrix_info.positional
+        || params.query_is_translated
+        || program == crate::program::BLASTN
+    {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = match window.align.as_ref() {
+            Some(align) if align.query_index >= 0 => align.query_index as usize,
+            _ => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+        if query_index >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+        let Some(window_align) = window.align.as_deref() else {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        };
+
+        let (query, subject) = match sequence_get_range_in_memory_with_code(
+            program,
+            &query_info[query_index].seq,
+            &window.query_range,
+            subject_source,
+            &window.subject_range,
+            genetic_code,
+        ) {
+            Ok(pair) => pair,
+            Err(_) => {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            }
+        };
+
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+        if query_num_true == 0 {
+            let (composition, num_true) = get_composition(
+                &query,
+                &window.query_range,
+                window_align,
+                crate::matrix::AA_SIZE,
+                true,
+                false,
+            );
+            query_composition = composition;
+            query_num_true = num_true;
+        }
+
+        let (subject_composition, subject_num_true) = get_composition(
+            &subject,
+            &window.subject_range,
+            window_align,
+            crate::matrix::AA_SIZE,
+            false,
+            params.subject_is_translated,
+        );
+        let matrix_adjust_rule = match blast_adjust_position_based_scores(
+            adjusted_pssm,
+            &query_composition,
+            query_num_true,
+            &subject_composition,
+            subject_num_true,
+            &params.matrix_info,
+            composition_test_index,
+            pvalue_for_this_pair,
+            lambda_ratio,
+        ) {
+            Ok(rule) => rule,
+            Err(status) if status < 0 => {
+                alignments_free_array(alignments, num_queries);
+                return status;
+            }
+            Err(_) => continue,
+        };
+
+        let searchsp = query_info[query_index].eff_search_space;
+        let mut forbidden = crate::smith_waterman::BlastForbiddenRanges::new(query.length);
+        let query_offset = window.query_range.begin.max(0) as usize;
+
+        loop {
+            let (sw_score, match_end, query_end) =
+                crate::smith_waterman::blast_smith_waterman_score_only_pssm_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    adjusted_pssm,
+                    query_offset,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    &forbidden,
+                );
+            let significant = smith_waterman_alignment_is_significant(
+                sw_score,
+                lambda,
+                log_k,
+                searchsp,
+                params,
+                alignments[query_index].as_deref(),
+                &significant_matches[query_index],
+                matching_seq.index,
+            );
+            if !significant {
+                break;
+            }
+
+            let (_updated_score, match_start, query_start) =
+                crate::smith_waterman::blast_smith_waterman_find_start_pssm_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    adjusted_pssm,
+                    query_offset,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    match_end,
+                    query_end,
+                    sw_score,
+                    &forbidden,
+                );
+
+            let Some((mut new_align, query_end_xdrop, match_end_xdrop)) =
+                new_alignment_using_xdrop_protein_pssm(
+                    &query,
+                    &window.query_range,
+                    &subject,
+                    &window.subject_range,
+                    query_start,
+                    query_end,
+                    match_start,
+                    match_end,
+                    sw_score,
+                    &params.gapping_params,
+                    matrix_adjust_rule,
+                    adjusted_pssm,
+                )
+            else {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            };
+            new_align.next = alignments[query_index].take();
+            alignments[query_index] = Some(Box::new(new_align));
+
+            if window.hspcnt > 1 {
+                forbidden.push(
+                    query_start as i32,
+                    query_end_xdrop + 1,
+                    match_start as i32,
+                    match_end_xdrop,
+                );
+            }
+            if !(significant && window.hspcnt > 1) {
+                break;
+            }
+        }
+    }
+
+    0
+}
+
+/// Callback-driven no-composition port boundary for
+/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`).
+///
+/// The C routine obtains sequence ranges through `callbacks->get_range`, runs
+/// Smith-Waterman, applies the significance gate, finds the start, finalizes
+/// with `callbacks->new_xdrop_align`, prepends the result, and pushes accepted
+/// rectangles into `Blast_ForbiddenRanges` for multi-HSP windows. This Rust
+/// boundary performs that flow when no composition score adjustment is needed.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_smith_waterman_with_callbacks(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    log_k: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    significant_matches: &[BlastCompoHeap],
+    sw_matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+) -> i32 {
+    let mut matrix = *sw_matrix;
+    let mut pvalue_for_this_pair = -1.0;
+    let mut lambda_ratio = 1.0;
+    blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
+        alignments,
+        params,
+        incoming_aligns,
+        _hspcnt,
+        lambda,
+        log_k,
+        matching_seq,
+        query_info,
+        significant_matches,
+        &mut matrix,
+        None,
+        &mut pvalue_for_this_pair,
+        0,
+        &mut lambda_ratio,
+    )
+}
+
+/// Callback-driven port boundary for `Blast_RedoOneMatchSmithWaterman`
+/// (`redo_alignment.c:1342`) with the non-position composition-adjusted
+/// score path wired before the SW loop.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    log_k: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    significant_matches: &[BlastCompoHeap],
+    matrix: &mut [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    workspace: Option<&BlastCompositionWorkspace>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries || significant_matches.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    let Some(callbacks) = params.callbacks else {
+        return -1;
+    };
+    if params.position_based {
+        let mut adjusted_pssm = Vec::new();
+        return blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustment(
+            alignments,
+            params,
+            incoming_aligns,
+            _hspcnt,
+            lambda,
+            log_k,
+            matching_seq,
+            query_info,
+            significant_matches,
+            &mut adjusted_pssm,
+            pvalue_for_this_pair,
+            composition_test_index,
+            lambda_ratio,
+        );
+    }
+    let (Some(get_range), Some(new_xdrop_align)) = (callbacks.get_range, callbacks.new_xdrop_align)
+    else {
+        return -1;
+    };
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = window.query_range.context;
+        if query_index < 0 || query_index as usize >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+        let query_index = query_index as usize;
+        let Some(window_align) = window.align.as_deref() else {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        };
+
+        let near_identical_status = preliminary_test_near_identical(
+            query_info,
+            window,
+            window_align,
+            params.near_identical_cutoff,
+        );
+        let mut subject = BlastCompoSequenceData::default();
+        let mut query = BlastCompoSequenceData::default();
+        let mut subject_maybe_biased = true;
+        let status = get_range(
+            matching_seq,
+            &window.subject_range,
+            &mut subject,
+            &query_info[query_index].seq,
+            &window.query_range,
+            &mut query,
+            &query_info[query_index].words,
+            window_align,
+            near_identical_status,
+            params.compo_adjust_mode,
+            true,
+            &mut subject_maybe_biased,
+        );
+        if status != 0 {
+            alignments_free_array(alignments, num_queries);
+            return status;
+        }
+
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+        if params.query_is_translated {
+            let (composition, num_true) = get_composition(
+                &query,
+                &window.query_range,
+                window_align,
+                crate::matrix::AA_SIZE,
+                true,
+                false,
+            );
+            query_composition = composition;
+            query_num_true = num_true;
+        }
+
+        let mut matrix_adjust_rule = MatrixAdjustRule::DontAdjust;
+        let mut adjust_search_failed = 0;
+        if !matches!(
+            params.compo_adjust_mode,
+            CompoAdjustMode::NoCompositionBasedStats
+        ) {
+            let (subject_composition, subject_num_true) = get_composition(
+                &subject,
+                &window.subject_range,
+                window_align,
+                crate::matrix::AA_SIZE,
+                false,
+                params.subject_is_translated,
+            );
+            match blast_adjust_scores_with_workspace(
+                matrix,
+                &query_composition,
+                query_num_true,
+                &subject_composition,
+                subject_num_true,
+                &params.matrix_info,
+                params.compo_adjust_mode,
+                params.re_pseudocounts,
+                workspace,
+                composition_test_index,
+                pvalue_for_this_pair,
+                lambda_ratio,
+            ) {
+                Ok(rule) => {
+                    matrix_adjust_rule = rule;
+                }
+                Err(status) if status < 0 => {
+                    alignments_free_array(alignments, num_queries);
+                    return status;
+                }
+                Err(_) => {
+                    adjust_search_failed = 1;
+                }
+            }
+        }
+
+        if adjust_search_failed != 0 {
+            sequence_data_release(&mut subject);
+            sequence_data_release(&mut query);
+            continue;
+        }
+
+        let searchsp = query_info[query_index].eff_search_space;
+        let mut forbidden = crate::smith_waterman::BlastForbiddenRanges::new(query.length);
+        loop {
+            let (sw_score, match_end, query_end) =
+                crate::smith_waterman::blast_smith_waterman_score_only_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    &forbidden,
+                );
+            let significant = smith_waterman_alignment_is_significant(
+                sw_score,
+                lambda,
+                log_k,
+                searchsp,
+                params,
+                alignments[query_index].as_deref(),
+                &significant_matches[query_index],
+                matching_seq.index,
+            );
+            if !significant {
+                break;
+            }
+
+            let (_updated_score, match_start, query_start) =
+                crate::smith_waterman::blast_smith_waterman_find_start_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    matrix,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    match_end,
+                    query_end,
+                    sw_score,
+                    &forbidden,
+                );
+
+            let mut new_align = None;
+            let mut query_end_forbidden = query_end as i32;
+            let mut match_end_forbidden = match_end as i32;
+            let status = new_xdrop_align(
+                &mut new_align,
+                &mut query_end_forbidden,
+                &mut match_end_forbidden,
+                query_start as i32,
+                match_start as i32,
+                sw_score,
+                &query,
+                &window.query_range,
+                params.ccat_query_length,
+                &subject,
+                &window.subject_range,
+                matching_seq.length,
+                &params.gapping_params,
+                matrix_adjust_rule,
+            );
+            if status != 0 {
+                alignments_free_array(alignments, num_queries);
+                return status;
+            }
+            let Some(mut new_align) = new_align else {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            };
+            new_align.next = alignments[query_index].take();
+            alignments[query_index] = Some(Box::new(new_align));
+
+            if window.hspcnt > 1 {
+                forbidden.push(
+                    query_start as i32,
+                    query_end_forbidden,
+                    match_start as i32,
+                    match_end_forbidden,
+                );
+            }
+            if !(significant && window.hspcnt > 1) {
+                break;
+            }
+        }
+        sequence_data_release(&mut subject);
+        sequence_data_release(&mut query);
+    }
+
+    0
+}
+
+/// Callback-driven position-specific/PSSM counterpart of
+/// [`blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment`].
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustment(
+    alignments: &mut [Option<Box<BlastCompoAlignment>>],
+    params: &BlastRedoAlignParams,
+    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
+    _hspcnt: i32,
+    lambda: f64,
+    log_k: f64,
+    matching_seq: &BlastCompoMatchingSequence,
+    query_info: &[BlastCompoQueryInfo],
+    significant_matches: &[BlastCompoHeap],
+    adjusted_pssm: &mut Vec<Vec<i32>>,
+    pvalue_for_this_pair: &mut f64,
+    composition_test_index: i32,
+    lambda_ratio: &mut f64,
+) -> i32 {
+    let num_queries = query_info.len();
+    if alignments.len() < num_queries || significant_matches.len() < num_queries {
+        return -1;
+    }
+    alignments_free_array(alignments, num_queries);
+
+    let Some(callbacks) = params.callbacks else {
+        return -1;
+    };
+    let Some(get_range) = callbacks.get_range else {
+        return -1;
+    };
+
+    if matches!(
+        params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) || !params.position_based
+        || !params.matrix_info.positional
+        || params.query_is_translated
+        || params.subject_is_translated
+    {
+        return -1;
+    }
+
+    let windows = match windows_from_aligns(
+        incoming_aligns,
+        query_info,
+        num_queries,
+        K_WINDOW_BORDER,
+        matching_seq.length,
+        params.query_is_translated,
+        params.subject_is_translated,
+        params.position_based,
+    ) {
+        Ok(windows) => windows,
+        Err(_) => return -1,
+    };
+
+    for window in &windows {
+        let query_index = window.query_range.context;
+        if query_index < 0 || query_index as usize >= num_queries {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        }
+        let query_index = query_index as usize;
+        let Some(window_align) = window.align.as_deref() else {
+            alignments_free_array(alignments, num_queries);
+            return -1;
+        };
+
+        let near_identical_status = preliminary_test_near_identical(
+            query_info,
+            window,
+            window_align,
+            params.near_identical_cutoff,
+        );
+        let mut subject = BlastCompoSequenceData::default();
+        let mut query = BlastCompoSequenceData::default();
+        let mut subject_maybe_biased = true;
+        let status = get_range(
+            matching_seq,
+            &window.subject_range,
+            &mut subject,
+            &query_info[query_index].seq,
+            &window.query_range,
+            &mut query,
+            &query_info[query_index].words,
+            window_align,
+            near_identical_status,
+            params.compo_adjust_mode,
+            true,
+            &mut subject_maybe_biased,
+        );
+        if status != 0 {
+            alignments_free_array(alignments, num_queries);
+            return status;
+        }
+
+        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
+            query_info[query_index].seq.length.max(0) as usize
+        } else {
+            0
+        };
+        if query_num_true == 0 {
+            let (composition, num_true) = get_composition(
+                &query,
+                &window.query_range,
+                window_align,
+                crate::matrix::AA_SIZE,
+                true,
+                false,
+            );
+            query_composition = composition;
+            query_num_true = num_true;
+        }
+
+        let (subject_composition, subject_num_true) = get_composition(
+            &subject,
+            &window.subject_range,
+            window_align,
+            crate::matrix::AA_SIZE,
+            false,
+            false,
+        );
+        let matrix_adjust_rule = match blast_adjust_position_based_scores(
+            adjusted_pssm,
+            &query_composition,
+            query_num_true,
+            &subject_composition,
+            subject_num_true,
+            &params.matrix_info,
+            composition_test_index,
+            pvalue_for_this_pair,
+            lambda_ratio,
+        ) {
+            Ok(rule) => rule,
+            Err(status) if status < 0 => {
+                alignments_free_array(alignments, num_queries);
+                return status;
+            }
+            Err(_) => {
+                sequence_data_release(&mut subject);
+                sequence_data_release(&mut query);
+                continue;
+            }
+        };
+
+        let searchsp = query_info[query_index].eff_search_space;
+        let mut forbidden = crate::smith_waterman::BlastForbiddenRanges::new(query.length);
+        let query_offset = window.query_range.begin.max(0) as usize;
+
+        loop {
+            let (sw_score, match_end, query_end) =
+                crate::smith_waterman::blast_smith_waterman_score_only_pssm_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    adjusted_pssm,
+                    query_offset,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    &forbidden,
+                );
+            let significant = smith_waterman_alignment_is_significant(
+                sw_score,
+                lambda,
+                log_k,
+                searchsp,
+                params,
+                alignments[query_index].as_deref(),
+                &significant_matches[query_index],
+                matching_seq.index,
+            );
+            if !significant {
+                break;
+            }
+
+            let (_updated_score, match_start, query_start) =
+                crate::smith_waterman::blast_smith_waterman_find_start_pssm_with_forbidden(
+                    subject.data(),
+                    query.data(),
+                    adjusted_pssm,
+                    query_offset,
+                    params.gapping_params.gap_open,
+                    params.gapping_params.gap_extend,
+                    match_end,
+                    query_end,
+                    sw_score,
+                    &forbidden,
+                );
+
+            let Some((mut new_align, query_end_xdrop, match_end_xdrop)) =
+                new_alignment_using_xdrop_protein_pssm(
+                    &query,
+                    &window.query_range,
+                    &subject,
+                    &window.subject_range,
+                    query_start,
+                    query_end,
+                    match_start,
+                    match_end,
+                    sw_score,
+                    &params.gapping_params,
+                    matrix_adjust_rule,
+                    adjusted_pssm,
+                )
+            else {
+                alignments_free_array(alignments, num_queries);
+                return -1;
+            };
+            new_align.next = alignments[query_index].take();
+            alignments[query_index] = Some(Box::new(new_align));
+
+            if window.hspcnt > 1 {
+                forbidden.push(
+                    query_start as i32,
+                    query_end_xdrop + 1,
+                    match_start as i32,
+                    match_end_xdrop,
+                );
+            }
+            if !(significant && window.hspcnt > 1) {
+                break;
+            }
+        }
+        sequence_data_release(&mut subject);
+        sequence_data_release(&mut query);
+    }
+
+    0
+}
+
+fn square_matrix_from_vec(
+    matrix: &[Vec<i32>],
+) -> Option<[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
+    if matrix.len() < crate::matrix::AA_SIZE {
+        return None;
+    }
+    let mut out = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+    for i in 0..crate::matrix::AA_SIZE {
+        if matrix[i].len() < crate::matrix::AA_SIZE {
+            return None;
+        }
+        out[i].copy_from_slice(&matrix[i][..crate::matrix::AA_SIZE]);
+    }
+    Some(out)
+}
+
+fn freq_ratios_from_vec(
+    matrix: &[Vec<f64>],
+) -> Option<[[f64; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
+    if matrix.len() < crate::matrix::AA_SIZE {
+        return None;
+    }
+    let mut out = [[0.0f64; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+    for i in 0..crate::matrix::AA_SIZE {
+        if matrix[i].len() < crate::matrix::AA_SIZE {
+            return None;
+        }
+        out[i].copy_from_slice(&matrix[i][..crate::matrix::AA_SIZE]);
+    }
+    Some(out)
+}
+
+fn composition_test_pvalue(query_prob: &[f64], subject_prob: &[f64]) -> f64 {
+    let mut permuted_query = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
+    let mut permuted_subject = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
+    crate::compo_mode_condition::gather_letter_probs(query_prob, &mut permuted_query);
+    crate::compo_mode_condition::gather_letter_probs(subject_prob, &mut permuted_subject);
+
+    let (mut lambda_for_pair, iter_count) = crate::composition::calc_lambda_full_precision(
+        &crate::composition::BLOS62,
+        &permuted_query,
+        &permuted_subject,
+        crate::composition::COMPO_NUM_TRUE_AA,
+    );
+    if iter_count >= crate::composition::LAMBDA_ITERATION_LIMIT {
+        lambda_for_pair = crate::composition::COMPO_MIN_LAMBDA;
+    }
+    crate::composition::composition_pvalue(lambda_for_pair)
+}
+
+fn pssm_score_probs(
+    matrix: &[Vec<i32>],
+    rows: usize,
+    subject_prob: &[f64],
+) -> Option<(Vec<f64>, i32, i32)> {
+    if rows == 0 || matrix.len() < rows {
+        return None;
+    }
+
+    let mut obs_min = 0i32;
+    let mut obs_max = 0i32;
+    for row in matrix.iter().take(rows) {
+        if row.len() < crate::matrix::AA_SIZE {
+            return None;
+        }
+        for &jcol in &crate::composition::TRUE_CHAR_POSITIONS {
+            let score = row[jcol];
+            if score < obs_min && score > -100_000 {
+                obs_min = score;
+            }
+            if score > obs_max {
+                obs_max = score;
+            }
+        }
+    }
+
+    let mut score_probs = vec![0.0f64; (obs_max - obs_min + 1) as usize];
+    let one_pos_frac = 1.0 / rows as f64;
+    for row in matrix.iter().take(rows) {
+        for &jcol in &crate::composition::TRUE_CHAR_POSITIONS {
+            if jcol >= subject_prob.len() {
+                return None;
+            }
+            let score = row[jcol];
+            if score >= obs_min {
+                score_probs[(score - obs_min) as usize] += one_pos_frac * subject_prob[jcol];
+            }
+        }
+    }
+    Some((score_probs, obs_min, obs_max))
+}
+
+fn pssm_lambda_ratio(
+    matrix: &[Vec<i32>],
+    rows: usize,
+    subject_prob: &[f64],
+    ungapped_lambda: f64,
+    p_value_adjustment: bool,
+) -> Option<f64> {
+    let (score_probs, obs_min, obs_max) = pssm_score_probs(matrix, rows, subject_prob)?;
+    let range = (obs_max - obs_min + 1) as usize;
+    let mut avg = 0.0f64;
+    for i in 0..range {
+        avg += (obs_min + i as i32) as f64 * score_probs[i];
+    }
+    let adjusted_lambda = if avg >= 0.0 {
+        -1.0
+    } else {
+        crate::composition::karlin_lambda_nr_pub(&score_probs, obs_min, obs_max, ungapped_lambda)
+    };
+
+    let mut ratio = adjusted_lambda / ungapped_lambda;
+    if !p_value_adjustment {
+        ratio = ratio.min(1.0);
+    }
+    Some(ratio.max(0.5))
+}
+
+fn pssm_x_score(row: &[f64], cols: usize, probs: &[f64]) -> f64 {
+    let mut score = 0.0f64;
+    for j in 0..cols.min(crate::composition::ALPHA_CONVERT.len()) {
+        if crate::composition::ALPHA_CONVERT[j] >= 0 && j < probs.len() {
+            score += row[j] * probs[j];
+        }
+    }
+    score.min(-1.0)
+}
+
+/// Position-specific counterpart of `Blast_CompositionBasedStats`.
+///
+/// This is the `s_GetPssmScoreProbs` + `s_ScalePSSM` branch used when
+/// `Blast_MatrixInfo::positionBased` is true.
+pub fn composition_scale_pssm_with_ratio(
+    start_matrix: &[Vec<i32>],
+    start_freq_ratios: &[Vec<f64>],
+    rows: usize,
+    cols: usize,
+    subject_prob: &[f64],
+    ungapped_lambda: f64,
+    p_value_adjustment: bool,
+) -> Option<(Vec<Vec<i32>>, f64)> {
+    const E_CCHAR: usize = crate::encoding::NCBISTDAA_C as usize;
+    const E_XCHAR: usize = crate::encoding::NCBISTDAA_X as usize;
+    const E_SELENOCYSTEINE: usize = crate::encoding::NCBISTDAA_U as usize;
+    const E_STOP_CHAR: usize = crate::encoding::NCBISTDAA_STOP as usize;
+    const E_OCHAR: usize = crate::encoding::NCBISTDAA_O as usize;
+    const COMPO_SCORE_MIN: f64 = -100_000.0;
+
+    if start_matrix.len() < rows || start_freq_ratios.len() < rows || cols == 0 {
+        return None;
+    }
+    let ratio = pssm_lambda_ratio(
+        start_matrix,
+        rows,
+        subject_prob,
+        ungapped_lambda,
+        p_value_adjustment,
+    )?;
+    let scaled_lambda = ungapped_lambda / ratio;
+    let mut matrix = vec![vec![0i32; cols]; rows];
+
+    for p in 0..rows {
+        if start_matrix[p].len() < cols || start_freq_ratios[p].len() < cols {
+            return None;
+        }
+        let mut row = vec![0.0f64; cols];
+        for (j, value) in row.iter_mut().enumerate() {
+            *value = if start_freq_ratios[p][j] <= 0.0 {
+                COMPO_SCORE_MIN
+            } else {
+                start_freq_ratios[p][j].ln() / scaled_lambda
+            };
+        }
+        if E_XCHAR < cols {
+            let x_score = pssm_x_score(&row, cols, subject_prob);
+            row[E_XCHAR] = x_score;
+            if E_OCHAR < cols {
+                row[E_OCHAR] = x_score;
+            }
+        }
+        if E_SELENOCYSTEINE < cols && E_CCHAR < cols {
+            row[E_SELENOCYSTEINE] = row[E_CCHAR];
+        }
+
+        for j in 0..cols {
+            matrix[p][j] = if row[j] < i32::MIN as f64 {
+                i32::MIN
+            } else {
+                crate::math::nint(row[j]) as i32
+            };
+        }
+        if E_STOP_CHAR < cols {
+            matrix[p][E_STOP_CHAR] = start_matrix[p][E_STOP_CHAR];
+        }
+    }
+
+    Some((matrix, ratio))
+}
+
+/// Old-style scaling branch of `Blast_AdjustScores`
+/// (`composition_adjustment.c:1446`).
+///
+/// This covers the non-position-based `eCompositionBasedStats` path that
+/// chooses `eCompoScaleOldMatrix` and calls `Blast_CompositionBasedStats`.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_adjust_scores_scale_old_matrix(
+    matrix: &mut [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    query_prob: &[f64],
+    query_num_true: usize,
+    subject_prob: &[f64],
+    subject_num_true: usize,
+    matrix_info: &BlastMatrixInfo,
+    composition_adjust_mode: CompoAdjustMode,
+    composition_test_index: i32,
+    pvalue_for_this_pair: &mut f64,
+    ratio_to_pass_back: &mut f64,
+) -> Result<MatrixAdjustRule, i32> {
+    blast_adjust_scores_with_workspace(
+        matrix,
+        query_prob,
+        query_num_true,
+        subject_prob,
+        subject_num_true,
+        matrix_info,
+        composition_adjust_mode,
+        K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS,
+        None,
+        composition_test_index,
+        pvalue_for_this_pair,
+        ratio_to_pass_back,
+    )
+}
+
+/// Position-based/PSSM old-style scaling branch of `Blast_AdjustScores`.
+///
+/// NCBI routes every `matrixInfo->positionBased` call to
+/// `eCompoScaleOldMatrix`, then `Blast_CompositionBasedStats`, whose PSSM
+/// branch computes score probabilities across PSSM rows and rescales each row
+/// with `s_ScalePSSM`.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_adjust_position_based_scores(
+    matrix: &mut Vec<Vec<i32>>,
+    query_prob: &[f64],
+    query_num_true: usize,
+    subject_prob: &[f64],
+    subject_num_true: usize,
+    matrix_info: &BlastMatrixInfo,
+    composition_test_index: i32,
+    pvalue_for_this_pair: &mut f64,
+    ratio_to_pass_back: &mut f64,
+) -> Result<MatrixAdjustRule, i32> {
+    if query_num_true == 0 || subject_num_true == 0 {
+        return Err(1);
+    }
+    if !matrix_info.positional {
+        return Err(-1);
+    }
+    if composition_test_index > 0 {
+        *pvalue_for_this_pair = composition_test_pvalue(query_prob, subject_prob);
+    }
+
+    let rows = matrix_info.rows.max(0) as usize;
+    let cols = matrix_info.cols.max(0) as usize;
+    let (scaled, ratio) = composition_scale_pssm_with_ratio(
+        &matrix_info.matrix,
+        &matrix_info.start_freq_ratios,
+        rows,
+        cols,
+        subject_prob,
+        matrix_info.ungapped_lambda,
+        composition_test_index > 0,
+    )
+    .ok_or(1)?;
+
+    *matrix = scaled;
+    *ratio_to_pass_back = ratio;
+    Ok(MatrixAdjustRule::ScaleOldMatrix)
+}
+
+/// Port boundary for `Blast_AdjustScores` (`composition_adjustment.c:1446`).
+///
+/// Implements the non-position-based paths whose required state is available:
+/// composition-based scale-old-matrix adjustment and relative-entropy matrix
+/// optimization with an explicit [`BlastCompositionWorkspace`]. If RE
+/// optimization returns a positive status, NCBI falls back to old-style
+/// scaling; this helper does the same. The non-position-based p-value-test
+/// branch mirrors `Blast_CalcLambdaFullPrecision` + `Blast_CompositionPvalue`.
+/// Position-based callers should use [`blast_adjust_position_based_scores`],
+/// since PSSMs have query-length rows rather than a square amino-acid matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_adjust_scores_with_workspace(
+    matrix: &mut [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    query_prob: &[f64],
+    query_num_true: usize,
+    subject_prob: &[f64],
+    subject_num_true: usize,
+    matrix_info: &BlastMatrixInfo,
+    composition_adjust_mode: CompoAdjustMode,
+    re_pseudocounts: i32,
+    workspace: Option<&BlastCompositionWorkspace>,
+    composition_test_index: i32,
+    pvalue_for_this_pair: &mut f64,
+    ratio_to_pass_back: &mut f64,
+) -> Result<MatrixAdjustRule, i32> {
+    if query_num_true == 0 || subject_num_true == 0 {
+        return Err(1);
+    }
+
+    if matrix_info.positional {
+        return Err(-1);
+    }
+
+    let mut permuted_query = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
+    let mut permuted_subject = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
+    if composition_test_index > 0
+        || !matches!(
+            composition_adjust_mode,
+            CompoAdjustMode::CompositionBasedStats
+        )
+    {
+        crate::compo_mode_condition::gather_letter_probs(query_prob, &mut permuted_query);
+        crate::compo_mode_condition::gather_letter_probs(subject_prob, &mut permuted_subject);
+    }
+
+    if composition_test_index > 0 {
+        *pvalue_for_this_pair = crate::composition::composition_pvalue({
+            let (mut lambda_for_pair, iter_count) = crate::composition::calc_lambda_full_precision(
+                &crate::composition::BLOS62,
+                &permuted_query,
+                &permuted_subject,
+                crate::composition::COMPO_NUM_TRUE_AA,
+            );
+            if iter_count >= crate::composition::LAMBDA_ITERATION_LIMIT {
+                lambda_for_pair = crate::composition::COMPO_MIN_LAMBDA;
+            }
+            lambda_for_pair
+        });
+    }
+
+    let mut matrix_adjust_rule = if matches!(
+        composition_adjust_mode,
+        CompoAdjustMode::CompositionBasedStats
+    ) {
+        MatrixAdjustRule::ScaleOldMatrix
+    } else {
+        crate::compo_mode_condition::choose_matrix_adjust_rule(
+            query_num_true,
+            subject_num_true,
+            &permuted_query,
+            &permuted_subject,
+            composition_adjust_mode as u8,
+        )
+    };
+
+    if matrix_adjust_rule != MatrixAdjustRule::ScaleOldMatrix {
+        let workspace = workspace.ok_or(-1)?;
+        let start_matrix = square_matrix_from_vec(&matrix_info.matrix).ok_or(-1)?;
+        let status = crate::composition::composition_matrix_adj(
+            matrix,
+            matrix_info.cols.max(0) as usize,
+            matrix_adjust_rule,
+            query_num_true,
+            subject_num_true,
+            query_prob,
+            subject_prob,
+            re_pseudocounts,
+            K_FIXED_RE_BLOSUM62,
+            &workspace.joint_probs,
+            &workspace.first_standard_freq,
+            &workspace.second_standard_freq,
+            matrix_info.ungapped_lambda,
+            &start_matrix,
+        );
+        *ratio_to_pass_back = 1.0;
+        if status == 0 {
+            return Ok(matrix_adjust_rule);
+        }
+        if status < 0 {
+            return Err(status);
+        }
+        matrix_adjust_rule = MatrixAdjustRule::ScaleOldMatrix;
+    }
+
+    let start_matrix = square_matrix_from_vec(&matrix_info.matrix).ok_or(-1)?;
+    let freq_ratios = freq_ratios_from_vec(&matrix_info.start_freq_ratios).ok_or(-1)?;
+    let (scaled, ratio) = if composition_test_index > 0 {
+        crate::composition::composition_scale_matrix_with_ratio_and_adjustment(
+            &start_matrix,
+            query_prob,
+            subject_prob,
+            matrix_info.ungapped_lambda,
+            &freq_ratios,
+            true,
+        )
+    } else {
+        crate::composition::composition_scale_matrix_with_ratio(
+            &start_matrix,
+            query_prob,
+            subject_prob,
+            matrix_info.ungapped_lambda,
+            &freq_ratios,
+        )
+    }
+    .ok_or(1)?;
+    *matrix = scaled;
+    *ratio_to_pass_back = ratio;
+    Ok(matrix_adjust_rule)
 }
 
 /// `NEAR_IDENTICAL_BITS_PER_POSITION` (`blast_kappa.c:2399`).
@@ -2390,6 +17433,10 @@ pub fn get_align_params(
     if status != 0 {
         return None;
     }
+    // `matrix_info_init_blastp` fills the shared non-position matrix fields
+    // and defaults this flag to false; preserve the caller's PSI/PSSM branch
+    // flag at the assembly point, matching `sbp->psi_matrix != NULL`.
+    matrix_info.positional = position_based;
 
     // C: `gapping_params = s_GappingParamsNew(context, extendParams,
     //                                          last_context + 1);`
@@ -2405,6 +17452,7 @@ pub fn get_align_params(
         matrix_info,
         gapping_params,
         compo_adjust_mode,
+        local_scaling_factor,
         position_based,
         query_is_translated_p,
         subject_is_translated_p,
@@ -2421,6 +17469,9 @@ pub fn get_align_params(
 /// adjustment. NCBI exposes no override path; this is hardcoded.
 pub const K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS: i32 = 20;
 
+/// `kFixedReBlosum62` (`composition_adjustment.c:77`).
+pub const K_FIXED_RE_BLOSUM62: f64 = 0.44;
+
 /// 1-1 port of `Blast_RedoAlignParamsNew` (`redo_alignment.c:1013`).
 ///
 /// Bundles the matrix info + gapping params + composition-adjust mode
@@ -2436,6 +17487,7 @@ pub fn blast_redo_align_params_new(
     matrix_info: BlastMatrixInfo,
     gapping_params: BlastCompoGappingParams,
     compo_adjust_mode: CompoAdjustMode,
+    local_scaling_factor: f64,
     position_based: bool,
     query_is_translated: bool,
     subject_is_translated: bool,
@@ -2445,10 +17497,46 @@ pub fn blast_redo_align_params_new(
     do_link_hsps: bool,
     near_identical_cutoff: f64,
 ) -> BlastRedoAlignParams {
+    blast_redo_align_params_new_with_callbacks(
+        matrix_info,
+        gapping_params,
+        compo_adjust_mode,
+        local_scaling_factor,
+        position_based,
+        query_is_translated,
+        subject_is_translated,
+        ccat_query_length,
+        cutoff_s,
+        cutoff_e,
+        do_link_hsps,
+        None,
+        near_identical_cutoff,
+    )
+}
+
+/// Variant of [`blast_redo_align_params_new`] that carries the
+/// `Blast_RedoAlignCallbacks *callbacks` argument from NCBI's constructor.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_redo_align_params_new_with_callbacks(
+    matrix_info: BlastMatrixInfo,
+    gapping_params: BlastCompoGappingParams,
+    compo_adjust_mode: CompoAdjustMode,
+    local_scaling_factor: f64,
+    position_based: bool,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+    ccat_query_length: i32,
+    cutoff_s: i32,
+    cutoff_e: f64,
+    do_link_hsps: bool,
+    callbacks: Option<BlastRedoAlignCallbacks>,
+    near_identical_cutoff: f64,
+) -> BlastRedoAlignParams {
     BlastRedoAlignParams {
         matrix_info,
         gapping_params,
         compo_adjust_mode,
+        local_scaling_factor,
         position_based,
         re_pseudocounts: K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS,
         subject_is_translated,
@@ -2457,6 +17545,7 @@ pub fn blast_redo_align_params_new(
         cutoff_s,
         cutoff_e,
         do_link_hsps,
+        callbacks,
         near_identical_cutoff,
     }
 }
@@ -2493,10 +17582,6 @@ pub fn blast_redo_align_params_free(slot: &mut Option<BlastRedoAlignParams>) {
 /// pointers are written into `lists` (which must have length 6).
 /// The function returns `0` on success.
 ///
-/// `hsp.subject_frame` isn't on the Rust `Hsp` struct yet (only
-/// `context`), so this port stamps `frame = 0` until `Hsp` carries
-/// the explicit subject frame field. That doesn't break the per-frame
-/// indexing — that's done via `(hsp.context - init_context)`.
 pub fn result_hsp_to_distinct_align(
     lists: &mut [Option<Box<BlastCompoAlignment>>; 6],
     num_aligns: &mut [i32; 6],
@@ -2522,7 +17607,7 @@ pub fn result_hsp_to_distinct_align(
             continue;
         }
         let frame_index = frame_index as usize;
-        let new_align = BlastCompoAlignment::new(
+        let mut new_align = BlastCompoAlignment::new(
             (hsp.score as f64 * local_scaling_factor).round() as i32,
             MatrixAdjustRule::DontAdjust,
             hsp.context,
@@ -2530,9 +17615,11 @@ pub fn result_hsp_to_distinct_align(
             hsp.query_end,
             hsp.subject_offset,
             hsp.subject_end,
-            0, // hsp.subject_frame — not on Rust Hsp yet (TODO)
+            hsp.subject_frame,
             None,
         );
+        new_align.query_gapped_start = hsp.query_gapped_start;
+        new_align.match_gapped_start = hsp.subject_gapped_start;
         let new_box = Box::new(new_align);
 
         match lists[frame_index].as_mut() {
@@ -2562,7 +17649,7 @@ pub fn result_hsp_to_distinct_align(
 /// Rust port collapses those into the existing
 /// `crate::filter::seg_filter_ncbistdaa` + an in-place X-substitution,
 /// which is what `Blast_MaskTheResidues` ultimately does for protein
-/// (replace each masked residue with NCBIstdaa `X = 21`).
+/// (replace each masked residue with NCBIstdaa `X`).
 ///
 /// Returns `(status, was_biased)` where `status = 0` on success and
 /// `was_biased` is true iff any region was masked (matches NCBI's
@@ -2580,12 +17667,11 @@ pub fn do_seg_sequence_data(seq_data: &mut BlastCompoSequenceData) -> (i32, bool
     let view = &mut seq_data.buffer[start..end];
     let mask = crate::filter::seg_filter_ncbistdaa(view, 12, 2.2, 2.5);
     let was_biased = !mask.regions.is_empty();
-    let masked_residue = 21u8; // NCBIstdaa 'X'
     for r in &mask.regions {
         let r_start = (r.start.max(0) as usize).min(view.len());
         let r_end = (r.end as usize).min(view.len());
         for aa in &mut view[r_start..r_end] {
-            *aa = masked_residue;
+            *aa = crate::encoding::NCBISTDAA_X;
         }
     }
     (0, was_biased)
@@ -2642,13 +17728,12 @@ pub fn rescale_search(
 /// Copies `query[q_range.begin .. q_range.end]` into a freshly-allocated
 /// buffer with NCBI's sentinel-byte layout (`buffer[0] = 0`, real data
 /// at `buffer[1 ..= length]`, terminator at `buffer[length + 1] = 0`),
-/// substituting amino acid 24 (Selenocysteine) with 3 (Cysteine) per
-/// the C source's inline rule.
+/// substituting selenocysteine with cysteine per the C source's inline rule.
 ///
 /// The full `s_SequenceGetRange` then dispatches to
 /// `s_SequenceGetProteinRange` or `s_SequenceGetTranslatedRange` to
-/// fill in the subject `seqData`. Those branches require subject I/O
-/// plumbing not yet ported; they're tracked as TODOs.
+/// fill in the subject `seqData`; those branches are modeled by the
+/// in-memory helpers below.
 pub fn sequence_prep_query_range(
     query: &BlastCompoSequenceData,
     q_range: &BlastCompoSequenceRange,
@@ -2662,14 +17747,127 @@ pub fn sequence_prep_query_range(
     let q_data = query.data();
     for (idx, slot) in buffer[1..=length].iter_mut().enumerate() {
         let src = q_data.get(begin + idx).copied().unwrap_or(0);
-        // Selenocysteine (24) → Cysteine (3).
-        *slot = if src != 24 { src } else { 3 };
+        *slot = if src != crate::encoding::NCBISTDAA_U {
+            src
+        } else {
+            crate::encoding::NCBISTDAA_C
+        };
     }
     BlastCompoSequenceData {
         buffer,
         data_offset: 1,
         length: length as i32,
     }
+}
+
+/// 1-1 port of the in-memory protein branch of
+/// `s_SequenceGetProteinRange` (`blast_kappa.c:1586`).
+///
+/// NCBI obtains the source residues from `BlastSeqSrcGetSequence`, then
+/// creates the same sentinel-byte layout used by the query path:
+/// leading zero, copied residues, trailing zero. This function covers
+/// that byte-level work once the caller has already materialized the
+/// subject protein sequence as NCBIstdaa bytes; the SeqSrc branch calls this
+/// after fetching the program-specific subject encoding.
+pub fn sequence_get_protein_range(
+    source: &[u8],
+    range: &BlastCompoSequenceRange,
+) -> BlastCompoSequenceData {
+    let begin = range.begin.max(0) as usize;
+    let end = range.end.max(range.begin) as usize;
+    let length = end.saturating_sub(begin);
+    let mut buffer = vec![0u8; length + 2];
+    if begin < source.len() {
+        let copy_len = length.min(source.len() - begin);
+        buffer[1..1 + copy_len].copy_from_slice(&source[begin..begin + copy_len]);
+    }
+    BlastCompoSequenceData {
+        buffer,
+        data_offset: 1,
+        length: length as i32,
+    }
+}
+
+/// In-memory port of `s_SequenceGetTranslatedRange` (`blast_kappa.c:1637`).
+///
+/// The C path obtains a `BlastTargetTranslation` for the subject/frame and
+/// copies the requested protein-space interval into sentinel-backed
+/// `BlastCompo_SequenceData`. This helper covers the same byte-level behavior
+/// when the caller has already materialized the translated subject source as
+/// NCBI4na bytes.
+///
+/// `range.context` is the translated subject frame (`+1..+3` or `-1..-3`),
+/// matching the `BlastCompo_Alignment.frame` value later produced by
+/// `s_NewAlignmentFromGapAlign`.
+pub fn sequence_get_translated_range(
+    source_ncbi4na: &[u8],
+    range: &BlastCompoSequenceRange,
+    genetic_code: &[u8; 64],
+) -> Result<BlastCompoSequenceData, &'static str> {
+    let frame = range.context;
+    let context = match frame {
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        -1 => 3,
+        -2 => 4,
+        -3 => 5,
+        _ => return Err("invalid translated subject frame"),
+    };
+    let (translation, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        source_ncbi4na,
+        source_ncbi4na.len(),
+        genetic_code,
+    );
+    let frame_begin = (offsets[context] + 1) as usize;
+    let frame_end = offsets[context + 1] as usize;
+    Ok(sequence_get_protein_range(
+        &translation[frame_begin..frame_end],
+        range,
+    ))
+}
+
+/// In-memory port boundary for `s_SequenceGetRange` (`blast_kappa.c:1670`).
+///
+/// The C helper prepares the query range, then dispatches subject extraction to
+/// either `s_SequenceGetProteinRange` or `s_SequenceGetTranslatedRange`
+/// depending on the program. This Rust helper covers the same dispatch when the
+/// caller has already materialized the subject sequence bytes. Protein subjects
+/// are NCBIstdaa bytes; translated subjects are NCBI4na bytes.
+pub fn sequence_get_range_in_memory(
+    program: ProgramType,
+    query: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    subject_source: &[u8],
+    subject_range: &BlastCompoSequenceRange,
+) -> Result<(BlastCompoSequenceData, BlastCompoSequenceData), &'static str> {
+    sequence_get_range_in_memory_with_code(
+        program,
+        query,
+        query_range,
+        subject_source,
+        subject_range,
+        &crate::util::STANDARD_GENETIC_CODE,
+    )
+}
+
+/// Same as [`sequence_get_range_in_memory`], with an explicit genetic code for
+/// translated-subject programs.
+pub fn sequence_get_range_in_memory_with_code(
+    program: ProgramType,
+    query: &BlastCompoSequenceData,
+    query_range: &BlastCompoSequenceRange,
+    subject_source: &[u8],
+    subject_range: &BlastCompoSequenceRange,
+    genetic_code: &[u8; 64],
+) -> Result<(BlastCompoSequenceData, BlastCompoSequenceData), &'static str> {
+    let query_seq = sequence_prep_query_range(query, query_range);
+    let subject_seq = if crate::program::subject_is_translated(program) {
+        sequence_get_translated_range(subject_source, subject_range, genetic_code)?
+    } else {
+        sequence_get_protein_range(subject_source, subject_range)
+    };
+    Ok((query_seq, subject_seq))
 }
 
 /// 1-1 port of `s_GappingParamsNew` (`blast_kappa.c:2354`).
@@ -2724,9 +17922,9 @@ pub fn gapping_params_new(
 ///
 /// Initializes a `BlastMatrixInfo` from the matrix name and the
 /// "ideal" gapped Karlin block, populating `ungappedLambda`,
-/// `startFreqRatios` (currently BLOSUM62 only), and `startMatrix`. The
-/// position-based (PSI) branch needs `s_GetPosBasedStartFreqRatios` and
-/// `s_ScalePosMatrix`, which are TODOs.
+/// `startFreqRatios`, and `startMatrix`. The position-based (PSI) branch has
+/// a dedicated initializer plus `s_ScalePosMatrix` and Lambda-ratio statistic
+/// update helpers.
 ///
 /// `kbp_ideal_lambda` is `sbp->kbp_ideal->Lambda` from the C source —
 /// the lambda for the ideal (non-context-specific) ungapped matrix.
@@ -2740,14 +17938,12 @@ pub fn matrix_info_init_blastp(
     self_.positional = false;
     self_.ungapped_lambda = kbp_ideal_lambda / scale_factor;
 
-    // C: `s_GetStartFreqRatios(self->startFreqRatios, matrixName);`
-    if !matrix_name.eq_ignore_ascii_case("BLOSUM62") {
-        // Other matrices are TODO; populate empty data and return -1
-        // (matches NCBI's `s_GetStartFreqRatios` returning non-zero on
-        // unknown matrix).
-        return -1;
-    }
-    let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+    let freq_ratio_info = match crate::matrix::get_matrix_freq_ratios_with_scale(matrix_name) {
+        Some(ratios) => ratios,
+        None => return -1,
+    };
+    self_.bit_scale_factor = freq_ratio_info.bit_scale_factor;
+    let freq_ratios = freq_ratio_info.data;
     self_.start_freq_ratios = freq_ratios.iter().map(|row| row.to_vec()).collect();
 
     // C: `Blast_Int4MatrixFromFreq(self->startMatrix, self->cols,
@@ -2757,6 +17953,43 @@ pub fn matrix_info_init_blastp(
     self_.rows = crate::matrix::AA_SIZE as i32;
     self_.cols = crate::matrix::AA_SIZE as i32;
     0
+}
+
+/// Position-based counterpart to the frequency-ratio setup in
+/// `s_MatrixInfoInit`.
+///
+/// NCBI's full PSI branch calls `s_GetPosBasedStartFreqRatios`, then
+/// `s_ScalePosMatrix`, which internally runs `_PSIConvertFreqRatiosToPSSM`.
+/// Call [`psi_private_update_lambda_statistics`] after position-based score
+/// adjustment when the private Lambda-ratio statistic side effect is needed.
+pub fn matrix_info_init_psiblast_from_start_numerator(
+    self_: &mut BlastMatrixInfo,
+    query: &[u8],
+    matrix_name: &str,
+    start_numerator: &[Vec<f64>],
+    kbp_ideal_lambda: f64,
+    scale_factor: f64,
+) -> i32 {
+    self_.matrix_name = matrix_name.to_string();
+    self_.positional = true;
+    self_.ungapped_lambda = kbp_ideal_lambda / scale_factor;
+
+    let freq_ratio_info = match crate::matrix::get_matrix_freq_ratios_with_scale(matrix_name) {
+        Some(ratios) => ratios,
+        None => return -1,
+    };
+    self_.bit_scale_factor = freq_ratio_info.bit_scale_factor;
+
+    let freq_ratios = match get_pos_based_start_freq_ratios(query, matrix_name, start_numerator) {
+        Ok(ratios) => ratios,
+        Err(()) => return -1,
+    };
+
+    self_.start_freq_ratios = freq_ratios;
+    self_.rows = query.len() as i32;
+    self_.cols = crate::matrix::AA_SIZE as i32;
+    let freq_ratios = self_.start_freq_ratios.clone();
+    scale_pos_matrix(self_, &freq_ratios)
 }
 
 /// 1-1 port of `s_RecordInitialSearch` (`blast_kappa.c:2059`).
@@ -2885,6 +18118,9 @@ pub struct BlastCompoHeap {
     pub ecutoff: f64,
 }
 
+/// `EVALUE_STRETCH` (`redo_alignment.c:1588`).
+pub const EVALUE_STRETCH: f64 = 5.0;
+
 impl BlastCompoHeap {
     pub fn new(heap_threshold: i32, ecutoff: f64) -> Self {
         Self {
@@ -2908,22 +18144,131 @@ impl BlastCompoHeap {
             })
     }
 
-    /// 1-1 port of `BlastCompo_HeapPop`. Removes and returns the
-    /// hit-list with the worst (largest) e-value.
-    pub fn pop_worst(&mut self) -> Option<HspList> {
+    fn best_score(record: &HspList) -> i32 {
+        record.hsps.iter().map(|hsp| hsp.score).max().unwrap_or(0)
+    }
+
+    fn record_worse_than(record: &HspList, evalue: f64, score: i32, subject_index: i32) -> bool {
+        if record.best_evalue > evalue {
+            return true;
+        }
+        if record.best_evalue < evalue {
+            return false;
+        }
+        let record_score = Self::best_score(record);
+        if record_score < score {
+            return true;
+        }
+        if record_score > score {
+            return false;
+        }
+        record.oid < subject_index
+    }
+
+    fn worst_record_index(&self) -> Option<usize> {
         if self.records.is_empty() {
             return None;
         }
-        let mut worst_idx = 0;
-        let mut worst_eval = self.records[0].best_evalue;
-        for (i, r) in self.records.iter().enumerate().skip(1) {
-            if r.best_evalue > worst_eval {
-                worst_eval = r.best_evalue;
+        let mut worst_idx = 0usize;
+        for i in 1..self.records.len() {
+            let current = &self.records[i];
+            let worst = &self.records[worst_idx];
+            if Self::record_worse_than(
+                current,
+                worst.best_evalue,
+                Self::best_score(worst),
+                worst.oid,
+            ) {
                 worst_idx = i;
             }
         }
+        Some(worst_idx)
+    }
+
+    /// 1-1 port of `BlastCompo_HeapWouldInsert`.
+    ///
+    /// Returns true if a candidate with `(evalue, score, subject_index)` would
+    /// be retained: the heap is not full, the candidate passes the inclusion
+    /// cutoff, the candidate e-value is better than the current worst, or it
+    /// wins the NCBI tie-breaker against the current worst record.
+    pub fn would_insert(&self, evalue: f64, score: i32, subject_index: i32) -> bool {
+        if self.records.len() < self.heap_threshold.max(0) as usize
+            || evalue <= self.ecutoff
+            || evalue < self.worst_evalue()
+        {
+            return true;
+        }
+        if let Some(worst_idx) = self.worst_record_index() {
+            Self::record_worse_than(&self.records[worst_idx], evalue, score, subject_index)
+        } else {
+            true
+        }
+    }
+
+    /// 1-1 semantic port of `BlastCompo_HeapInsert`.
+    ///
+    /// Inserts `record` if it would be retained. When the heap is full and the
+    /// candidate does not pass `ecutoff`, the worse of the candidate and the
+    /// current worst record is returned as discarded.
+    pub fn insert(&mut self, record: HspList) -> Option<HspList> {
+        let evalue = record.best_evalue;
+        let score = Self::best_score(&record);
+        let subject_index = record.oid;
+        if !self.would_insert(evalue, score, subject_index) {
+            return Some(record);
+        }
+
+        let threshold = self.heap_threshold.max(0) as usize;
+        if self.records.is_empty()
+            || self.records.len() < threshold
+            || (evalue <= self.ecutoff && self.worst_evalue() <= self.ecutoff)
+        {
+            self.records.push(record);
+            return None;
+        }
+
+        if let Some(worst_idx) = self.worst_record_index() {
+            if Self::record_worse_than(&self.records[worst_idx], evalue, score, subject_index) {
+                return Some(std::mem::replace(&mut self.records[worst_idx], record));
+            }
+        }
+        Some(record)
+    }
+
+    /// 1-1 port of `BlastCompo_HeapFilledToCutoff`.
+    pub fn filled_to_cutoff(&self) -> bool {
+        self.records.len() >= self.heap_threshold.max(0) as usize
+            && self.worst_evalue() <= self.ecutoff
+    }
+
+    /// 1-1 port of `BlastCompo_HeapPop`. Removes and returns the
+    /// hit-list with the worst (largest) e-value.
+    pub fn pop_worst(&mut self) -> Option<HspList> {
+        let worst_idx = self.worst_record_index()?;
         Some(self.records.swap_remove(worst_idx))
     }
+}
+
+/// 1-1 port of `BlastCompo_EarlyTermination` (`redo_alignment.c:1592`).
+pub fn blast_compo_early_termination(
+    evalue: f64,
+    significant_matches: &[BlastCompoHeap],
+    num_queries: usize,
+) -> bool {
+    if significant_matches.len() < num_queries {
+        return false;
+    }
+
+    for heap in &significant_matches[..num_queries] {
+        if heap.filled_to_cutoff() {
+            if evalue <= EVALUE_STRETCH * heap.ecutoff {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 /// 1-1 port of `s_FreeBlastCompo_QueryInfoArray` (`blast_kappa.c:2279`).
@@ -2940,6 +18285,31 @@ pub fn free_blast_compo_query_info_array(query_info: &mut Vec<BlastCompoQueryInf
 /// 1-1 port of `s_ClearHeap` (`blast_kappa.c:2518`).
 pub fn clear_heap(heap: &mut BlastCompoHeap) {
     while heap.pop_worst().is_some() {}
+}
+
+/// Merge worker-local composition heaps into the global per-query heaps.
+///
+/// NCBI's threaded redo core lets worker threads retain candidate HSP lists in
+/// local `BlastCompo_Heap` arrays, then merges them by reinserting each worker
+/// record into the final query heap. This function mirrors that semantic merge:
+/// every worker heap is drained through [`BlastCompoHeap::pop_worst`] and each
+/// record is retained or discarded only by the destination heap's normal
+/// [`BlastCompoHeap::insert`] rules.
+pub fn merge_compo_thread_heaps(
+    global_heaps: &mut [BlastCompoHeap],
+    worker_heaps: &mut [Vec<BlastCompoHeap>],
+) {
+    for worker in worker_heaps {
+        for (query_index, worker_heap) in worker.iter_mut().enumerate() {
+            if let Some(global_heap) = global_heaps.get_mut(query_index) {
+                while let Some(hsp_list) = worker_heap.pop_worst() {
+                    let _discarded = global_heap.insert(hsp_list);
+                }
+            } else {
+                clear_heap(worker_heap);
+            }
+        }
+    }
 }
 
 /// 1-1 port of `s_FillResultsFromCompoHeaps` (`blast_kappa.c:2493`).
@@ -3159,16 +18529,15 @@ pub fn blast_hsp_get_num_identities(
     (num_ident, align_length, num_pos)
 }
 
-/// 1-1 port of `s_ComputeNumIdentities` (`blast_kappa.c:458`) for the
-/// non-translated path.
+/// 1-1 port of `s_ComputeNumIdentities` (`blast_kappa.c:458`) for protein
+/// subjects and already-materialized protein-space subjects.
 ///
 /// Walks every HSP in the list and stamps `hsp.num_ident` from a fresh
 /// re-walk over the (unmasked) query and subject bytes via
-/// `blast_hsp_get_num_identities`. The C version dispatches on
-/// `program_number` to translate the subject for tblastn before
-/// counting; that branch is a TODO until `BlastTargetTranslationNew` is
-/// ported. Pass NCBI4na/BLASTNA decoded subject bytes for blastn,
-/// NCBIstdaa for blastp/blastx.
+/// `blast_hsp_get_num_identities`. Pass NCBIstdaa subject bytes for
+/// blastp/blastx. For tblastn-style NCBI4na subjects, use
+/// [`compute_num_identities_translated_subject`] so the HSP's
+/// `subject_frame` selects the translated target frame.
 ///
 /// `edit_ops` is the per-HSP edit script in parallel order with
 /// `hsp_list.hsps`. Pass `None` for an HSP that's still ungapped.
@@ -3187,6 +18556,61 @@ pub fn compute_num_identities_blastp(
     }
 }
 
+/// Translated-subject branch of `s_ComputeNumIdentities`.
+///
+/// NCBI builds a `BlastTargetTranslation` for each tblastn/tblastx subject
+/// frame before calling `Blast_HSPGetNumIdentitiesAndPositives`. This helper
+/// mirrors that flow for an in-memory NCBI4na subject. `hsp.subject_offset` and
+/// `hsp.subject_end` are expected to be protein-space offsets in the translated
+/// frame selected by `hsp.subject_frame`.
+pub fn compute_num_identities_translated_subject(
+    query_nomask: &[u8],
+    subject_ncbi4na: &[u8],
+    hsp_list: &mut HspList,
+    edit_ops_per_hsp: &[Option<Vec<(crate::gapinfo::GapAlignOpType, i32)>>],
+    matrix: Option<&[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]>,
+    genetic_code: &[u8; 64],
+) -> Result<(), &'static str> {
+    let (translation, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        subject_ncbi4na,
+        subject_ncbi4na.len(),
+        genetic_code,
+    );
+    for (i, hsp) in hsp_list.hsps.iter_mut().enumerate() {
+        let context = match hsp.subject_frame {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            -1 => 3,
+            -2 => 4,
+            -3 => 5,
+            _ => return Err("invalid translated subject frame"),
+        };
+        let frame_begin = (offsets[context] + 1) as usize;
+        let frame_end = offsets[context + 1] as usize;
+        let subject = &translation[frame_begin..frame_end];
+        let ops = edit_ops_per_hsp.get(i).and_then(|o| o.as_deref());
+        let (num_ident, _align_length, _num_pos) =
+            blast_hsp_get_num_identities(query_nomask, subject, hsp, ops, matrix);
+        hsp.num_ident = num_ident;
+    }
+    Ok(())
+}
+
+/// Link-HSP context needed by the sum-statistics branch of
+/// `s_HitlistEvaluateAndPurge`.
+///
+/// NCBI has these pieces available through `BlastScoreBlk`,
+/// `BlastQueryInfo`, and hit-saving parameters. Keeping them explicit here
+/// makes the Rust call site choose whether it is truly ready to take the
+/// `BLAST_LinkHsps` path.
+pub struct HitlistLinkContext<'a> {
+    pub query_info: &'a crate::queryinfo::QueryInfo,
+    pub score_block: &'a crate::link_hsps::LinkScoreBlock,
+    pub link_params: &'a crate::link_hsps::LinkHSPParameters,
+    pub gapped_calculation: bool,
+}
+
 /// 1-1 port of `s_HitlistEvaluateAndPurge` (`blast_kappa.c:394`).
 ///
 /// Assigns final e-values and prunes the hit list. The full C function
@@ -3195,12 +18619,12 @@ pub fn compute_num_identities_blastp(
 /// `s_AdjustEvaluesForComposition` for blastp/blastx, then drops HSPs
 /// above the evalue threshold and reports `(best_score, best_evalue)`.
 ///
-/// This Rust port currently implements the **single-HSP, no-link-HSPs
-/// branch** with composition adjustment — sufficient for blastp /
-/// blastx without sum statistics. The link-HSPs branch and the
-/// `Blast_HSPListGetEvalues` call are TODOs (caller is expected to have
-/// already populated `hsp.evalue` per-HSP). When those helpers are
-/// ported, plumb them in by branching on `do_sum_stats`.
+/// This Rust port implements the single-HSP branch and the link-HSPs branch
+/// when `link_context` is supplied.
+/// For the single-HSP branch, pass `Some(kbp)` to recompute per-HSP
+/// e-values and bit scores exactly like `Blast_HSPListGetEvalues`; pass
+/// `None` when the caller has already populated those fields with a
+/// Spouge or translated-search-specific statistic.
 ///
 /// Returns `(best_score, best_evalue)`. After the call, `hsp_list.hsps`
 /// is sorted-stable by NCBI's tie-breaker and contains only HSPs whose
@@ -3213,6 +18637,8 @@ pub fn hitlist_evaluate_and_purge(
     query_length: i32,
     length_adjustment: i32,
     eff_searchsp: f64,
+    kbp: Option<&crate::stat::KarlinBlk>,
+    link_context: Option<&HitlistLinkContext<'_>>,
     pvalue_for_this_pair: f64,
     max_evalue: f64,
     do_sum_stats: bool,
@@ -3222,17 +18648,23 @@ pub fn hitlist_evaluate_and_purge(
     let mut best_score = 0i32;
 
     if do_sum_stats {
-        // TODO: BLAST_LinkHsps port for sum-statistics path. The Rust
-        // `link_hsps.rs` ports the inner helpers (`s_BlastEvenGapLinkHSPs`
-        // etc.) but the umbrella `BLAST_LinkHsps` driver isn't wired in
-        // yet. For now, fall through and treat as the single-HSP branch.
+        if let Some(link_context) = link_context {
+            blast_link_hsps_for_kappa(
+                hsp_list,
+                program_number,
+                subject_length,
+                link_context.query_info,
+                link_context.score_block,
+                link_context.link_params,
+                link_context.gapped_calculation,
+            );
+        }
     }
-    // The C single-HSP branch normally calls `Blast_HSPListGetEvalues`
-    // here, which iterates the HSP array and sets `hsp->evalue` from the
-    // score using `BLAST_KarlinStoE_simple`. The Rust pipeline already
-    // does this assignment at HSP-construction time (see api.rs callers
-    // of `prot_kbp.raw_to_evalue` / `spouge_evalue`), so we skip the
-    // re-assignment to avoid double-applying.
+    if !do_sum_stats {
+        if let Some(kbp) = kbp {
+            blast_hsp_list_get_evalues(hsp_list, kbp, eff_searchsp);
+        }
+    }
 
     // Composition adjustment for blastp/blastx if the p-value is in [0, 1].
     if (program_number == crate::program::BLASTP || program_number == crate::program::BLASTX)
@@ -3259,6 +18691,169 @@ pub fn hitlist_evaluate_and_purge(
     }
 
     (best_score, best_evalue)
+}
+
+/// Bridge from the kappa `HspList` representation to the already-ported
+/// `BLAST_LinkHsps` dispatcher and back.
+pub fn blast_link_hsps_for_kappa(
+    hsp_list: &mut HspList,
+    program_number: ProgramType,
+    subject_length: i32,
+    query_info: &crate::queryinfo::QueryInfo,
+    score_block: &crate::link_hsps::LinkScoreBlock,
+    link_params: &crate::link_hsps::LinkHSPParameters,
+    gapped_calculation: bool,
+) -> i32 {
+    type HspMetaKey = (i32, i32, i32, i32, i32, i32, i32, i32);
+    let mut original_meta: std::collections::HashMap<
+        HspMetaKey,
+        Vec<(i32, Option<crate::gapinfo::GapEditScript>, i32)>,
+    > = std::collections::HashMap::new();
+    for hsp in &hsp_list.hsps {
+        original_meta
+            .entry((
+                hsp.score,
+                hsp.context,
+                hsp.query_frame,
+                hsp.subject_frame,
+                hsp.query_offset,
+                hsp.query_end,
+                hsp.subject_offset,
+                hsp.subject_end,
+            ))
+            .or_default()
+            .push((
+                hsp.comp_adjustment_method,
+                hsp.edit_script.clone(),
+                hsp.num_gaps,
+            ));
+    }
+
+    let mut link_list = crate::link_hsps::LinkBlastHspList {
+        oid: hsp_list.oid,
+        query_index: 0,
+        hsp_array: hsp_list
+            .hsps
+            .iter()
+            .map(|hsp| crate::link_hsps::LinkBlastHsp {
+                score: hsp.score,
+                num_ident: hsp.num_ident,
+                bit_score: hsp.bit_score,
+                evalue: hsp.evalue,
+                query: crate::link_hsps::LinkBlastSeg {
+                    frame: hsp.query_frame,
+                    offset: hsp.query_offset,
+                    end: hsp.query_end,
+                    gapped_start: hsp.query_gapped_start,
+                },
+                subject: crate::link_hsps::LinkBlastSeg {
+                    frame: hsp.subject_frame,
+                    offset: hsp.subject_offset,
+                    end: hsp.subject_end,
+                    gapped_start: hsp.subject_gapped_start,
+                },
+                context: hsp.context,
+                num: 1,
+            })
+            .collect(),
+        best_evalue: hsp_list.best_evalue,
+    };
+
+    let status = crate::link_hsps::BLAST_LinkHsps(
+        program_number,
+        &mut link_list,
+        query_info,
+        subject_length,
+        score_block,
+        link_params,
+        gapped_calculation,
+    );
+
+    hsp_list.oid = link_list.oid;
+    hsp_list.best_evalue = link_list.best_evalue;
+    hsp_list.hsps = link_list
+        .hsp_array
+        .into_iter()
+        .map(|hsp| {
+            let meta = original_meta
+                .get_mut(&(
+                    hsp.score,
+                    hsp.context,
+                    hsp.query.frame,
+                    hsp.subject.frame,
+                    hsp.query.offset,
+                    hsp.query.end,
+                    hsp.subject.offset,
+                    hsp.subject.end,
+                ))
+                .and_then(|items| items.pop())
+                .unwrap_or((0, None, 0));
+            Hsp {
+                score: hsp.score,
+                num_ident: hsp.num_ident,
+                bit_score: hsp.bit_score,
+                evalue: hsp.evalue,
+                query_offset: hsp.query.offset,
+                query_end: hsp.query.end,
+                query_gapped_start: hsp.query.gapped_start,
+                subject_offset: hsp.subject.offset,
+                subject_end: hsp.subject.end,
+                subject_gapped_start: hsp.subject.gapped_start,
+                context: hsp.context,
+                query_frame: hsp.query.frame,
+                subject_frame: hsp.subject.frame,
+                num_gaps: meta.2,
+                comp_adjustment_method: meta.0,
+                edit_script: meta.1,
+            }
+        })
+        .collect();
+    status
+}
+
+/// Count gap-opening operations in a `GapEditScript`.
+///
+/// NCBI's HSP initialization stores the number of gap runs, not the total
+/// number of gapped residues. Consecutive same-type gap ops are already merged
+/// by `GapEditScript::push`, so each insertion/deletion op contributes one.
+pub fn gap_edit_script_num_gap_opens(script: &crate::gapinfo::GapEditScript) -> i32 {
+    script
+        .ops
+        .iter()
+        .filter(|(op, _)| {
+            matches!(
+                op,
+                crate::gapinfo::GapAlignOpType::Del
+                    | crate::gapinfo::GapAlignOpType::Del1
+                    | crate::gapinfo::GapAlignOpType::Del2
+                    | crate::gapinfo::GapAlignOpType::Ins
+                    | crate::gapinfo::GapAlignOpType::Ins1
+                    | crate::gapinfo::GapAlignOpType::Ins2
+            )
+        })
+        .count() as i32
+}
+
+/// Port of the non-sum-statistics part of `Blast_HSPListGetEvalues`
+/// (`blast_hits.c:1828`).
+///
+/// Recomputes each HSP's e-value from its raw score and search space,
+/// stamps the bit score, and updates `best_evalue`. Sum-statistics
+/// callers should continue to use the linking path instead.
+pub fn blast_hsp_list_get_evalues(
+    hsp_list: &mut HspList,
+    kbp: &crate::stat::KarlinBlk,
+    search_space: f64,
+) {
+    let mut best_evalue = f64::MAX;
+    for hsp in &mut hsp_list.hsps {
+        hsp.evalue = kbp.raw_to_evalue(hsp.score, search_space);
+        hsp.bit_score = kbp.raw_to_bit(hsp.score);
+        if hsp.evalue < best_evalue {
+            best_evalue = hsp.evalue;
+        }
+    }
+    hsp_list.best_evalue = best_evalue;
 }
 
 /// 1-1 port of `s_AdjustEvaluesForComposition` (`blast_kappa.c:134`).
@@ -3409,12 +19004,10 @@ pub fn test_near_identical(
 /// `eDontAdjustMatrix → eNoCompositionBasedStats`,
 /// `eCompoScaleOldMatrix → eCompositionBasedStats`,
 /// otherwise `eCompositionMatrixAdjust`.
-/// Our `Hsp` doesn't carry that field yet (TODO: add it), so this port
-/// returns the per-HSP `CompoAdjustMode` tags in a parallel `Vec`.
-/// Caller order matches `hsp_list.hsps` order **before** the sort step,
-/// so the tag at index `i` corresponds to the alignment list's
-/// position-`i` element — sort the tag vec in tandem if you depend on
-/// hsp index post-sort.
+/// The Rust `Hsp` stores `comp_adjustment_method` as the raw
+/// `ECompoAdjustModes` integer and owns the transferred edit script.
+/// The return value keeps the historical parallel tag vector for existing
+/// call sites, but the primary state now lives on each HSP.
 pub fn hsp_list_from_distinct_alignments(
     hsp_list: &mut HspList,
     alignments: &mut Option<Box<BlastCompoAlignment>>,
@@ -3427,40 +19020,38 @@ pub fn hsp_list_from_distinct_alignments(
     let mut cursor = alignments.take();
     while let Some(mut node) = cursor {
         let edit_script = node.context.take();
+        let num_gaps = edit_script
+            .as_ref()
+            .map(gap_edit_script_num_gap_opens)
+            .unwrap_or(0);
         // C: `Blast_HSPInit(queryStart, queryEnd, matchStart, matchEnd,
         //                   unknown_value, unknown_value,
         //                   queryIndex, frame, align->frame, score,
         //                   &editScript, &new_hsp);`
-        // Our Hsp encodes (queryIndex, frame, subject_frame) as a single
-        // `context` integer — the search engine elsewhere uses this
-        // convention. We follow suit: pack the query `frame` into
-        // `context` and let the subject frame ride along via the
-        // alignment's `frame` field. When Hsp gets an explicit
-        // subject_frame field, plumb it then.
-        let _ = (edit_script, frame); // edit_script ownership now lives only
-                                      // here; downstream HSP storage will
-                                      // need to re-attach when port matures.
-        let mut hsp = Hsp {
+        let tag = match node.matrix_adjust_rule {
+            MatrixAdjustRule::DontAdjust => CompoAdjustMode::NoCompositionBasedStats,
+            MatrixAdjustRule::ScaleOldMatrix => CompoAdjustMode::CompositionBasedStats,
+            _ => CompoAdjustMode::CompositionMatrixAdjust,
+        };
+        let hsp = Hsp {
             score: node.score,
             num_ident: 0, // C: explicitly leaves num_ident blank
             bit_score: 0.0,
             evalue: 0.0,
             query_offset: node.query_start,
             query_end: node.query_end,
+            query_gapped_start: node.query_gapped_start,
             subject_offset: node.match_start,
             subject_end: node.match_end,
+            subject_gapped_start: node.match_gapped_start,
             context: node.query_index,
-            num_gaps: 0,
-        };
-        let _ = node.frame; // subject frame; carried via context tag below
-                            // Translate matrix_adjust_rule → comp_adjustment_method.
-        let tag = match node.matrix_adjust_rule {
-            MatrixAdjustRule::DontAdjust => CompoAdjustMode::NoCompositionBasedStats,
-            MatrixAdjustRule::ScaleOldMatrix => CompoAdjustMode::CompositionBasedStats,
-            _ => CompoAdjustMode::CompositionMatrixAdjust,
+            query_frame: frame,
+            subject_frame: node.frame,
+            num_gaps,
+            comp_adjustment_method: tag as i32,
+            edit_script,
         };
         // Append HSP and its compositional tag in parallel.
-        let _ = &mut hsp;
         hsp_list.hsps.push(hsp);
         comp_tags.push(tag);
 
@@ -3537,10 +19128,9 @@ pub fn hitlist_reap_contained(hsps: &mut Vec<Hsp>) {
             }
             let h1 = &hsps[i_read];
             let h2 = &hsps[i_back];
-            // The Rust `Hsp` carries `context` rather than separate
-            // query/subject frame fields. Identical context implies the
-            // same frame pair (one context per frame combination).
-            if h1.context != h2.context {
+            // NCBI requires the same query and subject frame before an
+            // earlier HSP can suppress a contained later HSP.
+            if h1.query_frame != h2.query_frame || h1.subject_frame != h2.subject_frame {
                 continue;
             }
             // CONTAINED_IN_HSP on both endpoints of h1's interval.
@@ -3649,10 +19239,16 @@ mod tests {
             evalue: 1e-10,
             query_offset: 0,
             query_end: 100,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 100,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         // Apply lambda=0.3, logK=-2.0, divisor=2.0
         hsp_list_normalize_scores(&mut list, 0.3, -2.0, 2.0);
@@ -3672,10 +19268,16 @@ mod tests {
                 evalue: 0.0,
                 query_offset: 0,
                 query_end: 100,
+                query_gapped_start: 0,
                 subject_offset: 0,
                 subject_end: 100,
+                subject_gapped_start: 0,
                 context: 0,
+                query_frame: 0,
+                subject_frame: 0,
                 num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
             },
             Hsp {
                 // Contained, lower score → dropped.
@@ -3685,29 +19287,61 @@ mod tests {
                 evalue: 0.0,
                 query_offset: 20,
                 query_end: 60,
+                query_gapped_start: 20,
                 subject_offset: 20,
                 subject_end: 60,
+                subject_gapped_start: 20,
                 context: 0,
+                query_frame: 0,
+                subject_frame: 0,
                 num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
             },
             Hsp {
-                // Different context → not contained even though inside coords.
+                // Different frame pair -> not contained even though inside coords.
                 score: 50,
                 num_ident: 0,
                 bit_score: 0.0,
                 evalue: 0.0,
                 query_offset: 20,
                 query_end: 60,
+                query_gapped_start: 20,
                 subject_offset: 20,
                 subject_end: 60,
-                context: 3,
+                subject_gapped_start: 20,
+                context: 0,
+                query_frame: 0,
+                subject_frame: -1,
                 num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+            },
+            Hsp {
+                // Different context alone is not enough to avoid pruning once
+                // the explicit frame pair matches.
+                score: 40,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: 0.0,
+                query_offset: 30,
+                query_end: 50,
+                query_gapped_start: 30,
+                subject_offset: 30,
+                subject_end: 50,
+                subject_gapped_start: 30,
+                context: 3,
+                query_frame: 0,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
             },
         ];
         hitlist_reap_contained(&mut hsps);
         assert_eq!(hsps.len(), 2);
         assert_eq!(hsps[0].score, 100);
-        assert_eq!(hsps[1].context, 3);
+        assert_eq!(hsps[1].subject_frame, -1);
     }
 
     #[test]

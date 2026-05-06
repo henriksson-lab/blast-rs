@@ -1,31 +1,8 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+use blast_rs::encoding::encode_blastna_sequence;
 use blast_rs::traceback::{blast_gapped_align, blast_gapped_score_only};
-
-fn encode_blastna(seq: &str) -> Vec<u8> {
-    seq.as_bytes()
-        .iter()
-        .map(|&b| match b {
-            b'A' | b'a' => 0,
-            b'C' | b'c' => 1,
-            b'G' | b'g' => 2,
-            b'T' | b't' | b'U' | b'u' => 3,
-            b'R' | b'r' => 4,
-            b'Y' | b'y' => 5,
-            b'M' | b'm' => 6,
-            b'K' | b'k' => 7,
-            b'W' | b'w' => 8,
-            b'S' | b's' => 9,
-            b'B' | b'b' => 10,
-            b'D' | b'd' => 11,
-            b'H' | b'h' => 12,
-            b'V' | b'v' => 13,
-            b'N' | b'n' => 14,
-            _ => 15,
-        })
-        .collect()
-}
 
 fn timed(name: &str, iterations: usize, mut f: impl FnMut() -> i32) {
     let start = Instant::now();
@@ -63,8 +40,8 @@ fn main() {
         }
     }
 
-    let query = encode_blastna(&query);
-    let subject = encode_blastna(&subject);
+    let query = encode_blastna_sequence(query.as_bytes());
+    let subject = encode_blastna_sequence(subject.as_bytes());
     let seed_q = query.len() / 2;
     let seed_s = subject.len() / 2;
 

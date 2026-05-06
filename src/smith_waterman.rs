@@ -218,6 +218,174 @@ pub fn bl_smith_waterman_find_start(
 /// never claim a positive contribution from that position.
 const COMPO_SCORE_MIN: i32 = i32::MIN / 2;
 
+fn pssm_cell_score(pssm: &[Vec<i32>], query_offset: usize, query_pos: usize, subject: u8) -> i32 {
+    pssm.get(query_offset.saturating_add(query_pos))
+        .and_then(|row| row.get(subject as usize))
+        .copied()
+        .unwrap_or(-4)
+}
+
+/// PSSM-backed variant of [`bl_basic_smith_waterman_score_only`].
+///
+/// `pssm[query_offset + query_pos][subject_byte]` supplies the
+/// substitution score. The DP state and gap/local SW behavior are kept
+/// identical to the square-matrix primitive.
+pub fn bl_basic_smith_waterman_score_only_pssm(
+    match_seq: &[u8],
+    query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+) -> (i32, usize, usize) {
+    let match_seq_length = match_seq.len();
+    let query_length = query.len();
+    if match_seq_length == 0 || query_length == 0 {
+        return (0, 0, 0);
+    }
+
+    let mut score_vector: Vec<SwGapInfo> = (0..match_seq_length)
+        .map(|_| SwGapInfo {
+            no_gap: 0,
+            gap_exists: -gap_open,
+        })
+        .collect();
+
+    let mut best_score = 0i32;
+    let mut best_match_seq_pos = 0usize;
+    let mut best_query_pos = 0usize;
+    let new_gap_cost = gap_open + gap_extend;
+
+    for query_pos in 0..query_length {
+        let mut new_score = 0i32;
+        let mut prev_score_no_gap_match_seq = 0i32;
+        let mut prev_score_gap_match_seq = -gap_open;
+
+        for match_seq_pos in 0..match_seq_length {
+            new_score -= new_gap_cost;
+            prev_score_gap_match_seq -= gap_extend;
+            if new_score > prev_score_gap_match_seq {
+                prev_score_gap_match_seq = new_score;
+            }
+
+            new_score = score_vector[match_seq_pos].no_gap - new_gap_cost;
+            let mut continue_gap_score = score_vector[match_seq_pos].gap_exists - gap_extend;
+            if new_score > continue_gap_score {
+                continue_gap_score = new_score;
+            }
+
+            new_score = prev_score_no_gap_match_seq
+                + pssm_cell_score(pssm, query_offset, query_pos, match_seq[match_seq_pos]);
+            if new_score < 0 {
+                new_score = 0;
+            }
+            if new_score < prev_score_gap_match_seq {
+                new_score = prev_score_gap_match_seq;
+            }
+            if new_score < continue_gap_score {
+                new_score = continue_gap_score;
+            }
+
+            prev_score_no_gap_match_seq = score_vector[match_seq_pos].no_gap;
+            score_vector[match_seq_pos].no_gap = new_score;
+            score_vector[match_seq_pos].gap_exists = continue_gap_score;
+
+            if new_score > best_score {
+                best_score = new_score;
+                best_query_pos = query_pos;
+                best_match_seq_pos = match_seq_pos;
+            }
+        }
+    }
+
+    if best_score < 0 {
+        best_score = 0;
+    }
+
+    (best_score, best_match_seq_pos, best_query_pos)
+}
+
+/// PSSM-backed variant of [`bl_smith_waterman_find_start`].
+pub fn bl_smith_waterman_find_start_pssm(
+    match_seq: &[u8],
+    _query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+    match_seq_end: usize,
+    query_end: usize,
+    score_in: i32,
+) -> (i32, usize, usize) {
+    let match_seq_length = match_seq_end + 1;
+    if match_seq_length == 0 || query_end == usize::MAX {
+        return (0, 0, 0);
+    }
+
+    let mut score_vector: Vec<SwGapInfo> = (0..match_seq_length)
+        .map(|_| SwGapInfo {
+            no_gap: 0,
+            gap_exists: -gap_open,
+        })
+        .collect();
+
+    let mut best_score = 0i32;
+    let mut best_match_seq_pos = 0usize;
+    let mut best_query_pos = 0usize;
+    let new_gap_cost = gap_open + gap_extend;
+
+    'outer: for query_pos in (0..=query_end).rev() {
+        let mut new_score = 0i32;
+        let mut prev_score_no_gap_match_seq = 0i32;
+        let mut prev_score_gap_match_seq = -gap_open;
+
+        for match_seq_pos in (0..=match_seq_end).rev() {
+            new_score -= new_gap_cost;
+            prev_score_gap_match_seq -= gap_extend;
+            if new_score > prev_score_gap_match_seq {
+                prev_score_gap_match_seq = new_score;
+            }
+
+            new_score = score_vector[match_seq_pos].no_gap - new_gap_cost;
+            let mut continue_gap_score = score_vector[match_seq_pos].gap_exists - gap_extend;
+            if new_score > continue_gap_score {
+                continue_gap_score = new_score;
+            }
+
+            new_score = prev_score_no_gap_match_seq
+                + pssm_cell_score(pssm, query_offset, query_pos, match_seq[match_seq_pos]);
+            if new_score < 0 {
+                new_score = 0;
+            }
+            if new_score < prev_score_gap_match_seq {
+                new_score = prev_score_gap_match_seq;
+            }
+            if new_score < continue_gap_score {
+                new_score = continue_gap_score;
+            }
+
+            prev_score_no_gap_match_seq = score_vector[match_seq_pos].no_gap;
+            score_vector[match_seq_pos].no_gap = new_score;
+            score_vector[match_seq_pos].gap_exists = continue_gap_score;
+
+            if new_score > best_score {
+                best_score = new_score;
+                best_query_pos = query_pos;
+                best_match_seq_pos = match_seq_pos;
+            }
+            if best_score >= score_in {
+                break 'outer;
+            }
+        }
+    }
+
+    if best_score < 0 {
+        best_score = 0;
+    }
+
+    (best_score, best_match_seq_pos, best_query_pos)
+}
+
 /// 1-1 port of `Blast_ForbiddenRanges` (`smith_waterman.h`).
 ///
 /// Tracks per-query-position lists of forbidden subject ranges, used by
@@ -492,6 +660,201 @@ pub fn bl_special_smith_waterman_find_start(
     (best_score, best_match_seq_pos, best_query_pos)
 }
 
+/// PSSM-backed variant of [`bl_special_smith_waterman_score_only`].
+pub fn bl_special_smith_waterman_score_only_pssm(
+    match_seq: &[u8],
+    query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+    forbidden: &BlastForbiddenRanges,
+) -> (i32, usize, usize) {
+    let match_seq_length = match_seq.len();
+    let query_length = query.len();
+    if match_seq_length == 0 || query_length == 0 {
+        return (0, 0, 0);
+    }
+
+    let mut score_vector: Vec<SwGapInfo> = (0..match_seq_length)
+        .map(|_| SwGapInfo {
+            no_gap: 0,
+            gap_exists: -gap_open,
+        })
+        .collect();
+
+    let mut best_score = 0i32;
+    let mut best_match_seq_pos = 0usize;
+    let mut best_query_pos = 0usize;
+    let new_gap_cost = gap_open + gap_extend;
+
+    for query_pos in 0..query_length {
+        let mut new_score = 0i32;
+        let mut prev_score_no_gap_match_seq = 0i32;
+        let mut prev_score_gap_match_seq = -gap_open;
+
+        let nf = *forbidden.num_forbidden.get(query_pos).unwrap_or(&0) as usize;
+        let row_ranges: &[i32] = forbidden
+            .ranges
+            .get(query_pos)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        for match_seq_pos in 0..match_seq_length {
+            new_score -= new_gap_cost;
+            prev_score_gap_match_seq -= gap_extend;
+            if new_score > prev_score_gap_match_seq {
+                prev_score_gap_match_seq = new_score;
+            }
+            new_score = score_vector[match_seq_pos].no_gap - new_gap_cost;
+            let mut continue_gap_score = score_vector[match_seq_pos].gap_exists - gap_extend;
+            if new_score > continue_gap_score {
+                continue_gap_score = new_score;
+            }
+
+            let mut is_forbidden = false;
+            for f in 0..nf {
+                let r0 = row_ranges[2 * f] as i64;
+                let r1 = row_ranges[2 * f + 1] as i64;
+                if (match_seq_pos as i64) >= r0 && (match_seq_pos as i64) <= r1 {
+                    is_forbidden = true;
+                    break;
+                }
+            }
+            new_score = if is_forbidden {
+                COMPO_SCORE_MIN
+            } else {
+                prev_score_no_gap_match_seq
+                    + pssm_cell_score(pssm, query_offset, query_pos, match_seq[match_seq_pos])
+            };
+            if new_score < 0 {
+                new_score = 0;
+            }
+            if new_score < prev_score_gap_match_seq {
+                new_score = prev_score_gap_match_seq;
+            }
+            if new_score < continue_gap_score {
+                new_score = continue_gap_score;
+            }
+
+            prev_score_no_gap_match_seq = score_vector[match_seq_pos].no_gap;
+            score_vector[match_seq_pos].no_gap = new_score;
+            score_vector[match_seq_pos].gap_exists = continue_gap_score;
+
+            if new_score > best_score {
+                best_score = new_score;
+                best_query_pos = query_pos;
+                best_match_seq_pos = match_seq_pos;
+            }
+        }
+    }
+
+    if best_score < 0 {
+        best_score = 0;
+    }
+    (best_score, best_match_seq_pos, best_query_pos)
+}
+
+/// PSSM-backed variant of [`bl_special_smith_waterman_find_start`].
+pub fn bl_special_smith_waterman_find_start_pssm(
+    match_seq: &[u8],
+    _query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+    match_seq_end: usize,
+    query_end: usize,
+    score_in: i32,
+    forbidden: &BlastForbiddenRanges,
+) -> (i32, usize, usize) {
+    let match_seq_length = match_seq_end + 1;
+    if match_seq_length == 0 {
+        return (0, 0, 0);
+    }
+
+    let mut score_vector: Vec<SwGapInfo> = (0..match_seq_length)
+        .map(|_| SwGapInfo {
+            no_gap: 0,
+            gap_exists: -gap_open,
+        })
+        .collect();
+
+    let mut best_score = 0i32;
+    let mut best_match_seq_pos = 0usize;
+    let mut best_query_pos = 0usize;
+    let new_gap_cost = gap_open + gap_extend;
+
+    'outer: for query_pos in (0..=query_end).rev() {
+        let mut new_score = 0i32;
+        let mut prev_score_no_gap_match_seq = 0i32;
+        let mut prev_score_gap_match_seq = -gap_open;
+
+        let nf = *forbidden.num_forbidden.get(query_pos).unwrap_or(&0) as usize;
+        let row_ranges: &[i32] = forbidden
+            .ranges
+            .get(query_pos)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        for match_seq_pos in (0..=match_seq_end).rev() {
+            new_score -= new_gap_cost;
+            prev_score_gap_match_seq -= gap_extend;
+            if new_score > prev_score_gap_match_seq {
+                prev_score_gap_match_seq = new_score;
+            }
+            new_score = score_vector[match_seq_pos].no_gap - new_gap_cost;
+            let mut continue_gap_score = score_vector[match_seq_pos].gap_exists - gap_extend;
+            if new_score > continue_gap_score {
+                continue_gap_score = new_score;
+            }
+
+            let mut is_forbidden = false;
+            for f in 0..nf {
+                let r0 = row_ranges[2 * f] as i64;
+                let r1 = row_ranges[2 * f + 1] as i64;
+                if (match_seq_pos as i64) >= r0 && (match_seq_pos as i64) <= r1 {
+                    is_forbidden = true;
+                    break;
+                }
+            }
+            new_score = if is_forbidden {
+                COMPO_SCORE_MIN
+            } else {
+                prev_score_no_gap_match_seq
+                    + pssm_cell_score(pssm, query_offset, query_pos, match_seq[match_seq_pos])
+            };
+            if new_score < 0 {
+                new_score = 0;
+            }
+            if new_score < prev_score_gap_match_seq {
+                new_score = prev_score_gap_match_seq;
+            }
+            if new_score < continue_gap_score {
+                new_score = continue_gap_score;
+            }
+
+            prev_score_no_gap_match_seq = score_vector[match_seq_pos].no_gap;
+            score_vector[match_seq_pos].no_gap = new_score;
+            score_vector[match_seq_pos].gap_exists = continue_gap_score;
+
+            if new_score > best_score {
+                best_score = new_score;
+                best_query_pos = query_pos;
+                best_match_seq_pos = match_seq_pos;
+            }
+            if best_score >= score_in {
+                break 'outer;
+            }
+        }
+    }
+
+    if best_score < 0 {
+        best_score = 0;
+    }
+    (best_score, best_match_seq_pos, best_query_pos)
+}
+
 /// 1-1 port of `Blast_SmithWatermanScoreOnly` (`smith_waterman.c:545`).
 ///
 /// Public dispatch — falls through to [`bl_basic_smith_waterman_score_only`]
@@ -523,6 +886,57 @@ pub fn blast_smith_waterman_score_only_with_forbidden(
     } else {
         bl_special_smith_waterman_score_only(
             match_seq, query, matrix, gap_open, gap_extend, forbidden,
+        )
+    }
+}
+
+/// PSSM-backed public score-only dispatch.
+pub fn blast_smith_waterman_score_only_pssm(
+    match_seq: &[u8],
+    query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+) -> (i32, usize, usize) {
+    bl_basic_smith_waterman_score_only_pssm(
+        match_seq,
+        query,
+        pssm,
+        query_offset,
+        gap_open,
+        gap_extend,
+    )
+}
+
+/// PSSM-backed score-only dispatch with forbidden ranges.
+pub fn blast_smith_waterman_score_only_pssm_with_forbidden(
+    match_seq: &[u8],
+    query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+    forbidden: &BlastForbiddenRanges,
+) -> (i32, usize, usize) {
+    if forbidden.is_empty {
+        bl_basic_smith_waterman_score_only_pssm(
+            match_seq,
+            query,
+            pssm,
+            query_offset,
+            gap_open,
+            gap_extend,
+        )
+    } else {
+        bl_special_smith_waterman_score_only_pssm(
+            match_seq,
+            query,
+            pssm,
+            query_offset,
+            gap_open,
+            gap_extend,
+            forbidden,
         )
     }
 }
@@ -592,25 +1006,94 @@ pub fn blast_smith_waterman_find_start_with_forbidden(
     }
 }
 
+/// PSSM-backed public find-start dispatch.
+pub fn blast_smith_waterman_find_start_pssm(
+    match_seq: &[u8],
+    query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+    match_seq_end: usize,
+    query_end: usize,
+    score_in: i32,
+) -> (i32, usize, usize) {
+    bl_smith_waterman_find_start_pssm(
+        match_seq,
+        query,
+        pssm,
+        query_offset,
+        gap_open,
+        gap_extend,
+        match_seq_end,
+        query_end,
+        score_in,
+    )
+}
+
+/// PSSM-backed find-start dispatch with forbidden ranges.
+pub fn blast_smith_waterman_find_start_pssm_with_forbidden(
+    match_seq: &[u8],
+    query: &[u8],
+    pssm: &[Vec<i32>],
+    query_offset: usize,
+    gap_open: i32,
+    gap_extend: i32,
+    match_seq_end: usize,
+    query_end: usize,
+    score_in: i32,
+    forbidden: &BlastForbiddenRanges,
+) -> (i32, usize, usize) {
+    if forbidden.is_empty {
+        bl_smith_waterman_find_start_pssm(
+            match_seq,
+            query,
+            pssm,
+            query_offset,
+            gap_open,
+            gap_extend,
+            match_seq_end,
+            query_end,
+            score_in,
+        )
+    } else {
+        bl_special_smith_waterman_find_start_pssm(
+            match_seq,
+            query,
+            pssm,
+            query_offset,
+            gap_open,
+            gap_extend,
+            match_seq_end,
+            query_end,
+            score_in,
+            forbidden,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::encode_ncbistdaa_sequence;
     use crate::matrix::AA_SIZE;
-
-    fn encode_aa(s: &[u8]) -> Vec<u8> {
-        s.iter()
-            .map(|&b| crate::encoding::AMINOACID_TO_NCBISTDAA[b as usize & 0x7F])
-            .collect()
-    }
 
     fn blosum62() -> [[i32; AA_SIZE]; AA_SIZE] {
         *crate::api::get_matrix(crate::api::MatrixType::Blosum62)
     }
 
+    fn offset_identity_pssm(query: &[u8], offset: usize) -> Vec<Vec<i32>> {
+        let mut pssm = vec![vec![-5; AA_SIZE]; offset + query.len() + 1];
+        for (i, &aa) in query.iter().enumerate() {
+            pssm[offset + i][aa as usize] = 5;
+        }
+        pssm
+    }
+
     #[test]
     fn test_score_only_exact_match() {
-        let q = encode_aa(b"MKFLILLF");
-        let s = encode_aa(b"MKFLILLF");
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"MKFLILLF");
         let m = blosum62();
         let (score, m_end, q_end) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
         // Diag scores: 5+5+6+4+4+4+4+6 = 38
@@ -621,8 +1104,8 @@ mod tests {
 
     #[test]
     fn test_find_start_exact_match() {
-        let q = encode_aa(b"MKFLILLF");
-        let s = encode_aa(b"MKFLILLF");
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"MKFLILLF");
         let m = blosum62();
         let (score, m_start, q_start) =
             blast_smith_waterman_find_start(&s, &q, &m, 11, 1, 7, 7, 38);
@@ -634,8 +1117,8 @@ mod tests {
     #[test]
     fn test_score_only_offset_match() {
         // Subject has 5 leading X's then the query
-        let q = encode_aa(b"MKFLILLF");
-        let s = encode_aa(b"AAAAAMKFLILLF");
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
         let m = blosum62();
         let (score, m_end, q_end) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
         assert_eq!(score, 38);
@@ -652,8 +1135,8 @@ mod tests {
 
     #[test]
     fn test_score_only_no_match() {
-        let q = encode_aa(b"AAAA");
-        let s = encode_aa(b"WWWW");
+        let q = encode_ncbistdaa_sequence(b"AAAA");
+        let s = encode_ncbistdaa_sequence(b"WWWW");
         let m = blosum62();
         let (score, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
         // BLOSUM62 A-W = -3, so all-negative; SW returns 0
@@ -663,8 +1146,8 @@ mod tests {
     #[test]
     fn test_score_only_with_gap() {
         // Aligning MKF + gap + LILLF vs MKFXLILLF (X is a substitution penalty)
-        let q = encode_aa(b"MKFLILLF");
-        let s = encode_aa(b"MKFGGLILLF");
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"MKFGGLILLF");
         let m = blosum62();
         let (score, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
         // SW will find best alignment which includes a gap or extension.
@@ -678,8 +1161,8 @@ mod tests {
         // find one of them (whichever the SW picks). Pushing the first
         // match's range as forbidden should make the second SW pass find
         // the *other* occurrence.
-        let q = encode_aa(b"MKFLILLF");
-        let s = encode_aa(b"MKFLILLFAAAAAMKFLILLF");
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"MKFLILLFAAAAAMKFLILLF");
         let m = blosum62();
         // First pass — empty forbidden set, picks the first occurrence.
         let mut fr = BlastForbiddenRanges::new(q.len() as i32);
@@ -721,5 +1204,64 @@ mod tests {
         fr.clear();
         assert!(fr.is_empty);
         assert!(fr.num_forbidden.iter().all(|&n| n == 0));
+    }
+
+    #[test]
+    fn test_smith_waterman_pssm_respects_query_offset() {
+        let q = vec![1u8, 2, 3, 4];
+        let s = q.clone();
+        let pssm = offset_identity_pssm(&q, 3);
+
+        let (score, m_end, q_end) = blast_smith_waterman_score_only_pssm(&s, &q, &pssm, 3, 11, 1);
+        assert_eq!(score, 20);
+        assert_eq!(m_end, 3);
+        assert_eq!(q_end, 3);
+
+        let (score2, m_start, q_start) =
+            blast_smith_waterman_find_start_pssm(&s, &q, &pssm, 3, 11, 1, m_end, q_end, score);
+        assert_eq!(score2, 20);
+        assert_eq!(m_start, 0);
+        assert_eq!(q_start, 0);
+    }
+
+    #[test]
+    fn test_smith_waterman_pssm_forbidden_ranges() {
+        let q = vec![1u8, 2, 3, 4];
+        let s = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let pssm = offset_identity_pssm(&q, 2);
+        let mut fr = BlastForbiddenRanges::new(q.len() as i32);
+
+        let (score1, m_end1, q_end1) =
+            blast_smith_waterman_score_only_pssm_with_forbidden(&s, &q, &pssm, 2, 11, 1, &fr);
+        assert_eq!(score1, 20);
+        let (score1_back, m_start1, q_start1) = blast_smith_waterman_find_start_pssm_with_forbidden(
+            &s, &q, &pssm, 2, 11, 1, m_end1, q_end1, score1, &fr,
+        );
+        assert_eq!(score1_back, 20);
+        assert_eq!(q_start1, 0);
+
+        fr.push(
+            q_start1 as i32,
+            q_end1 as i32 + 1,
+            m_start1 as i32,
+            m_end1 as i32,
+        );
+        let (score2, m_end2, _q_end2) =
+            blast_smith_waterman_score_only_pssm_with_forbidden(&s, &q, &pssm, 2, 11, 1, &fr);
+        assert_eq!(score2, 20);
+        assert!(m_end2 >= 4, "expected second occurrence, got {m_end2}");
+
+        let mut all_forbidden = BlastForbiddenRanges::new(q.len() as i32);
+        all_forbidden.push(0, q.len() as i32, 0, (s.len() - 1) as i32);
+        let (score3, _, _) = blast_smith_waterman_score_only_pssm_with_forbidden(
+            &s,
+            &q,
+            &pssm,
+            2,
+            11,
+            1,
+            &all_forbidden,
+        );
+        assert_eq!(score3, 0);
     }
 }

@@ -246,17 +246,6 @@ impl DustTriplets {
     }
 }
 
-fn blastna_to_ncbi2na(base: u8) -> u8 {
-    match base {
-        b'C' | b'c' | 1 => 1,
-        b'G' | b'g' | 2 => 2,
-        b'T' | b't' | b'U' | b'u' | 3 => 3,
-        b'N' | b'n' => 0,
-        _ if base <= 15 => base & 0x3,
-        _ => 0,
-    }
-}
-
 fn save_masked_regions(
     mask: &mut MaskLoc,
     perfects: &mut Vec<PerfectInterval>,
@@ -321,8 +310,8 @@ pub fn dust_filter(sequence: &[u8], level: u32, window: usize, linker: usize) ->
     let stop = sequence.len() - 1;
     while stop > start + 2 {
         let mut triplets = DustTriplets::new(window, low_k, thresholds.clone());
-        let mut t =
-            (blastna_to_ncbi2na(sequence[start]) << 2) + blastna_to_ncbi2na(sequence[start + 1]);
+        let mut t = (crate::encoding::blastna_or_iupac_to_ncbi2na_base(sequence[start]) << 2)
+            + crate::encoding::blastna_or_iupac_to_ncbi2na_base(sequence[start + 1]);
         let mut next_pos = start + triplets.stop + 2;
         let mut done = false;
 
@@ -335,7 +324,8 @@ pub fn dust_filter(sequence: &[u8], level: u32, window: usize, linker: usize) ->
                 linker,
             );
 
-            t = ((t << 2) & TRIPLET_MASK) + (blastna_to_ncbi2na(sequence[next_pos]) & 0x3);
+            t = ((t << 2) & TRIPLET_MASK)
+                + (crate::encoding::blastna_or_iupac_to_ncbi2na_base(sequence[next_pos]) & 0x3);
             next_pos += 1;
 
             if triplets.shift_window(t) {
@@ -351,7 +341,9 @@ pub fn dust_filter(sequence: &[u8], level: u32, window: usize, linker: usize) ->
                         start,
                         linker,
                     );
-                    t = ((t << 2) & TRIPLET_MASK) + (blastna_to_ncbi2na(sequence[next_pos]) & 0x3);
+                    t = ((t << 2) & TRIPLET_MASK)
+                        + (crate::encoding::blastna_or_iupac_to_ncbi2na_base(sequence[next_pos])
+                            & 0x3);
                     if triplets.shift_window(t) {
                         done = true;
                         break;
@@ -453,12 +445,6 @@ fn normalize_seg_params(window: usize, locut: f64, hicut: f64) -> SegParameters 
         maxbogus,
         overlaps: false,
     }
-}
-
-fn seg_ascii_to_ncbistdaa(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .map(|&b| crate::input::aminoacid_to_ncbistdaa(b))
-        .collect()
 }
 
 fn seg_alpha_index(code: u8) -> Option<usize> {
@@ -735,7 +721,7 @@ pub fn seg_filter_ncbistdaa(sequence: &[u8], window: usize, locut: f64, hicut: f
 /// NCBI `hicut` default.
 pub fn seg_filter(sequence: &[u8], window: usize, locut: f64) -> MaskLoc {
     seg_filter_ncbistdaa(
-        &seg_ascii_to_ncbistdaa(sequence),
+        &crate::encoding::encode_ncbistdaa_sequence(sequence),
         window,
         locut,
         SEG_DEFAULT_HICUT.max(locut),
@@ -926,10 +912,7 @@ mod tests {
     #[test]
     fn test_seg_ascii_and_ncbistdaa_match() {
         let ascii = b"AAAAAAAAAAAAQQQQQQQQQQQQ".to_vec();
-        let ncbi: Vec<u8> = ascii
-            .iter()
-            .map(|&b| crate::input::aminoacid_to_ncbistdaa(b))
-            .collect();
+        let ncbi = crate::encoding::encode_ncbistdaa_sequence(&ascii);
         let ascii_mask = seg_filter(&ascii, 12, 2.2);
         let ncbi_mask = seg_filter_ncbistdaa(&ncbi, 12, 2.2, 2.5);
         assert_eq!(ascii_mask.regions.len(), ncbi_mask.regions.len());

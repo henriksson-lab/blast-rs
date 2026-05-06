@@ -2,43 +2,20 @@ use blast_rs::db::BlastDb;
 use blast_rs::search::decode_packed_ncbi2na_with_ambiguity;
 use std::path::PathBuf;
 
-fn decode_raw_base(packed: &[u8], pos: usize) -> u8 {
-    let byte = packed[pos >> 2];
-    (byte >> (6 - 2 * (pos & 3))) & 3
-}
-
-fn code_to_char(code: u8) -> char {
-    match code {
-        0 => 'A',
-        1 => 'C',
-        2 => 'G',
-        3 => 'T',
-        4 => 'R',
-        5 => 'Y',
-        6 => 'M',
-        7 => 'K',
-        8 => 'W',
-        9 => 'S',
-        10 => 'B',
-        11 => 'D',
-        12 => 'H',
-        13 => 'V',
-        14 => 'N',
-        15 => '-',
-        _ => '?',
-    }
-}
-
 fn render_raw_window(packed: &[u8], start: usize, end: usize) -> String {
     (start..end)
-        .map(|pos| code_to_char(decode_raw_base(packed, pos)))
+        .map(|pos| {
+            blast_rs::encoding::blastna_to_iupacna_char(blast_rs::encoding::ncbi2na_base_at(
+                packed, pos,
+            ))
+        })
         .collect()
 }
 
 fn render_decoded_window(decoded: &[u8], start: usize, end: usize) -> String {
     decoded[start..end]
         .iter()
-        .map(|&b| code_to_char(b))
+        .map(|&b| blast_rs::encoding::blastna_to_iupacna_char(b))
         .collect()
 }
 

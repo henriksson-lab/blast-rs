@@ -93,8 +93,7 @@ pub fn na_ungapped_extend_len(
     while qi < q_len && si < s_len_bases {
         let q_base = query[qi as usize];
         // Decode subject base from packed format
-        let s_byte = subject[(si / 4) as usize];
-        let s_base = (s_byte >> (6 - 2 * (si % 4))) & 3;
+        let s_base = crate::encoding::ncbi2na_base_at(subject, si as usize);
 
         sum += blastna_score(q_base, s_base, reward, penalty);
 
@@ -119,8 +118,7 @@ pub fn na_ungapped_extend_len(
 
     while qi >= 0 && si >= 0 {
         let q_base = query[qi as usize];
-        let s_byte = subject[(si / 4) as usize];
-        let s_base = (s_byte >> (6 - 2 * (si % 4))) & 3;
+        let s_base = crate::encoding::ncbi2na_base_at(subject, si as usize);
 
         sum_left += blastna_score(q_base, s_base, reward, penalty);
 
@@ -150,21 +148,7 @@ pub fn na_ungapped_extend_len(
 
 #[inline(always)]
 fn blastna_score(a: u8, b: u8, reward: i32, penalty: i32) -> i32 {
-    const MASKS: [u8; 16] = [1, 2, 4, 8, 5, 10, 3, 12, 9, 6, 14, 13, 11, 7, 15, 0];
-    const DEGEN: [i32; 16] = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 0];
-
-    let a = a as usize;
-    let b = b as usize;
-    if a >= 15 || b >= 15 {
-        return i32::MIN / 2;
-    }
-    if MASKS[a] & MASKS[b] == 0 {
-        return penalty;
-    }
-    let degen = DEGEN[a.max(b)];
-    // NCBI `blast_stat.c:1106`:
-    //   (Int4)BLAST_Nint((double)((degeneracy[i2]-1)*penalty + reward) / degeneracy[i2])
-    crate::math::nint(((degen - 1) * penalty + reward) as f64 / degen as f64) as i32
+    crate::encoding::blastna_pair_score(a, b, reward, penalty)
 }
 
 #[cfg(test)]
@@ -198,15 +182,6 @@ mod tests {
         assert_eq!(data.length, 4);
     }
 
-    /// Helper: pack a slice of bases (0..3) into NCBI2na packed bytes.
-    fn pack_ncbi2na(bases: &[u8]) -> Vec<u8> {
-        let mut packed = vec![0u8; bases.len().div_ceil(4)];
-        for (i, &b) in bases.iter().enumerate() {
-            packed[i / 4] |= (b & 3) << (6 - 2 * (i % 4));
-        }
-        packed
-    }
-
     #[test]
     fn test_ungapped_extend_with_xdrop() {
         // Build a sequence that starts matching then diverges.
@@ -215,7 +190,7 @@ mod tests {
         // First 4 positions match (+2 each = +8), then 4 mismatches (-3 each).
         // With x_dropoff=5 the extension should stop before consuming all mismatches.
         let query = vec![0u8, 1, 2, 3, 0, 0, 0, 0];
-        let subject = pack_ncbi2na(&[0, 1, 2, 3, 1, 1, 1, 1]);
+        let subject = crate::encoding::pack_ncbi2na_bases(&[0, 1, 2, 3, 1, 1, 1, 1]);
 
         let result = na_ungapped_extend(&query, &subject, 0, 0, 2, -3, 5);
         assert!(result.is_some());
@@ -232,7 +207,7 @@ mod tests {
         // after a +2 first base, a -3 mismatch makes the running total negative
         // and terminates the right extension even when x_dropoff is much larger.
         let query = vec![0u8, 0, 0, 0];
-        let subject = pack_ncbi2na(&[0, 1, 0, 0]);
+        let subject = crate::encoding::pack_ncbi2na_bases(&[0, 1, 0, 0]);
 
         let result = na_ungapped_extend_len(&query, &subject, 4, 0, 0, 2, -3, 20);
         assert!(result.is_some());
@@ -244,7 +219,7 @@ mod tests {
     #[test]
     fn test_ungapped_extend_uses_blastna_ambiguity_score() {
         let query = vec![0u8, 0, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0];
-        let subject = pack_ncbi2na(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let subject = crate::encoding::pack_ncbi2na_bases(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
         let result = na_ungapped_extend_len(&query, &subject, 12, 0, 0, 1, -5, 20);
         assert!(result.is_some());
@@ -258,7 +233,7 @@ mod tests {
         // Seed at position 0 — left extension has nothing to extend into.
         // Query and subject: ACGT (4 bases, all match)
         let query = vec![0u8, 1, 2, 3];
-        let subject = pack_ncbi2na(&[0, 1, 2, 3]);
+        let subject = crate::encoding::pack_ncbi2na_bases(&[0, 1, 2, 3]);
 
         let result = na_ungapped_extend(&query, &subject, 0, 0, 2, -3, 20);
         assert!(result.is_some());
@@ -281,7 +256,7 @@ mod tests {
     fn test_ungapped_extend_all_matches() {
         // 16 bases, all A, perfect match — extension should cover full length.
         let query = vec![0u8; 16];
-        let subject = pack_ncbi2na(&[0u8; 16]);
+        let subject = crate::encoding::pack_ncbi2na_bases(&[0u8; 16]);
 
         let result = na_ungapped_extend_len(&query, &subject, 16, 8, 8, 2, -3, 100);
         assert!(result.is_some());
@@ -300,7 +275,7 @@ mod tests {
         // Position: 0:match(+2) 1:match(+2) 2:mismatch(-3) 3:match(+2) 4:match(+2)
         // Total = 2+2-3+2+2 = 5
         let query = vec![0u8, 1, 0, 1, 2];
-        let subject = pack_ncbi2na(&[0, 1, 2, 1, 2]);
+        let subject = crate::encoding::pack_ncbi2na_bases(&[0, 1, 2, 1, 2]);
 
         let result = na_ungapped_extend_len(&query, &subject, 5, 0, 0, 2, -3, 20);
         assert!(result.is_some());

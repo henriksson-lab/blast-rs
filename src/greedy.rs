@@ -5,7 +5,6 @@
 //! `gap_open == 0 && gap_extend == 0`.
 
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
-use crate::sequence::blastna_to_iupac;
 
 const INVALID_OFFSET: i32 = -2;
 const MAX_DBSEQ_LEN: usize = 5_000_000;
@@ -68,71 +67,6 @@ impl PrelimEditBlock {
     }
 }
 
-fn trace_reduce_target() -> bool {
-    std::env::var_os("BLAST_RS_TRACE_REDUCE").is_some()
-}
-
-fn trace_reduce_script(esp: &GapEditScript, query: &[u8], subject: &[u8]) -> bool {
-    let Some(raw) = std::env::var_os("BLAST_RS_TRACE_REDUCE") else {
-        return false;
-    };
-    if raw == "all" {
-        return true;
-    }
-    let raw = raw.to_string_lossy();
-    if let Some((q_range, s_range)) = raw.split_once(',') {
-        if let (Some((q_lo, q_hi)), Some((s_lo, s_hi))) =
-            (parse_trace_range(q_range), parse_trace_range(s_range))
-        {
-            return query.len() >= q_lo
-                && query.len() <= q_hi
-                && subject.len() >= s_lo
-                && subject.len() <= s_hi;
-        }
-    }
-    let (align_len, num_ident, gap_opens) = esp.count_identities(query, subject);
-    (query.len() >= 635 && query.len() <= 645)
-        && (subject.len() >= 645 && subject.len() <= 655)
-        && align_len >= 650
-        && num_ident >= 580
-        && gap_opens >= 6
-}
-
-fn parse_trace_range(raw: &str) -> Option<(usize, usize)> {
-    let (lo, hi) = raw.split_once("..")?;
-    Some((lo.parse().ok()?, hi.parse().ok()?))
-}
-
-fn trace_btop(esp: &GapEditScript, query: &[u8], subject: &[u8]) -> String {
-    let (qseq, sseq) = esp.render_alignment(query, subject, blastna_to_iupac);
-    let mut out = String::new();
-    let mut matches = 0usize;
-    for (q, s) in qseq.bytes().zip(sseq.bytes()) {
-        if q == s && q != b'-' {
-            matches += 1;
-        } else {
-            if matches > 0 {
-                out.push_str(&matches.to_string());
-                matches = 0;
-            }
-            out.push(q as char);
-            out.push(s as char);
-        }
-    }
-    if matches > 0 {
-        out.push_str(&matches.to_string());
-    }
-    out
-}
-
-fn trace_encoded_sequence(seq: &[u8]) -> String {
-    let mut out = String::with_capacity(seq.len() * 2);
-    for base in seq {
-        out.push_str(&format!("{base:02x}"));
-    }
-    out
-}
-
 fn ceil_div_i32(num: i32, den: i32) -> i32 {
     debug_assert!(den > 0);
     if num >= 0 {
@@ -179,13 +113,6 @@ fn find_first_mismatch(
     seq1_index - start
 }
 
-#[inline]
-fn unpack_packed_base(seq2: &[u8], base_index: usize) -> u8 {
-    let byte = seq2[base_index / 4];
-    let shift = 3 - (base_index % 4);
-    (byte >> (shift * 2)) & 0x03
-}
-
 fn find_first_mismatch_packed(
     seq1: &[u8],
     seq2_packed: &[u8],
@@ -200,7 +127,8 @@ fn find_first_mismatch_packed(
     if reverse {
         while seq1_index < len1
             && seq2_index < len2
-            && seq1[len1 - 1 - seq1_index] == unpack_packed_base(seq2_packed, len2 - 1 - seq2_index)
+            && seq1[len1 - 1 - seq1_index]
+                == crate::encoding::ncbi2na_base_at(seq2_packed, len2 - 1 - seq2_index)
         {
             seq1_index += 1;
             seq2_index += 1;
@@ -208,7 +136,7 @@ fn find_first_mismatch_packed(
     } else {
         while seq1_index < len1
             && seq2_index < len2
-            && seq1[seq1_index] == unpack_packed_base(seq2_packed, seq2_index + rem)
+            && seq1[seq1_index] == crate::encoding::ncbi2na_base_at(seq2_packed, seq2_index + rem)
         {
             seq1_index += 1;
             seq2_index += 1;
@@ -324,106 +252,14 @@ fn greedy_prelim_hsp_from_extensions(
     }
 }
 
-fn trace_greedy_seed_choice(
-    q_seed: usize,
-    s_seed: usize,
-    extents: GreedyAlignmentExtents,
-    left_seed: GreedySeed,
-    right_seed: GreedySeed,
-    adjusted_seed_q: usize,
-    adjusted_seed_s: usize,
-) {
-    if std::env::var_os("BLAST_RS_TRACE_GREEDY_SEED").is_none() {
-        return;
-    }
-    let right_q = q_seed + right_seed.start_q;
-    let right_s = s_seed + right_seed.start_s;
-    let right_len = if right_q < extents.query_end && right_s < extents.subject_end {
-        (extents.query_end - right_q)
-            .min(extents.subject_end - right_s)
-            .min(right_seed.match_length)
-            / 2
-    } else {
-        0
-    };
-    let left_q = q_seed.saturating_sub(left_seed.start_q);
-    let left_s = s_seed.saturating_sub(left_seed.start_s);
-    let left_len = if left_q > extents.query_start && left_s > extents.subject_start {
-        (left_q - extents.query_start)
-            .min(left_s - extents.subject_start)
-            .min(left_seed.match_length)
-            / 2
-    } else {
-        0
-    };
-    eprintln!(
-        "[rs-gseed] q_seed={} s_seed={} q_box={}..{} s_box={}..{} left=({},{},{}) right=({},{},{}) left_valid={} right_valid={} adjusted=({}, {}) score={}",
-        q_seed,
-        s_seed,
-        extents.query_start,
-        extents.query_end,
-        extents.subject_start,
-        extents.subject_end,
-        left_seed.start_q,
-        left_seed.start_s,
-        left_seed.match_length,
-        right_seed.start_q,
-        right_seed.start_s,
-        right_seed.match_length,
-        left_len,
-        right_len,
-        adjusted_seed_q,
-        adjusted_seed_s,
-        extents.score
-    );
-}
-
 fn merge_greedy_prelim_ops(
     left: &GreedySideAlignment,
     right: &GreedySideAlignment,
     query: &[u8],
     subject: &[u8],
     extents: GreedyAlignmentExtents,
-    q_seed: usize,
-    s_seed: usize,
 ) -> GapEditScript {
     let mut merged = prelim_to_gap_edit_script(&left.prelim, &right.prelim);
-    if trace_reduce_target() {
-        let (align_len, num_ident, gap_opens) = merged.count_identities(
-            &query[extents.query_start..extents.query_end],
-            &subject[extents.subject_start..extents.subject_end],
-        );
-        if std::env::var_os("BLAST_RS_TRACE_TBACK").is_some()
-            && extents.query_start == 692
-            && extents.query_end == 1321
-            && extents.subject_start == 17655079
-            && extents.subject_end == 17655712
-        {
-            eprintln!(
-                "[rs-split] q_seed={q_seed} s_seed={s_seed} q_ext_l={} s_ext_l={} q_ext_r={} s_ext_r={} left={:?} right={:?}",
-                left.q_ext,
-                left.s_ext,
-                right.q_ext,
-                right.s_ext,
-                left.prelim.edit_ops,
-                right.prelim.edit_ops
-            );
-        }
-        eprintln!(
-            "[reduce-trace] candidate q={}..{} s={}..{} score={} qlen={} slen={} align_len={} ident={} gaps={} ops={:?}",
-            extents.query_start,
-            extents.query_end,
-            extents.subject_start,
-            extents.subject_end,
-            extents.score,
-            extents.query_end.saturating_sub(extents.query_start),
-            extents.subject_end.saturating_sub(extents.subject_start),
-            align_len,
-            num_ident,
-            gap_opens,
-            merged.ops
-        );
-    }
     reduce_gaps(
         &mut merged,
         &query[extents.query_start..extents.query_end],
@@ -565,18 +401,6 @@ fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
 }
 
 fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
-    if std::env::var_os("BLAST_RS_SKIP_REDUCE_GAPS").is_some() {
-        return;
-    }
-    let trace_this = trace_reduce_script(esp, query, subject);
-    if trace_this {
-        eprintln!("[reduce-trace] begin ops={:?}", esp.ops);
-        eprintln!(
-            "[reduce-trace] begin qhex={} shex={}",
-            trace_encoded_sequence(query),
-            trace_encoded_sequence(subject)
-        );
-    }
     let (mut q1, mut s1) = (0usize, 0usize);
     let qf = query.len();
     let sf = subject.len();
@@ -612,16 +436,7 @@ fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
                         }
                     }
                     if nm1 > 1 || nm2 > 0 {
-                        if trace_this {
-                            eprintln!(
-                                "[reduce-trace] first-pass i={} op={:?} nm1={} nm2={} before={:?}",
-                                i, esp.ops[i], nm1, nm2, esp.ops
-                            );
-                        }
                         update_edit_script(esp, i, nm1 - 1, nm2);
-                        if trace_this {
-                            eprintln!("[reduce-trace] first-pass after={:?}", esp.ops);
-                        }
                     }
                     q1 = q1.saturating_sub(1);
                     s1 = s1.saturating_sub(1);
@@ -647,12 +462,6 @@ fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
         if i > 1 && esp.ops[i].0 != esp.ops[i - 2].0 && esp.ops[i - 2].1 > 0 {
             let mut d = esp.ops[i].1 + esp.ops[i - 1].1 + esp.ops[i - 2].1;
             if d == 3 {
-                if trace_this {
-                    eprintln!(
-                        "[reduce-trace] second-pass i={} d=3 before={:?}",
-                        i, esp.ops
-                    );
-                }
                 esp.ops[i - 2].1 = 0;
                 esp.ops[i - 1].1 = 2;
                 esp.ops[i].1 = 0;
@@ -661,14 +470,9 @@ fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
                 } else {
                     s += 1;
                 }
-                if trace_this {
-                    eprintln!("[reduce-trace] second-pass d=3 after={:?}", esp.ops);
-                }
             } else if d < 12 {
                 let slide = esp.ops[i].1.min(esp.ops[i - 2].1);
                 let middle = esp.ops[i - 1].1.max(0) as usize;
-                let q_before = q;
-                let s_before = s;
                 q = q.saturating_sub(middle);
                 s = s.saturating_sub(middle);
                 let mut q1 = q;
@@ -700,22 +504,6 @@ fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
                     s += 1;
                 }
                 d = slide;
-                if trace_this {
-                    eprintln!(
-                        "[reduce-trace] second-pass i={} tri={:?}/{:?}/{:?} q_before={} s_before={} middle={} slide={} nm1={} nm2={} decision={}",
-                        i,
-                        esp.ops[i - 2],
-                        esp.ops[i - 1],
-                        esp.ops[i],
-                        q_before,
-                        s_before,
-                        middle,
-                        d,
-                        nm1,
-                        nm2,
-                        if nm2 >= nm1 - d { "accept" } else { "reject" }
-                    );
-                }
                 if nm2 >= nm1 - d {
                     esp.ops[i - 2].1 -= d;
                     esp.ops[i - 1].1 += d;
@@ -733,17 +521,6 @@ fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
         }
     }
     rebuild_edit_script(esp);
-    if trace_this {
-        let (align_len, num_ident, gap_opens) = esp.count_identities(query, subject);
-        eprintln!(
-            "[reduce-trace] end ident={} len={} gaps={} ops={:?} btop={}",
-            num_ident,
-            align_len,
-            gap_opens,
-            esp.ops,
-            trace_btop(esp, query, subject)
-        );
-    }
 }
 
 fn blast_greedy_align_one_side(
@@ -773,8 +550,6 @@ fn blast_greedy_align_one_side(
         start_s: 0,
         match_length: index,
     };
-    let trace_internal = std::env::var_os("BLAST_RS_TRACE_GREEDY_INTERNAL").is_some();
-
     if index == len1 || index == len2 {
         let mut ops = PrelimEditBlock::default();
         ops.add(GapAlignOpType::Sub, index as i32);
@@ -832,23 +607,6 @@ fn blast_greedy_align_one_side(
                 reverse,
             );
             if matched > seed.match_length {
-                if trace_internal {
-                    eprintln!(
-                        "[rs-ginternal] reverse={} d={} k={} seq1_index={} seq2_index={} matched={} old_seed=({},{},{}) new_seed=({},{},{})",
-                        reverse,
-                        d,
-                        k,
-                        seq1_index,
-                        seq2_index,
-                        matched,
-                        seed.start_q,
-                        seed.start_s,
-                        seed.match_length,
-                        seq1_index,
-                        seq2_index,
-                        matched
-                    );
-                }
                 seed.start_q = seq1_index as usize;
                 seed.start_s = seq2_index as usize;
                 seed.match_length = matched;
@@ -903,34 +661,8 @@ fn blast_greedy_align_one_side(
     let mut ops = PrelimEditBlock::default();
     let mut d = best_dist;
     let mut seq2_index = seq2_align_len as i32;
-    let trace_tback = std::env::var_os("BLAST_RS_TRACE_TBACK").is_some()
-        && ((seq1_align_len == 629 && seq2_align_len == 633)
-            || (reverse
-                && (500..=650).contains(&seq1_align_len)
-                && (500..=650).contains(&seq2_align_len)));
-    if trace_tback {
-        eprintln!(
-            "[rs-tback] start len1={len1} len2={len2} best_dist={best_dist} best_diag={best_diag} seq1_align_len={seq1_align_len} seq2_align_len={seq2_align_len} diag_origin={diag_origin}"
-        );
-        for row in 1..=best_dist.min(12) {
-            let lo = diag_origin.saturating_sub(4);
-            let hi = (diag_origin + 4).min(width - 1);
-            let vals: Vec<String> = (lo..=hi)
-                .map(|diag| format!("{diag}:{}", last_seq2_off[row][diag]))
-                .collect();
-            eprintln!("[rs-row] d={row} {}", vals.join(" "));
-        }
-    }
     while d > 0 {
-        let left = last_seq2_off[d - 1][best_diag - 1];
-        let same = last_seq2_off[d - 1][best_diag];
-        let right = last_seq2_off[d - 1][best_diag + 1];
         let (new_diag, new_seq2_index) = get_next_non_affine_tback(&last_seq2_off, d, best_diag);
-        if trace_tback && d <= 12 {
-            eprintln!(
-                "[rs-tback] d={d} diag={best_diag} seq2={seq2_index} left={left} same={same} right={right} -> new_diag={new_diag} new_seq2={new_seq2_index}"
-            );
-        }
         if new_diag == best_diag {
             ops.add(GapAlignOpType::Sub, seq2_index - new_seq2_index);
         } else if new_diag < best_diag {
@@ -945,20 +677,6 @@ fn blast_greedy_align_one_side(
         seq2_index = new_seq2_index;
     }
     ops.add(GapAlignOpType::Sub, last_seq2_off[0][diag_origin].max(0));
-
-    if trace_internal {
-        eprintln!(
-            "[rs-ginternal] done reverse={} best_dist={} best_diag={} q_align_len={} s_align_len={} seed=({},{},{})",
-            reverse,
-            best_dist,
-            best_diag,
-            seq1_align_len,
-            seq2_align_len,
-            seed.start_q,
-            seed.start_s,
-            seed.match_length
-        );
-    }
 
     Some((best_dist as i32, seq1_align_len, seq2_align_len, ops, seed))
 }
@@ -991,8 +709,6 @@ fn blast_greedy_align_one_side_packed_subject(
         start_s: 0,
         match_length: index,
     };
-    let trace_internal = std::env::var_os("BLAST_RS_TRACE_GREEDY_INTERNAL").is_some();
-
     if index == len1 || index == len2 {
         let mut ops = PrelimEditBlock::default();
         ops.add(GapAlignOpType::Sub, index as i32);
@@ -1051,24 +767,6 @@ fn blast_greedy_align_one_side_packed_subject(
                 rem,
             );
             if matched > seed.match_length {
-                if trace_internal {
-                    eprintln!(
-                        "[rs-ginternal] reverse={} packed=1 rem={} d={} k={} seq1_index={} seq2_index={} matched={} old_seed=({},{},{}) new_seed=({},{},{})",
-                        reverse,
-                        rem,
-                        d,
-                        k,
-                        seq1_index,
-                        seq2_index,
-                        matched,
-                        seed.start_q,
-                        seed.start_s,
-                        seed.match_length,
-                        seq1_index,
-                        seq2_index,
-                        matched
-                    );
-                }
                 seed.start_q = seq1_index as usize;
                 seed.start_s = seq2_index as usize;
                 seed.match_length = matched;
@@ -1139,21 +837,6 @@ fn blast_greedy_align_one_side_packed_subject(
         seq2_index = new_seq2_index;
     }
     ops.add(GapAlignOpType::Sub, last_seq2_off[0][diag_origin].max(0));
-
-    if trace_internal {
-        eprintln!(
-            "[rs-ginternal] done reverse={} packed=1 rem={} best_dist={} best_diag={} q_align_len={} s_align_len={} seed=({},{},{})",
-            reverse,
-            rem,
-            best_dist,
-            best_diag,
-            seq1_align_len,
-            seq2_align_len,
-            seed.start_q,
-            seed.start_s,
-            seed.match_length
-        );
-    }
 
     Some((best_dist as i32, seq1_align_len, seq2_align_len, ops, seed))
 }
@@ -1259,16 +942,7 @@ pub fn greedy_align_with_seed(
         left.seed,
         right.seed,
     );
-    trace_greedy_seed_choice(
-        q_seed,
-        s_seed,
-        extents,
-        left.seed,
-        right.seed,
-        adjusted_seed_q,
-        adjusted_seed_s,
-    );
-    let merged = merge_greedy_prelim_ops(&left, &right, query, subject, extents, q_seed, s_seed);
+    let merged = merge_greedy_prelim_ops(&left, &right, query, subject, extents);
 
     Some((
         extents.score,
@@ -1346,16 +1020,6 @@ pub fn greedy_align_with_seed_packed_subject(
         left.seed,
         right.seed,
     );
-    trace_greedy_seed_choice(
-        q_seed,
-        s_seed,
-        extents,
-        left.seed,
-        right.seed,
-        adjusted_seed_q,
-        adjusted_seed_s,
-    );
-
     Some((
         extents.score,
         extents.query_start,

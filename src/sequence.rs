@@ -1,47 +1,30 @@
 //! Sequence encoding, complement, and manipulation utilities.
 
+use crate::encoding::{
+    blastna_to_iupacna_char, complement_blastna_base, encode_blastna_sequence,
+    iupacna_to_blastna_base, reverse_complement_blastna_sequence,
+};
+
 /// Encode an IUPAC nucleotide string to BLASTNA.
 pub fn encode_nucleotide(iupac: &[u8]) -> Vec<u8> {
-    iupac.iter().map(|&b| iupac_to_blastna(b)).collect()
+    encode_blastna_sequence(iupac)
 }
 
 /// Convert IUPAC character to BLASTNA encoding.
 #[inline]
 pub fn iupac_to_blastna(c: u8) -> u8 {
-    match c {
-        b'A' | b'a' => 0,
-        b'C' | b'c' => 1,
-        b'G' | b'g' => 2,
-        b'T' | b't' => 3,
-        b'R' | b'r' => 4,
-        b'Y' | b'y' => 5,
-        b'M' | b'm' => 6,
-        b'K' | b'k' => 7,
-        b'W' | b'w' => 8,
-        b'S' | b's' => 9,
-        b'B' | b'b' => 10,
-        b'D' | b'd' => 11,
-        b'H' | b'h' => 12,
-        b'V' | b'v' => 13,
-        b'N' | b'n' => 14,
-        _ => 15,
-    }
+    iupacna_to_blastna_base(c)
 }
 
 /// Complement a BLASTNA-encoded nucleotide.
 #[inline]
 pub fn complement_blastna(b: u8) -> u8 {
-    const TABLE: [u8; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 13, 12, 11, 10, 14, 15];
-    if b < 16 {
-        TABLE[b as usize]
-    } else {
-        15
-    }
+    complement_blastna_base(b)
 }
 
 /// Reverse complement a BLASTNA sequence.
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter().rev().map(|&b| complement_blastna(b)).collect()
+    reverse_complement_blastna_sequence(seq)
 }
 
 /// Encode a query for blastn: returns (plus_strand, minus_strand) in BLASTNA.
@@ -81,24 +64,7 @@ pub fn build_query_block(queries: &[&[u8]]) -> (Vec<u8>, Vec<(i32, i32)>) {
 
 /// BLASTNA to IUPAC character for display.
 pub fn blastna_to_iupac(b: u8) -> char {
-    match b {
-        0 => 'A',
-        1 => 'C',
-        2 => 'G',
-        3 => 'T',
-        4 => 'R',
-        5 => 'Y',
-        6 => 'M',
-        7 => 'K',
-        8 => 'W',
-        9 => 'S',
-        10 => 'B',
-        11 => 'D',
-        12 => 'H',
-        13 => 'V',
-        14 => 'N',
-        _ => '-',
-    }
+    blastna_to_iupacna_char(b)
 }
 
 #[cfg(test)]
@@ -110,6 +76,7 @@ mod tests {
         assert_eq!(encode_nucleotide(b"ACGT"), vec![0, 1, 2, 3]);
         assert_eq!(encode_nucleotide(b"acgt"), vec![0, 1, 2, 3]);
         assert_eq!(encode_nucleotide(b"N"), vec![14]);
+        assert_eq!(encode_nucleotide(b"Uu"), vec![3, 3]);
     }
 
     #[test]

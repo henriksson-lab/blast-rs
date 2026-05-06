@@ -59,6 +59,11 @@ pub fn compute_identities(
 /// Filter an HSP list by e-value threshold.
 pub fn filter_by_evalue(list: &mut HspList, max_evalue: f64) {
     list.hsps.retain(|hsp| hsp.evalue <= max_evalue);
+    list.best_evalue = list
+        .hsps
+        .iter()
+        .map(|hsp| hsp.evalue)
+        .fold(f64::MAX, f64::min);
 }
 
 /// Sort HSP list by score (descending), using NCBI's full tie-breaker.
@@ -87,8 +92,12 @@ pub fn remove_contained(list: &mut HspList) {
             if !keep[j] {
                 continue;
             }
-            // Check if j is contained within i on both query and subject
-            if list.hsps[j].query_offset >= list.hsps[i].query_offset
+            // NCBI only reaps contained HSPs within the same translated frame
+            // pair. This matters for blastx/tblastn/tblastx where identical
+            // protein-space boxes can refer to different nucleotide frames.
+            if list.hsps[j].query_frame == list.hsps[i].query_frame
+                && list.hsps[j].subject_frame == list.hsps[i].subject_frame
+                && list.hsps[j].query_offset >= list.hsps[i].query_offset
                 && list.hsps[j].query_end <= list.hsps[i].query_end
                 && list.hsps[j].subject_offset >= list.hsps[i].subject_offset
                 && list.hsps[j].subject_end <= list.hsps[i].subject_end
@@ -142,10 +151,16 @@ mod tests {
             evalue: 1e-20,
             query_offset: 0,
             query_end: 50,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 50,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         list.add_hsp(Hsp {
             score: 20,
@@ -154,14 +169,32 @@ mod tests {
             evalue: 5.0,
             query_offset: 0,
             query_end: 10,
+            query_gapped_start: 0,
             subject_offset: 0,
             subject_end: 10,
+            subject_gapped_start: 0,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         });
         filter_by_evalue(&mut list, 0.001);
         assert_eq!(list.hsps.len(), 1);
         assert_eq!(list.hsps[0].score, 100);
+        assert_eq!(list.best_evalue, 1e-20);
+    }
+
+    #[test]
+    fn test_filter_by_evalue_resets_best_when_empty() {
+        let mut list = HspList::new(0);
+        list.add_hsp(make_hsp(20, 5.0, 0, 10, 0, 10));
+
+        filter_by_evalue(&mut list, 0.001);
+
+        assert!(list.hsps.is_empty());
+        assert_eq!(list.best_evalue, f64::MAX);
     }
 
     /// Helper to create an HSP with specified fields, defaulting others.
@@ -173,10 +206,16 @@ mod tests {
             evalue,
             query_offset: q_off,
             query_end: q_end,
+            query_gapped_start: q_off,
             subject_offset: s_off,
             subject_end: s_end,
+            subject_gapped_start: s_off,
             context: 0,
+            query_frame: 0,
+            subject_frame: 0,
             num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
         }
     }
 
@@ -262,6 +301,21 @@ mod tests {
         assert!(scores.contains(&100));
         assert!(scores.contains(&60));
         assert!(!scores.contains(&40));
+    }
+
+    #[test]
+    fn test_hsp_containment_keeps_different_frame_pair() {
+        let mut list = HspList::new(0);
+        let outer = make_hsp(100, 1e-25, 10, 100, 10, 100);
+        let mut inner_other_frame = make_hsp(40, 1e-5, 30, 70, 30, 70);
+        inner_other_frame.subject_frame = -1;
+
+        list.add_hsp(outer);
+        list.add_hsp(inner_other_frame);
+        remove_contained(&mut list);
+
+        assert_eq!(list.hsps.len(), 2);
+        assert!(list.hsps.iter().any(|hsp| hsp.subject_frame == -1));
     }
 
     #[test]

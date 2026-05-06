@@ -93,7 +93,6 @@ dependencies = [
  "rayon",
  "rusqlite",
  "tempfile",
- "tracehash-rs",
 ]
 
 [[package]]
@@ -655,21 +654,6 @@ dependencies = [
  "rustix",
  "windows-sys",
 ]
-
-[[package]]
-name = "tracehash-rs"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdb526d2541405e1351a923afd9fce8d4e6e62a883a34f9ae12b612c725fd698"
-dependencies = [
- "tracehash-rs-derive",
-]
-
-[[package]]
-name = "tracehash-rs-derive"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54ceb8adb1e9b4fa7002b0d6a3dab24b0ea3888f27a320d35cd7f528e907e54f"
 
 [[package]]
 name = "unicode-ident"

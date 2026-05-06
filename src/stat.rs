@@ -668,6 +668,17 @@ pub struct GappedParams {
     pub beta: f64,
 }
 
+/// Protein matrix statistics row values used in pairwise/XML reporting.
+#[derive(Debug, Clone, Copy)]
+pub struct ProteinMatrixStats {
+    pub lambda: f64,
+    pub k: f64,
+    pub h: f64,
+    pub a: f64,
+    pub alpha: f64,
+    pub sigma: f64,
+}
+
 /// Gumbel block parameters for Spouge finite-size correction (FSC) e-value.
 /// Port of NCBI Blast_GumbelBlk from blast_stat.h.
 #[derive(Debug, Clone)]
@@ -732,6 +743,17 @@ impl MatrixStatRow {
             h: self.h,
             alpha: self.alpha,
             beta: self.beta,
+        }
+    }
+
+    fn display_params(self) -> ProteinMatrixStats {
+        ProteinMatrixStats {
+            lambda: self.lambda,
+            k: self.k,
+            h: self.h,
+            a: self.alpha,
+            alpha: self.alpha_v,
+            sigma: self.sigma,
         }
     }
 }
@@ -1404,6 +1426,30 @@ pub fn lookup_matrix_params(
     lookup_matrix_stat_row(matrix_name, gap_open, gap_extend).map(MatrixStatRow::gapped_params)
 }
 
+/// Look up the ungapped alpha/beta row for a named protein scoring matrix.
+pub fn lookup_matrix_ungapped_alpha_beta(matrix_name: &str) -> Option<(f64, f64)> {
+    matrix_stat_rows(matrix_name)?
+        .first()
+        .map(|row| (row.alpha, row.beta))
+}
+
+/// Look up the ungapped reporting row for a named protein scoring matrix.
+pub fn lookup_matrix_ungapped_display_params(matrix_name: &str) -> Option<ProteinMatrixStats> {
+    matrix_stat_rows(matrix_name)?
+        .first()
+        .copied()
+        .map(MatrixStatRow::display_params)
+}
+
+/// Look up the gapped reporting row for a named protein scoring matrix.
+pub fn lookup_matrix_display_params(
+    matrix_name: &str,
+    gap_open: i32,
+    gap_extend: i32,
+) -> Option<ProteinMatrixStats> {
+    lookup_matrix_stat_row(matrix_name, gap_open, gap_extend).map(MatrixStatRow::display_params)
+}
+
 /// Look up gapped KBP for NCBI's IDENTITY matrix.
 pub fn lookup_identity_params(gap_open: i32, gap_extend: i32) -> Option<GappedParams> {
     lookup_matrix_params("IDENTITY", gap_open, gap_extend)
@@ -1439,17 +1485,26 @@ pub fn protein_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
 /// table. Translated-query programs use this ideal block when the
 /// query-specific lambda is too high.
 pub fn protein_ideal_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
-    if !matrix_name.eq_ignore_ascii_case("BLOSUM62") && !matrix_name.is_empty() {
+    let Some(matrix) = protein_matrix_by_name(matrix_name) else {
         return protein_ungapped_kbp_for_matrix(matrix_name);
-    }
+    };
+    protein_ideal_ungapped_kbp_from_matrix(matrix, protein_ungapped_kbp_for_matrix(matrix_name))
+}
 
+fn protein_ideal_ungapped_kbp_from_matrix(
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    fallback: KarlinBlk,
+) -> KarlinBlk {
     let std_freq = protein_std_freq_ncbistdaa();
-    let matrix = crate::matrix::BLOSUM62;
-    let mut sfp = SfDist::new(-4, 11);
+    let Some((lo, hi)) = protein_matrix_score_bounds(matrix, &std_freq) else {
+        return fallback;
+    };
+
+    let mut sfp = SfDist::new(lo, hi);
     for i in 0..crate::matrix::AA_SIZE {
         for j in 0..crate::matrix::AA_SIZE {
             let s = matrix[i][j];
-            if (-4..=11).contains(&s) {
+            if (lo..=hi).contains(&s) {
                 *sfp.p_mut(s) += std_freq[i] * std_freq[j];
             }
         }
@@ -1458,7 +1513,7 @@ pub fn protein_ideal_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
     let mut obs_min = i32::MAX;
     let mut obs_max = i32::MIN;
     let mut psum = 0.0;
-    for s in -4..=11 {
+    for s in lo..=hi {
         if sfp.p(s) > 0.0 {
             psum += sfp.p(s);
             obs_min = obs_min.min(s);
@@ -1480,7 +1535,7 @@ pub fn protein_ideal_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
     let h = compute_h(&sfp, lambda);
     let k = compute_k(&sfp, lambda, h);
     if lambda < 0.0 || h < 0.0 || k < 0.0 {
-        return protein_ungapped_kbp_for_matrix(matrix_name);
+        return fallback;
     }
     KarlinBlk {
         lambda,
@@ -1488,6 +1543,58 @@ pub fn protein_ideal_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
         log_k: k.ln(),
         h,
         round_down: false,
+    }
+}
+
+fn protein_matrix_by_name(
+    matrix_name: &str,
+) -> Option<&'static [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
+    if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
+        Some(&crate::matrix::BLOSUM45)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM50") {
+        Some(&crate::matrix::BLOSUM50)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
+        Some(&crate::matrix::BLOSUM62)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM80") {
+        Some(&crate::matrix::BLOSUM80)
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM90") {
+        Some(&crate::matrix::BLOSUM90)
+    } else if matrix_name.eq_ignore_ascii_case("PAM30") {
+        Some(&crate::matrix::PAM30)
+    } else if matrix_name.eq_ignore_ascii_case("PAM70") {
+        Some(&crate::matrix::PAM70)
+    } else if matrix_name.eq_ignore_ascii_case("PAM250") {
+        Some(&crate::matrix::PAM250)
+    } else if matrix_name.eq_ignore_ascii_case("IDENTITY") {
+        Some(&crate::matrix::IDENTITY)
+    } else {
+        None
+    }
+}
+
+fn protein_matrix_score_bounds(
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    std_freq: &[f64; crate::matrix::AA_SIZE],
+) -> Option<(i32, i32)> {
+    let mut lo = i32::MAX;
+    let mut hi = i32::MIN;
+    for i in 0..crate::matrix::AA_SIZE {
+        if std_freq[i] == 0.0 {
+            continue;
+        }
+        for j in 0..crate::matrix::AA_SIZE {
+            if std_freq[j] == 0.0 {
+                continue;
+            }
+            let s = matrix[i][j];
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+    }
+    if lo <= hi {
+        Some((lo, hi))
+    } else {
+        None
     }
 }
 
@@ -1501,9 +1608,40 @@ pub fn query_specific_protein_ungapped_kbp(
     query_aa_ncbistdaa: &[u8],
     matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
 ) -> KarlinBlk {
+    query_specific_protein_ungapped_kbp_with_fallback(
+        query_aa_ncbistdaa,
+        matrix,
+        protein_ungapped_kbp(),
+    )
+}
+
+/// Compute query-specific ungapped protein KBP with the selected matrix's
+/// standard row as the fallback for unsupported query compositions.
+pub fn query_specific_protein_ungapped_kbp_for_matrix(
+    query_aa_ncbistdaa: &[u8],
+    matrix_name: &str,
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+) -> KarlinBlk {
+    query_specific_protein_ungapped_kbp_with_fallback(
+        query_aa_ncbistdaa,
+        matrix,
+        protein_ungapped_kbp_for_matrix(matrix_name),
+    )
+}
+
+fn query_specific_protein_ungapped_kbp_with_fallback(
+    query_aa_ncbistdaa: &[u8],
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    table_fallback: KarlinBlk,
+) -> KarlinBlk {
     let std_freq = protein_std_freq_ncbistdaa();
-    // NCBIstdaa ambiguity letters that NCBI's Blast_ResFreqString skips.
-    let ambiguous: [u8; 8] = [0, 2, 21, 23, 24, 25, 26, 27];
+    let Some((lo, hi)) = protein_matrix_score_bounds(matrix, &std_freq) else {
+        return table_fallback;
+    };
+    // Matrix-based protein setup calls `BLAST_ScoreSetAmbigRes(sbp, 'X')`
+    // (`blast_setup.c:384`). `Blast_ResFreqString` therefore clears X only;
+    // B/Z/U/*/O/J remain in the query composition exactly as NCBI sees them.
+    let ambiguous: [u8; 1] = [crate::encoding::NCBISTDAA_X];
     let contexts = [UngappedKbpContext {
         query_offset: 0,
         query_length: query_aa_ncbistdaa.len() as i32,
@@ -1513,17 +1651,15 @@ pub fn query_specific_protein_ungapped_kbp(
     let r = ungapped_kbp_calc_with_std(
         query_aa_ncbistdaa,
         &contexts,
-        -4,
-        11,
+        lo,
+        hi,
         crate::matrix::AA_SIZE,
         &ambiguous,
         &std_freq,
         &mat,
     );
-    r.into_iter()
-        .next()
-        .flatten()
-        .unwrap_or_else(protein_ungapped_kbp)
+    let fallback = protein_ideal_ungapped_kbp_from_matrix(matrix, table_fallback);
+    r.into_iter().next().flatten().unwrap_or(fallback)
 }
 
 /// NCBIstdaa-indexed standard amino-acid background frequencies.
@@ -1536,26 +1672,12 @@ pub fn protein_std_freq_ncbistdaa() -> [f64; 28] {
     // NCBIstdaa indices: -=0 A=1 B=2 C=3 D=4 E=5 F=6 G=7 H=8 I=9 K=10 L=11 M=12
     // N=13 P=14 Q=15 R=16 S=17 T=18 V=19 W=20 X=21 Y=22 Z=23 U=24 *=25 O=26 J=27
     let mut out = [0.0f64; 28];
-    out[1] = AA_FREQUENCIES[0]; // A
-    out[3] = AA_FREQUENCIES[1]; // C
-    out[4] = AA_FREQUENCIES[2]; // D
-    out[5] = AA_FREQUENCIES[3]; // E
-    out[6] = AA_FREQUENCIES[4]; // F
-    out[7] = AA_FREQUENCIES[5]; // G
-    out[8] = AA_FREQUENCIES[6]; // H
-    out[9] = AA_FREQUENCIES[7]; // I
-    out[10] = AA_FREQUENCIES[8]; // K
-    out[11] = AA_FREQUENCIES[9]; // L
-    out[12] = AA_FREQUENCIES[10]; // M
-    out[13] = AA_FREQUENCIES[11]; // N
-    out[14] = AA_FREQUENCIES[12]; // P
-    out[15] = AA_FREQUENCIES[13]; // Q
-    out[16] = AA_FREQUENCIES[14]; // R
-    out[17] = AA_FREQUENCIES[15]; // S
-    out[18] = AA_FREQUENCIES[16]; // T
-    out[19] = AA_FREQUENCIES[17]; // V
-    out[20] = AA_FREQUENCIES[18]; // W
-    out[22] = AA_FREQUENCIES[19]; // Y
+    for (freq, &code) in AA_FREQUENCIES
+        .iter()
+        .zip(crate::encoding::NCBISTDAA_STANDARD_RESIDUES.iter())
+    {
+        out[code as usize] = *freq;
+    }
     out
 }
 
@@ -2113,7 +2235,11 @@ impl SfDist {
     }
     #[inline]
     fn p(&self, s: i32) -> f64 {
-        self.probs[(s - self.score_min) as usize]
+        if s < self.score_min || s > self.score_max {
+            0.0
+        } else {
+            self.probs[(s - self.score_min) as usize]
+        }
     }
     #[inline]
     fn p_mut(&mut self, s: i32) -> &mut f64 {
@@ -3387,6 +3513,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_matrix_display_params_use_selected_table_rows() {
+        let ungapped =
+            lookup_matrix_ungapped_display_params("BLOSUM62").expect("BLOSUM62 ungapped row");
+        assert!((ungapped.a - 0.7916).abs() < 1e-12);
+        assert!((ungapped.alpha - 4.964660).abs() < 1e-12);
+        assert!((ungapped.sigma - 4.964660).abs() < 1e-12);
+
+        let gapped = lookup_matrix_display_params("PAM30", 9, 1).expect("PAM30 9/1 row");
+        assert!((gapped.lambda - 0.294).abs() < 1e-12);
+        assert!((gapped.a - 0.48).abs() < 1e-12);
+        assert_ne!(gapped.alpha, 42.602800);
+        assert_ne!(gapped.sigma, 43.636200);
+    }
+
     /// Verify length adjustment converges for typical search parameters.
     #[test]
     fn test_length_adjustment_exact_convergence() {
@@ -3453,6 +3594,38 @@ mod tests {
 
         let ideal_evalue = ideal.raw_to_evalue(38, 64.0) / gap_decay_divisor(0.5, 1);
         assert_eq!(format_evalue_for_test(ideal_evalue), "9.83e-05");
+    }
+
+    #[test]
+    fn test_protein_ideal_ungapped_kbp_uses_selected_matrix() {
+        let ideal = protein_ideal_ungapped_kbp_for_matrix("BLOSUM45");
+        let table = protein_ungapped_kbp_for_matrix("BLOSUM45");
+
+        assert!(ideal.is_valid());
+        assert!((ideal.lambda - table.lambda).abs() > 1e-6);
+        assert_ne!(ideal.log_k, table.log_k);
+    }
+
+    #[test]
+    fn test_protein_ideal_ungapped_kbp_uses_full_selected_score_range() {
+        let ideal = protein_ideal_ungapped_kbp_for_matrix("PAM30");
+        let table = protein_ungapped_kbp_for_matrix("PAM30");
+
+        assert!(ideal.is_valid());
+        assert!((ideal.lambda - table.lambda).abs() > 1e-6);
+        assert_ne!(ideal.log_k, table.log_k);
+    }
+
+    #[test]
+    fn test_query_specific_protein_ungapped_kbp_uses_selected_matrix_bounds() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"CWWYC");
+
+        let blosum62 = query_specific_protein_ungapped_kbp(&query, &crate::matrix::BLOSUM62);
+        let blosum45 = query_specific_protein_ungapped_kbp(&query, &crate::matrix::BLOSUM45);
+
+        assert!(blosum45.is_valid());
+        assert!(blosum62.is_valid());
+        assert!((blosum45.lambda - blosum62.lambda).abs() > 1e-6);
     }
 
     fn format_evalue_for_test(val: f64) -> String {

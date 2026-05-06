@@ -8,8 +8,11 @@
 //! fast rejection, and only on a PV hit are backbone entries examined
 //! and ungapped extensions triggered.
 
+#[cfg(test)]
+use crate::encoding::encode_ncbistdaa_sequence;
+use crate::encoding::ncbistdaa_to_aminoacid_char;
 use crate::matrix::AA_SIZE;
-use crate::protein::{ncbistdaa_to_char, protein_gapped_align, protein_ungapped_extend};
+use crate::protein::{get_start_for_gapped_alignment, protein_gapped_align};
 
 /// Result of a protein hit after extension.
 #[derive(Debug, Clone)]
@@ -73,7 +76,6 @@ struct BackboneCell {
 
 pub struct ProteinLookupTable {
     word_size: usize,
-    alphabet_size: usize,
     /// Thick backbone: each cell stores up to 3 hits inline.
     backbone: Vec<BackboneCell>,
     /// Overflow array for cells with > HITS_PER_CELL hits.
@@ -191,7 +193,6 @@ impl ProteinLookupTable {
 
         ProteinLookupTable {
             word_size,
-            alphabet_size,
             backbone: thick,
             overflow,
             pv,
@@ -316,11 +317,50 @@ pub fn merge_pv(tables: &[&ProteinLookupTable]) -> Vec<u64> {
     merged
 }
 
+fn merged_pv_is_superset(tables: &[&ProteinLookupTable], merged_pv: &[u64]) -> bool {
+    if tables.is_empty() {
+        return false;
+    }
+    let pv_len = tables[0].pv.len();
+    if merged_pv.len() != pv_len || tables.iter().any(|table| table.pv.len() != pv_len) {
+        return false;
+    }
+    tables.iter().all(|table| {
+        table
+            .pv
+            .iter()
+            .zip(merged_pv.iter())
+            .all(|(&table_bits, &merged_bits)| table_bits & !merged_bits == 0)
+    })
+}
+
+fn subject_has_merged_pv_hit(subject: &[u8], word_size: usize, merged_pv: &[u64]) -> bool {
+    if subject.len() < word_size || word_size == 0 {
+        return false;
+    }
+    let mask = (1usize << (word_size * CHARSIZE)) - 1;
+    let last_pos = subject.len() - word_size;
+    let mut hash = word_hash(&subject[0..word_size], 0);
+    for s_pos in 0..=last_pos {
+        if s_pos > 0 {
+            hash = word_hash_incremental(hash, subject[s_pos + word_size - 1], mask);
+        }
+        if merged_pv
+            .get(hash >> 6)
+            .is_some_and(|bits| bits & (1u64 << (hash & 63)) != 0)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Batch scan: scan ONE subject against MULTIPLE queries using a merged PV.
 ///
-/// For each subject position, the merged PV is checked first (one branch).
-/// Only on a hit, individual query tables are checked. This reduces the
-/// inner loop from O(positions × queries) to O(positions + hits × queries).
+/// The merged PV is used only as a conservative no-hit prefilter. Once any
+/// possible word is present, each query still runs through
+/// [`protein_scan_with_table_reuse`] so the NCBI two-hit diagonal state,
+/// overlap checks, and extension gates stay identical to the single-query path.
 ///
 /// Returns a `Vec` of `(query_index, Vec<ProteinHit>)` for queries that had hits.
 pub fn batch_scan_subject(
@@ -335,105 +375,28 @@ pub fn batch_scan_subject(
         return Vec::new();
     }
     let word_size = tables[0].word_size;
-    let alphabet_size = tables[0].alphabet_size;
-
-    if subject.len() < word_size {
+    if merged_pv_is_superset(tables, merged_pv)
+        && !subject_has_merged_pv_hit(subject, word_size, merged_pv)
+    {
         return Vec::new();
     }
 
-    // Per-query results and diagonal tracking
-    let num_queries = queries.len();
-    let mut results: Vec<Vec<ProteinHit>> = vec![Vec::new(); num_queries];
-
-    // Diagonal tracking per query — lazily initialized
-    let diag_count_max = subject.len() + queries.iter().map(|q| q.len()).max().unwrap_or(0);
-    let mut diag_bufs: Vec<Vec<i32>> = (0..num_queries)
-        .map(|_| vec![-1i32; diag_count_max])
-        .collect();
-
-    // Slide over the subject — ONE pass
-    for s_pos in 0..=(subject.len() - word_size) {
-        let s_word = &subject[s_pos..s_pos + word_size];
-        let hash = word_hash(s_word, alphabet_size);
-
-        // Merged PV check — rejects ~90% of positions in one branch
-        if merged_pv[hash >> 6] & (1u64 << (hash & 63)) == 0 {
-            continue;
-        }
-
-        // This position matched the merged PV — check individual queries
-        for qi in 0..num_queries {
-            let table = tables[qi];
-            let query = queries[qi];
-
-            // Individual PV check
-            if table.pv[hash >> 6] & (1u64 << (hash & 63)) == 0 {
-                continue;
-            }
-
-            // Thick backbone lookup
-            let cell = &table.backbone[hash];
-            let num = cell.num_used as usize;
-            if num == 0 {
-                continue;
-            }
-            let hit_slice: &[i32] = if num <= HITS_PER_CELL {
-                &cell.entries[..num]
-            } else {
-                let cursor = cell.entries[0] as usize;
-                &table.overflow[cursor..cursor + num]
-            };
-
-            for &q_off in hit_slice {
-                let q_pos = q_off as usize;
-
-                // Diagonal tracking
-                let diag = s_pos + query.len() - q_pos;
-                if diag >= diag_bufs[qi].len() {
-                    continue;
-                }
-                let last = diag_bufs[qi][diag];
-                if last >= 0 && (s_pos as i32) < last + word_size as i32 {
-                    continue;
-                }
-
-                // Ungapped extension
-                if let Some((qs, qe, ss, se, score, ident)) =
-                    protein_ungapped_extend(query, subject, q_pos, s_pos, matrix, x_dropoff)
-                {
-                    diag_bufs[qi][diag] = se as i32;
-                    let alen = (qe - qs) as i32;
-                    results[qi].push(ProteinHit {
-                        query_start: qs,
-                        query_end: qe,
-                        subject_start: ss,
-                        subject_end: se,
-                        score,
-                        num_ident: ident,
-                        align_length: alen,
-                        mismatches: alen - ident,
-                        gap_opens: 0,
-                        qseq: None,
-                        sseq: None,
-                        scaled_score: None,
-                        gapped_start_q: 0,
-                        gapped_start_s: 0,
-                    });
-                }
-            }
+    // Keep batch BLASTP byte-for-byte aligned with the single-query protein
+    // scanner. Earlier code used the merged PV but extended every accepted word
+    // hit with a simpler one-hit diagonal filter; NCBI's protein path goes
+    // through `s_BlastAaWordFinder_TwoHit`, including the diagonal-offset trick
+    // and the left-must-reach-first-hit check. Reusing the same translated
+    // scanner here trades some batching speed for faithful behavior.
+    let mut results = Vec::new();
+    let mut diag_buf = Vec::new();
+    for (qi, (&query, &table)) in queries.iter().zip(tables.iter()).enumerate() {
+        let hits =
+            protein_scan_with_table_reuse(query, subject, matrix, table, x_dropoff, &mut diag_buf);
+        if !hits.is_empty() {
+            results.push((qi, hits));
         }
     }
-
-    // Collect non-empty results with query index
     results
-        .into_iter()
-        .enumerate()
-        .filter(|(_, hits)| !hits.is_empty())
-        .map(|(qi, mut hits)| {
-            hits.sort_by(score_compare_protein_hits);
-            (qi, hits)
-        })
-        .collect()
 }
 
 /// Scan a subject sequence against a query using the protein lookup table,
@@ -824,9 +787,15 @@ pub fn protein_gapped_scan_with_table(
             continue;
         }
 
-        // Use center of ungapped hit as seed
-        let seed_q = (uh.query_start + uh.query_end) / 2;
-        let seed_s = (uh.subject_start + uh.subject_end) / 2;
+        let (seed_q, seed_s) = get_start_for_gapped_alignment(
+            query,
+            subject,
+            uh.query_start,
+            uh.query_end.saturating_sub(uh.query_start),
+            uh.subject_start,
+            uh.subject_end.saturating_sub(uh.subject_start),
+            matrix,
+        );
         let diag = seed_s + query.len() - seed_q;
         if diag < diag_count && gapped_diag[diag] {
             continue;
@@ -847,9 +816,9 @@ pub fn protein_gapped_scan_with_table(
         ) {
             let q_slice = &query[gr.query_start..gr.query_end];
             let s_slice = &subject[gr.subject_start..gr.subject_end];
-            let (qseq, sseq) = gr
-                .edit_script
-                .render_alignment(q_slice, s_slice, ncbistdaa_to_char);
+            let (qseq, sseq) =
+                gr.edit_script
+                    .render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
             gapped_hits.push(ProteinHit {
                 query_start: gr.query_start,
                 query_end: gr.query_end,
@@ -968,6 +937,91 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_scan_matches_single_two_hit_scanner() {
+        let m = simple_matrix();
+        let q1 = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+        let q2 = vec![9u8, 8, 7, 6, 5, 4, 3, 2, 1];
+        let subject = vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+        let t1 = ProteinLookupTable::build(&q1, 3, &m, 11.0);
+        let t2 = ProteinLookupTable::build(&q2, 3, &m, 11.0);
+        let tables = vec![&t1, &t2];
+        let queries = vec![q1.as_slice(), q2.as_slice()];
+        let merged = merge_pv(&tables);
+
+        let batch = batch_scan_subject(&queries, &tables, &merged, &subject, &m, 20);
+        let singles = [
+            protein_scan_with_table(&q1, &subject, &m, &t1, 20),
+            protein_scan_with_table(&q2, &subject, &m, &t2, 20),
+        ];
+
+        assert_eq!(batch.len(), 2);
+        for (query_idx, hits) in batch {
+            let expected = &singles[query_idx];
+            assert_eq!(hits.len(), expected.len());
+            for (hit, exp) in hits.iter().zip(expected.iter()) {
+                assert_eq!(
+                    (
+                        hit.query_start,
+                        hit.query_end,
+                        hit.subject_start,
+                        hit.subject_end,
+                        hit.score,
+                        hit.num_ident,
+                    ),
+                    (
+                        exp.query_start,
+                        exp.query_end,
+                        exp.subject_start,
+                        exp.subject_end,
+                        exp.score,
+                        exp.num_ident,
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batch_scan_merged_pv_no_hit_prefilter_preserves_empty_result() {
+        let m = simple_matrix();
+        let q1 = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+        let q2 = vec![9u8, 8, 7, 6, 5, 4, 3, 2, 1];
+        let subject = vec![27u8; 32];
+        let t1 = ProteinLookupTable::build(&q1, 3, &m, 12.0);
+        let t2 = ProteinLookupTable::build(&q2, 3, &m, 12.0);
+        let tables = vec![&t1, &t2];
+        let queries = vec![q1.as_slice(), q2.as_slice()];
+        let merged = merge_pv(&tables);
+
+        let batch = batch_scan_subject(&queries, &tables, &merged, &subject, &m, 20);
+        let singles = [
+            protein_scan_with_table(&q1, &subject, &m, &t1, 20),
+            protein_scan_with_table(&q2, &subject, &m, &t2, 20),
+        ];
+
+        assert!(batch.is_empty());
+        assert!(singles.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn batch_scan_ignores_merged_pv_that_is_not_a_superset() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+        let subject = query.clone();
+        let table = ProteinLookupTable::build(&query, 3, &m, 11.0);
+        let tables = vec![&table];
+        let queries = vec![query.as_slice()];
+        let invalid_merged = vec![0u64; table.pv.len()];
+
+        let batch = batch_scan_subject(&queries, &tables, &invalid_merged, &subject, &m, 20);
+        let single = protein_scan_with_table(&query, &subject, &m, &table, 20);
+
+        assert!(!single.is_empty());
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].1.len(), single.len());
+    }
+
+    #[test]
     fn test_lookup_table_pv_array_exact_match() {
         let m = simple_matrix();
         // Query: [1, 2, 3, 4, 5], word_size=3, threshold=12 (exact match only)
@@ -1044,7 +1098,7 @@ mod tests {
     #[test]
     fn test_protein_scan_with_table_reuse() {
         let m = crate::matrix::BLOSUM62;
-        let query = vec![1u8, 5, 8, 12, 17, 1, 5, 8]; // AGIMV AGI in NCBIstdaa
+        let query = encode_ncbistdaa_sequence(b"AGIMVAGI");
         let table = ProteinLookupTable::build(&query, 3, &m, 11.0);
         // Scan two different subjects with same table
         let subject1 = query.clone();
@@ -1094,7 +1148,7 @@ mod tests {
     fn test_protein_gapped_scan_with_table_finds_alignment() {
         let m = crate::matrix::BLOSUM62;
         // Two related protein sequences
-        let query = vec![1u8, 5, 8, 12, 17, 1, 5, 8, 12, 17]; // repeat of AGIMV
+        let query = encode_ncbistdaa_sequence(b"AGIMVAGIMV");
         let subject = query.clone();
         let table = ProteinLookupTable::build(&query, 3, &m, 11.0);
         let hits = protein_gapped_scan_with_table(
@@ -1110,5 +1164,28 @@ mod tests {
         let best = &hits[0];
         assert!(best.score > 0);
         assert_eq!(best.query_start, 0);
+    }
+
+    #[test]
+    fn test_protein_gapped_scan_uses_ncbi_window_start_not_midpoint() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+        let subject = query.clone();
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        let hits = protein_gapped_scan_with_table(
+            &query, &subject, &m, &table, 20, // ungap_x_dropoff
+            5, 1,   // gap_open, gap_extend
+            100, // gap_x_dropoff
+            1,   // ungap_cutoff
+        );
+
+        assert!(!hits.is_empty());
+        let expected =
+            get_start_for_gapped_alignment(&query, &subject, 0, query.len(), 0, subject.len(), &m);
+        assert_eq!((hits[0].gapped_start_q, hits[0].gapped_start_s), expected);
+        assert_ne!(
+            (hits[0].gapped_start_q, hits[0].gapped_start_s),
+            (query.len() / 2, subject.len() / 2)
+        );
     }
 }

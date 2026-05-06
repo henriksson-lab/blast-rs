@@ -25,7 +25,10 @@ pub const COMPO_LARGEST_ALPHABET: usize = crate::encoding::BLASTAA_SIZE;
 const LAMBDA_ERROR_TOLERANCE: f64 = 0.000_000_1;
 /// NCBI `kLambdaFunctionTolerance` (`composition_adjustment.c:69`).
 const LAMBDA_FUNCTION_TOLERANCE: f64 = 0.000_01;
-const LAMBDA_ITERATION_LIMIT: usize = 100;
+/// NCBI `kLambdaIterationLimit` (`composition_adjustment.c:72`).
+pub const LAMBDA_ITERATION_LIMIT: usize = 100;
+/// NCBI `COMPO_MIN_LAMBDA` (`unified_pvalues.h:47`).
+pub const COMPO_MIN_LAMBDA: f64 = 0.034;
 const LAMBDA_RATIO_LOWER_BOUND: f64 = 0.5;
 /// Rust-specific float sentinel for "impossible score" in composition
 /// adjustment's float matrix. NCBI's `COMPO_SCORE_MIN`
@@ -37,10 +40,31 @@ const COMPO_SCORE_MIN: f64 = -100000.0;
 
 /// NCBIstdaa indices of the 20 true amino acids.
 /// Matches NCBI trueCharPositions[].
-pub static TRUE_CHAR_POSITIONS: [usize; COMPO_NUM_TRUE_AA] = [
-    1, 3, 4, 5, 6, 7, 8, 9, 10, 11, // A C D E F G H I K L
-    12, 13, 14, 15, 16, 17, 18, 19, 20, 22, // M N P Q R S T V W Y
-];
+pub const TRUE_CHAR_POSITIONS: [usize; COMPO_NUM_TRUE_AA] = {
+    let residues = crate::encoding::NCBISTDAA_STANDARD_RESIDUES;
+    [
+        residues[0] as usize,
+        residues[1] as usize,
+        residues[2] as usize,
+        residues[3] as usize,
+        residues[4] as usize,
+        residues[5] as usize,
+        residues[6] as usize,
+        residues[7] as usize,
+        residues[8] as usize,
+        residues[9] as usize,
+        residues[10] as usize,
+        residues[11] as usize,
+        residues[12] as usize,
+        residues[13] as usize,
+        residues[14] as usize,
+        residues[15] as usize,
+        residues[16] as usize,
+        residues[17] as usize,
+        residues[18] as usize,
+        residues[19] as usize,
+    ]
+};
 
 /// Read amino acid composition from NCBIstdaa sequence.
 /// Port of NCBI Blast_ReadAaComposition.
@@ -51,17 +75,18 @@ pub fn read_composition(seq: &[u8], alphsize: usize) -> (Vec<f64>, usize) {
         let idx = b as usize;
         if idx < alphsize {
             // Check if it's a true amino acid
-            let is_true = TRUE_CHAR_POSITIONS.contains(&idx) || idx == 24; // 24 = Selenocysteine
-            if is_true {
+            if crate::encoding::is_ncbistdaa_composition_residue(b) {
                 prob[idx] += 1.0;
                 num_true += 1;
             }
         }
     }
-    // Count Selenocysteine (U=24) as Cysteine (C=3)
-    if prob.len() > 24 && prob[24] > 0.0 {
-        prob[3] += prob[24];
-        prob[24] = 0.0;
+    // Count Selenocysteine as cysteine.
+    let u = crate::encoding::NCBISTDAA_U as usize;
+    let c = crate::encoding::NCBISTDAA_C as usize;
+    if prob.len() > u && prob[u] > 0.0 {
+        prob[c] += prob[u];
+        prob[u] = 0.0;
     }
     if num_true > 0 {
         for p in prob.iter_mut() {
@@ -336,56 +361,6 @@ fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> 
     -x.ln() / d as f64
 }
 
-/// Debug: dump lambda ratio computation details for a query/subject pair.
-pub fn debug_lambda_ratio(
-    matrix: &[[i32; AA_SIZE]; AA_SIZE],
-    query_prob: &[f64],
-    subject_prob: &[f64],
-    standard_lambda: f64,
-) {
-    let (score_probs, obs_min, obs_max) =
-        get_matrix_score_probs(matrix, AA_SIZE, query_prob, subject_prob);
-    let range = (obs_max - obs_min + 1) as usize;
-    let mut avg = 0.0f64;
-    let mut total_prob = 0.0f64;
-    for i in 0..range {
-        avg += (obs_min + i as i32) as f64 * score_probs[i];
-        total_prob += score_probs[i];
-    }
-    eprintln!(
-        "  obs_min={} obs_max={} range={} total_prob={:.6} avg_score={:.6}",
-        obs_min, obs_max, range, total_prob, avg
-    );
-
-    // Show nonzero score probs
-    let mut nonzero = 0;
-    for i in 0..range {
-        if score_probs[i] > 0.0 {
-            nonzero += 1;
-        }
-    }
-    eprintln!("  nonzero score probs: {}", nonzero);
-
-    // GCD computation
-    let mut d = -obs_min;
-    for i in 1..=(obs_max - obs_min) {
-        if d <= 1 {
-            break;
-        }
-        if score_probs[i as usize] != 0.0 {
-            d = crate::math::gcd(d, i);
-        }
-    }
-    eprintln!("  GCD d={}", d);
-
-    let adjusted_lambda = karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda);
-    let ratio = adjusted_lambda / standard_lambda;
-    eprintln!(
-        "  adjusted_lambda={:.8} standard_lambda={:.8} ratio={:.8}",
-        adjusted_lambda, standard_lambda, ratio
-    );
-}
-
 /// Compute the ungapped lambda for an integer scoring matrix with given
 /// background frequencies. Port of NCBI kbp_ideal computation.
 pub fn compute_ungapped_lambda(matrix: &[[i32; AA_SIZE]; AA_SIZE]) -> f64 {
@@ -415,6 +390,26 @@ pub fn composition_lambda_ratio(
     subject_prob: &[f64],
     standard_lambda: f64,
 ) -> Option<f64> {
+    composition_lambda_ratio_with_adjustment(
+        matrix,
+        query_prob,
+        subject_prob,
+        standard_lambda,
+        false,
+    )
+}
+
+/// Compute composition-based LambdaRatio with NCBI's p-value-adjustment
+/// clamp choice. `p_value_adjustment=true` mirrors
+/// `Blast_CompositionBasedStats(..., pValueAdjustment=1)`, which skips the
+/// upper `MIN(1, LambdaRatio)` clamp.
+pub fn composition_lambda_ratio_with_adjustment(
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    query_prob: &[f64],
+    subject_prob: &[f64],
+    standard_lambda: f64,
+    p_value_adjustment: bool,
+) -> Option<f64> {
     // Compute score probability array (port of s_GetMatrixScoreProbs)
     let (score_probs, obs_min, obs_max) =
         get_matrix_score_probs(matrix, AA_SIZE, query_prob, subject_prob);
@@ -437,7 +432,9 @@ pub fn composition_lambda_ratio(
     };
 
     let mut ratio = adjusted_lambda / standard_lambda;
-    ratio = ratio.min(1.0); // MIN(1, LambdaRatio) when pValueAdjustment==0
+    if !p_value_adjustment {
+        ratio = ratio.min(1.0);
+    }
     ratio = ratio.max(LAMBDA_RATIO_LOWER_BOUND);
     Some(ratio)
 }
@@ -458,14 +455,41 @@ pub fn composition_scale_matrix_with_ratio(
     ungapped_lambda: f64,
     freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
 ) -> Option<([[i32; AA_SIZE]; AA_SIZE], f64)> {
-    let lr = composition_lambda_ratio(matrix, query_prob, subject_prob, ungapped_lambda)?;
-    let scaled = composition_scale_matrix(
+    composition_scale_matrix_with_ratio_and_adjustment(
         matrix,
         query_prob,
         subject_prob,
         ungapped_lambda,
         freq_ratios,
+        false,
+    )
+}
+
+/// Rescale a square matrix and return NCBI's LambdaRatio, preserving the
+/// `pValueAdjustment` clamp choice from `Blast_CompositionBasedStats`.
+pub fn composition_scale_matrix_with_ratio_and_adjustment(
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    query_prob: &[f64],
+    subject_prob: &[f64],
+    ungapped_lambda: f64,
+    freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
+    p_value_adjustment: bool,
+) -> Option<([[i32; AA_SIZE]; AA_SIZE], f64)> {
+    let lr = composition_lambda_ratio_with_adjustment(
+        matrix,
+        query_prob,
+        subject_prob,
+        ungapped_lambda,
+        p_value_adjustment,
     )?;
+    let scaled = composition_scale_matrix_at_ratio(
+        matrix,
+        query_prob,
+        subject_prob,
+        ungapped_lambda,
+        freq_ratios,
+        lr,
+    );
     Some((scaled, lr))
 }
 
@@ -479,6 +503,24 @@ pub fn composition_scale_matrix(
     freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
 ) -> Option<[[i32; AA_SIZE]; AA_SIZE]> {
     let lambda_ratio = composition_lambda_ratio(matrix, query_prob, subject_prob, ungapped_lambda)?;
+    Some(composition_scale_matrix_at_ratio(
+        matrix,
+        query_prob,
+        subject_prob,
+        ungapped_lambda,
+        freq_ratios,
+        lambda_ratio,
+    ))
+}
+
+fn composition_scale_matrix_at_ratio(
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    query_prob: &[f64],
+    subject_prob: &[f64],
+    ungapped_lambda: f64,
+    freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
+    lambda_ratio: f64,
+) -> [[i32; AA_SIZE]; AA_SIZE] {
     let scaled_lambda = ungapped_lambda / lambda_ratio;
 
     // Build rescaled matrix from frequency ratios at scaled lambda
@@ -547,7 +589,7 @@ pub fn composition_scale_matrix(
         result[i][E_STOP_CHAR] = matrix[i][E_STOP_CHAR];
         result[E_STOP_CHAR][i] = matrix[E_STOP_CHAR][i];
     }
-    Some(result)
+    result
 }
 
 /// Build an integer matrix directly from frequency ratios at a given lambda.
@@ -589,12 +631,9 @@ pub fn adjust_evalue_composition(
     k: f64,
     search_space: f64,
 ) -> f64 {
-    // Compute composition-specific lambda ratio and scale e-value.
-    // Note: NCBI's full mode 2 also re-adjusts the scoring matrix and
-    // re-aligns (Blast_CompositionMatrixAdj in composition_adjustment.c).
-    // We implement mode 1 behavior (lambda ratio scaling only).
-    // The one false positive this doesn't catch requires the full matrix
-    // adjustment + re-alignment which is a ~3000-line port.
+    // Score-only helper: compute the composition-specific lambda ratio and
+    // scale the e-value. Full mode-2 matrix adjustment is handled by
+    // `composition_matrix_adj` at the search/redo call sites.
     match composition_lambda_ratio(matrix, query_prob, subject_prob, standard_lambda) {
         None => raw_evalue,
         Some(lambda_ratio) => {
@@ -632,10 +671,7 @@ pub fn overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
 
 /// Composition P-value from lambda using the precomputed table.
 /// Port of NCBI Blast_CompositionPvalue.
-#[allow(dead_code)]
-fn composition_pvalue(lambda: f64) -> f64 {
-    /// NCBI `COMPO_MIN_LAMBDA` (`unified_pvalues.h:47`).
-    const COMPO_MIN_LAMBDA: f64 = 0.034;
+pub fn composition_pvalue(lambda: f64) -> f64 {
     /// NCBI `LAMBDA_BIN_SIZE` (`unified_pvalues.c:47`).
     const LAMBDA_BIN_SIZE: f64 = 0.001;
     /// NCBI `LOW_LAMBDA_BIN_CUT` (`unified_pvalues.c:53`).
@@ -1808,21 +1844,21 @@ const RE_PSEUDOCOUNTS: i32 = 20;
 // NCBIstdaa character indices — verbatim port of NCBI's anonymous
 // enum in `composition_adjustment.h:46-49`.
 #[allow(dead_code)]
-const E_GAP_CHAR: usize = 0; // NCBI `eGapChar`
-const E_BCHAR: usize = 2; // B = D or N
-const E_CCHAR: usize = 3;
-const E_DCHAR: usize = 4;
-const E_ECHAR: usize = 5;
-const E_ICHAR: usize = 9;
-const E_LCHAR: usize = 11;
-const E_NCHAR: usize = 13;
-const E_QCHAR: usize = 15;
-const E_XCHAR: usize = 21; // X = unknown
-const E_ZCHAR: usize = 23; // Z = E or Q
-const E_SELENOCYSTEINE: usize = 24; // U
-const E_STOP_CHAR: usize = 25; // NCBI `eStopChar` ('*')
-const E_OCHAR: usize = 26; // O = pyrrolysine
-const E_JCHAR: usize = 27; // J = I or L
+const E_GAP_CHAR: usize = crate::encoding::NCBISTDAA_GAP as usize; // NCBI `eGapChar`
+const E_BCHAR: usize = crate::encoding::NCBISTDAA_B as usize; // B = D or N
+const E_CCHAR: usize = crate::encoding::NCBISTDAA_C as usize;
+const E_DCHAR: usize = crate::encoding::NCBISTDAA_D as usize;
+const E_ECHAR: usize = crate::encoding::NCBISTDAA_E as usize;
+const E_ICHAR: usize = crate::encoding::NCBISTDAA_I as usize;
+const E_LCHAR: usize = crate::encoding::NCBISTDAA_L as usize;
+const E_NCHAR: usize = crate::encoding::NCBISTDAA_N as usize;
+const E_QCHAR: usize = crate::encoding::NCBISTDAA_Q as usize;
+const E_XCHAR: usize = crate::encoding::NCBISTDAA_X as usize; // X = unknown
+const E_ZCHAR: usize = crate::encoding::NCBISTDAA_Z as usize; // Z = E or Q
+const E_SELENOCYSTEINE: usize = crate::encoding::NCBISTDAA_U as usize; // U
+const E_STOP_CHAR: usize = crate::encoding::NCBISTDAA_STOP as usize; // NCBI `eStopChar` ('*')
+const E_OCHAR: usize = crate::encoding::NCBISTDAA_O as usize; // O = pyrrolysine
+const E_JCHAR: usize = crate::encoding::NCBISTDAA_J as usize; // J = I or L
 const MAXIMUM_X_SCORE: f64 = -1.0;
 
 /// Port of NCBI s_GatherLetterProbs.
@@ -2336,34 +2372,92 @@ pub fn blosum62_workspace() -> (
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::{AMINOACID_TO_NCBISTDAA, NCBISTDAA_TO_AMINOACID};
+    use crate::encoding::{
+        aminoacid_to_ncbistdaa_base, encode_ncbistdaa_sequence, ncbistdaa_to_aminoacid_base,
+    };
+
+    fn stdaa_composition(seq: &[u8]) -> (Vec<f64>, usize) {
+        let stdaa = encode_ncbistdaa_sequence(seq);
+        read_composition(&stdaa, AA_SIZE)
+    }
+
+    fn blosum62_background_stdaa() -> [f64; AA_SIZE] {
+        let mut bg = [0.0f64; AA_SIZE];
+        for (k, &idx) in TRUE_CHAR_POSITIONS.iter().enumerate() {
+            bg[idx] = BLOSUM62_BG[k];
+        }
+        bg
+    }
 
     /// Pin the NCBIstdaa character indices to NCBI's enum values
     /// (`composition_adjustment.h:46-49`). Also cross-check them
     /// against the `encoding` tables so a rename there surfaces here.
     #[test]
     fn test_ncbistdaa_indices_match_ncbi_enum() {
-        assert_eq!(E_GAP_CHAR, 0);
-        assert_eq!(E_BCHAR, 2);
-        assert_eq!(E_CCHAR, 3);
-        assert_eq!(E_DCHAR, 4);
-        assert_eq!(E_ECHAR, 5);
-        assert_eq!(E_ICHAR, 9);
-        assert_eq!(E_LCHAR, 11);
-        assert_eq!(E_NCHAR, 13);
-        assert_eq!(E_QCHAR, 15);
-        assert_eq!(E_XCHAR, 21);
-        assert_eq!(E_ZCHAR, 23);
-        assert_eq!(E_SELENOCYSTEINE, 24);
-        assert_eq!(E_STOP_CHAR, 25);
-        assert_eq!(E_OCHAR, 26);
-        assert_eq!(E_JCHAR, 27);
+        assert_eq!(E_GAP_CHAR, crate::encoding::NCBISTDAA_GAP as usize);
+        assert_eq!(E_BCHAR, crate::encoding::NCBISTDAA_B as usize);
+        assert_eq!(E_CCHAR, crate::encoding::NCBISTDAA_C as usize);
+        assert_eq!(E_DCHAR, crate::encoding::NCBISTDAA_D as usize);
+        assert_eq!(E_ECHAR, crate::encoding::NCBISTDAA_E as usize);
+        assert_eq!(E_ICHAR, crate::encoding::NCBISTDAA_I as usize);
+        assert_eq!(E_LCHAR, crate::encoding::NCBISTDAA_L as usize);
+        assert_eq!(E_NCHAR, crate::encoding::NCBISTDAA_N as usize);
+        assert_eq!(E_QCHAR, crate::encoding::NCBISTDAA_Q as usize);
+        assert_eq!(E_XCHAR, crate::encoding::NCBISTDAA_X as usize);
+        assert_eq!(E_ZCHAR, crate::encoding::NCBISTDAA_Z as usize);
+        assert_eq!(E_SELENOCYSTEINE, crate::encoding::NCBISTDAA_U as usize);
+        assert_eq!(E_STOP_CHAR, crate::encoding::NCBISTDAA_STOP as usize);
+        assert_eq!(E_OCHAR, crate::encoding::NCBISTDAA_O as usize);
+        assert_eq!(E_JCHAR, crate::encoding::NCBISTDAA_J as usize);
 
-        // Cross-check with encoding tables.
-        assert_eq!(NCBISTDAA_TO_AMINOACID[E_STOP_CHAR] as u8, b'*');
-        assert_eq!(NCBISTDAA_TO_AMINOACID[E_OCHAR] as u8, b'O');
-        assert_eq!(NCBISTDAA_TO_AMINOACID[E_GAP_CHAR] as u8, b'-');
-        assert_eq!(AMINOACID_TO_NCBISTDAA[b'*' as usize] as usize, E_STOP_CHAR);
-        assert_eq!(AMINOACID_TO_NCBISTDAA[b'O' as usize] as usize, E_OCHAR);
+        // Cross-check with encoding helpers.
+        assert_eq!(ncbistdaa_to_aminoacid_base(E_STOP_CHAR as u8), b'*');
+        assert_eq!(ncbistdaa_to_aminoacid_base(E_OCHAR as u8), b'O');
+        assert_eq!(ncbistdaa_to_aminoacid_base(E_GAP_CHAR as u8), b'-');
+        assert_eq!(aminoacid_to_ncbistdaa_base(b'*') as usize, E_STOP_CHAR);
+        assert_eq!(aminoacid_to_ncbistdaa_base(b'O') as usize, E_OCHAR);
+        assert_eq!(aminoacid_to_ncbistdaa_base(b'J') as usize, E_JCHAR);
+        assert_eq!(aminoacid_to_ncbistdaa_base(b'B') as usize, E_BCHAR);
+        assert_eq!(aminoacid_to_ncbistdaa_base(b'Z') as usize, E_ZCHAR);
+    }
+
+    #[test]
+    fn composition_lambda_ratio_clamps_upper_bound_unless_pvalue_adjusting() {
+        let matrix = crate::matrix::BLOSUM62;
+        let standard_lambda = 0.3176;
+        let (glu_comp, glu_len) =
+            stdaa_composition(b"MEEEEKELEQEKKKLEEEKAEELEEELKKLEQEEVKEEIKELEEKLEEEQKEELKNELEEE");
+        assert_eq!(glu_len, 61);
+        let bg = blosum62_background_stdaa();
+
+        let score_only = composition_lambda_ratio(&matrix, &glu_comp, &bg, standard_lambda)
+            .expect("biased/background pair should produce a lambda ratio");
+        assert_eq!(score_only, 1.0);
+
+        let pvalue_adjusted = composition_lambda_ratio_with_adjustment(
+            &matrix,
+            &glu_comp,
+            &bg,
+            standard_lambda,
+            true,
+        )
+        .expect("biased/background p-value pair should produce a lambda ratio");
+        assert!(
+            (pvalue_adjusted - 1.07041410).abs() < 1.0e-8,
+            "unexpected unclamped ratio: {pvalue_adjusted}"
+        );
+    }
+
+    #[test]
+    fn composition_lambda_ratio_applies_lower_bound() {
+        let matrix = crate::matrix::BLOSUM62;
+        let standard_lambda = 0.3176;
+        let (glu_comp, glu_len) =
+            stdaa_composition(b"MEEEEKELEQEKKKLEEEKAEELEEELKKLEQEEVKEEIKELEEKLEEEQKEELKNELEEE");
+        assert_eq!(glu_len, 61);
+
+        let ratio = composition_lambda_ratio(&matrix, &glu_comp, &glu_comp, standard_lambda)
+            .expect("biased self-pair should produce a lambda ratio");
+        assert_eq!(ratio, LAMBDA_RATIO_LOWER_BOUND);
     }
 }

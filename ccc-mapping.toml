@@ -1624,10 +1624,6 @@ rust  = "diag_table_extend_initial_hit_packed"
 other = "s_BlastnDiagTableExtendInitialHit"
 
 [[entries]]
-rust  = "diag_hash_extend_initial_hit_packed"
-other = "s_BlastnDiagHashExtendInitialHit"
-
-[[entries]]
 rust  = "blast_preliminary_search_engine_packed_prepared_with_split_xdrop"
 other = "BLAST_PreliminarySearchEngine"
 
@@ -2121,6 +2117,14 @@ other = "Blast_RedoAlignParamsFree"
 [[entries]]
 rust  = "get_start_freq_ratios"
 other = "s_GetStartFreqRatios"
+
+[[entries]]
+rust  = "get_pos_based_start_freq_ratios"
+other = "s_GetPosBasedStartFreqRatios"
+
+[[entries]]
+rust  = "scale_pos_matrix"
+other = "s_ScalePosMatrix"
 
 [[entries]]
 rust  = "sw_find_final_ends_using_xdrop"

@@ -4,6 +4,10 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
+use crate::db::defline::encode_defline_asn1;
+use crate::db::index_writer::write_index_file;
+use crate::encoding::{encode_ncbi2na_ambiguity_data, encode_ncbi2na_sequence};
+
 /// Create a BLAST v4 nucleotide database from a FASTA file.
 pub fn make_nucleotide_db(
     fasta_path: &Path,
@@ -48,44 +52,14 @@ pub fn make_nucleotide_db(
 
     for (_, seq) in &sequences {
         let seq_start = seq_offsets.last().copied().unwrap_or(1);
-        // Pack 4 bases per byte (NCBI2na)
-        let mut packed = Vec::new();
-        let iupac_to_2na = |b: u8| -> u8 {
-            match b {
-                b'A' | b'a' => 0,
-                b'C' | b'c' => 1,
-                b'G' | b'g' => 2,
-                b'T' | b't' => 3,
-                _ => 0,
-            }
-        };
-
-        let full_bytes = seq.len() / 4;
-        let remainder = seq.len() % 4;
-        for i in 0..full_bytes {
-            let b = (iupac_to_2na(seq[i * 4]) << 6)
-                | (iupac_to_2na(seq[i * 4 + 1]) << 4)
-                | (iupac_to_2na(seq[i * 4 + 2]) << 2)
-                | iupac_to_2na(seq[i * 4 + 3]);
-            packed.push(b);
-        }
-        // Last byte: pack remaining bases + remainder count in low 2 bits
-        if remainder > 0 {
-            let mut last = 0u8;
-            for j in 0..remainder {
-                last |= iupac_to_2na(seq[full_bytes * 4 + j]) << (6 - 2 * j);
-            }
-            last |= remainder as u8; // low 2 bits = remainder count
-            packed.push(last);
-        } else {
-            packed.push(0); // remainder = 0
-        }
+        let packed = encode_ncbi2na_sequence(seq);
 
         nsq.write_all(&packed)?;
         let amb_offset = seq_start as u32 + packed.len() as u32;
         amb_offsets.push(amb_offset);
-        // No ambiguity data for now
-        seq_offsets.push(amb_offset);
+        let ambiguity_data = encode_ncbi2na_ambiguity_data(seq);
+        nsq.write_all(&ambiguity_data)?;
+        seq_offsets.push(amb_offset + ambiguity_data.len() as u32);
         total_length += seq.len() as u64;
     }
     amb_offsets.push(*seq_offsets.last().unwrap_or(&0));
@@ -102,146 +76,25 @@ pub fn make_nucleotide_db(
     }
     nhr.flush()?;
 
-    // Write .nin (index)
-    let mut nin = BufWriter::new(File::create(output_base.with_extension("nin"))?);
-    // Version
-    nin.write_all(&4u32.to_be_bytes())?;
-    // Type (0 = nucleotide in v4 format)
-    nin.write_all(&0u32.to_be_bytes())?;
-    // Title
-    let title_bytes = title.as_bytes();
-    nin.write_all(&(title_bytes.len() as u32).to_be_bytes())?;
-    nin.write_all(title_bytes)?;
-    // Date
-    let date = "2026-01-01";
-    nin.write_all(&(date.len() as u32).to_be_bytes())?;
-    nin.write_all(date.as_bytes())?;
-    // Num OIDs
-    nin.write_all(&num_seqs.to_be_bytes())?;
-    // Total length (little-endian!)
-    nin.write_all(&total_length.to_le_bytes())?;
-    // Max length
     let max_len = sequences
         .iter()
         .map(|(_, s)| s.len() as u32)
         .max()
         .unwrap_or(0);
-    nin.write_all(&max_len.to_be_bytes())?;
-
-    // Header offsets (num_seqs + 1)
-    for off in &hdr_offsets {
-        nin.write_all(&off.to_be_bytes())?;
-    }
-    // Sequence offsets (num_seqs + 1)
-    for off in &seq_offsets {
-        nin.write_all(&off.to_be_bytes())?;
-    }
-    // Ambiguity offsets (num_seqs + 1) = same as seq offsets (no ambiguity)
-    for off in &amb_offsets {
-        nin.write_all(&off.to_be_bytes())?;
-    }
-    nin.flush()?;
+    write_index_file(
+        &output_base.with_extension("nin"),
+        4,
+        crate::db::DbType::Nucleotide,
+        title,
+        num_seqs,
+        total_length,
+        max_len,
+        &hdr_offsets,
+        &seq_offsets,
+        Some(&amb_offsets),
+    )?;
 
     Ok((num_seqs, total_length))
-}
-
-/// Encode a Blast-def-line-set ASN.1 BER header matching NCBI format.
-/// Structure: SEQUENCE { SEQUENCE { title [0] VisibleString, seqid [1] { general { db "BL_ORD_ID", tag id INTEGER } } } }
-fn encode_defline_asn1(title: &str, oid: i32) -> Vec<u8> {
-    let mut buf = Vec::new();
-    // Blast-def-line-set ::= SEQUENCE OF Blast-def-line
-    buf.extend_from_slice(&[0x30, 0x80]); // SEQUENCE, indefinite
-    {
-        // Blast-def-line ::= SEQUENCE
-        buf.extend_from_slice(&[0x30, 0x80]);
-        {
-            // title [0] VisibleString
-            buf.extend_from_slice(&[0xa0, 0x80]);
-            // VisibleString
-            buf.push(0x1a);
-            let title_bytes = title.as_bytes();
-            encode_asn1_length(&mut buf, title_bytes.len());
-            buf.extend_from_slice(title_bytes);
-            buf.extend_from_slice(&[0x00, 0x00]); // END context[0]
-
-            // seqid [1] SET OF Seq-id
-            buf.extend_from_slice(&[0xa1, 0x80]);
-            {
-                // Seq-id ::= CHOICE { general Dbtag }
-                // general [10] in Seq-id CHOICE
-                buf.extend_from_slice(&[0x30, 0x80]);
-                {
-                    buf.extend_from_slice(&[0xaa, 0x80]); // context[10] = general
-                    {
-                        // Dbtag ::= SEQUENCE { db VisibleString, tag Object-id }
-                        buf.extend_from_slice(&[0x30, 0x80]);
-                        {
-                            // db [0] VisibleString "BL_ORD_ID"
-                            buf.extend_from_slice(&[0xa0, 0x80]);
-                            buf.push(0x1a);
-                            buf.push(9); // length
-                            buf.extend_from_slice(b"BL_ORD_ID");
-                            buf.extend_from_slice(&[0x00, 0x00]); // END
-
-                            // tag [1] Object-id ::= CHOICE { id INTEGER }
-                            buf.extend_from_slice(&[0xa1, 0x80]);
-                            {
-                                // id [0] INTEGER
-                                buf.extend_from_slice(&[0xa0, 0x80]);
-                                buf.push(0x02); // INTEGER
-                                let oid_bytes = encode_asn1_integer(oid);
-                                encode_asn1_length(&mut buf, oid_bytes.len());
-                                buf.extend_from_slice(&oid_bytes);
-                                buf.extend_from_slice(&[0x00, 0x00]); // END id
-                            }
-                            buf.extend_from_slice(&[0x00, 0x00]); // END tag
-                        }
-                        buf.extend_from_slice(&[0x00, 0x00]); // END Dbtag
-                    }
-                    buf.extend_from_slice(&[0x00, 0x00]); // END general
-                }
-                buf.extend_from_slice(&[0x00, 0x00]); // END inner SEQUENCE
-            }
-            buf.extend_from_slice(&[0x00, 0x00]); // END seqid
-        }
-        buf.extend_from_slice(&[0x00, 0x00]); // END Blast-def-line
-    }
-    buf.extend_from_slice(&[0x00, 0x00]); // END Blast-def-line-set
-    buf
-}
-
-fn encode_asn1_length(buf: &mut Vec<u8>, len: usize) {
-    if len < 128 {
-        buf.push(len as u8);
-    } else if len < 256 {
-        buf.push(0x81);
-        buf.push(len as u8);
-    } else {
-        buf.push(0x82);
-        buf.push((len >> 8) as u8);
-        buf.push(len as u8);
-    }
-}
-
-fn encode_asn1_integer(val: i32) -> Vec<u8> {
-    if val == 0 {
-        vec![0]
-    } else if val > 0 && val < 128 {
-        vec![val as u8]
-    } else if val > 0 && val < 32768 {
-        if val < 256 {
-            vec![0, val as u8]
-        } else {
-            vec![(val >> 8) as u8, val as u8]
-        }
-    } else {
-        vec![
-            (val >> 24) as u8,
-            (val >> 16) as u8,
-            (val >> 8) as u8,
-            val as u8,
-        ]
-    }
 }
 
 #[cfg(test)]
@@ -270,6 +123,13 @@ mod tests {
         let db = super::super::index::BlastDb::open(&db_base).unwrap();
         assert_eq!(db.num_oids, 2);
         assert_eq!(db.total_length, 16);
+        assert!(is_blastdb_date(&db.date));
+        assert_eq!(db.get_accession(0).as_deref(), Some("seq1"));
+        assert_eq!(db.get_defline(0).as_deref(), Some("seq1"));
+        let raw_header = std::fs::read(db_base.with_extension("nhr")).unwrap();
+        assert!(raw_header
+            .windows(b"BL_ORD_ID".len())
+            .any(|w| w == b"BL_ORD_ID"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -296,6 +156,8 @@ mod tests {
         // Verify each sequence has the correct length
         assert_eq!(db.get_seq_len(0), 16);
         assert_eq!(db.get_seq_len(1), 16);
+        assert_eq!(db.get_accession(0).as_deref(), Some("chr1"));
+        assert_eq!(db.get_accession(1).as_deref(), Some("chr2"));
 
         // Verify raw data is non-empty
         assert!(!db.get_sequence(0).is_empty());
@@ -386,5 +248,48 @@ mod tests {
         assert_eq!(db2.get_seq_len(0), 8);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_make_nucleotide_db_writes_ambiguity_data() {
+        let dir = std::env::temp_dir().join("blast_makedb_ambiguity");
+        std::fs::create_dir_all(&dir).ok();
+
+        let fasta = dir.join("amb.fa");
+        std::fs::write(&fasta, ">amb1\nACGTRRNNY\n").unwrap();
+
+        let db_base = dir.join("ambdb");
+        let (nseq, total) = make_nucleotide_db(&fasta, &db_base, "Ambiguity Test").unwrap();
+        assert_eq!(nseq, 1);
+        assert_eq!(total, 9);
+
+        let db = super::super::index::BlastDb::open(&db_base).unwrap();
+        let ambiguity = db
+            .get_ambiguity_data(0)
+            .expect("ambiguous FASTA bases should be encoded");
+        assert!(!ambiguity.is_empty());
+
+        let decoded = crate::search::decode_packed_ncbi2na_with_ambiguity(
+            db.get_sequence(0),
+            db.get_seq_len(0) as usize,
+            ambiguity,
+        );
+        assert_eq!(
+            decoded,
+            vec![0, 1, 2, 3, 4, 4, 14, 14, 5],
+            "decoded BLASTNA sequence should preserve R/N/Y ambiguity"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn is_blastdb_date(date: &str) -> bool {
+        date.len() == 10
+            && date.as_bytes()[4] == b'-'
+            && date.as_bytes()[7] == b'-'
+            && date
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| matches!(i, 4 | 7) || b.is_ascii_digit())
     }
 }

@@ -8,7 +8,8 @@ use crate::parameters::EffectiveLengthsParameters;
 use crate::program::{is_mapping, is_phi_blast, subject_is_translated, ProgramType, BLASTN};
 use crate::queryinfo::QueryInfo;
 use crate::stat::{
-    compute_length_adjustment_exact, lookup_matrix_params, nucl_alpha_beta, KarlinBlk,
+    compute_length_adjustment_exact, lookup_matrix_params, lookup_matrix_ungapped_alpha_beta,
+    nucl_alpha_beta, KarlinBlk,
 };
 
 /// `BLAST_REWARD` (`blast_options.h:152`).
@@ -59,8 +60,8 @@ fn blast_get_alpha_beta(
     if !gapped {
         // Ungapped path in NCBI uses `alpha_arr[0]` / `beta_arr[0]` for
         // the matrix; if no entry exists fall back to Lambda/H.
-        if matrix_name.eq_ignore_ascii_case("IDENTITY") {
-            return (0.1703, -0.3);
+        if let Some((alpha, beta)) = lookup_matrix_ungapped_alpha_beta(matrix_name) {
+            return (alpha, beta);
         }
         return (kbp_ungapped.lambda / kbp_ungapped.h, 0.0);
     }

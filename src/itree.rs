@@ -1,8 +1,6 @@
 //! Rust equivalent of blast_itree.c — interval tree for HSP containment.
 //! Used to efficiently check if a new HSP is contained within existing ones.
 
-use std::cmp::{max, min};
-
 /// An interval [start, end) on one axis.
 #[derive(Debug, Clone, Copy)]
 pub struct Interval {
@@ -34,6 +32,8 @@ pub struct Interval2D {
     pub query: Interval,
     pub subject: Interval,
     pub score: i32,
+    pub query_index: i32,
+    pub subject_frame: i32,
 }
 
 /// Simple interval tree for 2D containment checking.
@@ -51,15 +51,29 @@ impl IntervalTree {
 
     /// Check if a new HSP is contained within any existing interval.
     /// Returns true if the new interval should be rejected (contained).
-    ///
-    /// Simpler than NCBI `s_HSPIsContained` (`blast_itree.c:810`): the
-    /// NCBI version also requires matching query index, subject-frame
-    /// sign, and the new HSP's score to be ≤ the containing HSP's. Rust
-    /// callers pre-sort by score and feed per-strand, per-query
-    /// batches, so this function only performs the 2D coord check and
-    /// the optional min-diag separation rule.
     pub fn is_contained(&self, query: Interval, subject: Interval, score: i32) -> bool {
-        self.is_contained_with_min_diag_separation(query, subject, score, 0)
+        self.is_contained_with_metadata(query, subject, score, 0, 0)
+    }
+
+    /// Check containment with NCBI `s_HSPIsContained` metadata gates
+    /// (`blast_itree.c:810`): the containing HSP must have the same query
+    /// index, the same subject-frame sign, and score >= the candidate.
+    pub fn is_contained_with_metadata(
+        &self,
+        query: Interval,
+        subject: Interval,
+        score: i32,
+        query_index: i32,
+        subject_frame: i32,
+    ) -> bool {
+        self.is_contained_with_metadata_and_min_diag_separation(
+            query,
+            subject,
+            score,
+            query_index,
+            subject_frame,
+            0,
+        )
     }
 
     /// Check if a new HSP is contained within any existing interval, using
@@ -71,70 +85,31 @@ impl IntervalTree {
         score: i32,
         min_diag_separation: i32,
     ) -> bool {
-        for existing in &self.intervals {
-            if score <= existing.score
-                && existing.query.contains(&query)
-                && existing.subject.contains(&subject)
-                && intervals_are_close_on_diagonal(
-                    existing.query,
-                    existing.subject,
-                    query,
-                    subject,
-                    min_diag_separation,
-                )
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Check if a new HSP overlaps with any existing interval by more than
-    /// a given fraction.
-    pub fn has_significant_overlap(
-        &self,
-        query: Interval,
-        subject: Interval,
-        max_overlap_fraction: f64,
-    ) -> bool {
-        self.has_significant_overlap_with_min_diag_separation(
+        self.is_contained_with_metadata_and_min_diag_separation(
             query,
             subject,
-            max_overlap_fraction,
+            score,
             0,
+            0,
+            min_diag_separation,
         )
     }
 
-    pub fn has_significant_overlap_with_min_diag_separation(
+    pub fn is_contained_with_metadata_and_min_diag_separation(
         &self,
         query: Interval,
         subject: Interval,
-        max_overlap_fraction: f64,
+        score: i32,
+        query_index: i32,
+        subject_frame: i32,
         min_diag_separation: i32,
     ) -> bool {
         for existing in &self.intervals {
-            let q_overlap = max(
-                0,
-                min(existing.query.end, query.end) - max(existing.query.start, query.start),
-            );
-            let s_overlap = max(
-                0,
-                min(existing.subject.end, subject.end) - max(existing.subject.start, subject.start),
-            );
-
-            let q_frac = if query.length() > 0 {
-                q_overlap as f64 / query.length() as f64
-            } else {
-                0.0
-            };
-            let s_frac = if subject.length() > 0 {
-                s_overlap as f64 / subject.length() as f64
-            } else {
-                0.0
-            };
-
-            if q_frac > max_overlap_fraction
-                && s_frac > max_overlap_fraction
+            if score <= existing.score
+                && query_index == existing.query_index
+                && same_subject_frame_sign(subject_frame, existing.subject_frame)
+                && existing.query.contains(&query)
+                && existing.subject.contains(&subject)
                 && intervals_are_close_on_diagonal(
                     existing.query,
                     existing.subject,
@@ -166,6 +141,17 @@ impl IntervalTree {
     /// endpoints, and the larger of them envelops legitimate seeds that
     /// NCBI's tree wouldn't envelop.
     pub fn insert(&mut self, query: Interval, subject: Interval, score: i32) {
+        self.insert_with_metadata(query, subject, score, 0, 0)
+    }
+
+    pub fn insert_with_metadata(
+        &mut self,
+        query: Interval,
+        subject: Interval,
+        score: i32,
+        query_index: i32,
+        subject_frame: i32,
+    ) {
         let in_q_len = query.end - query.start;
         let in_s_len = subject.end - subject.start;
         // Two passes: LEFT endpoint, then RIGHT endpoint. Same-pass logic.
@@ -174,6 +160,12 @@ impl IntervalTree {
             let mut idx = 0;
             while idx < self.intervals.len() {
                 let ex = &self.intervals[idx];
+                if query_index != ex.query_index
+                    || !same_subject_frame_sign(subject_frame, ex.subject_frame)
+                {
+                    idx += 1;
+                    continue;
+                }
                 let same_endpoint = if which_end == 0 {
                     ex.query.start == query.start && ex.subject.start == subject.start
                 } else {
@@ -219,12 +211,18 @@ impl IntervalTree {
             query,
             subject,
             score,
+            query_index,
+            subject_frame,
         });
     }
 
     pub fn len(&self) -> usize {
         self.intervals.len()
     }
+}
+
+fn same_subject_frame_sign(a: i32, b: i32) -> bool {
+    (a == 0 && b == 0) || (a > 0 && b > 0) || (a < 0 && b < 0)
 }
 
 fn intervals_are_close_on_diagonal(
@@ -271,15 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_overlap() {
-        let mut tree = IntervalTree::new(100, 100);
-        tree.insert(Interval::new(0, 50), Interval::new(0, 50), 100);
-
-        assert!(tree.has_significant_overlap(Interval::new(5, 45), Interval::new(5, 45), 0.5));
-        assert!(!tree.has_significant_overlap(Interval::new(45, 55), Interval::new(45, 55), 0.5));
-    }
-
-    #[test]
     fn test_megablast_diagonal_separation_keeps_distant_contained_hsp() {
         let mut tree = IntervalTree::new(100, 100);
         tree.insert(Interval::new(3, 40), Interval::new(3, 40), 37);
@@ -296,5 +285,43 @@ mod tests {
             30,
             6
         ));
+    }
+
+    #[test]
+    fn test_containment_requires_same_query_index_and_subject_frame_sign() {
+        let mut tree = IntervalTree::new(100, 100);
+        tree.insert_with_metadata(Interval::new(0, 50), Interval::new(0, 50), 100, 0, 1);
+
+        assert!(tree.is_contained_with_metadata(
+            Interval::new(10, 40),
+            Interval::new(10, 40),
+            90,
+            0,
+            2
+        ));
+        assert!(!tree.is_contained_with_metadata(
+            Interval::new(10, 40),
+            Interval::new(10, 40),
+            90,
+            1,
+            1
+        ));
+        assert!(!tree.is_contained_with_metadata(
+            Interval::new(10, 40),
+            Interval::new(10, 40),
+            90,
+            0,
+            -1
+        ));
+    }
+
+    #[test]
+    fn test_common_endpoint_dedup_respects_query_index_and_frame_sign() {
+        let mut tree = IntervalTree::new(100, 100);
+        tree.insert_with_metadata(Interval::new(0, 50), Interval::new(0, 50), 100, 0, 1);
+        tree.insert_with_metadata(Interval::new(0, 50), Interval::new(0, 50), 90, 1, 1);
+        tree.insert_with_metadata(Interval::new(0, 50), Interval::new(0, 50), 80, 0, -1);
+
+        assert_eq!(tree.len(), 3);
     }
 }

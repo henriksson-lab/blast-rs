@@ -209,13 +209,7 @@ mod tests {
 
     /// Helper: BLASTNA byte to IUPAC char (A=0,C=1,G=2,T=3).
     fn to_iupac(b: u8) -> char {
-        match b {
-            0 => 'A',
-            1 => 'C',
-            2 => 'G',
-            3 => 'T',
-            _ => 'N',
-        }
+        crate::encoding::blastna_to_iupacna_char(b)
     }
 
     #[test]

@@ -56,4 +56,3 @@ harness = false
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tracehash-rs = "0.1"

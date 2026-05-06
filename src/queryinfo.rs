@@ -21,6 +21,33 @@ pub struct QueryInfo {
 }
 
 impl QueryInfo {
+    /// Create QueryInfo for protein-query programs with one context per query.
+    pub fn new_blastp(query_lengths: &[usize]) -> Self {
+        let num_queries = query_lengths.len() as i32;
+        let mut contexts = Vec::new();
+        let mut offset = 0i32;
+
+        for (qi, &qlen) in query_lengths.iter().enumerate() {
+            contexts.push(ContextInfo {
+                query_offset: offset,
+                query_length: qlen as i32,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: qi as i32,
+                frame: 0,
+                is_valid: qlen > 0,
+            });
+            offset += qlen as i32 + 1;
+        }
+
+        let max_length = query_lengths.iter().copied().max().unwrap_or(0) as u32;
+        QueryInfo {
+            num_queries,
+            contexts,
+            max_length,
+        }
+    }
+
     /// Create QueryInfo for blastn with the given query lengths.
     pub fn new_blastn(query_lengths: &[usize]) -> Self {
         let num_queries = query_lengths.len() as i32;
@@ -57,6 +84,43 @@ impl QueryInfo {
 
         QueryInfo {
             num_queries,
+            contexts,
+            max_length,
+        }
+    }
+
+    /// Create QueryInfo for a single translated nucleotide query from the
+    /// offsets returned by `BLAST_GetAllTranslations`.
+    ///
+    /// The six contexts follow NCBI `BLAST_ContextToFrame` order:
+    /// `+1,+2,+3,-1,-2,-3`. Context offsets point into the flat translation
+    /// buffer after the leading NULLB sentinel for each frame.
+    pub fn new_translated_query_from_offsets(
+        frame_offsets: &[u32; crate::util::NUM_FRAMES + 1],
+    ) -> Self {
+        let contexts: Vec<ContextInfo> = (0..crate::util::NUM_FRAMES)
+            .map(|ctx| {
+                let begin = (frame_offsets[ctx] + 1) as i32;
+                let end = frame_offsets[ctx + 1] as i32;
+                let query_length = (end - begin).max(0);
+                ContextInfo {
+                    query_offset: begin,
+                    query_length,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: crate::util::blast_context_to_frame_blastx(ctx as u32),
+                    is_valid: query_length > 0,
+                }
+            })
+            .collect();
+        let max_length = contexts
+            .iter()
+            .map(|ctx| ctx.query_length.max(0) as u32)
+            .max()
+            .unwrap_or(0);
+        QueryInfo {
+            num_queries: 1,
             contexts,
             max_length,
         }
@@ -124,6 +188,20 @@ mod tests {
         assert_eq!(qi.contexts[2].query_index, 1);
     }
 
+    #[test]
+    fn test_new_blastp_multi() {
+        let qi = QueryInfo::new_blastp(&[150, 0, 40]);
+        assert_eq!(qi.num_queries, 3);
+        assert_eq!(qi.num_contexts(), 3);
+        assert_eq!(qi.max_length, 150);
+        assert_eq!(qi.contexts[0].query_offset, 0);
+        assert_eq!(qi.contexts[0].frame, 0);
+        assert_eq!(qi.contexts[1].query_offset, 151);
+        assert!(!qi.contexts[1].is_valid);
+        assert_eq!(qi.contexts[2].query_offset, 152);
+        assert_eq!(qi.contexts[2].query_index, 2);
+    }
+
     /// Port of NCBI queryinfo_unit_test: blastn with one query has 2 contexts (plus, minus).
     #[test]
     fn test_queryinfo_blastn_two_contexts() {
@@ -150,22 +228,8 @@ mod tests {
     /// Since we only have new_blastn, we simulate blastp as a single-context case.
     #[test]
     fn test_queryinfo_blastp_one_context() {
-        // For blastp, there is only 1 context per query (no strand).
-        // Construct manually since no new_blastp exists yet.
         let query_len = 150;
-        let qi = QueryInfo {
-            num_queries: 1,
-            contexts: vec![ContextInfo {
-                query_offset: 0,
-                query_length: query_len,
-                eff_searchsp: 0,
-                length_adjustment: 0,
-                query_index: 0,
-                frame: 0,
-                is_valid: true,
-            }],
-            max_length: query_len as u32,
-        };
+        let qi = QueryInfo::new_blastp(&[query_len as usize]);
         assert_eq!(qi.num_queries, 1);
         assert_eq!(qi.num_contexts(), 1);
         assert_eq!(qi.contexts[0].frame, 0);
@@ -175,34 +239,38 @@ mod tests {
     /// Port of NCBI queryinfo_unit_test: blastx should have 6 contexts (6 reading frames).
     #[test]
     fn test_queryinfo_blastx_six_contexts() {
-        // blastx has 6 frames: +1,+2,+3,-1,-2,-3
-        let query_len = 300;
-        let frames = [1, 2, 3, -1, -2, -3];
-        let protein_len = query_len / 3; // approximate translated length
-        let mut contexts = Vec::new();
-        let mut offset = 0i32;
-        for &frame in &frames {
-            contexts.push(ContextInfo {
-                query_offset: offset,
-                query_length: protein_len,
-                eff_searchsp: 0,
-                length_adjustment: 0,
-                query_index: 0,
-                frame,
-                is_valid: true,
-            });
-            offset += protein_len + 1;
-        }
-        let qi = QueryInfo {
-            num_queries: 1,
-            contexts,
-            max_length: protein_len as u32,
-        };
+        let nt = vec![1u8, 8, 4, 4, 2, 8]; // ATGGCT in NCBI4na.
+        let (_buf, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &nt,
+            nt.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let qi = QueryInfo::new_translated_query_from_offsets(&offsets);
         assert_eq!(qi.num_queries, 1);
         assert_eq!(qi.num_contexts(), 6);
         assert_eq!(qi.contexts[0].frame, 1);
+        assert_eq!(qi.contexts[0].query_length, 2);
+        assert_eq!(qi.contexts[1].query_length, 1);
+        assert_eq!(qi.contexts[2].query_length, 1);
         assert_eq!(qi.contexts[3].frame, -1);
+        assert_eq!(qi.contexts[3].query_length, 2);
         assert_eq!(qi.contexts[5].frame, -3);
+        assert_eq!(qi.max_length, 2);
+    }
+
+    #[test]
+    fn test_queryinfo_blastx_short_sequence_contexts_are_invalid() {
+        let nt = vec![1u8, 2]; // AC in NCBI4na; no complete codons.
+        let (_buf, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+            &nt,
+            nt.len(),
+            &crate::util::STANDARD_GENETIC_CODE,
+        );
+        let qi = QueryInfo::new_translated_query_from_offsets(&offsets);
+        assert_eq!(qi.num_contexts(), 6);
+        assert_eq!(qi.max_length, 0);
+        assert!(qi.contexts.iter().all(|ctx| ctx.query_length == 0));
+        assert!(qi.contexts.iter().all(|ctx| !ctx.is_valid));
     }
 
     /// Port of NCBI queryinfo_unit_test: multiple queries multiply the context count.

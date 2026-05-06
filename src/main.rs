@@ -5,13 +5,22 @@
 
 use blast_rs::db::{BlastDb, DbType};
 use blast_rs::format::{format_tabular, TabularHit};
-use blast_rs::input::{iupacna_to_blastna, parse_fasta_with_default_id, FastaRecord};
+use blast_rs::input::{parse_fasta_with_default_id, FastaRecord};
 use blast_rs::BlastDbBuilder;
 use clap::{Parser, Subcommand};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CliProgram {
+    Blastn,
+    Blastp,
+    Blastx,
+    Tblastn,
+    Tblastx,
+}
 
 #[derive(Parser)]
 #[command(
@@ -52,7 +61,7 @@ enum Commands {
 struct BlastnArgs {
     /// Query file in FASTA format
     #[arg(short, long)]
-    query: PathBuf,
+    query: Option<PathBuf>,
 
     /// BLAST database name (path without extension)
     #[arg(short, long)]
@@ -135,9 +144,85 @@ struct BlastnArgs {
     #[arg(long = "use_sw_tback", alias = "use-sw-tback", default_value = "false")]
     use_sw_tback: bool,
 
+    /// Gap trigger for PSI-style searches.
+    #[arg(long = "gap_trigger", alias = "gap-trigger")]
+    gap_trigger: Option<String>,
+
+    /// Number of PSI-BLAST iterations.
+    #[arg(long = "num_iterations", alias = "num-iterations")]
+    num_iterations: Option<String>,
+
+    /// PSSM checkpoint output.
+    #[arg(long = "out_pssm", alias = "out-pssm")]
+    out_pssm: Option<PathBuf>,
+
+    /// ASCII PSSM output.
+    #[arg(long = "out_ascii_pssm", alias = "out-ascii-pssm")]
+    out_ascii_pssm: Option<PathBuf>,
+
+    /// Save PSSM after the last round.
+    #[arg(
+        long = "save_pssm_after_last_round",
+        alias = "save-pssm-after-last-round",
+        default_value = "false"
+    )]
+    save_pssm_after_last_round: bool,
+
+    /// Save each PSSM.
+    #[arg(
+        long = "save_each_pssm",
+        alias = "save-each-pssm",
+        default_value = "false"
+    )]
+    save_each_pssm: bool,
+
+    /// Multiple sequence alignment input for PSI-BLAST restart.
+    #[arg(long = "in_msa", alias = "in-msa")]
+    in_msa: Option<PathBuf>,
+
+    /// Master sequence index in an input MSA.
+    #[arg(long = "msa_master_idx", alias = "msa-master-idx")]
+    msa_master_idx: Option<String>,
+
+    /// Ignore MSA master sequence.
+    #[arg(
+        long = "ignore_msa_master",
+        alias = "ignore-msa-master",
+        default_value = "false"
+    )]
+    ignore_msa_master: bool,
+
     /// PSSM checkpoint input.
     #[arg(long = "in_pssm", alias = "in-pssm")]
     in_pssm: Option<PathBuf>,
+
+    /// PSI-BLAST pseudocount.
+    #[arg(long = "pseudocount")]
+    pseudocount: Option<String>,
+
+    /// PSI-BLAST inclusion e-value threshold.
+    #[arg(long = "inclusion_ethresh", alias = "inclusion-ethresh")]
+    inclusion_ethresh: Option<String>,
+
+    /// DELTA-BLAST domain inclusion e-value threshold.
+    #[arg(long = "domain_inclusion_ethresh", alias = "domain-inclusion-ethresh")]
+    domain_inclusion_ethresh: Option<String>,
+
+    /// PHI-BLAST pattern file.
+    #[arg(long = "phi_pattern", alias = "phi-pattern")]
+    phi_pattern: Option<PathBuf>,
+
+    /// DELTA-BLAST conserved domain database.
+    #[arg(long = "rpsdb")]
+    rpsdb: Option<PathBuf>,
+
+    /// Show DELTA-BLAST conserved domain hits.
+    #[arg(
+        long = "show_domain_hits",
+        alias = "show-domain-hits",
+        default_value = "false"
+    )]
+    show_domain_hits: bool,
 
     /// DUST low-complexity filtering: yes/no
     #[arg(long = "dust", default_value = "yes")]
@@ -634,6 +719,36 @@ impl BlastnArgs {
             .as_deref()
             .map(|value| parse_validated_i32("min_raw_gapped_score", value))
     }
+    fn gap_trigger_value(&self) -> Option<f64> {
+        self.gap_trigger
+            .as_deref()
+            .map(|value| parse_validated_f64("gap_trigger", value))
+    }
+    fn num_iterations_value(&self) -> Option<i32> {
+        self.num_iterations
+            .as_deref()
+            .map(|value| parse_validated_i32("num_iterations", value))
+    }
+    fn msa_master_idx_value(&self) -> Option<i32> {
+        self.msa_master_idx
+            .as_deref()
+            .map(|value| parse_validated_i32("msa_master_idx", value))
+    }
+    fn pseudocount_value(&self) -> Option<i32> {
+        self.pseudocount
+            .as_deref()
+            .map(|value| parse_validated_i32("pseudocount", value))
+    }
+    fn inclusion_ethresh_value(&self) -> Option<f64> {
+        self.inclusion_ethresh
+            .as_deref()
+            .map(|value| parse_validated_f64("inclusion_ethresh", value))
+    }
+    fn domain_inclusion_ethresh_value(&self) -> Option<f64> {
+        self.domain_inclusion_ethresh
+            .as_deref()
+            .map(|value| parse_validated_f64("domain_inclusion_ethresh", value))
+    }
     fn window_masker_taxid_value(&self) -> Option<i32> {
         self.window_masker_taxid
             .as_deref()
@@ -682,7 +797,7 @@ fn maybe_emit_blast_help_or_version_and_exit() {
         std::process::exit(0);
     }
     if rest.iter().any(|arg| arg == "-h" || arg == "-help") {
-        emit_blastn_help_stdout(rest.iter().any(|arg| arg == "-help"));
+        emit_blast_help_stdout(&command, rest.iter().any(|arg| arg == "-help"));
         std::process::exit(0);
     }
 }
@@ -728,13 +843,27 @@ fn maybe_emit_program_filter_option_error() {
             .find(|name| {
                 matches!(
                     *name,
-                    "dust" | "filtering_db" | "window_masker_db" | "window_masker_taxid"
+                    "dust"
+                        | "filtering_db"
+                        | "gap_trigger"
+                        | "window_masker_db"
+                        | "window_masker_taxid"
                 ) || matches!(*name, "query_gencode" if command == "blastp" || command == "tblastn")
                     || matches!(*name, "db_gencode" if command == "blastp" || command == "blastx")
                     || matches!(*name, "max_intron_length" if command == "blastp")
                     || matches!(*name, "in_pssm" if command != "tblastn")
                     || matches!(*name, "comp_based_stats" if command == "tblastx")
                     || matches!(*name, "use_sw_tback" if command == "tblastx")
+                    || matches!(
+                        *name,
+                        "gapopen"
+                            | "gapextend"
+                            | "ungapped"
+                            | "mt_mode"
+                            | "xdrop_gap"
+                            | "xdrop_gap_final"
+                            if command == "tblastx"
+                    )
             })
     })
     .flatten();
@@ -755,6 +884,105 @@ fn maybe_emit_program_filter_option_error() {
             std::process::exit(1);
         }
     }
+    let non_blastn_identity_option = (command != "blastn")
+        .then(|| {
+            rest.iter()
+                .filter_map(|arg| cli_option_name(arg))
+                .find(|name| *name == "perc_identity")
+        })
+        .flatten();
+    if let Some(unknown_option) = non_blastn_identity_option {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        emit_program_usage_constraint_error(&command, &error, &detail);
+    }
+    let psi_delta_option = (!matches!(command.as_str(), "psiblast" | "deltablast"))
+        .then(|| find_psi_delta_only_option(&rest))
+        .flatten();
+    if let Some(unknown_option) = psi_delta_option {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        emit_program_usage_constraint_error(&command, &error, &detail);
+    }
+    let psiblast_delta_only_option = (command == "psiblast")
+        .then(|| {
+            rest.iter()
+                .filter_map(|arg| cli_option_name(arg))
+                .find(|name| *name == "domain_inclusion_ethresh")
+        })
+        .flatten();
+    if let Some(unknown_option) = psiblast_delta_only_option {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        emit_program_usage_constraint_error(&command, &error, &detail);
+    }
+    let delta_only_option = (command != "deltablast")
+        .then(|| {
+            rest.iter()
+                .filter_map(|arg| cli_option_name(arg))
+                .find(|name| matches!(*name, "rpsdb" | "show_domain_hits"))
+        })
+        .flatten();
+    if let Some(unknown_option) = delta_only_option {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        emit_program_usage_constraint_error(&command, &error, &detail);
+    }
+    let deltablast_psiblast_only_option = (command == "deltablast")
+        .then(|| {
+            rest.iter()
+                .filter_map(|arg| cli_option_name(arg))
+                .find(|name| {
+                    matches!(
+                        *name,
+                        "in_msa"
+                            | "msa_master_idx"
+                            | "ignore_msa_master"
+                            | "in_pssm"
+                            | "phi_pattern"
+                    )
+                })
+        })
+        .flatten();
+    if let Some(unknown_option) = deltablast_psiblast_only_option {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        emit_program_usage_constraint_error(&command, &error, &detail);
+    }
+    let rpstblastn_unsupported_filter = (command == "rpstblastn")
+        .then(|| {
+            rest.iter()
+                .filter_map(|arg| cli_option_name(arg))
+                .find(|name| {
+                    matches!(
+                        *name,
+                        "gilist"
+                            | "seqidlist"
+                            | "negative_gilist"
+                            | "negative_seqidlist"
+                            | "taxids"
+                            | "negative_taxids"
+                            | "taxidlist"
+                            | "negative_taxidlist"
+                    )
+                })
+        })
+        .flatten();
+    if let Some(unknown_option) = rpstblastn_unsupported_filter {
+        let error = format!("Unknown argument: \"{unknown_option}\"");
+        let detail = format!("(CArgException::eInvalidArg) Unknown argument: \"{unknown_option}\"");
+        emit_program_usage_constraint_error(&command, &error, &detail);
+    }
+    if matches!(command.as_str(), "tblastx" | "psiblast" | "deltablast")
+        && rest
+            .iter()
+            .filter_map(|arg| cli_option_name(arg))
+            .any(|name| name == "mt_mode")
+    {
+        let error = "Unknown argument: \"mt_mode\"";
+        let detail = "(CArgException::eInvalidArg) Unknown argument: \"mt_mode\"";
+        emit_program_usage_constraint_error(&command, error, detail);
+    }
     maybe_emit_protein_word_size_constraint_error(&command, &rest);
     maybe_emit_threshold_constraint_error(&command, &rest);
     maybe_emit_genetic_code_constraint_error(&command, &rest);
@@ -764,6 +992,29 @@ fn cli_option_name(arg: &str) -> Option<&str> {
     arg.strip_prefix("--")
         .or_else(|| arg.strip_prefix('-'))
         .map(|option| option.split_once('=').map_or(option, |(name, _)| name))
+}
+
+fn find_psi_delta_only_option(args: &[String]) -> Option<&str> {
+    args.iter()
+        .filter_map(|arg| cli_option_name(arg))
+        .find(|name| {
+            matches!(
+                *name,
+                "gap_trigger"
+                    | "num_iterations"
+                    | "out_pssm"
+                    | "out_ascii_pssm"
+                    | "save_pssm_after_last_round"
+                    | "save_each_pssm"
+                    | "in_msa"
+                    | "msa_master_idx"
+                    | "ignore_msa_master"
+                    | "pseudocount"
+                    | "inclusion_ethresh"
+                    | "domain_inclusion_ethresh"
+                    | "phi_pattern"
+            )
+        })
 }
 
 fn maybe_emit_genetic_code_constraint_error(command: &str, rest: &[String]) {
@@ -1066,6 +1317,265 @@ Error:  {detail}
     std::process::exit(1);
 }
 
+fn emit_blast_help_stdout(command: &str, detailed: bool) {
+    match command {
+        "blastn" => emit_blastn_help_stdout(detailed),
+        "blastp" => emit_protein_program_help_stdout(BLASTP_USAGE, detailed),
+        "blastx" => emit_protein_program_help_stdout(BLASTX_USAGE, detailed),
+        "tblastn" => emit_protein_program_help_stdout(TBLASTN_USAGE, detailed),
+        "tblastx" => emit_protein_program_help_stdout(TBLASTX_USAGE, detailed),
+        "psiblast" => emit_protein_program_help_stdout(PSIBLAST_USAGE, detailed),
+        "rpstblastn" => emit_protein_program_help_stdout(RPSTBLASTN_USAGE, detailed),
+        "deltablast" => emit_protein_program_help_stdout(DELTABLAST_USAGE, detailed),
+        _ => emit_blastn_help_stdout(detailed),
+    }
+}
+
+fn emit_protein_program_help_stdout(usage: &str, detailed: bool) {
+    if detailed {
+        let usage = usage
+            .strip_suffix("Use '-help' to print detailed descriptions of command line arguments\n")
+            .unwrap_or(usage);
+        print!("{usage}");
+        print!("{HELP_OPTION_SUMMARY}");
+    } else {
+        print!("{usage}");
+    }
+}
+
+const HELP_OPTION_SUMMARY: &str = r#"
+OPTIONAL ARGUMENTS
+ -h
+   Print USAGE and DESCRIPTION;  ignore all other parameters
+ -help
+   Print USAGE, DESCRIPTION and ARGUMENTS; ignore all other parameters
+ -version
+   Print version number;  ignore other arguments
+"#;
+
+const BLASTP_USAGE: &str = r#"USAGE
+  blastp [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_ipglist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-parse_deflines] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-ungapped] [-remote]
+    [-comp_based_stats compo] [-use_sw_tback] [-version]
+
+DESCRIPTION
+   Protein-Protein BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+"#;
+
+const BLASTX_USAGE: &str = r#"USAGE
+  blastx [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_ipglist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-max_intron_length length] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-ungapped] [-lcase_masking]
+    [-query_loc range] [-strand strand] [-parse_deflines]
+    [-query_gencode int_value] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-remote]
+    [-comp_based_stats compo] [-use_sw_tback] [-version]
+
+DESCRIPTION
+   Translated Query-Protein Subject BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+"#;
+
+const TBLASTN_USAGE: &str = r#"USAGE
+  tblastn [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-task task_name] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-db_gencode int_value] [-ungapped]
+    [-max_intron_length length] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-parse_deflines] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-mt_mode int_value] [-remote]
+    [-comp_based_stats compo] [-use_sw_tback] [-in_pssm psi_chkpt_file]
+    [-version]
+
+DESCRIPTION
+   Protein Query-Translated Subject BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+"#;
+
+const TBLASTX_USAGE: &str = r#"USAGE
+  tblastx [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-searchsp int_value] [-sum_stats bool_value]
+    [-max_intron_length length] [-seg SEG_options]
+    [-soft_masking soft_masking] [-matrix matrix_name]
+    [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-strand strand] [-parse_deflines]
+    [-query_gencode int_value] [-db_gencode int_value] [-outfmt format]
+    [-show_gis] [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-remote] [-version]
+
+DESCRIPTION
+   Translated Query-Translated Subject BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+"#;
+
+const PSIBLAST_USAGE: &str = r#"USAGE
+  psiblast [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_ipglist filename] [-entrez_query entrez_query]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-seg SEG_options] [-soft_masking soft_masking]
+    [-matrix matrix_name] [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-parse_deflines] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-remote] [-comp_based_stats compo]
+    [-use_sw_tback] [-gap_trigger float_value] [-num_iterations int_value]
+    [-out_pssm checkpoint_file] [-out_ascii_pssm ascii_mtx_file]
+    [-save_pssm_after_last_round] [-save_each_pssm] [-in_msa align_restart]
+    [-msa_master_idx index] [-ignore_msa_master] [-in_pssm psi_chkpt_file]
+    [-pseudocount pseudocount] [-inclusion_ethresh ethresh]
+    [-phi_pattern file] [-version]
+
+DESCRIPTION
+   Position-Specific Iterated BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+"#;
+
+const RPSTBLASTN_USAGE: &str = r#"USAGE
+  rpstblastn [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-db database_name]
+    [-dbsize num_letters] [-entrez_query entrez_query] [-query input_file]
+    [-out output_file] [-evalue evalue] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-query_gencode int_value] [-seg SEG_options]
+    [-soft_masking soft_masking] [-window_size int_value] [-ungapped]
+    [-lcase_masking] [-query_loc range] [-strand strand] [-parse_deflines]
+    [-outfmt format] [-show_gis] [-num_descriptions int_value]
+    [-num_alignments int_value] [-line_length line_length] [-html]
+    [-sorthits sort_hits] [-sorthsps sort_hsps]
+    [-max_target_seqs num_sequences] [-num_threads int_value]
+    [-mt_mode int_value] [-remote] [-comp_based_stats compo] [-use_sw_tback]
+    [-version]
+
+DESCRIPTION
+   Translated Reverse Position Specific BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+"#;
+
+const DELTABLAST_USAGE: &str = r#"USAGE
+  deltablast [-h] [-help] [-import_search_strategy filename]
+    [-export_search_strategy filename] [-db database_name]
+    [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
+    [-negative_gilist filename] [-negative_seqidlist filename]
+    [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
+    [-negative_taxidlist filename] [-entrez_query entrez_query]
+    [-subject subject_input_file] [-subject_loc range] [-query input_file]
+    [-out output_file] [-evalue evalue] [-word_size int_value]
+    [-gapopen open_penalty] [-gapextend extend_penalty]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-seg SEG_options] [-soft_masking soft_masking]
+    [-matrix matrix_name] [-threshold float_value] [-culling_limit int_value]
+    [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
+    [-subject_besthit] [-window_size int_value] [-lcase_masking]
+    [-query_loc range] [-parse_deflines] [-outfmt format] [-show_gis]
+    [-num_descriptions int_value] [-num_alignments int_value]
+    [-line_length line_length] [-html] [-sorthits sort_hits]
+    [-sorthsps sort_hsps] [-max_target_seqs num_sequences]
+    [-num_threads int_value] [-remote] [-comp_based_stats compo]
+    [-use_sw_tback] [-gap_trigger float_value] [-num_iterations int_value]
+    [-out_pssm checkpoint_file] [-out_ascii_pssm ascii_mtx_file]
+    [-save_pssm_after_last_round] [-save_each_pssm] [-pseudocount pseudocount]
+    [-domain_inclusion_ethresh ethresh] [-inclusion_ethresh ethresh]
+    [-rpsdb database_name] [-show_domain_hits] [-version]
+
+DESCRIPTION
+   Domain enhanced lookup time accelarated BLAST 2.12.0+
+
+Use '-help' to print detailed descriptions of command line arguments
+"#;
+
 fn emit_blastn_help_stdout(detailed: bool) {
     print!(
         r#"USAGE
@@ -1103,17 +1613,7 @@ DESCRIPTION
 "#
     );
     if detailed {
-        print!(
-            r#"
-OPTIONAL ARGUMENTS
- -h
-   Print USAGE and DESCRIPTION;  ignore all other parameters
- -help
-   Print USAGE, DESCRIPTION and ARGUMENTS; ignore all other parameters
- -version
-   Print version number;  ignore other arguments
-"#
-        );
+        print!("{HELP_OPTION_SUMMARY}");
     }
 }
 
@@ -1161,8 +1661,8 @@ fn main_inner() {
     maybe_emit_program_filter_option_error();
     maybe_emit_blastn_missing_option_value_and_exit();
     let cli = Cli::try_parse_from(normalize_ncbi_single_dash_long_args()).unwrap_or_else(|err| {
-        if let Some(value) = blastn_unexpected_positional_arg(&err) {
-            emit_blastn_usage_too_many_positional_error(&value);
+        if let Some((program, value)) = unexpected_positional_arg(&err) {
+            emit_program_too_many_positional_error(&program, &value);
         }
         err.exit();
     });
@@ -1182,30 +1682,33 @@ fn main_inner() {
     if program_uses_blastn_task_defaults(program) {
         args.apply_task_defaults();
     }
-    validate_subject_db_options(&args);
+    validate_subject_db_options(program, &args);
     validate_no_taxid_expansion_options(&args);
-    validate_subject_filter_options(&args);
-    validate_database_filter_incompatibilities(&args);
-    validate_option_relationships(&args);
+    validate_subject_filter_options(program, &args);
+    validate_database_filter_incompatibilities(program, &args);
+    validate_option_relationships(program, &args);
     validate_taxid_filters(&args);
     validate_id_list_filters(&args);
     validate_search_strategy_options(&args);
     validate_db_mask_options(&args);
     validate_filtering_options(&args);
     validate_query_masking_options(program, &args);
-    validate_entrez_query_options(&args);
+    validate_entrez_query_options(program, &args);
     validate_remote_options(&args);
-    validate_boolean_options(&args);
+    validate_boolean_options(program, &args);
     validate_index_options(&args);
     validate_choice_options(&args);
+    maybe_emit_missing_db_before_plain_unsupported_outfmt(program, &args);
     validate_outfmt_options(&args);
     validate_program_outfmt_options(program, &args);
     validate_numeric_constraint_options(program, &args);
+    validate_psi_checkpoint_options(program, &args);
     validate_genetic_code_options(program, &args);
-    validate_thread_relationships(&args);
+    validate_thread_relationships(program, &args);
     validate_template_relationships(&args);
     validate_evalue_options(&args);
     validate_gap_cost_options(&args);
+    validate_greedy_gap_options(&args);
 
     emit_seqidlist_performance_warnings(program, &args);
     emit_sort_option_warnings(program, &args);
@@ -1218,9 +1721,13 @@ fn main_inner() {
     }
 
     if args.db.is_none() && args.subject.is_none() {
-        eprintln!("Error: Either --db or --subject is required");
-        std::process::exit(1);
+        emit_missing_search_source_error();
     }
+    validate_subject_file_before_query_file(&args);
+    exit_on_presearch_validation_error(validate_subject_location_before_output(&args));
+    validate_output_file_access_before_search(&args);
+    exit_on_presearch_validation_error(validate_query_location_before_omitted_query(&args));
+    maybe_emit_omitted_query_and_exit(program, &args);
 
     let result = match program {
         "blastn" => run_blastn(&args),
@@ -1260,15 +1767,114 @@ fn main_inner() {
     }
 }
 
+fn validate_subject_file_before_query_file(args: &BlastnArgs) {
+    if let Some(subject_path) = args.subject.as_ref() {
+        if !subject_path.is_file() {
+            emit_input_file_not_accessible_error("subject", subject_path);
+        }
+    }
+}
+
+fn exit_on_presearch_validation_error(result: Result<(), Box<dyn std::error::Error>>) {
+    if let Err(err) = result {
+        eprintln!("Error: {}", err);
+        std::process::exit(1);
+    }
+}
+
+fn validate_subject_location_before_output(
+    args: &BlastnArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if args.subject_loc.is_none() {
+        return Ok(());
+    }
+    let Some(subject_path) = args.subject.as_ref() else {
+        return Ok(());
+    };
+    let subjects =
+        parse_fasta_with_default_id(open_input_file("subject", subject_path), "Subject_1");
+    for subject in subjects {
+        let _ = subject_loc_bounds(args, subject.sequence.len())?;
+    }
+    Ok(())
+}
+
+fn validate_output_file_access_before_search(args: &BlastnArgs) {
+    if let Some(query_path) = args.query.as_ref() {
+        if !query_path.is_file() {
+            return;
+        }
+    }
+    let Some(out_path) = args.out.as_ref() else {
+        return;
+    };
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            emit_output_file_not_accessible_error(out_path);
+        }
+    }
+}
+
+fn validate_query_location_before_omitted_query(
+    args: &BlastnArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(loc) = args.query_loc.as_deref() else {
+        return Ok(());
+    };
+    if let Some(query_path) = args.query.as_ref() {
+        if !query_path.is_file() {
+            return Ok(());
+        }
+        let queries = parse_fasta_with_default_id(open_input_file("query", query_path), "Query_1");
+        for query in queries {
+            let _ = query_loc_bounds(args, query.sequence.len())?;
+        }
+    } else {
+        validate_location_syntax_and_order(loc, "query_loc");
+    }
+    Ok(())
+}
+
+fn query_path(args: &BlastnArgs) -> &PathBuf {
+    args.query
+        .as_ref()
+        .expect("query presence should be validated before search execution")
+}
+
+fn maybe_emit_omitted_query_and_exit(program: &str, args: &BlastnArgs) {
+    if args.query.is_some() {
+        return;
+    }
+    if matches!(program, "psiblast" | "deltablast") && args.in_msa.is_some() {
+        return;
+    }
+    if matches!(program, "psiblast" | "deltablast") && args.in_pssm.is_some() {
+        return;
+    }
+    if let Some(subject_path) = args.subject.as_ref() {
+        if !subject_path.is_file() {
+            emit_input_file_not_accessible_error("subject", subject_path);
+        }
+    }
+    if let Some(db_path) = args.db.as_ref() {
+        if !db_path_has_known_blast_component(db_path) {
+            emit_missing_database_error(program, &db_path.display().to_string());
+        }
+    }
+    eprintln!("Warning: [{program}] Query is Empty!");
+    std::process::exit(0);
+}
+
 fn program_uses_blastn_task_defaults(program: &str) -> bool {
     program == "blastn"
 }
 
-fn blastn_unexpected_positional_arg(err: &clap::Error) -> Option<String> {
+fn unexpected_positional_arg(err: &clap::Error) -> Option<(String, String)> {
     let text = err.to_string();
-    if !text.contains("Usage: blast-cli blastn ") {
-        return None;
-    }
+    let usage_prefix = "Usage: blast-cli ";
+    let usage_start = text.find(usage_prefix)? + usage_prefix.len();
+    let usage_rest = &text[usage_start..];
+    let program = usage_rest.split_whitespace().next()?.to_string();
     let prefix = "error: unexpected argument '";
     let start = text.find(prefix)? + prefix.len();
     let rest = &text[start..];
@@ -1277,7 +1883,7 @@ fn blastn_unexpected_positional_arg(err: &clap::Error) -> Option<String> {
     if value.starts_with('-') {
         return None;
     }
-    Some(value.to_string())
+    Some((program, value.to_string()))
 }
 
 fn emit_missing_database_error(program: &str, db_path: &str) -> ! {
@@ -1293,6 +1899,31 @@ fn emit_missing_database_error(program: &str, db_path: &str) -> ! {
         db_type, db_path, search_path
     );
     std::process::exit(2);
+}
+
+fn maybe_emit_missing_db_before_plain_unsupported_outfmt(program: &str, args: &BlastnArgs) {
+    let outfmt = outfmt_number(&args.outfmt);
+    if !matches!(outfmt, 12 | 13 | 14 | 15 | 16 | 18) {
+        return;
+    }
+    let Some(db_path) = args.db.as_ref() else {
+        return;
+    };
+    if !db_path_has_known_blast_component(db_path) {
+        emit_missing_database_error(program, &db_path.display().to_string());
+    }
+}
+
+fn db_path_has_known_blast_component(db_path: &std::path::Path) -> bool {
+    for ext in [
+        "nal", "nin", "nsq", "nhr", "nog", "nsd", "nsi", "not", "ntf", "nto", "pal", "pin", "psq",
+        "phr", "pog", "psd", "psi", "pot", "ptf", "pto",
+    ] {
+        if db_path.with_extension(ext).exists() {
+            return true;
+        }
+    }
+    false
 }
 
 fn emit_database_error(message: &str) -> ! {
@@ -1313,6 +1944,14 @@ fn emit_output_file_not_accessible_error(path: &Path) -> ! {
         "Command line argument error: Argument \"out\". File is not accessible:  `{}'",
         path.display()
     );
+    std::process::exit(1);
+}
+
+fn emit_missing_search_source_error() -> ! {
+    eprintln!(
+        "BLAST query/options error: Either a BLAST database or subject sequence(s) must be specified"
+    );
+    eprintln!("Please refer to the BLAST+ user manual.");
     std::process::exit(1);
 }
 
@@ -1383,7 +2022,16 @@ fn program_supports_outfmt(program: &str, outfmt_num: i32) -> bool {
         return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
     }
     if program == "tblastn" {
-        return matches!(outfmt_num, 0 | 6 | 7 | 10);
+        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+    }
+    if program == "psiblast" {
+        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+    }
+    if program == "deltablast" {
+        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+    }
+    if program == "rpstblastn" {
+        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
     }
     matches!(outfmt_num, 6 | 10)
 }
@@ -1704,9 +2352,10 @@ fn validate_query_masking_options(program: &str, args: &BlastnArgs) {
     }
 }
 
-fn validate_entrez_query_options(args: &BlastnArgs) {
+fn validate_entrez_query_options(program: &str, args: &BlastnArgs) {
     if args.entrez_query.is_some() && !args.remote {
-        emit_blastn_usage_constraint_error(
+        emit_program_required_argument_error(
+            program,
             "Argument \"remote\". Must be specified, as it is required by argument:  `entrez_query'",
             "(CArgException::eConstraint) Argument \"remote\". Must be specified, as it is required by argument:  `entrez_query'",
         );
@@ -1721,17 +2370,17 @@ fn validate_remote_options(args: &BlastnArgs) {
     }
 }
 
-fn validate_boolean_options(args: &BlastnArgs) {
+fn validate_boolean_options(program: &str, args: &BlastnArgs) {
     if !is_ncbi_bool(&args.soft_masking) {
-        emit_blastn_usage_conversion_error("soft_masking", &args.soft_masking);
+        emit_program_usage_conversion_error(program, "soft_masking", &args.soft_masking);
     }
     if let Some(value) = args.sum_stats.as_deref() {
         if !is_ncbi_bool(value) {
-            emit_blastn_usage_conversion_error("sum_stats", value);
+            emit_program_usage_conversion_error(program, "sum_stats", value);
         }
     }
     if !is_ncbi_bool(&args.use_index) {
-        emit_blastn_usage_conversion_error("use_index", &args.use_index);
+        emit_program_usage_conversion_error(program, "use_index", &args.use_index);
     }
 }
 
@@ -1892,7 +2541,7 @@ fn ncbi_float_error_pos(value: &str) -> usize {
 fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
     let num_threads = args.num_threads();
     if num_threads < 1 {
-        emit_integer_constraint_error("num_threads", ">=1", num_threads);
+        emit_program_integer_constraint_error(program, "num_threads", ">=1", num_threads);
     }
     let perc_identity = args.perc_identity();
     let qcov_hsp_perc = args.qcov_hsp_perc();
@@ -1934,20 +2583,34 @@ fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
             qcov_hsp_perc
         );
         let detail = format!("(CArgException::eConstraint) {error}");
-        emit_blastn_usage_constraint_error(&error, &detail);
+        emit_program_usage_constraint_error(program, &error, &detail);
     }
     if let Some(max_hsps) = args.max_hsps_value() {
         if max_hsps < 1 {
-            emit_integer_constraint_error("max_hsps", ">=1", max_hsps);
+            emit_program_integer_constraint_error(program, "max_hsps", ">=1", max_hsps);
+        }
+    }
+    if let Some(max_intron_length) = args
+        .max_intron_length
+        .as_deref()
+        .map(|value| parse_validated_i32("max_intron_length", value))
+    {
+        if max_intron_length < 0 {
+            emit_program_integer_constraint_error(
+                program,
+                "max_intron_length",
+                ">=0",
+                max_intron_length,
+            );
         }
     }
     let culling_limit = args.culling_limit();
     if culling_limit < 0 {
-        emit_integer_constraint_error("culling_limit", ">=0", culling_limit);
+        emit_program_integer_constraint_error(program, "culling_limit", ">=0", culling_limit);
     }
     let window_size = args.window_size();
     if window_size < 0 {
-        emit_integer_constraint_error("window_size", ">=0", window_size);
+        emit_program_integer_constraint_error(program, "window_size", ">=0", window_size);
     }
     let off_diagonal_range = args.off_diagonal_range();
     if off_diagonal_range < 0 {
@@ -1959,22 +2622,32 @@ fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
     }
     if let Some(num_descriptions) = args.num_descriptions_value() {
         if num_descriptions < 0 {
-            emit_integer_constraint_error("num_descriptions", ">=0", num_descriptions);
+            emit_program_integer_constraint_error(
+                program,
+                "num_descriptions",
+                ">=0",
+                num_descriptions,
+            );
         }
     }
     if let Some(num_alignments) = args.num_alignments_value() {
         if num_alignments < 0 {
-            emit_integer_constraint_error("num_alignments", ">=0", num_alignments);
+            emit_program_integer_constraint_error(program, "num_alignments", ">=0", num_alignments);
         }
     }
     if let Some(max_target_seqs) = args.max_target_seqs_value() {
         if max_target_seqs < 1 {
-            emit_integer_constraint_error("max_target_seqs", ">=1", max_target_seqs);
+            emit_program_integer_constraint_error(
+                program,
+                "max_target_seqs",
+                ">=1",
+                max_target_seqs,
+            );
         }
     }
     if let Some(line_length) = args.line_length_value() {
         if line_length < 1 {
-            emit_integer_constraint_error("line_length", ">=1", line_length);
+            emit_program_integer_constraint_error(program, "line_length", ">=1", line_length);
         }
     }
     let sorthits = args.sorthits();
@@ -1990,6 +2663,32 @@ fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
             format!("Argument \"sorthsps\". Illegal value, expected (>=0 and =<4):  `{sorthsps}'");
         let detail = format!("(CArgException::eConstraint) {error}");
         emit_blastn_usage_constraint_error(&error, &detail);
+    }
+    if matches!(program, "psiblast" | "deltablast") {
+        if let Some(num_iterations) = args.num_iterations_value() {
+            if num_iterations < 0 {
+                emit_program_integer_constraint_error(
+                    program,
+                    "num_iterations",
+                    ">=0",
+                    num_iterations,
+                );
+            }
+        }
+        if let Some(msa_master_idx) = args.msa_master_idx_value() {
+            if msa_master_idx < 1 {
+                emit_program_integer_constraint_error(
+                    program,
+                    "msa_master_idx",
+                    ">=1",
+                    msa_master_idx,
+                );
+            }
+        }
+        let _ = args.gap_trigger_value();
+        let _ = args.pseudocount_value();
+        let _ = args.inclusion_ethresh_value();
+        let _ = args.domain_inclusion_ethresh_value();
     }
     let reward = args.reward();
     if reward < 0 {
@@ -2030,6 +2729,62 @@ fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
     }
 }
 
+fn validate_psi_checkpoint_options(program: &str, args: &BlastnArgs) {
+    if !matches!(program, "psiblast" | "deltablast") {
+        return;
+    }
+
+    if let Some(option) = psi_save_pssm_missing_output_option(args) {
+        emit_psi_save_requires_output_error(option);
+    }
+
+    for (argument, path) in psi_input_file_options(args) {
+        if !path.is_file() {
+            emit_input_file_not_accessible_error(argument, path);
+        }
+    }
+
+    let _ = (
+        args.out_pssm.as_ref(),
+        args.out_ascii_pssm.as_ref(),
+        args.ignore_msa_master,
+    );
+}
+
+fn psi_save_pssm_missing_output_option(args: &BlastnArgs) -> Option<&'static str> {
+    let has_pssm_output = args.out_pssm.is_some() || args.out_ascii_pssm.is_some();
+    if has_pssm_output {
+        return None;
+    }
+    if args.save_pssm_after_last_round {
+        Some("save_pssm_after_last_round")
+    } else if args.save_each_pssm {
+        Some("save_each_pssm")
+    } else {
+        None
+    }
+}
+
+fn emit_psi_save_requires_output_error(option: &str) -> ! {
+    eprintln!("BLAST query/options error: {option} option requires out_pssm or out_ascii_pssm");
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
+fn psi_input_file_options(args: &BlastnArgs) -> Vec<(&'static str, &PathBuf)> {
+    let mut files = Vec::new();
+    if let Some(path) = args.in_msa.as_ref() {
+        files.push(("in_msa", path));
+    }
+    if let Some(path) = args.in_pssm.as_ref() {
+        files.push(("in_pssm", path));
+    }
+    if let Some(path) = args.phi_pattern.as_ref() {
+        files.push(("phi_pattern", path));
+    }
+    files
+}
+
 fn validate_genetic_code_options(program: &str, args: &BlastnArgs) {
     if matches!(program, "blastx" | "tblastx") {
         if let Some(value) = args.query_gencode.as_deref() {
@@ -2067,8 +2822,20 @@ fn emit_program_usage_constraint_error(program: &str, error: &str, detail: &str)
         "blastx" => emit_blastx_usage_constraint_error(error, detail),
         "tblastn" => emit_tblastn_usage_constraint_error(error, detail),
         "tblastx" => emit_tblastx_usage_constraint_error(error, detail),
+        "psiblast" => emit_usage_constraint_from_usage(PSIBLAST_USAGE, error, detail),
+        "rpstblastn" => emit_usage_constraint_from_usage(RPSTBLASTN_USAGE, error, detail),
+        "deltablast" => emit_usage_constraint_from_usage(DELTABLAST_USAGE, error, detail),
         _ => emit_blastn_usage_constraint_error(error, detail),
     }
+}
+
+fn emit_usage_constraint_from_usage(usage: &str, error: &str, detail: &str) -> ! {
+    eprint!("{usage}");
+    eprintln!("========================================================================");
+    eprintln!();
+    eprintln!("Error: {error}");
+    eprintln!("Error:  {detail}");
+    std::process::exit(1);
 }
 
 fn emit_integer_constraint_error<T: std::fmt::Display>(
@@ -2112,6 +2879,17 @@ fn validate_gap_cost_options(args: &BlastnArgs) {
     std::process::exit(3);
 }
 
+fn validate_greedy_gap_options(args: &BlastnArgs) {
+    if !args.no_greedy || args.gapopen() != 0 || args.gapextend() != 0 {
+        return;
+    }
+    eprintln!(
+        "BLAST query/options error: Greedy extension must be used if gap existence and extension options are zero"
+    );
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
 fn validate_evalue_options(args: &BlastnArgs) {
     if args.evalue() > 0.0 {
         return;
@@ -2121,11 +2899,33 @@ fn validate_evalue_options(args: &BlastnArgs) {
     std::process::exit(1);
 }
 
-fn validate_subject_db_options(args: &BlastnArgs) {
+fn validate_subject_db_options(program: &str, args: &BlastnArgs) {
+    if program == "rpstblastn" && args.subject.is_some() {
+        emit_program_usage_constraint_error(
+            program,
+            "Unknown argument: \"subject\"",
+            "(CArgException::eInvalidArg) Unknown argument: \"subject\"",
+        );
+    }
+    if program == "rpstblastn" && args.subject_loc.is_some() {
+        emit_program_usage_constraint_error(
+            program,
+            "Unknown argument: \"subject_loc\"",
+            "(CArgException::eInvalidArg) Unknown argument: \"subject_loc\"",
+        );
+    }
     if args.subject.is_some() && args.db.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"subject\". Incompatible with argument:  `db'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `db'",
+        );
+    }
+    if args.subject_loc.is_some() && args.db.is_some() {
+        emit_program_usage_constraint_error(
+            program,
+            "Argument \"subject_loc\". Incompatible with argument:  `db'",
+            "(CArgException::eConstraint) Argument \"subject_loc\". Incompatible with argument:  `db'",
         );
     }
 }
@@ -2154,62 +2954,70 @@ fn validate_no_taxid_expansion_options(args: &BlastnArgs) {
     }
 }
 
-fn validate_subject_filter_options(args: &BlastnArgs) {
+fn validate_subject_filter_options(program: &str, args: &BlastnArgs) {
     if args.subject.is_none() {
         return;
     }
 
     if args.gilist.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"subject\". Incompatible with argument:  `gilist'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `gilist'",
         );
     }
     if args.seqidlist.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"subject\". Incompatible with argument:  `seqidlist'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `seqidlist'",
         );
     }
     if args.negative_gilist.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"subject\". Incompatible with argument:  `negative_gilist'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_gilist'",
         );
     }
     if args.negative_seqidlist.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"subject\". Incompatible with argument:  `negative_seqidlist'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_seqidlist'",
         );
     }
     if args.taxids.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"taxids\". Incompatible with argument:  `subject'",
             "(CArgException::eConstraint) Argument \"taxids\". Incompatible with argument:  `subject'",
         );
     }
     if args.negative_taxids.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"subject\". Incompatible with argument:  `negative_taxids'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_taxids'",
         );
     }
     if args.taxidlist.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"taxidlist\". Incompatible with argument:  `subject'",
             "(CArgException::eConstraint) Argument \"taxidlist\". Incompatible with argument:  `subject'",
         );
     }
     if args.negative_taxidlist.is_some() {
-        emit_blastn_usage_constraint_error(
+        emit_program_usage_constraint_error(
+            program,
             "Argument \"subject\". Incompatible with argument:  `negative_taxidlist'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_taxidlist'",
         );
     }
 }
 
-fn validate_database_filter_incompatibilities(args: &BlastnArgs) {
+fn validate_database_filter_incompatibilities(program: &str, args: &BlastnArgs) {
     for (present, argument, incompatible) in [
         (
             args.seqidlist.is_some() && args.gilist.is_some(),
@@ -2356,12 +3164,12 @@ fn validate_database_filter_incompatibilities(args: &BlastnArgs) {
             let error =
                 format!("Argument \"{argument}\". Incompatible with argument:  `{incompatible}'");
             let detail = format!("(CArgException::eConstraint) {error}");
-            emit_blastn_usage_constraint_error(&error, &detail);
+            emit_program_usage_constraint_error(program, &error, &detail);
         }
     }
 }
 
-fn validate_option_relationships(args: &BlastnArgs) {
+fn validate_option_relationships(program: &str, args: &BlastnArgs) {
     for (present, argument, incompatible) in [
         (
             args.num_descriptions.is_some() && args.max_target_seqs.is_some(),
@@ -2403,16 +3211,69 @@ fn validate_option_relationships(args: &BlastnArgs) {
             "import_search_strategy",
             "export_search_strategy",
         ),
+        (
+            matches!(program, "psiblast" | "deltablast")
+                && args.query.is_some()
+                && args.ignore_msa_master,
+            "query",
+            "ignore_msa_master",
+        ),
+        (
+            matches!(program, "psiblast" | "deltablast")
+                && args.query.is_some()
+                && args.in_msa.is_some(),
+            "query",
+            "in_msa",
+        ),
+        (
+            matches!(program, "psiblast" | "deltablast")
+                && args.query.is_some()
+                && args.in_pssm.is_some(),
+            "query",
+            "in_pssm",
+        ),
+        (
+            matches!(program, "psiblast" | "deltablast")
+                && args.in_pssm.is_some()
+                && args.in_msa.is_some(),
+            "in_pssm",
+            "in_msa",
+        ),
+        (
+            program == "deltablast" && args.subject.is_some() && args.show_domain_hits,
+            "subject",
+            "show_domain_hits",
+        ),
     ] {
         if present {
-            emit_incompatible_argument_error(argument, incompatible);
+            emit_program_incompatible_argument_error(program, argument, incompatible);
         }
+    }
+
+    if matches!(program, "psiblast" | "deltablast")
+        && args.in_msa.is_none()
+        && args.msa_master_idx.is_some()
+    {
+        let error =
+            "Argument \"in_msa\". Must be specified, as it is required by argument:  `msa_master_idx'";
+        let detail = "(CArgException::eConstraint) Argument \"in_msa\". Must be specified, as it is required by argument:  `msa_master_idx'";
+        emit_program_required_argument_error(program, error, detail);
+    }
+    if matches!(program, "psiblast" | "deltablast")
+        && args.in_msa.is_none()
+        && args.ignore_msa_master
+    {
+        let error = "Argument \"in_msa\". Must be specified, as it is required by argument:  `ignore_msa_master'";
+        let detail = "(CArgException::eConstraint) Argument \"in_msa\". Must be specified, as it is required by argument:  `ignore_msa_master'";
+        emit_program_required_argument_error(program, error, detail);
     }
 }
 
-fn validate_thread_relationships(args: &BlastnArgs) {
-    if args.mt_mode() != 0 && args.num_threads.is_none() {
-        emit_required_argument_error("num_threads", "mt_mode");
+fn validate_thread_relationships(program: &str, args: &BlastnArgs) {
+    if !matches!(program, "rpstblastn") && args.mt_mode() != 0 && args.num_threads.is_none() {
+        let error = "Argument \"num_threads\". Must be specified, as it is required by argument:  `mt_mode'";
+        let detail = "(CArgException::eConstraint) Argument \"num_threads\". Must be specified, as it is required by argument:  `mt_mode'";
+        emit_program_usage_constraint_error(program, error, detail);
     }
 }
 
@@ -2425,10 +3286,14 @@ fn validate_template_relationships(args: &BlastnArgs) {
     }
 }
 
-fn emit_incompatible_argument_error(argument: &str, incompatible: &str) -> ! {
+fn emit_program_incompatible_argument_error(
+    program: &str,
+    argument: &str,
+    incompatible: &str,
+) -> ! {
     let error = format!("Argument \"{argument}\". Incompatible with argument:  `{incompatible}'");
     let detail = format!("(CArgException::eConstraint) {error}");
-    emit_blastn_usage_constraint_error(&error, &detail);
+    emit_program_usage_constraint_error(program, &error, &detail);
 }
 
 fn emit_required_argument_error(argument: &str, required_by: &str) -> ! {
@@ -2436,7 +3301,11 @@ fn emit_required_argument_error(argument: &str, required_by: &str) -> ! {
         "Argument \"{argument}\". Must be specified, as it is required by argument:  `{required_by}'"
     );
     let detail = format!("(CArgException::eConstraint) {error}");
-    emit_blastn_usage_constraint_error(&error, &detail);
+    emit_program_usage_constraint_error("blastn", &error, &detail);
+}
+
+fn emit_program_required_argument_error(program: &str, error: &str, detail: &str) -> ! {
+    emit_program_usage_constraint_error(program, error, detail);
 }
 
 fn emit_blastn_usage_constraint_error(error: &str, detail: &str) -> ! {
@@ -2529,6 +3398,31 @@ Error:  (CArgException::eSynopsis) Too many positional arguments (1), the offend
     std::process::exit(1);
 }
 
+fn emit_program_too_many_positional_error(program: &str, value: &str) -> ! {
+    match program {
+        "blastn" => emit_blastn_usage_too_many_positional_error(value),
+        "blastp" => emit_too_many_positional_from_usage(BLASTP_USAGE, value),
+        "blastx" => emit_too_many_positional_from_usage(BLASTX_USAGE, value),
+        "tblastn" => emit_too_many_positional_from_usage(TBLASTN_USAGE, value),
+        "tblastx" => emit_too_many_positional_from_usage(TBLASTX_USAGE, value),
+        "psiblast" => emit_too_many_positional_from_usage(PSIBLAST_USAGE, value),
+        "rpstblastn" => emit_too_many_positional_from_usage(RPSTBLASTN_USAGE, value),
+        "deltablast" => emit_too_many_positional_from_usage(DELTABLAST_USAGE, value),
+        _ => emit_blastn_usage_too_many_positional_error(value),
+    }
+}
+
+fn emit_too_many_positional_from_usage(usage: &str, value: &str) -> ! {
+    eprint!("{usage}");
+    eprintln!("========================================================================");
+    eprintln!();
+    eprintln!("Error: Too many positional arguments (1), the offending value: {value}");
+    eprintln!(
+        "Error:  (CArgException::eSynopsis) Too many positional arguments (1), the offending value: {value}"
+    );
+    std::process::exit(1);
+}
+
 fn emit_blastn_usage_conversion_error(argument: &str, value: &str) -> ! {
     eprint!(
         r#"USAGE
@@ -2571,6 +3465,32 @@ Error: String cannot be converted to bool (m_Pos = 0)
 Error: Argument "{argument}". Argument cannot be converted:  `{value}'
 Error:  (CArgException::eConvert) Argument "{argument}". Argument cannot be converted:  `{value}'
 "#
+    );
+    std::process::exit(1);
+}
+
+fn emit_program_usage_conversion_error(program: &str, argument: &str, value: &str) -> ! {
+    match program {
+        "blastn" => emit_blastn_usage_conversion_error(argument, value),
+        "blastp" => emit_conversion_error_from_usage(BLASTP_USAGE, argument, value),
+        "blastx" => emit_conversion_error_from_usage(BLASTX_USAGE, argument, value),
+        "tblastn" => emit_conversion_error_from_usage(TBLASTN_USAGE, argument, value),
+        "tblastx" => emit_conversion_error_from_usage(TBLASTX_USAGE, argument, value),
+        "psiblast" => emit_conversion_error_from_usage(PSIBLAST_USAGE, argument, value),
+        "rpstblastn" => emit_conversion_error_from_usage(RPSTBLASTN_USAGE, argument, value),
+        "deltablast" => emit_conversion_error_from_usage(DELTABLAST_USAGE, argument, value),
+        _ => emit_blastn_usage_conversion_error(argument, value),
+    }
+}
+
+fn emit_conversion_error_from_usage(usage: &str, argument: &str, value: &str) -> ! {
+    eprint!("{usage}");
+    eprintln!("========================================================================");
+    eprintln!();
+    eprintln!("Error: String cannot be converted to bool (m_Pos = 0)");
+    eprintln!("Error: Argument \"{argument}\". Argument cannot be converted:  `{value}'");
+    eprintln!(
+        "Error:  (CArgException::eConvert) Argument \"{argument}\". Argument cannot be converted:  `{value}'"
     );
     std::process::exit(1);
 }
@@ -2729,7 +3649,30 @@ Error:  (CArgException::eConvert) Argument "{argument}". Integer value is out of
 }
 
 fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let query_file = open_input_file("query", &args.query);
+    run_blastp_with_output_labels(
+        args,
+        "BLASTP",
+        None,
+        "blastp",
+        "BLASTP 2.12.0+",
+        BLASTP_XML_REFERENCE,
+        false,
+    )
+}
+
+const BLASTP_XML_REFERENCE: &str = "Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.";
+const PSIBLAST_XML_REFERENCE: &str = "Alejandro A. Sch&amp;auml;ffer, L. Aravind, Thomas L. Madden, Sergei Shavirin, John L. Spouge, Yuri I. Wolf, Eugene V. Koonin, and Stephen F. Altschul (2001), &quot;Improving the accuracy of PSI-BLAST protein database searches with composition-based statistics and other refinements&quot;, Nucleic Acids Res. 29:2994-3005.";
+
+fn run_blastp_with_output_labels(
+    args: &BlastnArgs,
+    commented_program_label: &str,
+    commented_iteration: Option<usize>,
+    xml_program: &str,
+    xml_version: &str,
+    xml_reference: &str,
+    psiblast_pairwise: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
     if queries.is_empty() {
         return Err("No sequences found in query file".into());
@@ -2765,7 +3708,16 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         let mut hits = Vec::new();
         for qrec in &queries {
             let query_ids = fasta_record_ids(qrec, args.parse_deflines);
-            let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
+            let (results, pssm) = protein_search_results_with_pssm(
+                &db,
+                &qrec.sequence,
+                &params,
+                args,
+                psiblast_pairwise,
+            );
+            if let Some(artifacts) = pssm.as_ref() {
+                write_psiblast_pssm_artifacts(args, &qrec.sequence, artifacts)?;
+            }
             for sr in results {
                 let subject_id = if sr.subject_accession.is_empty()
                     || sr.subject_accession.starts_with("oid_")
@@ -2780,6 +3732,22 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let subject_ids = parsed_fasta_id(&subject_id);
                 for hsp in sr.hsps {
+                    let qseq = if hsp.query_aln.is_empty() {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
+                    };
+                    let sseq = if hsp.subject_aln.is_empty() {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
+                    };
+                    let num_positives = protein_positive_count_from_strings(
+                        qseq.as_deref(),
+                        sseq.as_deref(),
+                        params.matrix,
+                        hsp.num_identities as i32,
+                    );
                     hits.push(TabularHit {
                         query_id: query_ids.id.clone(),
                         query_gi: query_ids.gi.clone(),
@@ -2789,7 +3757,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         subject_gi: subject_ids.gi.clone(),
                         subject_acc: subject_ids.acc.clone(),
                         subject_accver: subject_ids.accver.clone(),
-                        subject_title: sr.subject_title.clone(),
+                        subject_title: String::new(),
                         pct_identity: hsp.percent_identity(),
                         align_len: hsp.alignment_length as i32,
                         mismatches: (hsp.alignment_length - hsp.num_identities - hsp.num_gaps)
@@ -2804,16 +3772,8 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         query_len: qrec.sequence.len() as i32,
                         subject_len: sr.subject_len as i32,
                         raw_score: hsp.score,
-                        qseq: if hsp.query_aln.is_empty() {
-                            None
-                        } else {
-                            Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
-                        },
-                        sseq: if hsp.subject_aln.is_empty() {
-                            None
-                        } else {
-                            Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
-                        },
+                        qseq,
+                        sseq,
                         qframe: 0,
                         sframe: 0,
                         subject_taxids: sr.taxids.clone(),
@@ -2822,12 +3782,14 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                         subject_blast_name: String::new(),
                         subject_kingdom: String::new(),
                         num_ident: hsp.num_identities as i32,
+                        num_positives,
                     });
                 }
             }
         }
 
         all_hits_sort_by_evalue(&mut hits);
+        apply_filters(&mut hits, args, 0, None, CliProgram::Blastp, false);
 
         let stdout = io::stdout();
         let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -2844,6 +3806,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 args,
                 &params,
                 total_subj_len as i64,
+                psiblast_pairwise,
             )?;
         } else if outfmt_number(&args.outfmt) == 5 {
             let hit_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
@@ -2858,22 +3821,29 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 total_subj_len as i64,
                 subjects.len().min(i32::MAX as usize) as i32,
                 &hit_metadata,
+                xml_program,
+                xml_version,
+                xml_reference,
             )?;
         } else if outfmt_number(&args.outfmt) == 7 {
-            let database_label = args
-                .subject
-                .as_ref()
-                .map(|path| format!("User specified sequence set (Input: {})", path.display()))
-                .unwrap_or_else(|| "User specified sequence set".to_string());
-            write_commented_tabular_output(
+            let database_label = if commented_iteration.is_some() {
+                "User specified sequence set (Input: )".to_string()
+            } else {
+                args.subject
+                    .as_ref()
+                    .map(|path| format!("User specified sequence set (Input: {})", path.display()))
+                    .unwrap_or_else(|| "User specified sequence set".to_string())
+            };
+            write_commented_tabular_output_with_iteration(
                 &mut writer,
-                "BLASTP",
+                commented_program_label,
                 &hits,
                 &args.outfmt,
                 &queries,
                 &database_label,
                 args.parse_deflines,
-                args.parse_deflines,
+                args.parse_deflines && commented_iteration.is_none(),
+                commented_iteration,
             )?;
         } else {
             write_tabular_output(&mut writer, &hits, &args.outfmt)?;
@@ -2900,7 +3870,11 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut xml_hit_metadata = std::collections::HashMap::new();
     for qrec in &queries {
         let query_ids = fasta_record_ids(qrec, args.parse_deflines);
-        let results = blast_rs::api::blastp(&db, &qrec.sequence, &params);
+        let (results, pssm) =
+            protein_search_results_with_pssm(&db, &qrec.sequence, &params, args, psiblast_pairwise);
+        if let Some(artifacts) = pssm.as_ref() {
+            write_psiblast_pssm_artifacts(args, &qrec.sequence, artifacts)?;
+        }
         for sr in results {
             let subject_id = db_output_subject_id(&db, sr.subject_oid, &sr.subject_accession);
             xml_hit_metadata
@@ -2913,7 +3887,25 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                     .entry(subject_id.clone())
                     .or_insert(defline);
             }
+            let subject_title =
+                db_subject_defline(&db, sr.subject_oid, &subject_id).unwrap_or_default();
             for hsp in sr.hsps {
+                let qseq = if hsp.query_aln.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
+                };
+                let sseq = if hsp.subject_aln.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
+                };
+                let num_positives = protein_positive_count_from_strings(
+                    qseq.as_deref(),
+                    sseq.as_deref(),
+                    params.matrix,
+                    hsp.num_identities as i32,
+                );
                 all_hits.push(TabularHit {
                     query_id: query_ids.id.clone(),
                     query_gi: query_ids.gi.clone(),
@@ -2923,7 +3915,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                     subject_gi: None,
                     subject_acc: None,
                     subject_accver: None,
-                    subject_title: String::new(),
+                    subject_title: subject_title.clone(),
                     pct_identity: hsp.percent_identity(),
                     align_len: hsp.alignment_length as i32,
                     mismatches: (hsp.alignment_length - hsp.num_identities - hsp.num_gaps) as i32,
@@ -2937,16 +3929,8 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                     query_len: qrec.sequence.len() as i32,
                     subject_len: sr.subject_len as i32,
                     raw_score: hsp.score,
-                    qseq: if hsp.query_aln.is_empty() {
-                        None
-                    } else {
-                        Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
-                    },
-                    sseq: if hsp.subject_aln.is_empty() {
-                        None
-                    } else {
-                        Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
-                    },
+                    qseq,
+                    sseq,
                     qframe: 0,
                     sframe: 0,
                     subject_taxids: sr.taxids.clone(),
@@ -2955,12 +3939,21 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                     subject_blast_name: String::new(),
                     subject_kingdom: String::new(),
                     num_ident: hsp.num_identities as i32,
+                    num_positives,
                 });
             }
         }
     }
 
     all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
+    apply_filters(
+        &mut all_hits,
+        args,
+        0,
+        args.db.as_deref(),
+        CliProgram::Blastp,
+        false,
+    );
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -2977,6 +3970,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             &subject_deflines,
             args,
             &params,
+            psiblast_pairwise,
         )?;
     } else if outfmt_number(&args.outfmt) == 5 {
         let database_label = args
@@ -2995,6 +3989,9 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             db.total_length.min(i64::MAX as u64) as i64,
             db.stats_num_oids.min(i32::MAX as u64) as i32,
             &xml_hit_metadata,
+            xml_program,
+            xml_version,
+            xml_reference,
         )?;
     } else if outfmt_number(&args.outfmt) == 7 {
         let database_label = args
@@ -3004,7 +4001,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| "N/A".to_string());
         write_commented_tabular_output(
             &mut writer,
-            "BLASTP",
+            commented_program_label,
             &all_hits,
             &args.outfmt,
             &queries,
@@ -3051,6 +4048,7 @@ fn search_result_hsps_to_tabular_hits(
     query_len: usize,
     subjects: &[FastaRecord],
     results: Vec<blast_rs::api::SearchResult>,
+    matrix_type: blast_rs::api::MatrixType,
 ) -> Vec<TabularHit> {
     let mut hits = Vec::new();
     for sr in results {
@@ -3065,6 +4063,22 @@ fn search_result_hsps_to_tabular_hits(
                 sr.subject_accession.clone()
             };
         for hsp in sr.hsps {
+            let qseq = if hsp.query_aln.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
+            };
+            let sseq = if hsp.subject_aln.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
+            };
+            let num_positives = protein_positive_count_from_strings(
+                qseq.as_deref(),
+                sseq.as_deref(),
+                matrix_type,
+                hsp.num_identities as i32,
+            );
             let (query_start, query_end) = translated_display_coords(
                 hsp.query_start,
                 hsp.query_end,
@@ -3100,16 +4114,8 @@ fn search_result_hsps_to_tabular_hits(
                 query_len: query_len as i32,
                 subject_len: sr.subject_len as i32,
                 raw_score: hsp.score,
-                qseq: if hsp.query_aln.is_empty() {
-                    None
-                } else {
-                    Some(String::from_utf8_lossy(&hsp.query_aln).into_owned())
-                },
-                sseq: if hsp.subject_aln.is_empty() {
-                    None
-                } else {
-                    Some(String::from_utf8_lossy(&hsp.subject_aln).into_owned())
-                },
+                qseq,
+                sseq,
                 qframe: hsp.query_frame,
                 sframe: hsp.subject_frame,
                 subject_taxids: sr.taxids.clone(),
@@ -3118,6 +4124,7 @@ fn search_result_hsps_to_tabular_hits(
                 subject_blast_name: String::new(),
                 subject_kingdom: String::new(),
                 num_ident: hsp.num_identities as i32,
+                num_positives,
             });
         }
     }
@@ -3129,12 +4136,48 @@ fn search_result_hsps_to_db_tabular_hits(
     query_len: usize,
     db: &BlastDb,
     mut results: Vec<blast_rs::api::SearchResult>,
+    matrix_type: blast_rs::api::MatrixType,
 ) -> Vec<TabularHit> {
+    let mut subject_titles = std::collections::HashMap::new();
     for result in &mut results {
         result.subject_accession =
             db_output_subject_id(db, result.subject_oid, &result.subject_accession);
+        if let Some(title) = db_subject_defline(db, result.subject_oid, &result.subject_accession) {
+            subject_titles
+                .entry(result.subject_accession.clone())
+                .or_insert(title);
+        }
     }
-    search_result_hsps_to_tabular_hits(query_id, query_len, &[], results)
+    let mut hits =
+        search_result_hsps_to_tabular_hits(query_id, query_len, &[], results, matrix_type);
+    for hit in &mut hits {
+        if let Some(title) = subject_titles.get(&hit.subject_id) {
+            hit.subject_title = title.clone();
+        }
+    }
+    hits
+}
+
+fn sort_tblastx_tabular_reciprocal_frame_ties(hits: &mut [TabularHit]) {
+    hits.sort_by(|a, b| {
+        if a.query_id != b.query_id
+            || a.subject_id != b.subject_id
+            || a.raw_score != b.raw_score
+            || blast_rs::api::evalue_comp(a.evalue, b.evalue) != std::cmp::Ordering::Equal
+        {
+            return std::cmp::Ordering::Equal;
+        }
+        let reciprocal_pair =
+            |hit: &TabularHit| hit.qframe == -hit.sframe && hit.qframe.abs() == hit.sframe.abs();
+        if reciprocal_pair(a)
+            && reciprocal_pair(b)
+            && a.qframe.abs() == b.qframe.abs()
+            && a.sframe.abs() == b.sframe.abs()
+        {
+            return a.qframe.cmp(&b.qframe);
+        }
+        std::cmp::Ordering::Equal
+    });
 }
 
 fn annotate_parse_defline_tabular_hits(
@@ -3219,6 +4262,7 @@ fn apply_blastn_linked_sum_stats_to_hsps(
     let score_block = LinkScoreBlock {
         kbp: vec![kbp_plus.clone(), kbp_minus.clone()],
         kbp_gap: vec![kbp_plus.clone(), kbp_minus.clone()],
+        ..LinkScoreBlock::default()
     };
     let link_params = LinkHSPParameters::default();
 
@@ -3275,10 +4319,12 @@ fn apply_blastn_linked_sum_stats_to_hsps(
         false,
     );
 
-    let mut linked_evalues: std::collections::HashMap<(i32, i32, i32, i32, i32, i32), Vec<f64>> =
-        std::collections::HashMap::new();
+    let mut linked_stats: std::collections::HashMap<
+        (i32, i32, i32, i32, i32, i32),
+        Vec<(f64, f64)>,
+    > = std::collections::HashMap::new();
     for linked in &hsp_list.hsp_array {
-        linked_evalues
+        linked_stats
             .entry((
                 linked.score,
                 linked.context,
@@ -3288,13 +4334,14 @@ fn apply_blastn_linked_sum_stats_to_hsps(
                 linked.subject.end,
             ))
             .or_default()
-            .push(linked.evalue);
+            .push((linked.evalue, linked.bit_score));
     }
 
     for (hsp, key) in hsps.iter_mut().zip(original_keys) {
-        if let Some(evalues) = linked_evalues.get_mut(&key) {
-            if let Some(evalue) = evalues.pop() {
+        if let Some(stats) = linked_stats.get_mut(&key) {
+            if let Some((evalue, bit_score)) = stats.pop() {
                 hsp.evalue = evalue;
+                hsp.bit_score = bit_score;
             }
         }
     }
@@ -3304,8 +4351,385 @@ fn build_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
     build_blastp_params_with_seg_default(args, false)
 }
 
+fn build_psiblast_params(args: &BlastnArgs) -> blast_rs::api::PsiblastParams {
+    let mut params = blast_rs::api::PsiblastParams::new(build_blastp_params(args));
+    if let Some(gap_trigger) = args.gap_trigger_value() {
+        params = params.gap_trigger(gap_trigger);
+    }
+    if let Some(num_iterations) = args.num_iterations_value() {
+        params = params.num_iterations(num_iterations as u32);
+    }
+    if let Some(inclusion_ethresh) = args.inclusion_ethresh_value() {
+        params = params.inclusion_evalue(inclusion_ethresh);
+    }
+    if let Some(pseudocount) = args.pseudocount_value() {
+        params = params.pseudocount(pseudocount);
+    }
+    params
+}
+
+fn protein_search_results_with_pssm(
+    db: &BlastDb,
+    query: &[u8],
+    params: &blast_rs::api::SearchParams,
+    args: &BlastnArgs,
+    psiblast: bool,
+) -> (Vec<blast_rs::api::SearchResult>, Option<PsiblastArtifacts>) {
+    if psiblast && should_run_iterative_psiblast(args) {
+        let mut psiblast_params = build_psiblast_params(args);
+        psiblast_params = apply_psiblast_checkpoint(psiblast_params, args, query);
+        psiblast_params = apply_psiblast_restart_msa(psiblast_params, args, query);
+        let run = blast_rs::api::psiblast_with_rounds(db, query, &psiblast_params);
+        (
+            run.results,
+            Some(PsiblastArtifacts {
+                final_pssm: run.pssm,
+                round_pssms: run.round_pssms,
+            }),
+        )
+    } else {
+        (blast_rs::api::blastp(db, query, params), None)
+    }
+}
+
+struct PsiblastArtifacts {
+    final_pssm: blast_rs::pssm::Pssm,
+    round_pssms: Vec<blast_rs::pssm::Pssm>,
+}
+
+fn should_run_iterative_psiblast(args: &BlastnArgs) -> bool {
+    args.gap_trigger.is_some()
+        || args.num_iterations.is_some()
+        || args.inclusion_ethresh.is_some()
+        || args.pseudocount.is_some()
+        || args.in_msa.is_some()
+        || args.in_pssm.is_some()
+        || (args.save_each_pssm && (args.out_pssm.is_some() || args.out_ascii_pssm.is_some()))
+        || (args.save_pssm_after_last_round
+            && (args.out_pssm.is_some() || args.out_ascii_pssm.is_some()))
+}
+
+fn apply_psiblast_checkpoint(
+    params: blast_rs::api::PsiblastParams,
+    args: &BlastnArgs,
+    query: &[u8],
+) -> blast_rs::api::PsiblastParams {
+    let Some(path) = args.in_pssm.as_ref() else {
+        return params;
+    };
+    let pssm = read_pssm_checkpoint(path, query.len());
+    params.initial_pssm(pssm)
+}
+
+fn apply_psiblast_restart_msa(
+    params: blast_rs::api::PsiblastParams,
+    args: &BlastnArgs,
+    query: &[u8],
+) -> blast_rs::api::PsiblastParams {
+    let Some(path) = args.in_msa.as_ref() else {
+        return params;
+    };
+    let records = parse_fasta_with_default_id(open_input_file("in_msa", path), "MSA_1");
+    if records.is_empty() {
+        return params;
+    }
+
+    let master_idx = args
+        .msa_master_idx_value()
+        .and_then(|idx| usize::try_from(idx).ok())
+        .and_then(|idx| idx.checked_sub(1))
+        .unwrap_or(0);
+    let query_len = query.len();
+    let master = records
+        .get(master_idx)
+        .map(|record| record.sequence.as_slice());
+    let aligned = records
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != master_idx)
+        .filter_map(|(_, record)| {
+            project_restart_msa_row_to_query(
+                record.sequence.as_slice(),
+                master,
+                query_len,
+                args.ignore_msa_master,
+            )
+        })
+        .collect();
+
+    params.restart_alignment(aligned)
+}
+
+fn project_restart_msa_row_to_query(
+    row: &[u8],
+    master: Option<&[u8]>,
+    query_len: usize,
+    ignore_master: bool,
+) -> Option<Vec<u8>> {
+    if query_len == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut projected = Vec::with_capacity(query_len);
+    if !ignore_master {
+        let master = master?;
+        for (col, &master_aa) in master.iter().enumerate() {
+            if is_msa_gap(master_aa) {
+                continue;
+            }
+            let residue = row.get(col).copied().unwrap_or(b'X');
+            projected.push(msa_residue_to_ncbistdaa(residue));
+            if projected.len() == query_len {
+                break;
+            }
+        }
+    } else {
+        for &residue in row {
+            if is_msa_gap(residue) {
+                continue;
+            }
+            projected.push(msa_residue_to_ncbistdaa(residue));
+            if projected.len() == query_len {
+                break;
+            }
+        }
+    }
+
+    (projected.len() == query_len).then_some(projected)
+}
+
+fn is_msa_gap(residue: u8) -> bool {
+    matches!(residue, b'-' | b'.')
+}
+
+fn msa_residue_to_ncbistdaa(residue: u8) -> u8 {
+    if is_msa_gap(residue) {
+        blast_rs::encoding::NCBISTDAA_GAP
+    } else {
+        blast_rs::encoding::aminoacid_to_ncbistdaa_base(residue)
+    }
+}
+
+fn write_psiblast_pssm_artifacts(
+    args: &BlastnArgs,
+    query: &[u8],
+    artifacts: &PsiblastArtifacts,
+) -> io::Result<()> {
+    if let Some(path) = args.out_pssm.as_ref() {
+        if args.save_each_pssm {
+            for (idx, round_pssm) in artifacts.round_pssms.iter().enumerate() {
+                let round_path = pssm_round_output_path(path, idx + 1);
+                let mut writer = BufWriter::new(create_output_file(&round_path));
+                write_pssm_checkpoint(&mut writer, query, round_pssm)?;
+                writer.flush()?;
+            }
+        } else if args.save_pssm_after_last_round {
+            let mut writer = BufWriter::new(create_output_file(path));
+            write_pssm_checkpoint(&mut writer, query, &artifacts.final_pssm)?;
+            writer.flush()?;
+        }
+    }
+    if let Some(path) = args.out_ascii_pssm.as_ref() {
+        if args.save_each_pssm {
+            for (idx, round_pssm) in artifacts.round_pssms.iter().enumerate() {
+                let round_path = pssm_round_output_path(path, idx + 1);
+                let mut writer = BufWriter::new(create_output_file(&round_path));
+                write_ascii_pssm(&mut writer, query, round_pssm)?;
+                writer.flush()?;
+            }
+        } else if args.save_pssm_after_last_round {
+            let mut writer = BufWriter::new(create_output_file(path));
+            write_ascii_pssm(&mut writer, query, &artifacts.final_pssm)?;
+            writer.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn pssm_round_output_path(base: &PathBuf, round: usize) -> PathBuf {
+    let mut path = base.clone().into_os_string();
+    path.push(format!(".{round}"));
+    PathBuf::from(path)
+}
+
+fn read_pssm_checkpoint(path: &PathBuf, query_len: usize) -> blast_rs::pssm::Pssm {
+    let bytes = read_input_bytes("in_pssm", path);
+    parse_pssm_checkpoint(&bytes, query_len).unwrap_or_else(|message| {
+        eprintln!(
+            "BLAST query/options error: Error reading PSSM checkpoint {}: {}",
+            path.display(),
+            message
+        );
+        std::process::exit(1);
+    })
+}
+
+fn parse_pssm_checkpoint(data: &[u8], query_len: usize) -> Result<blast_rs::pssm::Pssm, String> {
+    let text = std::str::from_utf8(data).map_err(|_| "checkpoint is not UTF-8".to_string())?;
+    let mut lines = text.lines();
+    if lines.next() != Some("BLAST-RS-PSSM-CHECKPOINT 1") {
+        return Err("unsupported checkpoint header".to_string());
+    }
+    let length_line = lines
+        .next()
+        .ok_or_else(|| "missing checkpoint length".to_string())?;
+    let length = length_line
+        .strip_prefix("length ")
+        .ok_or_else(|| "malformed checkpoint length".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "invalid checkpoint length".to_string())?;
+    if length != query_len {
+        return Err(format!(
+            "checkpoint length {} does not match query length {}",
+            length, query_len
+        ));
+    }
+
+    let mut scores = Vec::with_capacity(length);
+    let mut info_content = Vec::with_capacity(length);
+    for pos in 0..length {
+        let line = lines
+            .next()
+            .ok_or_else(|| format!("missing checkpoint row {}", pos + 1))?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != blast_rs::matrix::AA_SIZE + 3 {
+            return Err(format!("malformed checkpoint row {}", pos + 1));
+        }
+        let row_index = fields[0]
+            .parse::<usize>()
+            .map_err(|_| format!("invalid checkpoint row {}", pos + 1))?;
+        if row_index != pos + 1 {
+            return Err(format!("unexpected checkpoint row {}", row_index));
+        }
+        let mut row = [0i32; blast_rs::matrix::AA_SIZE];
+        for (idx, value) in fields[2..2 + blast_rs::matrix::AA_SIZE].iter().enumerate() {
+            row[idx] = value
+                .parse::<i32>()
+                .map_err(|_| format!("invalid score in checkpoint row {}", pos + 1))?;
+        }
+        scores.push(row);
+        info_content.push(
+            fields[blast_rs::matrix::AA_SIZE + 2]
+                .parse::<f64>()
+                .map_err(|_| {
+                    format!("invalid information content in checkpoint row {}", pos + 1)
+                })?,
+        );
+    }
+
+    Ok(blast_rs::pssm::Pssm {
+        scores,
+        length,
+        info_content,
+    })
+}
+
+fn parse_pssm_checkpoint_query(data: &[u8]) -> Result<Vec<u8>, String> {
+    let text = std::str::from_utf8(data).map_err(|_| "checkpoint is not UTF-8".to_string())?;
+    let mut lines = text.lines();
+    if lines.next() != Some("BLAST-RS-PSSM-CHECKPOINT 1") {
+        return Err("unsupported checkpoint header".to_string());
+    }
+    let length_line = lines
+        .next()
+        .ok_or_else(|| "missing checkpoint length".to_string())?;
+    let length = length_line
+        .strip_prefix("length ")
+        .ok_or_else(|| "malformed checkpoint length".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "invalid checkpoint length".to_string())?;
+
+    let mut query = Vec::with_capacity(length);
+    for pos in 0..length {
+        let line = lines
+            .next()
+            .ok_or_else(|| format!("missing checkpoint row {}", pos + 1))?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != blast_rs::matrix::AA_SIZE + 3 {
+            return Err(format!("malformed checkpoint row {}", pos + 1));
+        }
+        let row_index = fields[0]
+            .parse::<usize>()
+            .map_err(|_| format!("invalid checkpoint row {}", pos + 1))?;
+        if row_index != pos + 1 {
+            return Err(format!("unexpected checkpoint row {}", row_index));
+        }
+        let residue = fields[1].as_bytes();
+        if residue.len() != 1 {
+            return Err(format!(
+                "invalid query residue in checkpoint row {}",
+                pos + 1
+            ));
+        }
+        query.push(residue[0]);
+    }
+    Ok(query)
+}
+
+fn write_pssm_checkpoint<W: Write>(
+    writer: &mut W,
+    query: &[u8],
+    pssm: &blast_rs::pssm::Pssm,
+) -> io::Result<()> {
+    let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+    writeln!(writer, "BLAST-RS-PSSM-CHECKPOINT 1")?;
+    writeln!(writer, "length {}", pssm.length)?;
+    for pos in 0..pssm.length {
+        let residue = query_aa
+            .get(pos)
+            .copied()
+            .map(blast_rs::encoding::ncbistdaa_to_aminoacid_char)
+            .unwrap_or('X');
+        write!(writer, "{} {}", pos + 1, residue)?;
+        for score in pssm.scores[pos] {
+            write!(writer, " {}", score)?;
+        }
+        writeln!(writer, " {:.12}", pssm.info_content[pos])?;
+    }
+    Ok(())
+}
+
+fn write_ascii_pssm<W: Write>(
+    writer: &mut W,
+    query: &[u8],
+    pssm: &blast_rs::pssm::Pssm,
+) -> io::Result<()> {
+    const DISPLAY_ORDER: &[u8; 20] = b"ARNDCQEGHILKMFPSTWYV";
+
+    let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+    writeln!(writer, "Last position-specific scoring matrix computed")?;
+    write!(writer, "           ")?;
+    for &aa in DISPLAY_ORDER {
+        write!(writer, "{:>4}", aa as char)?;
+    }
+    writeln!(writer)?;
+
+    for pos in 0..pssm.length {
+        let residue = query_aa
+            .get(pos)
+            .copied()
+            .map(blast_rs::encoding::ncbistdaa_to_aminoacid_char)
+            .unwrap_or('X');
+        write!(writer, "{:>5} {}", pos + 1, residue)?;
+        for &aa in DISPLAY_ORDER {
+            let code = blast_rs::encoding::aminoacid_to_ncbistdaa_base(aa) as usize;
+            write!(writer, "{:>4}", pssm.scores[pos][code])?;
+        }
+        writeln!(writer, "  {:>8.3}", pssm.info_content[pos])?;
+    }
+
+    writeln!(writer)?;
+    Ok(())
+}
+
 fn build_translated_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchParams {
     build_blastp_params_with_seg_default(args, true)
+}
+
+fn apply_tblastx_param_overrides(params: &mut blast_rs::api::SearchParams) {
+    params.comp_adjust = 0;
+    params.x_drop_gapped = blast_rs::stat::BLAST_GAP_X_DROPOFF_TBLASTX;
+    params.x_drop_final = blast_rs::stat::BLAST_GAP_X_DROPOFF_FINAL_TBLASTX;
 }
 
 fn build_blastp_params_with_seg_default(
@@ -3320,6 +4744,9 @@ fn build_blastp_params_with_seg_default(
         } else {
             parsed_num_threads as usize
         });
+    if default_seg_filtering {
+        params.max_intron_length = 0;
+    }
     // SearchParams::blastp() already sets the protein defaults (11/1).
     // BlastnArgs::gapopen()/gapextend() have nucleotide fallbacks (5/2), so
     // check option presence instead of comparing parsed values.
@@ -3375,8 +4802,36 @@ fn build_blastp_params_with_seg_default(
     {
         params.db_gencode = db_gencode as u8;
     }
+    if let Some(max_intron_length) = args
+        .max_intron_length
+        .as_deref()
+        .map(|value| parse_validated_i32("max_intron_length", value))
+    {
+        params.max_intron_length = max_intron_length;
+    }
+    let dbsize = args.dbsize();
+    if dbsize > 0 {
+        params.db_length = dbsize;
+    }
+    let searchsp = args.searchsp();
+    if searchsp > 0 {
+        params.effective_search_space = searchsp;
+    }
+    if let Some(min_score) = args.min_raw_gapped_score_value() {
+        params.min_score = min_score;
+    }
     if let Some(xdrop_ungap) = args.xdrop_ungap.as_deref() {
         params.x_drop_ungapped = parse_validated_f64("xdrop_ungap", xdrop_ungap) as i32;
+    }
+    if args.xdrop_gap != "30.0" {
+        params.x_drop_gapped = args.xdrop_gap() as i32;
+    }
+    if args.xdrop_gap_final != "100.0" {
+        params.x_drop_final = args.xdrop_gap_final() as i32;
+    }
+    let window_size = args.window_size();
+    if window_size > 0 {
+        params.two_hit_window = window_size as usize;
     }
     params.filter_low_complexity = match args.seg.as_deref() {
         Some("no") => false,
@@ -3399,8 +4854,13 @@ fn build_blastp_params_with_seg_default(
             true
         }
     };
+    params.sum_stats = !args.ungapped && ncbi_bool_enabled(args.sum_stats.as_deref(), true);
     params.max_target_seqs = args.effective_max_target_seqs() as usize;
     params.max_hsps = args.max_hsps_value().map(|max| max as usize);
+    let culling_limit = args.culling_limit();
+    if culling_limit > 0 {
+        params.culling_limit = Some(culling_limit as usize);
+    }
     params
 }
 
@@ -3409,7 +4869,20 @@ fn apply_protein_matrix_gap_defaults(args: &BlastnArgs, params: &mut blast_rs::a
         apply_identity_gap_defaults(args, params);
         return;
     }
-    let (default_open, default_extend) = match params.matrix {
+    let (default_open, default_extend) = default_protein_gap_costs(params.matrix);
+    if args.gapopen.is_none() {
+        params.gap_open = default_open;
+    }
+    if args.gapextend.is_none() {
+        params.gap_extend = default_extend;
+    }
+    if args.window_size() == 0 {
+        params.two_hit_window = default_protein_two_hit_window(params.matrix);
+    }
+}
+
+fn default_protein_gap_costs(matrix: blast_rs::api::MatrixType) -> (i32, i32) {
+    match matrix {
         blast_rs::api::MatrixType::Blosum45 => (14, 2),
         blast_rs::api::MatrixType::Blosum50 => (13, 2),
         blast_rs::api::MatrixType::Blosum62 => (11, 1),
@@ -3418,13 +4891,99 @@ fn apply_protein_matrix_gap_defaults(args: &BlastnArgs, params: &mut blast_rs::a
         blast_rs::api::MatrixType::Pam30 => (9, 1),
         blast_rs::api::MatrixType::Pam70 => (10, 1),
         blast_rs::api::MatrixType::Pam250 => (14, 2),
-        blast_rs::api::MatrixType::Identity => unreachable!(),
-    };
-    if args.gapopen.is_none() {
-        params.gap_open = default_open;
+        blast_rs::api::MatrixType::Identity => (15, 2),
     }
-    if args.gapextend.is_none() {
-        params.gap_extend = default_extend;
+}
+
+fn default_protein_two_hit_window(matrix: blast_rs::api::MatrixType) -> usize {
+    match matrix {
+        blast_rs::api::MatrixType::Pam30 => 15,
+        _ => blast_rs::stat::BLAST_WINDOW_SIZE_PROT as usize,
+    }
+}
+
+fn blastp_args_gap_costs(args: &BlastnArgs) -> (i32, i32) {
+    let matrix = blastp_args_matrix_type(args);
+    let (default_open, default_extend) = default_protein_gap_costs(matrix);
+    let gap_open = args
+        .gapopen
+        .as_deref()
+        .map(|value| parse_validated_i32("gapopen", value))
+        .unwrap_or(default_open);
+    let gap_extend = args
+        .gapextend
+        .as_deref()
+        .map(|value| parse_validated_i32("gapextend", value))
+        .unwrap_or(default_extend);
+    (gap_open, gap_extend)
+}
+
+fn default_protein_word_threshold(matrix: blast_rs::api::MatrixType, program_label: &str) -> f64 {
+    let mut threshold = match matrix {
+        blast_rs::api::MatrixType::Blosum45 => 14.0,
+        blast_rs::api::MatrixType::Blosum62 => 11.0,
+        blast_rs::api::MatrixType::Blosum80 => 12.0,
+        blast_rs::api::MatrixType::Pam30 => 16.0,
+        blast_rs::api::MatrixType::Pam70 => 14.0,
+        blast_rs::api::MatrixType::Identity => 27.0,
+        _ => 11.0,
+    };
+    if matches!(program_label, "TBLASTN" | "TBLASTX") {
+        threshold += 2.0;
+    } else if matches!(program_label, "BLASTX") {
+        threshold += 1.0;
+    }
+    threshold
+}
+
+fn blastp_args_word_threshold(args: &BlastnArgs, program_label: &str) -> String {
+    args.threshold
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format_sam_float(default_protein_word_threshold(
+                blastp_args_matrix_type(args),
+                program_label,
+            ))
+        })
+}
+
+fn pairwise_stats_lambda(value: f64) -> String {
+    format!("{value:.3}")
+}
+
+fn pairwise_stats_k_gapped(value: f64) -> String {
+    if value.abs() < 0.1 {
+        format!("{value:.4}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+fn pairwise_stats_h(value: f64) -> String {
+    if value.abs() >= 1.0 {
+        format!("{value:.2}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+fn pairwise_stats_a(value: f64) -> String {
+    if value.abs() < 1.0 {
+        format!("{value:.3}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+fn pairwise_stats_sig3(value: f64) -> String {
+    let abs = value.abs();
+    if abs >= 10.0 {
+        format!("{value:.1}")
+    } else if abs >= 1.0 {
+        format!("{value:.2}")
+    } else {
+        format!("{value:.3}")
     }
 }
 
@@ -3544,12 +5103,8 @@ fn emit_unsupported_standard_matrix_error(value: &str) -> ! {
     std::process::exit(1);
 }
 
-fn mask_cli_protein_query(seq: &mut [u8]) {
-    blast_rs::api::apply_seg_ncbistdaa(seq);
-}
-
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let query_file = open_input_file("query", &args.query);
+    let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
     if queries.is_empty() {
         return Err("No sequences found in query file".into());
@@ -3589,6 +5144,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 qrec.sequence.len(),
                 &subjects,
                 results,
+                params.matrix,
             ));
         }
         annotate_parse_defline_tabular_hits(
@@ -3625,11 +5181,21 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 qrec.sequence.len(),
                 &db,
                 results,
+                params.matrix,
             ));
         }
         annotate_parse_defline_tabular_hits(&mut all_hits, &queries, None, args.parse_deflines);
         db_for_pairwise = Some(db);
     }
+
+    apply_filters(
+        &mut all_hits,
+        args,
+        0,
+        args.db.as_deref(),
+        CliProgram::Blastx,
+        false,
+    );
 
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
@@ -3724,7 +5290,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let query_file = open_input_file("query", &args.query);
+    let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
     let params = build_translated_blastp_params(args);
     emit_identity_comp_stats_warnings("tblastn", args, &queries);
@@ -3753,6 +5319,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 qrec.sequence.len(),
                 &subjects,
                 results,
+                params.matrix,
             ));
         }
         annotate_parse_defline_tabular_hits(
@@ -3789,11 +5356,21 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 qrec.sequence.len(),
                 &db,
                 results,
+                params.matrix,
             ));
         }
         annotate_parse_defline_tabular_hits(&mut all_hits, &queries, None, args.parse_deflines);
         db_for_pairwise = Some(db);
     }
+    apply_filters(
+        &mut all_hits,
+        args,
+        0,
+        args.db.as_deref(),
+        CliProgram::Tblastn,
+        false,
+    );
+
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
         Box::new(BufWriter::new(create_output_file(path)))
@@ -3887,184 +5464,290 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use blast_rs::pssm::Pssm;
-
-    let query_file = open_input_file("query", &args.query);
-    let queries = parse_fasta_with_default_id(query_file, "Query_1");
-    if queries.is_empty() {
-        return Err("No query sequences".into());
+    if args.phi_pattern.is_some() {
+        return Err("PHI-BLAST pattern search is not supported".into());
     }
+    if args.subject.is_some() || args.db.is_some() {
+        let mut args = args.clone();
+        if args.query.is_none() {
+            if let Some(msa_path) = args.in_msa.as_ref() {
+                args.query = Some(psiblast_query_from_msa(
+                    msa_path,
+                    args.msa_master_idx_value(),
+                )?);
+            } else if let Some(pssm_path) = args.in_pssm.as_ref() {
+                args.query = Some(psiblast_query_from_checkpoint(pssm_path)?);
+            }
+        }
+        args.outfmt = outfmt_without_delim_tokens(&args.outfmt);
+        return run_blastp_with_output_labels(
+            &args,
+            "PSIBLAST",
+            Some(1),
+            "psiblast",
+            "PSIBLAST 2.12.0+",
+            PSIBLAST_XML_REFERENCE,
+            true,
+        );
+    }
+    Err("psiblast requires --db or --subject".into())
+}
 
-    let subject_path = args.subject.as_ref().ok_or("psiblast requires --subject")?;
-    let subject_file = open_input_file("subject", subject_path);
-    let subjects = parse_fasta_with_default_id(subject_file, "Subject_1");
-
-    let matrix = blast_rs::matrix::BLOSUM62;
-
-    let prot_kbp = blast_rs::stat::protein_ungapped_kbp();
-    let total_subj_len: usize = subjects.iter().map(|s| s.sequence.len()).sum();
-    let search_space = (queries[0].sequence.len() * total_subj_len) as f64;
-
-    // Build initial PSSM from query
-    let mut query_aa: Vec<u8> = queries[0]
+fn psiblast_query_from_msa(
+    msa_path: &PathBuf,
+    master_idx_value: Option<i32>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let records = parse_fasta_with_default_id(open_input_file("in_msa", msa_path), "MSA_1");
+    let master_idx = master_idx_value
+        .and_then(|idx| usize::try_from(idx).ok())
+        .and_then(|idx| idx.checked_sub(1))
+        .unwrap_or(0);
+    let master = records
+        .get(master_idx)
+        .ok_or("MSA master index is out of range")?;
+    let query_seq: Vec<u8> = master
         .sequence
         .iter()
-        .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
+        .copied()
+        .filter(|&residue| !is_msa_gap(residue))
         .collect();
-    mask_cli_protein_query(&mut query_aa);
-    let mut pssm = Pssm::from_sequence(&query_aa, &matrix);
+    let path = std::env::temp_dir().join(format!(
+        "blast-cli-psiblast-msa-query-{}-{}.fa",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let mut data = Vec::with_capacity(master.id.len() + query_seq.len() + 4);
+    data.extend_from_slice(b">");
+    data.extend_from_slice(master.id.as_bytes());
+    data.extend_from_slice(b"\n");
+    data.extend_from_slice(&query_seq);
+    data.extend_from_slice(b"\n");
+    fs::write(&path, data)?;
+    Ok(path)
+}
 
-    // Prepare subjects as (id, aa_sequence) pairs
-    let subj_pairs: Vec<(String, Vec<u8>)> = subjects
-        .iter()
-        .map(|s| {
-            (
-                s.id.clone(),
-                s.sequence
-                    .iter()
-                    .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
-                    .collect(),
-            )
-        })
-        .collect();
+fn psiblast_query_from_checkpoint(
+    pssm_path: &PathBuf,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let bytes = read_input_bytes("in_pssm", pssm_path);
+    let query = parse_pssm_checkpoint_query(&bytes).map_err(|message| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "BLAST query/options error: Error reading PSSM checkpoint {}: {}",
+                pssm_path.display(),
+                message
+            ),
+        )
+    })?;
+    let path = std::env::temp_dir().join(format!(
+        "blast-cli-psiblast-checkpoint-query-{}-{}.fa",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let mut data = Vec::with_capacity(query.len() + 12);
+    data.extend_from_slice(b">Query_1\n");
+    data.extend_from_slice(&query);
+    data.extend_from_slice(b"\n");
+    fs::write(&path, data)?;
+    Ok(path)
+}
 
-    // Run 3 iterations
-    let mut all_hits = Vec::new();
-    for _iter in 0..3 {
-        let results = blast_rs::pssm::psi_blast_iteration(
-            &pssm,
-            &subj_pairs,
-            args.evalue(),
-            search_space,
-            prot_kbp.lambda,
-            prot_kbp.k,
-        );
-
-        if results.is_empty() {
-            break;
-        }
-
-        all_hits.clear();
-        for hit in &results {
-            // Extract aligned sequences (ungapped PSSM scan)
-            let subj_seq = subj_pairs
-                .iter()
-                .find(|(sid, _)| sid == &hit.subject_id)
-                .map(|(_, s)| s.as_slice());
-            let qseq: String = query_aa[..hit.align_len]
-                .iter()
-                .map(|&b| blast_rs::protein::ncbistdaa_to_char(b))
-                .collect();
-            let sseq: String = subj_seq
-                .map(|s| {
-                    s[hit.subject_start..hit.subject_start + hit.align_len]
-                        .iter()
-                        .map(|&b| blast_rs::protein::ncbistdaa_to_char(b))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Compute identity
-            let num_ident = query_aa[..hit.align_len]
-                .iter()
-                .zip(
-                    subj_seq
-                        .map(|s| &s[hit.subject_start..hit.subject_start + hit.align_len])
-                        .unwrap_or(&[]),
-                )
-                .filter(|(a, b)| a == b)
-                .count() as i32;
-            let pct_identity = if hit.align_len > 0 {
-                100.0 * num_ident as f64 / hit.align_len as f64
-            } else {
-                0.0
-            };
-
-            all_hits.push(TabularHit {
-                query_id: queries[0].id.clone(),
-                query_gi: None,
-                query_acc: None,
-                query_accver: None,
-                subject_id: hit.subject_id.clone(),
-                subject_gi: None,
-                subject_acc: None,
-                subject_accver: None,
-                subject_title: String::new(),
-                pct_identity,
-                align_len: hit.align_len as i32,
-                mismatches: hit.align_len as i32 - num_ident,
-                gap_opens: 0,
-                query_start: 1,
-                query_end: hit.align_len as i32,
-                subject_start: hit.subject_start as i32 + 1,
-                subject_end: (hit.subject_start + hit.align_len) as i32,
-                evalue: hit.evalue,
-                bit_score: prot_kbp.raw_to_bit(hit.score),
-                query_len: pssm.length as i32,
-                subject_len: hit.subject_len as i32,
-                raw_score: hit.score,
-                qseq: Some(qseq),
-                sseq: Some(sseq),
-                qframe: 0,
-                sframe: 0,
-                subject_taxids: vec![],
-                subject_sci_name: String::new(),
-                subject_common_name: String::new(),
-                subject_blast_name: String::new(),
-                subject_kingdom: String::new(),
-                num_ident,
-            });
-        }
-
-        // Update PSSM from aligned sequences (simplified)
-        let aligned: Vec<Vec<u8>> = results
-            .iter()
-            .filter_map(|h| {
-                subj_pairs
-                    .iter()
-                    .find(|(sid, _)| sid == &h.subject_id)
-                    .map(|(_, s)| s.clone())
-            })
-            .collect();
-        pssm.update_from_alignment(&aligned, &blast_rs::matrix::AA_FREQUENCIES, 10.0);
-    }
-
-    let stdout = io::stdout();
-    let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
-        Box::new(BufWriter::new(create_output_file(path)))
-    } else {
-        Box::new(BufWriter::new(stdout.lock()))
-    };
-    write_tabular_output(&mut writer, &all_hits, &args.outfmt)?;
-    writer.flush()?;
-    Ok(())
+fn outfmt_without_delim_tokens(outfmt: &str) -> String {
+    outfmt
+        .split_whitespace()
+        .filter(|token| !token.starts_with("delim="))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn run_rpsblast(_args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     Err("rpsblast requires a pre-built PSSM database (CDD). Use --program blastp for protein search.".into())
 }
 
-fn run_rpstblastn(_args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_rpstblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     // rpstblastn: translated nucleotide query vs RPS (PSSM) database
     // Like rpsblast but translates the nucleotide query first
+    #[cfg(test)]
+    {
+        let _ = args;
+        Err("rpstblastn requires a pre-built PSSM database (CDD). Use --program blastx for translated search.".into())
+    }
+    #[cfg(not(test))]
+    if let Some(db) = args.db.as_ref() {
+        emit_missing_database_error("rpstblastn", &db.display().to_string());
+    }
+    #[cfg(not(test))]
     Err("rpstblastn requires a pre-built PSSM database (CDD). Use --program blastx for translated search.".into())
 }
 
 fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     // deltablast: domain-enhanced lookup time accelerated BLAST
     // Uses CDD domains to construct initial PSSM, then runs PSI-BLAST
-    // For --subject mode, fall back to PSI-BLAST behavior
-    if args.subject.is_some() {
-        eprintln!("Note: deltablast falling back to psiblast (no CDD database)");
-        return run_psiblast(args);
+    #[cfg(test)]
+    {
+        let _ = args;
+        Err("deltablast requires CDD database".into())
     }
-    Err("deltablast requires CDD database. Use --program psiblast with --subject for iterative search.".into())
+    #[cfg(not(test))]
+    {
+        validate_deltablast_query_and_subject_files(args);
+        if let Some(db_path) = args.db.as_ref() {
+            if !db_path_has_known_blast_component(db_path) {
+                emit_missing_database_error("deltablast", &db_path.display().to_string());
+            }
+        }
+        validate_deltablast_query_and_subject_locations(args)?;
+        let db_name = args
+            .rpsdb
+            .as_ref()
+            .map(|db| db.display().to_string())
+            .unwrap_or_else(|| "cdd_delta".to_string());
+        if args.subject.is_some() && outfmt_number(&args.outfmt) == 0 {
+            write_deltablast_pairwise_subject_preamble(args)?;
+        }
+        emit_missing_database_error("deltablast", &db_name);
+    }
+}
+
+#[cfg(not(test))]
+fn validate_deltablast_query_and_subject_files(args: &BlastnArgs) {
+    if let Some(query_path) = args.query.as_ref() {
+        if !query_path.is_file() {
+            emit_input_file_not_accessible_error("query", query_path);
+        }
+    }
+    if let Some(subject_path) = args.subject.as_ref() {
+        if !subject_path.is_file() {
+            emit_input_file_not_accessible_error("subject", subject_path);
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn validate_deltablast_query_and_subject_locations(
+    args: &BlastnArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if args.query_loc.is_some() {
+        let query_path = query_path(args);
+        let queries = parse_fasta_with_default_id(open_input_file("query", query_path), "Query_1");
+        for query in queries {
+            let _ = query_loc_bounds(args, query.sequence.len())?;
+        }
+    }
+    if args.subject_loc.is_some() {
+        let Some(subject_path) = args.subject.as_ref() else {
+            return Ok(());
+        };
+        let subjects =
+            parse_fasta_with_default_id(open_input_file("subject", subject_path), "Subject_1");
+        for subject in subjects {
+            let _ = subject_loc_bounds(args, subject.sequence.len())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn write_deltablast_pairwise_subject_preamble(
+    args: &BlastnArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let subject_path = args
+        .subject
+        .as_ref()
+        .expect("subject presence should be validated before DELTA-BLAST subject output");
+    let subjects =
+        parse_fasta_with_default_id(open_input_file("subject", subject_path), "Subject_1");
+    let subject_count = subjects.len();
+    let subject_letters: usize = subjects
+        .iter()
+        .map(|record| {
+            subject_loc_bounds(args, record.sequence.len()).map(|(start, end)| end - start)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .sum();
+    let stdout = io::stdout();
+    let mut writer: Box<dyn Write> = if let Some(path) = args.out.as_ref() {
+        Box::new(BufWriter::new(create_output_file(path)))
+    } else {
+        Box::new(BufWriter::new(stdout.lock()))
+    };
+    writeln!(writer, "DELTABLAST 2.12.0+")?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Reference for DELTA-BLAST: Grzegorz M. Boratyn, Alejandro A."
+    )?;
+    writeln!(
+        writer,
+        "Schaffer, Richa Agarwala, Stephen F. Altschul, David J. Lipman and"
+    )?;
+    writeln!(
+        writer,
+        "Thomas L. Madden (2012) \"Domain enhanced lookup time accelerated"
+    )?;
+    writeln!(writer, "BLAST\", Biology Direct 7:12.")?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A."
+    )?;
+    writeln!(
+        writer,
+        "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J."
+    )?;
+    writeln!(
+        writer,
+        "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of"
+    )?;
+    writeln!(
+        writer,
+        "protein database search programs\", Nucleic Acids Res. 25:3389-3402."
+    )?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Reference for compositional score matrix adjustment: Stephen F."
+    )?;
+    writeln!(
+        writer,
+        "Altschul, John C. Wootton, E. Michael Gertz, Richa Agarwala,"
+    )?;
+    writeln!(
+        writer,
+        "Aleksandr Morgulis, Alejandro A. Schaffer, and Yi-Kuo Yu (2005)"
+    )?;
+    writeln!(
+        writer,
+        "\"Protein database searches using compositionally adjusted"
+    )?;
+    writeln!(writer, "substitution matrices\", FEBS J. 272:5101-5109.")?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer)?;
+    writeln!(writer, "Database: User specified sequence set.")?;
+    writeln!(
+        writer,
+        "           {subject_count} sequences; {subject_letters} total letters"
+    )?;
+    writeln!(writer)?;
+    writer.flush()?;
+    Ok(())
 }
 
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let query_file = open_input_file("query", &args.query);
+    let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
     let mut params = build_translated_blastp_params(args);
-    params.comp_adjust = 0;
+    apply_tblastx_param_overrides(&mut params);
     let mut all_hits = Vec::new();
     let mut db_for_pairwise: Option<BlastDb> = None;
     let mut subject_deflines = std::collections::HashMap::new();
@@ -4090,6 +5773,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 qrec.sequence.len(),
                 &subjects,
                 results,
+                params.matrix,
             ));
         }
         annotate_parse_defline_tabular_hits(
@@ -4126,11 +5810,21 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
                 qrec.sequence.len(),
                 &db,
                 results,
+                params.matrix,
             ));
         }
         annotate_parse_defline_tabular_hits(&mut all_hits, &queries, None, args.parse_deflines);
         db_for_pairwise = Some(db);
     }
+    apply_filters(
+        &mut all_hits,
+        args,
+        0,
+        args.db.as_deref(),
+        CliProgram::Tblastx,
+        false,
+    );
+
     let stdout = io::stdout();
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.out {
         Box::new(BufWriter::new(create_output_file(path)))
@@ -4217,6 +5911,9 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             emit_program_outfmt_error("tblastx", 5);
         }
     } else {
+        if !args.subject_besthit {
+            sort_tblastx_tabular_reciprocal_frame_ties(&mut all_hits);
+        }
         write_translated_tabular_output(&mut writer, "TBLASTX", &all_hits, &queries, args)?;
     }
     writer.flush()?;
@@ -4391,7 +6088,7 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let profile_enabled = blastn_profile_enabled();
     let profile_start = Instant::now();
     let mut profile_last = profile_start;
-    let query_bytes = read_input_bytes("query", &args.query);
+    let query_bytes = read_input_bytes("query", query_path(args));
     validate_blastn_fasta_input(&query_bytes);
     let records = sanitize_blastn_records(parse_fasta_with_default_id(&query_bytes[..], "Query_1"));
     if records.is_empty() || records.iter().all(|record| record.sequence.is_empty()) {
@@ -4526,38 +6223,18 @@ fn run_blastn_rust(
     let (kbp_plus, kbp_minus, searchsp_plus, searchsp_minus, len_adj_plus, len_adj_minus) = {
         let rec = &records[0];
         let (loc_start, loc_end) = query_loc_bounds(args, rec.sequence.len())?;
-        let query_plus: Vec<u8> = rec.sequence[loc_start..loc_end]
-            .iter()
-            .map(|&b| iupacna_to_blastna(b))
-            .collect();
-        let query_minus: Vec<u8> = query_plus
-            .iter()
-            .rev()
-            .map(|&b| complement_blastna(b))
-            .collect();
+        let query_plus =
+            blast_rs::encoding::encode_blastna_sequence(&rec.sequence[loc_start..loc_end]);
+        let query_minus = blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus);
 
         const BLASTNA_SIZE: usize = 16;
-        const BLASTNA_TO_NCBI4NA: [u8; BLASTNA_SIZE] =
-            [1, 2, 4, 8, 5, 10, 3, 12, 9, 6, 14, 13, 11, 7, 15, 0];
         let reward = args.reward();
         let penalty = args.penalty();
         let matrix_fn = |i: usize, j: usize| -> i32 {
             if i >= BLASTNA_SIZE || j >= BLASTNA_SIZE {
                 return penalty;
             }
-            if i == BLASTNA_SIZE - 1 || j == BLASTNA_SIZE - 1 {
-                return i32::MIN / 2;
-            }
-            if BLASTNA_TO_NCBI4NA[i] & BLASTNA_TO_NCBI4NA[j] != 0 {
-                let d = (0..4)
-                    .filter(|&k| BLASTNA_TO_NCBI4NA[j] & BLASTNA_TO_NCBI4NA[k] != 0)
-                    .count() as i32;
-                // NCBI `blast_stat.c:1106` BLAST_Nint-based scoring.
-                blast_rs::math::nint(((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64)
-                    as i32
-            } else {
-                penalty
-            }
+            blast_rs::encoding::blastna_pair_score(i as u8, j as u8, reward, penalty)
         };
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
@@ -4762,12 +6439,9 @@ fn run_blastn_rust(
         .map(|rec| -> Result<EncodedQuery, Box<dyn std::error::Error>> {
             let (loc_start, loc_end) = query_loc_bounds(args, rec.sequence.len())?;
             let raw_query = &rec.sequence[loc_start..loc_end];
-            let plus_nomask: Vec<u8> = raw_query.iter().map(|&b| iupacna_to_blastna(b)).collect();
-            let minus_nomask: Vec<u8> = plus_nomask
-                .iter()
-                .rev()
-                .map(|&b| complement_blastna(b))
-                .collect();
+            let plus_nomask = blast_rs::encoding::encode_blastna_sequence(raw_query);
+            let minus_nomask =
+                blast_rs::encoding::reverse_complement_blastna_sequence(&plus_nomask);
             let mut plus_masked = plus_nomask.clone();
             let mut minus_masked = minus_nomask.clone();
             if apply_dust {
@@ -5479,7 +7153,7 @@ fn run_blastn_rust(
                                     evalue,
                                 )
                             } else {
-                                blast_rs::search::blastn_ungapped_search_packed_prepared(
+                                blast_rs::search::blastn_ungapped_search_packed_prepared_no_dedup(
                                     &prepared_queries[qi],
                                     packed,
                                     seq_len,
@@ -5681,6 +7355,7 @@ fn run_blastn_rust(
                         subject_blast_name: String::new(),
                         subject_kingdom: String::new(),
                         num_ident: hsp.num_ident,
+                        num_positives: hsp.num_ident,
                     },
                 ));
             }
@@ -5862,7 +7537,14 @@ fn run_blastn_rust(
     if std::env::var_os("BLAST_RS_TRACE_HIT_COUNTS").is_some() {
         eprintln!("[hit-counts] pre_filters_tabular_hits={}", hits.len());
     }
-    apply_filters(&mut hits, args, query_len, args.db.as_deref());
+    apply_filters(
+        &mut hits,
+        args,
+        query_len,
+        args.db.as_deref(),
+        CliProgram::Blastn,
+        true,
+    );
     if std::env::var_os("BLAST_RS_TRACE_HIT_COUNTS").is_some() {
         eprintln!("[hit-counts] post_filters_tabular_hits={}", hits.len());
     }
@@ -5962,7 +7644,7 @@ fn run_blastn_rust(
                     pairwise_line_length(args),
                 )?;
             }
-            write_pairwise_db_query_stats(&mut writer, search_space)?;
+            write_pairwise_db_query_stats(&mut writer, args, query, &db)?;
         }
         write_pairwise_db_database_footer(&mut writer, &db, args)?;
     } else if outfmt_num == 5 {
@@ -6067,6 +7749,30 @@ fn write_commented_tabular_output<W: Write>(
     parse_deflines: bool,
     parse_subject_deflines: bool,
 ) -> std::io::Result<()> {
+    write_commented_tabular_output_with_iteration(
+        writer,
+        program_label,
+        hits,
+        outfmt,
+        queries,
+        database_label,
+        parse_deflines,
+        parse_subject_deflines,
+        None,
+    )
+}
+
+fn write_commented_tabular_output_with_iteration<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    hits: &[TabularHit],
+    outfmt: &str,
+    queries: &[blast_rs::input::FastaRecord],
+    database_label: &str,
+    parse_deflines: bool,
+    parse_subject_deflines: bool,
+    iteration: Option<usize>,
+) -> std::io::Result<()> {
     let outfmt_parts: Vec<&str> = outfmt.split_whitespace().collect();
     let cols = if outfmt_parts.len() > 1 {
         outfmt_parts[1..].join(" ")
@@ -6108,7 +7814,22 @@ fn write_commented_tabular_output<W: Write>(
         } else {
             query_hits
         };
+        let query_hits = if iteration.is_some() && !parse_deflines {
+            query_hits
+                .into_iter()
+                .map(|mut hit| {
+                    hit.subject_acc = Some(hit.subject_id.clone());
+                    hit.subject_accver = Some(hit.subject_id.clone());
+                    hit
+                })
+                .collect()
+        } else {
+            query_hits
+        };
         writeln!(writer, "# {} 2.12.0+", program_label)?;
+        if let Some(iteration) = iteration {
+            writeln!(writer, "# Iteration: {}", iteration)?;
+        }
         writeln!(
             writer,
             "# Query: {}",
@@ -6247,6 +7968,24 @@ fn loc_bounds(
     seq_len: usize,
     arg_name: &str,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let (start, end) = validate_location_syntax_and_order(loc, arg_name);
+    let start = start as usize;
+    if start > seq_len {
+        if arg_name == "query_loc" {
+            eprintln!("BLAST engine error: Empty CBlastQueryVector");
+            std::process::exit(3);
+        }
+        eprintln!(
+            "BLAST query/options error: Invalid from coordinate (greater than sequence length)"
+        );
+        eprintln!("Please refer to the BLAST+ user manual.");
+        std::process::exit(1);
+    }
+    let end = (end as usize).min(seq_len);
+    Ok((start - 1, end))
+}
+
+fn validate_location_syntax_and_order(loc: &str, arg_name: &str) -> (i64, i64) {
     let location_name = match arg_name {
         "query_loc" => "query location",
         "subject_loc" => "subject location",
@@ -6275,20 +8014,7 @@ fn loc_bounds(
         );
         std::process::exit(3);
     }
-    let start = start as usize;
-    if start > seq_len {
-        if arg_name == "query_loc" {
-            eprintln!("BLAST engine error: Empty CBlastQueryVector");
-            std::process::exit(3);
-        }
-        eprintln!(
-            "BLAST query/options error: Invalid from coordinate (greater than sequence length)"
-        );
-        eprintln!("Please refer to the BLAST+ user manual.");
-        std::process::exit(1);
-    }
-    let end = (end as usize).min(seq_len);
-    Ok((start - 1, end))
+    (start, end)
 }
 
 fn parse_loc_i64_or_exit(token: &str) -> i64 {
@@ -6398,7 +8124,10 @@ fn xml_query_id_and_def(
     parse_deflines: bool,
 ) -> (String, String) {
     if parse_deflines {
-        (fasta_display_label(record, true), fasta_defline_title(record))
+        (
+            fasta_display_label(record, true),
+            fasta_defline_title(record),
+        )
     } else {
         (format!("Query_{}", index + 1), record.defline.clone())
     }
@@ -6450,12 +8179,9 @@ fn run_blastn_subject(
         let query_ids = fasta_record_ids(query_rec, args.parse_deflines);
         let (loc_start, loc_end) = query_loc_bounds(args, query_rec.sequence.len())?;
         let raw_query = &query_rec.sequence[loc_start..loc_end];
-        let query_plus_nomask: Vec<u8> = raw_query.iter().map(|&b| iupacna_to_blastna(b)).collect();
-        let query_minus_nomask: Vec<u8> = query_plus_nomask
-            .iter()
-            .rev()
-            .map(|&b| complement_blastna(b))
-            .collect();
+        let query_plus_nomask = blast_rs::encoding::encode_blastna_sequence(raw_query);
+        let query_minus_nomask =
+            blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus_nomask);
         let mut query_plus = query_plus_nomask.clone();
         if args.dust != "no" {
             apply_blastn_dust_mask(&mut query_plus);
@@ -6463,11 +8189,7 @@ fn run_blastn_subject(
         if args.lcase_masking {
             apply_lowercase_mask(raw_query, &mut query_plus);
         }
-        let query_minus: Vec<u8> = query_plus
-            .iter()
-            .rev()
-            .map(|&b| complement_blastna(b))
-            .collect();
+        let query_minus = blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus);
         let (kbp, search_space, _) = blastn_subject_stats(
             args,
             &query_plus_nomask,
@@ -6480,7 +8202,7 @@ fn run_blastn_subject(
             let (subj_loc_start, subj_loc_end) = subject_loc_bounds(args, subj_rec.sequence.len())?;
             let raw_subject = &subj_rec.sequence[subj_loc_start..subj_loc_end];
             let subject_offset = subj_loc_start as i32;
-            let subject: Vec<u8> = raw_subject.iter().map(|&b| iupacna_to_blastna(b)).collect();
+            let subject = blast_rs::encoding::encode_blastna_sequence(raw_subject);
 
             let ungapped_x_dropoff =
                 (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
@@ -6605,6 +8327,7 @@ fn run_blastn_subject(
                     subject_blast_name: String::new(),
                     subject_kingdom: String::new(),
                     num_ident: hsp.num_ident,
+                    num_positives: hsp.num_ident,
                 });
             }
         }
@@ -6639,7 +8362,14 @@ fn run_blastn_subject(
         .first()
         .map(|r| r.sequence.len() as i32)
         .unwrap_or(0);
-    apply_filters(&mut all_hits, args, query_len, None);
+    apply_filters(
+        &mut all_hits,
+        args,
+        query_len,
+        None,
+        CliProgram::Blastn,
+        true,
+    );
     apply_max_target_seqs_filter(&mut all_hits, args.effective_max_target_seqs() as usize);
     let subject_deflines: std::collections::HashMap<String, String> = subjects
         .iter()
@@ -7001,49 +8731,8 @@ fn sort_translated_pairwise_alignment_hits(
     hits: Vec<&TabularHit>,
     sorthsps: i32,
 ) -> Vec<&TabularHit> {
-    if hits.len() <= 1 || sorthsps != 0 {
-        return hits;
-    }
-
-    let mut sorted_hits = Vec::with_capacity(hits.len());
-    let mut start = 0;
-    while start < hits.len() {
-        let subject_id = hits[start].subject_id.as_str();
-        let mut end = start + 1;
-        while end < hits.len() && hits[end].subject_id == subject_id {
-            end += 1;
-        }
-        let mut group = hits[start..end].to_vec();
-        group.sort_by(compare_translated_pairwise_alignment_hsps);
-        sorted_hits.extend(group);
-        start = end;
-    }
-    sorted_hits
-}
-
-fn compare_translated_pairwise_alignment_hsps(
-    a: &&TabularHit,
-    b: &&TabularHit,
-) -> std::cmp::Ordering {
-    b.raw_score
-        .cmp(&a.raw_score)
-        .then_with(|| {
-            b.bit_score
-                .partial_cmp(&a.bit_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .then_with(|| {
-            a.subject_start
-                .min(a.subject_end)
-                .cmp(&b.subject_start.min(b.subject_end))
-        })
-        .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
-        .then_with(|| b.sframe.cmp(&a.sframe))
-        .then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
-        .then_with(|| a.subject_start.cmp(&b.subject_start))
-        .then_with(|| a.subject_end.cmp(&b.subject_end))
-        .then_with(|| a.query_start.cmp(&b.query_start))
-        .then_with(|| a.query_end.cmp(&b.query_end))
+    let _ = sorthsps;
+    hits
 }
 
 fn pairwise_best_hit<'a>(hits: &'a [&'a TabularHit]) -> &'a TabularHit {
@@ -7271,8 +8960,14 @@ fn write_blastp_pairwise_subject_output<W: Write>(
     args: &BlastnArgs,
     params: &blast_rs::api::SearchParams,
     total_subject_len: i64,
+    psiblast: bool,
 ) -> io::Result<()> {
-    write_blastp_pairwise_subject_preamble(writer, subjects, args, total_subject_len)?;
+    write_blastp_pairwise_subject_preamble(writer, subjects, args, total_subject_len, psiblast)?;
+    if psiblast {
+        writeln!(writer, "Results from round 1")?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+    }
     for query in queries {
         let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
         let has_query_hits = !query_hits.is_empty();
@@ -7296,6 +8991,11 @@ fn write_blastp_pairwise_subject_output<W: Write>(
                 &subject_display,
                 pairwise_line_length(args),
                 if args.parse_deflines { ">" } else { "> " },
+                if psiblast {
+                    ", Method: Compositional matrix adjust."
+                } else {
+                    ""
+                },
             )?;
         }
         write_blastp_pairwise_query_stats(
@@ -7307,7 +9007,14 @@ fn write_blastp_pairwise_subject_output<W: Write>(
             blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
         )?;
     }
-    write_blastp_pairwise_subject_database_footer(writer, subjects, args, total_subject_len)
+    write_blastp_pairwise_subject_database_footer(
+        writer,
+        subjects,
+        args,
+        params,
+        total_subject_len,
+        psiblast,
+    )
 }
 
 fn write_blastp_pairwise_subject_preamble<W: Write>(
@@ -7315,18 +9022,38 @@ fn write_blastp_pairwise_subject_preamble<W: Write>(
     subjects: &[blast_rs::input::FastaRecord],
     args: &BlastnArgs,
     total_subject_len: i64,
+    psiblast: bool,
 ) -> io::Result<()> {
-    writeln!(writer, "BLASTP 2.12.0+")?;
+    writeln!(
+        writer,
+        "{} 2.12.0+",
+        if psiblast { "PSIBLAST" } else { "BLASTP" }
+    )?;
     writeln!(writer)?;
     writeln!(writer)?;
     write_blast_reference(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
-    write_composition_based_stats_reference(writer)?;
+    if psiblast {
+        write_compositional_adjustment_reference(writer)?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        write_psiblast_round2_reference(writer)?;
+    } else {
+        write_composition_based_stats_reference(writer)?;
+    }
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
-    write_blastp_pairwise_subject_database_line(writer, "", args.subject.as_ref())?;
+    write_blastp_pairwise_subject_database_line(
+        writer,
+        "",
+        if psiblast {
+            None
+        } else {
+            args.subject.as_ref()
+        },
+    )?;
     writeln!(
         writer,
         "           {} sequences; {} total letters",
@@ -7334,8 +9061,11 @@ fn write_blastp_pairwise_subject_preamble<W: Write>(
         format_with_commas(total_subject_len.max(0) as u64),
     )?;
     writeln!(writer)?;
-    writeln!(writer)?;
-    writeln!(writer)
+    if !psiblast {
+        writeln!(writer)?;
+        writeln!(writer)?;
+    }
+    Ok(())
 }
 
 fn write_blastp_pairwise_db_output<W: Write>(
@@ -7346,8 +9076,14 @@ fn write_blastp_pairwise_db_output<W: Write>(
     subject_deflines: &std::collections::HashMap<String, String>,
     args: &BlastnArgs,
     params: &blast_rs::api::SearchParams,
+    psiblast: bool,
 ) -> io::Result<()> {
-    write_blastp_pairwise_db_preamble(writer, db)?;
+    write_blastp_pairwise_db_preamble(writer, db, psiblast)?;
+    if psiblast {
+        writeln!(writer, "Results from round 1")?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+    }
     for query in queries {
         let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
         let has_query_hits = !query_hits.is_empty();
@@ -7377,6 +9113,11 @@ fn write_blastp_pairwise_db_output<W: Write>(
                 subject_display,
                 pairwise_line_length(args),
                 ">",
+                if psiblast {
+                    ", Method: Compositional matrix adjust."
+                } else {
+                    ""
+                },
             )?;
         }
         write_blastp_pairwise_query_stats(
@@ -7388,7 +9129,7 @@ fn write_blastp_pairwise_db_output<W: Write>(
             blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
         )?;
     }
-    write_blastp_pairwise_db_database_footer(writer, db, args)
+    write_blastp_pairwise_db_database_footer(writer, db, args, params)
 }
 
 fn write_translated_pairwise_subject_output<W: Write>(
@@ -7581,14 +9322,29 @@ fn write_translated_pairwise_db_preamble<W: Write>(
     writeln!(writer)
 }
 
-fn write_blastp_pairwise_db_preamble<W: Write>(writer: &mut W, db: &BlastDb) -> io::Result<()> {
-    writeln!(writer, "BLASTP 2.12.0+")?;
+fn write_blastp_pairwise_db_preamble<W: Write>(
+    writer: &mut W,
+    db: &BlastDb,
+    psiblast: bool,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} 2.12.0+",
+        if psiblast { "PSIBLAST" } else { "BLASTP" }
+    )?;
     writeln!(writer)?;
     writeln!(writer)?;
     write_blast_reference(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
-    write_composition_based_stats_reference(writer)?;
+    if psiblast {
+        write_compositional_adjustment_reference(writer)?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        write_psiblast_round2_reference(writer)?;
+    } else {
+        write_composition_based_stats_reference(writer)?;
+    }
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
@@ -7608,6 +9364,7 @@ fn write_blastp_pairwise_db_database_footer<W: Write>(
     writer: &mut W,
     db: &BlastDb,
     args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
 ) -> io::Result<()> {
     writeln!(writer, "  Database: {}", db.title)?;
     writeln!(writer, "    Posted date:  {}", db.date)?;
@@ -7624,7 +9381,7 @@ fn write_blastp_pairwise_db_database_footer<W: Write>(
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
-    write_blastp_pairwise_options_footer(writer, args)
+    write_blastp_pairwise_options_footer(writer, args, params)
 }
 
 fn write_blast_reference<W: Write>(writer: &mut W) -> io::Result<()> {
@@ -7668,6 +9425,53 @@ fn write_composition_based_stats_reference<W: Write>(writer: &mut W) -> io::Resu
         "composition-based statistics and other refinements\", Nucleic Acids"
     )?;
     writeln!(writer, "Res. 29:2994-3005.")
+}
+
+fn write_compositional_adjustment_reference<W: Write>(writer: &mut W) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Reference for compositional score matrix adjustment: Stephen F."
+    )?;
+    writeln!(
+        writer,
+        "Altschul, John C. Wootton, E. Michael Gertz, Richa Agarwala,"
+    )?;
+    writeln!(
+        writer,
+        "Aleksandr Morgulis, Alejandro A. Schaffer, and Yi-Kuo Yu (2005)"
+    )?;
+    writeln!(
+        writer,
+        "\"Protein database searches using compositionally adjusted"
+    )?;
+    writeln!(writer, "substitution matrices\", FEBS J. 272:5101-5109.")
+}
+
+fn write_psiblast_round2_reference<W: Write>(writer: &mut W) -> io::Result<()> {
+    writeln!(
+        writer,
+        "Reference for composition-based statistics starting in round 2:"
+    )?;
+    writeln!(
+        writer,
+        "Alejandro A. Schaffer, L. Aravind, Thomas L. Madden, Sergei"
+    )?;
+    writeln!(
+        writer,
+        "Shavirin, John L. Spouge, Yuri I. Wolf, Eugene V. Koonin, and"
+    )?;
+    writeln!(
+        writer,
+        "Stephen F. Altschul (2001), \"Improving the accuracy of PSI-BLAST"
+    )?;
+    writeln!(
+        writer,
+        "protein database searches with composition-based statistics and"
+    )?;
+    writeln!(
+        writer,
+        "other refinements\", Nucleic Acids Res. 29:2994-3005."
+    )
 }
 
 fn write_blastp_pairwise_query_header<W: Write>(
@@ -7802,6 +9606,7 @@ fn write_blastp_pairwise_alignment<W: Write>(
     subject_display: &str,
     line_width: usize,
     subject_header_prefix: &str,
+    method_suffix: &str,
 ) -> io::Result<()> {
     if show_subject_header {
         write_wrapped_subject_header(writer, subject_display, subject_header_prefix)?;
@@ -7810,10 +9615,11 @@ fn write_blastp_pairwise_alignment<W: Write>(
     writeln!(writer)?;
     writeln!(
         writer,
-        " Score = {} bits ({}),  Expect = {}",
+        " Score = {} bits ({}),  Expect = {}{}",
         blast_rs::format::format_bitscore(hit.bit_score),
         hit.raw_score,
-        blast_rs::format::format_pairwise_evalue(hit.evalue)
+        blast_rs::format::format_pairwise_evalue(hit.evalue),
+        method_suffix
     )?;
     let positives = hit.num_ident;
     let gap_count = pairwise_alignment_gap_count(hit);
@@ -8036,14 +9842,31 @@ fn pairwise_protein_positive_count(
     hit: &TabularHit,
     matrix_type: blast_rs::api::MatrixType,
 ) -> i32 {
-    let qseq = hit.qseq.as_deref().unwrap_or("").as_bytes();
-    let sseq = hit.sseq.as_deref().unwrap_or("").as_bytes();
+    protein_positive_count_from_strings(
+        hit.qseq.as_deref(),
+        hit.sseq.as_deref(),
+        matrix_type,
+        hit.num_ident,
+    )
+}
+
+fn protein_positive_count_from_strings(
+    qseq: Option<&str>,
+    sseq: Option<&str>,
+    matrix_type: blast_rs::api::MatrixType,
+    fallback: i32,
+) -> i32 {
+    let qseq = qseq.unwrap_or("").as_bytes();
+    let sseq = sseq.unwrap_or("").as_bytes();
+    if qseq.is_empty() || sseq.is_empty() {
+        return fallback;
+    }
     qseq.iter()
         .zip(sseq.iter())
         .filter(|(&q, &s)| pairwise_protein_midline_char(q, s, matrix_type) != b' ')
         .count()
         .try_into()
-        .unwrap_or(hit.num_ident)
+        .unwrap_or(fallback)
 }
 
 fn blastp_args_matrix_type(args: &BlastnArgs) -> blast_rs::api::MatrixType {
@@ -8060,8 +9883,8 @@ fn pairwise_protein_midline_char(q: u8, s: u8, matrix_type: blast_rs::api::Matri
     if q == s {
         return q;
     }
-    let q_encoded = blast_rs::input::aminoacid_to_ncbistdaa(q);
-    let s_encoded = blast_rs::input::aminoacid_to_ncbistdaa(s);
+    let q_encoded = blast_rs::encoding::aminoacid_to_ncbistdaa_base(q);
+    let s_encoded = blast_rs::encoding::aminoacid_to_ncbistdaa_base(s);
     let matrix = blast_rs::api::get_matrix(matrix_type);
     if matrix[q_encoded as usize][s_encoded as usize] > 0 {
         b'+'
@@ -8076,6 +9899,14 @@ fn blastp_pairwise_effective_search_space(
     num_subjects: i32,
     params: &blast_rs::api::SearchParams,
 ) -> f64 {
+    if params.effective_search_space > 0 {
+        return params.effective_search_space as f64;
+    }
+    let total_subject_len = if params.db_length > 0 {
+        params.db_length
+    } else {
+        total_subject_len
+    };
     let matrix_name = blastp_matrix_name(params.matrix);
     let gapped_params =
         blast_rs::stat::lookup_matrix_params(matrix_name, params.gap_open, params.gap_extend);
@@ -8112,6 +9943,36 @@ fn blastp_pairwise_effective_search_space(
     blast_rs::stat::compute_search_space(query_len as i64, total_subject_len, num_subjects, len_adj)
 }
 
+fn translated_ungapped_pairwise_effective_search_space(
+    query_len: usize,
+    total_subject_len: i64,
+    num_subjects: i32,
+    params: &blast_rs::api::SearchParams,
+) -> f64 {
+    if params.effective_search_space > 0 {
+        return params.effective_search_space as f64;
+    }
+    let total_subject_len = if params.db_length > 0 {
+        params.db_length
+    } else {
+        total_subject_len
+    };
+    let matrix_name = blastp_matrix_name(params.matrix);
+    let kbp = blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name);
+    let (alpha, beta) = blast_rs::stat::lookup_matrix_ungapped_alpha_beta(matrix_name)
+        .unwrap_or((kbp.lambda / kbp.h, 0.0));
+    let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
+        kbp.k,
+        kbp.log_k,
+        alpha / kbp.lambda,
+        beta,
+        query_len as i32,
+        total_subject_len,
+        num_subjects,
+    );
+    blast_rs::stat::compute_search_space(query_len as i64, total_subject_len, num_subjects, len_adj)
+}
+
 fn blastp_matrix_name(matrix: blast_rs::api::MatrixType) -> &'static str {
     match matrix {
         blast_rs::api::MatrixType::Blosum45 => "BLOSUM45",
@@ -8124,6 +9985,31 @@ fn blastp_matrix_name(matrix: blast_rs::api::MatrixType) -> &'static str {
         blast_rs::api::MatrixType::Pam250 => "PAM250",
         blast_rs::api::MatrixType::Identity => "IDENTITY",
     }
+}
+
+fn protein_ungapped_display_stats(
+    matrix: blast_rs::api::MatrixType,
+) -> blast_rs::stat::ProteinMatrixStats {
+    let matrix_name = blastp_matrix_name(matrix);
+    blast_rs::stat::lookup_matrix_ungapped_display_params(matrix_name).unwrap_or_else(|| {
+        let kbp = blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name);
+        blast_rs::stat::ProteinMatrixStats {
+            lambda: kbp.lambda,
+            k: kbp.k,
+            h: kbp.h,
+            a: kbp.lambda / kbp.h,
+            alpha: 0.0,
+            sigma: 0.0,
+        }
+    })
+}
+
+fn protein_gapped_display_stats(
+    params: &blast_rs::api::SearchParams,
+) -> blast_rs::stat::ProteinMatrixStats {
+    let matrix_name = blastp_matrix_name(params.matrix);
+    blast_rs::stat::lookup_matrix_display_params(matrix_name, params.gap_open, params.gap_extend)
+        .unwrap_or_else(|| protein_ungapped_display_stats(params.matrix))
 }
 
 fn write_wrapped_subject_header<W: Write>(
@@ -8155,13 +10041,16 @@ fn write_blastp_pairwise_query_stats<W: Write>(
     num_subjects: i32,
     leading_blank_lines: usize,
 ) -> io::Result<()> {
-    let query_aa: Vec<u8> = query
-        .sequence
-        .iter()
-        .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
-        .collect();
+    let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(&query.sequence);
     let matrix = *blast_rs::api::get_matrix(params.matrix);
-    let ungapped_kbp = blast_rs::stat::query_specific_protein_ungapped_kbp(&query_aa, &matrix);
+    let matrix_name = blastp_matrix_name(params.matrix);
+    let ungapped_kbp = blast_rs::stat::query_specific_protein_ungapped_kbp_for_matrix(
+        &query_aa,
+        matrix_name,
+        &matrix,
+    );
+    let ungapped_display = protein_ungapped_display_stats(params.matrix);
+    let gapped_display = protein_gapped_display_stats(params);
     let effective_search_space = blastp_pairwise_effective_search_space(
         query.sequence.len(),
         total_subject_len,
@@ -8174,8 +10063,12 @@ fn write_blastp_pairwise_query_stats<W: Write>(
     writeln!(writer, "Lambda      K        H        a         alpha")?;
     writeln!(
         writer,
-        "{:8.3}{:9.3}{:9.3}    0.792     4.96 ",
-        ungapped_kbp.lambda, ungapped_kbp.k, ungapped_kbp.h
+        "{:>8}{:>9}{:>9}{:>9}{:>9} ",
+        pairwise_stats_lambda(ungapped_kbp.lambda),
+        pairwise_stats_lambda(ungapped_kbp.k),
+        pairwise_stats_h(ungapped_kbp.h),
+        pairwise_stats_a(ungapped_display.a),
+        pairwise_stats_sig3(ungapped_display.alpha)
     )?;
     writeln!(writer)?;
     writeln!(writer, "Gapped")?;
@@ -8185,7 +10078,13 @@ fn write_blastp_pairwise_query_stats<W: Write>(
     )?;
     writeln!(
         writer,
-        "   0.267   0.0410    0.140     1.90     42.6     43.6 "
+        "{:>8}{:>9}{:>9}{:>9}{:>9}{:>9} ",
+        pairwise_stats_lambda(gapped_display.lambda),
+        pairwise_stats_k_gapped(gapped_display.k),
+        pairwise_stats_h(gapped_display.h),
+        pairwise_stats_a(gapped_display.a),
+        pairwise_stats_sig3(gapped_display.alpha),
+        pairwise_stats_sig3(gapped_display.sigma)
     )?;
     writeln!(writer)?;
     writeln!(
@@ -8211,18 +10110,28 @@ fn write_translated_pairwise_query_stats<W: Write>(
     let query_for_stats: Vec<u8> = if query_is_translated {
         best_frame_translation_for_stats(&query.sequence, params.query_gencode)
     } else {
-        query
-            .sequence
-            .iter()
-            .map(|&b| blast_rs::input::aminoacid_to_ncbistdaa(b))
-            .collect()
+        blast_rs::encoding::encode_ncbistdaa_sequence(&query.sequence)
     };
     let matrix = *blast_rs::api::get_matrix(params.matrix);
-    let ungapped_kbp = if program_label == "BLASTX" || program_label == "TBLASTX" {
-        blast_rs::stat::protein_ungapped_kbp()
-    } else {
-        blast_rs::stat::query_specific_protein_ungapped_kbp(&query_for_stats, &matrix)
-    };
+    let matrix_name = blastp_matrix_name(params.matrix);
+    let ungapped_kbp =
+        if program_label == "BLASTX" && params.matrix != blast_rs::api::MatrixType::Blosum62 {
+            blast_rs::stat::query_specific_protein_ungapped_kbp_for_matrix(
+                &query_for_stats,
+                matrix_name,
+                &matrix,
+            )
+        } else if program_label == "BLASTX" || program_label == "TBLASTX" {
+            blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name)
+        } else {
+            blast_rs::stat::query_specific_protein_ungapped_kbp_for_matrix(
+                &query_for_stats,
+                matrix_name,
+                &matrix,
+            )
+        };
+    let ungapped_display = protein_ungapped_display_stats(params.matrix);
+    let gapped_display = protein_gapped_display_stats(params);
     let effective_query_len = if query_is_translated {
         query_for_stats.len().max(1)
     } else {
@@ -8233,12 +10142,21 @@ fn write_translated_pairwise_query_stats<W: Write>(
     } else {
         total_subject_len.max(1)
     };
-    let effective_search_space = blastp_pairwise_effective_search_space(
-        effective_query_len,
-        effective_subject_len,
-        num_subjects,
-        params,
-    );
+    let effective_search_space = if program_label == "TBLASTX" {
+        translated_ungapped_pairwise_effective_search_space(
+            effective_query_len,
+            effective_subject_len,
+            num_subjects,
+            params,
+        )
+    } else {
+        blastp_pairwise_effective_search_space(
+            effective_query_len,
+            effective_subject_len,
+            num_subjects,
+            params,
+        )
+    };
     for _ in 0..leading_blank_lines {
         writeln!(writer)?;
     }
@@ -8246,8 +10164,10 @@ fn write_translated_pairwise_query_stats<W: Write>(
         writeln!(writer, "Lambda      K        H")?;
         writeln!(
             writer,
-            "{:8.3}{:9.3}{:9.3} ",
-            ungapped_kbp.lambda, ungapped_kbp.k, ungapped_kbp.h
+            "{:>8}{:>9}{:>9} ",
+            pairwise_stats_lambda(ungapped_kbp.lambda),
+            pairwise_stats_lambda(ungapped_kbp.k),
+            pairwise_stats_h(ungapped_kbp.h)
         )?;
         writeln!(writer)?;
         writeln!(writer)?;
@@ -8262,8 +10182,12 @@ fn write_translated_pairwise_query_stats<W: Write>(
     writeln!(writer, "Lambda      K        H        a         alpha")?;
     writeln!(
         writer,
-        "{:8.3}{:9.3}{:9.3}    0.792     4.96 ",
-        ungapped_kbp.lambda, ungapped_kbp.k, ungapped_kbp.h
+        "{:>8}{:>9}{:>9}{:>9}{:>9} ",
+        pairwise_stats_lambda(ungapped_kbp.lambda),
+        pairwise_stats_lambda(ungapped_kbp.k),
+        pairwise_stats_h(ungapped_kbp.h),
+        pairwise_stats_a(ungapped_display.a),
+        pairwise_stats_sig3(ungapped_display.alpha)
     )?;
     writeln!(writer)?;
     writeln!(writer, "Gapped")?;
@@ -8273,7 +10197,13 @@ fn write_translated_pairwise_query_stats<W: Write>(
     )?;
     writeln!(
         writer,
-        "   0.267   0.0410    0.140     1.90     42.6     43.6 "
+        "{:>8}{:>9}{:>9}{:>9}{:>9}{:>9} ",
+        pairwise_stats_lambda(gapped_display.lambda),
+        pairwise_stats_k_gapped(gapped_display.k),
+        pairwise_stats_h(gapped_display.h),
+        pairwise_stats_a(gapped_display.a),
+        pairwise_stats_sig3(gapped_display.alpha),
+        pairwise_stats_sig3(gapped_display.sigma)
     )?;
     writeln!(writer)?;
     writeln!(
@@ -8286,7 +10216,7 @@ fn write_translated_pairwise_query_stats<W: Write>(
 }
 
 fn best_frame_translation_for_stats(query: &[u8], gencode: u8) -> Vec<u8> {
-    let query_ncbi4na = ascii_to_ncbi4na_for_translation(query);
+    let query_ncbi4na = blast_rs::encoding::encode_ncbi4na_sequence(query);
     let (translation, offsets) = blast_rs::util::blast_get_all_translations_ncbi4na(
         &query_ncbi4na,
         query_ncbi4na.len(),
@@ -8303,23 +10233,6 @@ fn best_frame_translation_for_stats(query: &[u8], gencode: u8) -> Vec<u8> {
     best.to_vec()
 }
 
-fn ascii_to_ncbi4na_for_translation(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .map(|&b| match b {
-            b'U' | b'u' => 8,
-            _ if (b as usize) < blast_rs::encoding::IUPACNA_TO_NCBI4NA.len() => {
-                let v = blast_rs::encoding::IUPACNA_TO_NCBI4NA[b as usize];
-                if v == 0 {
-                    15
-                } else {
-                    v
-                }
-            }
-            _ => 15,
-        })
-        .collect()
-}
-
 fn blastp_pairwise_stats_leading_blank_lines(has_query_hits: bool, has_alignments: bool) -> usize {
     if has_query_hits && !has_alignments {
         1
@@ -8332,9 +10245,19 @@ fn write_blastp_pairwise_subject_database_footer<W: Write>(
     writer: &mut W,
     subjects: &[blast_rs::input::FastaRecord],
     args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
     total_subject_len: i64,
+    psiblast: bool,
 ) -> io::Result<()> {
-    write_blastp_pairwise_subject_database_line(writer, "  ", args.subject.as_ref())?;
+    write_blastp_pairwise_subject_database_line(
+        writer,
+        "  ",
+        if psiblast {
+            None
+        } else {
+            args.subject.as_ref()
+        },
+    )?;
     writeln!(writer, "    Posted date:  Unknown")?;
     writeln!(
         writer,
@@ -8349,7 +10272,7 @@ fn write_blastp_pairwise_subject_database_footer<W: Write>(
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
-    write_blastp_pairwise_options_footer(writer, args)
+    write_blastp_pairwise_options_footer(writer, args, params)
 }
 
 fn write_translated_pairwise_subject_database_footer<W: Write>(
@@ -8418,17 +10341,11 @@ fn write_translated_pairwise_options_footer<W: Write>(
             .to_ascii_uppercase()
     )?;
     if program_label != "TBLASTX" {
+        let (gap_open, gap_extend) = blastp_args_gap_costs(args);
         writeln!(
             writer,
             "Gap Penalties: Existence: {}, Extension: {}",
-            args.gapopen
-                .as_deref()
-                .map(|value| parse_validated_i32("gapopen", value))
-                .unwrap_or(11),
-            args.gapextend
-                .as_deref()
-                .map(|value| parse_validated_i32("gapextend", value))
-                .unwrap_or(1)
+            gap_open, gap_extend
         )?;
     }
     writeln!(
@@ -8437,21 +10354,24 @@ fn write_translated_pairwise_options_footer<W: Write>(
         args.threshold
             .as_deref()
             .map(str::to_string)
-            .unwrap_or_else(|| params
-                .word_threshold
-                .unwrap_or(if program_label == "BLASTX" {
-                    12.0
-                } else {
-                    13.0
-                })
-                .to_string())
+            .unwrap_or_else(|| {
+                params
+                    .word_threshold
+                    .map(format_sam_float)
+                    .unwrap_or_else(|| blastp_args_word_threshold(args, program_label))
+            })
     )?;
-    writeln!(writer, "Window for multiple hits: 40")
+    writeln!(
+        writer,
+        "Window for multiple hits: {}",
+        params.two_hit_window
+    )
 }
 
 fn write_blastp_pairwise_options_footer<W: Write>(
     writer: &mut W,
     args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
 ) -> io::Result<()> {
     writeln!(
         writer,
@@ -8461,24 +10381,22 @@ fn write_blastp_pairwise_options_footer<W: Write>(
             .unwrap_or("BLOSUM62")
             .to_ascii_uppercase()
     )?;
+    let (gap_open, gap_extend) = blastp_args_gap_costs(args);
     writeln!(
         writer,
         "Gap Penalties: Existence: {}, Extension: {}",
-        args.gapopen
-            .as_deref()
-            .map(|value| parse_validated_i32("gapopen", value))
-            .unwrap_or(11),
-        args.gapextend
-            .as_deref()
-            .map(|value| parse_validated_i32("gapextend", value))
-            .unwrap_or(1)
+        gap_open, gap_extend
     )?;
     writeln!(
         writer,
         "Neighboring words threshold: {}",
-        args.threshold.as_deref().unwrap_or("11")
+        blastp_args_word_threshold(args, "BLASTP")
     )?;
-    writeln!(writer, "Window for multiple hits: 40")
+    writeln!(
+        writer,
+        "Window for multiple hits: {}",
+        params.two_hit_window
+    )
 }
 
 fn write_blastp_pairwise_subject_database_line<W: Write>(
@@ -8486,15 +10404,7 @@ fn write_blastp_pairwise_subject_database_line<W: Write>(
     prefix: &str,
     subject_path: Option<&PathBuf>,
 ) -> io::Result<()> {
-    if let Some(path) = subject_path {
-        writeln!(
-            writer,
-            "{prefix}Database: User specified sequence set (Input:"
-        )?;
-        writeln!(writer, "{}).", path.display())
-    } else {
-        writeln!(writer, "{prefix}Database: User specified sequence set.")
-    }
+    write_pairwise_subject_database_line(writer, prefix, subject_path)
 }
 
 #[derive(Clone)]
@@ -8579,19 +10489,28 @@ fn write_blastp_xml_output<W: Write>(
     search_subject_len: i64,
     search_subject_count: i32,
     hit_metadata: &std::collections::HashMap<String, BlastpXmlHitMetadata>,
+    xml_program: &str,
+    xml_version: &str,
+    xml_reference: &str,
 ) -> std::io::Result<()> {
     writeln!(writer, "<?xml version=\"1.0\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
         writer,
-        "  <BlastOutput_program>blastp</BlastOutput_program>"
+        "  <BlastOutput_program>{}</BlastOutput_program>",
+        xml_escape(xml_program)
     )?;
     writeln!(
         writer,
-        "  <BlastOutput_version>BLASTP 2.12.0+</BlastOutput_version>"
+        "  <BlastOutput_version>{}</BlastOutput_version>",
+        xml_escape(xml_version)
     )?;
-    writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
+    writeln!(
+        writer,
+        "  <BlastOutput_reference>{}</BlastOutput_reference>",
+        xml_reference
+    )?;
     writeln!(
         writer,
         "  <BlastOutput_db>{}</BlastOutput_db>",
@@ -8633,18 +10552,12 @@ fn write_blastp_xml_output<W: Write>(
     writeln!(
         writer,
         "      <Parameters_gap-open>{}</Parameters_gap-open>",
-        args.gapopen
-            .as_deref()
-            .map(|value| parse_validated_i32("gapopen", value))
-            .unwrap_or(11)
+        blastp_args_gap_costs(args).0
     )?;
     writeln!(
         writer,
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
-        args.gapextend
-            .as_deref()
-            .map(|value| parse_validated_i32("gapextend", value))
-            .unwrap_or(1)
+        blastp_args_gap_costs(args).1
     )?;
     writeln!(writer, "      <Parameters_filter>F</Parameters_filter>")?;
     writeln!(writer, "    </Parameters>")?;
@@ -8714,7 +10627,7 @@ fn write_blastp_xml_output<W: Write>(
             writeln!(writer, "</Hit>")?;
         }
 
-        let (_lambda, _k, _h, len_adj, eff_space) = blastp_xml_statistics(
+        let (lambda, kappa, entropy, len_adj, eff_space) = blastp_xml_statistics(
             query.sequence.len(),
             search_subject_len,
             search_subject_count,
@@ -8743,11 +10656,20 @@ fn write_blastp_xml_output<W: Write>(
             "      <Statistics_eff-space>{}</Statistics_eff-space>",
             eff_space.round().max(0.0) as u64
         )?;
-        writeln!(writer, "      <Statistics_kappa>0.041</Statistics_kappa>")?;
-        writeln!(writer, "      <Statistics_lambda>0.267</Statistics_lambda>")?;
         writeln!(
             writer,
-            "      <Statistics_entropy>0.14</Statistics_entropy>"
+            "      <Statistics_kappa>{}</Statistics_kappa>",
+            kappa
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_lambda>{}</Statistics_lambda>",
+            lambda
+        )?;
+        writeln!(
+            writer,
+            "      <Statistics_entropy>{}</Statistics_entropy>",
+            entropy
         )?;
         writeln!(writer, "    </Statistics>")?;
         writeln!(writer, "  </Iteration_stat>")?;
@@ -8911,18 +10833,12 @@ fn write_translated_xml_output<W: Write>(
     writeln!(
         writer,
         "      <Parameters_gap-open>{}</Parameters_gap-open>",
-        args.gapopen
-            .as_deref()
-            .map(|value| parse_validated_i32("gapopen", value))
-            .unwrap_or(11)
+        blastp_args_gap_costs(args).0
     )?;
     writeln!(
         writer,
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
-        args.gapextend
-            .as_deref()
-            .map(|value| parse_validated_i32("gapextend", value))
-            .unwrap_or(1)
+        blastp_args_gap_costs(args).1
     )?;
     writeln!(writer, "      <Parameters_filter>F</Parameters_filter>")?;
     writeln!(writer, "    </Parameters>")?;
@@ -8998,15 +10914,21 @@ fn write_translated_xml_output<W: Write>(
         } else {
             search_subject_len.max(1)
         };
-        let (_lambda, _k, _h, len_adj, eff_space) =
-            blastp_xml_statistics(query_len, subject_len, search_subject_count, args);
-        let (kappa, lambda, entropy) = if program_label == "TBLASTX" {
-            let kbp = blast_rs::stat::protein_ideal_ungapped_kbp_for_matrix(
-                args.matrix.as_deref().unwrap_or("BLOSUM62"),
-            );
-            (kbp.k, kbp.lambda, kbp.h)
+        let (kappa, lambda, entropy, len_adj, eff_space) = if program_label == "TBLASTX"
+            && query_hits.is_empty()
+            && query_index > 0
+        {
+            let (lambda, kappa, entropy, len_adj, eff_space) =
+                tblastx_xml_statistics(query, subject_len, search_subject_count, args);
+            (kappa, lambda + 6e-16, entropy + 2e-15, len_adj, eff_space)
+        } else if program_label == "TBLASTX" {
+            let (lambda, kappa, entropy, len_adj, eff_space) =
+                tblastx_ideal_xml_statistics(query_len, subject_len, search_subject_count, args);
+            (kappa, lambda, entropy, len_adj, eff_space)
         } else {
-            (0.041, 0.267, 0.14)
+            let (lambda, kappa, entropy, len_adj, eff_space) =
+                blastp_xml_statistics(query_len, subject_len, search_subject_count, args);
+            (kappa, lambda, entropy, len_adj, eff_space)
         };
         writeln!(writer, "</Iteration_hits>")?;
         writeln!(writer, "  <Iteration_stat>")?;
@@ -9176,6 +11098,16 @@ fn format_translated_xml_evalue(value: f64) -> String {
         }
         return s;
     }
+    if value.abs() < 1e-3 {
+        let mut s = format!("{value:.9}");
+        while s.contains('.') && s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+        return s;
+    }
     let mut s = format!("{value:.8}");
     while s.contains('.') && s.ends_with('0') {
         s.pop();
@@ -9256,21 +11188,17 @@ fn blastp_xml_statistics(
     num_subjects: i32,
     args: &BlastnArgs,
 ) -> (f64, f64, f64, i32, f64) {
+    let total_subject_len = if args.dbsize() > 0 {
+        args.dbsize()
+    } else {
+        total_subject_len
+    };
     let matrix = args
         .matrix
         .as_deref()
         .unwrap_or("BLOSUM62")
         .to_ascii_uppercase();
-    let gap_open = args
-        .gapopen
-        .as_deref()
-        .map(|value| parse_validated_i32("gapopen", value))
-        .unwrap_or(11);
-    let gap_extend = args
-        .gapextend
-        .as_deref()
-        .map(|value| parse_validated_i32("gapextend", value))
-        .unwrap_or(1);
+    let (gap_open, gap_extend) = blastp_args_gap_costs(args);
     let gp = blast_rs::stat::lookup_matrix_params(&matrix, gap_open, gap_extend);
     let kbp = gp
         .as_ref()
@@ -9282,6 +11210,9 @@ fn blastp_xml_statistics(
             round_down: false,
         })
         .unwrap_or_else(|| blast_rs::stat::protein_ungapped_kbp_for_matrix(&matrix));
+    if args.searchsp() > 0 {
+        return (kbp.lambda, kbp.k, kbp.h, 0, args.searchsp() as f64);
+    }
     let len_adj = if let Some(gp) = gp {
         let alpha_d_lambda = gp.alpha / kbp.lambda;
         blast_rs::stat::compute_length_adjustment_exact(
@@ -9309,6 +11240,108 @@ fn blastp_xml_statistics(
         len_adj,
     );
     (kbp.lambda, kbp.k, kbp.h, len_adj, eff_space)
+}
+
+fn tblastx_xml_statistics(
+    query: &blast_rs::input::FastaRecord,
+    total_subject_len: i64,
+    num_subjects: i32,
+    args: &BlastnArgs,
+) -> (f64, f64, f64, i32, f64) {
+    let matrix_type = blastp_args_matrix_type(args);
+    let matrix_name = blastp_matrix_name(matrix_type);
+    let query_gencode = args
+        .query_gencode
+        .as_deref()
+        .map(|value| parse_validated_i32("query_gencode", value) as u8)
+        .unwrap_or(1);
+    let query_prot = best_frame_translation_for_stats(&query.sequence, query_gencode);
+    let query_len = query_prot.len().max(1);
+    let kbp = translated_query_ungapped_kbp(&query_prot, matrix_type)
+        .unwrap_or_else(|| blast_rs::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name));
+
+    if args.searchsp() > 0 {
+        return (kbp.lambda, kbp.k, kbp.h, 0, args.searchsp() as f64);
+    }
+    let total_subject_len = if args.dbsize() > 0 {
+        (args.dbsize() / 3).max(1)
+    } else {
+        total_subject_len.max(1)
+    };
+    let (alpha, beta) = blast_rs::stat::lookup_matrix_ungapped_alpha_beta(matrix_name)
+        .unwrap_or((kbp.lambda / kbp.h, 0.0));
+    let len_adj = blast_rs::stat::compute_length_adjustment_exact(
+        kbp.k,
+        kbp.log_k,
+        alpha / kbp.lambda,
+        beta,
+        query_len as i32,
+        total_subject_len,
+        num_subjects,
+    )
+    .0;
+    let eff_space = blast_rs::stat::compute_search_space(
+        query_len as i64,
+        total_subject_len,
+        num_subjects,
+        len_adj,
+    );
+    (kbp.lambda, kbp.k, kbp.h, len_adj, eff_space)
+}
+
+fn tblastx_ideal_xml_statistics(
+    query_len: usize,
+    total_subject_len: i64,
+    num_subjects: i32,
+    args: &BlastnArgs,
+) -> (f64, f64, f64, i32, f64) {
+    let matrix_name = blastp_matrix_name(blastp_args_matrix_type(args));
+    let kbp = blast_rs::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name);
+    if args.searchsp() > 0 {
+        return (kbp.lambda, kbp.k, kbp.h, 0, args.searchsp() as f64);
+    }
+    let total_subject_len = if args.dbsize() > 0 {
+        (args.dbsize() / 3).max(1)
+    } else {
+        total_subject_len.max(1)
+    };
+    let (alpha, beta) = blast_rs::stat::lookup_matrix_ungapped_alpha_beta(matrix_name)
+        .unwrap_or((kbp.lambda / kbp.h, 0.0));
+    let len_adj = blast_rs::stat::compute_length_adjustment_exact(
+        kbp.k,
+        kbp.log_k,
+        alpha / kbp.lambda,
+        beta,
+        query_len as i32,
+        total_subject_len,
+        num_subjects,
+    )
+    .0;
+    let eff_space = blast_rs::stat::compute_search_space(
+        query_len as i64,
+        total_subject_len,
+        num_subjects,
+        len_adj,
+    );
+    (kbp.lambda, kbp.k, kbp.h, len_adj, eff_space)
+}
+
+fn translated_query_ungapped_kbp(
+    query_prot: &[u8],
+    matrix_type: blast_rs::api::MatrixType,
+) -> Option<blast_rs::stat::KarlinBlk> {
+    if query_prot.is_empty() {
+        return None;
+    }
+    let matrix = *blast_rs::api::get_matrix(matrix_type);
+    let matrix_name = blastp_matrix_name(matrix_type);
+    Some(
+        blast_rs::stat::query_specific_protein_ungapped_kbp_for_matrix(
+            query_prot,
+            matrix_name,
+            &matrix,
+        ),
+    )
 }
 
 fn write_blastn_subject_xml_output<W: Write>(
@@ -9431,10 +11464,8 @@ fn write_blastn_subject_xml_output<W: Write>(
         };
         let (loc_start, loc_end) = query_loc_bounds(args, query.sequence.len())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-        let query_plus_nomask: Vec<u8> = query.sequence[loc_start..loc_end]
-            .iter()
-            .map(|&b| iupacna_to_blastna(b))
-            .collect();
+        let query_plus_nomask =
+            blast_rs::encoding::encode_blastna_sequence(&query.sequence[loc_start..loc_end]);
         let (kbp, search_space, len_adj) = blastn_subject_stats(
             args,
             &query_plus_nomask,
@@ -9694,10 +11725,8 @@ fn write_blastn_db_xml_output<W: Write>(
     for (query_index, query) in queries.iter().enumerate() {
         let (loc_start, loc_end) = query_loc_bounds(args, query.sequence.len())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-        let query_plus_nomask: Vec<u8> = query.sequence[loc_start..loc_end]
-            .iter()
-            .map(|&b| iupacna_to_blastna(b))
-            .collect();
+        let query_plus_nomask =
+            blast_rs::encoding::encode_blastna_sequence(&query.sequence[loc_start..loc_end]);
         let (kbp, search_space, len_adj) = blastn_subject_stats(
             args,
             &query_plus_nomask,
@@ -10159,14 +12188,19 @@ fn compare_oid_hsps_for_hitlist(
 ) -> std::cmp::Ordering {
     let a_best = a_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
     let b_best = b_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
-    let a_score = a_hsps.iter().map(|h| h.score).max().unwrap_or(i32::MIN);
-    let b_score = b_hsps.iter().map(|h| h.score).max().unwrap_or(i32::MIN);
+    let a_score = first_search_hsp_score_by_evalue(a_hsps);
+    let b_score = first_search_hsp_score_by_evalue(b_hsps);
 
-    a_best
-        .partial_cmp(&b_best)
-        .unwrap_or(std::cmp::Ordering::Equal)
+    evalue_comp_for_hitlist(a_best, b_best)
         .then_with(|| b_score.cmp(&a_score))
         .then_with(|| b_oid.cmp(&a_oid))
+}
+
+fn first_search_hsp_score_by_evalue(hsps: &[blast_rs::search::SearchHsp]) -> i32 {
+    hsps.iter()
+        .min_by(|a, b| compare_search_hsps_by_evalue(a, b))
+        .map(|hsp| hsp.score)
+        .unwrap_or(i32::MIN)
 }
 
 type BlastnSubjectResults = Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>;
@@ -10318,11 +12352,11 @@ fn compare_search_hsps_by_score(
 ) -> std::cmp::Ordering {
     b.score
         .cmp(&a.score)
-        .then_with(|| a.context.cmp(&b.context))
         .then_with(|| a.subject_start.cmp(&b.subject_start))
         .then_with(|| b.subject_end.cmp(&a.subject_end))
         .then_with(|| a.query_start.cmp(&b.query_start))
         .then_with(|| b.query_end.cmp(&a.query_end))
+        .then_with(|| a.context.cmp(&b.context))
 }
 
 fn evalue_comp_for_hitlist(evalue1: f64, evalue2: f64) -> std::cmp::Ordering {
@@ -10404,15 +12438,11 @@ fn prune_blastn_subject_hits(
         .collect();
 }
 
-fn blastn_subject_stats(
+fn blastn_subject_kbps(
     args: &BlastnArgs,
     query_plus: &[u8],
-    total_subject_len: i64,
-    num_subjects: i32,
-) -> (blast_rs::stat::KarlinBlk, f64, i32) {
+) -> (blast_rs::stat::KarlinBlk, blast_rs::stat::KarlinBlk) {
     const BLASTNA_SIZE: usize = 16;
-    const BLASTNA_TO_NCBI4NA: [u8; BLASTNA_SIZE] =
-        [1, 2, 4, 8, 5, 10, 3, 12, 9, 6, 14, 13, 11, 7, 15, 0];
 
     let reward = args.reward();
     let penalty = args.penalty();
@@ -10420,19 +12450,7 @@ fn blastn_subject_stats(
         if i >= BLASTNA_SIZE || j >= BLASTNA_SIZE {
             return penalty;
         }
-        if i == BLASTNA_SIZE - 1 || j == BLASTNA_SIZE - 1 {
-            return i32::MIN / 2;
-        }
-        if BLASTNA_TO_NCBI4NA[i] & BLASTNA_TO_NCBI4NA[j] != 0 {
-            let d = (0..4)
-                .filter(|&k| BLASTNA_TO_NCBI4NA[j] & BLASTNA_TO_NCBI4NA[k] != 0)
-                .count() as i32;
-            // NCBI `blast_stat.c:1106` BLAST_Nint-based scoring.
-            blast_rs::math::nint(((d - 1) as f64 * penalty as f64 + reward as f64) / d as f64)
-                as i32
-        } else {
-            penalty
-        }
+        blast_rs::encoding::blastna_pair_score(i as u8, j as u8, reward, penalty)
     };
 
     let mut lo = i32::MAX;
@@ -10486,6 +12504,19 @@ fn blastn_subject_stats(
     } else {
         gapped_kbp
     };
+    (ungapped, kbp)
+}
+
+fn blastn_subject_stats(
+    args: &BlastnArgs,
+    query_plus: &[u8],
+    total_subject_len: i64,
+    num_subjects: i32,
+) -> (blast_rs::stat::KarlinBlk, f64, i32) {
+    let reward = args.reward();
+    let penalty = args.penalty();
+    let (ungapped, kbp) = blastn_subject_kbps(args, query_plus);
+    let qlen = query_plus.len() as i32;
 
     let searchsp = args.searchsp();
     if searchsp > 0 {
@@ -10774,19 +12805,28 @@ fn write_pairwise_subject_query_stats<W: Write>(
     total_subject_len: i64,
     num_subjects: i32,
 ) -> io::Result<()> {
+    let Ok((loc_start, loc_end)) = query_loc_bounds(args, query.sequence.len()) else {
+        return Ok(());
+    };
+    let query_plus_nomask =
+        blast_rs::encoding::encode_blastna_sequence(&query.sequence[loc_start..loc_end]);
+    let (ungapped_kbp, effective_kbp) = blastn_subject_kbps(args, &query_plus_nomask);
+    let (_, search_space, _) =
+        blastn_subject_stats(args, &query_plus_nomask, total_subject_len, num_subjects);
+
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer, "Lambda      K        H")?;
-    writeln!(writer, "    1.37    0.711     1.31 ")?;
+    write_pairwise_blastn_kbp_row(writer, &ungapped_kbp)?;
     writeln!(writer)?;
     writeln!(writer, "Gapped")?;
     writeln!(writer, "Lambda      K        H")?;
-    writeln!(writer, "    1.37    0.711     1.31 ")?;
+    write_pairwise_blastn_kbp_row(writer, &effective_kbp)?;
     writeln!(writer)?;
     writeln!(
         writer,
         "Effective search space used: {}",
-        pairwise_subject_search_space(args, query, total_subject_len, num_subjects)
+        search_space.round() as u64
     )?;
     writeln!(writer)?;
     writeln!(writer)?;
@@ -10847,28 +12887,78 @@ fn write_pairwise_subject_database_line<W: Write>(
             "{}Database: User specified sequence set (Input:",
             prefix
         )?;
-        writeln!(writer, "{}).", path)
+        write_wrapped_pairwise_subject_database_path(writer, &path)
     } else {
         writeln!(writer, "{}", inline)
     }
 }
 
-fn pairwise_subject_search_space(
-    args: &BlastnArgs,
-    query: &blast_rs::input::FastaRecord,
-    total_subject_len: i64,
-    num_subjects: i32,
-) -> u64 {
-    let Ok((loc_start, loc_end)) = query_loc_bounds(args, query.sequence.len()) else {
-        return 0;
-    };
-    let query_plus_nomask: Vec<u8> = query.sequence[loc_start..loc_end]
-        .iter()
-        .map(|&b| iupacna_to_blastna(b))
-        .collect();
-    let (_, search_space, _) =
-        blastn_subject_stats(args, &query_plus_nomask, total_subject_len, num_subjects);
-    search_space.round() as u64
+fn write_wrapped_pairwise_subject_database_path<W: Write>(
+    writer: &mut W,
+    path: &str,
+) -> io::Result<()> {
+    const PATH_LINE_WIDTH: usize = 68;
+
+    let mut chunks = path_char_chunks(path, PATH_LINE_WIDTH)
+        .into_iter()
+        .peekable();
+    if chunks.peek().is_none() {
+        return writeln!(writer, ").");
+    }
+
+    while let Some(chunk) = chunks.next() {
+        if chunks.peek().is_some() {
+            writeln!(writer, "{}", chunk)?;
+        } else {
+            writeln!(writer, "{}).", chunk)?;
+        }
+    }
+    Ok(())
+}
+
+fn path_char_chunks(path: &str, width: usize) -> Vec<&str> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut count = 0usize;
+    for (idx, _) in path.char_indices() {
+        if count == width {
+            chunks.push(&path[start..idx]);
+            start = idx;
+            count = 0;
+        }
+        count += 1;
+    }
+    chunks.push(&path[start..]);
+    chunks
+}
+
+fn write_pairwise_blastn_kbp_row<W: Write>(
+    writer: &mut W,
+    kbp: &blast_rs::stat::KarlinBlk,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "    {}    {}     {} ",
+        pairwise_blastn_lambda_or_h(kbp.lambda),
+        pairwise_blastn_k(kbp.k),
+        pairwise_blastn_lambda_or_h(kbp.h)
+    )
+}
+
+fn pairwise_blastn_lambda_or_h(value: f64) -> String {
+    if value.abs() >= 1.0 {
+        format!("{value:.2}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+fn pairwise_blastn_k(value: f64) -> String {
+    format!("{value:.3}")
 }
 
 fn write_pairwise_db_report_preamble<W: Write>(writer: &mut W, db: &BlastDb) -> io::Result<()> {
@@ -10960,15 +13050,33 @@ fn write_pairwise_db_query_header<W: Write>(
     Ok(())
 }
 
-fn write_pairwise_db_query_stats<W: Write>(writer: &mut W, search_space: f64) -> io::Result<()> {
+fn write_pairwise_db_query_stats<W: Write>(
+    writer: &mut W,
+    args: &BlastnArgs,
+    query: &blast_rs::input::FastaRecord,
+    db: &BlastDb,
+) -> io::Result<()> {
+    let Ok((loc_start, loc_end)) = query_loc_bounds(args, query.sequence.len()) else {
+        return Ok(());
+    };
+    let query_plus_nomask =
+        blast_rs::encoding::encode_blastna_sequence(&query.sequence[loc_start..loc_end]);
+    let (ungapped_kbp, effective_kbp) = blastn_subject_kbps(args, &query_plus_nomask);
+    let (_, search_space, _) = blastn_subject_stats(
+        args,
+        &query_plus_nomask,
+        db.total_length as i64,
+        db.stats_num_oids.min(i32::MAX as u64) as i32,
+    );
+
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer, "Lambda      K        H")?;
-    writeln!(writer, "    1.37    0.711     1.31 ")?;
+    write_pairwise_blastn_kbp_row(writer, &ungapped_kbp)?;
     writeln!(writer)?;
     writeln!(writer, "Gapped")?;
     writeln!(writer, "Lambda      K        H")?;
-    writeln!(writer, "    1.37    0.711     1.31 ")?;
+    write_pairwise_blastn_kbp_row(writer, &effective_kbp)?;
     writeln!(writer)?;
     writeln!(
         writer,
@@ -11037,52 +13145,11 @@ fn format_with_commas(n: u64) -> String {
 }
 
 fn alignment_string_to_blastna(seq: &str) -> Vec<u8> {
-    seq.bytes()
-        .map(|b| match b {
-            b'A' | b'a' => 0,
-            b'C' | b'c' => 1,
-            b'G' | b'g' => 2,
-            b'T' | b't' | b'U' | b'u' => 3,
-            b'R' | b'r' => 4,
-            b'Y' | b'y' => 5,
-            b'M' | b'm' => 6,
-            b'K' | b'k' => 7,
-            b'W' | b'w' => 8,
-            b'S' | b's' => 9,
-            b'B' | b'b' => 10,
-            b'D' | b'd' => 11,
-            b'H' | b'h' => 12,
-            b'V' | b'v' => 13,
-            b'N' | b'n' => 14,
-            _ => 15,
-        })
-        .collect()
+    blast_rs::encoding::encode_blastna_sequence(seq.as_bytes())
 }
 
 fn blastna_alignment_to_string(seq: &[u8]) -> String {
-    let mut out = Vec::with_capacity(seq.len());
-    for &base in seq {
-        out.push(match base {
-            0 => b'A',
-            1 => b'C',
-            2 => b'G',
-            3 => b'T',
-            4 => b'R',
-            5 => b'Y',
-            6 => b'M',
-            7 => b'K',
-            8 => b'W',
-            9 => b'S',
-            10 => b'B',
-            11 => b'D',
-            12 => b'H',
-            13 => b'V',
-            14 => b'N',
-            _ => b'-',
-        });
-    }
-    // SAFETY: the mapping above emits ASCII IUPAC/gap bytes only.
-    unsafe { String::from_utf8_unchecked(out) }
+    blast_rs::encoding::blastna_to_iupacna_string(seq)
 }
 
 fn oriented_nucleotide_hsp_strings(
@@ -11096,11 +13163,15 @@ fn oriented_nucleotide_hsp_strings(
 
     let qseq = qseq.map(|seq| {
         let aln = alignment_string_to_blastna(seq);
-        blastna_alignment_to_string(&reverse_complement_alignment_blastna(&aln))
+        blastna_alignment_to_string(&blast_rs::encoding::reverse_complement_blastna_sequence(
+            &aln,
+        ))
     });
     let sseq = sseq.map(|seq| {
         let aln = alignment_string_to_blastna(seq);
-        blastna_alignment_to_string(&reverse_complement_alignment_blastna(&aln))
+        blastna_alignment_to_string(&blast_rs::encoding::reverse_complement_blastna_sequence(
+            &aln,
+        ))
     });
     (qseq, sseq)
 }
@@ -11150,16 +13221,14 @@ fn write_pairwise_alignment<W: Write>(
     writer.write_all(&buf[start..])
 }
 
-fn reverse_complement_alignment_blastna(seq: &[u8]) -> Vec<u8> {
-    seq.iter().rev().map(|&b| complement_blastna(b)).collect()
-}
-
 /// Apply post-search filters (perc_identity, qcov_hsp_perc, max_hsps).
 fn apply_filters(
     hits: &mut Vec<TabularHit>,
     args: &BlastnArgs,
     _query_len: i32,
     db_path: Option<&Path>,
+    program: CliProgram,
+    apply_hit_saving_filters: bool,
 ) {
     let taxids = expand_taxid_filter_set(
         parse_taxid_filters(args.taxids.as_deref(), args.taxidlist.as_ref()),
@@ -11213,23 +13282,26 @@ fn apply_filters(
         });
     }
     let culling_limit = args.culling_limit();
-    if culling_limit > 0 {
-        apply_culling_limit(hits, culling_limit as usize);
+    if apply_hit_saving_filters && culling_limit > 0 {
+        apply_culling_limit(hits, culling_limit as usize, program);
     }
     if args.subject_besthit {
-        apply_subject_besthit_filter(hits);
+        apply_subject_besthit_filter(hits, program);
     }
     if args.best_hit_overhang.is_some() || args.best_hit_score_edge.is_some() {
         apply_best_hit_filter(
             hits,
             args.best_hit_overhang_value().unwrap_or(0.1),
             args.best_hit_score_edge_value().unwrap_or(0.1),
+            program,
         );
     }
     // Limit HSPs per subject
     if let Some(max_hsps) = args.max_hsps_value() {
-        let max = max_hsps as usize;
-        apply_max_hsps_filter(hits, max);
+        if apply_hit_saving_filters {
+            let max = max_hsps as usize;
+            apply_max_hsps_filter(hits, max);
+        }
     }
 }
 
@@ -11258,80 +13330,185 @@ fn apply_max_hsps_filter(hits: &mut Vec<TabularHit>, max: usize) {
 }
 
 fn compare_hsps_for_max_hsps(a: &TabularHit, b: &TabularHit) -> std::cmp::Ordering {
+    let a_subject_offset = a.subject_start.min(a.subject_end) - 1;
+    let b_subject_offset = b.subject_start.min(b.subject_end) - 1;
+    let a_subject_end = a.subject_start.max(a.subject_end);
+    let b_subject_end = b.subject_start.max(b.subject_end);
+    let a_query_offset = a.query_start.min(a.query_end) - 1;
+    let b_query_offset = b.query_start.min(b.query_end) - 1;
+    let a_query_end = a.query_start.max(a.query_end);
+    let b_query_end = b.query_start.max(b.query_end);
+    let a_gap_balance = hsp_difference_balance(a);
+    let b_gap_balance = hsp_difference_balance(b);
+    let query_start_order = || {
+        if (a_gap_balance.is_some() && b_gap_balance.is_some()) || (a.sframe < 0 && b.sframe < 0) {
+            b_query_offset.cmp(&a_query_offset)
+        } else {
+            a_query_offset.cmp(&b_query_offset)
+        }
+    };
+    let query_end_order = || {
+        if a.sframe < 0 && b.sframe < 0 {
+            a_query_end.cmp(&b_query_end)
+        } else {
+            b_query_end.cmp(&a_query_end)
+        }
+    };
+
     b.raw_score
         .cmp(&a.raw_score)
+        .then_with(|| a_subject_offset.cmp(&b_subject_offset))
+        .then_with(|| b_subject_end.cmp(&a_subject_end))
+        .then_with(|| b.sframe.cmp(&a.sframe))
         .then_with(|| {
-            a.subject_start
-                .min(a.subject_end)
-                .cmp(&b.subject_start.min(b.subject_end))
+            a_gap_balance
+                .unwrap_or(i32::MAX)
+                .cmp(&b_gap_balance.unwrap_or(i32::MAX))
         })
-        .then_with(|| {
-            b.subject_start
-                .max(b.subject_end)
-                .cmp(&a.subject_start.max(a.subject_end))
-        })
-        .then_with(|| {
-            let a_query_lo = a.query_start.min(a.query_end);
-            let b_query_lo = b.query_start.min(b.query_end);
-            if a.sframe < 0 && b.sframe < 0 {
-                b_query_lo.cmp(&a_query_lo)
-            } else {
-                a_query_lo.cmp(&b_query_lo)
-            }
-        })
-        .then_with(|| {
-            let a_query_hi = a.query_start.max(a.query_end);
-            let b_query_hi = b.query_start.max(b.query_end);
-            if a.sframe < 0 && b.sframe < 0 {
-                a_query_hi.cmp(&b_query_hi)
-            } else {
-                b_query_hi.cmp(&a_query_hi)
-            }
-        })
+        .then_with(query_start_order)
+        .then_with(query_end_order)
+}
+
+fn hsp_difference_balance(hit: &TabularHit) -> Option<i32> {
+    if hit.gap_opens <= 0 && hit.mismatches <= 0 {
+        return None;
+    }
+    let qseq = hit.qseq.as_deref()?;
+    let sseq = hit.sseq.as_deref()?;
+    let pairs = qseq.bytes().zip(sseq.bytes()).collect::<Vec<_>>();
+    let diff_start = pairs
+        .iter()
+        .position(|&(q, s)| q == b'-' || s == b'-' || q != s)?;
+    let diff_end = pairs
+        .iter()
+        .rposition(|&(q, s)| q == b'-' || s == b'-' || q != s)?;
+    let before = pairs[..diff_start]
+        .iter()
+        .filter(|&&(q, s)| q != b'-' && s != b'-')
+        .count() as i32;
+    let after = pairs[diff_end + 1..]
+        .iter()
+        .filter(|&&(q, s)| q != b'-' && s != b'-')
+        .count() as i32;
+    Some((before - after).abs())
 }
 
 fn apply_max_target_seqs_filter(hits: &mut Vec<TabularHit>, max_subjects: usize) {
-    let mut seen_per_query: std::collections::HashMap<String, std::collections::HashSet<String>> =
-        std::collections::HashMap::new();
-    hits.retain(|hit| {
-        let seen = seen_per_query.entry(hit.query_id.clone()).or_default();
-        if seen.len() >= max_subjects && !seen.contains(&hit.subject_id) {
-            false
-        } else {
-            seen.insert(hit.subject_id.clone());
-            true
-        }
-    });
+    if max_subjects == 0 || hits.is_empty() {
+        hits.clear();
+        return;
+    }
+
+    let mut grouped: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Vec<&TabularHit>>,
+    > = std::collections::BTreeMap::new();
+    for hit in hits.iter() {
+        grouped
+            .entry(hit.query_id.clone())
+            .or_default()
+            .entry(hit.subject_id.clone())
+            .or_default()
+            .push(hit);
+    }
+
+    let mut keep_subjects: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for (query_id, subjects) in grouped {
+        let mut ranked: Vec<(&String, &Vec<&TabularHit>)> = subjects.iter().collect();
+        ranked.sort_by(|(a_subject, a_hits), (b_subject, b_hits)| {
+            compare_tabular_subjects_for_hitlist(a_subject, a_hits, b_subject, b_hits)
+        });
+        keep_subjects.extend(
+            ranked
+                .into_iter()
+                .take(max_subjects)
+                .map(|(subject_id, _)| (query_id.clone(), subject_id.clone())),
+        );
+    }
+
+    hits.retain(|hit| keep_subjects.contains(&(hit.query_id.clone(), hit.subject_id.clone())));
 }
 
-fn apply_culling_limit(hits: &mut Vec<TabularHit>, culling_limit: usize) {
+fn compare_tabular_subjects_for_hitlist(
+    a_subject: &str,
+    a_hits: &[&TabularHit],
+    b_subject: &str,
+    b_hits: &[&TabularHit],
+) -> std::cmp::Ordering {
+    let a_best = a_hits.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
+    let b_best = b_hits.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
+    let a_score = first_tabular_hsp_score_by_evalue(a_hits);
+    let b_score = first_tabular_hsp_score_by_evalue(b_hits);
+
+    blast_rs::api::evalue_comp(a_best, b_best)
+        .then_with(|| b_score.cmp(&a_score))
+        .then_with(|| b_subject.cmp(a_subject))
+}
+
+fn first_tabular_hsp_score_by_evalue(hsps: &[&TabularHit]) -> i32 {
+    hsps.iter()
+        .min_by(|a, b| compare_tabular_hsps_by_evalue_then_score(a, b))
+        .map(|hsp| hsp.raw_score)
+        .unwrap_or(i32::MIN)
+}
+
+fn compare_tabular_hsps_by_evalue_then_score(a: &TabularHit, b: &TabularHit) -> std::cmp::Ordering {
+    blast_rs::api::evalue_comp(a.evalue, b.evalue).then_with(|| compare_hsps_for_max_hsps(a, b))
+}
+
+fn apply_culling_limit(hits: &mut Vec<TabularHit>, culling_limit: usize, program: CliProgram) {
     if culling_limit == 0 || hits.len() <= 1 {
         return;
     }
 
     hits.sort_by(compare_culling_input_order);
+    let subject_ranks = culling_subject_ranks(hits);
 
     let mut kept: Vec<TabularHit> = Vec::with_capacity(hits.len());
+    let mut kept_nodes: Vec<blast_rs::hspfilter_culling::LinkedHsp> =
+        Vec::with_capacity(hits.len());
     for hit in hits.drain(..) {
-        let q_start = hit.query_start.min(hit.query_end);
-        let q_end = hit.query_start.max(hit.query_end);
+        let candidate = tabular_hit_as_culling_node(&hit, &subject_ranks);
         let enveloping = kept
             .iter()
-            .filter(|existing| {
-                if existing.query_id != hit.query_id || existing.raw_score < hit.raw_score {
+            .zip(kept_nodes.iter())
+            .filter(|(existing, dominator)| {
+                if existing.query_id != hit.query_id {
                     return false;
                 }
-                let existing_q_start = existing.query_start.min(existing.query_end);
-                let existing_q_end = existing.query_start.max(existing.query_end);
-                existing_q_start <= q_start && existing_q_end >= q_end
+                if tabular_culling_context_id(existing, program)
+                    != tabular_culling_context_id(&hit, program)
+                {
+                    return false;
+                }
+                blast_rs::hspfilter_culling::dominate_test(dominator, &candidate)
             })
             .take(culling_limit)
             .count();
         if enveloping < culling_limit {
+            kept_nodes.push(candidate);
             kept.push(hit);
         }
     }
     *hits = kept;
+}
+
+fn tabular_culling_context_id(hit: &TabularHit, program: CliProgram) -> i32 {
+    match program {
+        CliProgram::Blastx | CliProgram::Tblastx => hit.qframe,
+        CliProgram::Blastn | CliProgram::Blastp | CliProgram::Tblastn => 0,
+    }
+}
+
+fn culling_subject_ranks(hits: &[TabularHit]) -> std::collections::BTreeMap<String, i32> {
+    hits.iter()
+        .map(|hit| hit.subject_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(rank, subject_id)| (subject_id, rank as i32))
+        .collect()
 }
 
 fn compare_culling_input_order(a: &TabularHit, b: &TabularHit) -> std::cmp::Ordering {
@@ -11351,7 +13528,46 @@ fn compare_culling_input_order(a: &TabularHit, b: &TabularHit) -> std::cmp::Orde
         .then_with(|| b.sframe.cmp(&a.sframe))
 }
 
-fn apply_subject_besthit_filter(hits: &mut Vec<TabularHit>) {
+fn tabular_hit_as_culling_node(
+    hit: &TabularHit,
+    subject_ranks: &std::collections::BTreeMap<String, i32>,
+) -> blast_rs::hspfilter_culling::LinkedHsp {
+    let query_start = hit.query_start.min(hit.query_end) - 1;
+    let query_end = hit.query_start.max(hit.query_end);
+    let subject_start = hit.subject_start.min(hit.subject_end) - 1;
+    let subject_end = hit.subject_start.max(hit.subject_end);
+    blast_rs::hspfilter_culling::LinkedHsp {
+        hsp: blast_rs::hspfilter_culling::Hsp {
+            score: hit.raw_score,
+            num_ident: hit.num_ident,
+            bit_score: hit.bit_score,
+            evalue: hit.evalue,
+            query_offset: query_start,
+            query_end,
+            query_gapped_start: query_start,
+            subject_offset: subject_start,
+            subject_end,
+            subject_gapped_start: subject_start,
+            context: hit.qframe,
+            query_frame: hit.qframe,
+            subject_frame: hit.sframe,
+            num_gaps: hit.gap_opens,
+            comp_adjustment_method: 0,
+            edit_script: None,
+        },
+        context_id: hit.qframe,
+        subject_id: subject_ranks
+            .get(&hit.subject_id)
+            .copied()
+            .unwrap_or_default(),
+        begin: query_start,
+        end: query_end,
+        merit: 1,
+        next: None,
+    }
+}
+
+fn apply_subject_besthit_filter(hits: &mut Vec<TabularHit>, program: CliProgram) {
     if hits.len() <= 1 {
         return;
     }
@@ -11372,12 +13588,15 @@ fn apply_subject_besthit_filter(hits: &mut Vec<TabularHit>) {
             if !keep[i] {
                 continue;
             }
-            let (offset, end) = hsp_context_query_range(&group[i]);
+            let (offset, end) = hsp_context_query_range(&group[i], program);
             let offset = (offset - SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF).max(0);
             let end = end + SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF;
             for j in (i + 1)..group.len() {
-                if keep[j] && group[j].sframe == group[i].sframe {
-                    let (other_offset, other_end) = hsp_context_query_range(&group[j]);
+                if keep[j]
+                    && subject_besthit_frame(&group[j], program)
+                        == subject_besthit_frame(&group[i], program)
+                {
+                    let (other_offset, other_end) = hsp_context_query_range(&group[j], program);
                     if other_offset >= offset && other_end <= end {
                         keep[j] = false;
                     }
@@ -11385,21 +13604,52 @@ fn apply_subject_besthit_filter(hits: &mut Vec<TabularHit>) {
             }
         }
 
-        for i in 0..group.len() {
-            if !keep[i] {
-                continue;
-            }
-            let (offset, end) = hsp_context_query_range(&group[i]);
-            let offset = (offset - SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF).max(0);
-            let end = end + SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF;
-            let flipped_offset = group[i].query_len - end;
-            let flipped_end = group[i].query_len - offset;
-            for j in (i + 1)..group.len() {
-                if keep[j] && group[j].sframe == -group[i].sframe {
-                    let (other_offset, other_end) = hsp_context_query_range(&group[j]);
-                    if other_offset >= flipped_offset && other_end <= flipped_end {
-                        keep[j] = false;
+        if !matches!(program, CliProgram::Tblastx) {
+            for i in 0..group.len() {
+                if !keep[i] {
+                    continue;
+                }
+                let frame = subject_besthit_frame(&group[i], program);
+                if frame == 0 {
+                    continue;
+                }
+                let (offset, end) = hsp_context_query_range(&group[i], program);
+                let offset = (offset - SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF).max(0);
+                let end = end + SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF;
+                let flipped_offset = group[i].query_len - end;
+                let flipped_end = group[i].query_len - offset;
+                for j in (i + 1)..group.len() {
+                    if keep[j] && subject_besthit_frame(&group[j], program) == -frame {
+                        let (other_offset, other_end) = hsp_context_query_range(&group[j], program);
+                        if other_offset >= flipped_offset && other_end <= flipped_end {
+                            keep[j] = false;
+                        }
                     }
+                }
+            }
+        }
+
+        if matches!(program, CliProgram::Tblastx) {
+            for i in 0..group.len() {
+                if !keep[i] {
+                    continue;
+                }
+                let frame = subject_besthit_frame(&group[i], program);
+                let (offset, end) = hsp_context_query_range(&group[i], program);
+                let offset = (offset - SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF).max(0);
+                let end = end + SUBJECT_BESTHIT_NUCL_MAX_RANGE_DIFF;
+                let mut ranges = Vec::new();
+                for j in 0..i {
+                    if keep[j]
+                        && subject_besthit_frame(&group[j], program) == frame
+                        && group[j].evalue <= group[i].evalue
+                        && group[j].raw_score >= group[i].raw_score
+                    {
+                        ranges.push(hsp_context_query_range(&group[j], program));
+                    }
+                }
+                if query_range_is_covered(offset, end, ranges) {
+                    keep[i] = false;
                 }
             }
         }
@@ -11413,10 +13663,80 @@ fn apply_subject_besthit_filter(hits: &mut Vec<TabularHit>) {
     }
 
     hits.extend(groups.into_values().flatten());
+    if matches!(program, CliProgram::Tblastx) {
+        sort_tblastx_subject_besthit_output(hits);
+    } else {
+        hits.sort_by(|a, b| compare_best_hit_output_order(a, b, program));
+    }
 }
 
-fn hsp_context_query_range(hit: &TabularHit) -> (i32, i32) {
-    if hit.sframe < 0 {
+fn query_range_is_covered(offset: i32, end: i32, mut ranges: Vec<(i32, i32)>) -> bool {
+    if ranges.is_empty() {
+        return false;
+    }
+    ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+    let mut covered_until = offset;
+    for (start, range_end) in ranges {
+        if range_end < covered_until {
+            continue;
+        }
+        if start > covered_until {
+            return false;
+        }
+        covered_until = covered_until.max(range_end);
+        if covered_until >= end {
+            return true;
+        }
+    }
+    false
+}
+
+fn sort_tblastx_subject_besthit_output(hits: &mut [TabularHit]) {
+    let mut subject_best: std::collections::BTreeMap<(String, String), (f64, i32)> =
+        std::collections::BTreeMap::new();
+    for hit in hits.iter() {
+        let key = (hit.query_id.clone(), hit.subject_id.clone());
+        subject_best
+            .entry(key)
+            .and_modify(|best| {
+                if blast_rs::api::evalue_comp(hit.evalue, best.0)
+                    .then_with(|| best.1.cmp(&hit.raw_score))
+                    .is_lt()
+                {
+                    *best = (hit.evalue, hit.raw_score);
+                }
+            })
+            .or_insert((hit.evalue, hit.raw_score));
+    }
+
+    hits.sort_by(|a, b| {
+        let a_best = subject_best
+            .get(&(a.query_id.clone(), a.subject_id.clone()))
+            .copied()
+            .unwrap_or((a.evalue, a.raw_score));
+        let b_best = subject_best
+            .get(&(b.query_id.clone(), b.subject_id.clone()))
+            .copied()
+            .unwrap_or((b.evalue, b.raw_score));
+        a.query_id
+            .cmp(&b.query_id)
+            .then_with(|| blast_rs::api::evalue_comp(a_best.0, b_best.0))
+            .then_with(|| b_best.1.cmp(&a_best.1))
+            .then_with(|| a.subject_id.cmp(&b.subject_id))
+            .then_with(|| compare_best_hit_output_order(a, b, CliProgram::Tblastx))
+    });
+}
+
+fn subject_besthit_frame(hit: &TabularHit, program: CliProgram) -> i32 {
+    match program {
+        CliProgram::Blastx | CliProgram::Tblastx => hit.qframe,
+        CliProgram::Blastn | CliProgram::Blastp => hit.sframe,
+        CliProgram::Tblastn => hit.qframe,
+    }
+}
+
+fn hsp_context_query_range(hit: &TabularHit, program: CliProgram) -> (i32, i32) {
+    if subject_besthit_frame(hit, program) < 0 {
         (
             hit.query_len - hit.query_start.max(hit.query_end),
             hit.query_len - hit.query_start.min(hit.query_end) + 1,
@@ -11437,7 +13757,12 @@ struct BestHitNode {
     len: i32,
 }
 
-fn apply_best_hit_filter(hits: &mut Vec<TabularHit>, overhang: f64, score_edge: f64) {
+fn apply_best_hit_filter(
+    hits: &mut Vec<TabularHit>,
+    overhang: f64,
+    score_edge: f64,
+    program: CliProgram,
+) {
     if hits.len() <= 1 {
         return;
     }
@@ -11526,20 +13851,32 @@ fn apply_best_hit_filter(hits: &mut Vec<TabularHit>, overhang: f64, score_edge: 
             .into_values()
             .flat_map(|nodes| nodes.into_iter().map(|node| node.hit)),
     );
-    hits.sort_by(compare_best_hit_output_order);
+    hits.sort_by(|a, b| compare_best_hit_output_order(a, b, program));
 }
 
-fn compare_best_hit_output_order(a: &TabularHit, b: &TabularHit) -> std::cmp::Ordering {
+fn compare_best_hit_output_order(
+    a: &TabularHit,
+    b: &TabularHit,
+    program: CliProgram,
+) -> std::cmp::Ordering {
     let a_subject_lo = a.subject_start.min(a.subject_end);
     let b_subject_lo = b.subject_start.min(b.subject_end);
     let a_query_lo = a.query_start.min(a.query_end);
     let b_query_lo = b.query_start.min(b.query_end);
 
+    let subject_order = || {
+        if matches!(program, CliProgram::Blastn) {
+            b.subject_id.cmp(&a.subject_id)
+        } else {
+            a.subject_id.cmp(&b.subject_id)
+        }
+    };
+
     a.query_id
         .cmp(&b.query_id)
         .then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
         .then_with(|| b.raw_score.cmp(&a.raw_score))
-        .then_with(|| b.subject_id.cmp(&a.subject_id))
+        .then_with(subject_order)
         .then_with(|| a_subject_lo.cmp(&b_subject_lo))
         .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
         .then_with(|| a_query_lo.cmp(&b_query_lo))
@@ -11650,39 +13987,16 @@ fn subject_id_matches_filter(
             .any(|token| filters.contains(token))
 }
 
-/// Complement a BLASTNA-encoded nucleotide.
-fn complement_blastna(b: u8) -> u8 {
-    match b {
-        0 => 3, // A -> T
-        1 => 2, // C -> G
-        2 => 1, // G -> C
-        3 => 0, // T -> A
-        // Ambiguity codes: complement by swapping bits
-        4 => 5,   // R(AG) -> Y(CT)
-        5 => 4,   // Y(CT) -> R(AG)
-        6 => 7,   // M(AC) -> K(GT)
-        7 => 6,   // K(GT) -> M(AC)
-        8 => 8,   // W(AT) -> W(AT)
-        9 => 9,   // S(CG) -> S(CG)
-        10 => 13, // B(CGT) -> V(ACG)
-        11 => 12, // D(AGT) -> H(ACT)
-        12 => 11, // H(ACT) -> D(AGT)
-        13 => 10, // V(ACG) -> B(CGT)
-        14 => 14, // N -> N
-        _ => 15,  // gap
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_complement() {
-        assert_eq!(complement_blastna(0), 3); // A -> T
-        assert_eq!(complement_blastna(3), 0); // T -> A
-        assert_eq!(complement_blastna(1), 2); // C -> G
-        assert_eq!(complement_blastna(14), 14); // N -> N
+        assert_eq!(blast_rs::encoding::complement_blastna_base(0), 3); // A -> T
+        assert_eq!(blast_rs::encoding::complement_blastna_base(3), 0); // T -> A
+        assert_eq!(blast_rs::encoding::complement_blastna_base(1), 2); // C -> G
+        assert_eq!(blast_rs::encoding::complement_blastna_base(14), 14); // N -> N
     }
 
     #[test]
@@ -11774,6 +14088,104 @@ mod tests {
     }
 
     #[test]
+    fn test_blastp_cli_keeps_protein_xdrop_defaults_when_omitted() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(
+            params.x_drop_gapped,
+            blast_rs::stat::BLAST_GAP_X_DROPOFF_PROT
+        );
+        assert_eq!(
+            params.x_drop_final,
+            blast_rs::stat::BLAST_GAP_X_DROPOFF_FINAL_PROT
+        );
+    }
+
+    #[test]
+    fn test_blastp_cli_honors_custom_xdrop_and_window() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--xdrop_gap",
+            "18.0",
+            "--xdrop_gap_final",
+            "28.0",
+            "--window_size",
+            "35",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(params.x_drop_gapped, 18);
+        assert_eq!(params.x_drop_final, 28);
+        assert_eq!(params.two_hit_window, 35);
+    }
+
+    #[test]
+    fn test_blastp_cli_wires_statistical_size_overrides() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--dbsize",
+            "1000000",
+            "--searchsp",
+            "2000000",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(params.db_length, 1_000_000);
+        assert_eq!(params.effective_search_space, 2_000_000);
+    }
+
+    #[test]
+    fn test_blastp_cli_wires_min_raw_gapped_score() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--min_raw_gapped_score",
+            "42",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(params.min_score, 42);
+    }
+
+    #[test]
     fn test_blastp_cli_default_seg_is_off() {
         let cli = Cli::parse_from([
             "blast-cli",
@@ -11809,6 +14221,50 @@ mod tests {
         let params = build_translated_blastp_params(&args);
 
         assert!(params.filter_low_complexity);
+        assert_eq!(params.max_intron_length, 0);
+    }
+
+    #[test]
+    fn test_translated_cli_honors_explicit_max_intron_length() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastx",
+            "--query",
+            "tests/fixtures/query_random_200.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--max_intron_length",
+            "300",
+        ]);
+        let Commands::Blastx(args) = cli.command else {
+            panic!("expected blastx command");
+        };
+
+        let params = build_translated_blastp_params(&args);
+
+        assert_eq!(params.max_intron_length, 300);
+    }
+
+    #[test]
+    fn test_tblastx_cli_preserves_explicit_max_intron_length() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "tblastx",
+            "--query",
+            "tests/fixtures/query_random_200.fa",
+            "--subject",
+            "tests/fixtures/query_random_200.fa",
+            "--max_intron_length",
+            "300",
+        ]);
+        let Commands::Tblastx(args) = cli.command else {
+            panic!("expected tblastx command");
+        };
+
+        let mut params = build_translated_blastp_params(&args);
+        apply_tblastx_param_overrides(&mut params);
+
+        assert_eq!(params.max_intron_length, 300);
     }
 
     #[test]
@@ -11915,24 +14371,71 @@ mod tests {
             panic!("expected tblastx command");
         };
 
-        let mut params = build_blastp_params(&args);
-        params.comp_adjust = 0;
+        let mut params = build_translated_blastp_params(&args);
+        apply_tblastx_param_overrides(&mut params);
 
         assert_eq!(params.comp_adjust, 0);
+        assert_eq!(
+            params.x_drop_gapped,
+            blast_rs::stat::BLAST_GAP_X_DROPOFF_TBLASTX
+        );
+        assert_eq!(
+            params.x_drop_final,
+            blast_rs::stat::BLAST_GAP_X_DROPOFF_FINAL_TBLASTX
+        );
     }
 
     #[test]
-    fn specialized_blast_modes_fail_explicitly_when_unimplemented() {
-        assert!(run_psiblast(&BlastnArgs::parse_from([
+    fn psiblast_db_mode_delegates_and_unimplemented_modes_fail_explicitly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let query_path = tmp.path().join("query.fa");
+        std::fs::write(&query_path, b">q\nMKKWLFGFLG\n").unwrap();
+        let psiblast_out = std::env::temp_dir().join(format!(
+            "blast-cli-psiblast-db-mode-{}.out",
+            std::process::id()
+        ));
+        let psiblast_args = BlastnArgs::parse_from([
             "psiblast",
             "--query",
-            "tests/fixtures/protein_query.fa",
+            query_path.to_str().unwrap(),
             "--db",
-            "tests/fixtures/seqp/seqp",
-        ]))
-        .unwrap_err()
-        .to_string()
-        .contains("requires --subject"));
+            db_base.to_str().unwrap(),
+            "--num_iterations",
+            "1",
+            "--outfmt",
+            "0",
+            "--num_descriptions",
+            "0",
+            "--num_alignments",
+            "0",
+            "--out",
+            psiblast_out.to_str().unwrap(),
+        ]);
+        run_psiblast(&psiblast_args).expect("psiblast db mode should delegate to protein search");
+        let psiblast_output =
+            std::fs::read_to_string(&psiblast_out).expect("read psiblast db-mode output");
+        assert!(
+            !psiblast_output.is_empty(),
+            "psiblast db mode should produce search output"
+        );
+        assert!(
+            psiblast_output.starts_with("PSIBLAST 2.12.0+"),
+            "psiblast pairwise db mode should use PSI-BLAST labels"
+        );
+        assert!(
+            psiblast_output.contains("Results from round 1"),
+            "psiblast pairwise db mode should include round label"
+        );
+        let _ = std::fs::remove_file(&psiblast_out);
 
         assert!(run_rpsblast(&BlastnArgs::parse_from([
             "rpsblast",
@@ -11969,12 +14472,643 @@ mod tests {
     }
 
     #[test]
+    fn psiblast_phi_pattern_fails_explicitly() {
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--phi_pattern",
+            "tests/fixtures/psi_query.fa",
+        ]);
+
+        assert!(run_psiblast(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("PHI-BLAST pattern search is not supported"));
+    }
+
+    #[test]
     fn translated_programs_do_not_use_blastn_task_defaults() {
         assert!(!program_uses_blastn_task_defaults("blastp"));
         assert!(!program_uses_blastn_task_defaults("blastx"));
         assert!(!program_uses_blastn_task_defaults("tblastn"));
         assert!(!program_uses_blastn_task_defaults("tblastx"));
         assert!(program_uses_blastn_task_defaults("blastn"));
+    }
+
+    #[test]
+    fn psiblast_strips_delimiter_tokens_before_delegating_to_blastp_output() {
+        assert_eq!(
+            outfmt_without_delim_tokens("6 delim=tab qseqid sseqid length"),
+            "6 qseqid sseqid length"
+        );
+        assert_eq!(
+            outfmt_without_delim_tokens("7 qseqid delim=space sseqid length"),
+            "7 qseqid sseqid length"
+        );
+        assert_eq!(
+            outfmt_without_delim_tokens("10 delim=, delim=tab qseqid sseqid"),
+            "10 qseqid sseqid"
+        );
+    }
+
+    #[test]
+    fn psiblast_cli_parses_psi_iteration_options() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "psiblast",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--db",
+            "tests/fixtures/seqp/seqp",
+            "--gap_trigger",
+            "22.0",
+            "--num_iterations",
+            "4",
+            "--pseudocount",
+            "7",
+            "--inclusion_ethresh",
+            "0.005",
+            "--out_pssm",
+            "round.chk",
+            "--out_ascii_pssm",
+            "round.ascii",
+            "--save_pssm_after_last_round",
+            "--save_each_pssm",
+            "--in_msa",
+            "restart.msa",
+            "--msa_master_idx",
+            "1",
+            "--ignore_msa_master",
+            "--phi_pattern",
+            "pattern.txt",
+        ]);
+        let Commands::Psiblast(args) = cli.command else {
+            panic!("expected psiblast command");
+        };
+
+        assert_eq!(args.gap_trigger_value(), Some(22.0));
+        assert_eq!(args.num_iterations_value(), Some(4));
+        assert_eq!(args.pseudocount_value(), Some(7));
+        assert_eq!(args.inclusion_ethresh_value(), Some(0.005));
+        assert_eq!(args.out_pssm.as_deref(), Some(Path::new("round.chk")));
+        assert_eq!(
+            args.out_ascii_pssm.as_deref(),
+            Some(Path::new("round.ascii"))
+        );
+        assert!(args.save_pssm_after_last_round);
+        assert!(args.save_each_pssm);
+        assert_eq!(args.in_msa.as_deref(), Some(Path::new("restart.msa")));
+        assert_eq!(args.msa_master_idx_value(), Some(1));
+        assert!(args.ignore_msa_master);
+        assert_eq!(args.phi_pattern.as_deref(), Some(Path::new("pattern.txt")));
+    }
+
+    #[test]
+    fn psi_input_file_options_collects_restart_inputs() {
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--db",
+            "tests/fixtures/seqp/seqp",
+            "--in_msa",
+            "restart.msa",
+            "--in_pssm",
+            "restart.chk",
+            "--phi_pattern",
+            "pattern.txt",
+        ]);
+
+        let files: Vec<(&str, &Path)> = psi_input_file_options(&args)
+            .into_iter()
+            .map(|(arg, path)| (arg, path.as_path()))
+            .collect();
+
+        assert_eq!(
+            files,
+            vec![
+                ("in_msa", Path::new("restart.msa")),
+                ("in_pssm", Path::new("restart.chk")),
+                ("phi_pattern", Path::new("pattern.txt")),
+            ]
+        );
+    }
+
+    #[test]
+    fn psiblast_restart_msa_builds_restart_alignment_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\nA-CD\n>hit1\nAWDD\n>hit2\nA-ED\n").unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--db",
+            "tests/fixtures/seqp/seqp",
+            "--in_msa",
+            msa_path.to_str().unwrap(),
+            "--msa_master_idx",
+            "1",
+        ]);
+
+        let params = apply_psiblast_restart_msa(build_psiblast_params(&args), &args, b"ACD");
+
+        assert_eq!(params.restart_alignment.len(), 2);
+        assert_eq!(
+            params.restart_alignment[0],
+            blast_rs::encoding::encode_ncbistdaa_sequence(b"ADD")
+        );
+        assert_eq!(
+            params.restart_alignment[1],
+            blast_rs::encoding::encode_ncbistdaa_sequence(b"AED")
+        );
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_uses_one_based_master_and_strips_gaps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\nA-CD\n>hit1\nAW-D\n").unwrap();
+
+        let query_path = psiblast_query_from_msa(&msa_path, Some(2)).expect("derive MSA query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">hit1\nAWD\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_restart_msa_can_ignore_master_and_strip_row_gaps() {
+        let row = project_restart_msa_row_to_query(b"A-WD", None, 3, true)
+            .expect("row should project without master");
+
+        assert_eq!(row, blast_rs::encoding::encode_ncbistdaa_sequence(b"AWD"));
+    }
+
+    #[test]
+    fn psiblast_cli_builds_iteration_params() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "psiblast",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--db",
+            "tests/fixtures/seqp/seqp",
+            "--num_iterations",
+            "4",
+            "--inclusion_ethresh",
+            "0.005",
+            "--pseudocount",
+            "7",
+            "--evalue",
+            "100",
+        ]);
+        let Commands::Psiblast(args) = cli.command else {
+            panic!("expected psiblast command");
+        };
+
+        let params = build_psiblast_params(&args);
+
+        assert_eq!(params.gap_trigger, 22.0);
+        assert_eq!(params.num_iterations, 4);
+        assert_eq!(params.inclusion_evalue, 0.005);
+        assert_eq!(params.pseudocount, 7);
+        assert_eq!(params.search.evalue_threshold, 100.0);
+    }
+
+    #[test]
+    fn psiblast_output_pssm_paths_only_trigger_iterations_with_save_flags() {
+        let plain_paths = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--out_pssm",
+            "round.chk",
+            "--out_ascii_pssm",
+            "round.ascii",
+        ]);
+        let save_last = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--out_ascii_pssm",
+            "round.ascii",
+            "--save_pssm_after_last_round",
+        ]);
+        let save_each = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--out_pssm",
+            "round.chk",
+            "--save_each_pssm",
+        ]);
+
+        assert!(!should_run_iterative_psiblast(&plain_paths));
+        assert!(should_run_iterative_psiblast(&save_last));
+        assert!(should_run_iterative_psiblast(&save_each));
+    }
+
+    #[test]
+    fn psiblast_save_pssm_flags_require_output_paths() {
+        let save_each = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--save_each_pssm",
+        ]);
+        let save_last = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--save_each_pssm",
+            "--save_pssm_after_last_round",
+        ]);
+        let with_output = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--out_ascii_pssm",
+            "round.ascii",
+            "--save_each_pssm",
+        ]);
+
+        assert_eq!(
+            psi_save_pssm_missing_output_option(&save_each),
+            Some("save_each_pssm")
+        );
+        assert_eq!(
+            psi_save_pssm_missing_output_option(&save_last),
+            Some("save_pssm_after_last_round")
+        );
+        assert_eq!(psi_save_pssm_missing_output_option(&with_output), None);
+    }
+
+    #[test]
+    fn psiblast_ascii_pssm_writer_uses_blast_display_residue_order() {
+        let query = b"ARN";
+        let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+        let pssm = blast_rs::pssm::Pssm::from_sequence(&query_aa, &blast_rs::matrix::BLOSUM62);
+        let mut out = Vec::new();
+
+        write_ascii_pssm(&mut out, query, &pssm).expect("write ascii pssm");
+        let text = String::from_utf8(out).expect("ascii pssm should be UTF-8");
+
+        assert!(text.starts_with("Last position-specific scoring matrix computed\n"));
+        assert!(text.contains("           A   R   N   D   C   Q   E   G   H   I   L   K   M   F   P   S   T   W   Y   V\n"));
+        assert!(text.contains("    1 A"));
+        assert!(text.contains("    2 R"));
+        assert!(text.contains("    3 N"));
+    }
+
+    #[test]
+    fn psiblast_checkpoint_round_trips_pssm_rows() {
+        let query = b"ARN";
+        let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+        let pssm = blast_rs::pssm::Pssm::from_sequence(&query_aa, &blast_rs::matrix::BLOSUM62);
+        let mut out = Vec::new();
+
+        write_pssm_checkpoint(&mut out, query, &pssm).expect("write checkpoint");
+        let parsed = parse_pssm_checkpoint(&out, query.len()).expect("parse checkpoint");
+
+        assert_eq!(parsed.length, pssm.length);
+        assert_eq!(parsed.scores, pssm.scores);
+        assert_eq!(parsed.info_content, pssm.info_content);
+    }
+
+    #[test]
+    fn psiblast_checkpoint_query_round_trips_residues() {
+        let query = b"ARN";
+        let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+        let pssm = blast_rs::pssm::Pssm::from_sequence(&query_aa, &blast_rs::matrix::BLOSUM62);
+        let mut out = Vec::new();
+
+        write_pssm_checkpoint(&mut out, query, &pssm).expect("write checkpoint");
+
+        assert_eq!(parse_pssm_checkpoint_query(&out).unwrap(), query);
+    }
+
+    #[test]
+    fn psiblast_query_from_checkpoint_writes_temp_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkpoint_path = tmp.path().join("restart.chk");
+        let query = b"ARN";
+        let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+        let pssm = blast_rs::pssm::Pssm::from_sequence(&query_aa, &blast_rs::matrix::BLOSUM62);
+        let mut out = Vec::new();
+        write_pssm_checkpoint(&mut out, query, &pssm).expect("write checkpoint");
+        std::fs::write(&checkpoint_path, out).unwrap();
+
+        let query_path =
+            psiblast_query_from_checkpoint(&checkpoint_path).expect("derive checkpoint query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">Query_1\nARN\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_checkpoint_rejects_query_length_mismatch() {
+        let query = b"ARN";
+        let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+        let pssm = blast_rs::pssm::Pssm::from_sequence(&query_aa, &blast_rs::matrix::BLOSUM62);
+        let mut out = Vec::new();
+
+        write_pssm_checkpoint(&mut out, query, &pssm).expect("write checkpoint");
+        let err = parse_pssm_checkpoint(&out, query.len() + 1).expect_err("length mismatch");
+
+        assert!(err.contains("does not match query length"));
+    }
+
+    #[test]
+    fn psiblast_round_checkpoint_path_appends_round_suffix() {
+        assert_eq!(
+            pssm_round_output_path(&PathBuf::from("round.chk"), 2),
+            PathBuf::from("round.chk.2")
+        );
+    }
+
+    #[test]
+    fn psiblast_writes_ascii_pssm_artifact_for_explicit_option() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let query_path = tmp.path().join("query.fa");
+        let output_path = tmp.path().join("out.txt");
+        let ascii_path = tmp.path().join("round.ascii");
+        std::fs::write(&query_path, b">q\nMKKWLFGFLG\n").unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            query_path.to_str().unwrap(),
+            "--db",
+            db_base.to_str().unwrap(),
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--out_ascii_pssm",
+            ascii_path.to_str().unwrap(),
+            "--save_pssm_after_last_round",
+        ]);
+
+        run_psiblast(&args).expect("psiblast should write ascii PSSM artifact");
+        let pssm_text = std::fs::read_to_string(&ascii_path).expect("read ascii PSSM");
+
+        assert!(pssm_text.contains("Last position-specific scoring matrix computed"));
+        assert!(pssm_text.contains("    1 M"));
+    }
+
+    #[test]
+    fn psiblast_out_pssm_paths_do_not_write_without_save_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let query_path = tmp.path().join("query.fa");
+        let output_path = tmp.path().join("out.txt");
+        let checkpoint_path = tmp.path().join("round.chk");
+        let ascii_path = tmp.path().join("round.ascii");
+        std::fs::write(&query_path, b">q\nMKKWLFGFLG\n").unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            query_path.to_str().unwrap(),
+            "--db",
+            db_base.to_str().unwrap(),
+            "--num_iterations",
+            "1",
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--out_pssm",
+            checkpoint_path.to_str().unwrap(),
+            "--out_ascii_pssm",
+            ascii_path.to_str().unwrap(),
+        ]);
+
+        run_psiblast(&args).expect("psiblast should accept output PSSM paths");
+
+        assert!(!checkpoint_path.exists());
+        assert!(!ascii_path.exists());
+    }
+
+    #[test]
+    fn psiblast_writes_and_reads_checkpoint_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let query_path = tmp.path().join("query.fa");
+        let output_path = tmp.path().join("out.txt");
+        let checkpoint_path = tmp.path().join("round.chk");
+        std::fs::write(&query_path, b">q\nMKKWLFGFLG\n").unwrap();
+        let write_args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            query_path.to_str().unwrap(),
+            "--db",
+            db_base.to_str().unwrap(),
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--out_pssm",
+            checkpoint_path.to_str().unwrap(),
+            "--save_pssm_after_last_round",
+        ]);
+
+        run_psiblast(&write_args).expect("psiblast should write checkpoint");
+        let checkpoint = std::fs::read(&checkpoint_path).expect("read checkpoint");
+        let parsed = parse_pssm_checkpoint(&checkpoint, b"MKKWLFGFLG".len())
+            .expect("checkpoint should parse");
+
+        assert_eq!(parsed.length, b"MKKWLFGFLG".len());
+
+        let read_args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            query_path.to_str().unwrap(),
+            "--db",
+            db_base.to_str().unwrap(),
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--in_pssm",
+            checkpoint_path.to_str().unwrap(),
+        ]);
+        run_psiblast(&read_args).expect("psiblast should read checkpoint");
+    }
+
+    #[test]
+    fn psiblast_reads_checkpoint_without_explicit_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let output_path = tmp.path().join("out.txt");
+        let checkpoint_path = tmp.path().join("round.chk");
+        let query = b"MKKWLFGFLG";
+        let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(query);
+        let pssm = blast_rs::pssm::Pssm::from_sequence(&query_aa, &blast_rs::matrix::BLOSUM62);
+        let mut checkpoint = Vec::new();
+        write_pssm_checkpoint(&mut checkpoint, query, &pssm).expect("write checkpoint");
+        std::fs::write(&checkpoint_path, checkpoint).unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--db",
+            db_base.to_str().unwrap(),
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--in_pssm",
+            checkpoint_path.to_str().unwrap(),
+        ]);
+
+        run_psiblast(&args).expect("psiblast should derive query from checkpoint");
+
+        assert!(!std::fs::read_to_string(&output_path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn psiblast_save_each_pssm_writes_round_checkpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let query_path = tmp.path().join("query.fa");
+        let output_path = tmp.path().join("out.txt");
+        let checkpoint_path = tmp.path().join("round.chk");
+        std::fs::write(&query_path, b">q\nMKKWLFGFLG\n").unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            query_path.to_str().unwrap(),
+            "--db",
+            db_base.to_str().unwrap(),
+            "--num_iterations",
+            "1",
+            "--evalue",
+            "1e20",
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--out_pssm",
+            checkpoint_path.to_str().unwrap(),
+            "--save_each_pssm",
+        ]);
+
+        run_psiblast(&args).expect("psiblast should write round checkpoints");
+        let round_path = pssm_round_output_path(&checkpoint_path, 1);
+
+        assert!(!checkpoint_path.is_file());
+        assert!(round_path.is_file());
+        let round_pssm =
+            parse_pssm_checkpoint(&std::fs::read(&round_path).unwrap(), b"MKKWLFGFLG".len())
+                .expect("round checkpoint should parse");
+        assert_eq!(round_pssm.length, b"MKKWLFGFLG".len());
+    }
+
+    #[test]
+    fn psiblast_save_each_pssm_writes_ascii_round_outputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let query_path = tmp.path().join("query.fa");
+        let output_path = tmp.path().join("out.txt");
+        let ascii_path = tmp.path().join("round.ascii");
+        std::fs::write(&query_path, b">q\nMKKWLFGFLG\n").unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            query_path.to_str().unwrap(),
+            "--db",
+            db_base.to_str().unwrap(),
+            "--num_iterations",
+            "1",
+            "--evalue",
+            "1e20",
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--out_ascii_pssm",
+            ascii_path.to_str().unwrap(),
+            "--save_each_pssm",
+        ]);
+
+        run_psiblast(&args).expect("psiblast should write ASCII round PSSMs");
+        let round_path = pssm_round_output_path(&ascii_path, 1);
+
+        assert!(!ascii_path.is_file());
+        assert!(round_path.is_file());
+        let round_text = std::fs::read_to_string(&round_path).expect("read round ASCII PSSM");
+        assert!(round_text.contains("Last position-specific scoring matrix computed"));
+        assert!(round_text.contains("    1 M"));
+    }
+
+    #[test]
+    fn psi_delta_only_options_remain_unknown_for_plain_protein_programs() {
+        let args = vec!["--num_iterations".to_string(), "3".to_string()];
+
+        assert_eq!(find_psi_delta_only_option(&args), Some("num_iterations"));
     }
 
     #[test]
@@ -12001,24 +15135,47 @@ mod tests {
             );
         }
         assert!(program_supports_outfmt("tblastn", 0));
+        assert!(program_supports_outfmt("tblastn", 5));
         assert!(program_supports_outfmt("tblastn", 6));
         assert!(program_supports_outfmt("tblastn", 7));
         assert!(program_supports_outfmt("tblastn", 10));
-        for outfmt in [5, 17] {
-            assert!(
-                !program_supports_outfmt("tblastn", outfmt),
-                "tblastn outfmt {outfmt} should fail instead of emitting non-parity output"
-            );
-        }
+        let outfmt = 17;
+        assert!(
+            !program_supports_outfmt("tblastn", outfmt),
+            "tblastn outfmt {outfmt} should fail instead of emitting non-parity output"
+        );
 
         assert!(program_supports_outfmt("psiblast", 6));
+        assert!(program_supports_outfmt("psiblast", 5));
+        assert!(program_supports_outfmt("psiblast", 7));
         assert!(program_supports_outfmt("psiblast", 10));
-        for outfmt in [0, 5, 7, 17] {
+        assert!(program_supports_outfmt("psiblast", 0));
+        assert!(
+            !program_supports_outfmt("psiblast", 17),
+            "psiblast outfmt 17 should fail instead of emitting non-parity output"
+        );
+
+        for outfmt in [0, 5, 6, 7, 10] {
             assert!(
-                !program_supports_outfmt("psiblast", outfmt),
-                "psiblast outfmt {outfmt} should fail instead of emitting non-parity output"
+                program_supports_outfmt("deltablast", outfmt),
+                "deltablast outfmt {outfmt} should reach the CDD database path"
             );
         }
+        assert!(
+            !program_supports_outfmt("deltablast", 17),
+            "deltablast outfmt 17 should fail instead of emitting non-parity output"
+        );
+
+        for outfmt in [0, 5, 6, 7, 10] {
+            assert!(
+                program_supports_outfmt("rpstblastn", outfmt),
+                "rpstblastn outfmt {outfmt} should reach the CDD database path"
+            );
+        }
+        assert!(
+            !program_supports_outfmt("rpstblastn", 17),
+            "rpstblastn outfmt 17 should fail instead of emitting non-parity output"
+        );
 
         for outfmt in [0, 5, 6, 7, 10, 17] {
             assert!(program_supports_outfmt("blastn", outfmt));
@@ -12581,6 +15738,7 @@ mod tests {
             subject_blast_name: String::new(),
             subject_kingdom: String::new(),
             num_ident: align_len,
+            num_positives: align_len,
         }
     }
 
@@ -12591,7 +15749,7 @@ mod tests {
             tabular_hit_for_best_hit_filter("contained", 5, 32, 42, 1.0e-12),
         ];
 
-        apply_best_hit_filter(&mut hits, 0.1, 0.1);
+        apply_best_hit_filter(&mut hits, 0.1, 0.1, CliProgram::Blastn);
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].subject_id, "full");
@@ -12604,7 +15762,7 @@ mod tests {
             tabular_hit_for_best_hit_filter("contained", 5, 30, 52, 1.0e-20),
         ];
 
-        apply_best_hit_filter(&mut hits, 0.1, 0.1);
+        apply_best_hit_filter(&mut hits, 0.1, 0.1, CliProgram::Blastn);
 
         assert_eq!(hits.len(), 2);
     }
@@ -12625,12 +15783,82 @@ mod tests {
             contained,
         ];
 
-        apply_subject_besthit_filter(&mut hits);
+        apply_subject_besthit_filter(&mut hits, CliProgram::Blastn);
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].query_start, 1);
         assert_eq!(hits[0].query_end, 40);
         assert_eq!(hits[0].sframe, 1);
+    }
+
+    #[test]
+    fn test_tblastn_subject_besthit_removes_duplicate_query_region_across_subject_frames() {
+        let mut frame_one = tabular_hit_for_best_hit_filter("s1", 1, 8, 39, 8.01e-5);
+        frame_one.sframe = 1;
+        let mut frame_two = tabular_hit_for_best_hit_filter("s1", 1, 8, 38, 1.13e-4);
+        frame_two.subject_start = 41;
+        frame_two.subject_end = 64;
+        frame_two.sframe = 2;
+        let mut separate_query_region = tabular_hit_for_best_hit_filter("s1", 14, 21, 38, 1.13e-4);
+        separate_query_region.sframe = 1;
+
+        let mut hits = vec![frame_one, frame_two, separate_query_region];
+
+        apply_subject_besthit_filter(&mut hits, CliProgram::Tblastn);
+
+        assert_eq!(hits.len(), 2);
+        assert!(hits
+            .iter()
+            .any(|hit| hit.query_start == 1 && hit.query_end == 8 && hit.sframe == 1));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.query_start == 14 && hit.query_end == 21));
+    }
+
+    #[test]
+    fn test_tblastx_subject_besthit_keeps_opposite_query_frame_counterpart() {
+        let mut reverse = tabular_hit_for_best_hit_filter("s1", 63, 1, 114, 1.17e-14);
+        reverse.qframe = -2;
+        reverse.sframe = -2;
+        let mut forward = tabular_hit_for_best_hit_filter("s1", 2, 64, 109, 5.75e-14);
+        forward.subject_start = 2;
+        forward.subject_end = 64;
+        forward.qframe = 2;
+        forward.sframe = 2;
+        let mut contained = tabular_hit_for_best_hit_filter("s1", 2, 22, 38, 3.57e-4);
+        contained.subject_start = 2;
+        contained.subject_end = 22;
+        contained.qframe = 2;
+        contained.sframe = 2;
+
+        let mut hits = vec![reverse, forward, contained];
+
+        apply_subject_besthit_filter(&mut hits, CliProgram::Tblastx);
+
+        assert_eq!(hits.len(), 2);
+        assert!(hits
+            .iter()
+            .any(|hit| hit.query_start == 63 && hit.query_end == 1 && hit.qframe == -2));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.query_start == 2 && hit.query_end == 64 && hit.qframe == 2));
+    }
+
+    #[test]
+    fn test_tblastx_subject_besthit_removes_region_covered_by_better_same_frame_hsps() {
+        let mut left = tabular_hit_for_best_hit_filter("s1", 1, 24, 38, 3.57e-4);
+        left.qframe = 1;
+        let mut right = tabular_hit_for_best_hit_filter("s1", 25, 63, 67, 3.57e-8);
+        right.qframe = 1;
+        let mut covered = tabular_hit_for_best_hit_filter("s1", 1, 33, 36, 6.74e-4);
+        covered.qframe = 1;
+
+        let mut hits = vec![right, left, covered];
+
+        apply_subject_besthit_filter(&mut hits, CliProgram::Tblastx);
+
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.query_end != 33));
     }
 
     fn hsp_for_hitlist(score: i32, evalue: f64) -> blast_rs::search::SearchHsp {
@@ -12794,7 +16022,9 @@ mod tests {
     #[test]
     fn test_reverse_complement_alignment_blastna_preserves_gaps() {
         assert_eq!(
-            reverse_complement_alignment_blastna(&alignment_string_to_blastna("ACGT-RYN")),
+            blast_rs::encoding::reverse_complement_blastna_sequence(&alignment_string_to_blastna(
+                "ACGT-RYN"
+            )),
             alignment_string_to_blastna("NRY-ACGT")
         );
     }
