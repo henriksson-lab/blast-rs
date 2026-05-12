@@ -16,6 +16,756 @@ pub struct KarlinBlk {
     pub round_down: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct BlastScoreMatrix {
+    pub nrows: usize,
+    pub ncols: usize,
+    pub data: Vec<Vec<i32>>,
+}
+
+impl BlastScoreMatrix {
+    pub fn new(nrows: usize, ncols: usize) -> Self {
+        Self {
+            nrows,
+            ncols,
+            data: vec![vec![0; ncols]; nrows],
+        }
+    }
+}
+
+/// Rust-owned `BlastScoreBlk` counterpart for score/matrix/statistics setup.
+///
+/// The C structure is a large owner of score matrices, Karlin arrays, Gumbel
+/// parameters, and option-derived flags. This Rust type keeps those fields as
+/// owned values and vectors so parameter setup can pass the same logical inputs
+/// C passes through raw pointers.
+#[derive(Debug, Clone)]
+pub struct BlastScoreBlk {
+    pub alphabet_code: i32,
+    pub alphabet_size: usize,
+    pub protein_alphabet: bool,
+    pub matrix: BlastScoreMatrix,
+    pub name: Option<String>,
+    pub loscore: i32,
+    pub hiscore: i32,
+    pub penalty: i32,
+    pub reward: i32,
+    pub read_in_matrix: bool,
+    pub scale_factor: f64,
+    pub number_of_contexts: i32,
+    pub sfp: Vec<Option<ScoreFreq>>,
+    pub kbp: Vec<KarlinBlk>,
+    pub kbp_std: Vec<KarlinBlk>,
+    pub kbp_psi: Vec<KarlinBlk>,
+    pub kbp_gap: Vec<KarlinBlk>,
+    pub kbp_gap_std: Vec<KarlinBlk>,
+    pub kbp_gap_psi: Vec<KarlinBlk>,
+    pub kbp_ideal: Option<KarlinBlk>,
+    pub gbp: Option<GumbelBlk>,
+    pub ambiguous_res: Vec<u8>,
+    pub matrix_only_scoring: bool,
+    pub round_down: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlastResFreq {
+    pub alphabet_code: i32,
+    pub prob: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlastResComp {
+    pub alphabet_code: i32,
+    pub comp: Vec<i32>,
+}
+
+/// Port of NCBI `BlastScoreBlkNew` (`blast_stat.c:884`).
+pub fn blast_score_blk_new(alphabet: i32, number_of_contexts: i32) -> Option<BlastScoreBlk> {
+    let alphabet_size = if alphabet == crate::encoding::BLASTNA_SEQ_CODE {
+        crate::encoding::BLASTNA_SIZE
+    } else {
+        crate::encoding::BLASTAA_SIZE
+    };
+    let protein_alphabet = alphabet == crate::encoding::BLASTAA_SEQ_CODE;
+    let context_count = number_of_contexts.max(0) as usize;
+    Some(BlastScoreBlk {
+        alphabet_code: alphabet,
+        alphabet_size,
+        protein_alphabet,
+        matrix: BlastScoreMatrix::new(alphabet_size, alphabet_size),
+        name: None,
+        loscore: 0,
+        hiscore: 0,
+        penalty: 0,
+        reward: 0,
+        read_in_matrix: false,
+        scale_factor: 1.0,
+        number_of_contexts,
+        sfp: vec![None; context_count],
+        kbp: vec![KarlinBlk::default(); context_count],
+        kbp_std: vec![KarlinBlk::default(); context_count],
+        kbp_psi: vec![KarlinBlk::default(); context_count],
+        kbp_gap: Vec::new(),
+        kbp_gap_std: vec![KarlinBlk::default(); context_count],
+        kbp_gap_psi: vec![KarlinBlk::default(); context_count],
+        kbp_ideal: None,
+        gbp: None,
+        ambiguous_res: Vec::new(),
+        matrix_only_scoring: false,
+        round_down: false,
+    })
+}
+
+/// Port-shaped equivalent of NCBI `BlastScoreBlkCheck` (`blast_stat.c:853`).
+pub fn blast_score_blk_check(sbp: Option<&BlastScoreBlk>) -> i32 {
+    let Some(sbp) = sbp else {
+        return -1;
+    };
+    if sbp.kbp.is_empty() || sbp.sfp.is_empty() {
+        return 1;
+    }
+    let contexts = sbp.number_of_contexts.max(0) as usize;
+    let found = (0..contexts).any(|index| {
+        sbp.sfp.get(index).is_some_and(Option::is_some)
+            || sbp.kbp.get(index).is_some_and(KarlinBlk::is_valid)
+    });
+    if found {
+        0
+    } else {
+        1
+    }
+}
+
+/// Port of NCBI `BlastScoreBlkFree` (`blast_stat.c:965`).
+pub fn blast_score_blk_free(sbp: &mut Option<BlastScoreBlk>) -> Option<BlastScoreBlk> {
+    if let Some(sbp) = sbp.as_mut() {
+        sbp.name = None;
+        sbp.matrix.data.clear();
+        sbp.matrix.nrows = 0;
+        sbp.matrix.ncols = 0;
+        sbp.sfp.clear();
+        sbp.kbp.clear();
+        sbp.kbp_std.clear();
+        sbp.kbp_psi.clear();
+        sbp.kbp_gap.clear();
+        sbp.kbp_gap_std.clear();
+        sbp.kbp_gap_psi.clear();
+        sbp.kbp_ideal = None;
+        sbp.gbp = None;
+        sbp.ambiguous_res.clear();
+    }
+    *sbp = None;
+    None
+}
+
+/// Port of NCBI `Blast_ResFreqNew` (`blast_stat.c:1708`).
+pub fn blast_res_freq_new(sbp: Option<&BlastScoreBlk>) -> Option<BlastResFreq> {
+    let sbp = sbp?;
+    Some(BlastResFreq {
+        alphabet_code: sbp.alphabet_code,
+        prob: vec![0.0; sbp.alphabet_size],
+    })
+}
+
+/// Port of NCBI `Blast_ResFreqFree` (`blast_stat.c:1693`).
+pub fn blast_res_freq_free(rfp: &mut Option<BlastResFreq>) -> Option<BlastResFreq> {
+    if let Some(rfp) = rfp.as_mut() {
+        rfp.prob.clear();
+    }
+    *rfp = None;
+    None
+}
+
+/// Port of NCBI `Blast_ResFreqNormalize` (`blast_stat.c:1835`).
+pub fn blast_res_freq_normalize(
+    sbp: Option<&BlastScoreBlk>,
+    rfp: Option<&mut BlastResFreq>,
+    norm: f64,
+) -> i16 {
+    let (Some(sbp), Some(rfp)) = (sbp, rfp) else {
+        return 1;
+    };
+    if norm == 0.0 {
+        return 1;
+    }
+    let mut sum = 0.0;
+    for index in 0..sbp.alphabet_size {
+        let p = rfp.prob.get(index).copied().unwrap_or(0.0);
+        if p < 0.0 {
+            return 1;
+        }
+        sum += p;
+    }
+    if sum <= 0.0 {
+        return 0;
+    }
+    for index in 0..sbp.alphabet_size {
+        rfp.prob[index] = rfp.prob[index] / sum * norm;
+    }
+    0
+}
+
+/// Port of NCBI `Blast_GetStdAlphabet` (`blast_stat.c:1863`).
+pub fn blast_get_std_alphabet(alphabet_code: i32, residues: &mut [u8]) -> i16 {
+    let freqs = protein_std_freq_letters();
+    if residues.len() < freqs.len() {
+        return -2;
+    }
+    for (index, &(letter, _)) in freqs.iter().enumerate() {
+        residues[index] = if alphabet_code == crate::encoding::BLASTAA_SEQ_CODE {
+            crate::encoding::AMINOACID_TO_NCBISTDAA[letter.to_ascii_uppercase() as usize]
+        } else {
+            letter
+        };
+    }
+    freqs.len() as i16
+}
+
+/// Port of NCBI `Blast_ResFreqStdComp` (`blast_stat.c:1888`).
+pub fn blast_res_freq_std_comp(sbp: Option<&BlastScoreBlk>, rfp: Option<&mut BlastResFreq>) -> i16 {
+    let (Some(sbp), Some(rfp)) = (sbp, rfp) else {
+        return 1;
+    };
+    if sbp.protein_alphabet {
+        let mut residues = [0u8; 20];
+        let retval = blast_get_std_alphabet(sbp.alphabet_code, &mut residues);
+        if retval < 1 {
+            return retval;
+        }
+        for (index, &residue) in residues.iter().enumerate() {
+            if (residue as usize) < rfp.prob.len() {
+                rfp.prob[residue as usize] = protein_std_freq_letters()[index].1;
+            }
+        }
+    } else {
+        for index in 0..4.min(rfp.prob.len()) {
+            rfp.prob[index] = 25.0;
+        }
+    }
+    blast_res_freq_normalize(Some(sbp), Some(rfp), 1.0)
+}
+
+/// Port of NCBI `BlastResCompNew` (`blast_stat.c:1952`).
+pub fn blast_res_comp_new(sbp: Option<&BlastScoreBlk>) -> Option<BlastResComp> {
+    let sbp = sbp?;
+    Some(BlastResComp {
+        alphabet_code: sbp.alphabet_code,
+        comp: vec![0; sbp.alphabet_size],
+    })
+}
+
+pub fn blast_res_comp_destruct(rcp: &mut Option<BlastResComp>) -> Option<BlastResComp> {
+    if let Some(rcp) = rcp.as_mut() {
+        rcp.comp.clear();
+    }
+    *rcp = None;
+    None
+}
+
+/// Port of NCBI `BlastResCompStr` (`blast_stat.c:1984`).
+pub fn blast_res_comp_str(
+    sbp: Option<&BlastScoreBlk>,
+    rcp: Option<&mut BlastResComp>,
+    string: Option<&[u8]>,
+    length: i32,
+) -> i16 {
+    let (Some(sbp), Some(rcp), Some(string)) = (sbp, rcp, string) else {
+        return 1;
+    };
+    if rcp.alphabet_code != sbp.alphabet_code {
+        return 1;
+    }
+    rcp.comp.fill(0);
+    let mask = if sbp.protein_alphabet { 0xff } else { 0x0f };
+    for &letter in string.iter().take(length.max(0) as usize) {
+        let index = (letter & mask) as usize;
+        if index < rcp.comp.len() {
+            rcp.comp[index] += 1;
+        }
+    }
+    for &ambiguous in &sbp.ambiguous_res {
+        let index = ambiguous as usize;
+        if index < rcp.comp.len() {
+            rcp.comp[index] = 0;
+        }
+    }
+    0
+}
+
+/// Port of NCBI `Blast_ResFreqClr` (`blast_stat.c:2024`).
+pub fn blast_res_freq_clr(sbp: Option<&BlastScoreBlk>, rfp: Option<&mut BlastResFreq>) -> i16 {
+    let (Some(sbp), Some(rfp)) = (sbp, rfp) else {
+        return 1;
+    };
+    for index in 0..sbp.alphabet_size {
+        rfp.prob[index] = 0.0;
+    }
+    0
+}
+
+/// Port of NCBI `Blast_ResFreqResComp` (`blast_stat.c:2044`).
+pub fn blast_res_freq_res_comp(
+    sbp: Option<&BlastScoreBlk>,
+    rfp: Option<&mut BlastResFreq>,
+    rcp: Option<&BlastResComp>,
+) -> i16 {
+    let (Some(sbp), Some(rfp), Some(rcp)) = (sbp, rfp, rcp) else {
+        return 1;
+    };
+    if rfp.alphabet_code != rcp.alphabet_code {
+        return 1;
+    }
+    let sum: i32 = rcp.comp.iter().take(sbp.alphabet_size).sum();
+    if sum == 0 {
+        return blast_res_freq_clr(Some(sbp), Some(rfp));
+    }
+    for index in 0..sbp.alphabet_size {
+        rfp.prob[index] = rcp.comp[index] as f64 / sum as f64;
+    }
+    0
+}
+
+/// Port of NCBI `Blast_ResFreqString` (`blast_stat.c:2078`).
+pub fn blast_res_freq_string(
+    sbp: Option<&BlastScoreBlk>,
+    rfp: Option<&mut BlastResFreq>,
+    string: Option<&[u8]>,
+    length: i32,
+) -> i16 {
+    let Some(sbp_ref) = sbp else {
+        return 1;
+    };
+    let Some(mut rcp) = blast_res_comp_new(Some(sbp_ref)) else {
+        return 1;
+    };
+    if blast_res_comp_str(Some(sbp_ref), Some(&mut rcp), string, length) != 0 {
+        return 1;
+    }
+    blast_res_freq_res_comp(Some(sbp_ref), rfp, Some(&rcp))
+}
+
+/// Port-shaped deep copy for NCBI static `s_BlastScoreBlk_Copy`.
+pub fn s_blast_score_blk_copy(src: &BlastScoreBlk) -> BlastScoreBlk {
+    let mut matrix = BlastScoreMatrix::new(src.matrix.nrows, src.matrix.ncols);
+    for (dst, src_row) in matrix.data.iter_mut().zip(src.matrix.data.iter()) {
+        dst.clear();
+        dst.extend_from_slice(src_row);
+    }
+
+    BlastScoreBlk {
+        alphabet_code: src.alphabet_code,
+        alphabet_size: src.alphabet_size,
+        protein_alphabet: src.protein_alphabet,
+        matrix,
+        name: src.name.clone(),
+        loscore: src.loscore,
+        hiscore: src.hiscore,
+        penalty: src.penalty,
+        reward: src.reward,
+        read_in_matrix: src.read_in_matrix,
+        scale_factor: src.scale_factor,
+        number_of_contexts: src.number_of_contexts,
+        sfp: src.sfp.clone(),
+        kbp: src.kbp.clone(),
+        kbp_std: src.kbp_std.clone(),
+        kbp_psi: src.kbp_psi.clone(),
+        kbp_gap: src.kbp_gap.clone(),
+        kbp_gap_std: src.kbp_gap_std.clone(),
+        kbp_gap_psi: src.kbp_gap_psi.clone(),
+        kbp_ideal: src.kbp_ideal.clone(),
+        gbp: src.gbp.clone(),
+        ambiguous_res: src.ambiguous_res.clone(),
+        matrix_only_scoring: src.matrix_only_scoring,
+        round_down: src.round_down,
+    }
+}
+
+/// Port of NCBI `BlastScoreBlkNuclMatrixCreate` (`blast_stat.c:1060`).
+pub fn blast_score_blk_nucl_matrix_create(sbp: &mut BlastScoreBlk) -> i16 {
+    if sbp.alphabet_size != crate::encoding::BLASTNA_SIZE {
+        return 1;
+    }
+    if sbp.matrix.nrows != crate::encoding::BLASTNA_SIZE
+        || sbp.matrix.ncols != crate::encoding::BLASTNA_SIZE
+    {
+        sbp.matrix =
+            BlastScoreMatrix::new(crate::encoding::BLASTNA_SIZE, crate::encoding::BLASTNA_SIZE);
+    }
+
+    let reward = sbp.reward;
+    let penalty = sbp.penalty;
+    let mut degeneracy = [0i32; crate::encoding::BLASTNA_SIZE + 1];
+    for degen in degeneracy.iter_mut().take(4) {
+        *degen = 1;
+    }
+    for index1 in 4..crate::encoding::BLASTNA_SIZE {
+        let mut degen = 0;
+        for index2 in 0..4 {
+            if (crate::encoding::BLASTNA_TO_NCBI4NA[index1]
+                & crate::encoding::BLASTNA_TO_NCBI4NA[index2])
+                != 0
+            {
+                degen += 1;
+            }
+        }
+        degeneracy[index1] = degen;
+    }
+
+    for row in &mut sbp.matrix.data {
+        row.fill(0);
+    }
+    for index1 in 0..crate::encoding::BLASTNA_SIZE {
+        for index2 in index1..crate::encoding::BLASTNA_SIZE {
+            let score = if (crate::encoding::BLASTNA_TO_NCBI4NA[index1]
+                & crate::encoding::BLASTNA_TO_NCBI4NA[index2])
+                != 0
+            {
+                crate::math::nint(
+                    ((degeneracy[index2] - 1) * penalty + reward) as f64
+                        / degeneracy[index2].max(1) as f64,
+                ) as i32
+            } else {
+                penalty
+            };
+            sbp.matrix.data[index1][index2] = score;
+            sbp.matrix.data[index2][index1] = score;
+        }
+    }
+    sbp.matrix.data[crate::encoding::BLASTNA_SIZE - 1].fill(BLAST_SCORE_MIN);
+    for index in 0..crate::encoding::BLASTNA_SIZE {
+        sbp.matrix.data[index][crate::encoding::BLASTNA_SIZE - 1] = BLAST_SCORE_MIN;
+    }
+    blast_score_blk_max_score_set(sbp)
+}
+
+/// Port-shaped Rust reader for NCBI `BlastScoreBlkNucleotideMatrixRead`.
+pub fn blast_score_blk_nucleotide_matrix_read(
+    sbp: &mut BlastScoreBlk,
+    rows: &[[i32; crate::encoding::BLASTNA_SIZE]; crate::encoding::BLASTNA_SIZE],
+) -> i16 {
+    if sbp.alphabet_code != crate::encoding::BLASTNA_SEQ_CODE
+        && sbp.alphabet_code != crate::encoding::NCBI4NA_SEQ_CODE
+    {
+        return 1;
+    }
+    sbp.alphabet_size = crate::encoding::BLASTNA_SIZE;
+    sbp.protein_alphabet = false;
+    sbp.name = None;
+    sbp.matrix =
+        BlastScoreMatrix::new(crate::encoding::BLASTNA_SIZE, crate::encoding::BLASTNA_SIZE);
+    for (row_index, src) in rows.iter().enumerate() {
+        for (col_index, &score) in src.iter().enumerate() {
+            if !(BLAST_SCORE_MIN..=BLAST_SCORE_MAX).contains(&score) {
+                return 2;
+            }
+            sbp.matrix.data[row_index][col_index] = score;
+        }
+    }
+    let gap = crate::encoding::BLASTNA_SIZE - 1;
+    for index in 0..crate::encoding::BLASTNA_SIZE {
+        sbp.matrix.data[gap][index] = sbp.matrix.data[gap][index].min(BLAST_SCORE_MIN);
+        sbp.matrix.data[index][gap] = sbp.matrix.data[index][gap].min(BLAST_SCORE_MIN);
+    }
+    sbp.read_in_matrix = true;
+    sbp.matrix_only_scoring = true;
+    blast_score_blk_max_score_set(sbp)
+}
+
+/// Port-shaped Rust reader for NCBI `BlastScoreBlkProteinMatrixRead`.
+pub fn blast_score_blk_protein_matrix_read(sbp: &mut BlastScoreBlk, matrix_name: &str) -> i16 {
+    let matrix = if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
+        &crate::matrix::BLOSUM45
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM50") {
+        &crate::matrix::BLOSUM50
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
+        &crate::matrix::BLOSUM62
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM80") {
+        &crate::matrix::BLOSUM80
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM90") {
+        &crate::matrix::BLOSUM90
+    } else if matrix_name.eq_ignore_ascii_case("PAM30") {
+        &crate::matrix::PAM30
+    } else if matrix_name.eq_ignore_ascii_case("PAM70") {
+        &crate::matrix::PAM70
+    } else if matrix_name.eq_ignore_ascii_case("PAM250") {
+        &crate::matrix::PAM250
+    } else if matrix_name.eq_ignore_ascii_case("IDENTITY") {
+        &crate::matrix::IDENTITY
+    } else {
+        return 1;
+    };
+    sbp.alphabet_code = crate::encoding::BLASTAA_SEQ_CODE;
+    sbp.alphabet_size = crate::encoding::BLASTAA_SIZE;
+    sbp.protein_alphabet = true;
+    sbp.matrix =
+        BlastScoreMatrix::new(crate::encoding::BLASTAA_SIZE, crate::encoding::BLASTAA_SIZE);
+    for row_index in 0..crate::encoding::BLASTAA_SIZE {
+        for col_index in 0..crate::encoding::BLASTAA_SIZE {
+            let score = matrix[row_index][col_index];
+            if !(BLAST_SCORE_MIN..=BLAST_SCORE_MAX).contains(&score) {
+                return 2;
+            }
+            sbp.matrix.data[row_index][col_index] = score;
+        }
+    }
+    sbp.name = Some(matrix_name.to_ascii_uppercase());
+    sbp.read_in_matrix = true;
+    sbp.matrix_only_scoring = false;
+    sbp.kbp_ideal = Some(protein_ideal_ungapped_kbp_for_matrix(matrix_name));
+    blast_score_blk_max_score_set(sbp)
+}
+
+/// Port of NCBI static `BlastScoreBlkProteinMatrixLoad` (`blast_stat.c:1539`).
+pub fn blast_score_blk_protein_matrix_load(sbp: &mut BlastScoreBlk) -> i16 {
+    let matrix_name = sbp.name.as_deref().unwrap_or("BLOSUM62");
+    let source = if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
+        &crate::matrix::BLOSUM45
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM50") {
+        &crate::matrix::BLOSUM50
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
+        &crate::matrix::BLOSUM62
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM80") {
+        &crate::matrix::BLOSUM80
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM90") {
+        &crate::matrix::BLOSUM90
+    } else if matrix_name.eq_ignore_ascii_case("PAM30") {
+        &crate::matrix::PAM30
+    } else if matrix_name.eq_ignore_ascii_case("PAM70") {
+        &crate::matrix::PAM70
+    } else if matrix_name.eq_ignore_ascii_case("PAM250") {
+        &crate::matrix::PAM250
+    } else if matrix_name.eq_ignore_ascii_case("IDENTITY") {
+        &crate::matrix::IDENTITY
+    } else {
+        return 1;
+    };
+
+    if sbp.alphabet_size != crate::encoding::BLASTAA_SIZE
+        || sbp.matrix.ncols != crate::encoding::BLASTAA_SIZE
+        || sbp.matrix.nrows != crate::encoding::BLASTAA_SIZE
+    {
+        return 1;
+    }
+
+    sbp.matrix.data =
+        vec![vec![BLAST_SCORE_MIN; crate::encoding::BLASTAA_SIZE]; crate::encoding::BLASTAA_SIZE];
+    for i in 0..crate::encoding::BLASTAA_SIZE {
+        for j in 0..crate::encoding::BLASTAA_SIZE {
+            if i == crate::encoding::NCBISTDAA_U as usize
+                || i == crate::encoding::NCBISTDAA_O as usize
+                || i == crate::encoding::NCBISTDAA_GAP as usize
+                || j == crate::encoding::NCBISTDAA_U as usize
+                || j == crate::encoding::NCBISTDAA_O as usize
+                || j == crate::encoding::NCBISTDAA_GAP as usize
+            {
+                continue;
+            }
+            sbp.matrix.data[i][j] = source[i][j];
+        }
+    }
+
+    let x = crate::encoding::NCBISTDAA_X as usize;
+    let u = crate::encoding::NCBISTDAA_U as usize;
+    let o = crate::encoding::NCBISTDAA_O as usize;
+    let c = crate::encoding::NCBISTDAA_C as usize;
+    for i in 0..crate::encoding::BLASTAA_SIZE {
+        sbp.matrix.data[u][i] = sbp.matrix.data[c][i];
+        sbp.matrix.data[i][u] = sbp.matrix.data[i][c];
+        sbp.matrix.data[o][i] = sbp.matrix.data[x][i];
+        sbp.matrix.data[i][o] = sbp.matrix.data[i][x];
+    }
+
+    sbp.alphabet_code = crate::encoding::BLASTAA_SEQ_CODE;
+    sbp.protein_alphabet = true;
+    sbp.read_in_matrix = true;
+    sbp.matrix_only_scoring = false;
+    sbp.kbp_ideal = Some(protein_ideal_ungapped_kbp_for_matrix(matrix_name));
+    blast_score_blk_max_score_set(sbp)
+}
+
+/// Port of NCBI `Blast_ScoreBlkMatrixFill` (`blast_stat.c:1599`).
+pub fn blast_score_blk_matrix_fill(sbp: &mut BlastScoreBlk) -> i16 {
+    let status = if sbp.alphabet_code == crate::encoding::BLASTNA_SEQ_CODE
+        || sbp.alphabet_code == crate::encoding::NCBI4NA_SEQ_CODE
+    {
+        blast_score_blk_nucl_matrix_create(sbp)
+    } else {
+        let matrix_name = sbp.name.as_deref().unwrap_or("BLOSUM62").to_string();
+        blast_score_blk_protein_matrix_read(sbp, &matrix_name)
+    };
+    if status != 0 {
+        return status;
+    }
+    blast_score_blk_max_score_set(sbp)
+}
+
+/// Port of NCBI `Blast_ScoreBlkKbpIdealCalc` (`blast_stat.c:2832`).
+pub fn blast_score_blk_kbp_ideal_calc(sbp: Option<&mut BlastScoreBlk>) -> i16 {
+    let Some(sbp) = sbp else {
+        return 1;
+    };
+    let matrix_name = sbp.name.as_deref().unwrap_or("BLOSUM62");
+    sbp.kbp_ideal = Some(protein_ideal_ungapped_kbp_for_matrix(matrix_name));
+    0
+}
+
+/// Port of NCBI `Blast_KarlinBlkCopy` (`blast_stat.c:2871`).
+pub fn blast_karlin_blk_copy(kbp_to: Option<&mut KarlinBlk>, kbp_from: Option<&KarlinBlk>) -> i16 {
+    let (Some(kbp_to), Some(kbp_from)) = (kbp_to, kbp_from) else {
+        return -1;
+    };
+    *kbp_to = kbp_from.clone();
+    0
+}
+
+/// Port of NCBI `BlastScoreBlkMaxScoreSet` (`blast_stat.c:1500`).
+pub fn blast_score_blk_max_score_set(sbp: &mut BlastScoreBlk) -> i16 {
+    if sbp.matrix.data.is_empty() {
+        return 1;
+    }
+    let mut loscore = BLAST_SCORE_MAX;
+    let mut hiscore = BLAST_SCORE_MIN;
+    for row in &sbp.matrix.data {
+        for &score in row {
+            loscore = loscore.min(score);
+            hiscore = hiscore.max(score);
+        }
+    }
+    sbp.loscore = loscore;
+    sbp.hiscore = hiscore;
+    0
+}
+
+/// Port of NCBI static `s_BlastKarlinBlkIsValid`.
+pub fn s_blast_karlin_blk_is_valid(kbp: Option<&KarlinBlk>) -> bool {
+    kbp.is_some_and(KarlinBlk::is_valid)
+}
+
+/// Port-shaped lookup for NCBI static `s_BlastFindValidKarlinBlk`.
+pub fn s_blast_find_valid_karlin_blk<'a>(
+    kbp_in: &'a [KarlinBlk],
+    query_info: &crate::queryinfo::QueryInfo,
+) -> Result<&'a KarlinBlk, i16> {
+    for (context_index, context) in query_info.contexts.iter().enumerate() {
+        if !context.is_valid {
+            continue;
+        }
+        if let Some(kbp) = kbp_in.get(context_index) {
+            if s_blast_karlin_blk_is_valid(Some(kbp)) {
+                return Ok(kbp);
+            }
+        }
+    }
+    Err(crate::diagnostics::BLASTERR_NOVALIDKARLINALTSCHUL)
+}
+
+/// Port of NCBI static `s_BlastFindValidKarlinBlk`
+/// (`blast_parameters.c:62`) with pointer-shaped output.
+pub fn s_blast_find_valid_karlin_blk_c<'a>(
+    kbp_in: &'a [KarlinBlk],
+    query_info: Option<&crate::queryinfo::QueryInfo>,
+    kbp_ret: Option<&mut Option<&'a KarlinBlk>>,
+) -> i16 {
+    let (Some(query_info), Some(kbp_ret)) = (query_info, kbp_ret) else {
+        return crate::diagnostics::BLASTERR_NOVALIDKARLINALTSCHUL;
+    };
+    match s_blast_find_valid_karlin_blk(kbp_in, query_info) {
+        Ok(kbp) => {
+            *kbp_ret = Some(kbp);
+            0
+        }
+        Err(status) => {
+            *kbp_ret = None;
+            status
+        }
+    }
+}
+
+/// Port-shaped lookup for NCBI static `s_BlastFindSmallestLambda`.
+pub fn s_blast_find_smallest_lambda<'a>(
+    kbp_in: &'a [KarlinBlk],
+    query_info: &crate::queryinfo::QueryInfo,
+) -> Option<(f64, &'a KarlinBlk)> {
+    query_info
+        .contexts
+        .iter()
+        .enumerate()
+        .filter(|(_, context)| context.is_valid)
+        .filter_map(|(context_index, _)| kbp_in.get(context_index))
+        .filter(|kbp| s_blast_karlin_blk_is_valid(Some(kbp)))
+        .min_by(|left, right| left.lambda.total_cmp(&right.lambda))
+        .map(|kbp| (kbp.lambda, kbp))
+}
+
+/// Port of NCBI static `s_BlastFindSmallestLambda`
+/// (`blast_parameters.c:92`) with optional pointer-shaped output.
+pub fn s_blast_find_smallest_lambda_c<'a>(
+    kbp_in: &'a [KarlinBlk],
+    query_info: Option<&crate::queryinfo::QueryInfo>,
+    kbp_out: Option<&mut Option<&'a KarlinBlk>>,
+) -> f64 {
+    let Some(query_info) = query_info else {
+        if let Some(kbp_out) = kbp_out {
+            *kbp_out = None;
+        }
+        return i32::MAX as f64;
+    };
+    let result = s_blast_find_smallest_lambda(kbp_in, query_info);
+    if let Some(kbp_out) = kbp_out {
+        *kbp_out = result.map(|(_, kbp)| kbp);
+    }
+    result.map(|(lambda, _)| lambda).unwrap_or(i32::MAX as f64)
+}
+
+/// Port of NCBI static `s_BlastGumbelBlkFree`.
+pub fn s_blast_gumbel_blk_free(gbp: &mut Option<GumbelBlk>) -> Option<GumbelBlk> {
+    *gbp = None;
+    None
+}
+
+/// Port of NCBI static `s_BlastGumbelBlkNew`.
+pub fn s_blast_gumbel_blk_new() -> GumbelBlk {
+    GumbelBlk {
+        lambda: 0.0,
+        a: 0.0,
+        b: 0.0,
+        alpha: 0.0,
+        beta: 0.0,
+        sigma: 0.0,
+        tau: 0.0,
+        db_length: 0,
+    }
+}
+
+/// Port of NCBI `Blast_KarlinBlkFree`.
+pub fn blast_karlin_blk_free(kbp: &mut Option<KarlinBlk>) -> Option<KarlinBlk> {
+    *kbp = None;
+    None
+}
+
+/// Port of NCBI `BLAST_ScoreSetAmbigRes`.
+pub fn blast_score_set_ambig_res(sbp: Option<&mut BlastScoreBlk>, ambiguous_res: u8) -> i16 {
+    let Some(sbp) = sbp else {
+        return crate::util::BLASTERR_INVALIDPARAM;
+    };
+    let byte = ambiguous_res.to_ascii_uppercase();
+    if byte as usize >= 128 {
+        return crate::util::BLASTERR_INVALIDPARAM;
+    }
+    let index = byte as usize;
+    let encoded = if sbp.alphabet_code == crate::encoding::BLASTAA_SEQ_CODE {
+        crate::encoding::AMINOACID_TO_NCBISTDAA[index]
+    } else if sbp.alphabet_code == crate::encoding::BLASTNA_SEQ_CODE {
+        crate::encoding::IUPACNA_TO_BLASTNA[index]
+    } else if sbp.alphabet_code == crate::encoding::NCBI4NA_SEQ_CODE {
+        crate::encoding::IUPACNA_TO_NCBI4NA[index]
+    } else {
+        return crate::util::BLASTERR_INVALIDPARAM;
+    };
+    sbp.ambiguous_res.push(encoded);
+    0
+}
+
 /// Apply NCBI's `score &= ~1` even-rounding when `round_down` is set.
 #[inline]
 fn round_down_score(score: i32, round_down: bool) -> i32 {
@@ -76,6 +826,47 @@ impl KarlinBlk {
         let score = -(evalue / denom).ln() / self.lambda;
         score.ceil() as i32
     }
+}
+
+/// Port of NCBI `BLAST_KarlinStoE_simple` (`blast_stat.c:4157`).
+pub fn blast_karlin_sto_e_simple(score: i32, kbp: Option<&KarlinBlk>, searchsp: i64) -> f64 {
+    let Some(kbp) = kbp else {
+        return -1.0;
+    };
+    if kbp.lambda < 0.0 || kbp.k < 0.0 || kbp.h < 0.0 {
+        return -1.0;
+    }
+    searchsp as f64 * (-kbp.lambda * score as f64 + kbp.log_k).exp()
+}
+
+/// Port of NCBI static `BlastKarlinEtoS_simple` (`blast_stat.c:4040`).
+pub fn blast_karlin_eto_s_simple(evalue: f64, kbp: Option<&KarlinBlk>, searchsp: i64) -> i32 {
+    let Some(kbp) = kbp else {
+        return BLAST_SCORE_MIN;
+    };
+    if kbp.lambda < 0.0 || kbp.k < 0.0 || kbp.h < 0.0 {
+        return BLAST_SCORE_MIN;
+    }
+    let evalue = evalue.max(K_SMALL_FLOAT);
+    ((kbp.k * searchsp as f64 / evalue).ln() / kbp.lambda).ceil() as i32
+}
+
+/// 1-1 port of `Blast_HSPListGetBitScores` (`blast_hits.c:1907`) for
+/// `hspstream::HspList`.
+pub fn blast_hsp_list_get_bit_scores(
+    hsp_list: Option<&mut crate::hspstream::HspList>,
+    _gapped_calculation: bool,
+    kbp: &[KarlinBlk],
+) -> i32 {
+    let Some(hsp_list) = hsp_list else { return 1 };
+    for hsp in &mut hsp_list.hsps {
+        let Some(ctx_kbp) = kbp.get(hsp.context.max(0) as usize) else {
+            return 1;
+        };
+        hsp.bit_score =
+            (hsp.score as f64 * ctx_kbp.lambda - ctx_kbp.log_k) / crate::math::NCBIMATH_LN2;
+    }
+    0
 }
 
 /// `BLAST_GAP_PROB` (`blast_parameters.h:66`): gap probability for
@@ -318,6 +1109,53 @@ pub fn blast_cutoffs(
     (s, e_out)
 }
 
+/// Port of NCBI `BLAST_Cutoffs` (`blast_stat.c:4089`) with pointer-style
+/// mutable outputs.
+pub fn blast_cutoffs_in_place(
+    score: Option<&mut i32>,
+    evalue: Option<&mut f64>,
+    kbp: Option<&KarlinBlk>,
+    searchsp: i64,
+    dodecay: bool,
+    gap_decay_rate: f64,
+) -> i16 {
+    let (Some(score), Some(evalue), Some(kbp)) = (score, evalue, kbp) else {
+        return 1;
+    };
+    if kbp.lambda == -1.0 || kbp.k == -1.0 || kbp.h == -1.0 {
+        return 1;
+    }
+
+    let mut s = *score;
+    let mut e = *evalue;
+    let esave = e;
+    let mut s_changed = false;
+    let mut es = 1;
+
+    if e > 0.0 {
+        if dodecay && gap_decay_rate > 0.0 && gap_decay_rate < 1.0 {
+            e *= gap_decay_divisor(gap_decay_rate, 1);
+        }
+        es = blast_karlin_eto_s_simple(e, Some(kbp), searchsp);
+    }
+
+    if es > s {
+        s_changed = true;
+        s = es;
+        *score = s;
+    }
+
+    if esave <= 0.0 || !s_changed {
+        e = blast_karlin_sto_e_simple(s, Some(kbp), searchsp);
+        if dodecay && gap_decay_rate > 0.0 && gap_decay_rate < 1.0 {
+            e /= gap_decay_divisor(gap_decay_rate, 1);
+        }
+        *evalue = e;
+    }
+
+    0
+}
+
 // NCBI s_BlastSumP interpolation tables (blast_stat.c:4359-4379).
 // Retained verbatim so any drift is easy to spot against the C source.
 
@@ -399,6 +1237,48 @@ pub fn sum_p(r: u32, s: f64) -> Option<f64> {
     Some(sum_p_calc(r, s))
 }
 
+/// Port of NCBI `SRombergCbackArgs` (`blast_stat.c:4205`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SRombergCbackArgs {
+    pub num_hsps: i32,
+    pub num_hsps_minus_2: i32,
+    pub adj1: f64,
+    pub adj2: f64,
+    pub sdvir: f64,
+    pub epsilon: f64,
+}
+
+/// Port of NCBI static `s_OuterIntegralCback` (`blast_stat.c:4219`).
+pub fn s_outer_integral_cback(x: f64, callback_args: &SRombergCbackArgs) -> f64 {
+    let y = (x - callback_args.sdvir).exp();
+    if y == f64::INFINITY {
+        return 0.0;
+    }
+    if callback_args.num_hsps_minus_2 == 0 {
+        return (callback_args.adj2 - y).exp();
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    (callback_args.num_hsps_minus_2 as f64 * x.ln() + callback_args.adj2 - y).exp()
+}
+
+/// Port of NCBI static `s_InnerIntegralCback` (`blast_stat.c:4240`).
+pub fn s_inner_integral_cback(s: f64, callback_args: &SRombergCbackArgs) -> f64 {
+    let mut outer_args = *callback_args;
+    outer_args.adj2 = callback_args.adj1 - s;
+    outer_args.sdvir = s / callback_args.num_hsps as f64;
+    let mx = if s > 0.0 { outer_args.sdvir + 3.0 } else { 3.0 };
+    crate::math::romberg_integrate(
+        |x| s_outer_integral_cback(x, &outer_args),
+        0.0,
+        mx,
+        callback_args.epsilon,
+        0,
+        1,
+    )
+}
+
 /// Port of NCBI `s_BlastSumPCalc` (`blast_stat.c:4269`).
 /// Computes the Sum P-value via double Romberg integration for
 /// `r ≥ 5` (callers with smaller `r` should go through `sum_p` instead).
@@ -468,44 +1348,21 @@ pub fn sum_p_calc(r: u32, s: f64) -> f64 {
         (mean + 6.0 * stddev, 2)
     };
 
-    let num_hsps = r_i;
-    let num_hsps_minus_2 = r_i - 2;
     // NCBI `blast_stat.c:4338`: `adj1 = num_hsps_minus_2*logr
     //                                   - BLAST_LnGammaInt(r1)
     //                                   - BLAST_LnGammaInt(r)`.
-    let adj1 = num_hsps_minus_2 as f64 * logr
-        - crate::math::ln_gamma_int(r1 as i32)
-        - crate::math::ln_gamma_int(r_i);
     /// NCBI `kSumpEpsilon` (`blast_stat.c:4276`): Romberg convergence
     /// epsilon for the sum-P double integral.
     const EPSILON: f64 = 0.002;
-
-    // Inner integrand: the callback nested inside the outer Romberg.
-    // Mirrors `s_OuterIntegralCback` + `s_InnerIntegralCback`.
-    let integrand = |sv: f64| {
-        let adj2 = adj1 - sv;
-        let sdvir = sv / num_hsps as f64;
-        let mx = if sv > 0.0 { sdvir + 3.0 } else { 3.0 };
-        crate::math::romberg_integrate(
-            |x| {
-                let y = (x - sdvir).exp();
-                if y == f64::INFINITY {
-                    return 0.0;
-                }
-                if num_hsps_minus_2 == 0 {
-                    return (adj2 - y).exp();
-                }
-                if x == 0.0 {
-                    return 0.0;
-                }
-                (num_hsps_minus_2 as f64 * x.ln() + adj2 - y).exp()
-            },
-            0.0,
-            mx,
-            EPSILON,
-            0,
-            1,
-        )
+    let callback_args = SRombergCbackArgs {
+        num_hsps: r_i,
+        num_hsps_minus_2: r_i - 2,
+        adj1: (r_i - 2) as f64 * logr
+            - crate::math::ln_gamma_int(r1 as i32)
+            - crate::math::ln_gamma_int(r_i),
+        adj2: 0.0,
+        sdvir: 0.0,
+        epsilon: EPSILON,
     };
 
     // NCBI iteratively tightens `itmin` if the outer integral returns a
@@ -513,7 +1370,14 @@ pub fn sum_p_calc(r: u32, s: f64) -> f64 {
     let mut itmin = itmin0;
     let mut d;
     loop {
-        d = crate::math::romberg_integrate(integrand, s, t0, EPSILON, 0, itmin);
+        d = crate::math::romberg_integrate(
+            |sv| s_inner_integral_cback(sv, &callback_args),
+            s,
+            t0,
+            EPSILON,
+            0,
+            itmin,
+        );
         if d == f64::INFINITY {
             return d;
         }
@@ -537,6 +1401,22 @@ pub fn karlin_p_to_e(p: f64) -> f64 {
     }
     // NCBI: `return -BLAST_Log1p(-p)`.
     -crate::math::log1p(-p)
+}
+
+/// Port of NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`).
+pub fn blast_karlin_p_to_e(p: f64) -> f64 {
+    if !(0.0..=1.0).contains(&p) {
+        return i32::MIN as f64;
+    }
+    if p == 1.0 {
+        return i32::MAX as f64;
+    }
+    -crate::math::log1p(-p)
+}
+
+/// Port of NCBI `BLAST_KarlinEtoP` (`blast_stat.c:4189`).
+pub fn karlin_e_to_p(evalue: f64) -> f64 {
+    -crate::math::expm1(-evalue)
 }
 
 const SUM_E_CAP: f64 = i32::MAX as f64;
@@ -578,6 +1458,30 @@ pub fn small_gap_sum_e(
     Some(sum_e)
 }
 
+/// Port of NCBI `BLAST_SmallGapSumE` (`blast_stat.c:4418`) with the C
+/// return type and argument shape.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_small_gap_sum_e(
+    starting_points: i32,
+    num: i16,
+    xsum: f64,
+    query_length: i32,
+    subject_length: i32,
+    searchsp_eff: i64,
+    weight_divisor: f64,
+) -> f64 {
+    small_gap_sum_e(
+        starting_points,
+        num.max(0) as u32,
+        xsum,
+        query_length,
+        subject_length,
+        searchsp_eff as f64,
+        weight_divisor,
+    )
+    .unwrap_or(SUM_E_CAP)
+}
+
 /// Port of NCBI `BLAST_UnevenGapSumE` (`blast_stat.c:4491`).
 /// Used for HSP collections with asymmetric gap widths — e.g. exons
 /// separated by introns in translated searches.
@@ -614,6 +1518,32 @@ pub fn uneven_gap_sum_e(
     Some(sum_e)
 }
 
+/// Port of NCBI `BLAST_UnevenGapSumE` (`blast_stat.c:4491`) with the C
+/// return type and argument shape.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_uneven_gap_sum_e(
+    query_start_points: i32,
+    subject_start_points: i32,
+    num: i16,
+    xsum: f64,
+    query_length: i32,
+    subject_length: i32,
+    searchsp_eff: i64,
+    weight_divisor: f64,
+) -> f64 {
+    uneven_gap_sum_e(
+        query_start_points,
+        subject_start_points,
+        num.max(0) as u32,
+        xsum,
+        query_length,
+        subject_length,
+        searchsp_eff as f64,
+        weight_divisor,
+    )
+    .unwrap_or(SUM_E_CAP)
+}
+
 /// Port of NCBI `BLAST_LargeGapSumE` (`blast_stat.c:4532`).
 /// Computes the e-value of a collection of distinct alignments
 /// separated by arbitrarily large gaps.
@@ -645,6 +1575,27 @@ pub fn large_gap_sum_e(
     Some(sum_e)
 }
 
+/// Port of NCBI `BLAST_LargeGapSumE` (`blast_stat.c:4532`) with the C
+/// return type and argument shape.
+pub fn blast_large_gap_sum_e(
+    num: i16,
+    xsum: f64,
+    query_length: i32,
+    subject_length: i32,
+    searchsp_eff: i64,
+    weight_divisor: f64,
+) -> f64 {
+    large_gap_sum_e(
+        num.max(0) as u32,
+        xsum,
+        query_length,
+        subject_length,
+        searchsp_eff as f64,
+        weight_divisor,
+    )
+    .unwrap_or(SUM_E_CAP)
+}
+
 /// Score frequency distribution.
 #[derive(Debug, Clone)]
 pub struct ScoreFreq {
@@ -654,6 +1605,322 @@ pub struct ScoreFreq {
     pub obs_max: i32,
     pub score_avg: f64,
     pub sprob: Vec<f64>, // probability for each score value
+}
+
+/// Port of NCBI static `BlastScoreChk` (`blast_stat.c:2095`).
+pub fn blast_score_chk(lo: i32, hi: i32) -> i16 {
+    if lo >= 0
+        || hi <= 0
+        || !(BLAST_SCORE_MIN..=BLAST_SCORE_MAX).contains(&lo)
+        || !(BLAST_SCORE_MIN..=BLAST_SCORE_MAX).contains(&hi)
+    {
+        return 1;
+    }
+    if hi - lo > BLAST_SCORE_MAX - BLAST_SCORE_MIN {
+        return 1;
+    }
+    0
+}
+
+/// Port of NCBI `Blast_ScoreFreqNew` (`blast_stat.c:2113`).
+pub fn blast_score_freq_new(score_min: i32, score_max: i32) -> Option<ScoreFreq> {
+    if blast_score_chk(score_min, score_max) != 0 {
+        return None;
+    }
+    let range = (score_max - score_min + 1) as usize;
+    Some(ScoreFreq {
+        score_min,
+        score_max,
+        obs_min: 0,
+        obs_max: 0,
+        score_avg: 0.0,
+        sprob: vec![0.0; range],
+    })
+}
+
+pub fn blast_score_freq_free(sfp: &mut Option<ScoreFreq>) -> Option<ScoreFreq> {
+    if let Some(sfp) = sfp.as_mut() {
+        sfp.sprob.clear();
+    }
+    *sfp = None;
+    None
+}
+
+impl ScoreFreq {
+    #[inline]
+    fn p(&self, score: i32) -> f64 {
+        if score < self.score_min || score > self.score_max {
+            0.0
+        } else {
+            self.sprob[(score - self.score_min) as usize]
+        }
+    }
+
+    #[inline]
+    fn p_mut(&mut self, score: i32) -> Option<&mut f64> {
+        if score < self.score_min || score > self.score_max {
+            None
+        } else {
+            Some(&mut self.sprob[(score - self.score_min) as usize])
+        }
+    }
+}
+
+/// Port of NCBI static `BlastScoreFreqCalc` (`blast_stat.c:2151`).
+pub fn blast_score_freq_calc(
+    sbp: Option<&BlastScoreBlk>,
+    sfp: Option<&mut ScoreFreq>,
+    rfp1: Option<&BlastResFreq>,
+    rfp2: Option<&BlastResFreq>,
+) -> i16 {
+    let (Some(sbp), Some(sfp), Some(rfp1), Some(rfp2)) = (sbp, sfp, rfp1, rfp2) else {
+        return 1;
+    };
+    if sbp.loscore < sfp.score_min || sbp.hiscore > sfp.score_max {
+        return 1;
+    }
+    if rfp1.prob.len() < sbp.alphabet_size
+        || rfp2.prob.len() < sbp.alphabet_size
+        || sbp.matrix.data.len() < sbp.alphabet_size
+    {
+        return 1;
+    }
+
+    for prob in &mut sfp.sprob {
+        *prob = 0.0;
+    }
+    for index1 in 0..sbp.alphabet_size {
+        if sbp.matrix.data[index1].len() < sbp.alphabet_size {
+            return 1;
+        }
+        for index2 in 0..sbp.alphabet_size {
+            let score = sbp.matrix.data[index1][index2];
+            if score >= sbp.loscore {
+                if let Some(slot) = sfp.p_mut(score) {
+                    *slot += rfp1.prob[index1] * rfp2.prob[index2];
+                }
+            }
+        }
+    }
+
+    let mut score_sum = 0.0;
+    let mut obs_min = BLAST_SCORE_MIN;
+    let mut obs_max = BLAST_SCORE_MIN;
+    for score in sfp.score_min..=sfp.score_max {
+        let prob = sfp.p(score);
+        if prob > 0.0 {
+            score_sum += prob;
+            obs_max = score;
+            if obs_min == BLAST_SCORE_MIN {
+                obs_min = score;
+            }
+        }
+    }
+    sfp.obs_min = obs_min;
+    sfp.obs_max = obs_max;
+
+    let mut score_avg = 0.0;
+    if score_sum > 0.0001 || score_sum < -0.0001 {
+        for score in obs_min..=obs_max {
+            if let Some(slot) = sfp.p_mut(score) {
+                *slot /= score_sum;
+                score_avg += score as f64 * *slot;
+            }
+        }
+    }
+    sfp.score_avg = score_avg;
+    0
+}
+
+/// Port of NCBI `Blast_KarlinBlkNew` (`blast_stat.c:2860`).
+pub fn blast_karlin_blk_new() -> KarlinBlk {
+    KarlinBlk::default()
+}
+
+fn score_freq_to_sf_dist(sfp: &ScoreFreq) -> SfDist {
+    SfDist {
+        score_min: sfp.score_min,
+        score_max: sfp.score_max,
+        obs_min: sfp.obs_min,
+        obs_max: sfp.obs_max,
+        score_avg: sfp.score_avg,
+        probs: sfp.sprob.clone(),
+    }
+}
+
+/// Port of NCBI `Blast_KarlinBlkUngappedCalc` (`blast_stat.c:2699`).
+pub fn blast_karlin_blk_ungapped_calc(kbp: Option<&mut KarlinBlk>, sfp: Option<&ScoreFreq>) -> i16 {
+    let (Some(kbp), Some(sfp)) = (kbp, sfp) else {
+        return 1;
+    };
+    let dist = score_freq_to_sf_dist(sfp);
+    kbp.lambda = compute_lambda(&dist);
+    if kbp.lambda < 0.0 {
+        kbp.lambda = -1.0;
+        kbp.h = -1.0;
+        kbp.k = -1.0;
+        kbp.log_k = f64::INFINITY;
+        return 1;
+    }
+    kbp.h = compute_h(&dist, kbp.lambda);
+    if kbp.h < 0.0 {
+        kbp.lambda = -1.0;
+        kbp.h = -1.0;
+        kbp.k = -1.0;
+        kbp.log_k = f64::INFINITY;
+        return 1;
+    }
+    kbp.k = compute_k(&dist, kbp.lambda, kbp.h);
+    if kbp.k < 0.0 {
+        kbp.lambda = -1.0;
+        kbp.h = -1.0;
+        kbp.k = -1.0;
+        kbp.log_k = f64::INFINITY;
+        return 1;
+    }
+    kbp.log_k = kbp.k.ln();
+    0
+}
+
+/// Port of NCBI `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`).
+pub fn blast_score_blk_kbp_ungapped_calc(
+    program: crate::program::ProgramType,
+    sbp: Option<&mut BlastScoreBlk>,
+    query: Option<&[u8]>,
+    query_info: Option<&mut crate::queryinfo::QueryInfo>,
+    blast_message: Option<&mut Option<Box<crate::diagnostics::BlastMessage>>>,
+) -> i16 {
+    let (Some(sbp), Some(query), Some(query_info)) = (sbp, query, query_info) else {
+        return 1;
+    };
+
+    let status = blast_score_blk_kbp_ideal_calc(Some(sbp));
+    if status != 0 {
+        return status;
+    }
+    let Some(mut stdrfp) = blast_res_freq_new(Some(sbp)) else {
+        return 1;
+    };
+    if blast_res_freq_std_comp(Some(sbp), Some(&mut stdrfp)) != 0 {
+        return 1;
+    }
+    let Some(mut rfp) = blast_res_freq_new(Some(sbp)) else {
+        return 1;
+    };
+
+    let context_count = query_info.contexts.len();
+    if sbp.sfp.len() < context_count {
+        sbp.sfp.resize_with(context_count, || None);
+    }
+    if sbp.kbp_std.len() < context_count {
+        sbp.kbp_std.resize_with(context_count, KarlinBlk::default);
+    }
+    if sbp.kbp_psi.len() < context_count {
+        sbp.kbp_psi.resize_with(context_count, KarlinBlk::default);
+    }
+    if sbp.kbp.len() < context_count {
+        sbp.kbp.resize_with(context_count, KarlinBlk::default);
+    }
+
+    let check_ideal = program == crate::program::BLASTX
+        || program == crate::program::TBLASTX
+        || program == crate::program::RPS_TBLASTN;
+    let mut valid_context = false;
+    let mut blast_message = blast_message;
+
+    for context in 0..context_count {
+        if !query_info.contexts[context].is_valid {
+            continue;
+        }
+        let query_length = query_info.contexts[context].query_length;
+        let context_offset = query_info.contexts[context].query_offset;
+        if query_length <= 0 || context_offset < 0 {
+            query_info.contexts[context].is_valid = false;
+            continue;
+        }
+        let begin = context_offset as usize;
+        let end = begin.saturating_add(query_length as usize);
+        if end > query.len() {
+            query_info.contexts[context].is_valid = false;
+            continue;
+        }
+
+        let buffer = &query[begin..end];
+        if blast_res_freq_string(Some(sbp), Some(&mut rfp), Some(buffer), query_length) != 0 {
+            query_info.contexts[context].is_valid = false;
+            continue;
+        }
+        let Some(mut sfp) = blast_score_freq_new(sbp.loscore, sbp.hiscore) else {
+            query_info.contexts[context].is_valid = false;
+            continue;
+        };
+        if blast_score_freq_calc(Some(sbp), Some(&mut sfp), Some(&rfp), Some(&stdrfp)) != 0 {
+            query_info.contexts[context].is_valid = false;
+            continue;
+        }
+
+        let mut kbp = blast_karlin_blk_new();
+        let loop_status = blast_karlin_blk_ungapped_calc(Some(&mut kbp), Some(&sfp));
+        if loop_status != 0 {
+            query_info.contexts[context].is_valid = false;
+            sbp.sfp[context] = None;
+            sbp.kbp_std[context] = KarlinBlk::default();
+            if !crate::program::blast_query_is_translated(program) {
+                if let Some(messages) = blast_message.as_mut() {
+                    let _ = crate::diagnostics::blast_message_write(
+                        *messages,
+                        crate::diagnostics::BlastSeverity::Warning,
+                        context as i32,
+                        crate::diagnostics::K_BLAST_ERR_MSG_CANT_CALCULATE_UNGAPPED_KA_PARAMS,
+                    );
+                }
+            }
+            continue;
+        }
+        if check_ideal {
+            if let Some(ideal) = sbp.kbp_ideal.as_ref() {
+                if kbp.lambda >= ideal.lambda {
+                    let _ = blast_karlin_blk_copy(Some(&mut kbp), Some(ideal));
+                }
+            }
+        }
+
+        let mut psi_kbp = blast_karlin_blk_new();
+        let loop_status = blast_karlin_blk_ungapped_calc(Some(&mut psi_kbp), Some(&sfp));
+        if loop_status != 0 {
+            query_info.contexts[context].is_valid = false;
+            sbp.sfp[context] = None;
+            sbp.kbp_std[context] = KarlinBlk::default();
+            sbp.kbp_psi[context] = KarlinBlk::default();
+            continue;
+        }
+
+        sbp.sfp[context] = Some(sfp);
+        sbp.kbp_std[context] = kbp;
+        sbp.kbp_psi[context] = psi_kbp;
+        valid_context = true;
+    }
+
+    if !valid_context {
+        if crate::program::blast_query_is_translated(program) {
+            if let Some(messages) = blast_message.as_mut() {
+                let _ = crate::diagnostics::blast_message_write(
+                    *messages,
+                    crate::diagnostics::BlastSeverity::Warning,
+                    crate::diagnostics::K_BLAST_MESSAGE_NO_CONTEXT,
+                    crate::diagnostics::K_BLAST_ERR_MSG_CANT_CALCULATE_UNGAPPED_KA_PARAMS,
+                );
+            }
+        }
+        return 1;
+    }
+
+    sbp.kbp = if crate::program::blast_query_is_pssm(program) {
+        sbp.kbp_psi.clone()
+    } else {
+        sbp.kbp_std.clone()
+    };
+    0
 }
 
 /// Gapped Karlin-Altschul parameters (precomputed tables).
@@ -693,8 +1960,8 @@ pub struct GumbelBlk {
     pub db_length: i64, // total database length
 }
 
-#[derive(Debug, Clone, Copy)]
-struct MatrixStatRow {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatrixStatRow {
     gap_open: i32,
     gap_extend: i32,
     lambda: f64,
@@ -702,7 +1969,7 @@ struct MatrixStatRow {
     h: f64,
     alpha: f64,
     beta: f64,
-    _theta: f64,
+    _gumbel_a: f64,
     alpha_v: f64,
     sigma: f64,
 }
@@ -716,7 +1983,7 @@ impl MatrixStatRow {
         h: f64,
         alpha: f64,
         beta: f64,
-        _theta: f64,
+        _gumbel_a: f64,
         alpha_v: f64,
         sigma: f64,
     ) -> Self {
@@ -728,7 +1995,7 @@ impl MatrixStatRow {
             h,
             alpha,
             beta,
-            _theta,
+            _gumbel_a,
             alpha_v,
             sigma,
         }
@@ -840,6 +2107,21 @@ pub fn spouge_evalue(
     (area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor).max(0.0)
 }
 
+/// Port of NCBI `BLAST_SpougeStoE` (`blast_stat.c:5176`) with
+/// pointer-shaped arguments.
+pub fn blast_spouge_sto_e(
+    y_: i32,
+    kbp: Option<&KarlinBlk>,
+    gbp: Option<&GumbelBlk>,
+    m_: i32,
+    n_: i32,
+) -> f64 {
+    let (Some(kbp), Some(gbp)) = (kbp, gbp) else {
+        return -1.0;
+    };
+    spouge_evalue(y_, kbp, gbp, m_, n_)
+}
+
 /// Port of NCBI `BLAST_SpougeEtoS` (`blast_stat.c:5236`). Binary-search the
 /// raw score `S` such that `BLAST_SpougeStoE(S, kbp, gbp, m, n) <= e0`.
 ///
@@ -889,6 +2171,21 @@ pub fn spouge_etos(e0: f64, kbp: &KarlinBlk, gbp: &GumbelBlk, m: i32, n: i32) ->
     a
 }
 
+/// Port of NCBI `BLAST_SpougeEtoS` (`blast_stat.c:5236`) with
+/// pointer-shaped arguments.
+pub fn blast_spouge_eto_s(
+    e0: f64,
+    kbp: Option<&KarlinBlk>,
+    gbp: Option<&GumbelBlk>,
+    m: i32,
+    n: i32,
+) -> i32 {
+    let (Some(kbp), Some(gbp)) = (kbp, gbp) else {
+        return BLAST_SCORE_MIN;
+    };
+    spouge_etos(e0, kbp, gbp, m, n)
+}
+
 /// Build Gumbel block for protein BLOSUM62 with given gap costs.
 /// Port of Blast_GumbelBlkLoadFromTables from blast_stat.c:3696.
 pub fn protein_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Option<GumbelBlk> {
@@ -925,6 +2222,143 @@ pub fn matrix_gumbel_blk(
 /// Port of `Blast_GumbelBlkLoadFromTables` using `prot_idenity_values[]`.
 pub fn identity_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Option<GumbelBlk> {
     matrix_gumbel_blk("IDENTITY", gap_open, gap_extend, db_length)
+}
+
+/// Port of NCBI `Blast_KarlinBlkGappedLoadFromTables`
+/// (`blast_stat.c:3577`).
+pub fn blast_karlin_blk_gapped_load_from_tables(
+    kbp: Option<&mut KarlinBlk>,
+    gap_open: i32,
+    gap_extend: i32,
+    matrix_name: Option<&str>,
+    standard_only: bool,
+) -> i16 {
+    let Some(matrix_name) = matrix_name else {
+        return -1;
+    };
+    let Some(rows) = matrix_stat_rows_with_standard_only(matrix_name, standard_only) else {
+        return 1;
+    };
+    let Some(row) = rows
+        .iter()
+        .copied()
+        .find(|row| row.gap_open == gap_open && row.gap_extend == gap_extend)
+    else {
+        return 2;
+    };
+    if let Some(kbp) = kbp {
+        kbp.lambda = row.lambda;
+        kbp.k = row.k;
+        kbp.log_k = row.k.ln();
+        kbp.h = row.h;
+        kbp.round_down = false;
+    }
+    0
+}
+
+/// Port of NCBI `Blast_KarlinBlkGappedCalc` (`blast_stat.c:3527`).
+pub fn blast_karlin_blk_gapped_calc(
+    kbp: Option<&mut KarlinBlk>,
+    gap_open: i32,
+    gap_extend: i32,
+    matrix_name: Option<&str>,
+    error_return: Option<&mut Option<Box<crate::diagnostics::BlastMessage>>>,
+) -> i16 {
+    let status =
+        blast_karlin_blk_gapped_load_from_tables(kbp, gap_open, gap_extend, matrix_name, false);
+    if status != 0 {
+        report_matrix_table_error(error_return, status, matrix_name, gap_open, gap_extend);
+    }
+    status
+}
+
+/// Port of NCBI `Blast_GumbelBlkLoadFromTables` (`blast_stat.c:3696`).
+pub fn blast_gumbel_blk_load_from_tables(
+    gbp: Option<&mut GumbelBlk>,
+    gap_open: i32,
+    gap_extend: i32,
+    matrix_name: Option<&str>,
+) -> i16 {
+    let Some(matrix_name) = matrix_name else {
+        return -1;
+    };
+    if matrix_stat_rows(matrix_name).is_none() {
+        return 1;
+    }
+    let Some(gumbel) = matrix_gumbel_blk(matrix_name, gap_open, gap_extend, 0) else {
+        return 2;
+    };
+    if let Some(gbp) = gbp {
+        *gbp = gumbel;
+    }
+    0
+}
+
+/// Port of NCBI `Blast_GumbelBlkCalc` (`blast_stat.c:3652`).
+pub fn blast_gumbel_blk_calc(
+    gbp: Option<&mut GumbelBlk>,
+    gap_open: i32,
+    gap_extend: i32,
+    matrix_name: Option<&str>,
+    error_return: Option<&mut Option<Box<crate::diagnostics::BlastMessage>>>,
+) -> i16 {
+    let status = blast_gumbel_blk_load_from_tables(gbp, gap_open, gap_extend, matrix_name);
+    if status != 0 {
+        report_matrix_table_error(error_return, status, matrix_name, gap_open, gap_extend);
+    }
+    status
+}
+
+fn report_matrix_table_error(
+    error_return: Option<&mut Option<Box<crate::diagnostics::BlastMessage>>>,
+    status: i16,
+    matrix_name: Option<&str>,
+    gap_open: i32,
+    gap_extend: i32,
+) {
+    let Some(error_return) = error_return else {
+        return;
+    };
+    let Some(matrix_name) = matrix_name else {
+        return;
+    };
+    match status {
+        1 => {
+            crate::diagnostics::blast_message_write(
+                error_return,
+                crate::diagnostics::BlastSeverity::Error,
+                crate::diagnostics::K_BLAST_MESSAGE_NO_CONTEXT,
+                &format!("{matrix_name} is not a supported matrix"),
+            );
+            for info in blast_load_matrix_values(false) {
+                crate::diagnostics::blast_message_write(
+                    error_return,
+                    crate::diagnostics::BlastSeverity::Error,
+                    crate::diagnostics::K_BLAST_MESSAGE_NO_CONTEXT,
+                    &format!("{} is a supported matrix", info.name),
+                );
+            }
+        }
+        2 => {
+            crate::diagnostics::blast_message_write(
+                error_return,
+                crate::diagnostics::BlastSeverity::Error,
+                crate::diagnostics::K_BLAST_MESSAGE_NO_CONTEXT,
+                &format!(
+                    "Gap existence and extension values of {gap_open} and {gap_extend} not supported for {matrix_name}"
+                ),
+            );
+            for message in blast_karlin_report_allowed_values(matrix_name) {
+                crate::diagnostics::blast_message_write(
+                    error_return,
+                    crate::diagnostics::BlastSeverity::Error,
+                    crate::diagnostics::K_BLAST_MESSAGE_NO_CONTEXT,
+                    &message,
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Compute ungapped Karlin-Altschul lambda parameter for nucleotide scoring.
@@ -1369,6 +2803,17 @@ fn matrix_stat_rows(matrix_name: &str) -> Option<&'static [MatrixStatRow]> {
     }
 }
 
+fn matrix_stat_rows_with_standard_only(
+    matrix_name: &str,
+    standard_only: bool,
+) -> Option<&'static [MatrixStatRow]> {
+    if standard_only && matrix_name.eq_ignore_ascii_case("IDENTITY") {
+        None
+    } else {
+        matrix_stat_rows(matrix_name)
+    }
+}
+
 fn lookup_matrix_stat_row(
     matrix_name: &str,
     gap_open: i32,
@@ -1681,6 +3126,31 @@ pub fn protein_std_freq_ncbistdaa() -> [f64; 28] {
     out
 }
 
+fn protein_std_freq_letters() -> [(u8, f64); 20] {
+    [
+        (b'A', 78.05),
+        (b'C', 19.25),
+        (b'D', 53.64),
+        (b'E', 62.95),
+        (b'F', 38.56),
+        (b'G', 73.77),
+        (b'H', 21.99),
+        (b'I', 51.42),
+        (b'K', 57.44),
+        (b'L', 90.19),
+        (b'M', 22.43),
+        (b'N', 44.87),
+        (b'P', 52.03),
+        (b'Q', 42.64),
+        (b'R', 51.29),
+        (b'S', 71.20),
+        (b'T', 58.41),
+        (b'V', 64.41),
+        (b'W', 13.30),
+        (b'Y', 32.16),
+    ]
+}
+
 /// Compute effective search space.
 /// eff_length = db_length - num_seqs * length_adjustment
 /// eff_query_length = query_length - length_adjustment
@@ -1696,13 +3166,276 @@ pub fn compute_search_space(
     eff_query as f64 * eff_db as f64
 }
 
+const TARGET_HIT_PROB: f64 = 0.98;
+
+/// Rust owner for NCBI `MatrixData` scratch state in `blast_tune.c`.
+#[derive(Debug, Clone, Default)]
+pub struct MatrixData {
+    pub matrix_dim_alloc: i32,
+    pub matrix_dim: i32,
+    pub hit_probability: f64,
+    pub percent_identity: f64,
+    pub power_matrix: Vec<f64>,
+    pub prod_matrix: Vec<f64>,
+}
+
+/// Port of NCBI internal `s_MatrixDataReset` (`blast_tune.c:125`).
+pub fn s_matrix_data_reset(
+    m: Option<&mut MatrixData>,
+    new_word_size: i32,
+    percent_identity: f64,
+) -> i16 {
+    let Some(m) = m else {
+        return -1;
+    };
+
+    m.hit_probability = 0.0;
+    m.percent_identity = percent_identity;
+    m.matrix_dim = new_word_size + 1;
+
+    if m.matrix_dim > m.matrix_dim_alloc {
+        let Some(num_cells) = (m.matrix_dim as usize).checked_mul(m.matrix_dim as usize) else {
+            m.power_matrix.clear();
+            m.prod_matrix.clear();
+            return -2;
+        };
+        m.matrix_dim_alloc = m.matrix_dim;
+        m.power_matrix.resize(num_cells, 0.0);
+        m.prod_matrix.resize(num_cells, 0.0);
+    }
+    0
+}
+
+fn s_set_initial_matrix(matrix: &mut [f64], matrix_dim: i32, identity: f64) {
+    let dim = matrix_dim.max(0) as usize;
+    matrix[..dim * dim].fill(0.0);
+    for i in 0..dim.saturating_sub(1) {
+        let row = i * dim;
+        matrix[row] = 1.0 - identity;
+        matrix[row + i + 1] = identity;
+    }
+    if dim > 0 {
+        matrix[(dim - 1) * dim + dim - 1] = 1.0;
+    }
+}
+
+fn s_matrix_multiply(a: &[f64], identity: f64, prod: &mut [f64], dim: i32) {
+    let dim = dim.max(0) as usize;
+    let comp_identity = 1.0 - identity;
+
+    for i in 0..dim {
+        let row = i * dim;
+        let accum: f64 = a[row..row + dim.saturating_sub(1)].iter().sum();
+        prod[row] = comp_identity * accum;
+    }
+
+    for i in 0..dim {
+        let row = i * dim;
+        for j in 1..dim {
+            prod[row + j] = identity * a[row + j - 1];
+        }
+    }
+
+    if dim > 0 {
+        for i in 0..dim {
+            let row = i * dim;
+            prod[row + dim - 1] += a[row + dim - 1];
+        }
+    }
+}
+
+/// Port of NCBI internal `s_MatrixSquare` (`blast_tune.c:243`).
+pub fn s_matrix_square(a: &[f64], prod: &mut [f64], dim: i32) {
+    let dim = dim.max(0) as usize;
+    let full_entries = dim & !3;
+
+    for i in 0..dim {
+        let row = i * dim;
+        for j in 0..dim {
+            let mut accum = 0.0;
+            let mut k = 0;
+            while k < full_entries {
+                accum += a[row + k] * a[j + k * dim]
+                    + a[row + k + 1] * a[j + (k + 1) * dim]
+                    + a[row + k + 2] * a[j + (k + 2) * dim]
+                    + a[row + k + 3] * a[j + (k + 3) * dim];
+                k += 4;
+            }
+            while k < dim {
+                accum += a[row + k] * a[j + k * dim];
+                k += 1;
+            }
+            prod[row + j] = accum;
+        }
+    }
+}
+
+fn s_find_hit_probability(
+    m: &mut MatrixData,
+    word_size: i32,
+    min_percent_identity: f64,
+    min_align_length: i32,
+) -> i16 {
+    if min_align_length == 0 {
+        return -3;
+    }
+    if s_matrix_data_reset(Some(m), word_size, min_percent_identity) != 0 {
+        return -4;
+    }
+
+    let dim = m.matrix_dim as usize;
+    s_set_initial_matrix(&mut m.power_matrix, m.matrix_dim, min_percent_identity);
+
+    let mut mask = 0x8000_0000u32;
+    while (min_align_length as u32 & mask) == 0 {
+        mask /= 2;
+    }
+
+    mask /= 2;
+    let mut num_squares = 0;
+    while mask != 0 {
+        if num_squares == 0 {
+            s_matrix_multiply(
+                &m.power_matrix[..dim * dim],
+                m.percent_identity,
+                &mut m.prod_matrix[..dim * dim],
+                m.matrix_dim,
+            );
+        } else {
+            s_matrix_square(
+                &m.power_matrix[..dim * dim],
+                &mut m.prod_matrix[..dim * dim],
+                m.matrix_dim,
+            );
+        }
+        std::mem::swap(&mut m.prod_matrix, &mut m.power_matrix);
+
+        if (min_align_length as u32 & mask) != 0 {
+            s_matrix_multiply(
+                &m.power_matrix[..dim * dim],
+                m.percent_identity,
+                &mut m.prod_matrix[..dim * dim],
+                m.matrix_dim,
+            );
+            std::mem::swap(&mut m.prod_matrix, &mut m.power_matrix);
+        }
+
+        mask /= 2;
+        num_squares += 1;
+    }
+
+    m.hit_probability = m.power_matrix[dim - 1];
+    0
+}
+
+/// Port of NCBI internal `s_FindWordSize` (`blast_tune.c:362`).
+pub fn s_find_word_size(
+    m: Option<&mut MatrixData>,
+    min_percent_identity: f64,
+    min_align_length: i32,
+) -> i32 {
+    let Some(m) = m else {
+        return 0;
+    };
+
+    let k_min_w: f64 = 4.0;
+    let k_max_w: f64 = 110.0;
+
+    let mut w1 = 28.0;
+    if s_find_hit_probability(m, (w1 + 0.5) as i32, min_percent_identity, min_align_length) != 0 {
+        return 0;
+    }
+    let mut p1 = m.hit_probability - TARGET_HIT_PROB;
+
+    let mut w0 = 11.0;
+    if s_find_hit_probability(m, (w0 + 0.5) as i32, min_percent_identity, min_align_length) != 0 {
+        return 0;
+    }
+    let mut p0 = m.hit_probability - TARGET_HIT_PROB;
+
+    if p1 > 0.0 {
+        while p1 > 0.0 && w1 < k_max_w {
+            w0 = w1;
+            p0 = p1;
+            w1 = (2.0 * w1).min(k_max_w);
+            if s_find_hit_probability(m, (w1 + 0.5) as i32, min_percent_identity, min_align_length)
+                != 0
+            {
+                return 0;
+            }
+            p1 = m.hit_probability - TARGET_HIT_PROB;
+        }
+
+        if p1 > 0.0 {
+            return (w1 + 0.5) as i32;
+        }
+    } else if p0 < 0.0 {
+        w1 = w0;
+        p1 = p0;
+        w0 = k_min_w;
+        if s_find_hit_probability(m, (w0 + 0.5) as i32, min_percent_identity, min_align_length) != 0
+        {
+            return 0;
+        }
+        p0 = m.hit_probability - TARGET_HIT_PROB;
+
+        if p0 < 0.0 {
+            return (w0 + 0.5) as i32;
+        }
+    }
+
+    while (w1 - w0).abs() > 1.0 {
+        let w2 = (w0 + w1) / 2.0;
+        if s_find_hit_probability(m, (w2 + 0.5) as i32, min_percent_identity, min_align_length) != 0
+        {
+            return 0;
+        }
+        let p2 = m.hit_probability - TARGET_HIT_PROB;
+
+        if p2 > 0.0 {
+            w0 = w2;
+            p0 = p2;
+        } else {
+            w1 = w2;
+            p1 = p2;
+        }
+    }
+
+    let _ = (p0, p1);
+    (w0 + 0.5) as i32
+}
+
+/// Port of NCBI `BLAST_FindBestNucleotideWordSize` (`blast_tune.c:468`).
+pub fn blast_find_best_nucleotide_word_size(
+    min_percent_identity: f64,
+    mut min_align_length: i32,
+) -> i32 {
+    if !(0.6..1.0).contains(&min_percent_identity) {
+        return 0;
+    }
+    if min_align_length > 10_000 {
+        min_align_length = 10_000;
+    } else if min_align_length < 0 {
+        return 0;
+    } else if min_align_length < 8 {
+        return 4;
+    }
+
+    let mut matrix_data = MatrixData::default();
+    s_find_word_size(
+        Some(&mut matrix_data),
+        min_percent_identity,
+        min_align_length,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Gapped Karlin-Altschul parameter lookup (exact C-compatible tables)
 // Port of Blast_KarlinBlkNuclGappedCalc from blast_stat.c
 // ---------------------------------------------------------------------------
 
 /// Each row: [gap_open, gap_extend, lambda, K, H, alpha, beta, theta]
-type KbpTableRow = [f64; 8];
+pub type KbpTableRow = [f64; 8];
 
 const KBPT_1_5: &[KbpTableRow] = &[
     [0.0, 0.0, 1.39, 0.747, 1.38, 1.00, 0.0, 100.0],
@@ -1792,6 +3525,213 @@ struct KbpTableMeta {
     gap_open_max: i32,
     gap_extend_max: i32,
     round_down: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixInfo {
+    pub name: String,
+    pub values: &'static [MatrixStatRow],
+    pub prefs: Vec<i32>,
+    pub max_number_values: i32,
+}
+
+/// Port-shaped Rust equivalent of NCBI static `MatrixInfoNew`.
+pub fn matrix_info_new(name: &str) -> Option<MatrixInfo> {
+    let values = matrix_stat_rows(name)?;
+    Some(MatrixInfo {
+        name: name.to_string(),
+        values,
+        prefs: Vec::new(),
+        max_number_values: values.len() as i32,
+    })
+}
+
+/// Rust ownership equivalent of NCBI static `MatrixInfoDestruct`
+/// (`blast_stat.c:2890`).
+pub fn matrix_info_destruct(matrix_info: &mut Option<MatrixInfo>) -> Option<MatrixInfo> {
+    if let Some(info) = matrix_info.as_mut() {
+        info.name.clear();
+        info.prefs.clear();
+        info.max_number_values = 0;
+    }
+    *matrix_info = None;
+    None
+}
+
+const STANDARD_MATRIX_NAMES: &[&str] = &[
+    "BLOSUM80", "BLOSUM62", "BLOSUM50", "BLOSUM45", "PAM250", "BLOSUM90", "PAM30", "PAM70",
+];
+
+const ALL_MATRIX_NAMES: &[&str] = &[
+    "BLOSUM80", "BLOSUM62", "BLOSUM50", "BLOSUM45", "PAM250", "BLOSUM90", "PAM30", "PAM70",
+    "IDENTITY",
+];
+
+/// Rust-owned equivalent of NCBI `BlastLoadMatrixValues`
+/// (`blast_stat.c:2952`).
+pub fn blast_load_matrix_values(standard_only: bool) -> Vec<MatrixInfo> {
+    let names = if standard_only {
+        STANDARD_MATRIX_NAMES
+    } else {
+        ALL_MATRIX_NAMES
+    };
+    names
+        .iter()
+        .filter_map(|name| matrix_info_new(name))
+        .collect()
+}
+
+/// Port-shaped no-op for NCBI `BlastMatrixValuesDestruct`
+/// (`blast_stat.c:2929`), which releases the C linked list.
+pub fn blast_matrix_values_destruct(values: &mut Vec<MatrixInfo>) -> Vec<MatrixInfo> {
+    values.clear();
+    Vec::new()
+}
+
+/// Rust string-returning equivalent of NCBI `BLAST_PrintMatrixMessage`
+/// (`blast_stat.c:3760`).
+pub fn blast_print_matrix_message(matrix_name: &str, standard_only: bool) -> String {
+    let mut out = format!("{matrix_name} is not a supported matrix, supported matrices are:\n");
+    for info in blast_load_matrix_values(standard_only) {
+        out.push_str(&format!("{} \n", info.name));
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixValues {
+    pub open: Vec<i32>,
+    pub extension: Vec<i32>,
+    pub lambda: Vec<f64>,
+    pub k: Vec<f64>,
+    pub h: Vec<f64>,
+    pub alpha: Vec<f64>,
+    pub beta: Vec<f64>,
+    pub pref_flags: Vec<i32>,
+}
+
+fn matrix_best_index(matrix_name: &str, rows_len: usize) -> Option<usize> {
+    let index = if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
+        7
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM50") {
+        9
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM62") || matrix_name.is_empty() {
+        9
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM80") {
+        8
+    } else if matrix_name.eq_ignore_ascii_case("BLOSUM90") {
+        6
+    } else if matrix_name.eq_ignore_ascii_case("PAM250") {
+        8
+    } else if matrix_name.eq_ignore_ascii_case("PAM30") {
+        5
+    } else if matrix_name.eq_ignore_ascii_case("PAM70") {
+        5
+    } else if matrix_name.eq_ignore_ascii_case("IDENTITY") {
+        1
+    } else {
+        return None;
+    };
+    (index < rows_len).then_some(index)
+}
+
+/// Port-shaped equivalent of NCBI `Blast_GetMatrixValues`
+/// (`blast_stat.c:3013`).
+pub fn blast_get_matrix_values(matrix_name: Option<&str>) -> MatrixValues {
+    let Some(matrix_name) = matrix_name else {
+        return MatrixValues {
+            open: Vec::new(),
+            extension: Vec::new(),
+            lambda: Vec::new(),
+            k: Vec::new(),
+            h: Vec::new(),
+            alpha: Vec::new(),
+            beta: Vec::new(),
+            pref_flags: Vec::new(),
+        };
+    };
+    let Some(rows) = matrix_stat_rows(matrix_name) else {
+        return MatrixValues {
+            open: Vec::new(),
+            extension: Vec::new(),
+            lambda: Vec::new(),
+            k: Vec::new(),
+            h: Vec::new(),
+            alpha: Vec::new(),
+            beta: Vec::new(),
+            pref_flags: Vec::new(),
+        };
+    };
+    let best_index = matrix_best_index(matrix_name, rows.len());
+    MatrixValues {
+        open: rows.iter().map(|row| row.gap_open).collect(),
+        extension: rows.iter().map(|row| row.gap_extend).collect(),
+        lambda: rows.iter().map(|row| row.lambda).collect(),
+        k: rows.iter().map(|row| row.k).collect(),
+        h: rows.iter().map(|row| row.h).collect(),
+        alpha: rows.iter().map(|row| row.alpha).collect(),
+        beta: rows.iter().map(|row| row.beta).collect(),
+        pref_flags: rows
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                if Some(index) == best_index {
+                    BLAST_MATRIX_BEST
+                } else {
+                    BLAST_MATRIX_NOMINAL
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Port of NCBI `BLAST_GetAlphaBeta` (`blast_stat.c:3094`) for protein
+/// matrix rows. Nucleotide callers use [`blast_get_nucl_alpha_beta`].
+pub fn blast_get_alpha_beta(
+    matrix_name: Option<&str>,
+    alpha: &mut f64,
+    beta: &mut f64,
+    gapped: bool,
+    gap_open: i32,
+    gap_extend: i32,
+    kbp_ungapped: Option<&KarlinBlk>,
+) {
+    let values = blast_get_matrix_values(matrix_name);
+    let num_values = values.open.len();
+    if gapped {
+        if gap_open == 0 && gap_extend == 0 {
+            for index in 1..num_values {
+                if values.pref_flags[index] == BLAST_MATRIX_BEST {
+                    *alpha = values.alpha[index];
+                    *beta = values.beta[index];
+                    break;
+                }
+            }
+        } else {
+            for index in 1..num_values {
+                if values.open[index] == gap_open && values.extension[index] == gap_extend {
+                    *alpha = values.alpha[index];
+                    *beta = values.beta[index];
+                    break;
+                }
+            }
+        }
+    } else if num_values > 0 {
+        *alpha = values.alpha[0];
+        *beta = values.beta[0];
+    } else if let Some(kbp) = kbp_ungapped {
+        *alpha = kbp.lambda / kbp.h;
+        *beta = 0.0;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NuclValuesArray {
+    pub normal: Vec<KbpTableRow>,
+    pub non_affine: Vec<KbpTableRow>,
+    pub gap_open_max: i32,
+    pub gap_extend_max: i32,
+    pub round_down: bool,
 }
 
 /// NCBI `kSmallFloat` (`blast_stat.c:4049`): smallest positive e-value
@@ -1969,6 +3909,225 @@ fn get_kbp_table(reward: i32, penalty: i32) -> Option<KbpTableMeta> {
     }
 }
 
+/// Port of NCBI static `s_SplitArrayOf8` (`blast_stat.c:3152`).
+pub fn s_split_array_of8(input: &[KbpTableRow]) -> (i16, Vec<KbpTableRow>, Vec<KbpTableRow>, bool) {
+    if input.is_empty() {
+        return (1, Vec::new(), Vec::new(), false);
+    }
+    if input[0][0] == 0.0 && input[0][1] == 0.0 {
+        (0, input[1..].to_vec(), vec![input[0]], true)
+    } else {
+        (0, input.to_vec(), Vec::new(), false)
+    }
+}
+
+/// Port of NCBI static `s_AdjustGapParametersByGcd` (`blast_stat.c:3186`).
+pub fn s_adjust_gap_parameters_by_gcd(
+    normal: &mut [KbpTableRow],
+    non_affine: &mut [KbpTableRow],
+    gap_open_max: &mut i32,
+    gap_extend_max: &mut i32,
+    divisor: i32,
+) -> i16 {
+    if divisor <= 0 {
+        return 1;
+    }
+    if divisor == 1 {
+        return 0;
+    }
+    for row in normal.iter_mut().chain(non_affine.iter_mut()) {
+        row[0] *= divisor as f64;
+        row[1] *= divisor as f64;
+        row[2] /= divisor as f64;
+        row[5] /= divisor as f64;
+    }
+    *gap_open_max *= divisor;
+    *gap_extend_max *= divisor;
+    0
+}
+
+/// Port-shaped Rust equivalent of NCBI static `s_GetNuclValuesArray`
+/// (`blast_stat.c:3238`).
+pub fn s_get_nucl_values_array(reward: i32, penalty: i32) -> Result<NuclValuesArray, i16> {
+    let divisor = crate::math::gcd(reward, penalty.abs());
+    if divisor <= 0 {
+        return Err(-1);
+    }
+    let nr = reward / divisor;
+    let np = penalty / divisor;
+    let Some(meta) = get_kbp_table(nr, np) else {
+        return Err(-1);
+    };
+    let (status, mut normal, mut non_affine, _) = s_split_array_of8(meta.table);
+    if status != 0 {
+        return Err(status);
+    }
+    let mut gap_open_max = meta.gap_open_max;
+    let mut gap_extend_max = meta.gap_extend_max;
+    let status = s_adjust_gap_parameters_by_gcd(
+        &mut normal,
+        &mut non_affine,
+        &mut gap_open_max,
+        &mut gap_extend_max,
+        divisor,
+    );
+    if status != 0 {
+        return Err(status);
+    }
+    Ok(NuclValuesArray {
+        normal,
+        non_affine,
+        gap_open_max,
+        gap_extend_max,
+        round_down: meta.round_down,
+    })
+}
+
+/// Port of NCBI `BLAST_GetNucleotideGapExistenceExtendParams`
+/// (`blast_stat.c:3402`).
+pub fn blast_get_nucleotide_gap_existence_extend_params(
+    reward: i32,
+    penalty: i32,
+    gap_existence: &mut i32,
+    gap_extension: &mut i32,
+) -> i16 {
+    let values = match s_get_nucl_values_array(reward, penalty) {
+        Ok(values) => values,
+        Err(status) => return status,
+    };
+    if *gap_existence == 0 && *gap_extension == 0 && !values.non_affine.is_empty() {
+        return 0;
+    }
+    let found = values.normal.iter().any(|row| {
+        crate::math::nint(row[0]) as i32 == *gap_existence
+            && crate::math::nint(row[1]) as i32 == *gap_extension
+    });
+    if !found && (*gap_existence < values.gap_open_max || *gap_extension < values.gap_extend_max) {
+        *gap_existence = values.gap_open_max;
+        *gap_extension = values.gap_extend_max;
+    }
+    0
+}
+
+/// Port of NCBI `Blast_KarlinBlkNuclGappedCalc` (`blast_stat.c:3846`).
+pub fn blast_karlin_blk_nucl_gapped_calc(
+    kbp: Option<&mut KarlinBlk>,
+    gap_open: i32,
+    gap_extend: i32,
+    reward: i32,
+    penalty: i32,
+    kbp_ungap: Option<&KarlinBlk>,
+    round_down: Option<&mut bool>,
+    error_return: Option<&mut Option<Box<crate::diagnostics::BlastMessage>>>,
+) -> i16 {
+    let values = match s_get_nucl_values_array(reward, penalty) {
+        Ok(values) => values,
+        Err(status) => return status,
+    };
+    if let Some(round_down) = round_down {
+        *round_down = values.round_down;
+    }
+    let (Some(kbp), Some(kbp_ungap)) = (kbp, kbp_ungap) else {
+        return 1;
+    };
+
+    if gap_open == 0 && gap_extend == 0 && !values.non_affine.is_empty() {
+        let row = values.non_affine[0];
+        kbp.lambda = row[2];
+        kbp.k = row[3];
+        kbp.log_k = kbp.k.ln();
+        kbp.h = row[4];
+        kbp.round_down = values.round_down;
+        return 0;
+    }
+
+    for row in &values.normal {
+        if crate::math::nint(row[0]) as i32 == gap_open
+            && crate::math::nint(row[1]) as i32 == gap_extend
+        {
+            kbp.lambda = row[2];
+            kbp.k = row[3];
+            kbp.log_k = kbp.k.ln();
+            kbp.h = row[4];
+            kbp.round_down = values.round_down;
+            return 0;
+        }
+    }
+
+    if gap_open >= values.gap_open_max && gap_extend >= values.gap_extend_max {
+        *kbp = kbp_ungap.clone();
+        kbp.round_down = values.round_down;
+        return 0;
+    }
+
+    if let Some(error_return) = error_return {
+        let mut message = format!(
+            "Gap existence and extension values {} and {} are not supported for substitution scores {} and {}\n",
+            gap_open, gap_extend, reward, penalty
+        );
+        for row in &values.normal {
+            message.push_str(&format!(
+                "{} and {} are supported existence and extension values\n",
+                crate::math::nint(row[0]) as i32,
+                crate::math::nint(row[1]) as i32
+            ));
+        }
+        message.push_str(&format!(
+            "{} and {} are supported existence and extension values\n",
+            values.gap_open_max, values.gap_extend_max
+        ));
+        message.push_str(&format!(
+            "Any values more stringent than {} and {} are supported\n",
+            values.gap_open_max, values.gap_extend_max
+        ));
+        let _ = crate::diagnostics::blast_message_write(
+            error_return,
+            crate::diagnostics::BlastSeverity::Error,
+            crate::diagnostics::K_BLAST_MESSAGE_NO_CONTEXT,
+            &message,
+        );
+        return 1;
+    }
+
+    0
+}
+
+/// Port of NCBI `BLAST_CheckRewardPenaltyScores` (`blast_stat.c:3454`).
+pub fn blast_check_reward_penalty_scores(reward: i32, penalty: i32) -> bool {
+    s_get_nucl_values_array(reward, penalty).is_ok()
+}
+
+/// Rust string-returning equivalent of NCBI `BLAST_PrintAllowedValues`
+/// (`blast_stat.c:3792`).
+pub fn blast_print_allowed_values(matrix_name: &str, gap_open: i32, gap_extend: i32) -> String {
+    let mut out = format!(
+        "Gap existence and extension values of {} and {} not supported for {}\nsupported values are:\n",
+        gap_open, gap_extend, matrix_name
+    );
+    if let Some(rows) = matrix_stat_rows(matrix_name) {
+        for row in rows {
+            out.push_str(&format!("{}, {}\n", row.gap_open, row.gap_extend));
+        }
+    }
+    out
+}
+
+/// Rust message-list equivalent of NCBI static `BlastKarlinReportAllowedValues`.
+pub fn blast_karlin_report_allowed_values(matrix_name: &str) -> Vec<String> {
+    matrix_stat_rows(matrix_name)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    format!(
+                        "Gap existence and extension values of {} and {} are supported",
+                        row.gap_open, row.gap_extend
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Look up gapped KBP params for nucleotide, matching C's Blast_KarlinBlkNuclGappedCalc exactly.
 /// Returns Ok((lambda, k, log_k, h, round_down)) or Err message.
 pub fn nucl_gapped_kbp_lookup(
@@ -2131,6 +4290,38 @@ pub fn compute_length_adjustment_exact(
     (adj, converged)
 }
 
+/// Port of NCBI `BLAST_ComputeLengthAdjustment` (`blast_stat.c:5041`) with
+/// pointer-style output and integer convergence status.
+pub fn blast_compute_length_adjustment(
+    k: f64,
+    log_k: f64,
+    alpha_d_lambda: f64,
+    beta: f64,
+    query_length: i32,
+    db_length: i64,
+    db_num_seqs: i32,
+    length_adjustment: Option<&mut i32>,
+) -> i32 {
+    let Some(length_adjustment) = length_adjustment else {
+        return 1;
+    };
+    let (adj, converged) = compute_length_adjustment_exact(
+        k,
+        log_k,
+        alpha_d_lambda,
+        beta,
+        query_length,
+        db_length,
+        db_num_seqs,
+    );
+    *length_adjustment = adj;
+    if converged {
+        0
+    } else {
+        1
+    }
+}
+
 /// Look up alpha and beta for nucleotide gapped alignment.
 /// Port of Blast_GetNuclAlphaBeta from blast_stat.c.
 pub fn nucl_alpha_beta(
@@ -2193,15 +4384,463 @@ pub fn nucl_alpha_beta(
     )
 }
 
-/// Port of NCBI `s_GetUngappedBeta` (`blast_stat.c:3955`): `(1,-1)` and
-/// `(2,-3)` scoring systems use `beta = -2`; every other combination
-/// uses `beta = 0`.
-fn get_ungapped_beta(reward: i32, penalty: i32) -> f64 {
+/// Port-shaped wrapper for NCBI `Blast_GetNuclAlphaBeta`
+/// (`blast_stat.c:3965`).
+pub fn blast_get_nucl_alpha_beta(
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    lambda: f64,
+    h: f64,
+    gapped: bool,
+    alpha: &mut f64,
+    beta: &mut f64,
+) -> i16 {
+    let values = match s_get_nucl_values_array(reward, penalty) {
+        Ok(values) => values,
+        Err(status) => return status,
+    };
+    let mut found = false;
+    if gapped {
+        if gap_open == 0 && gap_extend == 0 && !values.non_affine.is_empty() {
+            let row = values.non_affine[0];
+            *alpha = row[5];
+            *beta = row[6];
+            found = true;
+        } else {
+            for row in &values.normal {
+                if crate::math::nint(row[0]) as i32 == gap_open
+                    && crate::math::nint(row[1]) as i32 == gap_extend
+                {
+                    *alpha = row[5];
+                    *beta = row[6];
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !found {
+        *alpha = lambda / h;
+        *beta = s_get_ungapped_beta(reward, penalty);
+    }
+    0
+}
+
+/// Port of NCBI `Blast_FillResidueProbability` (`blast_stat.c:4577`).
+pub fn blast_fill_residue_probability(sequence: &[u8], res_prob: &mut [f64]) {
+    let mut frequency = vec![0i32; crate::encoding::BLASTAA_SIZE];
+    let mut denominator = sequence.len() as i32;
+    for &residue in sequence {
+        if residue == crate::encoding::NCBISTDAA_X {
+            denominator -= 1;
+        } else if (residue as usize) < frequency.len() {
+            frequency[residue as usize] += 1;
+        }
+    }
+    for index in 0..res_prob.len().min(frequency.len()) {
+        res_prob[index] = if frequency[index] == 0 || denominator <= 0 {
+            0.0
+        } else {
+            frequency[index] as f64 / denominator as f64
+        };
+    }
+}
+
+/// Port of NCBI static `RPSfindUngappedLambda` (`blast_stat.c:4610`).
+pub fn rps_find_ungapped_lambda(matrix_name: Option<&str>) -> f64 {
+    let values = blast_get_matrix_values(matrix_name);
+    values.lambda.first().copied().unwrap_or(0.0)
+}
+
+/// Port of NCBI static `RPSFillScores` (`blast_stat.c:4649`).
+pub fn rps_fill_scores(
+    matrix: &[Vec<i32>],
+    query_prob_array: &[f64],
+    return_sfp: &mut ScoreFreq,
+    alphabet_size: usize,
+) {
+    let mut min_score = 0;
+    let mut max_score = 0;
+    for row in matrix {
+        for j in 0..alphabet_size.min(row.len()) {
+            if j == crate::encoding::NCBISTDAA_X as usize {
+                continue;
+            }
+            let score = row[j];
+            if score > BLAST_SCORE_MIN && score < min_score {
+                min_score = score;
+            }
+            if score > max_score {
+                max_score = score;
+            }
+        }
+    }
+
+    return_sfp.obs_min = min_score;
+    return_sfp.obs_max = max_score;
+    return_sfp.score_min = min_score;
+    return_sfp.score_max = max_score;
+    return_sfp.sprob = vec![0.0; (max_score - min_score + 1).max(0) as usize];
+    if matrix.is_empty() {
+        return;
+    }
+    let recip_length = 1.0 / matrix.len() as f64;
+    for row in matrix {
+        for j in 0..alphabet_size.min(row.len()).min(query_prob_array.len()) {
+            if j == crate::encoding::NCBISTDAA_X as usize {
+                continue;
+            }
+            let score = row[j];
+            if score >= min_score {
+                let index = (score - min_score) as usize;
+                if let Some(slot) = return_sfp.sprob.get_mut(index) {
+                    *slot += recip_length * query_prob_array[j];
+                }
+            }
+        }
+    }
+    return_sfp.score_avg = (min_score..=max_score)
+        .map(|score| {
+            let index = (score - min_score) as usize;
+            score as f64 * return_sfp.sprob.get(index).copied().unwrap_or(0.0)
+        })
+        .sum();
+}
+
+fn blast_karlin_lambda_nr_from_score_freq(sfp: &ScoreFreq, initial_lambda: f64) -> f64 {
+    let dist = score_freq_to_sf_dist(sfp);
+    if dist.score_avg >= 0.0 {
+        return -1.0;
+    }
+    let low = dist.obs_min;
+    let high = dist.obs_max;
+    let mut d = -low;
+    for i in 1..=(high - low) {
+        if d <= 1 {
+            break;
+        }
+        if dist.p(low + i) != 0.0 {
+            d = crate::math::gcd(d, i);
+        }
+    }
+    solve_lambda(&dist, d, low, high, initial_lambda)
+}
+
+/// Port of NCBI `Blast_KarlinLambdaNR` (`blast_stat.c:2567`) with an
+/// explicit initial lambda.
+pub fn blast_karlin_lambda_nr(sfp: Option<&ScoreFreq>, initial_lambda: f64) -> f64 {
+    let Some(sfp) = sfp else {
+        return -1.0;
+    };
+    blast_karlin_lambda_nr_from_score_freq(sfp, initial_lambda)
+}
+
+/// Port of NCBI `RPSRescalePssm` (`blast_stat.c:4693`) using owned Rust
+/// matrix rows instead of `_PSIAllocateMatrix`.
+pub fn rps_rescale_pssm(
+    scaling_factor: f64,
+    rps_query_length: i32,
+    rps_query_seq: Option<&[u8]>,
+    db_seq_length: i32,
+    pos_matrix: Option<&[Vec<i32>]>,
+    sbp: Option<&BlastScoreBlk>,
+) -> Option<Vec<Vec<i32>>> {
+    let (Some(rps_query_seq), Some(pos_matrix), Some(sbp)) = (rps_query_seq, pos_matrix, sbp)
+    else {
+        return None;
+    };
+    if scaling_factor == 0.0 || rps_query_length < 0 || db_seq_length < 0 {
+        return None;
+    }
+    let db_seq_length = db_seq_length as usize;
+    if pos_matrix.len() < db_seq_length {
+        return None;
+    }
+    let query_len = (rps_query_length as usize).min(rps_query_seq.len());
+    let mut res_prob = vec![0.0; crate::encoding::BLASTAA_SIZE];
+    blast_fill_residue_probability(&rps_query_seq[..query_len], &mut res_prob);
+
+    let alphabet_size = pos_matrix
+        .iter()
+        .take(db_seq_length)
+        .map(|row| row.len())
+        .min()
+        .unwrap_or(0)
+        .min(crate::encoding::BLASTAA_SIZE);
+    if alphabet_size == 0 {
+        return None;
+    }
+    let mut return_sfp = ScoreFreq {
+        score_min: 0,
+        score_max: 0,
+        obs_min: 0,
+        obs_max: 0,
+        score_avg: 0.0,
+        sprob: Vec::new(),
+    };
+    rps_fill_scores(
+        &pos_matrix[..db_seq_length],
+        &res_prob,
+        &mut return_sfp,
+        alphabet_size,
+    );
+
+    let initial_ungapped_lambda = rps_find_ungapped_lambda(sbp.name.as_deref());
+    if initial_ungapped_lambda <= 0.0 {
+        return None;
+    }
+    let scaled_initial_ungapped_lambda = initial_ungapped_lambda / scaling_factor;
+    let correct_ungapped_lambda =
+        blast_karlin_lambda_nr(Some(&return_sfp), scaled_initial_ungapped_lambda);
+    if correct_ungapped_lambda == -1.0 {
+        return None;
+    }
+    let final_lambda = correct_ungapped_lambda / scaled_initial_ungapped_lambda;
+
+    let mut return_matrix =
+        vec![vec![BLAST_SCORE_MIN; crate::encoding::BLASTAA_SIZE]; db_seq_length];
+    for index in 0..db_seq_length {
+        for inner_index in 0..alphabet_size {
+            let score = pos_matrix[index][inner_index];
+            return_matrix[index][inner_index] = if score <= BLAST_SCORE_MIN
+                || inner_index == crate::encoding::NCBISTDAA_X as usize
+            {
+                score
+            } else {
+                crate::math::nint(score as f64 * final_lambda) as i32
+            };
+        }
+    }
+    Some(return_matrix)
+}
+
+pub const COMPRESSED_REVERSE_LOOKUP_SIZE: usize = crate::encoding::BLASTAA_SIZE + 1;
+pub type CompressedReverseLookup =
+    [[i8; COMPRESSED_REVERSE_LOOKUP_SIZE]; COMPRESSED_REVERSE_LOOKUP_SIZE];
+
+pub const S_ALPHABET10: &str = "IJLMV AST BDENZ KQR G FY P H C W";
+pub const S_ALPHABET15: &str = "ST IJV LM KR EQZ A G BD P N F Y H C W";
+
+/// Rust-owned counterpart of NCBI `SCompressedAlphabet`.
+#[derive(Debug, Clone, Default)]
+pub struct SCompressedAlphabet {
+    pub compressed_alphabet_size: i32,
+    pub compress_table: Vec<u8>,
+    pub matrix: Option<BlastScoreMatrix>,
+}
+
+/// Port of NCBI static `s_BuildCompressedTranslation`
+/// (`blast_stat.c:4736`).
+pub fn s_build_compressed_translation(
+    trans_string: &str,
+    table: &mut [u8],
+    compressed_alphabet_size: i32,
+    rev_table: &mut CompressedReverseLookup,
+) {
+    for value in table.iter_mut().take(crate::encoding::BLASTAA_SIZE) {
+        *value = compressed_alphabet_size as u8;
+    }
+    for row in rev_table.iter_mut() {
+        row.fill(-1);
+    }
+
+    let mut compressed_letter = 0usize;
+    let mut j = 0usize;
+    for byte in trans_string.bytes() {
+        if byte.is_ascii_whitespace() {
+            compressed_letter += 1;
+            j = 0;
+        } else if byte.is_ascii_alphabetic() {
+            let aa_letter = crate::encoding::AMINOACID_TO_NCBISTDAA[byte as usize] as usize;
+            if aa_letter < table.len() {
+                table[aa_letter] = compressed_letter as u8;
+            }
+            if compressed_letter < rev_table.len() && j + 1 < rev_table[compressed_letter].len() {
+                rev_table[compressed_letter][j] = aa_letter as i8;
+                j += 1;
+                rev_table[compressed_letter][j] = -1;
+            }
+        }
+    }
+}
+
+/// Port of NCBI static `s_GetCompressedProbs` (`blast_stat.c:4772`).
+pub fn s_get_compressed_probs(
+    sbp: Option<&BlastScoreBlk>,
+    compressed_prob: &mut [f64],
+    compressed_alphabet_size: i32,
+    rev_table: &CompressedReverseLookup,
+) -> i16 {
+    let Some(sbp) = sbp else {
+        return -1;
+    };
+    let mut rfp = match blast_res_freq_new(Some(sbp)) {
+        Some(rfp) => rfp,
+        None => return -1,
+    };
+    if blast_res_freq_std_comp(Some(sbp), Some(&mut rfp)) != 0 {
+        return -1;
+    }
+
+    for value in compressed_prob
+        .iter_mut()
+        .take(crate::encoding::BLASTAA_SIZE)
+    {
+        *value = 0.0;
+    }
+
+    for letter in 0..compressed_alphabet_size.max(0) as usize {
+        let mut prob_sum = 0.0;
+        for &aa in &rev_table[letter] {
+            if aa < 0 {
+                break;
+            }
+            prob_sum += rfp.prob.get(aa as usize).copied().unwrap_or(0.0);
+        }
+        for &aa in &rev_table[letter] {
+            if aa < 0 {
+                break;
+            }
+            if let Some(slot) = compressed_prob.get_mut(aa as usize) {
+                *slot = if prob_sum == 0.0 {
+                    0.0
+                } else {
+                    rfp.prob[aa as usize] / prob_sum
+                };
+            }
+        }
+    }
+    0
+}
+
+/// Port of NCBI static `s_BuildCompressedScoreMatrix`
+/// (`blast_stat.c:4818`).
+pub fn s_build_compressed_score_matrix(
+    sbp: Option<&BlastScoreBlk>,
+    new_alphabet: Option<&mut SCompressedAlphabet>,
+    mut matrix_scale_factor: f64,
+    rev_table: &CompressedReverseLookup,
+) -> i16 {
+    let (Some(sbp), Some(new_alphabet)) = (sbp, new_alphabet) else {
+        return -1;
+    };
+    let lambda = rps_find_ungapped_lambda(sbp.name.as_deref());
+    if lambda <= 0.0 {
+        return -1;
+    }
+    matrix_scale_factor /= lambda;
+
+    let Some(std_freqs) =
+        crate::matrix::get_matrix_freq_ratios(sbp.name.as_deref().unwrap_or_default())
+    else {
+        return -2;
+    };
+
+    let compressed_alphabet_size = new_alphabet.compressed_alphabet_size;
+    let mut compressed_prob = vec![0.0; crate::encoding::BLASTAA_SIZE];
+    if s_get_compressed_probs(
+        Some(sbp),
+        &mut compressed_prob,
+        compressed_alphabet_size,
+        rev_table,
+    ) < 0
+    {
+        return -3;
+    }
+
+    let mut new_matrix = BlastScoreMatrix::new(
+        crate::encoding::BLASTAA_SIZE,
+        compressed_alphabet_size.max(0) as usize,
+    );
+    let min_freq = BLAST_SCORE_MIN as f64 / matrix_scale_factor;
+    for q in 0..crate::encoding::BLASTAA_SIZE {
+        for s in 0..compressed_alphabet_size.max(0) as usize {
+            let mut val = 0.0;
+            for &aa in &rev_table[s] {
+                if aa < 0 {
+                    break;
+                }
+                let aa = aa as usize;
+                val += std_freqs[q][aa] * compressed_prob[aa];
+            }
+            val = if val < 1e-8 { min_freq } else { val.ln() };
+            new_matrix.data[q][s] = crate::math::nint(val * matrix_scale_factor) as i32;
+        }
+    }
+    new_alphabet.matrix = Some(new_matrix);
+    0
+}
+
+/// Port of NCBI `SCompressedAlphabetNew` (`blast_stat.c:4887`).
+pub fn s_compressed_alphabet_new(
+    sbp: Option<&BlastScoreBlk>,
+    compressed_alphabet_size: i32,
+    matrix_scale_factor: f64,
+) -> Option<SCompressedAlphabet> {
+    if compressed_alphabet_size != 10 && compressed_alphabet_size != 15 {
+        return None;
+    }
+    let alphabet_string = if compressed_alphabet_size == 10 {
+        S_ALPHABET10
+    } else {
+        S_ALPHABET15
+    };
+    let mut rev_table = [[-1; COMPRESSED_REVERSE_LOOKUP_SIZE]; COMPRESSED_REVERSE_LOOKUP_SIZE];
+    let mut new_alphabet = SCompressedAlphabet {
+        compressed_alphabet_size,
+        compress_table: vec![0; crate::encoding::BLASTAA_SIZE],
+        matrix: None,
+    };
+    s_build_compressed_translation(
+        alphabet_string,
+        &mut new_alphabet.compress_table,
+        compressed_alphabet_size,
+        &mut rev_table,
+    );
+    if s_build_compressed_score_matrix(
+        sbp,
+        Some(&mut new_alphabet),
+        matrix_scale_factor,
+        &rev_table,
+    ) < 0
+    {
+        return None;
+    }
+    Some(new_alphabet)
+}
+
+/// Port of NCBI `SCompressedAlphabetFree` (`blast_stat.c:4916`).
+pub fn s_compressed_alphabet_free(
+    alphabet: &mut Option<SCompressedAlphabet>,
+) -> Option<SCompressedAlphabet> {
+    if let Some(alphabet) = alphabet.as_mut() {
+        alphabet.compress_table.clear();
+        if let Some(matrix) = alphabet.matrix.as_mut() {
+            matrix.data.clear();
+            matrix.nrows = 0;
+            matrix.ncols = 0;
+        }
+        alphabet.matrix = None;
+    }
+    *alphabet = None;
+    None
+}
+
+/// Port of NCBI `s_GetUngappedBeta` (`blast_stat.c:3935`): `(1,-1)` and
+/// `(2,-3)` scoring systems use `beta = -2`; every other combination uses
+/// `beta = 0`.
+pub fn s_get_ungapped_beta(reward: i32, penalty: i32) -> f64 {
     if (reward == 1 && penalty == -1) || (reward == 2 && penalty == -3) {
         -2.0
     } else {
         0.0
     }
+}
+
+fn get_ungapped_beta(reward: i32, penalty: i32) -> f64 {
+    s_get_ungapped_beta(reward, penalty)
 }
 
 // ---------------------------------------------------------------------------
@@ -2660,6 +5299,236 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blast_score_blk_new_free_and_nucl_matrix_create_match_core_fields() {
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 2).expect("score block");
+        assert_eq!(sbp.alphabet_size, crate::encoding::BLASTNA_SIZE);
+        assert!(!sbp.protein_alphabet);
+        assert_eq!(sbp.number_of_contexts, 2);
+        assert_eq!(sbp.kbp.len(), 2);
+        assert_eq!(sbp.kbp_std.len(), 2);
+        assert_eq!(sbp.scale_factor, 1.0);
+        assert_eq!(blast_score_blk_check(None), -1);
+        assert_eq!(blast_score_blk_check(Some(&sbp)), 1);
+        sbp.kbp[0] = KarlinBlk {
+            lambda: 0.5,
+            k: 0.2,
+            log_k: 0.2_f64.ln(),
+            h: 0.4,
+            round_down: false,
+        };
+        assert_eq!(blast_score_blk_check(Some(&sbp)), 0);
+
+        sbp.reward = 1;
+        sbp.penalty = -3;
+        assert_eq!(blast_score_blk_nucl_matrix_create(&mut sbp), 0);
+        assert_eq!(sbp.matrix.data[0][0], 1);
+        assert_eq!(sbp.matrix.data[0][1], -3);
+        assert_eq!(
+            sbp.matrix.data[crate::encoding::BLASTNA_SIZE - 1][0],
+            BLAST_SCORE_MIN
+        );
+        assert_eq!(sbp.hiscore, 1);
+        assert_eq!(sbp.loscore, BLAST_SCORE_MIN);
+
+        let mut owned = Some(sbp);
+        assert!(blast_score_blk_free(&mut owned).is_none());
+        assert!(owned.is_none());
+    }
+
+    #[test]
+    fn blast_score_blk_protein_matrix_read_sets_bounds_and_name() {
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("protein score block");
+        assert_eq!(blast_score_blk_protein_matrix_read(&mut sbp, "BLOSUM62"), 0);
+        assert!(sbp.protein_alphabet);
+        assert_eq!(sbp.name.as_deref(), Some("BLOSUM62"));
+        assert_eq!(sbp.matrix.data[1][1], crate::matrix::BLOSUM62[1][1]);
+        assert_eq!(sbp.loscore, -4);
+        assert_eq!(sbp.hiscore, 11);
+    }
+
+    #[test]
+    fn blast_score_blk_protein_matrix_load_matches_c_special_residue_rules() {
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("protein score block");
+        sbp.name = Some("BLOSUM62".to_string());
+        assert_eq!(blast_score_blk_protein_matrix_load(&mut sbp), 0);
+
+        let gap = crate::encoding::NCBISTDAA_GAP as usize;
+        let c = crate::encoding::NCBISTDAA_C as usize;
+        let x = crate::encoding::NCBISTDAA_X as usize;
+        let u = crate::encoding::NCBISTDAA_U as usize;
+        let o = crate::encoding::NCBISTDAA_O as usize;
+        let a = crate::encoding::NCBISTDAA_A as usize;
+
+        assert_eq!(sbp.matrix.data[gap][a], BLAST_SCORE_MIN);
+        assert_eq!(sbp.matrix.data[a][gap], BLAST_SCORE_MIN);
+        assert_eq!(sbp.matrix.data[u][a], sbp.matrix.data[c][a]);
+        assert_eq!(sbp.matrix.data[a][u], sbp.matrix.data[a][c]);
+        assert_eq!(sbp.matrix.data[o][a], sbp.matrix.data[x][a]);
+        assert_eq!(sbp.matrix.data[a][o], sbp.matrix.data[a][x]);
+        assert_eq!(sbp.hiscore, 11);
+
+        sbp.name = Some("NOT_A_MATRIX".to_string());
+        assert_eq!(blast_score_blk_protein_matrix_load(&mut sbp), 1);
+    }
+
+    #[test]
+    fn s_blast_score_blk_copy_deep_copies_owned_fields() {
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("protein score block");
+        assert_eq!(blast_score_blk_protein_matrix_read(&mut sbp, "PAM30"), 0);
+        sbp.kbp[0] = protein_ungapped_kbp_for_matrix("PAM30");
+        sbp.ambiguous_res.push(crate::encoding::NCBISTDAA_X);
+
+        let mut copy = s_blast_score_blk_copy(&sbp);
+        assert_eq!(copy.name.as_deref(), Some("PAM30"));
+        assert_eq!(copy.matrix.data[1][1], sbp.matrix.data[1][1]);
+        assert_eq!(copy.ambiguous_res, sbp.ambiguous_res);
+        copy.matrix.data[1][1] = -999;
+        copy.kbp[0].lambda = 99.0;
+        copy.ambiguous_res.push(crate::encoding::NCBISTDAA_B);
+
+        assert_ne!(copy.matrix.data[1][1], sbp.matrix.data[1][1]);
+        assert_ne!(copy.kbp[0].lambda, sbp.kbp[0].lambda);
+        assert_ne!(copy.ambiguous_res, sbp.ambiguous_res);
+    }
+
+    #[test]
+    fn s_blast_find_valid_karlin_blk_returns_first_valid_context() {
+        let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[10, 10, 10]);
+        query_info.contexts[0].is_valid = false;
+        let kbps = vec![
+            KarlinBlk::default(),
+            KarlinBlk {
+                lambda: 0.7,
+                k: 0.2,
+                log_k: 0.2_f64.ln(),
+                h: 0.4,
+                round_down: false,
+            },
+            KarlinBlk {
+                lambda: 0.5,
+                k: 0.3,
+                log_k: 0.3_f64.ln(),
+                h: 0.6,
+                round_down: false,
+            },
+        ];
+
+        let kbp = s_blast_find_valid_karlin_blk(&kbps, &query_info).expect("valid Karlin block");
+        assert_eq!(kbp.lambda, 0.7);
+        assert!(s_blast_karlin_blk_is_valid(Some(kbp)));
+        let mut out = None;
+        assert_eq!(
+            s_blast_find_valid_karlin_blk_c(&kbps, Some(&query_info), Some(&mut out)),
+            0
+        );
+        assert_eq!(out.expect("valid Karlin block").lambda, 0.7);
+
+        let invalid = vec![KarlinBlk::default(); 3];
+        assert_eq!(
+            s_blast_find_valid_karlin_blk(&invalid, &query_info).unwrap_err(),
+            crate::diagnostics::BLASTERR_NOVALIDKARLINALTSCHUL
+        );
+        let mut out = Some(&kbps[0]);
+        assert_eq!(
+            s_blast_find_valid_karlin_blk_c(&invalid, Some(&query_info), Some(&mut out)),
+            crate::diagnostics::BLASTERR_NOVALIDKARLINALTSCHUL
+        );
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn s_blast_find_smallest_lambda_uses_valid_contexts_only() {
+        let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[10, 10, 10]);
+        query_info.contexts[1].is_valid = false;
+        let kbps = vec![
+            KarlinBlk {
+                lambda: 0.8,
+                k: 0.2,
+                log_k: 0.2_f64.ln(),
+                h: 0.4,
+                round_down: false,
+            },
+            KarlinBlk {
+                lambda: 0.1,
+                k: 0.2,
+                log_k: 0.2_f64.ln(),
+                h: 0.4,
+                round_down: false,
+            },
+            KarlinBlk {
+                lambda: 0.6,
+                k: 0.3,
+                log_k: 0.3_f64.ln(),
+                h: 0.6,
+                round_down: false,
+            },
+        ];
+
+        let (lambda, kbp) =
+            s_blast_find_smallest_lambda(&kbps, &query_info).expect("smallest lambda");
+        assert_eq!(lambda, 0.6);
+        assert_eq!(kbp.k, 0.3);
+        let mut out = None;
+        let lambda = s_blast_find_smallest_lambda_c(&kbps, Some(&query_info), Some(&mut out));
+        assert_eq!(lambda, 0.6);
+        assert_eq!(out.expect("smallest lambda").k, 0.3);
+        let lambda = s_blast_find_smallest_lambda_c(&[], Some(&query_info), None);
+        assert_eq!(lambda, i32::MAX as f64);
+    }
+
+    #[test]
+    fn karlin_and_gumbel_free_helpers_clear_slots() {
+        let mut kbp = Some(KarlinBlk {
+            lambda: 0.5,
+            k: 0.2,
+            log_k: 0.2_f64.ln(),
+            h: 0.4,
+            round_down: false,
+        });
+        assert!(blast_karlin_blk_free(&mut kbp).is_none());
+        assert!(kbp.is_none());
+
+        let mut gbp = Some(GumbelBlk {
+            lambda: 0.5,
+            a: 1.0,
+            b: 2.0,
+            alpha: 3.0,
+            beta: 4.0,
+            sigma: 5.0,
+            tau: 6.0,
+            db_length: 7,
+        });
+        assert!(s_blast_gumbel_blk_free(&mut gbp).is_none());
+        assert!(gbp.is_none());
+    }
+
+    #[test]
+    fn blast_score_set_ambig_res_encodes_by_score_block_alphabet() {
+        let mut protein =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("protein score block");
+        assert_eq!(blast_score_set_ambig_res(Some(&mut protein), b'X'), 0);
+        assert_eq!(protein.ambiguous_res, vec![crate::encoding::NCBISTDAA_X]);
+
+        let mut blastna =
+            blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("blastna score block");
+        assert_eq!(blast_score_set_ambig_res(Some(&mut blastna), b'N'), 0);
+        assert_eq!(blastna.ambiguous_res, vec![14]);
+
+        let mut ncbi4na =
+            blast_score_blk_new(crate::encoding::NCBI4NA_SEQ_CODE, 1).expect("ncbi4na score block");
+        assert_eq!(blast_score_set_ambig_res(Some(&mut ncbi4na), b'N'), 0);
+        assert_eq!(ncbi4na.ambiguous_res, vec![15]);
+        assert_eq!(
+            blast_score_set_ambig_res(None, b'X'),
+            crate::util::BLASTERR_INVALIDPARAM
+        );
+    }
+
+    #[test]
     fn test_gap_decay_divisor_matches_ncbi_formula() {
         // NCBI `BLAST_GapDecayDivisor(decayrate, nsegs)` =
         // `(1 - decayrate) * decayrate^(nsegs - 1)`. Spot-check a few
@@ -2760,6 +5629,56 @@ mod tests {
     }
 
     #[test]
+    fn translated_karlin_simple_wrappers_match_c_shape() {
+        let kbp = KarlinBlk {
+            lambda: 0.625,
+            k: 0.41,
+            log_k: 0.41_f64.ln(),
+            h: 0.78,
+            round_down: true,
+        };
+        let searchsp = 1_000_000_000_i64;
+        let evalue = blast_karlin_sto_e_simple(9, Some(&kbp), searchsp);
+        let expected = searchsp as f64 * (-kbp.lambda * 9.0 + kbp.log_k).exp();
+        assert!((evalue - expected).abs() < expected.abs() * 1e-12);
+        assert_ne!(evalue, kbp.raw_to_evalue(9, searchsp as f64));
+
+        let score = blast_karlin_eto_s_simple(evalue, Some(&kbp), searchsp);
+        assert_eq!(score, 9);
+        assert_eq!(
+            blast_karlin_eto_s_simple(
+                1.0,
+                Some(&KarlinBlk {
+                    lambda: -1.0,
+                    ..kbp
+                }),
+                searchsp
+            ),
+            BLAST_SCORE_MIN
+        );
+        assert_eq!(blast_karlin_sto_e_simple(9, None, searchsp), -1.0);
+
+        assert_eq!(blast_karlin_p_to_e(1.0), i32::MAX as f64);
+        assert_eq!(blast_karlin_p_to_e(-0.1), i32::MIN as f64);
+        assert_eq!(karlin_e_to_p(0.0), 0.0);
+        assert!((karlin_e_to_p(std::f64::consts::LN_2) - 0.5).abs() < 1e-12);
+
+        let mut s = 1;
+        let mut e = 10.0;
+        assert_eq!(
+            blast_cutoffs_in_place(Some(&mut s), Some(&mut e), Some(&kbp), searchsp, false, 0.0),
+            0
+        );
+        let (tuple_s, tuple_e) = blast_cutoffs(1, 10.0, &kbp, searchsp as f64, false, 0.0);
+        assert_eq!(s, tuple_s);
+        assert_eq!(e, tuple_e);
+        assert_eq!(
+            blast_cutoffs_in_place(None, Some(&mut e), Some(&kbp), searchsp, false, 0.0),
+            1
+        );
+    }
+
+    #[test]
     fn test_sum_p_r1_formula() {
         // r=1 closed form: p = 1 - exp(-exp(-s)).
         // For s=0, exp(0)=1, 1-exp(-1) ≈ 0.632120.
@@ -2842,6 +5761,33 @@ mod tests {
     }
 
     #[test]
+    fn translated_sum_p_romberg_callbacks_match_c_shape() {
+        let args = SRombergCbackArgs {
+            num_hsps: 2,
+            num_hsps_minus_2: 0,
+            adj1: -crate::math::ln_gamma_int(1) - crate::math::ln_gamma_int(2),
+            adj2: -3.0,
+            sdvir: 1.5,
+            epsilon: 0.002,
+        };
+        assert_eq!(
+            s_outer_integral_cback(0.0, &args),
+            (args.adj2 - (-1.5_f64).exp()).exp()
+        );
+
+        let mut args3 = args;
+        args3.num_hsps = 3;
+        args3.num_hsps_minus_2 = 1;
+        assert_eq!(s_outer_integral_cback(0.0, &args3), 0.0);
+        let inner = s_inner_integral_cback(3.0, &args);
+        assert!(inner.is_finite());
+        assert!(inner > 0.0);
+
+        let via_sum = sum_p_calc(5, 5.0);
+        assert!((0.0..=1.0).contains(&via_sum));
+    }
+
+    #[test]
     fn test_sum_e_num_gte_5_now_uses_romberg() {
         // Since sum_p handles r >= 5 via Romberg, the sum-E wrappers
         // now return Some for num >= 5 too.
@@ -2880,6 +5826,32 @@ mod tests {
                 "got={got} expected={expected}"
             );
         }
+    }
+
+    #[test]
+    fn translated_sum_e_c_wrappers_match_option_helpers() {
+        let q = 100;
+        let s = 1000;
+        let searchsp_i = 1_000_000_000_i64;
+        let searchsp = searchsp_i as f64;
+        let w = 0.5;
+        let xsum = 120.0;
+        assert_eq!(
+            blast_small_gap_sum_e(40, 2, xsum, q, s, searchsp_i, w),
+            small_gap_sum_e(40, 2, xsum, q, s, searchsp, w).unwrap()
+        );
+        assert_eq!(
+            blast_uneven_gap_sum_e(40, 4000, 2, xsum, q, s, searchsp_i, w),
+            uneven_gap_sum_e(40, 4000, 2, xsum, q, s, searchsp, w).unwrap()
+        );
+        assert_eq!(
+            blast_large_gap_sum_e(2, xsum, q, s, searchsp_i, w),
+            large_gap_sum_e(2, xsum, q, s, searchsp, w).unwrap()
+        );
+        assert_eq!(
+            blast_small_gap_sum_e(40, 1, 0.0, q, s, searchsp_i, 0.0),
+            i32::MAX as f64
+        );
     }
 
     #[test]
@@ -3003,6 +5975,70 @@ mod tests {
         let bit_even_rd = kbp.raw_to_bit(8);
         assert!((bit_even_rd - bit_even).abs() < 1e-14);
         let _ = ev_odd;
+    }
+
+    #[test]
+    fn blast_hsp_list_get_bit_scores_uses_hsp_context_kbp() {
+        fn hsp(score: i32, context: i32) -> crate::hspstream::Hsp {
+            crate::hspstream::Hsp {
+                score,
+                num_ident: 0,
+                bit_score: -1.0,
+                evalue: 0.0,
+                query_offset: 0,
+                query_end: 10,
+                query_gapped_start: 0,
+                subject_offset: 0,
+                subject_end: 10,
+                subject_gapped_start: 0,
+                context,
+                query_frame: 0,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+                pat_info: None,
+            map_info: None,
+            }
+        }
+
+        let kbp = vec![
+            KarlinBlk {
+                lambda: 0.2,
+                k: 0.5,
+                log_k: 0.5_f64.ln(),
+                h: 0.1,
+                round_down: false,
+            },
+            KarlinBlk {
+                lambda: 0.6,
+                k: 0.4,
+                log_k: 0.4_f64.ln(),
+                h: 0.7,
+                round_down: true,
+            },
+        ];
+        let mut list = crate::hspstream::HspList::new(3);
+        list.add_hsp(hsp(20, 0));
+        list.add_hsp(hsp(9, 1));
+        list.add_hsp(hsp(7, -1));
+
+        assert_eq!(
+            blast_hsp_list_get_bit_scores(Some(&mut list), true, &kbp),
+            0
+        );
+        assert_eq!(list.hsps[0].bit_score, kbp[0].raw_to_bit(20));
+        assert_eq!(list.hsps[1].bit_score, kbp[1].raw_to_bit(9));
+        assert_eq!(list.hsps[2].bit_score, kbp[0].raw_to_bit(7));
+
+        assert_eq!(blast_hsp_list_get_bit_scores(None, false, &kbp), 1);
+
+        let mut missing_context = crate::hspstream::HspList::new(4);
+        missing_context.add_hsp(hsp(11, 2));
+        assert_eq!(
+            blast_hsp_list_get_bit_scores(Some(&mut missing_context), false, &kbp),
+            1
+        );
     }
 
     #[test]
@@ -3380,6 +6416,194 @@ mod tests {
         check(19, 3216, "Y"); // Tyr
     }
 
+    #[test]
+    fn translated_residue_frequency_helpers_match_c_shape() {
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("score block");
+        assert_eq!(blast_score_set_ambig_res(Some(&mut sbp), b'X'), 0);
+        let mut residues = [0u8; 20];
+        assert_eq!(blast_get_std_alphabet(sbp.alphabet_code, &mut residues), 20);
+        assert_eq!(residues[0], crate::encoding::NCBISTDAA_A);
+        assert_eq!(
+            blast_get_std_alphabet(sbp.alphabet_code, &mut residues[..10]),
+            -2
+        );
+
+        let mut rfp = blast_res_freq_new(Some(&sbp)).expect("res freq");
+        assert_eq!(blast_res_freq_std_comp(Some(&sbp), Some(&mut rfp)), 0);
+        assert!((rfp.prob.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(rfp.prob[crate::encoding::NCBISTDAA_C as usize] > 0.0);
+
+        let mut custom = BlastResFreq {
+            alphabet_code: sbp.alphabet_code,
+            prob: vec![2.0; sbp.alphabet_size],
+        };
+        assert_eq!(
+            blast_res_freq_normalize(Some(&sbp), Some(&mut custom), 2.0),
+            0
+        );
+        assert!((custom.prob.iter().sum::<f64>() - 2.0).abs() < 1e-12);
+        custom.prob[0] = -1.0;
+        assert_eq!(
+            blast_res_freq_normalize(Some(&sbp), Some(&mut custom), 1.0),
+            1
+        );
+
+        let mut rcp = blast_res_comp_new(Some(&sbp)).expect("res comp");
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDX");
+        assert_eq!(
+            blast_res_comp_str(Some(&sbp), Some(&mut rcp), Some(&query), query.len() as i32),
+            0
+        );
+        assert_eq!(rcp.comp[crate::encoding::NCBISTDAA_A as usize], 1);
+        assert_eq!(rcp.comp[crate::encoding::NCBISTDAA_X as usize], 0);
+
+        let mut query_freq = blast_res_freq_new(Some(&sbp)).expect("res freq");
+        assert_eq!(
+            blast_res_freq_res_comp(Some(&sbp), Some(&mut query_freq), Some(&rcp)),
+            0
+        );
+        assert!((query_freq.prob.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert_eq!(blast_res_freq_clr(Some(&sbp), Some(&mut query_freq)), 0);
+        assert_eq!(query_freq.prob.iter().sum::<f64>(), 0.0);
+        assert_eq!(
+            blast_res_freq_string(
+                Some(&sbp),
+                Some(&mut query_freq),
+                Some(&query),
+                query.len() as i32
+            ),
+            0
+        );
+        assert!((query_freq.prob.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+
+        let mut rfp_slot = Some(query_freq);
+        assert!(blast_res_freq_free(&mut rfp_slot).is_none());
+        let mut rcp_slot = Some(rcp);
+        assert!(blast_res_comp_destruct(&mut rcp_slot).is_none());
+    }
+
+    #[test]
+    fn translated_score_freq_new_validates_score_range() {
+        assert_eq!(blast_score_chk(-3, 5), 0);
+        assert_eq!(blast_score_chk(0, 5), 1);
+        assert_eq!(blast_score_chk(-5, 0), 1);
+        assert_eq!(blast_score_chk(BLAST_SCORE_MIN - 1, 5), 1);
+        assert_eq!(blast_score_chk(-5, BLAST_SCORE_MAX + 1), 1);
+        let sfp = blast_score_freq_new(-3, 5).expect("score freq");
+        assert_eq!(sfp.score_min, -3);
+        assert_eq!(sfp.score_max, 5);
+        assert_eq!(sfp.obs_min, 0);
+        assert_eq!(sfp.obs_max, 0);
+        assert_eq!(sfp.sprob.len(), 9);
+        assert!(blast_score_freq_new(0, 5).is_none());
+        assert!(blast_score_freq_new(-5, 0).is_none());
+    }
+
+    #[test]
+    fn translated_score_freq_calc_and_ungapped_karlin_match_c_shape() {
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("score block");
+        sbp.reward = 1;
+        sbp.penalty = -2;
+        assert_eq!(blast_score_blk_nucl_matrix_create(&mut sbp), 0);
+
+        let mut rfp1 = blast_res_freq_new(Some(&sbp)).expect("freq1");
+        let mut rfp2 = blast_res_freq_new(Some(&sbp)).expect("freq2");
+        assert_eq!(blast_res_freq_std_comp(Some(&sbp), Some(&mut rfp1)), 0);
+        assert_eq!(blast_res_freq_std_comp(Some(&sbp), Some(&mut rfp2)), 0);
+        let mut sfp = blast_score_freq_new(sbp.loscore, sbp.hiscore).expect("score freq");
+
+        assert_eq!(
+            blast_score_freq_calc(Some(&sbp), Some(&mut sfp), Some(&rfp1), Some(&rfp2)),
+            0
+        );
+        assert_eq!(sfp.obs_min, -2);
+        assert_eq!(sfp.obs_max, 1);
+        assert!((sfp.p(1) - 0.25).abs() < 1e-12);
+        assert!((sfp.p(-2) - 0.75).abs() < 1e-12);
+        assert!((sfp.score_avg + 1.25).abs() < 1e-12);
+
+        let mut kbp = blast_karlin_blk_new();
+        assert_eq!(
+            blast_karlin_blk_ungapped_calc(Some(&mut kbp), Some(&sfp)),
+            0
+        );
+        assert!(kbp.is_valid());
+        let lambda_residual =
+            0.25 * (kbp.lambda * 1.0).exp() + 0.75 * (kbp.lambda * -2.0).exp() - 1.0;
+        assert!(lambda_residual.abs() < 1e-10);
+
+        let mut sfp_slot = Some(sfp);
+        assert!(blast_score_freq_free(&mut sfp_slot).is_none());
+        assert!(sfp_slot.is_none());
+    }
+
+    #[test]
+    fn translated_score_blk_kbp_ungapped_calc_fills_context_arrays() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFGHIKLMNPQRSTVWY");
+        let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("score block");
+        sbp.name = Some("BLOSUM62".to_string());
+        assert_eq!(blast_score_blk_matrix_fill(&mut sbp), 0);
+        assert_eq!(
+            blast_score_set_ambig_res(Some(&mut sbp), crate::encoding::NCBISTDAA_X),
+            0
+        );
+        let mut messages = None;
+
+        assert_eq!(
+            blast_score_blk_kbp_ungapped_calc(
+                crate::program::BLASTP,
+                Some(&mut sbp),
+                Some(&query),
+                Some(&mut query_info),
+                Some(&mut messages),
+            ),
+            0
+        );
+
+        assert!(messages.is_none());
+        assert!(query_info.contexts[0].is_valid);
+        assert!(sbp.kbp_ideal.as_ref().is_some_and(KarlinBlk::is_valid));
+        assert!(sbp.sfp[0].is_some());
+        assert!(sbp.kbp_std[0].is_valid());
+        assert!(sbp.kbp_psi[0].is_valid());
+        assert_eq!(sbp.kbp[0].lambda, sbp.kbp_std[0].lambda);
+    }
+
+    #[test]
+    fn translated_score_blk_kbp_ungapped_calc_warns_for_invalid_plain_query() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"XXXX");
+        let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("score block");
+        sbp.name = Some("BLOSUM62".to_string());
+        assert_eq!(blast_score_blk_matrix_fill(&mut sbp), 0);
+        assert_eq!(
+            blast_score_set_ambig_res(Some(&mut sbp), crate::encoding::NCBISTDAA_X),
+            0
+        );
+        let mut messages = None;
+
+        assert_eq!(
+            blast_score_blk_kbp_ungapped_calc(
+                crate::program::BLASTP,
+                Some(&mut sbp),
+                Some(&query),
+                Some(&mut query_info),
+                Some(&mut messages),
+            ),
+            1
+        );
+
+        assert!(!query_info.contexts[0].is_valid);
+        let message = messages.expect("warning");
+        assert_eq!(message.severity, crate::diagnostics::BlastSeverity::Warning);
+        assert_eq!(message.context, 0);
+    }
+
     /// Port of EvalueForProteinFSC: E-values should never be negative.
     /// Uses BLOSUM62 with gap_open=11, gap_extend=1.
     #[test]
@@ -3544,6 +6768,63 @@ mod tests {
         assert!(converged, "Length adjustment should converge");
         assert!(adj > 0, "Length adjustment should be positive");
         assert!(adj < 300, "Length adjustment should be < query length");
+    }
+
+    #[test]
+    fn translated_length_adjustment_wrapper_matches_c_status_shape() {
+        let kbp = lookup_protein_params(11, 1).unwrap();
+        let mut adj = -1;
+        let status = blast_compute_length_adjustment(
+            kbp.k,
+            kbp.k.ln(),
+            kbp.alpha / kbp.lambda,
+            kbp.beta,
+            300,
+            1_000_000,
+            5000,
+            Some(&mut adj),
+        );
+        let (expected, converged) = compute_length_adjustment_exact(
+            kbp.k,
+            kbp.k.ln(),
+            kbp.alpha / kbp.lambda,
+            kbp.beta,
+            300,
+            1_000_000,
+            5000,
+        );
+        assert_eq!(adj, expected);
+        assert_eq!(status, if converged { 0 } else { 1 });
+
+        assert_eq!(
+            blast_compute_length_adjustment(
+                kbp.k,
+                kbp.k.ln(),
+                kbp.alpha / kbp.lambda,
+                kbp.beta,
+                300,
+                1_000_000,
+                5000,
+                None,
+            ),
+            1
+        );
+
+        let mut adj = 99;
+        assert_eq!(
+            blast_compute_length_adjustment(
+                1.0e-300,
+                (1.0e-300_f64).ln(),
+                kbp.alpha / kbp.lambda,
+                kbp.beta,
+                10,
+                10,
+                1,
+                Some(&mut adj),
+            ),
+            1
+        );
+        assert_eq!(adj, 0);
     }
 
     /// Verify E-value <-> raw score round-trip consistency.
@@ -3723,6 +7004,58 @@ mod tests {
         assert_eq!(ss, 1.0);
     }
 
+    #[test]
+    fn test_matrix_data_reset_reuses_and_resizes_scratch() {
+        let mut m = MatrixData::default();
+        assert_eq!(s_matrix_data_reset(Some(&mut m), 11, 0.9), 0);
+        assert_eq!(m.matrix_dim, 12);
+        assert_eq!(m.matrix_dim_alloc, 12);
+        assert_eq!(m.power_matrix.len(), 144);
+        assert_eq!(m.prod_matrix.len(), 144);
+        assert_eq!(m.percent_identity, 0.9);
+
+        m.hit_probability = 0.5;
+        assert_eq!(s_matrix_data_reset(Some(&mut m), 4, 0.75), 0);
+        assert_eq!(m.matrix_dim, 5);
+        assert_eq!(m.matrix_dim_alloc, 12);
+        assert_eq!(m.power_matrix.len(), 144);
+        assert_eq!(m.hit_probability, 0.0);
+        assert_eq!(s_matrix_data_reset(None, 4, 0.75), -1);
+    }
+
+    #[test]
+    fn test_matrix_square_matches_naive_product() {
+        let a = vec![
+            1.0, 2.0, 3.0, 4.0, //
+            0.5, 1.5, 2.5, 3.5, //
+            4.0, 3.0, 2.0, 1.0, //
+            2.0, 0.0, 1.0, 3.0,
+        ];
+        let mut prod = vec![0.0; 16];
+        s_matrix_square(&a, &mut prod, 4);
+
+        let mut expected = vec![0.0; 16];
+        for i in 0..4 {
+            for j in 0..4 {
+                expected[i * 4 + j] = (0..4).map(|k| a[i * 4 + k] * a[k * 4 + j]).sum();
+            }
+        }
+        assert_eq!(prod, expected);
+    }
+
+    #[test]
+    fn test_find_best_nucleotide_word_size_matches_ncbi_sanity_paths() {
+        assert_eq!(blast_find_best_nucleotide_word_size(1.0, 100), 0);
+        assert_eq!(blast_find_best_nucleotide_word_size(0.59, 100), 0);
+        assert_eq!(blast_find_best_nucleotide_word_size(0.9, -1), 0);
+        assert_eq!(blast_find_best_nucleotide_word_size(0.9, 7), 4);
+
+        let mut m = MatrixData::default();
+        let direct = s_find_word_size(Some(&mut m), 0.9, 100);
+        assert_eq!(blast_find_best_nucleotide_word_size(0.9, 100), direct);
+        assert!((4..=110).contains(&direct));
+    }
+
     /// Verify length adjustment is 0 for degenerate inputs.
     #[test]
     fn test_length_adjustment_degenerate() {
@@ -3735,5 +7068,585 @@ mod tests {
         };
         let adj = compute_length_adjustment(100, 1000000, 100, &kbp);
         assert_eq!(adj, 0);
+    }
+
+    #[test]
+    fn translated_matrix_and_table_entry_points_match_c_shape() {
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("score block");
+        sbp.name = Some("BLOSUM62".to_string());
+        assert_eq!(blast_score_blk_matrix_fill(&mut sbp), 0);
+        assert_eq!(sbp.hiscore, 11);
+        assert_eq!(blast_score_blk_kbp_ideal_calc(Some(&mut sbp)), 0);
+        assert!(sbp.kbp_ideal.as_ref().is_some_and(KarlinBlk::is_valid));
+        assert_eq!(blast_score_blk_kbp_ideal_calc(None), 1);
+
+        let src = KarlinBlk {
+            lambda: 0.3,
+            k: 0.1,
+            log_k: 0.1_f64.ln(),
+            h: 0.2,
+            round_down: true,
+        };
+        let mut dst = KarlinBlk::default();
+        assert_eq!(blast_karlin_blk_copy(Some(&mut dst), Some(&src)), 0);
+        assert_eq!(dst.lambda, src.lambda);
+        assert_eq!(dst.round_down, src.round_down);
+        assert_eq!(blast_karlin_blk_copy(None, Some(&src)), -1);
+    }
+
+    #[test]
+    fn translated_gapped_and_gumbel_table_loaders_match_c_statuses() {
+        let mut kbp = KarlinBlk::default();
+        assert_eq!(
+            blast_karlin_blk_gapped_load_from_tables(
+                Some(&mut kbp),
+                11,
+                1,
+                Some("BLOSUM62"),
+                false,
+            ),
+            0
+        );
+        assert!((kbp.lambda - 0.267).abs() < 1e-12);
+        assert_eq!(
+            blast_karlin_blk_gapped_load_from_tables(None, 11, 1, None, false),
+            -1
+        );
+        assert_eq!(
+            blast_karlin_blk_gapped_calc(None, 11, 1, Some("NOT_A_MATRIX"), None),
+            1
+        );
+        assert_eq!(
+            blast_karlin_blk_gapped_calc(None, 99, 99, Some("BLOSUM62"), None),
+            2
+        );
+
+        let mut gbp = GumbelBlk {
+            lambda: 0.0,
+            a: 0.0,
+            b: 0.0,
+            alpha: 0.0,
+            beta: 0.0,
+            sigma: 0.0,
+            tau: 0.0,
+            db_length: 0,
+        };
+        assert_eq!(
+            blast_gumbel_blk_load_from_tables(Some(&mut gbp), 11, 1, Some("BLOSUM62")),
+            0
+        );
+        assert!((gbp.lambda - 0.267).abs() < 1e-12);
+        assert_eq!(blast_gumbel_blk_calc(None, 11, 1, None, None), -1);
+        assert_eq!(
+            blast_gumbel_blk_calc(None, 99, 99, Some("BLOSUM62"), None),
+            2
+        );
+    }
+
+    #[test]
+    fn translated_spouge_wrappers_match_c_shape() {
+        let mut kbp = KarlinBlk::default();
+        assert_eq!(
+            blast_karlin_blk_gapped_load_from_tables(
+                Some(&mut kbp),
+                11,
+                1,
+                Some("BLOSUM62"),
+                false,
+            ),
+            0
+        );
+        let mut gbp = GumbelBlk {
+            lambda: 0.0,
+            a: 0.0,
+            b: 0.0,
+            alpha: 0.0,
+            beta: 0.0,
+            sigma: 0.0,
+            tau: 0.0,
+            db_length: 1_000_000,
+        };
+        assert_eq!(
+            blast_gumbel_blk_load_from_tables(Some(&mut gbp), 11, 1, Some("BLOSUM62")),
+            0
+        );
+        gbp.db_length = 1_000_000;
+
+        let score = 72;
+        let m = 250;
+        let n = 400;
+        let evalue = blast_spouge_sto_e(score, Some(&kbp), Some(&gbp), m, n);
+        let expected = spouge_evalue(score, &kbp, &gbp, m, n);
+        assert!((evalue - expected).abs() <= expected.abs() * 1e-12);
+
+        let cutoff = blast_spouge_eto_s(evalue, Some(&kbp), Some(&gbp), m, n);
+        assert_eq!(cutoff, spouge_etos(evalue, &kbp, &gbp, m, n));
+        assert_eq!(blast_spouge_sto_e(score, None, Some(&gbp), m, n), -1.0);
+        assert_eq!(
+            blast_spouge_eto_s(evalue, Some(&kbp), None, m, n),
+            BLAST_SCORE_MIN
+        );
+    }
+
+    #[test]
+    fn translated_matrix_table_wrappers_report_c_style_errors() {
+        let all = blast_load_matrix_values(false);
+        assert!(all.iter().any(|info| info.name == "IDENTITY"));
+        let standard = blast_load_matrix_values(true);
+        assert!(!standard.iter().any(|info| info.name == "IDENTITY"));
+        let mut destructed = all.clone();
+        assert!(blast_matrix_values_destruct(&mut destructed).is_empty());
+        assert!(destructed.is_empty());
+        assert_eq!(
+            blast_karlin_blk_gapped_load_from_tables(None, 15, 2, Some("IDENTITY"), true,),
+            1
+        );
+
+        let mut messages = None;
+        assert_eq!(
+            blast_karlin_blk_gapped_calc(None, 11, 1, Some("NOT_A_MATRIX"), Some(&mut messages),),
+            1
+        );
+        let message = messages.expect("matrix error message");
+        assert_eq!(message.severity, crate::diagnostics::BlastSeverity::Error);
+        assert_eq!(message.message, "NOT_A_MATRIX is not a supported matrix");
+        assert!(message
+            .next
+            .as_ref()
+            .is_some_and(|next| next.message == "BLOSUM80 is a supported matrix"));
+
+        let mut messages = None;
+        assert_eq!(
+            blast_gumbel_blk_calc(None, 99, 99, Some("BLOSUM62"), Some(&mut messages),),
+            2
+        );
+        let message = messages.expect("gap error message");
+        assert!(message.message.contains(
+            "Gap existence and extension values of 99 and 99 not supported for BLOSUM62"
+        ));
+        assert!(message.next.as_ref().is_some_and(|next| {
+            next.message == "Gap existence and extension values of 32767 and 32767 are supported"
+        }));
+    }
+
+    #[test]
+    fn translated_nucleotide_gap_helpers_and_alpha_beta_match_c_shape() {
+        let values = s_get_nucl_values_array(2, -4).expect("values");
+        assert!(!values.normal.is_empty());
+        assert_eq!(values.gap_open_max, 4);
+        assert_eq!(values.gap_extend_max, 4);
+        assert!(blast_check_reward_penalty_scores(1, -2));
+        assert!(!blast_check_reward_penalty_scores(2, -1));
+        assert_eq!(s_get_nucl_values_array(2, -1).unwrap_err(), -1);
+
+        let mut gap_open = 1;
+        let mut gap_extend = 1;
+        assert_eq!(
+            blast_get_nucleotide_gap_existence_extend_params(1, -2, &mut gap_open, &mut gap_extend,),
+            0
+        );
+        assert_eq!((gap_open, gap_extend), (1, 1));
+
+        let ungapped = compute_ungapped_kbp(1, -2);
+        let mut alpha = 0.0;
+        let mut beta = 0.0;
+        assert_eq!(
+            blast_get_nucl_alpha_beta(
+                1,
+                -2,
+                3,
+                1,
+                ungapped.lambda,
+                ungapped.h,
+                true,
+                &mut alpha,
+                &mut beta,
+            ),
+            0
+        );
+        assert!((alpha - 1.3).abs() < 1e-6);
+        assert!((beta + 1.0).abs() < 1e-6);
+
+        assert_eq!(s_get_ungapped_beta(1, -1), -2.0);
+        assert_eq!(s_get_ungapped_beta(2, -3), -2.0);
+        assert_eq!(s_get_ungapped_beta(1, -2), 0.0);
+        assert_eq!(
+            blast_get_nucl_alpha_beta(
+                2,
+                -1,
+                1,
+                1,
+                ungapped.lambda,
+                ungapped.h,
+                true,
+                &mut alpha,
+                &mut beta
+            ),
+            -1
+        );
+
+        assert_eq!(
+            blast_get_nucl_alpha_beta(
+                1,
+                -2,
+                99,
+                99,
+                ungapped.lambda,
+                ungapped.h,
+                true,
+                &mut alpha,
+                &mut beta,
+            ),
+            0
+        );
+        assert!((alpha - ungapped.lambda / ungapped.h).abs() < 1e-12);
+        assert_eq!(beta, 0.0);
+    }
+
+    #[test]
+    fn translated_nucl_gapped_calc_sets_table_linear_fallback_and_error_message() {
+        let ungapped = compute_ungapped_kbp(1, -2);
+        let mut kbp = KarlinBlk::default();
+        let mut round_down = true;
+        assert_eq!(
+            blast_karlin_blk_nucl_gapped_calc(
+                Some(&mut kbp),
+                3,
+                1,
+                1,
+                -2,
+                Some(&ungapped),
+                Some(&mut round_down),
+                None,
+            ),
+            0
+        );
+        assert!(!round_down);
+        assert!((kbp.lambda - 1.32).abs() < 1e-12);
+        assert!((kbp.k - 0.57).abs() < 1e-12);
+
+        assert_eq!(
+            blast_karlin_blk_nucl_gapped_calc(
+                Some(&mut kbp),
+                0,
+                0,
+                1,
+                -2,
+                Some(&ungapped),
+                Some(&mut round_down),
+                None,
+            ),
+            0
+        );
+        assert!((kbp.lambda - 1.28).abs() < 1e-12);
+
+        assert_eq!(
+            blast_karlin_blk_nucl_gapped_calc(
+                Some(&mut kbp),
+                99,
+                99,
+                1,
+                -2,
+                Some(&ungapped),
+                Some(&mut round_down),
+                None,
+            ),
+            0
+        );
+        assert!((kbp.lambda - ungapped.lambda).abs() < 1e-12);
+
+        let before = kbp.clone();
+        assert_eq!(
+            blast_karlin_blk_nucl_gapped_calc(
+                Some(&mut kbp),
+                1,
+                3,
+                1,
+                -2,
+                Some(&ungapped),
+                Some(&mut round_down),
+                None,
+            ),
+            0
+        );
+        assert_eq!(kbp.lambda, before.lambda);
+
+        let mut messages = None;
+        assert_eq!(
+            blast_karlin_blk_nucl_gapped_calc(
+                Some(&mut kbp),
+                1,
+                3,
+                1,
+                -2,
+                Some(&ungapped),
+                Some(&mut round_down),
+                Some(&mut messages),
+            ),
+            1
+        );
+        let message = messages.expect("error message");
+        assert_eq!(message.severity, crate::diagnostics::BlastSeverity::Error);
+        assert!(message
+            .message
+            .contains("are not supported for substitution scores 1 and -2"));
+        assert!(message
+            .message
+            .contains("Any values more stringent than 2 and 2 are supported"));
+    }
+
+    #[test]
+    fn translated_residue_probability_and_rps_fill_scores_match_c_shape() {
+        let sequence = [
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+            crate::encoding::NCBISTDAA_X,
+        ];
+        let mut probs = vec![0.0; crate::encoding::BLASTAA_SIZE];
+        blast_fill_residue_probability(&sequence, &mut probs);
+        assert!((probs[crate::encoding::NCBISTDAA_A as usize] - 2.0 / 3.0).abs() < 1e-12);
+        assert!((probs[crate::encoding::NCBISTDAA_C as usize] - 1.0 / 3.0).abs() < 1e-12);
+        assert_eq!(probs[crate::encoding::NCBISTDAA_X as usize], 0.0);
+        assert!((rps_find_ungapped_lambda(Some("BLOSUM62")) - 0.3176).abs() < 1e-12);
+        assert_eq!(rps_find_ungapped_lambda(Some("NOT_A_MATRIX")), 0.0);
+        assert_eq!(rps_find_ungapped_lambda(None), 0.0);
+
+        let matrix = vec![vec![-1, 2, BLAST_SCORE_MIN], vec![3, -2, 1]];
+        let query_probs = vec![0.25, 0.75, 0.0];
+        let mut sfp = blast_score_freq_new(-5, 5).expect("score freq");
+        rps_fill_scores(&matrix, &query_probs, &mut sfp, 3);
+        assert_eq!(sfp.obs_min, -2);
+        assert_eq!(sfp.obs_max, 3);
+        assert!((sfp.score_avg - 0.25).abs() < 1e-12);
+
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("score block");
+        sbp.name = Some("BLOSUM62".to_string());
+        let pos_matrix: Vec<Vec<i32>> = crate::matrix::BLOSUM62
+            .iter()
+            .map(|row| row.to_vec())
+            .collect();
+        let mut full_sfp = ScoreFreq {
+            score_min: 0,
+            score_max: 0,
+            obs_min: 0,
+            obs_max: 0,
+            score_avg: 0.0,
+            sprob: Vec::new(),
+        };
+        rps_fill_scores(
+            &pos_matrix,
+            &probs,
+            &mut full_sfp,
+            crate::encoding::BLASTAA_SIZE,
+        );
+        assert!(blast_karlin_lambda_nr(Some(&full_sfp), 0.3) > 0.0);
+        assert_eq!(blast_karlin_lambda_nr(None, 0.3), -1.0);
+        let rescaled = rps_rescale_pssm(
+            2.0,
+            sequence.len() as i32,
+            Some(&sequence),
+            pos_matrix.len() as i32,
+            Some(&pos_matrix),
+            Some(&sbp),
+        )
+        .expect("rescaled pssm");
+        assert_eq!(rescaled.len(), pos_matrix.len());
+        assert_eq!(rescaled[0].len(), crate::encoding::BLASTAA_SIZE);
+        assert_eq!(
+            rescaled[0][crate::encoding::NCBISTDAA_X as usize],
+            pos_matrix[0][crate::encoding::NCBISTDAA_X as usize]
+        );
+        assert_ne!(
+            rescaled[0][crate::encoding::NCBISTDAA_A as usize],
+            pos_matrix[0][crate::encoding::NCBISTDAA_A as usize]
+        );
+        assert!(
+            rps_rescale_pssm(0.0, 1, Some(&sequence), 1, Some(&pos_matrix), Some(&sbp)).is_none()
+        );
+        assert!(
+            rps_rescale_pssm(2.0, 1, Some(&sequence), 3, Some(&pos_matrix), Some(&sbp)).is_none()
+        );
+        sbp.name = Some("NOT_A_MATRIX".to_string());
+        assert!(
+            rps_rescale_pssm(2.0, 1, Some(&sequence), 1, Some(&pos_matrix), Some(&sbp)).is_none()
+        );
+    }
+
+    #[test]
+    fn translated_compressed_alphabet_helpers_match_c_shape() {
+        let mut table = vec![0u8; crate::encoding::BLASTAA_SIZE];
+        let mut rev_table =
+            [[-1i8; COMPRESSED_REVERSE_LOOKUP_SIZE]; COMPRESSED_REVERSE_LOOKUP_SIZE];
+        s_build_compressed_translation(S_ALPHABET10, &mut table, 10, &mut rev_table);
+
+        assert_eq!(table[crate::encoding::NCBISTDAA_I as usize], 0);
+        assert_eq!(table[crate::encoding::NCBISTDAA_J as usize], 0);
+        assert_eq!(table[crate::encoding::NCBISTDAA_L as usize], 0);
+        assert_eq!(
+            table[crate::encoding::aminoacid_to_ncbistdaa_base(b'M') as usize],
+            0
+        );
+        assert_eq!(
+            table[crate::encoding::aminoacid_to_ncbistdaa_base(b'V') as usize],
+            0
+        );
+        assert_eq!(table[crate::encoding::NCBISTDAA_A as usize], 1);
+        assert_eq!(
+            table[crate::encoding::aminoacid_to_ncbistdaa_base(b'W') as usize],
+            9
+        );
+        assert_eq!(rev_table[0][0], crate::encoding::NCBISTDAA_I as i8);
+        assert_eq!(rev_table[0][5], -1);
+
+        let mut sbp =
+            blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("score block");
+        sbp.name = Some("BLOSUM62".to_string());
+        assert_eq!(
+            blast_score_set_ambig_res(Some(&mut sbp), crate::encoding::NCBISTDAA_X),
+            0
+        );
+        let mut compressed_prob = vec![0.0; crate::encoding::BLASTAA_SIZE];
+        assert_eq!(
+            s_get_compressed_probs(Some(&sbp), &mut compressed_prob, 10, &rev_table),
+            0
+        );
+        for letter in 0..10 {
+            let mut sum = 0.0;
+            for &aa in &rev_table[letter] {
+                if aa < 0 {
+                    break;
+                }
+                sum += compressed_prob[aa as usize];
+            }
+            assert!(
+                (sum - 1.0).abs() < 1e-12,
+                "compressed letter {letter} conditional sum {sum}"
+            );
+        }
+        assert_eq!(
+            s_get_compressed_probs(None, &mut compressed_prob, 10, &rev_table),
+            -1
+        );
+
+        let mut alphabet = SCompressedAlphabet {
+            compressed_alphabet_size: 10,
+            compress_table: table.clone(),
+            matrix: None,
+        };
+        assert_eq!(
+            s_build_compressed_score_matrix(Some(&sbp), Some(&mut alphabet), 1.0, &rev_table),
+            0
+        );
+        let matrix = alphabet.matrix.as_ref().expect("compressed score matrix");
+        assert_eq!(matrix.nrows, crate::encoding::BLASTAA_SIZE);
+        assert_eq!(matrix.ncols, 10);
+        let ratios = crate::matrix::get_matrix_freq_ratios("BLOSUM62").unwrap();
+        let compressed_a = table[crate::encoding::NCBISTDAA_A as usize] as usize;
+        let mut ratio = 0.0;
+        for &aa in &rev_table[compressed_a] {
+            if aa < 0 {
+                break;
+            }
+            let aa = aa as usize;
+            ratio += ratios[crate::encoding::NCBISTDAA_A as usize][aa] * compressed_prob[aa];
+        }
+        let lambda = rps_find_ungapped_lambda(Some("BLOSUM62"));
+        let expected = crate::math::nint(ratio.ln() / lambda) as i32;
+        assert_eq!(
+            matrix.data[crate::encoding::NCBISTDAA_A as usize][compressed_a],
+            expected
+        );
+        assert_eq!(
+            s_build_compressed_score_matrix(None, Some(&mut alphabet), 1.0, &rev_table),
+            -1
+        );
+
+        let allocated =
+            s_compressed_alphabet_new(Some(&sbp), 15, 1.0).expect("compressed alphabet");
+        assert_eq!(allocated.compressed_alphabet_size, 15);
+        assert_eq!(
+            allocated.compress_table.len(),
+            crate::encoding::BLASTAA_SIZE
+        );
+        assert_eq!(allocated.matrix.as_ref().unwrap().ncols, 15);
+        assert!(s_compressed_alphabet_new(Some(&sbp), 11, 1.0).is_none());
+        let mut allocated = Some(allocated);
+        assert!(s_compressed_alphabet_free(&mut allocated).is_none());
+        assert!(allocated.is_none());
+    }
+
+    #[test]
+    fn translated_allowed_values_helpers_report_matrix_rows() {
+        let info = matrix_info_new("BLOSUM62").expect("matrix info");
+        assert_eq!(info.name, "BLOSUM62");
+        assert!(info.max_number_values > 0);
+        let mut info_slot = Some(info.clone());
+        assert!(matrix_info_destruct(&mut info_slot).is_none());
+        assert!(info_slot.is_none());
+        let matrix_message = blast_print_matrix_message("NOT_A_MATRIX", true);
+        assert!(matrix_message
+            .starts_with("NOT_A_MATRIX is not a supported matrix, supported matrices are:\n"));
+        assert!(matrix_message.contains("BLOSUM62 \n"));
+        assert!(!matrix_message.contains("IDENTITY \n"));
+
+        let allowed = blast_print_allowed_values("BLOSUM62", 1, 1);
+        assert!(allowed.contains("supported values"));
+        assert!(allowed.contains("32767, 32767\n") || allowed.contains("32767, 32767,"));
+        assert!(allowed.contains("11, 1\n"));
+        assert!(!blast_karlin_report_allowed_values("BLOSUM62").is_empty());
+    }
+
+    #[test]
+    fn translated_matrix_values_and_alpha_beta_match_c_table_shape() {
+        let values = blast_get_matrix_values(Some("BLOSUM62"));
+        assert_eq!(
+            values.open.len(),
+            matrix_stat_rows("BLOSUM62").unwrap().len()
+        );
+        assert_eq!(values.open[9], 11);
+        assert_eq!(values.extension[9], 1);
+        assert_eq!(values.pref_flags[9], BLAST_MATRIX_BEST);
+        assert!(values
+            .pref_flags
+            .iter()
+            .enumerate()
+            .all(|(index, flag)| index == 9 || *flag == BLAST_MATRIX_NOMINAL));
+        assert!(blast_get_matrix_values(None).open.is_empty());
+        assert!(blast_get_matrix_values(Some("NOT_A_MATRIX"))
+            .open
+            .is_empty());
+
+        let mut alpha = -1.0;
+        let mut beta = -1.0;
+        blast_get_alpha_beta(Some("BLOSUM62"), &mut alpha, &mut beta, true, 0, 0, None);
+        assert!((alpha - values.alpha[9]).abs() < 1e-12);
+        assert!((beta - values.beta[9]).abs() < 1e-12);
+
+        blast_get_alpha_beta(Some("BLOSUM62"), &mut alpha, &mut beta, true, 10, 1, None);
+        let row = lookup_matrix_stat_row("BLOSUM62", 10, 1).expect("row");
+        assert!((alpha - row.alpha).abs() < 1e-12);
+        assert!((beta - row.beta).abs() < 1e-12);
+
+        let fallback = KarlinBlk {
+            lambda: 0.5,
+            h: 0.25,
+            k: 0.1,
+            log_k: 0.1_f64.ln(),
+            round_down: false,
+        };
+        blast_get_alpha_beta(
+            Some("NOT_A_MATRIX"),
+            &mut alpha,
+            &mut beta,
+            false,
+            0,
+            0,
+            Some(&fallback),
+        );
+        assert_eq!(alpha, 2.0);
+        assert_eq!(beta, 0.0);
     }
 }

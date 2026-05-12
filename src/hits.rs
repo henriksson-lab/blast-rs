@@ -161,6 +161,8 @@ mod tests {
             num_gaps: 0,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         });
         list.add_hsp(Hsp {
             score: 20,
@@ -179,6 +181,8 @@ mod tests {
             num_gaps: 0,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         });
         filter_by_evalue(&mut list, 0.001);
         assert_eq!(list.hsps.len(), 1);
@@ -216,6 +220,8 @@ mod tests {
             num_gaps: 0,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         }
     }
 
@@ -384,7 +390,7 @@ mod tests {
                 0,
                 50,
             ));
-            hitlist.add_hsp_list(hsp_list);
+            hitlist.blast_hit_list_update(hsp_list);
         }
         assert_eq!(hitlist.hsp_lists.len(), 10);
 

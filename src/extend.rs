@@ -1,12 +1,96 @@
 //! Rust equivalent of blast_extend.c and na_ungapped.c
 //! Ungapped and gapped extension structures.
 
+use crate::parameters::InitialWordParameters;
+
+pub const DIAGHASH_NUM_BUCKETS: usize = 512;
+pub const DIAGHASH_CHAIN_LENGTH: usize = 256;
+pub const MIN_INIT_HITLIST_SIZE: usize = 100;
+
+/// Diagonal bookkeeping selector used by `BlastExtendWordNew`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagTableType {
+    DiagArray,
+    DiagHash,
+}
+
+/// Structure for keeping last hit information for a diagonal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiagStruct {
+    pub last_hit: i32,
+    pub flag: bool,
+}
+
+/// Diagonal-array bookkeeping used by the ungapped extension word finders.
+#[derive(Debug, Clone)]
+pub struct BlastDiagTable {
+    pub hit_level_array: Vec<DiagStruct>,
+    pub hit_len_array: Option<Vec<u8>>,
+    pub diag_array_length: i32,
+    pub diag_mask: i32,
+    pub offset: i32,
+    pub window: i32,
+    pub multiple_hits: bool,
+    pub actual_window: i32,
+}
+
+/// One cell in the diagonal hash chain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiagHashCell {
+    pub diag: i32,
+    pub level: i32,
+    pub hit_saved: bool,
+    pub hit_len: i32,
+    pub next: u32,
+}
+
+/// Hash-table diagonal bookkeeping used by indexed nucleotide search.
+#[derive(Debug, Clone)]
+pub struct BlastDiagHash {
+    pub num_buckets: u32,
+    pub occupancy: u32,
+    pub capacity: u32,
+    pub backbone: Vec<u32>,
+    pub chain: Vec<DiagHashCell>,
+    pub offset: i32,
+    pub window: i32,
+}
+
+/// Structure for keeping initial word extension information.
+#[derive(Debug, Clone, Default)]
+pub struct BlastExtendWord {
+    pub diag_table: Option<BlastDiagTable>,
+    pub hash_table: Option<BlastDiagHash>,
+}
+
+/// Rust owner for the NCBI `BlastCoreAuxStruct` search scratch bundle.
+#[derive(Debug, Default)]
+pub struct BlastCoreAuxStruct {
+    pub ewp: Option<BlastExtendWord>,
+    pub init_hitlist: Option<InitHitList>,
+    pub seqsrc_oid_array: Vec<i32>,
+    pub seqsrc_oid_status: Vec<i16>,
+    pub mapper_word_hits: Vec<InitHsp>,
+}
+
 /// Initial hit from word finding (before ungapped extension).
 #[derive(Debug, Clone)]
 pub struct InitHsp {
     pub query_offset: i32,
     pub subject_offset: i32,
     pub ungapped_data: Option<UngappedData>,
+}
+
+/// PHI-BLAST initial hit from subject pattern scanning.
+///
+/// C stores this in `BlastOffsetPair::phi_offsets` and then calls
+/// `BLAST_SaveInitialHit(init_hitlist, s_start, s_end, NULL)`. The generic
+/// `InitHsp` storage is still used underneath, but this view keeps the PHI
+/// names visible at call sites.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhiInitialHit {
+    pub subject_start: i32,
+    pub subject_end: i32,
 }
 
 /// Data from an ungapped extension.
@@ -18,15 +102,199 @@ pub struct UngappedData {
     pub score: i32,
 }
 
+/// Port of `s_GetUngappedHSPContext` (`blast_gapalign.c:2371`).
+pub fn s_get_ungapped_hsp_context(
+    query_info: &crate::queryinfo::QueryInfo,
+    init_hsp: &InitHsp,
+) -> i32 {
+    crate::queryinfo::bsearch_context_info(init_hsp.query_offset, query_info)
+}
+
+/// Port of `s_AdjustInitialHSPOffsets` (`blast_gapalign.c:2384`).
+pub fn s_adjust_initial_hsp_offsets(init_hsp: &mut InitHsp, query_start: i32) {
+    init_hsp.query_offset -= query_start;
+    if let Some(ungapped_data) = init_hsp.ungapped_data.as_mut() {
+        ungapped_data.q_start -= query_start;
+        debug_assert!(ungapped_data.q_start >= 0);
+    }
+}
+
+/// Port of `s_SetUpLocalBlastSequenceBlk` (`blast_gapalign.c:2404`).
+/// Returns the starting offset of the selected query context.
+pub fn s_set_up_local_blast_sequence_blk(
+    concatenated_query: &crate::util::BlastSequenceBlk,
+    query_info: &crate::queryinfo::QueryInfo,
+    context: i32,
+    single_query: &mut crate::util::BlastSequenceBlk,
+) -> i32 {
+    let context = context.max(0) as usize;
+
+    if let Some(oof_sequence) = concatenated_query.oof_sequence.as_ref() {
+        let mixed_frame_context = context - context % crate::util::CODON_LENGTH;
+        let Some(first_context) = query_info.contexts.get(mixed_frame_context) else {
+            *single_query = crate::util::BlastSequenceBlk::default();
+            return -1;
+        };
+        let Some(last_context) = query_info
+            .contexts
+            .get(mixed_frame_context + crate::util::CODON_LENGTH - 1)
+        else {
+            *single_query = crate::util::BlastSequenceBlk::default();
+            return -1;
+        };
+
+        let query_start = first_context.query_offset;
+        let query_end = last_context
+            .query_offset
+            .saturating_add(last_context.query_length);
+        let query_length = query_end.saturating_sub(query_start);
+        single_query.sequence = None;
+        single_query.oof_sequence = slice_sequence(oof_sequence, query_start, query_length);
+        single_query.length = query_length;
+        return query_start;
+    }
+
+    let Some(context_info) = query_info.contexts.get(context) else {
+        *single_query = crate::util::BlastSequenceBlk::default();
+        return -1;
+    };
+    let query_start = context_info.query_offset;
+    let query_length = context_info.query_length;
+    single_query.sequence = concatenated_query
+        .sequence
+        .as_ref()
+        .and_then(|sequence| slice_sequence(sequence, query_start, query_length));
+    single_query.oof_sequence = None;
+    single_query.length = query_length;
+    query_start
+}
+
+/// Port of `s_AdjustHspOffsetsAndGetQueryData` (`blast_gapalign.c:2446`).
+/// Returns the context containing `init_hsp` after populating `query_out`.
+pub fn s_adjust_hsp_offsets_and_get_query_data(
+    query: &crate::util::BlastSequenceBlk,
+    query_info: &crate::queryinfo::QueryInfo,
+    init_hsp: &mut InitHsp,
+    query_out: &mut crate::util::BlastSequenceBlk,
+) -> i32 {
+    let context = s_get_ungapped_hsp_context(query_info, init_hsp);
+    let query_start = s_set_up_local_blast_sequence_blk(query, query_info, context, query_out);
+    if query_start >= 0 {
+        s_adjust_initial_hsp_offsets(init_hsp, query_start);
+    }
+    context
+}
+
+/// Port of `BLAST_GetUngappedHSPList` (`blast_gapalign.c:4822`).
+pub fn blast_get_ungapped_hsp_list(
+    init_hitlist: Option<&mut InitHitList>,
+    query_info: &crate::queryinfo::QueryInfo,
+    subject_oid: i32,
+    subject_frame: i32,
+    hsp_num_max: i32,
+    hsp_list: &mut Option<crate::hspstream::HspList>,
+) -> i16 {
+    let k_hsp_num_max = crate::hspstream::blast_hsp_num_max(false, hsp_num_max);
+
+    let Some(init_hitlist) = init_hitlist else {
+        if let Some(hsp_list) = hsp_list.as_mut() {
+            hsp_list.hsps.clear();
+            hsp_list.best_evalue = f64::MAX;
+        }
+        return 0;
+    };
+
+    for init_hsp in init_hitlist.hits.iter_mut() {
+        if init_hsp.ungapped_data.is_none() {
+            continue;
+        }
+
+        if hsp_list.is_none() {
+            let mut new_list = crate::hspstream::blast_hsp_list_new(k_hsp_num_max);
+            new_list.oid = subject_oid;
+            *hsp_list = Some(new_list);
+        }
+
+        let context = s_get_ungapped_hsp_context(query_info, init_hsp);
+        let Some(context_info) = query_info.contexts.get(context as usize) else {
+            continue;
+        };
+        s_adjust_initial_hsp_offsets(init_hsp, context_info.query_offset);
+        let ungapped_data = init_hsp
+            .ungapped_data
+            .as_ref()
+            .expect("ungapped data checked before offset adjustment");
+
+        let new_hsp = crate::hspstream::Hsp {
+            score: ungapped_data.score,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: f64::MAX,
+            query_offset: ungapped_data.q_start,
+            query_end: ungapped_data.q_start + ungapped_data.length,
+            query_gapped_start: init_hsp.query_offset,
+            subject_offset: ungapped_data.s_start,
+            subject_end: ungapped_data.s_start + ungapped_data.length,
+            subject_gapped_start: init_hsp.subject_offset,
+            context,
+            query_frame: context_info.frame,
+            subject_frame,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        };
+        if let Some(hsp_list) = hsp_list.as_mut() {
+            crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+        }
+    }
+
+    crate::hspstream::blast_hsp_list_sort_by_score(hsp_list.as_mut());
+    0
+}
+
+fn slice_sequence(sequence: &[u8], start: i32, length: i32) -> Option<Vec<u8>> {
+    let start = start.max(0) as usize;
+    let length = length.max(0) as usize;
+    let end = start.checked_add(length)?;
+    if end <= sequence.len() {
+        Some(sequence[start..end].to_vec())
+    } else {
+        None
+    }
+}
+
 /// List of initial HSPs from the word-finding + ungapped extension phase.
 #[derive(Debug)]
 pub struct InitHitList {
     pub hits: Vec<InitHsp>,
+    pub allocated: i32,
+    pub do_not_reallocate: bool,
+}
+
+/// Node used by the gapped-alignment chaining workspace.
+#[derive(Debug, Clone)]
+pub struct BlastInitHspNode {
+    pub init_hsp: Option<InitHsp>,
+    pub best_score: i32,
+    pub next: Option<usize>,
+}
+
+/// Rust model of NCBI `ChainingStruct` (`blast_gapalign_priv.h`).
+#[derive(Debug, Clone, Default)]
+pub struct ChainingStruct {
+    pub nodes: Vec<BlastInitHspNode>,
+    pub num_allocated: u32,
 }
 
 impl InitHitList {
     pub fn new() -> Self {
-        InitHitList { hits: Vec::new() }
+        InitHitList {
+            hits: Vec::with_capacity(MIN_INIT_HITLIST_SIZE),
+            allocated: MIN_INIT_HITLIST_SIZE as i32,
+            do_not_reallocate: false,
+        }
     }
 
     pub fn add(&mut self, hsp: InitHsp) {
@@ -40,6 +308,401 @@ impl InitHitList {
     pub fn reset(&mut self) {
         self.hits.clear();
     }
+}
+
+/// Port of `s_BlastDiagTableNew` (`blast_extend.c:47`).
+pub fn s_blast_diag_table_new(
+    qlen: i32,
+    multiple_hits: bool,
+    window_size: i32,
+) -> Option<BlastDiagTable> {
+    let mut diag_array_length = 1i32;
+    let target = qlen.saturating_add(window_size).max(1);
+    while diag_array_length < target {
+        diag_array_length = diag_array_length.checked_shl(1)?;
+    }
+
+    Some(BlastDiagTable {
+        hit_level_array: Vec::new(),
+        hit_len_array: None,
+        diag_array_length,
+        diag_mask: diag_array_length - 1,
+        offset: window_size,
+        window: window_size,
+        multiple_hits,
+        actual_window: 0,
+    })
+}
+
+/// Port of `s_BlastDiagTableFree` (`blast_extend.c:79`).
+pub fn s_blast_diag_table_free(diag_table: &mut Option<BlastDiagTable>) -> Option<BlastDiagTable> {
+    if let Some(table) = diag_table.as_mut() {
+        table.hit_level_array.clear();
+        table.hit_len_array = None;
+    }
+    *diag_table = None;
+    None
+}
+
+/// Port of `s_BlastDiagClear` (`blast_extend.c:92`).
+pub fn s_blast_diag_clear(diag: Option<&mut BlastDiagTable>) -> i32 {
+    let Some(diag) = diag else {
+        return 0;
+    };
+
+    diag.offset = diag.window;
+    for entry in &mut diag.hit_level_array {
+        entry.flag = false;
+        entry.last_hit = -diag.window;
+    }
+    if let Some(hit_len_array) = diag.hit_len_array.as_mut() {
+        hit_len_array.fill(0);
+    }
+    0
+}
+
+/// Port of `BlastExtendWordNew` (`blast_extend.c:115`).
+pub fn blast_extend_word_new(
+    query_length: u32,
+    word_params: &InitialWordParameters,
+    diag_table_type: DiagTableType,
+) -> Option<BlastExtendWord> {
+    let window_size = word_params.options.window_size;
+    match diag_table_type {
+        DiagTableType::DiagArray => {
+            let multiple_hits = window_size > 0;
+            let mut diag_table =
+                s_blast_diag_table_new(query_length as i32, multiple_hits, window_size)?;
+            let diag_len = diag_table.diag_array_length as usize;
+
+            diag_table.hit_level_array = vec![DiagStruct::default(); diag_len];
+            if window_size > 0 {
+                diag_table.hit_len_array = Some(vec![0; diag_len]);
+            }
+
+            Some(BlastExtendWord {
+                diag_table: Some(diag_table),
+                hash_table: None,
+            })
+        }
+        DiagTableType::DiagHash => Some(BlastExtendWord {
+            diag_table: None,
+            hash_table: Some(BlastDiagHash {
+                num_buckets: DIAGHASH_NUM_BUCKETS as u32,
+                occupancy: 1,
+                capacity: DIAGHASH_CHAIN_LENGTH as u32,
+                backbone: vec![0; DIAGHASH_NUM_BUCKETS],
+                chain: vec![DiagHashCell::default(); DIAGHASH_CHAIN_LENGTH],
+                offset: window_size,
+                window: window_size,
+            }),
+        }),
+    }
+}
+
+/// Port of `s_BlastDiagHashFree` (`blast_extend.c:196`).
+pub fn s_blast_diag_hash_free(hash_table: &mut Option<BlastDiagHash>) -> Option<BlastDiagHash> {
+    if let Some(hash) = hash_table.as_mut() {
+        hash.backbone.clear();
+        hash.chain.clear();
+        hash.occupancy = 0;
+    }
+    *hash_table = None;
+    None
+}
+
+/// Port of `Blast_ExtendWordExit` (`blast_extend.c:167`).
+pub fn blast_extend_word_exit(ewp: Option<&mut BlastExtendWord>, subject_length: i32) -> i16 {
+    let Some(ewp) = ewp else {
+        return -1;
+    };
+
+    if let Some(diag_table) = ewp.diag_table.as_mut() {
+        if diag_table.offset >= i32::MAX / 4 {
+            let _ = s_blast_diag_clear(Some(diag_table));
+        } else {
+            diag_table.offset = diag_table
+                .offset
+                .saturating_add(subject_length)
+                .saturating_add(diag_table.window);
+        }
+    } else if let Some(hash_table) = ewp.hash_table.as_mut() {
+        if hash_table.offset >= i32::MAX / 4 {
+            hash_table.occupancy = 1;
+            hash_table.offset = hash_table.window;
+            hash_table.backbone.fill(0);
+        } else {
+            hash_table.offset = hash_table
+                .offset
+                .saturating_add(subject_length)
+                .saturating_add(hash_table.window);
+        }
+    }
+
+    0
+}
+
+/// Port of `BlastExtendWordFree` (`blast_extend.c:208`).
+pub fn blast_extend_word_free(ewp: &mut Option<BlastExtendWord>) -> Option<BlastExtendWord> {
+    if let Some(extend_word) = ewp.as_mut() {
+        let _ = s_blast_diag_table_free(&mut extend_word.diag_table);
+        let _ = s_blast_diag_hash_free(&mut extend_word.hash_table);
+    }
+    *ewp = None;
+    None
+}
+
+/// Port of NCBI static `s_BlastCoreAuxStructFree`.
+pub fn s_blast_core_aux_struct_free(
+    aux_struct: &mut Option<BlastCoreAuxStruct>,
+) -> Option<BlastCoreAuxStruct> {
+    if let Some(aux) = aux_struct.as_mut() {
+        let _ = blast_extend_word_free(&mut aux.ewp);
+        let _ = blast_init_hit_list_free(&mut aux.init_hitlist);
+        aux.seqsrc_oid_array.clear();
+        aux.seqsrc_oid_status.clear();
+        aux.mapper_word_hits.clear();
+    }
+    *aux_struct = None;
+    None
+}
+
+/// Port of `BLAST_InitHitListNew` (`blast_extend.c:221`).
+pub fn blast_init_hit_list_new() -> Option<InitHitList> {
+    Some(InitHitList::new())
+}
+
+/// Port of `s_BlastInitHitListClean` (`blast_extend.c:247`).
+pub fn s_blast_init_hit_list_clean(init_hitlist: &mut InitHitList) {
+    blast_init_hit_list_reset(init_hitlist);
+    init_hitlist.hits.shrink_to(0);
+    init_hitlist.allocated = 0;
+}
+
+/// Port of `BlastInitHitListReset` (`blast_extend.c`).
+pub fn blast_init_hit_list_reset(init_hitlist: &mut InitHitList) {
+    init_hitlist.reset();
+}
+
+/// Port of `BlastInitHitListMove` (`blast_extend.c`).
+pub fn blast_init_hit_list_move(dst: &mut InitHitList, src: &mut InitHitList) {
+    s_blast_init_hit_list_clean(dst);
+    dst.hits.append(&mut src.hits);
+    dst.allocated = src.allocated;
+    dst.do_not_reallocate = src.do_not_reallocate;
+    src.allocated = 0;
+    src.do_not_reallocate = false;
+}
+
+/// Port of `BLAST_InitHitListFree` (`blast_extend.c`).
+pub fn blast_init_hit_list_free(init_hitlist: &mut Option<InitHitList>) -> Option<InitHitList> {
+    if let Some(list) = init_hitlist.as_mut() {
+        blast_init_hit_list_reset(list);
+    }
+    *init_hitlist = None;
+    None
+}
+
+/// Port of `BLAST_SaveInitialHit` (`blast_extend.c:330`).
+pub fn blast_save_initial_hit(
+    init_hitlist: &mut InitHitList,
+    q_off: i32,
+    s_off: i32,
+    ungapped_data: Option<UngappedData>,
+) -> bool {
+    if init_hitlist.hits.len() >= init_hitlist.allocated.max(0) as usize {
+        if init_hitlist.do_not_reallocate {
+            return false;
+        }
+        init_hitlist.allocated = if init_hitlist.allocated > 0 {
+            init_hitlist.allocated.saturating_mul(2)
+        } else {
+            MIN_INIT_HITLIST_SIZE as i32
+        };
+    }
+    init_hitlist.add(InitHsp {
+        query_offset: q_off,
+        subject_offset: s_off,
+        ungapped_data,
+    });
+    true
+}
+
+/// Port of `BlastSaveInitHsp` (`blast_extend.c:367`).
+pub fn blast_save_init_hsp(
+    ungapped_hsps: &mut InitHitList,
+    q_start: i32,
+    s_start: i32,
+    q_off: i32,
+    s_off: i32,
+    len: i32,
+    score: i32,
+) {
+    let ungapped_data = UngappedData {
+        q_start,
+        s_start,
+        length: len,
+        score,
+    };
+    let _ = blast_save_initial_hit(ungapped_hsps, q_off, s_off, Some(ungapped_data));
+}
+
+/// Comparator used by the C hit-list sorter (`score_compare_match`).
+pub fn score_compare_match(a: &InitHsp, b: &InitHsp) -> i32 {
+    let Some(data_a) = a.ungapped_data.as_ref() else {
+        return if b.ungapped_data.is_none() { 0 } else { 1 };
+    };
+    let Some(data_b) = b.ungapped_data.as_ref() else {
+        return -1;
+    };
+
+    if data_a.score > data_b.score {
+        -1
+    } else if data_a.score < data_b.score {
+        1
+    } else if data_a.s_start < data_b.s_start {
+        -1
+    } else if data_a.s_start > data_b.s_start {
+        1
+    } else if data_a.length > data_b.length {
+        -1
+    } else if data_a.length < data_b.length {
+        1
+    } else if data_a.q_start < data_b.q_start {
+        -1
+    } else if data_a.q_start > data_b.q_start {
+        1
+    } else {
+        0
+    }
+}
+
+/// Port of `Blast_InitHitListSortByScore` (`blast_extend.c:311`).
+pub fn blast_init_hit_list_sort_by_score(init_hitlist: &mut InitHitList) {
+    init_hitlist
+        .hits
+        .sort_by(|a, b| score_compare_match(a, b).cmp(&0));
+}
+
+/// Port of `Blast_InitHitListIsSortedByScore` (`blast_extend.c:317`).
+pub fn blast_init_hit_list_is_sorted_by_score(init_hitlist: &InitHitList) -> bool {
+    init_hitlist
+        .hits
+        .windows(2)
+        .all(|window| score_compare_match(&window[0], &window[1]) <= 0)
+}
+
+/// Port of NCBI internal `s_TranslateHSPsToDNAPCoord`
+/// (`blast_engine.c:324`).
+///
+/// Converts initial HSP offsets from translated protein coordinates back into
+/// mixed DNA/protein coordinates for out-of-frame gapped extension, then
+/// resorts the initial-hit list by score.
+pub fn s_translate_hsps_to_dnapcoord(
+    program: crate::program::ProgramType,
+    init_hitlist: &mut InitHitList,
+    query_info: &crate::queryinfo::QueryInfo,
+    subject_frame: i16,
+    subject_length: i32,
+    offset: i32,
+) {
+    let codon_length = crate::util::CODON_LENGTH as i32;
+
+    for init_hsp in &mut init_hitlist.hits {
+        if program == crate::program::BLASTX {
+            let contexts = &query_info.contexts;
+            let context_idx =
+                crate::queryinfo::bsearch_context_info(init_hsp.query_offset, query_info);
+            if context_idx < 0 {
+                continue;
+            }
+            let context_idx = context_idx as usize;
+            let Some(context) = contexts.get(context_idx) else {
+                continue;
+            };
+
+            let frame_idx = context_idx % crate::util::CODON_LENGTH as usize;
+            let init_frame_idx = context_idx - frame_idx;
+            let Some(init_context) = contexts.get(init_frame_idx) else {
+                continue;
+            };
+            let frame_pos = init_context.query_offset + frame_idx as i32;
+
+            init_hsp.query_offset =
+                (init_hsp.query_offset - context.query_offset) * codon_length + frame_pos;
+            if let Some(ungapped_data) = init_hsp.ungapped_data.as_mut() {
+                ungapped_data.q_start =
+                    (ungapped_data.q_start - context.query_offset) * codon_length + frame_pos;
+            }
+        } else {
+            init_hsp.subject_offset += offset;
+            if let Some(ungapped_data) = init_hsp.ungapped_data.as_mut() {
+                ungapped_data.s_start += offset;
+            }
+
+            if subject_frame > 0 {
+                let frame_shift = subject_frame as i32 - 1;
+                init_hsp.subject_offset = init_hsp.subject_offset * codon_length + frame_shift;
+                if let Some(ungapped_data) = init_hsp.ungapped_data.as_mut() {
+                    ungapped_data.s_start = ungapped_data.s_start * codon_length + frame_shift;
+                }
+            } else {
+                let frame_shift = subject_length - subject_frame as i32;
+                init_hsp.subject_offset = init_hsp.subject_offset * codon_length + frame_shift;
+                if let Some(ungapped_data) = init_hsp.ungapped_data.as_mut() {
+                    ungapped_data.s_start = ungapped_data.s_start * codon_length + frame_shift;
+                }
+            }
+        }
+    }
+
+    blast_init_hit_list_sort_by_score(init_hitlist);
+}
+
+/// Port of `s_CompareInitHSPsByQueryOffsetScore` (`blast_gapalign.c:3470`).
+pub fn s_compare_init_hsps_by_query_offset_score(a: Option<&InitHsp>, b: Option<&InitHsp>) -> i32 {
+    let Some(hsp_a) = a else {
+        return if b.is_some() { -1 } else { 0 };
+    };
+    let Some(hsp_b) = b else {
+        return 1;
+    };
+    let Some(data_a) = hsp_a.ungapped_data.as_ref() else {
+        return if hsp_b.ungapped_data.is_some() { -1 } else { 0 };
+    };
+    let Some(data_b) = hsp_b.ungapped_data.as_ref() else {
+        return 1;
+    };
+
+    if data_a.q_start < data_b.q_start {
+        -1
+    } else if data_a.q_start > data_b.q_start {
+        1
+    } else if data_a.score > data_b.score {
+        -1
+    } else if data_a.score < data_b.score {
+        1
+    } else {
+        0
+    }
+}
+
+/// Port of `ChainingStructNew` (`blast_gapalign.c:3455`).
+pub fn chaining_struct_new() -> Option<ChainingStruct> {
+    let mut chaining = ChainingStruct::default();
+    chaining.nodes = Vec::new();
+    chaining.num_allocated = 0;
+    Some(chaining)
+}
+
+/// Port of `ChainingStructFree` (`blast_gapalign.c:3442`).
+pub fn chaining_struct_free(ch: &mut Option<ChainingStruct>) -> Option<ChainingStruct> {
+    if let Some(chaining) = ch.as_mut() {
+        chaining.nodes.clear();
+        chaining.num_allocated = 0;
+    }
+    *ch = None;
+    None
 }
 
 /// Perform ungapped extension on packed nucleotide sequences.
@@ -156,6 +819,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_chaining_struct_new_and_free_match_c_shape() {
+        let mut chaining = chaining_struct_new();
+        let ch = chaining.as_mut().expect("chaining workspace");
+        assert!(ch.nodes.is_empty());
+        assert_eq!(ch.num_allocated, 0);
+        ch.nodes.push(BlastInitHspNode {
+            init_hsp: Some(InitHsp {
+                query_offset: 1,
+                subject_offset: 2,
+                ungapped_data: Some(UngappedData {
+                    q_start: 1,
+                    s_start: 2,
+                    length: 3,
+                    score: 11,
+                }),
+            }),
+            best_score: 11,
+            next: None,
+        });
+        ch.num_allocated = ch.nodes.capacity() as u32;
+
+        assert!(chaining_struct_free(&mut chaining).is_none());
+        assert!(chaining.is_none());
+    }
+
+    #[test]
     fn test_init_hitlist() {
         let mut list = InitHitList::new();
         list.add(InitHsp {
@@ -166,6 +855,576 @@ mod tests {
         assert_eq!(list.total(), 1);
         list.reset();
         assert_eq!(list.total(), 0);
+    }
+
+    #[test]
+    fn test_init_hitlist_c_lifecycle_helpers() {
+        let fresh = blast_init_hit_list_new().expect("init hit list");
+        assert_eq!(fresh.total(), 0);
+        assert_eq!(fresh.allocated, MIN_INIT_HITLIST_SIZE as i32);
+        assert!(!fresh.do_not_reallocate);
+
+        let low = InitHsp {
+            query_offset: 1,
+            subject_offset: 2,
+            ungapped_data: Some(UngappedData {
+                q_start: 1,
+                s_start: 2,
+                length: 3,
+                score: 7,
+            }),
+        };
+        let high = InitHsp {
+            query_offset: 4,
+            subject_offset: 5,
+            ungapped_data: Some(UngappedData {
+                q_start: 4,
+                s_start: 5,
+                length: 6,
+                score: 13,
+            }),
+        };
+
+        assert_eq!(score_compare_match(&high, &low), -1);
+        assert_eq!(score_compare_match(&low, &high), 1);
+        assert_eq!(score_compare_match(&low, &low), 0);
+        assert_eq!(
+            s_compare_init_hsps_by_query_offset_score(Some(&low), Some(&high)),
+            -1
+        );
+        assert_eq!(
+            s_compare_init_hsps_by_query_offset_score(Some(&high), Some(&low)),
+            1
+        );
+        assert_eq!(
+            s_compare_init_hsps_by_query_offset_score(None, Some(&low)),
+            -1
+        );
+        assert_eq!(
+            score_compare_match(
+                &InitHsp {
+                    query_offset: 0,
+                    subject_offset: 0,
+                    ungapped_data: None,
+                },
+                &high
+            ),
+            1
+        );
+
+        let mut src = InitHitList::new();
+        src.add(low.clone());
+        src.add(high.clone());
+        let mut dst = InitHitList::new();
+        dst.add(InitHsp {
+            query_offset: 9,
+            subject_offset: 9,
+            ungapped_data: None,
+        });
+
+        blast_init_hit_list_move(&mut dst, &mut src);
+        assert_eq!(src.total(), 0);
+        assert_eq!(src.allocated, 0);
+        assert_eq!(dst.total(), 2);
+        assert_eq!(dst.hits[0].query_offset, low.query_offset);
+        assert_eq!(dst.hits[1].query_offset, high.query_offset);
+
+        blast_init_hit_list_reset(&mut dst);
+        assert_eq!(dst.total(), 0);
+
+        let mut maybe_list = Some(InitHitList::new());
+        maybe_list.as_mut().unwrap().add(high);
+        assert!(blast_init_hit_list_free(&mut maybe_list).is_none());
+        assert!(maybe_list.is_none());
+    }
+
+    #[test]
+    fn test_translate_hsps_to_dnapcoord_blastx_uses_context_offsets() {
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            max_length: 10,
+            contexts: (0..6)
+                .map(|idx| crate::queryinfo::ContextInfo {
+                    query_offset: 100 + idx * 100,
+                    query_length: 50,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: idx + 1,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                })
+                .collect(),
+        };
+        let mut list = InitHitList::new();
+        list.add(InitHsp {
+            query_offset: 205,
+            subject_offset: 7,
+            ungapped_data: Some(UngappedData {
+                q_start: 202,
+                s_start: 7,
+                length: 3,
+                score: 11,
+            }),
+        });
+
+        s_translate_hsps_to_dnapcoord(crate::program::BLASTX, &mut list, &query_info, 0, 0, 0);
+
+        assert_eq!(list.hits[0].query_offset, 116);
+        assert_eq!(list.hits[0].ungapped_data.as_ref().unwrap().q_start, 107);
+        assert_eq!(list.hits[0].subject_offset, 7);
+    }
+
+    #[test]
+    fn test_translate_hsps_to_dnapcoord_translated_subject_and_resort() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[20]);
+        let mut list = InitHitList::new();
+        list.add(InitHsp {
+            query_offset: 5,
+            subject_offset: 4,
+            ungapped_data: Some(UngappedData {
+                q_start: 5,
+                s_start: 4,
+                length: 2,
+                score: 3,
+            }),
+        });
+        list.add(InitHsp {
+            query_offset: 2,
+            subject_offset: 1,
+            ungapped_data: Some(UngappedData {
+                q_start: 2,
+                s_start: 1,
+                length: 2,
+                score: 20,
+            }),
+        });
+
+        s_translate_hsps_to_dnapcoord(crate::program::TBLASTN, &mut list, &query_info, 2, 0, 2);
+
+        assert_eq!(list.hits[0].ungapped_data.as_ref().unwrap().score, 20);
+        assert_eq!(list.hits[0].subject_offset, 10);
+        assert_eq!(list.hits[0].ungapped_data.as_ref().unwrap().s_start, 10);
+        assert_eq!(list.hits[1].subject_offset, 19);
+        assert_eq!(list.hits[1].ungapped_data.as_ref().unwrap().s_start, 19);
+
+        s_translate_hsps_to_dnapcoord(crate::program::TBLASTN, &mut list, &query_info, -1, 100, 0);
+        assert_eq!(list.hits[0].subject_offset, 131);
+        assert_eq!(list.hits[1].subject_offset, 158);
+    }
+
+    #[test]
+    fn blast_core_aux_struct_free_clears_owned_scratch() {
+        let mut aux = Some(BlastCoreAuxStruct {
+            ewp: Some(BlastExtendWord {
+                diag_table: s_blast_diag_table_new(16, false, 8),
+                hash_table: None,
+            }),
+            init_hitlist: blast_init_hit_list_new(),
+            seqsrc_oid_array: vec![1, 2, 3],
+            seqsrc_oid_status: vec![0, 1],
+            mapper_word_hits: vec![InitHsp {
+                query_offset: 3,
+                subject_offset: 5,
+                ungapped_data: None,
+            }],
+        });
+        aux.as_mut()
+            .unwrap()
+            .init_hitlist
+            .as_mut()
+            .unwrap()
+            .add(InitHsp {
+                query_offset: 7,
+                subject_offset: 11,
+                ungapped_data: None,
+            });
+
+        assert!(s_blast_core_aux_struct_free(&mut aux).is_none());
+        assert!(aux.is_none());
+    }
+
+    #[test]
+    fn test_save_initial_hit_helpers_match_c_shape() {
+        let mut list = InitHitList::new();
+        assert!(blast_save_initial_hit(&mut list, 3, 5, None));
+        assert_eq!(list.total(), 1);
+        assert_eq!(list.hits[0].query_offset, 3);
+        assert_eq!(list.hits[0].subject_offset, 5);
+        assert!(list.hits[0].ungapped_data.is_none());
+
+        blast_save_init_hsp(&mut list, 7, 11, 13, 17, 19, 23);
+        assert_eq!(list.total(), 2);
+        let hsp = &list.hits[1];
+        assert_eq!(hsp.query_offset, 13);
+        assert_eq!(hsp.subject_offset, 17);
+        let data = hsp.ungapped_data.as_ref().expect("ungapped data");
+        assert_eq!(data.q_start, 7);
+        assert_eq!(data.s_start, 11);
+        assert_eq!(data.length, 19);
+        assert_eq!(data.score, 23);
+
+        assert!(!blast_init_hit_list_is_sorted_by_score(&list));
+        blast_init_hit_list_sort_by_score(&mut list);
+        assert!(blast_init_hit_list_is_sorted_by_score(&list));
+        assert_eq!(list.hits[0].ungapped_data.as_ref().unwrap().score, 23);
+
+        list.allocated = list.total() as i32;
+        list.do_not_reallocate = true;
+        assert!(!blast_save_initial_hit(&mut list, 1, 2, None));
+    }
+
+    #[test]
+    fn test_s_get_ungapped_hsp_context_uses_query_offset() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastn(&[10, 5]);
+        let init_hsp = InitHsp {
+            query_offset: 22,
+            subject_offset: 7,
+            ungapped_data: None,
+        };
+
+        assert_eq!(s_get_ungapped_hsp_context(&query_info, &init_hsp), 2);
+    }
+
+    #[test]
+    fn test_s_adjust_initial_hsp_offsets_rebases_query_offsets() {
+        let mut init_hsp = InitHsp {
+            query_offset: 31,
+            subject_offset: 7,
+            ungapped_data: Some(UngappedData {
+                q_start: 29,
+                s_start: 5,
+                length: 4,
+                score: 12,
+            }),
+        };
+
+        s_adjust_initial_hsp_offsets(&mut init_hsp, 20);
+
+        assert_eq!(init_hsp.query_offset, 11);
+        assert_eq!(init_hsp.subject_offset, 7);
+        let ungapped_data = init_hsp.ungapped_data.unwrap();
+        assert_eq!(ungapped_data.q_start, 9);
+        assert_eq!(ungapped_data.s_start, 5);
+        assert_eq!(ungapped_data.length, 4);
+        assert_eq!(ungapped_data.score, 12);
+    }
+
+    #[test]
+    fn test_blast_get_ungapped_hsp_list_matches_c_field_mapping() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastn(&[10, 8]);
+        let mut init_hitlist = InitHitList::new();
+        init_hitlist.add(InitHsp {
+            query_offset: 23,
+            subject_offset: 30,
+            ungapped_data: Some(UngappedData {
+                q_start: 22,
+                s_start: 28,
+                length: 4,
+                score: 11,
+            }),
+        });
+        init_hitlist.add(InitHsp {
+            query_offset: 4,
+            subject_offset: 18,
+            ungapped_data: Some(UngappedData {
+                q_start: 2,
+                s_start: 16,
+                length: 5,
+                score: 23,
+            }),
+        });
+        init_hitlist.add(InitHsp {
+            query_offset: 7,
+            subject_offset: 99,
+            ungapped_data: None,
+        });
+
+        let mut hsp_list = None;
+        assert_eq!(
+            blast_get_ungapped_hsp_list(
+                Some(&mut init_hitlist),
+                &query_info,
+                42,
+                -1,
+                0,
+                &mut hsp_list,
+            ),
+            0
+        );
+
+        let hsp_list = hsp_list.expect("HSP list allocated for ungapped hits");
+        assert_eq!(hsp_list.oid, 42);
+        assert_eq!(hsp_list.hsps.len(), 2);
+        assert_eq!(hsp_list.hsps[0].score, 23);
+        assert_eq!(hsp_list.hsps[0].query_offset, 2);
+        assert_eq!(hsp_list.hsps[0].query_end, 7);
+        assert_eq!(hsp_list.hsps[0].query_gapped_start, 4);
+        assert_eq!(hsp_list.hsps[0].subject_offset, 16);
+        assert_eq!(hsp_list.hsps[0].subject_end, 21);
+        assert_eq!(hsp_list.hsps[0].subject_gapped_start, 18);
+        assert_eq!(hsp_list.hsps[0].context, 0);
+        assert_eq!(hsp_list.hsps[0].query_frame, 1);
+        assert_eq!(hsp_list.hsps[0].subject_frame, -1);
+
+        assert_eq!(hsp_list.hsps[1].score, 11);
+        assert_eq!(hsp_list.hsps[1].query_offset, 0);
+        assert_eq!(hsp_list.hsps[1].query_gapped_start, 1);
+        assert_eq!(hsp_list.hsps[1].context, 2);
+    }
+
+    #[test]
+    fn test_blast_get_ungapped_hsp_list_clears_existing_list_without_hits() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[10]);
+        let mut hsp_list = Some(crate::hspstream::blast_hsp_list_new(0));
+        hsp_list.as_mut().unwrap().add_hsp(crate::hspstream::Hsp {
+            score: 7,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 3.0,
+            query_offset: 1,
+            query_end: 2,
+            query_gapped_start: 1,
+            subject_offset: 4,
+            subject_end: 5,
+            subject_gapped_start: 4,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        });
+
+        assert_eq!(
+            blast_get_ungapped_hsp_list(None, &query_info, 0, 0, 0, &mut hsp_list),
+            0
+        );
+        assert!(hsp_list.as_ref().unwrap().hsps.is_empty());
+        assert_eq!(hsp_list.as_ref().unwrap().best_evalue, f64::MAX);
+    }
+
+    #[test]
+    fn test_s_set_up_local_blast_sequence_blk_slices_context_sequence() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastn(&[4, 3]);
+        let concatenated_query = crate::util::BlastSequenceBlk {
+            sequence: Some(vec![
+                1, 2, 3, 4, 15, 5, 6, 7, 8, 15, 9, 10, 11, 15, 12, 13, 14,
+            ]),
+            length: 17,
+            ..Default::default()
+        };
+        let mut single_query = crate::util::BlastSequenceBlk::default();
+
+        let query_start = s_set_up_local_blast_sequence_blk(
+            &concatenated_query,
+            &query_info,
+            2,
+            &mut single_query,
+        );
+
+        assert_eq!(query_start, 10);
+        assert_eq!(single_query.length, 3);
+        assert_eq!(single_query.sequence.as_deref(), Some(&[9, 10, 11][..]));
+        assert!(single_query.oof_sequence.is_none());
+    }
+
+    #[test]
+    fn test_s_set_up_local_blast_sequence_blk_handles_oof_context_group() {
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![
+                crate::queryinfo::ContextInfo {
+                    query_offset: 0,
+                    query_length: 2,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 1,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+                crate::queryinfo::ContextInfo {
+                    query_offset: 3,
+                    query_length: 2,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 2,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+                crate::queryinfo::ContextInfo {
+                    query_offset: 6,
+                    query_length: 2,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 3,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+            ],
+            max_length: 2,
+        };
+        let concatenated_query = crate::util::BlastSequenceBlk {
+            oof_sequence: Some(vec![1, 2, 15, 3, 4, 15, 5, 6]),
+            length: 8,
+            ..Default::default()
+        };
+        let mut single_query = crate::util::BlastSequenceBlk::default();
+
+        let query_start = s_set_up_local_blast_sequence_blk(
+            &concatenated_query,
+            &query_info,
+            1,
+            &mut single_query,
+        );
+
+        assert_eq!(query_start, 0);
+        assert_eq!(single_query.length, 8);
+        assert!(single_query.sequence.is_none());
+        assert_eq!(
+            single_query.oof_sequence.as_deref(),
+            Some(&[1, 2, 15, 3, 4, 15, 5, 6][..])
+        );
+    }
+
+    #[test]
+    fn test_s_adjust_hsp_offsets_and_get_query_data_rebases_hsp() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastn(&[4, 3]);
+        let query = crate::util::BlastSequenceBlk {
+            sequence: Some(vec![
+                1, 2, 3, 4, 15, 5, 6, 7, 8, 15, 9, 10, 11, 15, 12, 13, 14,
+            ]),
+            length: 17,
+            ..Default::default()
+        };
+        let mut init_hsp = InitHsp {
+            query_offset: 12,
+            subject_offset: 5,
+            ungapped_data: Some(UngappedData {
+                q_start: 11,
+                s_start: 5,
+                length: 2,
+                score: 17,
+            }),
+        };
+        let mut query_out = crate::util::BlastSequenceBlk::default();
+
+        let context = s_adjust_hsp_offsets_and_get_query_data(
+            &query,
+            &query_info,
+            &mut init_hsp,
+            &mut query_out,
+        );
+
+        assert_eq!(context, 2);
+        assert_eq!(query_out.sequence.as_deref(), Some(&[9, 10, 11][..]));
+        assert_eq!(query_out.length, 3);
+        assert_eq!(init_hsp.query_offset, 2);
+        assert_eq!(init_hsp.ungapped_data.as_ref().unwrap().q_start, 1);
+    }
+
+    #[test]
+    fn test_diag_table_and_extend_word_helpers_match_c_shape() {
+        let mut diag = s_blast_diag_table_new(33, true, 40).expect("diag table");
+        assert_eq!(diag.diag_array_length, 128);
+        assert_eq!(diag.diag_mask, 127);
+        assert_eq!(diag.offset, 40);
+        assert_eq!(diag.window, 40);
+        assert!(diag.multiple_hits);
+
+        diag.hit_level_array = vec![
+            DiagStruct {
+                last_hit: 55,
+                flag: true,
+            };
+            diag.diag_array_length as usize
+        ];
+        diag.hit_len_array = Some(vec![9; diag.diag_array_length as usize]);
+        assert_eq!(s_blast_diag_clear(Some(&mut diag)), 0);
+        assert_eq!(diag.offset, diag.window);
+        assert!(diag
+            .hit_level_array
+            .iter()
+            .all(|entry| !entry.flag && entry.last_hit == -40));
+        assert!(diag
+            .hit_len_array
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|&len| len == 0));
+
+        let mut options = crate::options::InitialWordOptions::new_blastn();
+        options.window_size = 12;
+        let word_params = InitialWordParameters {
+            options,
+            x_dropoff_max: 20,
+            cutoff_score_min: 8,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: InitialWordParameters::build_nucl_score_table(1, -3),
+        };
+        let extend_word =
+            blast_extend_word_new(21, &word_params, DiagTableType::DiagArray).expect("extend word");
+        let diag_table = extend_word.diag_table.as_ref().expect("diag table path");
+        assert_eq!(diag_table.diag_array_length, 64);
+        assert_eq!(diag_table.hit_level_array.len(), 64);
+        assert_eq!(diag_table.hit_len_array.as_ref().unwrap().len(), 64);
+        assert!(extend_word.hash_table.is_none());
+
+        let mut extend_slot = Some(extend_word);
+        assert_eq!(blast_extend_word_exit(extend_slot.as_mut(), 30), 0);
+        assert_eq!(
+            extend_slot
+                .as_ref()
+                .unwrap()
+                .diag_table
+                .as_ref()
+                .unwrap()
+                .offset,
+            54
+        );
+        assert!(blast_extend_word_free(&mut extend_slot).is_none());
+        assert!(extend_slot.is_none());
+
+        let mut diag_slot = Some(diag);
+        assert!(s_blast_diag_table_free(&mut diag_slot).is_none());
+        assert!(diag_slot.is_none());
+
+        let mut hash_extend =
+            blast_extend_word_new(21, &word_params, DiagTableType::DiagHash).expect("hash path");
+        assert!(hash_extend.diag_table.is_none());
+        let hash_table = hash_extend.hash_table.as_ref().expect("hash table path");
+        assert_eq!(hash_table.num_buckets, DIAGHASH_NUM_BUCKETS as u32);
+        assert_eq!(hash_table.occupancy, 1);
+        assert_eq!(hash_table.capacity, DIAGHASH_CHAIN_LENGTH as u32);
+        assert_eq!(hash_table.backbone.len(), DIAGHASH_NUM_BUCKETS);
+        assert_eq!(hash_table.chain.len(), DIAGHASH_CHAIN_LENGTH);
+        assert_eq!(hash_table.offset, 12);
+        assert_eq!(hash_table.window, 12);
+
+        assert_eq!(blast_extend_word_exit(Some(&mut hash_extend), 20), 0);
+        assert_eq!(hash_extend.hash_table.as_ref().unwrap().offset, 44);
+
+        {
+            let hash_table = hash_extend.hash_table.as_mut().unwrap();
+            hash_table.offset = i32::MAX / 4;
+            hash_table.occupancy = 77;
+            hash_table.backbone.fill(9);
+        }
+        assert_eq!(blast_extend_word_exit(Some(&mut hash_extend), 20), 0);
+        let hash_table = hash_extend.hash_table.as_ref().unwrap();
+        assert_eq!(hash_table.offset, hash_table.window);
+        assert_eq!(hash_table.occupancy, 1);
+        assert!(hash_table.backbone.iter().all(|&bucket| bucket == 0));
+
+        let mut hash_slot = hash_extend.hash_table.take();
+        assert!(s_blast_diag_hash_free(&mut hash_slot).is_none());
+        assert!(hash_slot.is_none());
     }
 
     #[test]

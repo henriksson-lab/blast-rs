@@ -10,6 +10,223 @@ const INVALID_OFFSET: i32 = -2;
 const MAX_DBSEQ_LEN: usize = 5_000_000;
 const GREEDY_MAX_COST_FRACTION: usize = 2;
 const GREEDY_MAX_COST: usize = 1000;
+const MBSPACE_MIN_SPACE: usize = 1_000_000;
+
+/// Rust equivalent of NCBI `SGreedyOffset`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SGreedyOffset {
+    pub insert_off: i32,
+    pub match_off: i32,
+    pub delete_off: i32,
+}
+
+#[derive(Clone, Debug)]
+struct SMBSpaceChunk {
+    space_array: Vec<SGreedyOffset>,
+    space_used: usize,
+}
+
+impl SMBSpaceChunk {
+    fn new(num_space_arrays: usize) -> Self {
+        let space_allocated = MBSPACE_MIN_SPACE.max(num_space_arrays);
+        SMBSpaceChunk {
+            space_array: vec![SGreedyOffset::default(); space_allocated],
+            space_used: 0,
+        }
+    }
+
+    fn space_allocated(&self) -> usize {
+        self.space_array.len()
+    }
+}
+
+/// Rust equivalent of the C `SMBSpace` linked pool.
+#[derive(Clone, Debug)]
+pub struct SMBSpace {
+    chunks: Vec<SMBSpaceChunk>,
+}
+
+impl SMBSpace {
+    pub fn space_used_per_chunk(&self) -> Vec<usize> {
+        self.chunks.iter().map(|chunk| chunk.space_used).collect()
+    }
+
+    pub fn space_allocated_per_chunk(&self) -> Vec<usize> {
+        self.chunks
+            .iter()
+            .map(SMBSpaceChunk::space_allocated)
+            .collect()
+    }
+}
+
+/// Port of NCBI `MBSpaceNew` (`greedy_align.c:44`).
+pub fn mbspace_new(num_space_arrays: i32) -> SMBSpace {
+    let requested = num_space_arrays.max(0) as usize;
+    let space_allocated = MBSPACE_MIN_SPACE.max(requested);
+    let space_array = vec![SGreedyOffset::default(); space_allocated];
+    let first_chunk = SMBSpaceChunk {
+        space_array,
+        space_used: 0,
+    };
+
+    SMBSpace {
+        chunks: vec![first_chunk],
+    }
+}
+
+/// Port of NCBI static `s_RefreshMBSpace`.
+pub fn s_refresh_mbspace(space: Option<&mut SMBSpace>) {
+    let Some(space) = space else {
+        return;
+    };
+    for chunk in &mut space.chunks {
+        chunk.space_used = 0;
+    }
+}
+
+/// Rust ownership equivalent of NCBI `MBSpaceFree`.
+pub fn mbspace_free(space: &mut Option<SMBSpace>) {
+    *space = None;
+}
+
+/// Port of NCBI static `s_GetMBSpace`.
+pub fn s_get_mbspace(pool: Option<&mut SMBSpace>, num_alloc: i32) -> Option<&mut [SGreedyOffset]> {
+    let pool = pool?;
+    if num_alloc < 0 {
+        return None;
+    }
+    let num_alloc = num_alloc as usize;
+    let mut chunk_index = 0;
+
+    loop {
+        if chunk_index >= pool.chunks.len() {
+            return None;
+        }
+
+        let chunk = &pool.chunks[chunk_index];
+        if chunk.space_used + num_alloc <= chunk.space_allocated() {
+            let chunk = &mut pool.chunks[chunk_index];
+            let start = chunk.space_used;
+            chunk.space_used += num_alloc;
+            return Some(&mut chunk.space_array[start..start + num_alloc]);
+        }
+
+        if chunk_index + 1 == pool.chunks.len() {
+            pool.chunks.push(SMBSpaceChunk::new(num_alloc));
+        }
+        chunk_index += 1;
+    }
+}
+
+/// Rust-owned equivalent of NCBI `SGreedyAlignMem`.
+#[derive(Clone, Debug)]
+pub struct SGreedyAlignMem {
+    pub max_dist: i32,
+    pub xdrop: i32,
+    pub last_seq2_off: Option<Vec<Vec<i32>>>,
+    pub last_seq2_off_affine: Option<Vec<Vec<SGreedyOffset>>>,
+    pub diag_bounds: Vec<i32>,
+    pub max_score: Vec<i32>,
+    pub space: SMBSpace,
+}
+
+fn blast_gdb3_values(a: &mut i32, b: &mut i32, c: &mut i32) -> i32 {
+    let g = if *b == 0 {
+        crate::math::gcd(*a, *c)
+    } else {
+        crate::math::gcd(*a, crate::math::gcd(*b, *c))
+    };
+    if g > 1 {
+        *a /= g;
+        *b /= g;
+        *c /= g;
+    }
+    g
+}
+
+/// Port of NCBI static `s_BlastGreedyAlignMemAlloc` (`blast_gapalign.c:172`).
+///
+/// The C function receives score/extension parameter structs. This Rust port
+/// takes the scalar fields used by the allocation logic and materializes the
+/// same non-affine or affine work buffers in owned vectors.
+pub fn s_blast_greedy_align_mem_alloc(
+    score_reward: i32,
+    score_penalty: i32,
+    score_gap_open: i32,
+    score_gap_extend: i32,
+    max_d: i32,
+    xdrop: i32,
+) -> Option<SGreedyAlignMem> {
+    if xdrop == 0 || max_d < 0 {
+        return None;
+    }
+
+    let (reward, penalty, gap_open, mut gap_extend) = if score_reward % 2 == 1 {
+        (
+            2 * score_reward,
+            -2 * score_penalty,
+            2 * score_gap_open,
+            2 * score_gap_extend,
+        )
+    } else {
+        (
+            score_reward,
+            -score_penalty,
+            score_gap_open,
+            score_gap_extend,
+        )
+    };
+
+    if gap_open == 0 && gap_extend == 0 {
+        gap_extend = reward / 2 + penalty;
+    }
+
+    let max_d_usize = max_d as usize;
+    let mut mem = SGreedyAlignMem {
+        max_dist: max_d,
+        xdrop,
+        last_seq2_off: None,
+        last_seq2_off_affine: None,
+        diag_bounds: Vec::new(),
+        max_score: Vec::new(),
+        space: mbspace_new(0),
+    };
+
+    let mut max_score_max_d = max_d;
+    let d_diff = if score_gap_open == 0 && score_gap_extend == 0 {
+        let denom = penalty + reward;
+        if denom <= 0 {
+            return None;
+        }
+        let d_diff = (xdrop + reward / 2) / denom + 1;
+        let width = max_d_usize * 2 + 6;
+        mem.last_seq2_off = Some(vec![vec![0; width]; max_d_usize + 2]);
+        d_diff
+    } else {
+        let mut mis_cost = reward + penalty;
+        let mut gap_open_cost = gap_open;
+        let mut ge_cost = gap_extend + reward / 2;
+        let max_d_1 = max_d_usize;
+        max_score_max_d = max_d * ge_cost;
+        let scaled_max_d = (max_d * ge_cost).max(0) as usize;
+        let max_cost = mis_cost.max(gap_open_cost + ge_cost).max(0) as usize;
+        let gd = blast_gdb3_values(&mut mis_cost, &mut gap_open_cost, &mut ge_cost);
+        if gd <= 0 {
+            return None;
+        }
+        let d_diff = (xdrop + reward / 2) / gd + 1;
+        mem.diag_bounds = vec![0; 2 * (scaled_max_d + 1 + max_cost)];
+        mem.last_seq2_off_affine = Some(vec![
+            vec![SGreedyOffset::default(); 2 * max_d_1 + 6];
+            max_cost + 1
+        ]);
+        d_diff
+    };
+
+    let max_score_len = (max_score_max_d + 1 + d_diff).max(0) as usize;
+    mem.max_score = vec![0; max_score_len];
+    Some(mem)
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct GreedySeed {
@@ -260,7 +477,7 @@ fn merge_greedy_prelim_ops(
     extents: GreedyAlignmentExtents,
 ) -> GapEditScript {
     let mut merged = prelim_to_gap_edit_script(&left.prelim, &right.prelim);
-    reduce_gaps(
+    s_reduce_gaps(
         &mut merged,
         &query[extents.query_start..extents.query_end],
         &subject[extents.subject_start..extents.subject_end],
@@ -306,7 +523,7 @@ fn rebuild_edit_script(esp: &mut GapEditScript) {
     esp.ops.truncate((j + 1).max(0) as usize);
 }
 
-fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
+fn s_update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
     // 1-1 port of NCBI `s_UpdateEditScript` (`blast_gapalign.c:2573`). The
     // `op_type[op] = Sub` write must precede the `op_type[pos-1] = Del/Ins`
     // (or `pos+1` for the af branch) write, mirroring the C statement
@@ -400,7 +617,7 @@ fn update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
     }
 }
 
-fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
+fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
     let (mut q1, mut s1) = (0usize, 0usize);
     let qf = query.len();
     let sf = subject.len();
@@ -436,7 +653,7 @@ fn reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
                         }
                     }
                     if nm1 > 1 || nm2 > 0 {
-                        update_edit_script(esp, i, nm1 - 1, nm2);
+                        s_update_edit_script(esp, i, nm1 - 1, nm2);
                     }
                     q1 = q1.saturating_sub(1);
                     s1 = s1.saturating_sub(1);
@@ -1101,6 +1318,69 @@ pub fn greedy_align(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translated_mbspace_pool_allocates_refreshes_and_frees_like_c() {
+        let mut pool = mbspace_new(3);
+        assert_eq!(pool.space_allocated_per_chunk(), vec![MBSPACE_MIN_SPACE]);
+
+        {
+            let slice = s_get_mbspace(Some(&mut pool), 2).expect("first allocation");
+            assert_eq!(slice.len(), 2);
+            slice[0].match_off = 17;
+        }
+        assert_eq!(pool.space_used_per_chunk(), vec![2]);
+
+        {
+            let slice = s_get_mbspace(Some(&mut pool), MBSPACE_MIN_SPACE as i32)
+                .expect("spillover allocation");
+            assert_eq!(slice.len(), MBSPACE_MIN_SPACE);
+            slice[0].insert_off = 9;
+        }
+        assert_eq!(
+            pool.space_allocated_per_chunk(),
+            vec![MBSPACE_MIN_SPACE, MBSPACE_MIN_SPACE]
+        );
+        assert_eq!(pool.space_used_per_chunk(), vec![2, MBSPACE_MIN_SPACE]);
+
+        s_refresh_mbspace(Some(&mut pool));
+        assert_eq!(pool.space_used_per_chunk(), vec![0, 0]);
+        assert!(s_get_mbspace(Some(&mut pool), -1).is_none());
+
+        let mut slot = Some(pool);
+        mbspace_free(&mut slot);
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn blast_greedy_align_mem_alloc_name_matched_non_affine_layout() {
+        let mem = s_blast_greedy_align_mem_alloc(1, -3, 0, 0, 5, 10).expect("greedy mem");
+        assert_eq!(mem.max_dist, 5);
+        assert_eq!(mem.xdrop, 10);
+        assert_eq!(
+            mem.last_seq2_off
+                .as_ref()
+                .map(|rows| (rows.len(), rows[0].len())),
+            Some((7, 16))
+        );
+        assert!(mem.last_seq2_off_affine.is_none());
+        assert!(mem.diag_bounds.is_empty());
+        assert_eq!(mem.max_score.len(), 8);
+    }
+
+    #[test]
+    fn blast_greedy_align_mem_alloc_name_matched_affine_layout() {
+        let mem = s_blast_greedy_align_mem_alloc(2, -3, 5, 2, 4, 20).expect("affine greedy mem");
+        assert!(mem.last_seq2_off.is_none());
+        assert_eq!(
+            mem.last_seq2_off_affine
+                .as_ref()
+                .map(|rows| (rows.len(), rows[0].len())),
+            Some((9, 14))
+        );
+        assert_eq!(mem.diag_bounds.len(), 2 * (12 + 1 + 8));
+        assert_eq!(mem.max_score.len(), 35);
+    }
 
     #[test]
     fn test_greedy_perfect_match() {

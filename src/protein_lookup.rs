@@ -13,6 +13,7 @@ use crate::encoding::encode_ncbistdaa_sequence;
 use crate::encoding::ncbistdaa_to_aminoacid_char;
 use crate::matrix::AA_SIZE;
 use crate::protein::{get_start_for_gapped_alignment, protein_gapped_align};
+use crate::pssm::Pssm;
 
 /// Result of a protein hit after extension.
 #[derive(Debug, Clone)]
@@ -83,6 +84,160 @@ pub struct ProteinLookupTable {
     pv: Vec<u64>,
 }
 
+const COMPRESSED_HITS_PER_BACKBONE_CELL: usize = 4;
+const COMPRESSED_HITS_PER_OVERFLOW_CELL: usize = 4;
+const COMPRESSED_HITS_CELL_MASK: i32 = 0x03;
+const COMPRESSED_OVERFLOW_CELLS_IN_BANK: i32 = 209_710;
+const COMPRESSED_OVERFLOW_MAX_BANKS: i32 = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompressedOverflowCell {
+    pub next: Option<usize>,
+    pub query_offsets: [i32; COMPRESSED_HITS_PER_OVERFLOW_CELL],
+}
+
+impl Default for CompressedOverflowCell {
+    fn default() -> Self {
+        Self {
+            next: None,
+            query_offsets: [0; COMPRESSED_HITS_PER_OVERFLOW_CELL],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompressedLookupBackboneCell {
+    pub num_used: i32,
+    pub query_offset: i32,
+    pub payload_query_offsets: [i32; COMPRESSED_HITS_PER_BACKBONE_CELL],
+    pub overflow_query_offsets: [i32; COMPRESSED_HITS_PER_BACKBONE_CELL - 2],
+    pub overflow_head: Option<usize>,
+}
+
+impl Default for CompressedLookupBackboneCell {
+    fn default() -> Self {
+        Self {
+            num_used: 0,
+            query_offset: 0,
+            payload_query_offsets: [0; COMPRESSED_HITS_PER_BACKBONE_CELL],
+            overflow_query_offsets: [0; COMPRESSED_HITS_PER_BACKBONE_CELL - 2],
+            overflow_head: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlastCompressedAaLookupTable {
+    pub threshold: i32,
+    pub word_length: usize,
+    pub alphabet_size: usize,
+    pub compressed_alphabet_size: usize,
+    pub longest_chain: i32,
+    pub backbone: Vec<CompressedLookupBackboneCell>,
+    pub overflow_cells: Vec<CompressedOverflowCell>,
+    pub curr_overflow_cell: i32,
+    pub curr_overflow_bank: i32,
+    pub pv: Vec<u32>,
+    pub pv_array_bts: usize,
+    pub reciprocal_alphabet_size: u64,
+    pub compress_table: Vec<u8>,
+    pub scaled_compress_table: Vec<i32>,
+    pub neighbor_matches: i32,
+    pub exact_matches: i32,
+}
+
+impl BlastCompressedAaLookupTable {
+    pub fn new(word_length: usize, compressed_alphabet_size: usize, backbone_size: usize) -> Self {
+        let mut compress_table = vec![u8::MAX; AA_SIZE];
+        for (idx, value) in compress_table.iter_mut().enumerate() {
+            *value = idx as u8;
+        }
+        let scaled_compress_table =
+            build_scaled_compress_table(word_length, compressed_alphabet_size, &compress_table);
+        Self {
+            threshold: 0,
+            word_length,
+            alphabet_size: AA_SIZE,
+            compressed_alphabet_size,
+            longest_chain: 0,
+            backbone: vec![CompressedLookupBackboneCell::default(); backbone_size],
+            overflow_cells: Vec::new(),
+            curr_overflow_cell: COMPRESSED_OVERFLOW_CELLS_IN_BANK,
+            curr_overflow_bank: -1,
+            pv: Vec::new(),
+            pv_array_bts: crate::stat::PV_ARRAY_BTS,
+            reciprocal_alphabet_size: compressed_reciprocal_alphabet_size(compressed_alphabet_size),
+            compress_table,
+            scaled_compress_table,
+            neighbor_matches: 0,
+            exact_matches: 0,
+        }
+    }
+}
+
+fn compressed_reciprocal_alphabet_size(compressed_alphabet_size: usize) -> u64 {
+    if compressed_alphabet_size == 0 {
+        0
+    } else {
+        (1u64 << 32) / compressed_alphabet_size as u64
+    }
+}
+
+fn compressed_scale(word_length: usize, compressed_alphabet_size: usize) -> i32 {
+    let mut scale = 1i32;
+    for _ in 1..word_length {
+        scale = scale.saturating_mul(compressed_alphabet_size as i32);
+    }
+    scale
+}
+
+fn build_scaled_compress_table(
+    word_length: usize,
+    compressed_alphabet_size: usize,
+    compress_table: &[u8],
+) -> Vec<i32> {
+    let scale = compressed_scale(word_length, compressed_alphabet_size);
+    compress_table
+        .iter()
+        .map(|&compressed| {
+            if compressed as usize >= compressed_alphabet_size {
+                -1
+            } else {
+                compressed as i32 * scale
+            }
+        })
+        .collect()
+}
+
+fn compressed_reciprocal_preshift(index: usize, reciprocal: u64) -> usize {
+    (((index as u64) * reciprocal) >> 32) as usize
+}
+
+fn compressed_prefix_index(
+    lookup: &BlastCompressedAaLookupTable,
+    subject: &[u8],
+    start: usize,
+    width: usize,
+) -> Option<usize> {
+    let mut index = 0usize;
+    let mut factor = 1usize;
+    for &letter in subject[start..start + width].iter() {
+        let compressed = *lookup.compress_table.get(letter as usize)?;
+        if compressed as usize >= lookup.compressed_alphabet_size {
+            return None;
+        }
+        index += compressed as usize * factor;
+        factor *= lookup.compressed_alphabet_size;
+    }
+    Some(index)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AaLookupBoneType {
+    Backbone,
+    Smallbone,
+}
+
 struct NeighborInfo<'a> {
     query_word: &'a [u8],
     subject_word: &'a mut [u8],
@@ -92,6 +247,27 @@ struct NeighborInfo<'a> {
     row_max: &'a [i32; AA_SIZE],
     offset_list: &'a [i32],
     threshold: i32,
+}
+
+struct PssmNeighborInfo<'a> {
+    pssm: &'a Pssm,
+    subject_word: &'a mut [u8],
+    alphabet_size: usize,
+    word_size: usize,
+    row_max: &'a [i32],
+    offset: i32,
+    threshold: i32,
+    query_offset: usize,
+}
+
+pub struct CompressedNeighborInfo<'a> {
+    pub compressed_alphabet_size: usize,
+    pub wordsize: usize,
+    pub matrix: &'a [[i32; AA_SIZE]; AA_SIZE],
+    pub row_max: [i32; AA_SIZE],
+    pub threshold: i32,
+    pub matrix_sorted: [[i32; AA_SIZE]; AA_SIZE],
+    pub matrix_sorted_char: [[u8; AA_SIZE]; AA_SIZE],
 }
 
 impl ProteinLookupTable {
@@ -141,7 +317,7 @@ impl ProteinLookupTable {
                 }
                 let query_offset = offsets[0] as usize;
                 let query_word = &query[query_offset..query_offset + word_size];
-                add_word_hits(
+                s_add_word_hits(
                     &mut backbone,
                     matrix,
                     query_word,
@@ -200,7 +376,60 @@ impl ProteinLookupTable {
     }
 }
 
-fn add_word_hits(
+/// Conservative Rust port of NCBI `BlastAaLookupFinalize`
+/// (`blast_aalookup.c:267`).
+///
+/// Audit caveat: C finalizes from a temporary `thin_backbone` allocation into
+/// either `AaLookupBackboneCell` or `AaLookupSmallboneCell` storage, then frees
+/// the thin rows. Rust `ProteinLookupTable::build` already stores the finalized
+/// thick-backbone representation, so this routine recomputes the presence
+/// vector and compacts overflow storage in place. `Smallbone` is accepted for
+/// C-name parity, but uses the same `u16` hit-count representation as the
+/// existing Rust scanner.
+pub fn blast_aa_lookup_finalize(
+    lookup: Option<&mut ProteinLookupTable>,
+    bone_type: AaLookupBoneType,
+) -> i32 {
+    let Some(lookup) = lookup else {
+        return -1;
+    };
+    let _smallbone = matches!(bone_type, AaLookupBoneType::Smallbone);
+
+    let pv_len = lookup.backbone.len().div_ceil(64);
+    let mut pv = vec![0u64; pv_len];
+    let mut compact_overflow = Vec::new();
+
+    for (index, cell) in lookup.backbone.iter_mut().enumerate() {
+        let num_used = cell.num_used as usize;
+        if num_used == 0 {
+            cell.entries = [0; HITS_PER_CELL];
+            continue;
+        }
+
+        pv[index >> 6] |= 1u64 << (index & 63);
+        if num_used <= HITS_PER_CELL {
+            for slot in cell.entries.iter_mut().skip(num_used) {
+                *slot = 0;
+            }
+            continue;
+        }
+
+        let old_start = cell.entries[0].max(0) as usize;
+        let old_end = old_start
+            .saturating_add(num_used)
+            .min(lookup.overflow.len());
+        let new_start = compact_overflow.len();
+        compact_overflow.extend_from_slice(&lookup.overflow[old_start..old_end]);
+        cell.entries = [0; HITS_PER_CELL];
+        cell.entries[0] = new_start as i32;
+    }
+
+    lookup.pv = pv;
+    lookup.overflow = compact_overflow;
+    0
+}
+
+fn s_add_word_hits(
     backbone: &mut [Vec<i32>],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     query_word: &[u8],
@@ -217,8 +446,9 @@ fn add_word_hits(
         .sum();
 
     if threshold == 0 || self_score < threshold {
-        let hash = word_hash(query_word, alphabet_size);
-        backbone[hash].extend(offset_list.iter().copied());
+        for &query_offset in offset_list {
+            blast_lookup_add_word_hit(backbone, word_size, CHARSIZE, query_word, query_offset);
+        }
     }
 
     if threshold == 0 {
@@ -241,10 +471,10 @@ fn add_word_hits(
         score += row_max[aa as usize];
     }
 
-    add_word_hits_core(backbone, &mut info, score, 0);
+    s_add_word_hits_core(backbone, &mut info, score, 0);
 }
 
-fn add_word_hits_core(
+fn s_add_word_hits_core(
     backbone: &mut [Vec<i32>],
     info: &mut NeighborInfo<'_>,
     mut score: i32,
@@ -257,8 +487,15 @@ fn add_word_hits_core(
         for (aa, &cell_score) in row.iter().take(info.alphabet_size).enumerate() {
             if score + cell_score >= info.threshold {
                 info.subject_word[current_pos] = aa as u8;
-                let hash = word_hash(info.subject_word, info.alphabet_size);
-                backbone[hash].extend(info.offset_list.iter().copied());
+                for &query_offset in info.offset_list {
+                    blast_lookup_add_word_hit(
+                        backbone,
+                        info.word_size,
+                        CHARSIZE,
+                        info.subject_word,
+                        query_offset,
+                    );
+                }
             }
         }
         return;
@@ -267,14 +504,781 @@ fn add_word_hits_core(
     for (aa, &cell_score) in row.iter().take(info.alphabet_size).enumerate() {
         if score + cell_score >= info.threshold {
             info.subject_word[current_pos] = aa as u8;
-            add_word_hits_core(backbone, info, score + cell_score, current_pos + 1);
+            s_add_word_hits_core(backbone, info, score + cell_score, current_pos + 1);
         }
     }
+}
+
+/// Add neighboring words from position-specific rows, matching
+/// `s_AddPSSMNeighboringWords` in NCBI's protein lookup builder.
+///
+/// Audit caveat: C receives a raw `BlastSeqLoc` list and `Int4**` row pointers.
+/// The Rust API receives a `Pssm` plus optional half-open query ranges, then
+/// follows the same row-max pruning and word insertion logic over Vec-backed
+/// thin-backbone cells.
+pub fn s_add_pssm_neighboring_words(
+    backbone: &mut [Vec<i32>],
+    pssm: &Pssm,
+    word_size: usize,
+    threshold: i32,
+    query_bias: i32,
+    ranges: Option<&[(usize, usize)]>,
+) -> i32 {
+    if word_size == 0 || pssm.length < word_size {
+        return 0;
+    }
+
+    let Some(bits) = word_size.checked_mul(CHARSIZE) else {
+        return -1;
+    };
+    if bits >= usize::BITS as usize {
+        return -1;
+    }
+    let table_size = 1usize << bits;
+    if backbone.len() < table_size {
+        return -1;
+    }
+
+    let mut total = 0;
+    let mut subject_word = vec![0u8; word_size];
+
+    if let Some(ranges) = ranges {
+        for &(start, end) in ranges {
+            total += s_add_pssm_neighboring_range(
+                backbone,
+                pssm,
+                word_size,
+                threshold,
+                query_bias,
+                start,
+                end,
+                &mut subject_word,
+            );
+        }
+    } else {
+        total += s_add_pssm_neighboring_range(
+            backbone,
+            pssm,
+            word_size,
+            threshold,
+            query_bias,
+            0,
+            pssm.length,
+            &mut subject_word,
+        );
+    }
+
+    total
+}
+
+fn s_add_pssm_neighboring_range(
+    backbone: &mut [Vec<i32>],
+    pssm: &Pssm,
+    word_size: usize,
+    threshold: i32,
+    query_bias: i32,
+    start: usize,
+    end: usize,
+    subject_word: &mut [u8],
+) -> i32 {
+    let start = start.min(pssm.length);
+    let end = end.min(pssm.length);
+    if end < start || end - start < word_size {
+        return 0;
+    }
+
+    let last_offset = end - word_size;
+    let mut total = 0;
+    for query_offset in start..=last_offset {
+        let Some(query_offset_i32) = i32::try_from(query_offset).ok() else {
+            return -1;
+        };
+        let Some(offset) = query_offset_i32.checked_add(query_bias) else {
+            return -1;
+        };
+
+        let mut row_max = vec![i32::MIN; word_size];
+        for (i, max_score) in row_max.iter_mut().enumerate() {
+            *max_score = pssm.scores[query_offset + i]
+                .iter()
+                .take(AA_SIZE)
+                .copied()
+                .max()
+                .unwrap_or(i32::MIN);
+        }
+
+        total += s_add_pssm_word_hits(
+            backbone,
+            pssm,
+            query_offset,
+            word_size,
+            threshold,
+            offset,
+            &row_max,
+            subject_word,
+        );
+    }
+
+    total
+}
+
+fn s_add_pssm_word_hits(
+    backbone: &mut [Vec<i32>],
+    pssm: &Pssm,
+    query_offset: usize,
+    word_size: usize,
+    threshold: i32,
+    offset: i32,
+    row_max: &[i32],
+    subject_word: &mut [u8],
+) -> i32 {
+    let score = row_max.iter().take(word_size).sum();
+    let mut info = PssmNeighborInfo {
+        pssm,
+        subject_word,
+        alphabet_size: AA_SIZE,
+        word_size,
+        row_max,
+        offset,
+        threshold,
+        query_offset,
+    };
+
+    s_add_pssm_word_hits_core(backbone, &mut info, score, 0)
+}
+
+fn s_add_pssm_word_hits_core(
+    backbone: &mut [Vec<i32>],
+    info: &mut PssmNeighborInfo<'_>,
+    mut score: i32,
+    current_pos: usize,
+) -> i32 {
+    score -= info.row_max[current_pos];
+    let row = &info.pssm.scores[info.query_offset + current_pos];
+
+    if current_pos == info.word_size - 1 {
+        let mut added = 0;
+        for (aa, &cell_score) in row.iter().take(info.alphabet_size).enumerate() {
+            if score + cell_score >= info.threshold {
+                info.subject_word[current_pos] = aa as u8;
+                blast_lookup_add_word_hit(
+                    backbone,
+                    info.word_size,
+                    CHARSIZE,
+                    info.subject_word,
+                    info.offset,
+                );
+                added += 1;
+            }
+        }
+        return added;
+    }
+
+    let mut added = 0;
+    for (aa, &cell_score) in row.iter().take(info.alphabet_size).enumerate() {
+        if score + cell_score >= info.threshold {
+            info.subject_word[current_pos] = aa as u8;
+            added += s_add_pssm_word_hits_core(backbone, info, score + cell_score, current_pos + 1);
+        }
+    }
+    added
+}
+
+/// Allocate the next compressed-overflow cell, matching
+/// `s_CompressedListGetNewCell`'s bank/cursor state.
+///
+/// Audit caveat: C stores banks of raw cells and returns a raw pointer. Rust
+/// stores the same cells in one Vec and returns the stable cell index used by
+/// the compressed backbone's linked-list fields.
+pub fn s_compressed_list_get_new_cell(lookup: &mut BlastCompressedAaLookupTable) -> Option<usize> {
+    if lookup.curr_overflow_cell == COMPRESSED_OVERFLOW_CELLS_IN_BANK {
+        let bank_idx = lookup.curr_overflow_bank + 1;
+        if bank_idx >= COMPRESSED_OVERFLOW_MAX_BANKS {
+            return None;
+        }
+        lookup.curr_overflow_bank = bank_idx;
+        lookup.curr_overflow_cell = 0;
+    }
+
+    let cell_index = lookup.overflow_cells.len();
+    lookup
+        .overflow_cells
+        .push(CompressedOverflowCell::default());
+    lookup.curr_overflow_cell += 1;
+    Some(cell_index)
+}
+
+/// Add one query offset to a compressed-alphabet lookup cell, following
+/// `s_CompressedLookupAddWordHit`'s inline-to-overflow transition.
+///
+/// The first five hits are stored in the backbone representation. On the sixth
+/// hit, the last two inline payload offsets plus the new offset are moved to an
+/// overflow cell; subsequent hits fill the overflow head and allocate another
+/// head cell whenever the current one reaches the C cell capacity of four.
+pub fn s_compressed_lookup_add_word_hit(
+    lookup: &mut BlastCompressedAaLookupTable,
+    index: usize,
+    query_offset: i32,
+) -> i32 {
+    if index >= lookup.backbone.len() {
+        return -1;
+    }
+
+    let num_entries = lookup.backbone[index].num_used;
+    match num_entries {
+        0 => {
+            lookup.backbone[index].query_offset = query_offset;
+        }
+        1..=4 => {
+            lookup.backbone[index].payload_query_offsets[(num_entries - 1) as usize] = query_offset;
+        }
+        5 => {
+            let payload = lookup.backbone[index].payload_query_offsets;
+            let Some(new_cell) = s_compressed_list_get_new_cell(lookup) else {
+                return -1;
+            };
+            lookup.overflow_cells[new_cell].next = None;
+            lookup.overflow_cells[new_cell].query_offsets[0] = payload[2];
+            lookup.overflow_cells[new_cell].query_offsets[1] = payload[3];
+            lookup.overflow_cells[new_cell].query_offsets[2] = query_offset;
+            lookup.backbone[index].overflow_query_offsets[0] = payload[0];
+            lookup.backbone[index].overflow_query_offsets[1] = payload[1];
+            lookup.backbone[index].overflow_head = Some(new_cell);
+        }
+        _ => {
+            let cell_offset = ((num_entries - 3) & COMPRESSED_HITS_CELL_MASK) as usize;
+            if cell_offset == 0 {
+                let old_head = lookup.backbone[index].overflow_head;
+                let Some(new_cell) = s_compressed_list_get_new_cell(lookup) else {
+                    return -1;
+                };
+                lookup.overflow_cells[new_cell].next = old_head;
+                lookup.backbone[index].overflow_head = Some(new_cell);
+            }
+
+            let Some(head) = lookup.backbone[index].overflow_head else {
+                return -1;
+            };
+            lookup.overflow_cells[head].query_offsets[cell_offset] = query_offset;
+        }
+    }
+
+    lookup.backbone[index].num_used += 1;
+    0
+}
+
+/// Add one already-compressed word to the compressed lookup table, matching
+/// `s_CompressedLookupAddEncoded`'s fixed-radix index formulas.
+pub fn s_compressed_lookup_add_encoded(
+    lookup: &mut BlastCompressedAaLookupTable,
+    word: &[u8],
+    query_offset: i32,
+) -> i32 {
+    const W7P1: [usize; 10] = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90];
+    const W7P2: [usize; 10] = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900];
+    const W7P3: [usize; 10] = [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000];
+    const W7P4: [usize; 10] = [
+        0, 10000, 20000, 30000, 40000, 50000, 60000, 70000, 80000, 90000,
+    ];
+    const W7P5: [usize; 10] = [
+        0, 100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000,
+    ];
+    const W7P6: [usize; 10] = [
+        0, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000, 8000000, 9000000,
+    ];
+    const W6P1: [usize; 15] = [
+        0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210,
+    ];
+    const W6P2: [usize; 15] = [
+        0, 225, 450, 675, 900, 1125, 1350, 1575, 1800, 2025, 2250, 2475, 2700, 2925, 3150,
+    ];
+    const W6P3: [usize; 15] = [
+        0, 3375, 6750, 10125, 13500, 16875, 20250, 23625, 27000, 30375, 33750, 37125, 40500, 43875,
+        47250,
+    ];
+    const W6P4: [usize; 15] = [
+        0, 50625, 101250, 151875, 202500, 253125, 303750, 354375, 405000, 455625, 506250, 556875,
+        607500, 658125, 708750,
+    ];
+    const W6P5: [usize; 15] = [
+        0, 759375, 1518750, 2278125, 3037500, 3796875, 4556250, 5315625, 6075000, 6834375, 7593750,
+        8353125, 9112500, 9871875, 10631250,
+    ];
+
+    let index = match lookup.word_length {
+        5 => {
+            if word.len() < 5 || word[..5].iter().any(|&c| c as usize >= 15) {
+                return -1;
+            }
+            word[0] as usize
+                + W6P1[word[1] as usize]
+                + W6P2[word[2] as usize]
+                + W6P3[word[3] as usize]
+                + W6P4[word[4] as usize]
+        }
+        6 => {
+            if word.len() < 6 || word[..6].iter().any(|&c| c as usize >= 15) {
+                return -1;
+            }
+            word[0] as usize
+                + W6P1[word[1] as usize]
+                + W6P2[word[2] as usize]
+                + W6P3[word[3] as usize]
+                + W6P4[word[4] as usize]
+                + W6P5[word[5] as usize]
+        }
+        7 => {
+            if word.len() < 7 || word[..7].iter().any(|&c| c as usize >= 10) {
+                return -1;
+            }
+            word[0] as usize
+                + W7P1[word[1] as usize]
+                + W7P2[word[2] as usize]
+                + W7P3[word[3] as usize]
+                + W7P4[word[4] as usize]
+                + W7P5[word[5] as usize]
+                + W7P6[word[6] as usize]
+        }
+        _ => 0,
+    };
+
+    s_compressed_lookup_add_word_hit(lookup, index, query_offset)
+}
+
+fn s_compressed_lookup_add_unencoded(
+    lookup: &mut BlastCompressedAaLookupTable,
+    word: &[u8],
+    query_offset: i32,
+) -> i32 {
+    if word.len() < lookup.word_length {
+        return -1;
+    }
+
+    let mut encoded = vec![0u8; lookup.word_length];
+    for (dst, &letter) in encoded.iter_mut().zip(word.iter()) {
+        let Some(&compressed) = lookup.compress_table.get(letter as usize) else {
+            return 0;
+        };
+        if compressed as usize >= lookup.compressed_alphabet_size {
+            return 0;
+        }
+        *dst = compressed;
+    }
+
+    s_compressed_lookup_add_encoded(lookup, &encoded, query_offset)
+}
+
+pub fn s_load_sorted_matrix(info: &mut CompressedNeighborInfo<'_>) {
+    for long_char in 0..AA_SIZE {
+        let mut pairs: Vec<(i32, u8)> = (0..info.compressed_alphabet_size)
+            .map(|short_char| {
+                (
+                    info.row_max[long_char] - info.matrix[long_char][short_char],
+                    short_char as u8,
+                )
+            })
+            .collect();
+        pairs.sort_by_key(|&(diff, letter)| (diff, letter));
+
+        for (i, &(_, letter)) in pairs.iter().enumerate() {
+            info.matrix_sorted[long_char][i] = info.matrix[long_char][letter as usize];
+            info.matrix_sorted_char[long_char][i] = letter;
+        }
+    }
+}
+
+fn compressed_neighbor_info<'a>(
+    lookup: &BlastCompressedAaLookupTable,
+    matrix: &'a [[i32; AA_SIZE]; AA_SIZE],
+) -> CompressedNeighborInfo<'a> {
+    let mut info = CompressedNeighborInfo {
+        compressed_alphabet_size: lookup.compressed_alphabet_size,
+        wordsize: lookup.word_length,
+        matrix,
+        row_max: [0; AA_SIZE],
+        threshold: lookup.threshold,
+        matrix_sorted: [[0; AA_SIZE]; AA_SIZE],
+        matrix_sorted_char: [[0; AA_SIZE]; AA_SIZE],
+    };
+
+    for row in 0..lookup.alphabet_size.min(AA_SIZE) {
+        info.row_max[row] = matrix[row][0];
+        for col in 1..lookup.compressed_alphabet_size.min(AA_SIZE) {
+            info.row_max[row] = info.row_max[row].max(matrix[row][col]);
+        }
+    }
+    s_load_sorted_matrix(&mut info);
+    info
+}
+
+/// Recursive compressed-neighbor enumeration, matching
+/// `s_CompressedAddWordHitsCore`.
+///
+/// Audit caveat: C keeps `query_word`, `subject_word`, and lookup pointers
+/// inside `CompressedNeighborInfo`; Rust passes those slices explicitly to keep
+/// mutable lookup access separate from immutable scoring state.
+pub fn s_compressed_add_word_hits_core(
+    lookup: &mut BlastCompressedAaLookupTable,
+    info: &CompressedNeighborInfo<'_>,
+    query_word: &[u8],
+    subject_word: &mut [u8],
+    query_offset: i32,
+    mut score: i32,
+    current_pos: usize,
+) -> i32 {
+    let curr_query_char = query_word[current_pos] as usize;
+    score -= info.row_max[curr_query_char];
+    let row_sorted = &info.matrix_sorted[curr_query_char];
+    let char_sorted = &info.matrix_sorted_char[curr_query_char];
+
+    if current_pos == info.wordsize - 1 {
+        let mut added = 0;
+        for i in 0..info.compressed_alphabet_size {
+            if score + row_sorted[i] < info.threshold {
+                break;
+            }
+            subject_word[current_pos] = char_sorted[i];
+            if s_compressed_lookup_add_encoded(lookup, subject_word, query_offset) == 0 {
+                lookup.neighbor_matches += 1;
+                added += 1;
+            }
+        }
+        return added;
+    }
+
+    let mut added = 0;
+    for i in 0..info.compressed_alphabet_size {
+        if score + row_sorted[i] < info.threshold {
+            break;
+        }
+        subject_word[current_pos] = char_sorted[i];
+        added += s_compressed_add_word_hits_core(
+            lookup,
+            info,
+            query_word,
+            subject_word,
+            query_offset,
+            score + row_sorted[i],
+            current_pos + 1,
+        );
+    }
+    added
+}
+
+pub fn s_compressed_add_word_hits(
+    lookup: &mut BlastCompressedAaLookupTable,
+    info: &CompressedNeighborInfo<'_>,
+    query: &[u8],
+    query_offset: usize,
+) -> i32 {
+    if lookup.word_length == 0 || query_offset + lookup.word_length > query.len() {
+        return -1;
+    }
+
+    lookup.exact_matches += 1;
+    let query_word = &query[query_offset..query_offset + lookup.word_length];
+    let mut score = 0;
+    for &letter in query_word {
+        let Some(&compressed) = lookup.compress_table.get(letter as usize) else {
+            return 0;
+        };
+        if compressed as usize >= lookup.compressed_alphabet_size {
+            return 0;
+        }
+        score += info.matrix[letter as usize][compressed as usize];
+    }
+
+    let mut added = 0;
+    if lookup.threshold == 0 || score < lookup.threshold {
+        added += s_compressed_lookup_add_unencoded(lookup, query_word, query_offset as i32);
+    } else {
+        lookup.neighbor_matches -= 1;
+    }
+
+    if lookup.threshold == 0 {
+        return added;
+    }
+
+    let mut subject_word = vec![0u8; lookup.word_length];
+    score = query_word
+        .iter()
+        .map(|&letter| info.row_max[letter as usize])
+        .sum();
+
+    added
+        + s_compressed_add_word_hits_core(
+            lookup,
+            info,
+            query_word,
+            &mut subject_word,
+            query_offset as i32,
+            score,
+            0,
+        )
+}
+
+/// Index compressed-alphabet neighboring words over optional half-open query
+/// ranges, matching `s_CompressedAddNeighboringWords`'s setup and loop shape.
+pub fn s_compressed_add_neighboring_words(
+    lookup: &mut BlastCompressedAaLookupTable,
+    compressed_matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    query: &[u8],
+    ranges: Option<&[(usize, usize)]>,
+) -> i32 {
+    if lookup.word_length == 0 || query.len() < lookup.word_length {
+        return 0;
+    }
+
+    let info = compressed_neighbor_info(lookup, compressed_matrix);
+    let mut total = 0;
+    if let Some(ranges) = ranges {
+        for &(start, end) in ranges {
+            let start = start.min(query.len());
+            let end = end.min(query.len());
+            if end < start || end - start < lookup.word_length {
+                continue;
+            }
+            for offset in start..=end - lookup.word_length {
+                total += s_compressed_add_word_hits(lookup, &info, query, offset);
+            }
+        }
+    } else {
+        for offset in 0..=query.len() - lookup.word_length {
+            total += s_compressed_add_word_hits(lookup, &info, query, offset);
+        }
+    }
+    total
+}
+
+/// Complete compressed lookup construction by building the presence vector and
+/// longest-chain metadata, matching `s_CompressedLookupFinalize`.
+pub fn s_compressed_lookup_finalize(lookup: &mut BlastCompressedAaLookupTable) -> i32 {
+    const TARGET_PV_BYTES: usize = 262_144;
+
+    let backbone_size = lookup.backbone.len();
+    let occupied = lookup
+        .backbone
+        .iter()
+        .filter(|cell| cell.num_used > 0)
+        .count();
+
+    let mut pv_array_bts = crate::stat::PV_ARRAY_BTS;
+    if occupied as f64 <= 0.01 * backbone_size as f64 {
+        pv_array_bts +=
+            crate::util::ilog2((backbone_size / (8 * TARGET_PV_BYTES)) as i64).max(0) as usize;
+    }
+
+    let mut pv = vec![0u32; (backbone_size >> pv_array_bts) + 1];
+    let mut longest_chain = 0;
+    for (index, cell) in lookup.backbone.iter().enumerate() {
+        let count = cell.num_used;
+        if count > 0 {
+            pv[index >> pv_array_bts] |= 1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            longest_chain = longest_chain.max(count);
+        }
+    }
+
+    lookup.pv = pv;
+    lookup.pv_array_bts = pv_array_bts;
+    lookup.longest_chain = longest_chain;
+    0
+}
+
+fn compressed_cell_query_offsets(
+    lookup: &BlastCompressedAaLookupTable,
+    cell: &CompressedLookupBackboneCell,
+) -> Vec<i32> {
+    let numhits = cell.num_used.max(0) as usize;
+    if numhits == 0 {
+        return Vec::new();
+    }
+
+    let mut offsets = Vec::with_capacity(numhits);
+    offsets.push(cell.query_offset);
+    if numhits <= COMPRESSED_HITS_PER_BACKBONE_CELL + 1 {
+        offsets.extend_from_slice(&cell.payload_query_offsets[..numhits - 1]);
+        return offsets;
+    }
+
+    offsets.extend_from_slice(&cell.overflow_query_offsets);
+    let mut current = cell.overflow_head;
+    let first_cell_entries = ((numhits as i32 - 3) & COMPRESSED_HITS_CELL_MASK).max(0) as usize;
+    if let Some(head) = current {
+        offsets.extend_from_slice(&lookup.overflow_cells[head].query_offsets[..first_cell_entries]);
+        if first_cell_entries != 0 {
+            current = lookup.overflow_cells[head].next;
+        }
+    }
+
+    while let Some(cell_index) = current {
+        offsets.extend_from_slice(&lookup.overflow_cells[cell_index].query_offsets);
+        current = lookup.overflow_cells[cell_index].next;
+    }
+    offsets.truncate(numhits);
+    offsets
+}
+
+/// Scan a subject sequence with a compressed amino-acid lookup table, matching
+/// `s_BlastCompressedAaScanSubject`'s PV test and offset-pair copy behavior.
+///
+/// Audit caveat: C uses a reciprocal-multiply rolling index over
+/// `scaled_compress_table`; Rust mirrors that rolling index, with slice bounds
+/// checks and a rebuilt scaled table if callers changed `compress_table`.
+pub fn s_blast_compressed_aa_scan_subject(
+    lookup: &BlastCompressedAaLookupTable,
+    subject: &[u8],
+    array_size: usize,
+    scan_range: Option<(usize, usize)>,
+) -> Vec<crate::lookup::OffsetPair> {
+    if lookup.word_length == 0
+        || lookup.compressed_alphabet_size == 0
+        || subject.len() < lookup.word_length
+        || array_size == 0
+    {
+        return Vec::new();
+    }
+
+    let start = scan_range.map(|range| range.0).unwrap_or(0);
+    let end = scan_range
+        .map(|range| range.1)
+        .unwrap_or(subject.len() - lookup.word_length)
+        .min(subject.len() - lookup.word_length);
+    if start > end {
+        return Vec::new();
+    }
+
+    let scale = compressed_scale(lookup.word_length, lookup.compressed_alphabet_size);
+    let scaled_table_is_current = lookup.scaled_compress_table.len() == lookup.compress_table.len()
+        && lookup
+            .compress_table
+            .iter()
+            .zip(&lookup.scaled_compress_table)
+            .all(|(&compressed, &scaled)| {
+                let expected = if compressed as usize >= lookup.compressed_alphabet_size {
+                    -1
+                } else {
+                    compressed as i32 * scale
+                };
+                scaled == expected
+            });
+    let rebuilt_scaled_compress_table;
+    let scaled_compress_table = if scaled_table_is_current {
+        &lookup.scaled_compress_table
+    } else {
+        rebuilt_scaled_compress_table = build_scaled_compress_table(
+            lookup.word_length,
+            lookup.compressed_alphabet_size,
+            &lookup.compress_table,
+        );
+        &rebuilt_scaled_compress_table
+    };
+    let reciprocal = if lookup.reciprocal_alphabet_size != 0 {
+        lookup.reciprocal_alphabet_size
+    } else {
+        compressed_reciprocal_alphabet_size(lookup.compressed_alphabet_size)
+    };
+    let prefix_width = lookup.word_length - 1;
+    let mut hits = Vec::new();
+    let mut subject_offset = start;
+
+    'prime: while subject_offset <= end {
+        let Some(prefix_index) =
+            compressed_prefix_index(lookup, subject, subject_offset, prefix_width)
+        else {
+            subject_offset += 1;
+            continue;
+        };
+        let mut shifted_index = prefix_index;
+
+        while subject_offset <= end {
+            let next_letter = subject[subject_offset + prefix_width] as usize;
+            let scaled_compressed = scaled_compress_table
+                .get(next_letter)
+                .copied()
+                .unwrap_or(-1);
+            if scaled_compressed < 0 {
+                subject_offset += 1;
+                continue 'prime;
+            }
+
+            let index = shifted_index + scaled_compressed as usize;
+            shifted_index = compressed_reciprocal_preshift(index, reciprocal);
+
+            let Some(pv_word) = lookup.pv.get(index >> lookup.pv_array_bts) else {
+                subject_offset += 1;
+                continue;
+            };
+            if (pv_word & (1u32 << (index & crate::stat::PV_ARRAY_MASK as usize))) == 0 {
+                subject_offset += 1;
+                continue;
+            }
+
+            let Some(cell) = lookup.backbone.get(index) else {
+                subject_offset += 1;
+                continue;
+            };
+            if cell.num_used <= 0 {
+                subject_offset += 1;
+                continue;
+            }
+            let query_offsets = compressed_cell_query_offsets(lookup, cell);
+            let available = array_size.saturating_sub(hits.len());
+            if query_offsets.len() > available {
+                hits.extend(
+                    query_offsets
+                        .into_iter()
+                        .take(available)
+                        .map(|query_offset| crate::lookup::OffsetPair {
+                            query_offset,
+                            subject_offset: subject_offset as i32,
+                        }),
+                );
+                return hits;
+            }
+            hits.extend(
+                query_offsets
+                    .into_iter()
+                    .map(|query_offset| crate::lookup::OffsetPair {
+                        query_offset,
+                        subject_offset: subject_offset as i32,
+                    }),
+            );
+            subject_offset += 1;
+        }
+    }
+    hits
 }
 
 /// Bits per residue for hashing (ceil(log2(alphabet_size))).
 /// AA_SIZE=28, charsize=5 (rounds up to 32). Matches NCBI BLAST+ `charsize`.
 const CHARSIZE: usize = 5;
+
+/// 1-1 port of `BlastLookupAddWordHit` (`blast_lookup.c:33`) over the Rust
+/// vector-backed thin backbone.
+///
+/// NCBI stores each cell as a manually grown `[capacity, used, hits...]` chain.
+/// The Rust representation uses `Vec<i32>` per cell; `push` is the exact
+/// ownership-safe equivalent of appending `query_offset` after growing the C
+/// chain when needed.
+pub(crate) fn blast_lookup_add_word_hit(
+    backbone: &mut [Vec<i32>],
+    wordsize: usize,
+    charsize: usize,
+    seq: &[u8],
+    query_offset: i32,
+) {
+    let index = s_compute_table_index(wordsize, charsize, seq);
+    backbone[index].push(query_offset);
+}
+
+fn s_compute_table_index(wordsize: usize, charsize: usize, word: &[u8]) -> usize {
+    let mut index = 0usize;
+    for &letter in word.iter().take(wordsize) {
+        index = (index << charsize) | letter as usize;
+    }
+    index
+}
+
 /// Mask for the hash: (1 << (word_size * CHARSIZE)) - 1.
 /// For word_size=3: mask = (1 << 15) - 1 = 32767.
 #[allow(dead_code)]
@@ -284,11 +1288,7 @@ const HASH_MASK_W3: usize = (1 << (3 * CHARSIZE)) - 1;
 /// hash = (w[0] << (n-1)*charsize) | (w[1] << (n-2)*charsize) | ... | w[n-1]
 #[inline]
 fn word_hash(word: &[u8], _alphabet_size: usize) -> usize {
-    let mut h: usize = 0;
-    for &b in word {
-        h = (h << CHARSIZE) | b as usize;
-    }
-    h
+    s_compute_table_index(word.len(), CHARSIZE, word)
 }
 
 /// Incremental hash update (NCBI ComputeTableIndexIncremental).
@@ -363,7 +1363,7 @@ fn subject_has_merged_pv_hit(subject: &[u8], word_size: usize, merged_pv: &[u64]
 /// overlap checks, and extension gates stay identical to the single-query path.
 ///
 /// Returns a `Vec` of `(query_index, Vec<ProteinHit>)` for queries that had hits.
-pub fn batch_scan_subject(
+pub fn s_blast_aa_scan_subject(
     queries: &[&[u8]],
     tables: &[&ProteinLookupTable],
     merged_pv: &[u64],
@@ -403,7 +1403,7 @@ pub fn batch_scan_subject(
 /// performing ungapped extensions for each hit.
 ///
 /// Returns a list of `ProteinHit` sorted by descending score.
-pub fn protein_scan(
+pub fn blast_choose_protein_scan_subject(
     query: &[u8],
     subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -435,9 +1435,9 @@ const TWO_HIT_WINDOW: i32 = 40;
 
 /// Extend left from position (q_start-1, s_start-1) with x-dropoff.
 /// Returns (best_score, left_displacement, num_identities).
-/// Matches NCBI s_BlastAaExtendLeft.
+/// Matches NCBI `s_BlastAaExtendLeft`.
 #[inline]
-fn extend_left(
+fn s_blast_aa_extend_left(
     query: &[u8],
     subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -498,7 +1498,7 @@ fn extend_left(
 /// via `s_BlastAaExtendRight`'s `s_last_off` out-parameter
 /// (`aa_ungapped.c:864`: `*s_last_off = s_off + i;`).
 #[inline]
-fn extend_right(
+fn s_blast_aa_extend_right(
     query: &[u8],
     subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -555,12 +1555,91 @@ fn extend_right(
     (best, best_d, best_ident, last_off_delta)
 }
 
-/// Like `protein_scan_with_table` but reuses a diagonal tracking buffer.
+/// Port of NCBI `s_BlastAaExtendTwoHit` (`aa_ungapped.c:1089`), reduced to
+/// the local slice-based scanner state. Returns the HSP plus NCBI's
+/// `s_last_off` value used by `s_BlastAaWordFinder_TwoHit` diagonal
+/// bookkeeping.
+fn s_blast_aa_extend_two_hit(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    word_size: usize,
+    x_dropoff: i32,
+    q_right_off: usize,
+    s_right_off: usize,
+    s_left_off: usize,
+) -> Option<(ProteinHit, i32)> {
+    let qlen = query.len();
+
+    // Find best start within the word.
+    let mut wscore = 0i32;
+    let mut best_wscore = 0i32;
+    let mut right_d = 0usize;
+    for k in 0..word_size {
+        let qi = q_right_off + k;
+        let si = s_right_off + k;
+        if qi < qlen && si < subject.len() {
+            wscore += matrix[query[qi] as usize][subject[si] as usize];
+        }
+        if wscore > best_wscore {
+            best_wscore = wscore;
+            right_d = k + 1;
+        }
+    }
+    let ext_q = q_right_off + right_d;
+    let ext_s = s_right_off + right_d;
+
+    let (left_score, left_d, left_ident) =
+        s_blast_aa_extend_left(query, subject, matrix, ext_q, ext_s, x_dropoff);
+    let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
+    if !reached_first {
+        return None;
+    }
+
+    let (right_score, right_d_r, right_ident, s_last_off_delta) =
+        s_blast_aa_extend_right(query, subject, matrix, ext_q, ext_s, x_dropoff, left_score);
+    let total_score = left_score.max(right_score);
+    if total_score <= 0 {
+        return None;
+    }
+
+    let qs = ext_q - left_d as usize;
+    let qe = ext_q + right_d_r as usize;
+    let ss = ext_s - left_d as usize;
+    let se = ext_s + right_d_r as usize;
+    let alen = (qe - qs) as i32;
+    let ident = left_ident + right_ident;
+    let s_last_off = ext_s as i32 + s_last_off_delta;
+
+    Some((
+        ProteinHit {
+            query_start: qs,
+            query_end: qe,
+            subject_start: ss,
+            subject_end: se,
+            score: total_score,
+            num_ident: ident,
+            align_length: alen,
+            mismatches: alen - ident,
+            gap_opens: 0,
+            qseq: None,
+            sseq: None,
+            scaled_score: None,
+            gapped_start_q: 0,
+            gapped_start_s: 0,
+        },
+        s_last_off,
+    ))
+}
+
+/// Name-matched port of NCBI `s_BlastAaWordFinder_TwoHit`
+/// (`aa_ungapped.c:440`) over the Rust lookup-table representation.
 ///
 /// Uses the NCBI BLAST+ two-hit algorithm: a word hit on a diagonal only
 /// triggers ungapped extension if a second hit was seen on the same diagonal
-/// within `TWO_HIT_WINDOW` positions. This dramatically reduces extensions.
-pub fn protein_scan_with_table_reuse(
+/// within `TWO_HIT_WINDOW` positions. Rust returns collected ungapped hits
+/// instead of filling C's `BlastInitHitList` and stats side channels.
+pub fn s_blast_aa_word_finder_two_hit(
     query: &[u8],
     subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -584,7 +1663,6 @@ pub fn protein_scan_with_table_reuse(
 
     let mut hits: Vec<ProteinHit> = Vec::new();
     let ws = word_size as i32;
-    let qlen = query.len();
     let mask = (1usize << (word_size * CHARSIZE)) - 1;
 
     let last_pos = subject.len() - word_size;
@@ -651,73 +1729,23 @@ pub fn protein_scan_with_table_reuse(
                     continue;
                 }
 
-                // NCBI two-hit extension (s_BlastAaExtendTwoHit):
-                // 1. Find best starting point within the word at s_pos
-                // 2. Extend LEFT — must reach the first hit (at `last`)
-                // 3. Extend RIGHT only if left reached far enough
                 let s_left_off = (last_hit - diag_offset + ws) as usize; // end of first hit
                 let s_right_off = s_pos;
                 let q_right_off = q_pos;
 
-                // Find best start within the word
-                let mut wscore = 0i32;
-                let mut best_wscore = 0i32;
-                let mut right_d = 0usize;
-                for k in 0..word_size {
-                    let qi = q_right_off + k;
-                    let si = s_right_off + k;
-                    if qi < qlen && si < subject.len() {
-                        wscore += *matrix
-                            .get_unchecked(*query.as_ptr().add(qi) as usize)
-                            .get_unchecked(*subject.as_ptr().add(si) as usize);
-                    }
-                    if wscore > best_wscore {
-                        best_wscore = wscore;
-                        right_d = k + 1;
-                    }
-                }
-                let ext_q = q_right_off + right_d;
-                let ext_s = s_right_off + right_d;
-
-                // Extend left from ext_s-1 — must reach s_left_off
-                let (left_score, left_d, left_ident) =
-                    extend_left(query, subject, matrix, ext_q, ext_s, x_dropoff);
-
-                let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
-
-                if reached_first {
-                    // Extend right with cumulative score
-                    let (right_score, right_d_r, right_ident, s_last_off_delta) =
-                        extend_right(query, subject, matrix, ext_q, ext_s, x_dropoff, left_score);
-
-                    let total_score = left_score.max(right_score);
-                    if total_score > 0 {
-                        let qs = ext_q - left_d as usize;
-                        let qe = ext_q + right_d_r as usize;
-                        let ss = ext_s - left_d as usize;
-                        let se = ext_s + right_d_r as usize;
-                        let s_last_off = ext_s as i32 + s_last_off_delta;
-                        *diag_ptr.add(diag) = (s_last_off - (ws - 1) + diag_offset, true);
-                        let alen = (qe - qs) as i32;
-                        let ident = left_ident + right_ident;
-                        hits.push(ProteinHit {
-                            query_start: qs,
-                            query_end: qe,
-                            subject_start: ss,
-                            subject_end: se,
-                            score: total_score,
-                            num_ident: ident,
-                            align_length: alen,
-                            mismatches: alen - ident,
-                            gap_opens: 0,
-                            qseq: None,
-                            sseq: None,
-                            scaled_score: None,
-                            gapped_start_q: 0,
-                            gapped_start_s: 0,
-                        });
-                        continue;
-                    }
+                if let Some((hit, s_last_off)) = s_blast_aa_extend_two_hit(
+                    query,
+                    subject,
+                    matrix,
+                    word_size,
+                    x_dropoff,
+                    q_right_off,
+                    s_right_off,
+                    s_left_off,
+                ) {
+                    *diag_ptr.add(diag) = (s_last_off - (ws - 1) + diag_offset, true);
+                    hits.push(hit);
+                    continue;
                 }
                 *diag_ptr.add(diag) = (s_off + diag_offset, false);
             }
@@ -728,6 +1756,18 @@ pub fn protein_scan_with_table_reuse(
         hits.sort_unstable_by(score_compare_protein_hits);
     }
     hits
+}
+
+/// Like `protein_scan_with_table` but reuses a diagonal tracking buffer.
+pub fn protein_scan_with_table_reuse(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+) -> Vec<ProteinHit> {
+    s_blast_aa_word_finder_two_hit(query, subject, matrix, table, x_dropoff, diag_buf)
 }
 
 /// Scan + gapped extension: find ungapped seeds, then perform gapped DP on top hits.
@@ -900,11 +1940,222 @@ mod tests {
     }
 
     #[test]
+    fn blast_aa_lookup_finalize_rebuilds_pv_and_compacts_overflow() {
+        let mut table = ProteinLookupTable {
+            word_size: 3,
+            backbone: vec![
+                BackboneCell {
+                    num_used: 0,
+                    entries: [99; HITS_PER_CELL],
+                },
+                BackboneCell {
+                    num_used: 2,
+                    entries: [7, 8, 99],
+                },
+                BackboneCell {
+                    num_used: 4,
+                    entries: [2, 0, 0],
+                },
+            ],
+            overflow: vec![100, 101, 9, 10, 11, 12, 200],
+            pv: vec![u64::MAX],
+        };
+
+        assert_eq!(
+            blast_aa_lookup_finalize(Some(&mut table), AaLookupBoneType::Backbone),
+            0
+        );
+        assert_eq!(table.pv[0] & 1, 0);
+        assert_ne!(table.pv[0] & (1u64 << 1), 0);
+        assert_ne!(table.pv[0] & (1u64 << 2), 0);
+        assert_eq!(table.backbone[0].entries, [0; HITS_PER_CELL]);
+        assert_eq!(table.backbone[1].entries, [7, 8, 0]);
+        assert_eq!(table.backbone[2].entries[0], 0);
+        assert_eq!(table.overflow, vec![9, 10, 11, 12]);
+        assert_eq!(
+            blast_aa_lookup_finalize(None, AaLookupBoneType::Smallbone),
+            -1
+        );
+    }
+
+    #[test]
+    fn add_pssm_neighboring_words_indexes_threshold_words() {
+        let mut scores = vec![[-10i32; AA_SIZE]; 3];
+        scores[0][1] = 6;
+        scores[1][2] = 5;
+        scores[1][3] = 7;
+        scores[2][4] = 6;
+        let pssm = Pssm {
+            scores,
+            length: 3,
+            info_content: vec![0.0; 3],
+        };
+        let table_size = 1usize << (2 * CHARSIZE);
+        let mut backbone = vec![Vec::new(); table_size];
+
+        assert_eq!(
+            s_add_pssm_neighboring_words(&mut backbone, &pssm, 2, 11, 5, None),
+            4
+        );
+
+        assert_eq!(backbone[word_hash(&[1, 2], AA_SIZE)], vec![5]);
+        assert_eq!(backbone[word_hash(&[1, 3], AA_SIZE)], vec![5]);
+        assert_eq!(backbone[word_hash(&[2, 4], AA_SIZE)], vec![6]);
+        assert_eq!(backbone[word_hash(&[3, 4], AA_SIZE)], vec![6]);
+    }
+
+    #[test]
+    fn compressed_lookup_add_word_hit_transitions_to_overflow_cells() {
+        let mut lookup = BlastCompressedAaLookupTable::new(3, 15, 1);
+        for offset in 10..18 {
+            assert_eq!(s_compressed_lookup_add_word_hit(&mut lookup, 0, offset), 0);
+        }
+
+        let cell = lookup.backbone[0];
+        assert_eq!(cell.num_used, 8);
+        assert_eq!(cell.query_offset, 10);
+        assert_eq!(cell.overflow_query_offsets, [11, 12]);
+        let head = cell.overflow_head.expect("overflow head");
+        assert_eq!(lookup.overflow_cells[head].query_offsets, [17, 0, 0, 0]);
+        let next = lookup.overflow_cells[head]
+            .next
+            .expect("older overflow cell");
+        assert_eq!(lookup.overflow_cells[next].query_offsets, [13, 14, 15, 16]);
+        assert_eq!(lookup.curr_overflow_bank, 0);
+        assert_eq!(lookup.curr_overflow_cell, 2);
+    }
+
+    #[test]
+    fn compressed_lookup_add_encoded_uses_c_radices() {
+        let index5 = 1 + 15 * 2 + 225 * 3 + 3_375 * 4 + 50_625 * 5;
+        let mut lookup5 = BlastCompressedAaLookupTable::new(5, 15, index5 + 1);
+        assert_eq!(
+            s_compressed_lookup_add_encoded(&mut lookup5, &[1, 2, 3, 4, 5], 42),
+            0
+        );
+        assert_eq!(lookup5.backbone[index5].query_offset, 42);
+
+        let index6 = index5 + 759_375 * 6;
+        let mut lookup6 = BlastCompressedAaLookupTable::new(6, 15, index6 + 1);
+        assert_eq!(
+            s_compressed_lookup_add_encoded(&mut lookup6, &[1, 2, 3, 4, 5, 6], 43),
+            0
+        );
+        assert_eq!(lookup6.backbone[index6].query_offset, 43);
+
+        let index7 = 1 + 10 * 2 + 100 * 3 + 1_000 * 4 + 10_000 * 5 + 100_000 * 6;
+        let index7 = index7 + 1_000_000 * 7;
+        let mut lookup7 = BlastCompressedAaLookupTable::new(7, 10, index7 + 1);
+        assert_eq!(
+            s_compressed_lookup_add_encoded(&mut lookup7, &[1, 2, 3, 4, 5, 6, 7], 44),
+            0
+        );
+        assert_eq!(lookup7.backbone[index7].query_offset, 44);
+    }
+
+    #[test]
+    fn compressed_add_neighboring_words_uses_sorted_matrix_pruning() {
+        let index = 1 + 15 + 225 + 3_375 + 50_625;
+        let mut lookup = BlastCompressedAaLookupTable::new(5, 2, index + 1);
+        lookup.threshold = 25;
+        lookup.compress_table = vec![u8::MAX; AA_SIZE];
+        lookup.compress_table[1] = 1;
+
+        let mut matrix = [[-10i32; AA_SIZE]; AA_SIZE];
+        matrix[1][1] = 5;
+        matrix[1][0] = -10;
+        assert_eq!(
+            s_compressed_add_neighboring_words(&mut lookup, &matrix, &[1, 1, 1, 1, 1], None),
+            1
+        );
+
+        assert_eq!(lookup.backbone[index].query_offset, 0);
+        assert_eq!(lookup.backbone[index].num_used, 1);
+        assert_eq!(lookup.exact_matches, 1);
+        assert_eq!(lookup.neighbor_matches, 0);
+    }
+
+    #[test]
+    fn compressed_lookup_finalize_builds_pv_and_longest_chain() {
+        let mut lookup = BlastCompressedAaLookupTable::new(5, 15, 130);
+        lookup.backbone[3].num_used = 2;
+        lookup.backbone[64].num_used = 5;
+        lookup.backbone[129].num_used = 1;
+
+        assert_eq!(s_compressed_lookup_finalize(&mut lookup), 0);
+
+        assert_eq!(lookup.longest_chain, 5);
+        assert_eq!(lookup.pv_array_bts, crate::stat::PV_ARRAY_BTS);
+        assert_ne!(lookup.pv[3 >> lookup.pv_array_bts] & (1u32 << (3 & 31)), 0);
+        assert_ne!(
+            lookup.pv[64 >> lookup.pv_array_bts] & (1u32 << (64 & 31)),
+            0
+        );
+        assert_ne!(
+            lookup.pv[129 >> lookup.pv_array_bts] & (1u32 << (129 & 31)),
+            0
+        );
+        assert_eq!(lookup.pv[0] & (1u32 << 4), 0);
+    }
+
+    #[test]
+    fn compressed_scan_subject_copies_inline_hits_after_pv_test() {
+        let index = 1 + 15 * 2 + 225 * 3 + 3_375 * 4 + 50_625 * 5;
+        let mut lookup = BlastCompressedAaLookupTable::new(5, 15, index + 1);
+        assert_eq!(
+            s_compressed_lookup_add_encoded(&mut lookup, &[1, 2, 3, 4, 5], 11),
+            0
+        );
+        assert_eq!(
+            s_compressed_lookup_add_encoded(&mut lookup, &[1, 2, 3, 4, 5], 17),
+            0
+        );
+        assert_eq!(s_compressed_lookup_finalize(&mut lookup), 0);
+
+        let hits = s_blast_compressed_aa_scan_subject(&lookup, &[9, 1, 2, 3, 4, 5, 8], 8, None);
+        assert_eq!(
+            hits,
+            vec![
+                crate::lookup::OffsetPair {
+                    query_offset: 11,
+                    subject_offset: 1,
+                },
+                crate::lookup::OffsetPair {
+                    query_offset: 17,
+                    subject_offset: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn compressed_scan_subject_fills_capacity_before_pausing() {
+        let index = 1 + 15 * 2 + 225 * 3 + 3_375 * 4 + 50_625 * 5;
+        let mut lookup = BlastCompressedAaLookupTable::new(5, 15, index + 1);
+        for query_offset in [11, 17] {
+            assert_eq!(
+                s_compressed_lookup_add_encoded(&mut lookup, &[1, 2, 3, 4, 5], query_offset),
+                0
+            );
+        }
+        assert_eq!(s_compressed_lookup_finalize(&mut lookup), 0);
+
+        let hits = s_blast_compressed_aa_scan_subject(&lookup, &[9, 1, 2, 3, 4, 5, 8], 1, None);
+        assert_eq!(
+            hits,
+            vec![crate::lookup::OffsetPair {
+                query_offset: 11,
+                subject_offset: 1,
+            }]
+        );
+    }
+
+    #[test]
     fn test_protein_scan_identical() {
         let m = simple_matrix();
         let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         let subject = query.clone();
-        let hits = protein_scan(&query, &subject, &m, 3, 11.0, 20);
+        let hits = blast_choose_protein_scan_subject(&query, &subject, &m, 3, 11.0, 20);
         assert!(!hits.is_empty(), "Should find hits for identical sequences");
         // Best hit should cover full length.
         let best = &hits[0];
@@ -917,7 +2168,7 @@ mod tests {
         // Query all 1s, subject all 2s — word score = -1*3 = -3 < threshold 11
         let query = vec![1u8, 1, 1, 1, 1];
         let subject = vec![2u8, 2, 2, 2, 2];
-        let hits = protein_scan(&query, &subject, &m, 3, 11.0, 20);
+        let hits = blast_choose_protein_scan_subject(&query, &subject, &m, 3, 11.0, 20);
         assert!(
             hits.is_empty(),
             "Should find no hits for unrelated sequences"
@@ -929,7 +2180,7 @@ mod tests {
         let m = simple_matrix();
         let query = vec![1u8, 2];
         let subject = vec![1u8, 2, 3];
-        let hits = protein_scan(&query, &subject, &m, 3, 11.0, 20);
+        let hits = blast_choose_protein_scan_subject(&query, &subject, &m, 3, 11.0, 20);
         assert!(
             hits.is_empty(),
             "Sequences shorter than word_size yield no hits"
@@ -948,7 +2199,7 @@ mod tests {
         let queries = vec![q1.as_slice(), q2.as_slice()];
         let merged = merge_pv(&tables);
 
-        let batch = batch_scan_subject(&queries, &tables, &merged, &subject, &m, 20);
+        let batch = s_blast_aa_scan_subject(&queries, &tables, &merged, &subject, &m, 20);
         let singles = [
             protein_scan_with_table(&q1, &subject, &m, &t1, 20),
             protein_scan_with_table(&q2, &subject, &m, &t2, 20),
@@ -993,7 +2244,7 @@ mod tests {
         let queries = vec![q1.as_slice(), q2.as_slice()];
         let merged = merge_pv(&tables);
 
-        let batch = batch_scan_subject(&queries, &tables, &merged, &subject, &m, 20);
+        let batch = s_blast_aa_scan_subject(&queries, &tables, &merged, &subject, &m, 20);
         let singles = [
             protein_scan_with_table(&q1, &subject, &m, &t1, 20),
             protein_scan_with_table(&q2, &subject, &m, &t2, 20),
@@ -1013,7 +2264,7 @@ mod tests {
         let queries = vec![query.as_slice()];
         let invalid_merged = vec![0u64; table.pv.len()];
 
-        let batch = batch_scan_subject(&queries, &tables, &invalid_merged, &subject, &m, 20);
+        let batch = s_blast_aa_scan_subject(&queries, &tables, &invalid_merged, &subject, &m, 20);
         let single = protein_scan_with_table(&query, &subject, &m, &table, 20);
 
         assert!(!single.is_empty());

@@ -13482,7 +13482,7 @@ fn apply_culling_limit(hits: &mut Vec<TabularHit>, culling_limit: usize, program
                 {
                     return false;
                 }
-                blast_rs::hspfilter_culling::dominate_test(dominator, &candidate)
+                blast_rs::hspfilter_culling::s_dominate_test(dominator, &candidate)
             })
             .take(culling_limit)
             .count();
@@ -13554,6 +13554,8 @@ fn tabular_hit_as_culling_node(
             num_gaps: hit.gap_opens,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         },
         context_id: hit.qframe,
         subject_id: subject_ranks

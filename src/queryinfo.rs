@@ -1,5 +1,10 @@
 //! Rust equivalent of blast_query_info.c — query information management.
 
+/// NCBI `ESequenceSegment` values used by `BlastContextInfo.segment_flags`.
+pub const E_NO_SEGMENTS: i32 = 0;
+pub const E_FIRST_SEGMENT: i32 = 1;
+pub const E_LAST_SEGMENT: i32 = 2;
+
 /// Information about a single query context (strand/frame).
 #[derive(Debug, Clone)]
 pub struct ContextInfo {
@@ -10,6 +15,7 @@ pub struct ContextInfo {
     pub query_index: i32,
     pub frame: i32,
     pub is_valid: bool,
+    pub segment_flags: i32,
 }
 
 /// Information about all queries in a search.
@@ -36,6 +42,7 @@ impl QueryInfo {
                 query_index: qi as i32,
                 frame: 0,
                 is_valid: qlen > 0,
+                segment_flags: E_NO_SEGMENTS,
             });
             offset += qlen as i32 + 1;
         }
@@ -64,6 +71,7 @@ impl QueryInfo {
                 query_index: qi as i32,
                 frame: 1,
                 is_valid: true,
+                segment_flags: E_NO_SEGMENTS,
             });
             offset += qlen as i32 + 1; // +1 for sentinel between strands
 
@@ -76,6 +84,7 @@ impl QueryInfo {
                 query_index: qi as i32,
                 frame: -1,
                 is_valid: true,
+                segment_flags: E_NO_SEGMENTS,
             });
             offset += qlen as i32 + 1;
         }
@@ -111,6 +120,7 @@ impl QueryInfo {
                     query_index: 0,
                     frame: crate::util::blast_context_to_frame_blastx(ctx as u32),
                     is_valid: query_length > 0,
+                    segment_flags: E_NO_SEGMENTS,
                 }
             })
             .collect();
@@ -136,6 +146,24 @@ impl QueryInfo {
         self.contexts.get(context).map_or(-1, |c| c.query_index)
     }
 
+    pub fn query_segment_flags(&self, query_idx: usize) -> i32 {
+        self.contexts
+            .get(query_idx * crate::util::NUM_STRANDS)
+            .map_or(E_NO_SEGMENTS, |context| context.segment_flags)
+    }
+
+    pub fn set_query_segment_flags(&mut self, query_idx: usize, segment_flags: i32) {
+        let first_context = query_idx * crate::util::NUM_STRANDS;
+        for context in self
+            .contexts
+            .iter_mut()
+            .skip(first_context)
+            .take(crate::util::NUM_STRANDS)
+        {
+            context.segment_flags = segment_flags;
+        }
+    }
+
     /// Number of contexts.
     pub fn num_contexts(&self) -> usize {
         self.contexts.len()
@@ -152,13 +180,48 @@ pub fn blast_get_query_index_from_context(
     context: i32,
     program: crate::program::ProgramType,
 ) -> i32 {
-    if crate::program::query_is_protein(program) {
+    if crate::program::blast_query_is_protein(program) {
         context
-    } else if crate::program::query_is_translated(program) {
+    } else if crate::program::blast_query_is_translated(program) {
         context / crate::util::NUM_FRAMES as i32
     } else {
         context / crate::util::NUM_STRANDS as i32
     }
+}
+
+/// 1-1 port of `Blast_GetQueryIndexFromQueryOffset`
+/// (`blast_query_info.c:52`).
+pub fn blast_get_query_index_from_query_offset(
+    query_offset: i32,
+    program: crate::program::ProgramType,
+    query_info: &QueryInfo,
+) -> i32 {
+    let context = bsearch_context_info(query_offset, query_info);
+    blast_get_query_index_from_context(context, program)
+}
+
+/// 1-1 port of `BSearchContextInfo` (`blast_query_info.c:219`).
+/// Returns the index of the context with the greatest query offset not
+/// exceeding `n`.
+pub fn bsearch_context_info(n: i32, query_info: &QueryInfo) -> i32 {
+    let size = query_info.contexts.len();
+    if size == 0 {
+        return -1;
+    }
+
+    let mut b = 0usize;
+    let mut e = size;
+
+    while b < e - 1 {
+        let m = (b + e) / 2;
+        if query_info.contexts[m].query_offset > n {
+            e = m;
+        } else {
+            b = m;
+        }
+    }
+
+    b as i32
 }
 
 #[cfg(test)]
@@ -327,5 +390,56 @@ mod tests {
                 prev.query_length
             );
         }
+    }
+
+    #[test]
+    fn test_bsearch_context_info_returns_preceding_context() {
+        let qi = QueryInfo::new_blastn(&[10, 5]);
+
+        assert_eq!(bsearch_context_info(-1, &qi), 0);
+        assert_eq!(bsearch_context_info(0, &qi), 0);
+        assert_eq!(bsearch_context_info(9, &qi), 0);
+        assert_eq!(bsearch_context_info(10, &qi), 0);
+        assert_eq!(bsearch_context_info(11, &qi), 1);
+        assert_eq!(bsearch_context_info(21, &qi), 1);
+        assert_eq!(bsearch_context_info(22, &qi), 2);
+        assert_eq!(bsearch_context_info(27, &qi), 2);
+        assert_eq!(bsearch_context_info(28, &qi), 3);
+        assert_eq!(bsearch_context_info(1000, &qi), 3);
+    }
+
+    #[test]
+    fn test_bsearch_context_info_empty_query_info() {
+        let qi = QueryInfo {
+            num_queries: 0,
+            contexts: Vec::new(),
+            max_length: 0,
+        };
+
+        assert_eq!(bsearch_context_info(0, &qi), -1);
+    }
+
+    #[test]
+    fn test_blast_get_query_index_from_query_offset() {
+        let blastn = QueryInfo::new_blastn(&[10, 5]);
+        assert_eq!(
+            blast_get_query_index_from_query_offset(0, crate::program::BLASTN, &blastn),
+            0
+        );
+        assert_eq!(
+            blast_get_query_index_from_query_offset(11, crate::program::BLASTN, &blastn),
+            0
+        );
+        assert_eq!(
+            blast_get_query_index_from_query_offset(22, crate::program::BLASTN, &blastn),
+            1
+        );
+
+        let offsets = [0, 3, 7, 11, 14, 18, 22];
+        let blastx = QueryInfo::new_translated_query_from_offsets(&offsets);
+        assert_eq!(
+            blast_get_query_index_from_query_offset(17, crate::program::BLASTX, &blastx),
+            0
+        );
     }
 }

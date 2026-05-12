@@ -1,81 +1,493 @@
 [[entries]]
-rust  = "query_is_protein"
+rust  = "blast_query_is_protein"
 other = "Blast_QueryIsProtein"
 
 [[entries]]
-rust  = "query_is_nucleotide"
+rust  = "blast_query_is_nucleotide"
 other = "Blast_QueryIsNucleotide"
 
 [[entries]]
-rust  = "query_is_pssm"
+rust  = "blast_query_is_pssm"
 other = "Blast_QueryIsPssm"
 
 [[entries]]
-rust  = "subject_is_protein"
+rust  = "blast_subject_is_protein"
 other = "Blast_SubjectIsProtein"
 
 [[entries]]
-rust  = "subject_is_nucleotide"
+rust  = "blast_subject_is_nucleotide"
 other = "Blast_SubjectIsNucleotide"
 
 [[entries]]
-rust  = "query_is_pssm"
+rust  = "blast_subject_is_pssm"
 other = "Blast_SubjectIsPssm"
 
 [[entries]]
-rust  = "query_is_translated"
+rust  = "blast_query_is_translated"
 other = "Blast_QueryIsTranslated"
 
 [[entries]]
-rust  = "subject_is_translated"
+rust  = "blast_subject_is_translated"
 other = "Blast_SubjectIsTranslated"
 
 [[entries]]
-rust  = "is_psi_blast"
+rust  = "blast_program_is_psi_blast"
 other = "Blast_ProgramIsPsiBlast"
 
 [[entries]]
-rust  = "is_phi_blast"
+rust  = "blast_program_is_phi_blast"
 other = "Blast_ProgramIsPhiBlast"
 
 [[entries]]
-rust  = "is_rps_blast"
+rust  = "blast_program_is_rps_blast"
 other = "Blast_ProgramIsRpsBlast"
 
 [[entries]]
-rust  = "is_mapping"
+rust  = "blast_program_is_mapping"
 other = "Blast_ProgramIsMapping"
 
 [[entries]]
-rust  = "query_is_pattern"
+rust  = "blast_query_is_pattern"
 other = "Blast_QueryIsPattern"
 
 [[entries]]
-rust  = "is_nucleotide"
+rust  = "blast_program_is_nucleotide"
 other = "Blast_ProgramIsNucleotide"
 
 [[entries]]
-rust  = "is_valid"
+rust  = "blast_program_is_valid"
 other = "Blast_ProgramIsValid"
 
 [[entries]]
-rust  = "batch_scan_subject"
+rust  = "blast_program_2_number"
+other = "BlastProgram2Number"
+
+[[entries]]
+rust  = "blast_number_2_program"
+other = "BlastNumber2Program"
+
+[[entries]]
+rust  = "bsearch_int4"
+other = "BSearchInt4"
+
+[[entries]]
+rust  = "blast_str_to_upper"
+other = "BLAST_StrToUpper"
+
+[[entries]]
+rust  = "blast_pack_dna"
+other = "BLAST_PackDNA"
+
+[[entries]]
+rust  = "blast_translate_compressed_sequence"
+other = "BLAST_TranslateCompressedSequence"
+
+[[entries]]
+rust  = "blast_get_partial_translation"
+other = "Blast_GetPartialTranslation"
+
+[[entries]]
+rust  = "s_blast_get_translation_table"
+other = "s_BlastGetTranslationTable"
+
+[[entries]]
+rust  = "blast_get_translated_protein_length"
+other = "BLAST_GetTranslatedProteinLength"
+
+[[entries]]
+rust  = "blast_mem_dup"
+other = "BlastMemDup"
+
+[[entries]]
+rust  = "sfree"
+other = "__sfree"
+
+[[entries]]
+rust  = "sseq_range_new"
+other = "SSeqRangeNew"
+
+[[entries]]
+rust  = "sseq_range_array_less_than_or_equal"
+other = "SSeqRangeArrayLessThanOrEqual"
+
+[[entries]]
+rust  = "s_blast_sequence_blk_free_seq_ranges"
+other = "s_BlastSequenceBlkFreeSeqRanges"
+
+[[entries]]
+rust  = "blast_set_up_seq_blk_new"
+other = "BlastSetUp_SeqBlkNew"
+
+[[entries]]
+rust  = "blast_seq_blk_new"
+other = "BlastSeqBlkNew"
+
+[[entries]]
+rust  = "blast_seq_blk_set_sequence"
+other = "BlastSeqBlkSetSequence"
+
+[[entries]]
+rust  = "blast_seq_blk_set_compressed_sequence"
+other = "BlastSeqBlkSetCompressedSequence"
+
+[[entries]]
+rust  = "blast_seq_blk_set_seq_ranges"
+other = "BlastSeqBlkSetSeqRanges"
+
+[[entries]]
+rust  = "blast_sequence_blk_clean"
+other = "BlastSequenceBlkClean"
+
+[[entries]]
+rust  = "blast_sequence_blk_free"
+other = "BlastSequenceBlkFree"
+
+[[entries]]
+rust  = "blast_sequence_blk_copy"
+other = "BlastSequenceBlkCopy"
+
+[[entries]]
+rust  = "blast_compress_blastna_sequence"
+other = "BlastCompressBlastnaSequence"
+
+[[entries]]
+rust  = "blast_target_translation_free"
+other = "BlastTargetTranslationFree"
+
+[[entries]]
+rust  = "blast_target_translation_new"
+other = "BlastTargetTranslationNew"
+
+[[entries]]
+rust  = "s_blast_progress_new"
+other = "SBlastProgressNew"
+
+[[entries]]
+rust  = "s_blast_progress_free"
+other = "SBlastProgressFree"
+
+[[entries]]
+rust  = "s_blast_progress_reset"
+other = "SBlastProgressReset"
+
+[[entries]]
+rust  = "dynamic_uint4_array_free"
+other = "DynamicUint4ArrayFree"
+
+[[entries]]
+rust  = "dynamic_uint4_array_new"
+other = "DynamicUint4ArrayNew"
+
+[[entries]]
+rust  = "dynamic_uint4_array_new_ex"
+other = "DynamicUint4ArrayNewEx"
+
+[[entries]]
+rust  = "s_dynamic_uint4_array_realloc_if_necessary"
+other = "s_DynamicUint4Array_ReallocIfNecessary"
+
+[[entries]]
+rust  = "dynamic_uint4_array_append"
+other = "DynamicUint4Array_Append"
+
+[[entries]]
+rust  = "dynamic_uint4_array_dup"
+other = "DynamicUint4Array_Dup"
+
+[[entries]]
+rust  = "dynamic_uint4_array_copy"
+other = "DynamicUint4Array_Copy"
+
+[[entries]]
+rust  = "dynamic_uint4_array_are_equal"
+other = "DynamicUint4Array_AreEqual"
+
+[[entries]]
+rust  = "dynamic_int4_array_free"
+other = "DynamicInt4ArrayFree"
+
+[[entries]]
+rust  = "dynamic_int4_array_new"
+other = "DynamicInt4ArrayNew"
+
+[[entries]]
+rust  = "s_dynamic_int4_array_realloc_if_necessary"
+other = "s_DynamicInt4Array_ReallocIfNecessary"
+
+[[entries]]
+rust  = "dynamic_int4_array_append"
+other = "DynamicInt4Array_Append"
+
+[[entries]]
+rust  = "dynamic_sgen_code_node_array_free"
+other = "DynamicSGenCodeNodeArrayFree"
+
+[[entries]]
+rust  = "dynamic_sgen_code_node_array_new"
+other = "DynamicSGenCodeNodeArrayNew"
+
+[[entries]]
+rust  = "s_dynamic_sgen_code_node_array_realloc_if_necessary"
+other = "s_DynamicSGenCodeNodeArray_ReallocIfNecessary"
+
+[[entries]]
+rust  = "s_dynamic_sgen_code_node_array_is_sorted"
+other = "s_DynamicSGenCodeNodeArray_IsSorted"
+
+[[entries]]
+rust  = "s_sgen_code_node_compare"
+other = "s_SGenCodeNodeCompare"
+
+[[entries]]
+rust  = "s_dynamic_sgen_code_node_array_sort"
+other = "s_DynamicSGenCodeNodeArray_Sort"
+
+[[entries]]
+rust  = "dynamic_sgen_code_node_array_append"
+other = "DynamicSGenCodeNodeArray_Append"
+
+[[entries]]
+rust  = "s_dynamic_sgen_code_node_array_bin_search"
+other = "s_DynamicSGenCodeNodeArray_BinSearch"
+
+[[entries]]
+rust  = "dynamic_sgen_code_node_array_find"
+other = "DynamicSGenCodeNodeArray_Find"
+
+[[entries]]
+rust  = "gen_code_singleton_init"
+other = "GenCodeSingletonInit"
+
+[[entries]]
+rust  = "gen_code_singleton_fini"
+other = "GenCodeSingletonFini"
+
+[[entries]]
+rust  = "gen_code_singleton_add"
+other = "GenCodeSingletonAdd"
+
+[[entries]]
+rust  = "gen_code_singleton_find"
+other = "GenCodeSingletonFind"
+
+[[entries]]
+rust  = "list_node_add"
+other = "ListNodeAdd"
+
+[[entries]]
+rust  = "list_node_copy_str"
+other = "ListNodeCopyStr"
+
+[[entries]]
+rust  = "s_blast_aa_scan_subject"
 other = "s_BlastAaScanSubject"
 
 [[entries]]
-rust  = "batch_scan_subject"
+rust  = "blast_rps_scan_subject"
 other = "BlastRPSScanSubject"
 
 [[entries]]
-rust  = "blast_na_word_finder_scan_subject_packed"
+# Audit caveat: Rust exposes the sorted RPS pre-extension word-finding surface;
+# C `BlastRPSWordFinder` also dispatches one-hit/two-hit ungapped extension.
+rust  = "blast_rps_word_finder"
+other = "BlastRPSWordFinder"
+
+[[entries]]
+rust  = "s_blast_aa_word_finder_two_hit"
+other = "s_BlastAaWordFinder_TwoHit"
+
+[[entries]]
+rust  = "s_blast_aa_extend_left"
+other = "s_BlastAaExtendLeft"
+
+[[entries]]
+rust  = "s_blast_aa_extend_right"
+other = "s_BlastAaExtendRight"
+
+[[entries]]
+rust  = "s_blast_aa_extend_two_hit"
+other = "s_BlastAaExtendTwoHit"
+
+[[entries]]
+rust  = "s_blast_lookup_get_num_hits"
+other = "s_BlastLookupGetNumHits"
+
+[[entries]]
+rust  = "s_blast_lookup_retrieve"
+other = "s_BlastLookupRetrieve"
+
+[[entries]]
+rust  = "blastn_ungapped_search_packed_prepared_with_scratch_inner"
 other = "BlastNaWordFinder"
 
 [[entries]]
-rust  = "blast_na_hash_lookup_scan_subject_packed"
+rust  = "s_blast_na_scan_subject_any_packed"
+other = "s_BlastNaScanSubject_Any"
+
+[[entries]]
+rust  = "s_blast_na_hash_scan_subject_any_packed"
 other = "s_NaHashLookupScanSubjectForWordCounts"
 
 [[entries]]
-rust  = "protein_scan"
+rust  = "s_blast_na_hash_scan_subject_any"
+other = "s_BlastNaHashScanSubject_Any"
+
+[[entries]]
+rust  = "blast_choose_na_lookup_table"
+other = "BlastChooseNaLookupTable"
+
+[[entries]]
+rust  = "s_is_seed_masked"
+other = "s_IsSeedMasked"
+
+[[entries]]
+rust  = "s_type_of_word"
+other = "s_TypeOfWord"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_7_1_packed"
+other = "s_BlastSmallNaScanSubject_7_1"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_5_1_packed"
+other = "s_BlastSmallNaScanSubject_5_1"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_6_1_packed"
+other = "s_BlastSmallNaScanSubject_6_1"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_6_2_packed"
+other = "s_BlastSmallNaScanSubject_6_2"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_7_2_packed"
+other = "s_BlastSmallNaScanSubject_7_2"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_7_3_packed"
+other = "s_BlastSmallNaScanSubject_7_3"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_8_1_mod4_packed"
+other = "s_BlastSmallNaScanSubject_8_1Mod4"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_8_2_mod4_packed"
+other = "s_BlastSmallNaScanSubject_8_2Mod4"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_8_3_mod4_packed"
+other = "s_BlastSmallNaScanSubject_8_3Mod4"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_8_4_packed"
+other = "s_BlastSmallNaScanSubject_8_4"
+
+[[entries]]
+rust  = "s_blast_small_na_scan_subject_any_packed"
+other = "s_BlastSmallNaScanSubject_Any"
+
+[[entries]]
+rust  = "s_small_na_choose_scan_subject"
+other = "s_SmallNaChooseScanSubject"
+
+[[entries]]
+rust  = "s_mb_scan_subject_any_packed"
+other = "s_MBScanSubject_Any"
+
+[[entries]]
+rust  = "s_mb_scan_subject_9_1_packed"
+other = "s_MBScanSubject_9_1"
+
+[[entries]]
+rust  = "s_mb_scan_subject_9_2_packed"
+other = "s_MBScanSubject_9_2"
+
+[[entries]]
+rust  = "s_mb_scan_subject_10_1_packed"
+other = "s_MBScanSubject_10_1"
+
+[[entries]]
+rust  = "s_mb_scan_subject_10_2_packed"
+other = "s_MBScanSubject_10_2"
+
+[[entries]]
+rust  = "s_mb_scan_subject_10_3_packed"
+other = "s_MBScanSubject_10_3"
+
+[[entries]]
+rust  = "s_mb_scan_subject_11_1_mod4_packed"
+other = "s_MBScanSubject_11_1Mod4"
+
+[[entries]]
+rust  = "s_mb_scan_subject_11_2_mod4_packed"
+other = "s_MBScanSubject_11_2Mod4"
+
+[[entries]]
+rust  = "s_mb_scan_subject_11_3_mod4_packed"
+other = "s_MBScanSubject_11_3Mod4"
+
+[[entries]]
+rust  = "s_mb_choose_scan_subject"
+other = "s_MBChooseScanSubject"
+
+[[entries]]
+rust  = "s_blast_mb_lookup_has_hits"
+other = "s_BlastMBLookupHasHits"
+
+[[entries]]
+rust  = "s_blast_mb_lookup_retrieve"
+other = "s_BlastMBLookupRetrieve"
+
+[[entries]]
+rust  = "s_blast_mb_lookup_retrieve2"
+other = "s_BlastMBLookupRetrieve2"
+
+[[entries]]
+rust  = "s_mb_lookup"
+other = "s_MBLookup"
+
+[[entries]]
+rust  = "s_small_na_lookup"
+other = "s_SmallNaLookup"
+
+[[entries]]
+rust  = "s_na_lookup"
+other = "s_NaLookup"
+
+[[entries]]
+# Audit caveat: Rust returns typed lookup/extension callback enums instead of
+# mutating C's raw function pointers on `LookupTableWrap`.
+rust  = "blast_choose_na_extend"
+other = "BlastChooseNaExtend"
+
+[[entries]]
+rust  = "NaHashLookupThreadData"
+other = "NaHashLookupThreadData"
+
+[[entries]]
+rust  = "na_hash_lookup_thread_data_new"
+other = "NaHashLookupThreadDataNew"
+
+[[entries]]
+rust  = "na_hash_lookup_thread_data_free"
+other = "NaHashLookupThreadDataFree"
+
+[[entries]]
+rust  = "MapperWordHits"
+other = "MapperWordHits"
+
+[[entries]]
+rust  = "mapper_word_hits_new"
+other = "MapperWordHitsNew"
+
+[[entries]]
+rust  = "mapper_word_hits_free"
+other = "MapperWordHitsFree"
+
+[[entries]]
+rust  = "blast_choose_protein_scan_subject"
 other = "BlastChooseProteinScanSubject"
 
 [[entries]]
@@ -83,20 +495,144 @@ rust  = "sort_by_score"
 other = "Blast_HSPListSortByScore"
 
 [[entries]]
-rust  = "is_contained"
-other = "s_HSPIsContained"
-
-[[entries]]
-rust  = "extend_right"
+rust  = "s_extend_right"
 other = "s_ExtendRight"
 
 [[entries]]
-rust  = "extend_left"
+rust  = "s_extend_left"
 other = "s_ExtendLeft"
 
 [[entries]]
-rust  = "validate_filtering_options"
+rust  = "blast_hspfiltering_options_validate"
 other = "BlastHSPFilteringOptionsValidate"
+
+[[entries]]
+rust  = "s_comp_on"
+other = "s_CompOn"
+
+[[entries]]
+rust  = "s_has_dash"
+other = "s_HasDash"
+
+[[entries]]
+rust  = "s_state_cmp"
+other = "s_StateCmp"
+
+[[entries]]
+rust  = "s_state_on"
+other = "s_StateOn"
+
+[[entries]]
+rust  = "s_entropy"
+other = "s_Entropy"
+
+[[entries]]
+rust  = "s_seq_entropy"
+other = "s_SeqEntropy"
+
+[[entries]]
+rust  = "s_find_low"
+other = "s_FindLow"
+
+[[entries]]
+rust  = "s_find_high"
+other = "s_FindHigh"
+
+[[entries]]
+rust  = "s_ln_ass"
+other = "s_LnAss"
+
+[[entries]]
+rust  = "s_lnfact"
+other = "s_lnfact"
+
+[[entries]]
+rust  = "s_get_prob"
+other = "s_GetProb"
+
+[[entries]]
+rust  = "s_trim"
+other = "s_Trim"
+
+[[entries]]
+rust  = "s_seg_seq"
+other = "s_SegSeq"
+
+[[entries]]
+rust  = "s_merge_segs"
+other = "s_MergeSegs"
+
+[[entries]]
+rust  = "s_segs_to_blast_seq_loc"
+other = "s_SegsToBlastSeqLoc"
+
+[[entries]]
+rust  = "s_aa20alpha_std"
+other = "s_AA20alphaStd"
+
+[[entries]]
+rust  = "seg_parameters_new_aa"
+other = "SegParametersNewAa"
+
+[[entries]]
+rust  = "s_seg_parameters_check"
+other = "s_SegParametersCheck"
+
+[[entries]]
+rust  = "seg_parameters_free"
+other = "SegParametersFree"
+
+[[entries]]
+rust  = "seq_buffer_seg"
+other = "SeqBufferSeg"
+
+[[entries]]
+rust  = "s_ssequence_new"
+other = "s_SSequenceNew"
+
+[[entries]]
+rust  = "s_ssequence_free"
+other = "s_SSequenceFree"
+
+[[entries]]
+rust  = "s_seg_free"
+other = "s_SegFree"
+
+[[entries]]
+rust  = "s_open_win"
+other = "s_OpenWin"
+
+[[entries]]
+rust  = "s_decrement_sv"
+other = "s_DecrementSV"
+
+[[entries]]
+rust  = "s_increment_sv"
+other = "s_IncrementSV"
+
+[[entries]]
+rust  = "s_shift_win1"
+other = "s_ShiftWin1"
+
+[[entries]]
+rust  = "s_close_win"
+other = "s_CloseWin"
+
+[[entries]]
+rust  = "s_entropy_on"
+other = "s_EntropyOn"
+
+[[entries]]
+rust  = "s_find_dimer_entropy"
+other = "s_FindDimerEntropy"
+
+[[entries]]
+rust  = "filter_queries_for_mapping"
+other = "FilterQueriesForMapping"
+
+[[entries]]
+rust  = "get_cutoff_score"
+other = "GetCutoffScore"
 
 [[entries]]
 rust  = "align_ex"
@@ -119,12 +655,44 @@ rust  = "get_start_for_gapped_alignment"
 other = "BlastGetStartForGappedAlignment"
 
 [[entries]]
-rust  = "greedy_align"
+rust  = "greedy_align_with_seed"
 other = "BLAST_GreedyAlign"
 
 [[entries]]
-rust  = "greedy_align"
+rust  = "greedy_align_with_seed"
 other = "BLAST_AffineGreedyAlign"
+
+[[entries]]
+rust  = "SGreedyOffset"
+other = "SGreedyOffset"
+
+[[entries]]
+rust  = "SMBSpace"
+other = "SMBSpace"
+
+[[entries]]
+rust  = "mbspace_new"
+other = "MBSpaceNew"
+
+[[entries]]
+rust  = "s_refresh_mbspace"
+other = "s_RefreshMBSpace"
+
+[[entries]]
+rust  = "mbspace_free"
+other = "MBSpaceFree"
+
+[[entries]]
+rust  = "s_get_mbspace"
+other = "s_GetMBSpace"
+
+[[entries]]
+rust  = "s_blast_greedy_align_mem_alloc"
+other = "s_BlastGreedyAlignMemAlloc"
+
+[[entries]]
+rust  = "get_next_non_affine_tback"
+other = "s_GetNextNonAffineTback"
 
 [[entries]]
 rust  = "compute_sequence_weights_and_match_weights"
@@ -139,27 +707,58 @@ rust  = "compute_effective_observations"
 other = "s_effectiveObservations"
 
 [[entries]]
-rust  = "add_lookup_hit"
+rust  = "blast_lookup_add_word_hit"
 other = "BlastLookupAddWordHit"
 
 [[entries]]
-rust  = "max_seq_len"
+rust  = "blast_lookup_index_query_exact_matches"
+other = "BlastLookupIndexQueryExactMatches"
+
+[[entries]]
+rust  = "blast_hash_lookup_index_query_exact_matches"
+other = "BlastHashLookupIndexQueryExactMatches"
+
+[[entries]]
+rust  = "s_add_word_hits"
+other = "s_AddWordHits"
+
+[[entries]]
+rust  = "s_add_word_hits_core"
+other = "s_AddWordHitsCore"
+
+[[entries]]
+# Audit caveat: Rust receives a `Pssm` plus optional half-open ranges instead
+# of C's raw `Int4**` matrix and linked `BlastSeqLoc`, but keeps the same
+# row-max pruning and thin-backbone word insertion path.
+rust  = "s_add_pssm_neighboring_words"
+other = "s_AddPSSMNeighboringWords"
+
+[[entries]]
+rust  = "s_add_pssm_word_hits"
+other = "s_AddPSSMWordHits"
+
+[[entries]]
+rust  = "s_add_pssm_word_hits_core"
+other = "s_AddPSSMWordHitsCore"
+
+[[entries]]
+rust  = "blast_seq_src_get_max_seq_len"
 other = "BlastSeqSrcGetMaxSeqLen"
 
 [[entries]]
-rust  = "min_seq_len"
+rust  = "blast_seq_src_get_min_seq_len"
 other = "BlastSeqSrcGetMinSeqLen"
 
 [[entries]]
-rust  = "avg_seq_len"
+rust  = "blast_seq_src_get_avg_seq_len"
 other = "BlastSeqSrcGetAvgSeqLen"
 
 [[entries]]
-rust  = "get_sequence"
+rust  = "blast_seq_src_get_sequence"
 other = "BlastSeqSrcGetSequence"
 
 [[entries]]
-rust  = "seq_len"
+rust  = "blast_seq_src_get_seq_len"
 other = "BlastSeqSrcGetSeqLen"
 
 [[entries]]
@@ -183,12 +782,8 @@ rust  = "powi"
 other = "BLAST_Powi"
 
 [[entries]]
-rust  = "ln_factorial"
+rust  = "blast_ln_factorial"
 other = "BLAST_LnFactorial"
-
-[[entries]]
-rust  = "add_hsp"
-other = "BlastHSPPipeInfo_Add"
 
 [[entries]]
 rust  = "protein_gumbel_blk"
@@ -199,11 +794,7 @@ rust  = "protein_gumbel_blk"
 other = "s_BlastGumbelBlkFree"
 
 [[entries]]
-rust  = "karlin_lambda_nr"
-other = "NlmKarlinLambdaNR"
-
-[[entries]]
-rust  = "karlin_lambda_nr"
+rust  = "blast_karlin_lambda_nr"
 other = "Blast_KarlinLambdaNR"
 
 [[entries]]
@@ -223,7 +814,7 @@ rust  = "nucl_alpha_beta"
 other = "Blast_GetNuclAlphaBeta"
 
 [[entries]]
-rust  = "compute_length_adjustment"
+rust  = "blast_compute_length_adjustment"
 other = "BLAST_ComputeLengthAdjustment"
 
 [[entries]]
@@ -235,7 +826,7 @@ rust  = "semi_gapped_align"
 other = "Blast_SemiGappedAlign"
 
 [[entries]]
-rust  = "compute_length_adjustment_exact"
+rust  = "blast_compute_length_adjustment"
 other = "BLAST_ComputeLengthAdjustment"
 
 [[entries]]
@@ -247,12 +838,20 @@ rust  = "s_ln_gamma"
 other = "s_LnGamma"
 
 [[entries]]
-rust  = "s_ln_gamma"
+rust  = "s_general_ln_gamma"
 other = "s_GeneralLnGamma"
 
 [[entries]]
-rust  = "s_ln_gamma"
+rust  = "s_poly_gamma"
 other = "s_PolyGamma"
+
+[[entries]]
+rust  = "s_log_derivative"
+other = "s_LogDerivative"
+
+[[entries]]
+rust  = "blast_factorial"
+other = "BLAST_Factorial"
 
 [[entries]]
 rust  = "ln_gamma_int"
@@ -263,19 +862,19 @@ rust  = "romberg_integrate"
 other = "BLAST_RombergIntegrate"
 
 [[entries]]
-rust  = "raw_to_bit"
+rust  = "blast_hsp_list_get_bit_scores"
 other = "Blast_HSPListGetBitScores"
 
 [[entries]]
-rust  = "raw_to_evalue"
+rust  = "blast_karlin_sto_e_simple"
 other = "BLAST_KarlinStoE_simple"
 
 [[entries]]
-rust  = "evalue_to_raw"
+rust  = "blast_karlin_eto_s_simple"
 other = "BlastKarlinEtoS_simple"
 
 [[entries]]
-rust  = "blast_cutoffs"
+rust  = "blast_cutoffs_in_place"
 other = "BLAST_Cutoffs"
 
 [[entries]]
@@ -287,28 +886,36 @@ rust  = "sum_p"
 other = "s_BlastSumP"
 
 [[entries]]
+rust  = "SRombergCbackArgs"
+other = "SRombergCbackArgs"
+
+[[entries]]
+rust  = "s_outer_integral_cback"
+other = "s_OuterIntegralCback"
+
+[[entries]]
+rust  = "s_inner_integral_cback"
+other = "s_InnerIntegralCback"
+
+[[entries]]
 rust  = "sum_p_calc"
 other = "s_BlastSumPCalc"
 
 [[entries]]
-rust  = "karlin_p_to_e"
+rust  = "blast_karlin_p_to_e"
 other = "BLAST_KarlinPtoE"
 
 [[entries]]
-rust  = "small_gap_sum_e"
+rust  = "blast_small_gap_sum_e"
 other = "BLAST_SmallGapSumE"
 
 [[entries]]
-rust  = "uneven_gap_sum_e"
+rust  = "blast_uneven_gap_sum_e"
 other = "BLAST_UnevenGapSumE"
 
 [[entries]]
-rust  = "large_gap_sum_e"
+rust  = "blast_large_gap_sum_e"
 other = "BLAST_LargeGapSumE"
-
-[[entries]]
-rust  = "compute_lambda"
-other = "Blast_KarlinLambdaNR"
 
 [[entries]]
 rust  = "solve_lambda"
@@ -335,8 +942,12 @@ rust  = "get_ungapped_beta"
 other = "s_GetUngappedBeta"
 
 [[entries]]
-rust  = "spouge_evalue"
+rust  = "blast_spouge_sto_e"
 other = "BLAST_SpougeStoE"
+
+[[entries]]
+rust  = "blast_spouge_eto_s"
+other = "BLAST_SpougeEtoS"
 
 [[entries]]
 rust  = "SfDist"
@@ -355,12 +966,32 @@ rust  = "GappedParams"
 other = "array_of_8"
 
 [[entries]]
-rust  = "build_blastna_matrix"
+rust  = "blast_score_blk_nucl_matrix_create"
 other = "BlastScoreBlkNuclMatrixCreate"
+
+[[entries]]
+rust  = "s_matrix_data_reset"
+other = "s_MatrixDataReset"
+
+[[entries]]
+rust  = "s_matrix_square"
+other = "s_MatrixSquare"
+
+[[entries]]
+rust  = "s_find_word_size"
+other = "s_FindWordSize"
 
 [[entries]]
 rust  = "reevaluate_with_ambiguities_gapped"
 other = "Blast_HSPReevaluateWithAmbiguitiesGapped"
+
+[[entries]]
+rust  = "s_update_reevaluated_hsp"
+other = "s_UpdateReevaluatedHSP"
+
+[[entries]]
+rust  = "s_update_reevaluated_hsp_ungapped"
+other = "s_UpdateReevaluatedHSPUngapped"
 
 [[entries]]
 rust  = "blast_gapped_align"
@@ -395,8 +1026,165 @@ rust  = "na_ungapped_extend_len"
 other = "s_NuclUngappedExtendExact"
 
 [[entries]]
+rust  = "DiagTableType"
+other = "EDiagTableType"
+
+[[entries]]
+rust  = "DiagStruct"
+other = "DiagStruct"
+
+[[entries]]
+rust  = "BlastDiagTable"
+other = "BLAST_DiagTable"
+
+[[entries]]
+rust  = "DiagHashCell"
+other = "DiagHashCell"
+
+[[entries]]
+rust  = "BlastDiagHash"
+other = "BLAST_DiagHash"
+
+[[entries]]
+rust  = "BlastExtendWord"
+other = "Blast_ExtendWord"
+
+[[entries]]
+rust  = "BlastCoreAuxStruct"
+other = "BlastCoreAuxStruct"
+
+[[entries]]
+rust  = "s_blast_diag_table_new"
+other = "s_BlastDiagTableNew"
+
+[[entries]]
+rust  = "s_blast_diag_table_free"
+other = "s_BlastDiagTableFree"
+
+[[entries]]
+rust  = "s_blast_diag_clear"
+other = "s_BlastDiagClear"
+
+[[entries]]
+rust  = "blast_extend_word_new"
+other = "BlastExtendWordNew"
+
+[[entries]]
+rust  = "s_blast_diag_hash_free"
+other = "s_BlastDiagHashFree"
+
+[[entries]]
+rust  = "s_blastn_diag_hash_extend_initial_hit"
+other = "s_BlastnDiagHashExtendInitialHit"
+
+[[entries]]
+rust  = "blast_extend_word_exit"
+other = "Blast_ExtendWordExit"
+
+[[entries]]
+rust  = "blast_extend_word_free"
+other = "BlastExtendWordFree"
+
+[[entries]]
+rust  = "s_blast_core_aux_struct_free"
+other = "s_BlastCoreAuxStructFree"
+
+[[entries]]
+rust  = "s_get_ungapped_hsp_context"
+other = "s_GetUngappedHSPContext"
+
+[[entries]]
+rust  = "s_adjust_initial_hsp_offsets"
+other = "s_AdjustInitialHSPOffsets"
+
+[[entries]]
+rust  = "s_set_up_local_blast_sequence_blk"
+other = "s_SetUpLocalBlastSequenceBlk"
+
+[[entries]]
+rust  = "s_adjust_hsp_offsets_and_get_query_data"
+other = "s_AdjustHspOffsetsAndGetQueryData"
+
+[[entries]]
+rust  = "s_translate_hsps_to_dnapcoord"
+other = "s_TranslateHSPsToDNAPCoord"
+
+[[entries]]
+rust  = "s_adjust_subject_for_translated_sra_search"
+other = "s_AdjustSubjectForTranslatedSraSearch"
+
+[[entries]]
+rust  = "blast_prelim_edit_block_to_gap_edit_script"
+other = "Blast_PrelimEditBlockToGapEditScript"
+
+[[entries]]
+rust  = "s_update_edit_script"
+other = "s_UpdateEditScript"
+
+[[entries]]
+rust  = "s_reduce_gaps"
+other = "s_ReduceGaps"
+
+[[entries]]
+# Audit caveat: Rust wrapper delegates to existing packed preliminary DP path;
+# keep as potentially incomplete/hard-to-audit until full C control flow is
+# compared against `s_BlastDynProgNtGappedAlignment`.
+rust  = "s_blast_dyn_prog_nt_gapped_alignment"
+other = "s_BlastDynProgNtGappedAlignment"
+
+[[entries]]
+# Audit caveat: Rust wrapper delegates to the one-direction packed DP helper;
+# mapping is for name alignment, not proof of full caller/context parity.
+rust  = "s_blast_align_packed_nucl"
+other = "s_BlastAlignPackedNucl"
+
+[[entries]]
 rust  = "InitHitList"
 other = "BlastInitHitList"
+
+[[entries]]
+rust  = "blast_init_hit_list_new"
+other = "BLAST_InitHitListNew"
+
+[[entries]]
+rust  = "s_blast_init_hit_list_clean"
+other = "s_BlastInitHitListClean"
+
+[[entries]]
+rust  = "blast_init_hit_list_reset"
+other = "BlastInitHitListReset"
+
+[[entries]]
+rust  = "blast_init_hit_list_move"
+other = "BlastInitHitListMove"
+
+[[entries]]
+rust  = "blast_init_hit_list_free"
+other = "BLAST_InitHitListFree"
+
+[[entries]]
+rust  = "blast_save_initial_hit"
+other = "BLAST_SaveInitialHit"
+
+[[entries]]
+rust  = "blast_save_init_hsp"
+other = "BlastSaveInitHsp"
+
+[[entries]]
+rust  = "score_compare_match"
+other = "score_compare_match"
+
+[[entries]]
+rust  = "blast_init_hit_list_sort_by_score"
+other = "Blast_InitHitListSortByScore"
+
+[[entries]]
+rust  = "blast_init_hit_list_is_sorted_by_score"
+other = "Blast_InitHitListIsSortedByScore"
+
+[[entries]]
+rust  = "s_compare_init_hsps_by_query_offset_score"
+other = "s_CompareInitHSPsByQueryOffsetScore"
 
 [[entries]]
 rust  = "protein_gapped_align"
@@ -409,6 +1197,86 @@ other = "Blast_SemiGappedAlign"
 [[entries]]
 rust  = "ProteinLookupTable"
 other = "BlastAaLookupTable"
+
+[[entries]]
+rust  = "CompressedOverflowCell"
+other = "CompressedOverflowCell"
+
+[[entries]]
+rust  = "CompressedLookupBackboneCell"
+other = "CompressedLookupBackboneCell"
+
+[[entries]]
+rust  = "BlastCompressedAaLookupTable"
+other = "BlastCompressedAaLookupTable"
+
+[[entries]]
+rust  = "CompressedNeighborInfo"
+other = "CompressedNeighborInfo"
+
+[[entries]]
+# Audit caveat: Rust returns a Vec cell index instead of C's raw pointer into
+# malloc-backed overflow banks, while preserving the bank cursor state.
+rust  = "s_compressed_list_get_new_cell"
+other = "s_CompressedListGetNewCell"
+
+[[entries]]
+rust  = "s_compressed_lookup_add_word_hit"
+other = "s_CompressedLookupAddWordHit"
+
+[[entries]]
+rust  = "s_compressed_lookup_add_encoded"
+other = "s_CompressedLookupAddEncoded"
+
+[[entries]]
+rust  = "s_compressed_lookup_add_unencoded"
+other = "s_CompressedLookupAddUnencoded"
+
+[[entries]]
+rust  = "s_load_sorted_matrix"
+other = "s_loadSortedMatrix"
+
+[[entries]]
+# Audit caveat: Rust passes query/subject word slices and mutable lookup
+# separately instead of storing raw pointers to all of them in
+# `CompressedNeighborInfo`; the sorted-score pruning and encoded insertion are
+# the same audit path.
+rust  = "s_compressed_add_word_hits_core"
+other = "s_CompressedAddWordHitsCore"
+
+[[entries]]
+rust  = "s_compressed_add_word_hits"
+other = "s_CompressedAddWordHits"
+
+[[entries]]
+# Audit caveat: Rust uses optional half-open ranges instead of C's linked
+# `BlastSeqLoc`, then walks the same offsets after preparing row maxima and
+# sorted compressed matrix rows.
+rust  = "s_compressed_add_neighboring_words"
+other = "s_CompressedAddNeighboringWords"
+
+[[entries]]
+rust  = "s_compressed_lookup_finalize"
+other = "s_CompressedLookupFinalize"
+
+[[entries]]
+# Audit caveat: Rust mirrors C's reciprocal rolling compressed-word scan, but
+# keeps Vec/slice bounds checks and rebuilds `scaled_compress_table` if a test
+# mutates `compress_table` directly. Caller capacity is honored by filling
+# available slots before returning.
+rust  = "s_blast_compressed_aa_scan_subject"
+other = "s_BlastCompressedAaScanSubject"
+
+[[entries]]
+rust  = "AaLookupBoneType"
+other = "EBoneType"
+
+[[entries]]
+# Audit caveat: Rust lookup construction already stores the finalized
+# thick-backbone layout; this C-shaped finalizer recomputes PV bits and compacts
+# overflow storage instead of converting from C's temporary `thin_backbone`.
+rust  = "blast_aa_lookup_finalize"
+other = "BlastAaLookupFinalize"
 
 [[entries]]
 rust  = "read_composition"
@@ -495,11 +1363,11 @@ rust  = "BlastDb"
 other = "BlastSeqSrc"
 
 [[entries]]
-rust  = "get_seq_len"
+rust  = "blast_seq_src_get_seq_len"
 other = "BlastSeqSrcGetSeqLen"
 
 [[entries]]
-rust  = "num_oids"
+rust  = "blast_seq_src_get_num_seqs"
 other = "BlastSeqSrcGetNumSeqs"
 
 [[entries]]
@@ -509,10 +1377,6 @@ other = "NStr::DoubleToString"
 [[entries]]
 rust  = "rounded_query_coverage"
 other = "CAlignFormatUtil::GetAlnSpaceCount"
-
-[[entries]]
-rust  = "apply_lowercase_mask"
-other = "Blast_MaskTheResidues"
 
 [[entries]]
 rust  = "BlastnSearch"
@@ -535,12 +1399,164 @@ rust  = "GappedStats"
 other = "BlastGappedStats"
 
 [[entries]]
-rust  = "add_ungapped_hit"
+rust  = "RawCutoffs"
+other = "BlastRawCutoffs"
+
+[[entries]]
+rust  = "blast_diagnostics_free"
+other = "Blast_DiagnosticsFree"
+
+[[entries]]
+rust  = "blast_diagnostics_copy"
+other = "Blast_DiagnosticsCopy"
+
+[[entries]]
+rust  = "blast_diagnostics_init"
+other = "Blast_DiagnosticsInit"
+
+[[entries]]
+rust  = "blast_diagnostics_init_mt"
+other = "Blast_DiagnosticsInitMT"
+
+[[entries]]
+rust  = "SMessageOrigin"
+other = "SMessageOrigin"
+
+[[entries]]
+rust  = "BlastMessage"
+other = "Blast_Message"
+
+[[entries]]
+rust  = "s_message_origin_new"
+other = "SMessageOriginNew"
+
+[[entries]]
+rust  = "s_message_origin_free"
+other = "SMessageOriginFree"
+
+[[entries]]
+rust  = "blast_message_free"
+other = "Blast_MessageFree"
+
+[[entries]]
+rust  = "blast_message_write"
+other = "Blast_MessageWrite"
+
+[[entries]]
+rust  = "blast_message_post"
+other = "Blast_MessagePost"
+
+[[entries]]
+rust  = "blast_perror_ex"
+other = "Blast_PerrorEx"
+
+[[entries]]
+rust  = "ChainingStruct"
+other = "ChainingStruct"
+
+[[entries]]
+rust  = "chaining_struct_new"
+other = "ChainingStructNew"
+
+[[entries]]
+rust  = "chaining_struct_free"
+other = "ChainingStructFree"
+
+[[entries]]
+rust  = "s_chaining_alignment"
+other = "s_ChainingAlignment"
+
+[[entries]]
+rust  = "blast_get_ungapped_hsp_list"
+other = "BLAST_GetUngappedHSPList"
+
+[[entries]]
+rust  = "blast_get_gapped_score"
+other = "BLAST_GetGappedScore"
+
+[[entries]]
+rust  = "blast_traceback_from_hsp_list"
+other = "Blast_TracebackFromHSPList"
+
+[[entries]]
+rust  = "blast_ungapped_stats_update"
 other = "Blast_UngappedStatsUpdate"
+
+[[entries]]
+rust  = "blast_diagnostics_update"
+other = "Blast_DiagnosticsUpdate"
 
 [[entries]]
 rust  = "IntervalTree"
 other = "BlastIntervalTree"
+
+[[entries]]
+rust  = "SIntervalNode"
+other = "SIntervalNode"
+
+[[entries]]
+rust  = "s_interval_node_init"
+other = "s_IntervalNodeInit"
+
+[[entries]]
+rust  = "s_interval_root_node_init"
+other = "s_IntervalRootNodeInit"
+
+[[entries]]
+rust  = "blast_interval_tree_init"
+other = "Blast_IntervalTreeInit"
+
+[[entries]]
+rust  = "blast_interval_tree_free"
+other = "Blast_IntervalTreeFree"
+
+[[entries]]
+rust  = "blast_interval_tree_reset"
+other = "Blast_IntervalTreeReset"
+
+[[entries]]
+rust  = "blast_interval_tree_add_hsp"
+other = "BlastIntervalTreeAddHSP"
+
+[[entries]]
+rust  = "blast_interval_tree_contains_hsp"
+other = "BlastIntervalTreeContainsHSP"
+
+[[entries]]
+rust  = "blast_interval_tree_num_redundant"
+other = "BlastIntervalTreeNumRedundant"
+
+[[entries]]
+rust  = "blast_interval_tree_masks_hsp"
+other = "BlastIntervalTreeMasksHSP"
+
+[[entries]]
+rust  = "s_hsp_is_contained"
+other = "s_HSPIsContained"
+
+[[entries]]
+rust  = "s_hsps_have_common_endpoint"
+other = "s_HSPsHaveCommonEndpoint"
+
+[[entries]]
+rust  = "s_midpoint_tree_has_hsp_endpoint"
+other = "s_MidpointTreeHasHSPEndpoint"
+
+[[entries]]
+rust  = "s_interval_tree_has_hsp_endpoint"
+other = "s_IntervalTreeHasHSPEndpoint"
+
+[[entries]]
+rust  = "s_midpoint_tree_contains_hsp"
+other = "s_MidpointTreeContainsHSP"
+
+[[entries]]
+rust  = "s_hsp_query_range_is_contained"
+other = "s_HSPQueryRangeIsContained"
+
+[[entries]]
+rust  = "s_hsp_query_range_is_masklevel_contained"
+other = "s_HSPQueryRangeIsMasklevelContained"
 
 [[entries]]
 rust  = "Pssm"
@@ -931,20 +1947,311 @@ rust  = "HspStream"
 other = "BlastHSPStream"
 
 [[entries]]
-rust  = "add_hsp"
+rust  = "blast_hsp_list_new"
+other = "Blast_HSPListNew"
+
+[[entries]]
+rust  = "blast_hsp_list_free"
+other = "Blast_HSPListFree"
+
+[[entries]]
+rust  = "blast_hsp_list_dup"
+other = "BlastHSPListDup"
+
+[[entries]]
+rust  = "blast_hsp_list_swap"
+other = "Blast_HSPListSwap"
+
+[[entries]]
+rust  = "blast_hsp_list_sort_by_score"
+other = "Blast_HSPListSortByScore"
+
+[[entries]]
+rust  = "blast_hsp_update_with_traceback"
+other = "Blast_HSPUpdateWithTraceback"
+
+[[entries]]
+rust  = "blast_hsp_list_sort_by_evalue"
+other = "Blast_HSPListSortByEvalue"
+
+[[entries]]
+rust  = "blast_hsp_list_save_hsp"
 other = "Blast_HSPListSaveHSP"
 
 [[entries]]
-rust  = "add_hsp_list"
+rust  = "blast_hsp_list_phi_get_bit_scores"
+other = "Blast_HSPListPHIGetBitScores"
+
+[[entries]]
+# Audit caveat: Rust keeps PHI pattern metadata as explicit helper inputs
+# instead of embedding C's `SPHIQueryInfo` and `SPHIPatternSearchBlk` in
+# `BlastQueryInfo`; the occurrence-counting and e-value formula are the same.
+rust  = "phi_blast_get_effective_number_of_patterns"
+other = "PhiBlastGetEffectiveNumberOfPatterns"
+
+[[entries]]
+# Audit caveat: see `PhiBlastGetEffectiveNumberOfPatterns`; Rust passes the
+# score-block/pattern-block scalar fields explicitly.
+rust  = "s_hsp_phi_get_evalue"
+other = "s_HSPPHIGetEvalue"
+
+[[entries]]
+# Audit caveat: see `PhiBlastGetEffectiveNumberOfPatterns`; Rust passes the
+# score-block/pattern-block scalar fields explicitly.
+rust  = "blast_hsp_list_phi_get_evalues"
+other = "Blast_HSPListPHIGetEvalues"
+
+[[entries]]
+rust  = "blast_hsp_list_is_sorted_by_score"
+other = "Blast_HSPListIsSortedByScore"
+
+[[entries]]
+rust  = "s_hsp_list_rescale_scores"
+other = "s_HSPListRescaleScores"
+
+[[entries]]
+rust  = "s_blast_hsp_rps_update"
+other = "s_BlastHSPRPSUpdate"
+
+[[entries]]
+rust  = "s_blast_hsp_list_rps_update"
+other = "s_BlastHSPListRPSUpdate"
+
+[[entries]]
+rust  = "blast_hsp_calc_length_and_gaps"
+other = "Blast_HSPCalcLengthAndGaps"
+
+[[entries]]
+rust  = "blast_hsp_list_adjust_offsets"
+other = "Blast_HSPListAdjustOffsets"
+
+[[entries]]
+rust  = "blast_hsp_list_append"
+other = "Blast_HSPListAppend"
+
+[[entries]]
+rust  = "s_blast_hsp_lists_combine_by_score"
+other = "s_BlastHSPListsCombineByScore"
+
+[[entries]]
+rust  = "s_cut_off_gap_edit_script"
+other = "s_CutOffGapEditScript"
+
+[[entries]]
+# Audit caveat: Rust uses a typed slice heap instead of C's raw `char*` plus
+# element-width heap. The comparison polarity and sift-down rule are the same.
+rust  = "s_heapify"
+other = "s_Heapify"
+
+[[entries]]
+# Audit caveat: Rust builds the heap over typed slices instead of C's generic
+# `void*` storage, then calls the same sift-down helper.
+rust  = "s_create_heap"
+other = "s_CreateHeap"
+
+[[entries]]
+rust  = "s_blast_hsp_list_insert_hsp_in_heap"
+other = "s_BlastHSPListInsertHSPInHeap"
+
+[[entries]]
+rust  = "blast_hsp_list_purge_null_hsps"
+other = "Blast_HSPListPurgeNullHSPs"
+
+[[entries]]
+rust  = "blast_hit_list_new"
+other = "Blast_HitListNew"
+
+[[entries]]
+rust  = "blast_hit_list_free"
+other = "Blast_HitListFree"
+
+[[entries]]
+rust  = "blast_hit_list_hsp_lists_free"
+other = "Blast_HitListHSPListsFree"
+
+[[entries]]
+rust  = "s_blast_hit_list_purge"
+other = "s_BlastHitListPurge"
+
+[[entries]]
+rust  = "blast_hit_list_purge_null_hsp_lists"
+other = "Blast_HitListPurgeNullHSPLists"
+
+[[entries]]
+rust  = "blast_hit_list_sort_by_evalue"
+other = "Blast_HitListSortByEvalue"
+
+[[entries]]
+rust  = "s_blast_hit_list_insert_hsp_list_in_heap"
+other = "s_BlastHitListInsertHSPListInHeap"
+
+[[entries]]
+rust  = "blast_hsp_results_new"
+other = "Blast_HSPResultsNew"
+
+[[entries]]
+rust  = "blast_hsp_results_free"
+other = "Blast_HSPResultsFree"
+
+[[entries]]
+rust  = "sthread_local_data_new"
+other = "SThreadLocalDataNew"
+
+[[entries]]
+rust  = "sthread_local_data_free"
+other = "SThreadLocalDataFree"
+
+[[entries]]
+rust  = "sthread_local_data_array_new"
+other = "SThreadLocalDataArrayNew"
+
+[[entries]]
+rust  = "sthread_local_data_array_free"
+other = "SThreadLocalDataArrayFree"
+
+[[entries]]
+rust  = "sthread_local_data_array_trim"
+other = "SThreadLocalDataArrayTrim"
+
+[[entries]]
+rust  = "s_count_hsp_lists_per_query"
+other = "s_CountHspListsPerQuery"
+
+[[entries]]
+rust  = "sthread_local_data_array_consolidate_results"
+other = "SThreadLocalDataArrayConsolidateResults"
+
+[[entries]]
+# Audit caveat: Rust setup duplicates `QueryInfo` and allocates per-thread
+# `HspResults` here; C also creates raw gap-align/scoring/seqsrc handles via
+# `BLAST_GapAlignSetUp`, which are represented by other Rust owners.
+rust  = "sthread_local_data_array_setup"
+other = "SThreadLocalDataArraySetup"
+
+[[entries]]
+rust  = "blast_hsp_results_insert_hsp_list"
 other = "Blast_HSPResultsInsertHSPList"
 
 [[entries]]
-rust  = "sort_by_evalue"
+rust  = "blast_hsp_results_sort_by_evalue"
 other = "Blast_HSPResultsSortByEvalue"
 
 [[entries]]
-rust  = "write"
+rust  = "blast_hsp_results_reverse_sort"
+other = "Blast_HSPResultsReverseSort"
+
+[[entries]]
+rust  = "blast_hsp_results_reverse_order"
+other = "Blast_HSPResultsReverseOrder"
+
+[[entries]]
+rust  = "blast_hsp_results_apply_masklevel"
+other = "Blast_HSPResultsApplyMasklevel"
+
+[[entries]]
+rust  = "s_trim_results_by_total_hsp_limit"
+other = "s_TrimResultsByTotalHSPLimit"
+
+[[entries]]
+rust  = "s_trim_results_by_total_hsp_limit_ex"
+other = "s_TrimResultsByTotalHSPLimitEx"
+
+[[entries]]
+rust  = "blast_trim_hsp_list_by_max_hsps"
+other = "Blast_TrimHSPListByMaxHsps"
+
+[[entries]]
+rust  = "blast_hsp_list_reap_by_evalue"
+other = "Blast_HSPListReapByEvalue"
+
+[[entries]]
+rust  = "blast_hsp_list_purge_hsps_with_common_endpoints"
+other = "Blast_HSPListPurgeHSPsWithCommonEndpoints"
+
+[[entries]]
+# Audit caveat: this maps the ordinary non-sum-statistics branch; the
+# sum-statistics path is still represented by the link-HSPs evaluation path.
+rust  = "blast_hsp_list_get_evalues"
+other = "Blast_HSPListGetEvalues"
+
+[[entries]]
+# Audit caveat: Rust passes query lengths by context explicitly instead of
+# reading C's `BlastQueryInfo`; the query-coverage removal rule is the same.
+rust  = "blast_hsp_list_reap_by_query_coverage"
+other = "Blast_HSPListReapByQueryCoverage"
+
+[[entries]]
+# Audit caveat: Rust applies C's max-HSP and query-coverage branches here.
+# C's optional `Blast_HSPListSubjectBestHit` branch still lives outside this
+# helper and remains a follow-up audit target.
+rust  = "s_filter_blast_results"
+other = "s_FilterBlastResults"
+
+[[entries]]
+rust  = "blast_hspstream_write"
 other = "BlastHSPStreamWrite"
+
+[[entries]]
+rust  = "blast_hsp_free"
+other = "Blast_HSPFree"
+
+[[entries]]
+rust  = "blast_hsp_mapping_info_new"
+other = "BlastHSPMappingInfoNew"
+
+[[entries]]
+rust  = "blast_hsp_mapping_info_free"
+other = "BlastHSPMappingInfoFree"
+
+[[entries]]
+rust  = "blast_hsp_num_max"
+other = "BlastHspNumMax"
+
+[[entries]]
+rust  = "s_hsp_test"
+other = "s_HSPTest"
+
+[[entries]]
+rust  = "blast_hsp_test"
+other = "Blast_HSPTest"
+
+[[entries]]
+rust  = "s_blast_hsp_get_oof_num_identities_and_positives"
+other = "s_Blast_HSPGetOOFNumIdentitiesAndPositives"
+
+[[entries]]
+# Audit caveat: C returns a raw pointer adjusted by `-range_start + 1`; Rust
+# returns a borrowed translation plus that pointer offset as an explicit view.
+rust  = "blast_hsp_get_target_translation"
+other = "Blast_HSPGetTargetTranslation"
+
+[[entries]]
+rust  = "blast_hsp_get_query_coverage"
+other = "Blast_HSPGetQueryCoverage"
+
+[[entries]]
+rust  = "blast_hsp_query_coverage_test"
+other = "Blast_HSPQueryCoverageTest"
+
+[[entries]]
+rust  = "s_hsp_start_diag"
+other = "s_HSPStartDiag"
+
+[[entries]]
+rust  = "s_hsp_end_diag"
+other = "s_HSPEndDiag"
+
+[[entries]]
+rust  = "get_prelim_hitlist_size"
+other = "GetPrelimHitlistSize"
+
+[[entries]]
+rust  = "sblast_hits_parameters_new"
+other = "SBlastHitsParametersNew"
+
+[[entries]]
+rust  = "sblast_hits_parameters_free"
+other = "SBlastHitsParametersFree"
 
 [[entries]]
 rust  = "lookup_table"
@@ -957,10 +2264,6 @@ other = "PV_ARRAY_BTS"
 [[entries]]
 rust  = "ListNode"
 other = "ListNode"
-
-[[entries]]
-rust  = "is_contained_with_min_diag_separation"
-other = "BlastIntervalTreeContainsHSP"
 
 [[entries]]
 rust  = "cutoff_score_min"
@@ -1063,6 +2366,130 @@ rust  = "GapEditScript"
 other = "GapEditScript"
 
 [[entries]]
+rust  = "gap_state_free"
+other = "GapStateFree"
+
+[[entries]]
+rust  = "s_gap_get_state"
+other = "s_GapGetState"
+
+[[entries]]
+rust  = "s_gap_purge_state"
+other = "s_GapPurgeState"
+
+[[entries]]
+rust  = "gap_edit_script_new"
+other = "GapEditScriptNew"
+
+[[entries]]
+rust  = "gap_edit_script_delete"
+other = "GapEditScriptDelete"
+
+[[entries]]
+rust  = "gap_edit_script_dup"
+other = "GapEditScriptDup"
+
+[[entries]]
+rust  = "gap_edit_script_partial_copy"
+other = "GapEditScriptPartialCopy"
+
+[[entries]]
+rust  = "s_gap_prelim_edit_block_realloc"
+other = "s_GapPrelimEditBlockRealloc"
+
+[[entries]]
+rust  = "s_gap_prelim_edit_block_add_new"
+other = "s_GapPrelimEditBlockAddNew"
+
+[[entries]]
+rust  = "gap_prelim_edit_block_add"
+other = "GapPrelimEditBlockAdd"
+
+[[entries]]
+rust  = "gap_prelim_edit_block_new"
+other = "GapPrelimEditBlockNew"
+
+[[entries]]
+rust  = "gap_prelim_edit_block_free"
+other = "GapPrelimEditBlockFree"
+
+[[entries]]
+rust  = "gap_prelim_edit_block_reset"
+other = "GapPrelimEditBlockReset"
+
+[[entries]]
+rust  = "gap_prelim_edit_block_append"
+other = "GapPrelimEditBlockAppend"
+
+[[entries]]
+rust  = "jumper_prelim_edit_block_new"
+other = "JumperPrelimEditBlockNew"
+
+[[entries]]
+rust  = "jumper_prelim_edit_block_free"
+other = "JumperPrelimEditBlockFree"
+
+[[entries]]
+rust  = "jumper_prelim_edit_block_add"
+other = "JumperPrelimEditBlockAdd"
+
+[[entries]]
+rust  = "s_create_table"
+other = "s_CreateTable"
+
+[[entries]]
+rust  = "jumper_gap_align_free"
+other = "JumperGapAlignFree"
+
+[[entries]]
+rust  = "jumper_gap_align_new"
+other = "JumperGapAlignNew"
+
+[[entries]]
+rust  = "s_reset_jumper_prelim_edit_blocks"
+other = "s_ResetJumperPrelimEditBlocks"
+
+[[entries]]
+rust  = "s_get_seq_positions"
+other = "s_GetSeqPositions"
+
+[[entries]]
+rust  = "jumper_edits_block_free"
+other = "JumperEditsBlockFree"
+
+[[entries]]
+rust  = "jumper_edits_block_new"
+other = "JumperEditsBlockNew"
+
+[[entries]]
+rust  = "jumper_edits_block_dup"
+other = "JumperEditsBlockDup"
+
+[[entries]]
+rust  = "jumper_prelim_edit_block_to_gap_edit_script"
+other = "JumperPrelimEditBlockToGapEditScript"
+
+[[entries]]
+rust  = "jumper_edits_block_combine"
+other = "JumperEditsBlockCombine"
+
+[[entries]]
+rust  = "s_compute_extension_score"
+other = "s_ComputeExtensionScore"
+
+[[entries]]
+rust  = "gap_edit_script_combine"
+other = "GapEditScriptCombine"
+
+[[entries]]
+rust  = "sequence_overhangs_free"
+other = "SequenceOverhangsFree"
+
+[[entries]]
+rust  = "subject_index_iterator_free"
+other = "SubjectIndexIteratorFree"
+
+[[entries]]
 rust  = "Strand"
 other = "ENa_strand"
 
@@ -1079,8 +2506,21 @@ rust  = "Strand::Both"
 other = "eNa_strand_both"
 
 [[entries]]
+rust  = "blast_score_blk_nucleotide_matrix_read"
+other = "BlastScoreBlkNucleotideMatrixRead"
+
+[[entries]]
+rust  = "blast_score_blk_protein_matrix_read"
+other = "BlastScoreBlkProteinMatrixRead"
+
+[[entries]]
+rust  = "blast_score_blk_max_score_set"
+other = "BlastScoreBlkMaxScoreSet"
+
+[[entries]]
 rust  = "nucleotide_matrix"
 other = "BlastScoreBlkNuclMatrixCreate"
+notes = "Legacy traceback-local wrapper; canonical score-block mapping is blast_score_blk_nucl_matrix_create."
 
 [[entries]]
 rust  = "AA_FREQUENCIES"
@@ -1095,20 +2535,128 @@ rust  = "MaskedRegion"
 other = "BlastSeqLoc"
 
 [[entries]]
-rust  = "MaskLoc"
+rust  = "BlastSeqLoc"
 other = "BlastSeqLoc"
 
 [[entries]]
-rust  = "add"
+rust  = "blast_seq_loc_new"
 other = "BlastSeqLocNew"
 
 [[entries]]
-rust  = "apply"
+rust  = "blast_seq_loc_append"
+other = "BlastSeqLocAppend"
+
+[[entries]]
+rust  = "s_blast_seq_loc_node_dup"
+other = "s_BlastSeqLocNodeDup"
+
+[[entries]]
+rust  = "s_blast_seq_loc_len"
+other = "s_BlastSeqLocLen"
+
+[[entries]]
+rust  = "s_blast_seq_loc_list_to_array_of_pointers"
+other = "s_BlastSeqLocListToArrayOfPointers"
+
+[[entries]]
+rust  = "blast_seq_loc_list_reverse"
+other = "BlastSeqLocListReverse"
+
+[[entries]]
+rust  = "blast_seq_loc_node_free"
+other = "BlastSeqLocNodeFree"
+
+[[entries]]
+rust  = "blast_seq_loc_free"
+other = "BlastSeqLocFree"
+
+[[entries]]
+rust  = "blast_seq_loc_restrict_to_interval"
+other = "BlastSeqLoc_RestrictToInterval"
+
+[[entries]]
+rust  = "blast_seq_loc_list_dup"
+other = "BlastSeqLocListDup"
+
+[[entries]]
+rust  = "s_seq_loc_list_invert"
+other = "s_SeqLocListInvert"
+
+[[entries]]
+rust  = "BlastMaskLoc"
+other = "BlastMaskLoc"
+
+[[entries]]
+rust  = "blast_mask_loc_new"
+other = "BlastMaskLocNew"
+
+[[entries]]
+rust  = "blast_mask_loc_dup"
+other = "BlastMaskLocDup"
+
+[[entries]]
+rust  = "blast_mask_loc_free"
+other = "BlastMaskLocFree"
+
+[[entries]]
+rust  = "blast_mask_loc_dna_to_protein"
+other = "BlastMaskLocDNAToProtein"
+
+[[entries]]
+rust  = "blast_mask_loc_protein_to_dna"
+other = "BlastMaskLocProteinToDNA"
+
+[[entries]]
+rust  = "blast_is_reverse_strand"
+other = "BlastIsReverseStrand"
+
+[[entries]]
+rust  = "blast_seq_loc_combine"
+other = "BlastSeqLocCombine"
+
+[[entries]]
+rust  = "blast_complement_mask_locations"
+other = "BLAST_ComplementMaskLocations"
+
+[[entries]]
+rust  = "blast_seq_loc_reverse"
+other = "BlastSeqLocReverse"
+
+[[entries]]
+rust  = "blast_setup_mask_query"
+other = "BlastSetUp_MaskQuery"
+
+[[entries]]
+rust  = "blast_setup_filter"
+other = "BlastSetUp_Filter"
+
+[[entries]]
+rust  = "s_get_filtering_locations_for_one_context"
+other = "s_GetFilteringLocationsForOneContext"
+
+[[entries]]
+rust  = "blast_setup_get_filtering_locations"
+other = "BlastSetUp_GetFilteringLocations"
+
+[[entries]]
+rust  = "blast_mask_the_residues"
 other = "Blast_MaskTheResidues"
 
 [[entries]]
-rust  = "NaLookup"
+rust  = "blast_mask_unsupported_aa"
+other = "Blast_MaskUnsupportedAA"
+
+[[entries]]
+rust  = "BlastNaLookupTable"
 other = "BlastNaLookupTable"
+
+[[entries]]
+rust  = "BlastNaHashLookupTable"
+other = "BlastNaHashLookupTable"
+
+[[entries]]
+rust  = "NaHashLookupBackboneCell"
+other = "NaHashLookupBackboneCell"
 
 [[entries]]
 rust  = "pv_array"
@@ -1117,6 +2665,14 @@ other = "PV_ARRAY_TYPE"
 [[entries]]
 rust  = "InitialWordOptions"
 other = "BlastInitialWordOptions"
+
+[[entries]]
+rust  = "QuerySetUpOptions"
+other = "QuerySetUpOptions"
+
+[[entries]]
+rust  = "LookupTableOptions"
+other = "LookupTableOptions"
 
 [[entries]]
 rust  = "ExtensionOptions"
@@ -1133,6 +2689,10 @@ other = "BlastScoringOptions"
 [[entries]]
 rust  = "EffectiveLengthsOptions"
 other = "BlastEffectiveLengthsOptions"
+
+[[entries]]
+rust  = "PSIBlastOptions"
+other = "PSIBlastOptions"
 
 [[entries]]
 rust  = "QueryInfo"
@@ -1403,12 +2963,160 @@ rust  = "MessageSeverity::Fatal"
 other = "eBlastSevFatal"
 
 [[entries]]
+rust  = "SeqEncoding"
+other = "EBlastEncoding"
+
+[[entries]]
 rust  = "GetSeqArg"
 other = "BlastSeqSrcGetSeqArg"
 
 [[entries]]
 rust  = "SeqData"
 other = "BLAST_SequenceBlk"
+
+[[entries]]
+rust  = "BlastSeqSrc"
+other = "BlastSeqSrc"
+
+[[entries]]
+rust  = "BlastSeqSrcNewInfo"
+other = "BlastSeqSrcNewInfo"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_MINGAP"
+other = "BLAST_SEQSRC_MINGAP"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_OVERHANG"
+other = "BLAST_SEQSRC_OVERHANG"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_MINLENGTH"
+other = "BLAST_SEQSRC_MINLENGTH"
+
+[[entries]]
+rust  = "blast_seq_src_new"
+other = "BlastSeqSrcNew"
+
+[[entries]]
+rust  = "blast_seq_src_free"
+other = "BlastSeqSrcFree"
+
+[[entries]]
+rust  = "blast_seq_src_copy"
+other = "BlastSeqSrcCopy"
+
+[[entries]]
+rust  = "blast_seq_src_set_number_of_threads"
+other = "BlastSeqSrcSetNumberOfThreads"
+
+[[entries]]
+rust  = "blast_seq_src_get_tot_len"
+other = "BlastSeqSrcGetTotLen"
+
+[[entries]]
+rust  = "blast_seq_src_get_tot_len_stats"
+other = "BlastSeqSrcGetTotLenStats"
+
+[[entries]]
+rust  = "blast_seq_src_get_num_seqs"
+other = "BlastSeqSrcGetNumSeqs"
+
+[[entries]]
+rust  = "blast_seq_src_get_num_seqs_stats"
+other = "BlastSeqSrcGetNumSeqsStats"
+
+[[entries]]
+rust  = "blast_seq_src_get_max_seq_len"
+other = "BlastSeqSrcGetMaxSeqLen"
+
+[[entries]]
+rust  = "blast_seq_src_get_min_seq_len"
+other = "BlastSeqSrcGetMinSeqLen"
+
+[[entries]]
+rust  = "blast_seq_src_get_avg_seq_len"
+other = "BlastSeqSrcGetAvgSeqLen"
+
+[[entries]]
+rust  = "blast_seq_src_get_name"
+other = "BlastSeqSrcGetName"
+
+[[entries]]
+rust  = "blast_seq_src_get_is_prot"
+other = "BlastSeqSrcGetIsProt"
+
+[[entries]]
+rust  = "blast_seq_src_get_sequence"
+other = "BlastSeqSrcGetSequence"
+
+[[entries]]
+rust  = "blast_seq_src_get_seq_len"
+other = "BlastSeqSrcGetSeqLen"
+
+[[entries]]
+rust  = "blast_seq_src_get_supports_partial_fetching"
+other = "BlastSeqSrcGetSupportsPartialFetching"
+
+[[entries]]
+rust  = "blast_seq_src_set_seq_ranges"
+other = "BlastSeqSrcSetSeqRanges"
+
+[[entries]]
+rust  = "BlastGiList"
+other = "Blast_GiList"
+
+[[entries]]
+rust  = "blast_gi_list_new"
+other = "Blast_GiListNew"
+
+[[entries]]
+rust  = "blast_gi_list_new_ex"
+other = "Blast_GiListNewEx"
+
+[[entries]]
+rust  = "blast_gi_list_free"
+other = "Blast_GiListFree"
+
+[[entries]]
+rust  = "blast_gi_list_realloc_if_necessary"
+other = "Blast_GiList_ReallocIfNecessary"
+
+[[entries]]
+rust  = "blast_gi_list_append"
+other = "Blast_GiList_Append"
+
+[[entries]]
+rust  = "blast_seq_src_get_gis"
+other = "BlastSeqSrcGetGis"
+
+[[entries]]
+rust  = "BlastSeqSrcIterator"
+other = "BlastSeqSrcIterator"
+
+[[entries]]
+rust  = "K_BLAST_SEQ_SRC_DEFAULT_CHUNK_SIZE"
+other = "kBlastSeqSrcDefaultChunkSize"
+
+[[entries]]
+rust  = "blast_seq_src_iterator_new"
+other = "BlastSeqSrcIteratorNew"
+
+[[entries]]
+rust  = "blast_seq_src_iterator_new_ex"
+other = "BlastSeqSrcIteratorNewEx"
+
+[[entries]]
+rust  = "blast_seq_src_iterator_free"
+other = "BlastSeqSrcIteratorFree"
+
+[[entries]]
+rust  = "blast_seq_src_iterator_next"
+other = "BlastSeqSrcIteratorNext"
+
+[[entries]]
+rust  = "blast_seq_src_reset_chunk_iterator"
+other = "BlastSeqSrcResetChunkIterator"
 
 [[entries]]
 rust  = "iupac_to_blastna"
@@ -1471,6 +3179,274 @@ rust  = "EffectiveLengthsParameters"
 other = "BlastEffectiveLengthsParameters"
 
 [[entries]]
+rust  = "BlastScoreBlk"
+other = "BlastScoreBlk"
+
+[[entries]]
+rust  = "blast_initial_word_options_free"
+other = "BlastInitialWordOptionsFree"
+
+[[entries]]
+rust  = "blast_initial_word_options_new"
+other = "BlastInitialWordOptionsNew"
+
+[[entries]]
+rust  = "blast_initial_word_options_validate"
+other = "BlastInitialWordOptionsValidate"
+
+[[entries]]
+rust  = "blast_fill_initial_word_options"
+other = "BLAST_FillInitialWordOptions"
+
+[[entries]]
+rust  = "lookup_table_options_free"
+other = "LookupTableOptionsFree"
+
+[[entries]]
+rust  = "lookup_table_options_new"
+other = "LookupTableOptionsNew"
+
+[[entries]]
+rust  = "blast_fill_lookup_table_options"
+other = "BLAST_FillLookupTableOptions"
+
+[[entries]]
+rust  = "blast_get_suggested_threshold"
+other = "BLAST_GetSuggestedThreshold"
+
+[[entries]]
+rust  = "blast_get_suggested_window_size"
+other = "BLAST_GetSuggestedWindowSize"
+
+[[entries]]
+rust  = "s_disc_word_options_validate"
+other = "s_DiscWordOptionsValidate"
+
+[[entries]]
+rust  = "lookup_table_options_validate"
+other = "LookupTableOptionsValidate"
+
+[[entries]]
+rust  = "blast_extension_options_free"
+other = "BlastExtensionOptionsFree"
+
+[[entries]]
+rust  = "blast_extension_options_new"
+other = "BlastExtensionOptionsNew"
+
+[[entries]]
+rust  = "blast_fill_extension_options"
+other = "BLAST_FillExtensionOptions"
+
+[[entries]]
+rust  = "blast_extension_options_validate"
+other = "BlastExtensionOptionsValidate"
+
+[[entries]]
+rust  = "blast_scoring_options_free"
+other = "BlastScoringOptionsFree"
+
+[[entries]]
+rust  = "blast_scoring_options_new"
+other = "BlastScoringOptionsNew"
+
+[[entries]]
+rust  = "blast_fill_scoring_options"
+other = "BLAST_FillScoringOptions"
+
+[[entries]]
+rust  = "blast_scoring_options_validate"
+other = "BlastScoringOptionsValidate"
+
+[[entries]]
+rust  = "blast_scoring_options_dup"
+other = "BlastScoringOptionsDup"
+
+[[entries]]
+rust  = "blast_scoring_options_set_matrix"
+other = "BlastScoringOptionsSetMatrix"
+
+[[entries]]
+rust  = "blast_hit_saving_options_free"
+other = "BlastHitSavingOptionsFree"
+
+[[entries]]
+rust  = "blast_hit_saving_options_new"
+other = "BlastHitSavingOptionsNew"
+
+[[entries]]
+rust  = "blast_fill_hit_saving_options"
+other = "BLAST_FillHitSavingOptions"
+
+[[entries]]
+rust  = "blast_hit_saving_options_validate"
+other = "BlastHitSavingOptionsValidate"
+
+[[entries]]
+rust  = "blast_effective_lengths_options_free"
+other = "BlastEffectiveLengthsOptionsFree"
+
+[[entries]]
+rust  = "blast_query_set_up_options_free"
+other = "BlastQuerySetUpOptionsFree"
+
+[[entries]]
+rust  = "blast_query_set_up_options_new"
+other = "BlastQuerySetUpOptionsNew"
+
+[[entries]]
+rust  = "blast_fill_query_set_up_options"
+other = "BLAST_FillQuerySetUpOptions"
+
+[[entries]]
+rust  = "blast_validate_options"
+other = "BLAST_ValidateOptions"
+
+[[entries]]
+rust  = "blast_effective_lengths_options_new"
+other = "BlastEffectiveLengthsOptionsNew"
+
+[[entries]]
+rust  = "blast_fill_effective_lengths_options"
+other = "BLAST_FillEffectiveLengthsOptions"
+
+[[entries]]
+rust  = "psi_blast_options_free"
+other = "PSIBlastOptionsFree"
+
+[[entries]]
+rust  = "psi_blast_options_new"
+other = "PSIBlastOptionsNew"
+
+[[entries]]
+rust  = "psi_blast_options_validate"
+other = "PSIBlastOptionsValidate"
+
+[[entries]]
+rust  = "blast_database_options_free"
+other = "BlastDatabaseOptionsFree"
+
+[[entries]]
+rust  = "blast_database_options_new"
+other = "BlastDatabaseOptionsNew"
+
+[[entries]]
+rust  = "blast_initial_word_parameters_free"
+other = "BlastInitialWordParametersFree"
+
+[[entries]]
+rust  = "s_get_cutoff_evalue"
+other = "s_GetCutoffEvalue"
+
+[[entries]]
+rust  = "s_get_estimated_phi_expect"
+other = "s_GetEstimatedPhiExpect"
+
+[[entries]]
+rust  = "s_phi_blast_cutoff_score"
+other = "s_PhiBlastCutoffScore"
+
+[[entries]]
+rust  = "blast_extension_parameters_free"
+other = "BlastExtensionParametersFree"
+
+[[entries]]
+rust  = "blast_scoring_parameters_free"
+other = "BlastScoringParametersFree"
+
+[[entries]]
+rust  = "blast_hit_saving_parameters_free"
+other = "BlastHitSavingParametersFree"
+
+[[entries]]
+rust  = "blast_effective_lengths_parameters_free"
+other = "BlastEffectiveLengthsParametersFree"
+
+[[entries]]
+rust  = "blast_score_blk_new"
+other = "BlastScoreBlkNew"
+
+[[entries]]
+rust  = "blast_score_blk_free"
+other = "BlastScoreBlkFree"
+
+[[entries]]
+rust  = "s_blast_score_blk_copy"
+other = "s_BlastScoreBlk_Copy"
+
+[[entries]]
+rust  = "s_blast_karlin_blk_is_valid"
+other = "s_BlastKarlinBlkIsValid"
+
+[[entries]]
+rust  = "s_blast_find_valid_karlin_blk_c"
+other = "s_BlastFindValidKarlinBlk"
+
+[[entries]]
+rust  = "s_blast_find_smallest_lambda_c"
+other = "s_BlastFindSmallestLambda"
+
+[[entries]]
+rust  = "s_blast_gumbel_blk_free"
+other = "s_BlastGumbelBlkFree"
+
+[[entries]]
+rust  = "blast_karlin_blk_free"
+other = "Blast_KarlinBlkFree"
+
+[[entries]]
+rust  = "blast_score_set_ambig_res"
+other = "BLAST_ScoreSetAmbigRes"
+
+[[entries]]
+rust  = "blast_scoring_parameters_new_c"
+other = "BlastScoringParametersNew"
+
+[[entries]]
+rust  = "blast_effective_lengths_parameters_new_c"
+other = "BlastEffectiveLengthsParametersNew"
+
+[[entries]]
+rust  = "blast_extension_parameters_new_c"
+other = "BlastExtensionParametersNew"
+
+[[entries]]
+rust  = "blast_link_hsp_parameters_new_c"
+other = "BlastLinkHSPParametersNew"
+
+[[entries]]
+rust  = "blast_link_hsp_parameters_free"
+other = "BlastLinkHSPParametersFree"
+
+[[entries]]
+rust  = "blast_link_hsp_parameters_update_c"
+other = "BlastLinkHSPParametersUpdate"
+
+[[entries]]
+rust  = "s_fill_return_cutoffs_info"
+other = "s_FillReturnCutoffsInfo"
+
+[[entries]]
+rust  = "s_blast_run_full_search_clean_up"
+other = "s_BlastRunFullSearchCleanUp"
+
+[[entries]]
+rust  = "blast_hit_saving_parameters_new_c"
+other = "BlastHitSavingParametersNew"
+
+[[entries]]
+rust  = "blast_hit_saving_parameters_update_c"
+other = "BlastHitSavingParametersUpdate"
+
+[[entries]]
+rust  = "blast_initial_word_parameters_new_c"
+other = "BlastInitialWordParametersNew"
+
+[[entries]]
+rust  = "blast_initial_word_parameters_update_c"
+other = "BlastInitialWordParametersUpdate"
+
+[[entries]]
 rust  = "ProgramType"
 other = "EBlastProgramType"
 
@@ -1507,11 +3483,170 @@ rust  = "AaLookupTable"
 other = "BlastAaLookupTable"
 
 [[entries]]
+rust  = "BlastRpsInfo"
+other = "BlastRPSInfo"
+
+[[entries]]
+rust  = "BlastRpsLookupTable"
+other = "BlastRPSLookupTable"
+
+[[entries]]
 rust  = "LookupTableType"
 other = "ELookupTableType"
 
 [[entries]]
-rust  = "add_pointer"
+rust  = "DiscWordType"
+other = "EDiscWordType"
+
+[[entries]]
+rust  = "DiscTemplateType"
+other = "EDiscTemplateType"
+
+[[entries]]
+rust  = "s_has_mask_at_hash_enabled"
+other = "s_HasMaskAtHashEnabled"
+
+[[entries]]
+rust  = "s_get_disc_template_type"
+other = "s_GetDiscTemplateType"
+
+[[entries]]
+rust  = "compute_discontiguous_index"
+other = "ComputeDiscontiguousIndex"
+
+[[entries]]
+rust  = "s_fill_disc_mb_table"
+other = "s_FillDiscMBTable"
+
+[[entries]]
+rust  = "s_mb_disc_word_scan_subject_11_18_1"
+other = "s_MB_DiscWordScanSubject_11_18_1"
+
+[[entries]]
+rust  = "s_mb_disc_word_scan_subject_11_21_1"
+other = "s_MB_DiscWordScanSubject_11_21_1"
+
+[[entries]]
+rust  = "s_blast_small_na_lookup_finalize"
+other = "s_BlastSmallNaLookupFinalize"
+
+[[entries]]
+rust  = "blast_small_na_lookup_table_destruct"
+other = "BlastSmallNaLookupTableDestruct"
+
+[[entries]]
+rust  = "s_blast_na_lookup_finalize"
+other = "s_BlastNaLookupFinalize"
+
+[[entries]]
+rust  = "blast_na_lookup_table_destruct"
+other = "BlastNaLookupTableDestruct"
+
+[[entries]]
+rust  = "s_blast_na_hash_lookup_finalize"
+other = "s_BlastNaHashLookupFinalize"
+
+[[entries]]
+rust  = "s_na_hash_lookup_fill_pv"
+other = "s_NaHashLookupFillPV"
+
+[[entries]]
+rust  = "s_na_hash_lookup_count_words_in_subject_16_1"
+other = "s_NaHashLookupCountWordsInSubject_16_1"
+
+[[entries]]
+rust  = "s_na_hash_lookup_remove_poly_a_words"
+other = "s_NaHashLookupRemovePolyAWords"
+
+[[entries]]
+rust  = "s_remove_poly_a_words"
+other = "s_RemovePolyAWords"
+
+[[entries]]
+rust  = "s_fill_pv"
+other = "s_FillPV"
+
+[[entries]]
+rust  = "s_fill_contig_mb_table"
+other = "s_FillContigMBTable"
+
+[[entries]]
+rust  = "s_mb_count_words_in_subject_16_1"
+other = "s_MBCountWordsInSubject_16_1"
+
+[[entries]]
+rust  = "s_scan_subject_for_word_counts"
+other = "s_ScanSubjectForWordCounts"
+
+[[entries]]
+rust  = "blast_na_hash_lookup_table_destruct"
+other = "BlastNaHashLookupTableDestruct"
+
+[[entries]]
+rust  = "blast_mb_lookup_table_destruct"
+other = "BlastMBLookupTableDestruct"
+
+[[entries]]
+rust  = "lookup_table_wrap_free"
+other = "LookupTableWrapFree"
+
+[[entries]]
+rust  = "lookup_table_wrap_init"
+other = "LookupTableWrapInit"
+
+[[entries]]
+rust  = "lookup_table_wrap_init_mt"
+other = "LookupTableWrapInit_MT"
+
+[[entries]]
+# Audit caveat: Rust models RPS lookup ownership using cloned backbone/PSSM
+# rows and buckets; C builds from RPS database memory and stores raw pointers
+# into that payload.
+rust  = "rps_lookup_table_new"
+other = "RPSLookupTableNew"
+
+[[entries]]
+rust  = "rps_lookup_table_destruct"
+other = "RPSLookupTableDestruct"
+
+[[entries]]
+rust  = "s_add_to_rps_bucket"
+other = "s_AddToRPSBucket"
+
+[[entries]]
+rust  = "get_offset_array_size"
+other = "GetOffsetArraySize"
+
+[[entries]]
+rust  = "s_get_minimum_subj_seq_len"
+other = "s_GetMinimumSubjSeqLen"
+
+[[entries]]
+rust  = "OFFSET_ARRAY_SIZE"
+other = "OFFSET_ARRAY_SIZE"
+
+[[entries]]
+rust  = "BackboneCell"
+other = "BackboneCell"
+
+[[entries]]
+rust  = "backbone_cell_free"
+other = "BackboneCellFree"
+
+[[entries]]
+rust  = "backbone_cell_new"
+other = "BackboneCellNew"
+
+[[entries]]
+rust  = "backbone_cell_init"
+other = "BackboneCellInit"
+
+[[entries]]
+rust  = "s_add_word_hit"
+other = "s_AddWordHit"
+
+[[entries]]
+rust  = "list_node_add_pointer"
 other = "ListNodeAddPointer"
 
 [[entries]]
@@ -1700,8 +3835,62 @@ rust  = "iupacna_to_blastna"
 other = "IUPACNA_TO_BLASTNA"
 
 [[entries]]
+# Audit caveat: Rust delegates this C-shaped fdlibm helper to `f64::exp`
+# instead of duplicating NCBI's private range-reduction/bit-scaling kernel.
+rust  = "s_ieee754_exp"
+other = "s_IEEE754_Exp"
+
+[[entries]]
 rust  = "erfc"
 other = "BLAST_ErfC"
+
+[[entries]]
+rust  = "erfc"
+other = "NCBI_ErfC"
+
+[[entries]]
+rust  = "erf"
+other = "NCBI_Erf"
+
+[[entries]]
+rust  = "erf_boost"
+other = "Erf"
+
+[[entries]]
+rust  = "erfc_boost"
+other = "ErfC"
+
+[[entries]]
+rust  = "iexp"
+other = "iexp"
+
+[[entries]]
+rust  = "ilog2"
+other = "ilog2"
+
+[[entries]]
+rust  = "fnv_hash"
+other = "FNV_hash"
+
+[[entries]]
+rust  = "s_popcount"
+other = "s_Popcount"
+
+[[entries]]
+rust  = "blast_sparse_uint1_array_free"
+other = "BlastSparseUint1ArrayFree"
+
+[[entries]]
+rust  = "blast_sparse_uint1_array_new"
+other = "BlastSparseUint1ArrayNew"
+
+[[entries]]
+rust  = "blast_sparse_uint1_array_get_index"
+other = "BlastSparseUint1ArrayGetIndex"
+
+[[entries]]
+rust  = "blast_sparse_uint1_array_get_element"
+other = "BlastSparseUint1ArrayGetElement"
 
 
 [[entries]]
@@ -1797,8 +3986,16 @@ rust  = "score_compare_hsps"
 other = "ScoreCompareHSPs"
 
 [[entries]]
+rust  = "s_query_end_compare_hsps"
+other = "s_QueryEndCompareHSPs"
+
+[[entries]]
 rust  = "evalue_comp"
 other = "s_EvalueComp"
+
+[[entries]]
+rust  = "evalue_compare_hsps"
+other = "s_EvalueCompareHSPs"
 
 [[entries]]
 rust  = "evalue_compare_hsp_lists"
@@ -1843,6 +4040,38 @@ other = "EBlastEncoding"
 [[entries]]
 rust  = "BlastSeqSource"
 other = "BlastSeqSrc"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_MINGAP"
+other = "BLAST_SEQSRC_MINGAP"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_OVERHANG"
+other = "BLAST_SEQSRC_OVERHANG"
+
+[[entries]]
+rust  = "BLAST_SEQSRC_MINLENGTH"
+other = "BLAST_SEQSRC_MINLENGTH"
+
+[[entries]]
+rust  = "BlastSeqSrcSetRangesArg"
+other = "BlastSeqSrcSetRangesArg"
+
+[[entries]]
+rust  = "blast_seq_src_set_ranges_arg_new"
+other = "BlastSeqSrcSetRangesArgNew"
+
+[[entries]]
+rust  = "blast_seq_src_set_ranges_arg_free"
+other = "BlastSeqSrcSetRangesArgFree"
+
+[[entries]]
+rust  = "blast_seq_src_set_ranges_arg_add_range"
+other = "BlastSeqSrcSetRangesArgAddRange"
+
+[[entries]]
+rust  = "blast_seq_src_set_ranges_arg_build"
+other = "BlastSeqSrcSetRangesArgBuild"
 
 [[entries]]
 rust  = "SEQSRC_EOF"
@@ -1917,7 +4146,7 @@ rust  = "find_neighboring_words"
 other = "s_AddNeighboringWords"
 
 [[entries]]
-rust  = "add_hsp_list"
+rust  = "blast_hit_list_update"
 other = "Blast_HitListUpdate"
 
 [[entries]]
@@ -1934,35 +4163,35 @@ other = "s_EvalueCompareHSPLists"
 
 # blast_kappa.c — leaf utility ports (composition-based scoring helpers)
 [[entries]]
-rust  = "get_subject_length"
+rust  = "s_get_subject_length"
 other = "s_GetSubjectLength"
 
 [[entries]]
-rust  = "hsp_list_normalize_scores"
+rust  = "s_hsp_list_normalize_scores"
 other = "s_HSPListNormalizeScores"
 
 [[entries]]
-rust  = "get_hash"
+rust  = "s_get_hash"
 other = "s_GetHash"
 
 [[entries]]
-rust  = "extend_right"
+rust  = "s_extend_right"
 other = "s_ExtendRight"
 
 [[entries]]
-rust  = "extend_left"
+rust  = "s_extend_left"
 other = "s_ExtendLeft"
 
 [[entries]]
-rust  = "find_num_identical"
+rust  = "s_find_num_identical"
 other = "s_FindNumIdentical"
 
 [[entries]]
-rust  = "hitlist_reap_contained"
+rust  = "s_hitlist_reap_contained"
 other = "s_HitlistReapContained"
 
 [[entries]]
-rust  = "calc_lambda"
+rust  = "s_calc_lambda"
 other = "s_CalcLambda"
 
 [[entries]]
@@ -1975,8 +4204,48 @@ other = "GET_NUCL_LENGTH"
 
 # blast_setup.c — search-space setup
 [[entries]]
-rust  = "blast_calc_eff_lengths"
+rust  = "blast_calc_eff_lengths_c"
 other = "BLAST_CalcEffLengths"
+
+[[entries]]
+rust  = "blast_get_subject_totals"
+other = "BLAST_GetSubjectTotals"
+
+[[entries]]
+rust  = "blast_one_subject_update_parameters"
+other = "BLAST_OneSubjectUpdateParameters"
+
+[[entries]]
+rust  = "blast_set_phi_pattern_info"
+other = "Blast_SetPHIPatternInfo"
+
+[[entries]]
+rust  = "blast_setup_validate"
+other = "BlastSetup_Validate"
+
+[[entries]]
+rust  = "blast_score_blk_matrix_init"
+other = "Blast_ScoreBlkMatrixInit"
+
+[[entries]]
+rust  = "blast_score_blk_kbp_gapped_calc"
+other = "Blast_ScoreBlkKbpGappedCalc"
+
+[[entries]]
+rust  = "s_phi_score_blk_fill"
+other = "s_PHIScoreBlkFill"
+
+[[entries]]
+rust  = "s_jumper_score_blk_fill"
+other = "s_JumperScoreBlkFill"
+
+[[entries]]
+rust  = "blast_setup_score_blk_init"
+other = "BlastSetup_ScoreBlkInit"
+
+[[entries]]
+rust  = "blast_main_set_up"
+other = "BLAST_MainSetUp"
 
 [[entries]]
 rust  = "is_search_space_set"
@@ -1999,6 +4268,10 @@ rust  = "hsp_list_from_distinct_alignments"
 other = "s_HSPListFromDistinctAlignments"
 
 [[entries]]
+rust  = "s_free_edit_script"
+other = "s_FreeEditScript"
+
+[[entries]]
 rust  = "test_near_identical"
 other = "s_TestNearIdentical"
 
@@ -2019,12 +4292,16 @@ rust  = "overall_p_value"
 other = "Blast_Overall_P_Value"
 
 [[entries]]
-rust  = "hitlist_evaluate_and_purge"
+rust  = "s_hitlist_evaluate_and_purge"
 other = "s_HitlistEvaluateAndPurge"
 
 [[entries]]
 rust  = "blast_hsp_get_num_identities"
 other = "s_Blast_HSPGetNumIdentitiesAndPositives"
+
+[[entries]]
+rust  = "blast_hsp_get_num_identities_plain"
+other = "Blast_HSPGetNumIdentities"
 
 [[entries]]
 rust  = "blast_hsp_get_num_identities"
@@ -2063,7 +4340,155 @@ rust  = "BlastKappaSavedParameters"
 other = "BlastKappa_SavedParameters"
 
 [[entries]]
-rust  = "BlastKappaSavedParameters::new"
+rust  = "KappaPosSearchItems"
+other = "Kappa_posSearchItems"
+
+[[entries]]
+rust  = "kappa_pos_search_items_new"
+other = "Kappa_posSearchItemsNew"
+
+[[entries]]
+rust  = "kappa_pos_search_items_free"
+other = "Kappa_posSearchItemsFree"
+
+[[entries]]
+rust  = "KappaCompactSearchItems"
+other = "Kappa_compactSearchItems"
+
+[[entries]]
+rust  = "kappa_compact_search_items_new"
+other = "Kappa_compactSearchItemsNew"
+
+[[entries]]
+rust  = "kappa_compact_search_items_free"
+other = "Kappa_compactSearchItemsFree"
+
+[[entries]]
+rust  = "fill_sfp"
+other = "fillSfp"
+
+[[entries]]
+rust  = "impala_scale_matrix"
+other = "impalaScaleMatrix"
+
+[[entries]]
+rust  = "kappa_impala_scaling"
+other = "Kappa_impalaScaling"
+
+[[entries]]
+rust  = "psi_compute_score_probabilities"
+other = "_PSIComputeScoreProbabilities"
+
+[[entries]]
+rust  = "psi_update_lambda_k"
+other = "_PSIUpdateLambdaK"
+
+[[entries]]
+rust  = "s_psi_discard_if_unused"
+other = "s_PSIDiscardIfUnused"
+
+[[entries]]
+rust  = "psi_purge_aligned_region"
+other = "_PSIPurgeAlignedRegion"
+
+[[entries]]
+rust  = "s_fill_column_probabilities"
+other = "s_fillColumnProbabilities"
+
+[[entries]]
+rust  = "psi_calculate_information_content_from_freq_ratios"
+other = "_PSICalculateInformationContentFromFreqRatios"
+
+[[entries]]
+rust  = "psi_save_diagnostics"
+other = "_PSISaveDiagnostics"
+
+[[entries]]
+rust  = "psi_save_cd_diagnostics"
+other = "_PSISaveCDDiagnostics"
+
+[[entries]]
+rust  = "s_psi_save_pssm"
+other = "s_PSISavePssm"
+
+[[entries]]
+rust  = "psi_structure_group_customization"
+other = "_PSIStructureGroupCustomization"
+
+[[entries]]
+rust  = "psi_purge_biased_segments"
+other = "_PSIPurgeBiasedSegments"
+
+[[entries]]
+rust  = "s_psi_purge_self_hits"
+other = "s_PSIPurgeSelfHits"
+
+[[entries]]
+rust  = "debug_print_traits"
+other = "DEBUG_printTraits"
+
+[[entries]]
+rust  = "handle_neither_aligned"
+other = "_handleNeitherAligned"
+
+[[entries]]
+rust  = "handle_either_aligned_either_x"
+other = "_handleEitherAlignedEitherX"
+
+[[entries]]
+rust  = "s_psi_purge_similar_alignments"
+other = "s_PSIPurgeSimilarAlignments"
+
+[[entries]]
+rust  = "psi_compute_alignment_blocks"
+other = "_PSIComputeAlignmentBlocks"
+
+[[entries]]
+rust  = "psi_get_left_extents"
+other = "_PSIGetLeftExtents"
+
+[[entries]]
+rust  = "psi_get_right_extents"
+other = "_PSIGetRightExtents"
+
+[[entries]]
+rust  = "psi_compute_aligned_region_lengths"
+other = "_PSIComputeAlignedRegionLengths"
+
+[[entries]]
+rust  = "psi_calculate_normalized_sequence_weights"
+other = "_PSICalculateNormalizedSequenceWeights"
+
+[[entries]]
+rust  = "psi_calculate_match_weights"
+other = "_PSICalculateMatchWeights"
+
+[[entries]]
+rust  = "psi_spread_gap_weights"
+other = "_PSISpreadGapWeights"
+
+[[entries]]
+rust  = "psi_check_sequence_weights"
+other = "_PSICheckSequenceWeights"
+
+[[entries]]
+rust  = "s_psi_compute_frequencies_from_cds_cleanup"
+other = "s_PSIComputeFrequenciesFromCDsCleanup"
+
+[[entries]]
+rust  = "psi_compute_frequencies_from_cds"
+other = "_PSIComputeFrequenciesFromCDs"
+
+[[entries]]
+rust  = "psi_scale_matrix"
+other = "_PSIScaleMatrix"
+
+[[entries]]
+rust  = "psi_compute_freq_ratios_from_cds"
+other = "_PSIComputeFreqRatiosFromCDs"
+
+[[entries]]
+rust  = "s_saved_parameters_new"
 other = "s_SavedParametersNew"
 
 [[entries]]
@@ -2079,11 +4504,11 @@ rust  = "restore_search"
 other = "s_RestoreSearch"
 
 [[entries]]
-rust  = "gapping_params_new"
+rust  = "s_gapping_params_new"
 other = "s_GappingParamsNew"
 
 [[entries]]
-rust  = "matrix_info_init_blastp"
+rust  = "s_matrix_info_init"
 other = "s_MatrixInfoInit"
 
 [[entries]]
@@ -2093,6 +4518,14 @@ other = "s_RescaleSearch"
 [[entries]]
 rust  = "sequence_prep_query_range"
 other = "s_SequenceGetRange"
+
+[[entries]]
+rust  = "s_sequence_get_translated_range"
+other = "s_SequenceGetTranslatedRange"
+
+[[entries]]
+rust  = "s_matching_sequence_initialize"
+other = "s_MatchingSequenceInitialize"
 
 [[entries]]
 rust  = "do_seg_sequence_data"
@@ -2138,33 +4571,263 @@ other = "s_NewAlignmentUsingXdrop"
 rust  = "redo_one_alignment"
 other = "s_RedoOneAlignment"
 
+# link_hsps.c
+[[entries]]
+rust  = "fwd_compare_hsps"
+other = "s_FwdCompareHSPs"
+
+[[entries]]
+rust  = "fwd_compare_hsps_transl"
+other = "s_FwdCompareHSPsTransl"
+
+[[entries]]
+rust  = "rev_compare_hsps"
+other = "s_RevCompareHSPs"
+
+[[entries]]
+rust  = "rev_compare_hsps_transl"
+other = "s_RevCompareHSPsTransl"
+
+[[entries]]
+rust  = "rev_compare_hsps_tbn"
+other = "s_RevCompareHSPsTbn"
+
+[[entries]]
+rust  = "rev_compare_hsps_tbx"
+other = "s_RevCompareHSPsTbx"
+
+[[entries]]
+rust  = "s_link_hsp_struct_reset"
+other = "s_LinkHSPStructReset"
+
+[[entries]]
+rust  = "fwd_compare_linked_hsp_sets"
+other = "s_FwdCompareLinkedHSPSets"
+
+[[entries]]
+rust  = "sum_score_compare_linked_hsp_sets"
+other = "s_SumScoreCompareLinkedHSPSets"
+
+[[entries]]
+rust  = "s_linked_hsp_set_array_clean_up"
+other = "s_LinkedHSPSetArrayCleanUp"
+
+# pattern.c — PHI-BLAST bit helpers
+[[entries]]
+rust  = "s_find_prefix_and_suffix_pos"
+other = "s_FindPrefixAndSuffixPos"
+
+[[entries]]
+rust  = "s_init_dna_pattern"
+other = "s_InitDNAPattern"
+
+[[entries]]
+rust  = "s_expand_pattern"
+other = "s_ExpandPattern"
+
+[[entries]]
+rust  = "s_pack_pattern"
+other = "s_PackPattern"
+
+[[entries]]
+rust  = "s_pack_long_pattern"
+other = "s_PackLongPattern"
+
+[[entries]]
+rust  = "s_num_of_one"
+other = "s_NumOfOne"
+
+[[entries]]
+rust  = "s_pack_very_long_pattern"
+other = "s_PackVeryLongPattern"
+
+[[entries]]
+rust  = "s_pattern_search_items_init"
+other = "s_PatternSearchItemsInit"
+
+[[entries]]
+rust  = "s_make_pattern_upper_case"
+other = "s_MakePatternUpperCase"
+
+[[entries]]
+rust  = "sphi_pattern_search_blk_new"
+other = "SPHIPatternSearchBlkNew"
+
+[[entries]]
+rust  = "sphi_pattern_search_blk_free"
+other = "SPHIPatternSearchBlkFree"
+
+[[entries]]
+rust  = "_phi_get_right_one_bits"
+other = "_PHIGetRightOneBits"
+
+[[entries]]
+rust  = "s_len_of"
+other = "s_LenOf"
+
+[[entries]]
+rust  = "_phi_blast_find_hits_short"
+other = "_PHIBlastFindHitsShort"
+
+[[entries]]
+rust  = "s_find_hits_short_dna"
+other = "s_FindHitsShortDNA"
+
+[[entries]]
+rust  = "s_find_hits_short_head"
+other = "s_FindHitsShortHead"
+
+[[entries]]
+rust  = "_phi_pattern_words_left_shift"
+other = "_PHIPatternWordsLeftShift"
+
+[[entries]]
+rust  = "_phi_pattern_words_bitwise_or"
+other = "_PHIPatternWordsBitwiseOr"
+
+[[entries]]
+rust  = "_phi_pattern_words_bitwise_and"
+other = "_PHIPatternWordsBitwiseAnd"
+
+[[entries]]
+rust  = "s_len_of_l"
+other = "s_LenOfL"
+
+[[entries]]
+rust  = "s_find_hits_long"
+other = "s_FindHitsLong"
+
+[[entries]]
+rust  = "s_find_hits_very_long"
+other = "s_FindHitsVeryLong"
+
+[[entries]]
+rust  = "s_phi_get_short_pattern"
+other = "s_PHIGetShortPattern"
+
+[[entries]]
+rust  = "s_phi_get_long_pattern"
+other = "s_PHIGetLongPattern"
+
+[[entries]]
+rust  = "s_phi_get_extra_long_pattern"
+other = "s_PHIGetExtraLongPattern"
+
+[[entries]]
+rust  = "find_pattern_hits"
+other = "FindPatternHits"
+
+[[entries]]
+rust  = "phi_blast_scan_subject"
+other = "PHIBlastScanSubject"
+
+[[entries]]
+rust  = "SphiQueryInfo"
+other = "SPHIQueryInfo"
+
+[[entries]]
+rust  = "SphiPatternInfo"
+other = "SPHIPatternInfo"
+
+[[entries]]
+rust  = "sphi_query_info_new"
+other = "SPHIQueryInfoNew"
+
+[[entries]]
+rust  = "sphi_query_info_free"
+other = "SPHIQueryInfoFree"
+
+[[entries]]
+rust  = "sphi_query_info_copy"
+other = "SPHIQueryInfoCopy"
+
+[[entries]]
+rust  = "s_phi_blast_add_pattern_hit"
+other = "s_PHIBlastAddPatternHit"
+
+[[entries]]
+rust  = "phi_get_pattern_occurrences"
+other = "PHIGetPatternOccurrences"
+
+[[entries]]
+rust  = "s_phi_save_initial_hit"
+other = "s_PHISaveInitialHit"
+
+[[entries]]
+rust  = "phi_blast_word_finder"
+other = "PHIBlastWordFinder"
+
+[[entries]]
+rust  = "s_gap_cost"
+other = "s_GapCost"
+
+[[entries]]
+rust  = "s_align"
+other = "s_Align"
+
+[[entries]]
+rust  = "s_banded_align"
+other = "s_BandedAlign"
+
+[[entries]]
+rust  = "s_phi_gapped_alignment"
+other = "s_PHIGappedAlignment"
+
+[[entries]]
+rust  = "phi_get_gapped_score"
+other = "PHIGetGappedScore"
+
+[[entries]]
+rust  = "s_phi_blast_align_patterns"
+other = "s_PHIBlastAlignPatterns"
+
+[[entries]]
+rust  = "phi_gapped_alignment_with_traceback"
+other = "PHIGappedAlignmentWithTraceback"
+
+[[entries]]
+rust  = "s_phi_traceback_from_hsp_list"
+other = "s_PHITracebackFromHSPList"
+
+[[entries]]
+rust  = "blast_compute_traceback"
+other = "BLAST_ComputeTraceback"
+
+[[entries]]
+rust  = "blast_run_traceback_search_with_interrupt"
+other = "Blast_RunTracebackSearchWithInterrupt"
+
 # hspfilter_culling.c — culling-tree skeleton
 [[entries]]
 rust  = "LinkedHsp"
 other = "LinkedHSP"
 
 [[entries]]
-rust  = "LinkedHsp::copy"
+rust  = "s_hsp_copy"
 other = "s_HSPCopy"
 
 [[entries]]
-rust  = "dominate_test"
+rust  = "s_hsp_free"
+other = "s_HSPFree"
+
+[[entries]]
+rust  = "s_dominate_test"
 other = "s_DominateTest"
 
 [[entries]]
-rust  = "full_pass"
+rust  = "s_full_pass"
 other = "s_FullPass"
 
 [[entries]]
-rust  = "process_hsp_list"
+rust  = "s_process_hsp_list"
 other = "s_ProcessHSPList"
 
 [[entries]]
-rust  = "mark_down_hsp_list"
+rust  = "s_mark_down_hsp_list"
 other = "s_MarkDownHSPList"
 
 [[entries]]
-rust  = "add_hsp_to_list"
+rust  = "s_add_hsp_to_list"
 other = "s_AddHSPtoList"
 
 [[entries]]
@@ -2176,31 +4839,51 @@ rust  = "CTreeChild"
 other = "ECTreeChild"
 
 [[entries]]
-rust  = "CTreeNode::new_child"
+rust  = "s_get_node"
+other = "s_GetNode"
+
+[[entries]]
+rust  = "s_ret_node"
+other = "s_RetNode"
+
+[[entries]]
+rust  = "s_ctree_node_new"
 other = "s_CTreeNodeNew"
 
 [[entries]]
-rust  = "fork_children"
+rust  = "s_ctree_node_free"
+other = "s_CTreeNodeFree"
+
+[[entries]]
+rust  = "s_fork_children"
 other = "s_ForkChildren"
 
 [[entries]]
-rust  = "mark_down_ctree"
+rust  = "s_debug"
+other = "s_Debug"
+
+[[entries]]
+rust  = "s_mark_down_ctree"
 other = "s_MarkDownCTree"
 
 [[entries]]
-rust  = "process_ctree"
+rust  = "s_process_ctree"
 other = "s_ProcessCTree"
 
 [[entries]]
-rust  = "ctree_new"
+rust  = "s_ctree_new"
 other = "s_CTreeNew"
 
 [[entries]]
-rust  = "rip_hsp_off_ctree"
+rust  = "s_ctree_free"
+other = "s_CTreeFree"
+
+[[entries]]
+rust  = "s_rip_hsp_off_ctree"
 other = "s_RipHSPOffCTree"
 
 [[entries]]
-rust  = "save_hsp"
+rust  = "s_save_hsp"
 other = "s_SaveHSP"
 
 [[entries]]
@@ -2210,6 +4893,92 @@ other = "BlastHSPCullingParams"
 [[entries]]
 rust  = "BlastHSPCullingOptions"
 other = "BlastHSPCullingOptions"
+
+[[entries]]
+rust  = "BlastHSPBestHitOptions"
+other = "BlastHSPBestHitOptions"
+
+[[entries]]
+rust  = "BlastHSPFilteringOptions"
+other = "BlastHSPFilteringOptions"
+
+[[entries]]
+rust  = "blast_hspbest_hit_options_new"
+other = "BlastHSPBestHitOptionsNew"
+
+[[entries]]
+rust  = "blast_hspbest_hit_options_validate"
+other = "BlastHSPBestHitOptionsValidate"
+
+[[entries]]
+rust  = "blast_hspbest_hit_options_free"
+other = "BlastHSPBestHitOptionsFree"
+
+[[entries]]
+rust  = "blast_hspculling_options_new"
+other = "BlastHSPCullingOptionsNew"
+
+[[entries]]
+rust  = "blast_hspculling_options_validate"
+other = "BlastHSPCullingOptionsValidate"
+
+[[entries]]
+rust  = "blast_hspculling_options_free"
+other = "BlastHSPCullingOptionsFree"
+
+[[entries]]
+rust  = "blast_hspfiltering_options_new"
+other = "BlastHSPFilteringOptionsNew"
+
+[[entries]]
+rust  = "blast_hspfiltering_options_add_best_hit"
+other = "BlastHSPFilteringOptions_AddBestHit"
+
+[[entries]]
+rust  = "blast_hsp_best_hit_params_new"
+other = "BlastHSPBestHitParamsNew"
+
+[[entries]]
+rust  = "blast_hsp_best_hit_params_free"
+other = "BlastHSPBestHitParamsFree"
+
+[[entries]]
+rust  = "blast_hsp_best_hit_info_new"
+other = "BlastHSPBestHitInfoNew"
+
+[[entries]]
+rust  = "s_export_to_hitlist"
+other = "s_ExportToHitlist"
+
+[[entries]]
+rust  = "s_blast_hsp_best_hit_final"
+other = "s_BlastHSPBestHitFinal"
+
+[[entries]]
+rust  = "s_blast_hsp_best_hit_run"
+other = "s_BlastHSPBestHitRun"
+
+[[entries]]
+# Audit caveat: Rust takes the RPS query index explicitly because its
+# `HspList` does not carry C's raw `query_index` field.
+rust  = "s_blast_hsp_best_hit_run_rps"
+other = "s_BlastHSPBestHitRun_RPS"
+
+[[entries]]
+rust  = "s_blast_hsp_best_hit_pipe_run"
+other = "s_BlastHSPBestHitPipeRun"
+
+[[entries]]
+rust  = "s_blast_hsp_best_hit_pipe_free"
+other = "s_BlastHSPBestHitPipeFree"
+
+[[entries]]
+rust  = "blast_hspfiltering_options_add_culling"
+other = "BlastHSPFilteringOptions_AddCulling"
+
+[[entries]]
+rust  = "blast_hspfiltering_options_free"
+other = "BlastHSPFilteringOptionsFree"
 
 [[entries]]
 rust  = "BlastHSPWriterInfo"
@@ -2232,32 +5001,348 @@ rust  = "blast_hsp_culling_info_new"
 other = "BlastHSPCullingInfoNew"
 
 [[entries]]
+rust  = "blast_hsp_collector_params_new"
+other = "BlastHSPCollectorParamsNew"
+
+[[entries]]
+rust  = "blast_hsp_collector_params_free"
+other = "BlastHSPCollectorParamsFree"
+
+[[entries]]
+rust  = "s_blast_hspcollector_final"
+other = "s_BlastHSPCollectorFinal"
+
+[[entries]]
+rust  = "s_blast_hspcollector_run"
+other = "s_BlastHSPCollectorRun"
+
+[[entries]]
+rust  = "s_blast_hspcollector_run_rps"
+other = "s_BlastHSPCollectorRun_RPS"
+
+[[entries]]
+rust  = "s_blast_hspcollector_free"
+other = "s_BlastHSPCollectorFree"
+
+[[entries]]
+rust  = "s_blast_hspcollector_new"
+other = "s_BlastHSPCollectorNew"
+
+[[entries]]
+rust  = "blast_hsp_collector_info_new"
+other = "BlastHSPCollectorInfoNew"
+
+[[entries]]
+rust  = "spliced_hits::hspcontainer_new"
+other = "HSPContainerNew"
+
+[[entries]]
+rust  = "spliced_hits::hspcontainer_free"
+other = "HSPContainerFree"
+
+[[entries]]
+rust  = "spliced_hits::hspcontainer_dup"
+other = "HSPContainerDup"
+
+[[entries]]
+rust  = "spliced_hits::hspchain_free"
+other = "HSPChainFree"
+
+[[entries]]
+rust  = "spliced_hits::hspchain_new"
+other = "HSPChainNew"
+
+[[entries]]
+rust  = "spliced_hits::clone_chain"
+other = "CloneChain"
+
+[[entries]]
+rust  = "spliced_hits::find_partialy_covered_queries"
+other = "FindPartialyCoveredQueries"
+
+[[entries]]
+rust  = "spliced_hits::blast_mapping_results_new"
+other = "Blast_MappingResultsNew"
+
+[[entries]]
+rust  = "spliced_hits::blast_mapping_results_free"
+other = "Blast_MappingResultsFree"
+
+[[entries]]
+rust  = "spliced_hits::blast_hspmapper_params_new"
+other = "BlastHSPMapperParamsNew"
+
+[[entries]]
+rust  = "spliced_hits::blast_hspmapper_params_free"
+other = "BlastHSPMapperParamsFree"
+
+[[entries]]
+rust  = "spliced_hits::blast_hspmapper_info_new"
+other = "BlastHSPMapperInfoNew"
+
+[[entries]]
+rust  = "spliced_hits::s_hspchain_list_insert_one_old"
+other = "s_HSPChainListInsertOne_OLD"
+
+[[entries]]
+rust  = "spliced_hits::s_test_cutoffs"
+other = "s_TestCutoffs"
+
+[[entries]]
+rust  = "spliced_hits::s_hspchain_list_insert_one"
+other = "s_HSPChainListInsertOne"
+
+[[entries]]
+rust  = "spliced_hits::hspchain_list_insert"
+other = "HSPChainListInsert"
+
+[[entries]]
+rust  = "spliced_hits::hspchain_list_trim"
+other = "HSPChainListTrim"
+
+[[entries]]
+rust  = "spliced_hits::s_test_chains"
+other = "s_TestChains"
+
+[[entries]]
+rust  = "spliced_hits::s_test_chains_sorted"
+other = "s_TestChainsSorted"
+
+[[entries]]
+rust  = "spliced_hits::s_blast_hspmapper_paired_init"
+other = "s_BlastHSPMapperPairedInit"
+
+[[entries]]
+rust  = "spliced_hits::s_blast_hspmapper_paired_new"
+other = "s_BlastHSPMapperPairedNew"
+
+[[entries]]
+rust  = "spliced_hits::s_blast_hspmapper_free"
+other = "s_BlastHSPMapperFree"
+
+[[entries]]
+rust  = "spliced_hits::s_get_overlap_cost"
+other = "s_GetOverlapCost"
+
+[[entries]]
+rust  = "spliced_hits::s_compute_chain_score"
+other = "s_ComputeChainScore"
+
+[[entries]]
+rust  = "spliced_hits::s_find_fragment_start"
+other = "s_FindFragmentStart"
+
+[[entries]]
+# Audit caveat: Rust ports the gap-script/coordinate trimming core only; NCBI
+# also updates mapper `map_info` Jumper edits and subject overhang buffers.
+rust  = "spliced_hits::s_trim_hsp"
+other = "s_TrimHSP"
+
+[[entries]]
+# Audit caveat: Rust ports adapter propagation plus chain/HSP trimming; NCBI
+# also marks mapper edge bits in `map_info`, which Rust HSPs do not carry.
+rust  = "spliced_hits::s_set_adapter"
+other = "s_SetAdapter"
+
+[[entries]]
+# Audit caveat: Rust ports adapter search/dispatch over saved chains; trimming
+# inherits the `s_SetAdapter` caveat around missing mapper edge-bit fields.
+rust  = "spliced_hits::s_find_adapters"
+other = "s_FindAdapters"
+
+[[entries]]
+# Audit caveat: Rust merges HSP extents and BLAST gap scripts only; NCBI also
+# merges mapper `map_info` Jumper edits and subject overhang buffers.
+rust  = "spliced_hits::s_merge_hsps"
+other = "s_MergeHSPs"
+
+[[entries]]
+# Audit caveat: Rust marks rearranged adjacent read pairs with query indices;
+# NCBI stores direct `HSPChain*` pair links and checks `segment_flags`.
+rust  = "spliced_hits::s_find_rearranged_pairs"
+other = "s_FindRearrangedPairs"
+
+[[entries]]
+# Audit caveat: Rust prunes over linked lists using paired query indices plus
+# cached partner scores; NCBI stores direct `HSPChain*` pair links.
+rust  = "spliced_hits::s_prune_chains"
+other = "s_PruneChains"
+
+[[entries]]
+# Audit caveat: Rust splits query-overlapping adjacent HSPs by rebuilding the
+# owned list; NCBI splices raw HSP/chain pointers in place.
+rust  = "spliced_hits::s_remove_overlaps"
+other = "s_RemoveOverlaps"
+
+[[entries]]
+# Audit caveat: Rust moves the owned saved-chain vector into mapping results;
+# NCBI transfers the raw saved-chain array pointer.
+rust  = "spliced_hits::s_finalize"
+other = "s_Finalize"
+
+[[entries]]
+# Audit caveat: Rust uses typed mapper data/results references and explicit
+# missing-field errors instead of C `void*` callback arguments.
+rust  = "spliced_hits::s_blast_hspmapper_final"
+other = "s_BlastHSPMapperFinal"
+
+[[entries]]
+# Audit caveat: Rust HSPs do not carry mapper `map_info` Jumper edits, edge
+# bits, or subject overhangs, so this is a conservative overlap-trimming
+# fallback and is potentially incomplete/hard to audit.
+rust  = "spliced_hits::s_find_splice_junctions_for_overlaps"
+other = "s_FindSpliceJunctionsForOverlaps"
+
+[[entries]]
+# Audit caveat: Rust drops owned values at the cleanup point; the exact C
+# `BlastGapAlignStruct` and `JumperEditsBlock` payloads are not modeled here.
+rust  = "spliced_hits::s_extend_alignment_cleanup"
+other = "s_ExtendAlignmentCleanup"
+
+[[entries]]
+# Audit caveat: Rust takes subject overhang slices explicitly because `Hsp`
+# does not carry mapper `map_info`; it ports canonical splice-signal detection
+# plus coordinate/gap-script extension, but not Jumper edit or edge-bit updates.
+rust  = "spliced_hits::s_find_splice_junctions_for_gap"
+other = "s_FindSpliceJunctionsForGap"
+
+[[entries]]
+# Audit caveat: Rust delegates to `s_trim_hsp` for coordinate/script trimming;
+# it does not update mapper `map_info` Jumper edits or overhang buffers.
+rust  = "spliced_hits::s_trim_overlap"
+other = "s_TrimOverlap"
+
+[[entries]]
+# Audit caveat: Rust relinks owned HSP containers after trimming/merging;
+# NCBI also clears mapper splice edge bits on merge failure via `map_info`.
+rust  = "spliced_hits::s_intron_to_gap"
+other = "s_IntronToGap"
+
+[[entries]]
+# Audit caveat: Rust ports chain traversal, overlap trimming, short-gap merge,
+# and score recomputation, but cannot audit/port C `map_info` subject overhangs,
+# splice edge bits, Jumper edits, or query-info context slicing.
+rust  = "spliced_hits::s_find_splice_junctions"
+other = "s_FindSpliceJunctions"
+
+[[entries]]
+# Audit caveat: Rust trims/removes owned HSP containers by subject cutoff, but
+# does not clear C mapper `map_info` splice/exon edge bits.
+rust  = "spliced_hits::s_trim_chain_start_to_subj_pos"
+other = "s_TrimChainStartToSubjPos"
+
+[[entries]]
+# Audit caveat: Rust trims/removes owned HSP containers by subject cutoff, but
+# does not clear C mapper `map_info` splice/exon edge bits.
+rust  = "spliced_hits::s_trim_chain_end_to_subj_pos"
+other = "s_TrimChainEndToSubjPos"
+
+[[entries]]
+# Audit caveat: Rust ports pair scoring, configuration ranking, selected-pair
+# marking, and overextension trimming using paired list indexes plus cached
+# partner scores; C uses raw chain pointers and can clone already-paired mates.
+rust  = "spliced_hits::s_find_best_pairs"
+other = "s_FindBestPairs"
+
+[[entries]]
+# Audit caveat: Rust ports the mapper dispatcher over owned `HspList`s using
+# one-HSP chains and adjacent even/odd query slots for read pairs. C uses
+# `s_FindBestPath`, context segment flags, and raw pointer ownership, so exon
+# path construction remains potentially incomplete/hard to audit here.
+rust  = "spliced_hits::s_blast_hspmapper_spliced_paired_run"
+other = "s_BlastHSPMapperSplicedPairedRun"
+
+[[entries]]
+rust  = "s_test_hsp_ranges"
+other = "s_TestHSPRanges"
+
+[[entries]]
+rust  = "spliced_hits::s_find_adapter_in_sequence"
+other = "s_FindAdapterInSequence"
+
+[[entries]]
+rust  = "spliced_hits::s_find_poly_a_in_sequence"
+other = "s_FindPolyAInSequence"
+
+[[entries]]
+rust  = "spliced_hits::s_set_poly_a_tail"
+other = "s_SetPolyATail"
+
+[[entries]]
+rust  = "spliced_hits::s_find_poly_a_tails"
+other = "s_FindPolyATails"
+
+[[entries]]
+rust  = "spliced_hits::s_sort_chains"
+other = "s_SortChains"
+
+[[entries]]
+rust  = "spliced_hits::s_filter_chains"
+other = "s_FilterChains"
+
+[[entries]]
+rust  = "spliced_hits::s_compare_chains_by_score"
+other = "s_CompareChainsByScore"
+
+[[entries]]
+rust  = "spliced_hits::s_compare_chains_by_oid"
+other = "s_CompareChainsByOid"
+
+[[entries]]
+rust  = "spliced_hits::s_hspnode_array_copy"
+other = "s_HSPNodeArrayCopy"
+
+[[entries]]
+rust  = "spliced_hits::hsppath_free"
+other = "HSPPathFree"
+
+[[entries]]
+rust  = "spliced_hits::hsppath_new"
+other = "HSPPathNew"
+
+[[entries]]
 rust  = "blast_hsp_culling_pipe_info_new"
 other = "BlastHSPCullingPipeInfoNew"
+
+[[entries]]
+rust  = "blast_hsp_pipe_info_add"
+other = "BlastHSPPipeInfo_Add"
 
 [[entries]]
 rust  = "BlastHSPCullingData"
 other = "BlastHSPCullingData"
 
 [[entries]]
-rust  = "BlastHSPCullingData::new"
+rust  = "s_blast_hspculling_new"
 other = "s_BlastHSPCullingNew"
 
 [[entries]]
-rust  = "BlastHSPCullingData::init"
+rust  = "s_blast_hspculling_init"
 other = "s_BlastHSPCullingInit"
 
 [[entries]]
-rust  = "BlastHSPCullingData::run"
+rust  = "s_blast_hspculling_run"
 other = "s_BlastHSPCullingRun"
 
 [[entries]]
-rust  = "BlastHSPCullingData::finalize"
+rust  = "s_blast_hspculling_final"
 other = "s_BlastHSPCullingFinal"
+
+[[entries]]
+rust  = "s_blast_hspculling_free"
+other = "s_BlastHSPCullingFree"
 
 [[entries]]
 rust  = "blast_get_query_index_from_context"
 other = "Blast_GetQueryIndexFromContext"
+
+[[entries]]
+rust  = "blast_get_query_index_from_query_offset"
+other = "Blast_GetQueryIndexFromQueryOffset"
+
+[[entries]]
+rust  = "bsearch_context_info"
+other = "BSearchContextInfo"
 
 [[entries]]
 rust  = "blast_hsp_culling_pipe_run"
@@ -2272,7 +5357,7 @@ rust  = "blast_hsp_culling_pipe_free"
 other = "s_BlastHSPCullingPipeFree"
 
 [[entries]]
-rust  = "get_align_params"
+rust  = "s_get_align_params"
 other = "s_GetAlignParams"
 
 [[entries]]
@@ -2280,11 +5365,19 @@ rust  = "BlastGapAlignWorkspace"
 other = "BlastGapAlignStruct"
 
 [[entries]]
-rust  = "BlastGapAlignWorkspace::deep_copy"
-other = "s_BlastGapAlignStruct_Copy"
+rust  = "blast_gap_align_struct_new"
+other = "BLAST_GapAlignStructNew"
 
 [[entries]]
 rust  = "blast_gap_align_struct_free"
+other = "BLAST_GapAlignStructFree"
+
+[[entries]]
+rust  = "s_blast_gap_align_struct_copy"
+other = "s_BlastGapAlignStruct_Copy"
+
+[[entries]]
+rust  = "s_blast_gap_align_struct_free"
 other = "s_BlastGapAlignStruct_Free"
 
 [[entries]]
@@ -2296,6 +5389,11 @@ rust  = "blast_redo_alignment_core"
 other = "Blast_RedoAlignmentCore"
 
 [[entries]]
+# Audit caveat: Rust splits the C MT redo driver across branch-specific helpers
+# (`*_with_callbacks`, `*_in_memory_subject`, `*_in_memory_subjects`, and
+# `*_seqsrc_subjects`). This name-matched entry is the compatibility boundary
+# and remains potentially incomplete/hard to audit against the full 670-line C
+# orchestration function.
 rust  = "blast_redo_alignment_core_mt"
 other = "Blast_RedoAlignmentCore_MT"
 
@@ -2324,6 +5422,26 @@ rust  = "smith_waterman::blast_smith_waterman_find_start"
 other = "Blast_SmithWatermanFindStart"
 
 [[entries]]
+rust  = "smith_waterman::s_smith_waterman_score_only"
+other = "s_SmithWatermanScoreOnly"
+
+[[entries]]
+rust  = "smith_waterman::s_get_traceback"
+other = "s_GetTraceback"
+
+[[entries]]
+rust  = "smith_waterman::smith_waterman_score_with_traceback"
+other = "SmithWatermanScoreWithTraceback"
+
+[[entries]]
+rust  = "smith_waterman::blast_smith_waterman_get_gapped_score"
+other = "BLAST_SmithWatermanGetGappedScore"
+
+[[entries]]
+rust  = "smith_waterman::s_nucl_smith_waterman"
+other = "s_NuclSmithWaterman"
+
+[[entries]]
 rust  = "smith_waterman::BlastForbiddenRanges"
 other = "Blast_ForbiddenRanges"
 
@@ -2338,3 +5456,974 @@ other = "Blast_ForbiddenRangesClear"
 [[entries]]
 rust  = "smith_waterman::BlastForbiddenRanges::push"
 other = "Blast_ForbiddenRangesPush"
+
+[[entries]]
+rust  = "SDustOptions"
+other = "SDustOptions"
+
+[[entries]]
+rust  = "SSegOptions"
+other = "SSegOptions"
+
+[[entries]]
+rust  = "SRepeatFilterOptions"
+other = "SRepeatFilterOptions"
+
+[[entries]]
+rust  = "SWindowMaskerOptions"
+other = "SWindowMaskerOptions"
+
+[[entries]]
+rust  = "SReadQualityOptions"
+other = "SReadQualityOptions"
+
+[[entries]]
+rust  = "SBlastFilterOptions"
+other = "SBlastFilterOptions"
+
+[[entries]]
+rust  = "EFilterOptions"
+other = "EFilterOptions"
+
+[[entries]]
+rust  = "sdust_options_free"
+other = "SDustOptionsFree"
+
+[[entries]]
+rust  = "sdust_options_new"
+other = "SDustOptionsNew"
+
+[[entries]]
+rust  = "sseg_options_free"
+other = "SSegOptionsFree"
+
+[[entries]]
+rust  = "sseg_options_new"
+other = "SSegOptionsNew"
+
+[[entries]]
+rust  = "srepeat_filter_options_free"
+other = "SRepeatFilterOptionsFree"
+
+[[entries]]
+rust  = "srepeat_filter_options_new"
+other = "SRepeatFilterOptionsNew"
+
+[[entries]]
+rust  = "srepeat_filter_options_reset_db"
+other = "SRepeatFilterOptionsResetDB"
+
+[[entries]]
+rust  = "swindow_masker_options_free"
+other = "SWindowMaskerOptionsFree"
+
+[[entries]]
+rust  = "swindow_masker_options_new"
+other = "SWindowMaskerOptionsNew"
+
+[[entries]]
+rust  = "swindow_masker_options_reset_db"
+other = "SWindowMaskerOptionsResetDB"
+
+[[entries]]
+rust  = "sread_quality_options_free"
+other = "SReadQualityOptionsFree"
+
+[[entries]]
+rust  = "sread_quality_options_new"
+other = "SReadQualityOptionsNew"
+
+[[entries]]
+rust  = "sblast_filter_options_free"
+other = "SBlastFilterOptionsFree"
+
+[[entries]]
+rust  = "sblast_filter_options_new"
+other = "SBlastFilterOptionsNew"
+
+[[entries]]
+rust  = "s_merge_dust_options"
+other = "s_MergeDustOptions"
+
+[[entries]]
+rust  = "s_merge_seg_options"
+other = "s_MergeSegOptions"
+
+[[entries]]
+rust  = "s_merge_repeat_options"
+other = "s_MergeRepeatOptions"
+
+[[entries]]
+rust  = "s_merge_window_masker_options"
+other = "s_MergeWindowMaskerOptions"
+
+[[entries]]
+rust  = "sblast_filter_options_merge"
+other = "SBlastFilterOptionsMerge"
+
+[[entries]]
+rust  = "sblast_filter_options_no_filtering"
+other = "SBlastFilterOptionsNoFiltering"
+
+[[entries]]
+rust  = "sblast_filter_options_mask_at_hash"
+other = "SBlastFilterOptionsMaskAtHash"
+
+[[entries]]
+rust  = "sblast_filter_options_validate"
+other = "SBlastFilterOptionsValidate"
+
+[[entries]]
+rust  = "blast_filtering_options_to_string"
+other = "BlastFilteringOptionsToString"
+
+[[entries]]
+rust  = "blast_filtering_options_from_string"
+other = "BlastFilteringOptionsFromString"
+
+[[entries]]
+rust  = "s_safe_str_cat"
+other = "s_SafeStrCat"
+
+[[entries]]
+rust  = "s_load_options_to_buffer"
+other = "s_LoadOptionsToBuffer"
+
+[[entries]]
+rust  = "s_parse_seg_options"
+other = "s_ParseSegOptions"
+
+[[entries]]
+rust  = "s_shift_gaps_right"
+other = "s_ShiftGapsRight"
+
+[[entries]]
+rust  = "s_shift_gaps"
+other = "s_ShiftGaps"
+
+[[entries]]
+rust  = "s_trim_extension"
+other = "s_TrimExtension"
+
+[[entries]]
+rust  = "jumper_extend_right"
+other = "JumperExtendRight"
+
+[[entries]]
+rust  = "jumper_extend_right_with_traceback"
+other = "JumperExtendRightWithTraceback"
+
+[[entries]]
+rust  = "jumper_extend_left"
+other = "JumperExtendLeft"
+
+[[entries]]
+rust  = "jumper_extend_right_compressed"
+other = "JumperExtendRightCompressed"
+
+[[entries]]
+rust  = "jumper_extend_left_compressed"
+other = "JumperExtendLeftCompressed"
+
+[[entries]]
+rust  = "jumper_extend_right_compressed_with_traceback"
+other = "JumperExtendRightCompressedWithTraceback"
+
+[[entries]]
+rust  = "jumper_extend_left_compressed_with_traceback"
+other = "JumperExtendLeftCompressedWithTraceback"
+
+[[entries]]
+rust  = "jumper_extend_right_compressed_with_traceback_optimal"
+other = "JumperExtendRightCompressedWithTracebackOptimal"
+
+[[entries]]
+rust  = "jumper_extend_left_compressed_with_traceback_optimal"
+other = "JumperExtendLeftCompressedWithTracebackOptimal"
+
+[[entries]]
+rust  = "jumper_gapped_alignment_compressed_with_traceback"
+other = "JumperGappedAlignmentCompressedWithTraceback"
+
+[[entries]]
+rust  = "blast_na_extend_jumper"
+other = "BlastNaExtendJumper"
+
+[[entries]]
+rust  = "jumper_na_word_finder"
+other = "JumperNaWordFinder"
+
+[[entries]]
+rust  = "mb_indexed_word_finder"
+other = "MB_IndexedWordFinder"
+
+[[entries]]
+rust  = "short_read_indexed_word_finder"
+other = "ShortRead_IndexedWordFinder"
+
+[[entries]]
+rust  = "do_anchored_scan"
+other = "DoAnchoredScan"
+
+[[entries]]
+rust  = "do_anchored_search"
+other = "DoAnchoredSearch"
+
+[[entries]]
+rust  = "jumper_good_align"
+other = "JumperGoodAlign"
+
+[[entries]]
+rust  = "jumper_find_edits"
+other = "JumperFindEdits"
+
+[[entries]]
+rust  = "jumper_find_splice_signals"
+other = "JumperFindSpliceSignals"
+
+[[entries]]
+rust  = "s_save_subject_overhangs"
+other = "s_SaveSubjectOverhangs"
+
+[[entries]]
+rust  = "s_create_hsp_for_word_hit"
+other = "s_CreateHSPForWordHit"
+
+[[entries]]
+rust  = "s_create_hsp"
+other = "s_CreateHSP"
+
+[[entries]]
+# Audit caveat: Rust indexes subject words directly in a BTreeMap rather than
+# constructing NCBI's per-window BlastNaLookupTable array.
+rust  = "subject_index_new"
+other = "SubjectIndexNew"
+
+[[entries]]
+rust  = "subject_index_iterator_new"
+other = "SubjectIndexIteratorNew"
+
+[[entries]]
+rust  = "subject_index_iterator_next"
+other = "SubjectIndexIteratorNext"
+
+[[entries]]
+rust  = "subject_index_iterator_prev"
+other = "SubjectIndexIteratorPrev"
+
+[[entries]]
+# Audit caveat: the represented Rust HSP-list merge delegates to the translated
+# append/combine-by-score path; C overlap-strip reconciliation for split
+# queries/subjects is not represented here.
+rust  = "blast_hsp_lists_merge"
+other = "Blast_HSPListsMerge"
+
+[[entries]]
+# Audit caveat: merges same-oid subject lists via `blast_hsp_lists_merge`;
+# split-chunk overlap reconciliation remains outside this helper.
+rust  = "blast_hit_list_merge"
+other = "Blast_HitListMerge"
+
+[[entries]]
+rust  = "fkm_output"
+other = "fkm_output"
+
+[[entries]]
+rust  = "fkm"
+other = "fkm"
+
+[[entries]]
+rust  = "erf_impl"
+other = "ErfImpl"
+
+[[entries]]
+rust  = "phiblast_hsp_results_split"
+other = "PHIBlast_HSPResultsSplit"
+
+[[entries]]
+rust  = "BlastHspStreamResultBatch"
+other = "BlastHSPStreamResultBatch"
+
+[[entries]]
+rust  = "blast_hsp_stream_result_batch_init"
+other = "Blast_HSPStreamResultBatchInit"
+
+[[entries]]
+rust  = "blast_hsp_stream_result_batch_free"
+other = "Blast_HSPStreamResultBatchFree"
+
+[[entries]]
+rust  = "blast_hsp_stream_result_batch_reset"
+other = "Blast_HSPStreamResultBatchReset"
+
+[[entries]]
+rust  = "BlastHspStreamResultsBatchArray"
+other = "BlastHSPStreamResultsBatchArray"
+
+[[entries]]
+rust  = "s_blast_hsp_stream_results_batch_array_reset"
+other = "s_BlastHSPStreamResultsBatchArrayReset"
+
+[[entries]]
+rust  = "blast_hsp_stream_results_batch_array_free"
+other = "BlastHSPStreamResultsBatchArrayFree"
+
+[[entries]]
+rust  = "s_blast_hsp_stream_results_batch_array_new"
+other = "s_BlastHSPStreamResultsBatchArrayNew"
+
+[[entries]]
+rust  = "blast_hsp_stream_results_batch_new"
+other = "BlastHSPStreamResultsBatchNew"
+
+[[entries]]
+rust  = "s_blast_hsp_stream_results_batch_array_append"
+other = "s_BlastHSPStreamResultsBatchArrayAppend"
+
+# split_query.c — split query bookkeeping
+[[entries]]
+rust  = "SSplitQueryBlk"
+other = "SSplitQueryBlk"
+
+[[entries]]
+rust  = "split_query_blk_new"
+other = "SplitQueryBlkNew"
+
+[[entries]]
+rust  = "split_query_blk_free"
+other = "SplitQueryBlkFree"
+
+[[entries]]
+rust  = "split_query_blk_allow_gap"
+other = "SplitQueryBlk_AllowGap"
+
+[[entries]]
+rust  = "split_query_blk_set_chunk_bounds"
+other = "SplitQueryBlk_SetChunkBounds"
+
+[[entries]]
+rust  = "split_query_blk_get_chunk_bounds"
+other = "SplitQueryBlk_GetChunkBounds"
+
+[[entries]]
+rust  = "split_query_blk_get_num_queries_for_chunk"
+other = "SplitQueryBlk_GetNumQueriesForChunk"
+
+[[entries]]
+rust  = "split_query_blk_add_query_to_chunk"
+other = "SplitQueryBlk_AddQueryToChunk"
+
+[[entries]]
+rust  = "split_query_blk_add_context_to_chunk"
+other = "SplitQueryBlk_AddContextToChunk"
+
+[[entries]]
+rust  = "split_query_blk_add_context_offset_to_chunk"
+other = "SplitQueryBlk_AddContextOffsetToChunk"
+
+[[entries]]
+rust  = "split_query_blk_get_query_indices_for_chunk"
+other = "SplitQueryBlk_GetQueryIndicesForChunk"
+
+[[entries]]
+rust  = "split_query_blk_get_query_contexts_for_chunk"
+other = "SplitQueryBlk_GetQueryContextsForChunk"
+
+[[entries]]
+rust  = "split_query_blk_get_context_offsets_for_chunk"
+other = "SplitQueryBlk_GetContextOffsetsForChunk"
+
+[[entries]]
+rust  = "split_query_blk_set_chunk_overlap_size"
+other = "SplitQueryBlk_SetChunkOverlapSize"
+
+[[entries]]
+rust  = "split_query_blk_get_chunk_overlap_size"
+other = "SplitQueryBlk_GetChunkOverlapSize"
+
+# index_ungapped.c — indexed megablast diagonal hash
+[[entries]]
+rust  = "IR_HASH_SIZE"
+other = "IR_HASH_SIZE"
+
+[[entries]]
+rust  = "FP_ENTRY_SIZE"
+other = "FP_ENTRY_SIZE"
+
+[[entries]]
+rust  = "ir_diag"
+other = "IR_DIAG"
+
+[[entries]]
+rust  = "ir_key"
+other = "IR_KEY"
+
+[[entries]]
+rust  = "IrDiagData"
+other = "ir_diag_data"
+
+[[entries]]
+rust  = "IrHashEntry"
+other = "ir_hash_entry"
+
+[[entries]]
+rust  = "IrFpEntry"
+other = "ir_fp_entry"
+
+[[entries]]
+rust  = "IrDiagHash"
+other = "ir_diag_hash"
+
+[[entries]]
+rust  = "ir_fp_entry_destroy"
+other = "ir_fp_entry_destroy"
+
+[[entries]]
+rust  = "ir_fp_entry_create"
+other = "ir_fp_entry_create"
+
+[[entries]]
+rust  = "ir_hash_create"
+other = "ir_hash_create"
+
+[[entries]]
+rust  = "ir_hash_destroy"
+other = "ir_hash_destroy"
+
+[[entries]]
+rust  = "ir_locate"
+other = "ir_locate"
+
+[[entries]]
+rust  = "ir_locate_macro"
+other = "IR_LOCATE"
+
+[[entries]]
+rust  = "blast_traceback_get_encoding"
+other = "Blast_TracebackGetEncoding"
+
+# blast_stat.c — residue and score frequency helpers
+[[entries]]
+rust  = "BlastResFreq"
+other = "Blast_ResFreq"
+
+[[entries]]
+rust  = "blast_res_freq_new"
+other = "Blast_ResFreqNew"
+
+[[entries]]
+rust  = "blast_res_freq_free"
+other = "Blast_ResFreqFree"
+
+[[entries]]
+rust  = "blast_res_freq_normalize"
+other = "Blast_ResFreqNormalize"
+
+[[entries]]
+rust  = "blast_get_std_alphabet"
+other = "Blast_GetStdAlphabet"
+
+[[entries]]
+rust  = "blast_res_freq_std_comp"
+other = "Blast_ResFreqStdComp"
+
+[[entries]]
+rust  = "BlastResComp"
+other = "Blast_ResComp"
+
+[[entries]]
+rust  = "blast_res_comp_new"
+other = "BlastResCompNew"
+
+[[entries]]
+rust  = "blast_res_comp_destruct"
+other = "BlastResCompDestruct"
+
+[[entries]]
+rust  = "blast_res_comp_str"
+other = "BlastResCompStr"
+
+[[entries]]
+rust  = "blast_res_freq_clr"
+other = "Blast_ResFreqClr"
+
+[[entries]]
+rust  = "blast_res_freq_res_comp"
+other = "Blast_ResFreqResComp"
+
+[[entries]]
+rust  = "blast_res_freq_string"
+other = "Blast_ResFreqString"
+
+[[entries]]
+rust  = "blast_score_chk"
+other = "BlastScoreChk"
+
+[[entries]]
+rust  = "blast_score_freq_new"
+other = "Blast_ScoreFreqNew"
+
+[[entries]]
+rust  = "blast_score_freq_free"
+other = "Blast_ScoreFreqFree"
+
+[[entries]]
+rust  = "blast_score_freq_calc"
+other = "BlastScoreFreqCalc"
+
+# blast_stat.c — matrix/statistics table entry points
+[[entries]]
+rust  = "blast_score_blk_check"
+other = "BlastScoreBlkCheck"
+
+[[entries]]
+rust  = "blast_score_blk_matrix_fill"
+other = "Blast_ScoreBlkMatrixFill"
+
+[[entries]]
+rust  = "blast_score_blk_kbp_ideal_calc"
+other = "Blast_ScoreBlkKbpIdealCalc"
+
+[[entries]]
+rust  = "blast_karlin_blk_copy"
+other = "Blast_KarlinBlkCopy"
+
+[[entries]]
+rust  = "s_blast_gumbel_blk_new"
+other = "s_BlastGumbelBlkNew"
+
+[[entries]]
+rust  = "blast_karlin_blk_new"
+other = "Blast_KarlinBlkNew"
+
+[[entries]]
+rust  = "blast_karlin_blk_ungapped_calc"
+other = "Blast_KarlinBlkUngappedCalc"
+
+[[entries]]
+rust  = "blast_score_blk_kbp_ungapped_calc"
+other = "Blast_ScoreBlkKbpUngappedCalc"
+
+[[entries]]
+rust  = "MatrixInfo"
+other = "MatrixInfo"
+
+[[entries]]
+rust  = "matrix_info_new"
+other = "MatrixInfoNew"
+
+[[entries]]
+rust  = "matrix_info_destruct"
+other = "MatrixInfoDestruct"
+
+[[entries]]
+rust  = "blast_get_matrix_values"
+other = "Blast_GetMatrixValues"
+
+[[entries]]
+rust  = "blast_get_alpha_beta"
+other = "BLAST_GetAlphaBeta"
+
+[[entries]]
+rust  = "s_split_array_of8"
+other = "s_SplitArrayOf8"
+
+[[entries]]
+rust  = "s_adjust_gap_parameters_by_gcd"
+other = "s_AdjustGapParametersByGcd"
+
+[[entries]]
+rust  = "s_get_nucl_values_array"
+other = "s_GetNuclValuesArray"
+
+[[entries]]
+rust  = "blast_get_nucleotide_gap_existence_extend_params"
+other = "BLAST_GetNucleotideGapExistenceExtendParams"
+
+[[entries]]
+rust  = "blast_karlin_blk_nucl_gapped_calc"
+other = "Blast_KarlinBlkNuclGappedCalc"
+
+[[entries]]
+rust  = "blast_check_reward_penalty_scores"
+other = "BLAST_CheckRewardPenaltyScores"
+
+[[entries]]
+rust  = "blast_karlin_report_allowed_values"
+other = "BlastKarlinReportAllowedValues"
+
+[[entries]]
+rust  = "blast_matrix_values_destruct"
+other = "BlastMatrixValuesDestruct"
+
+[[entries]]
+rust  = "blast_load_matrix_values"
+other = "BlastLoadMatrixValues"
+
+[[entries]]
+rust  = "blast_karlin_blk_gapped_calc"
+other = "Blast_KarlinBlkGappedCalc"
+
+[[entries]]
+rust  = "blast_karlin_blk_gapped_load_from_tables"
+other = "Blast_KarlinBlkGappedLoadFromTables"
+
+[[entries]]
+rust  = "blast_gumbel_blk_calc"
+other = "Blast_GumbelBlkCalc"
+
+[[entries]]
+rust  = "blast_gumbel_blk_load_from_tables"
+other = "Blast_GumbelBlkLoadFromTables"
+
+[[entries]]
+rust  = "blast_print_matrix_message"
+other = "BLAST_PrintMatrixMessage"
+
+[[entries]]
+rust  = "blast_print_allowed_values"
+other = "BLAST_PrintAllowedValues"
+
+[[entries]]
+rust  = "s_get_ungapped_beta"
+other = "s_GetUngappedBeta"
+
+[[entries]]
+rust  = "blast_get_nucl_alpha_beta"
+other = "Blast_GetNuclAlphaBeta"
+
+[[entries]]
+rust  = "blast_fill_residue_probability"
+other = "Blast_FillResidueProbability"
+
+[[entries]]
+rust  = "rps_find_ungapped_lambda"
+other = "RPSfindUngappedLambda"
+
+[[entries]]
+rust  = "rps_fill_scores"
+other = "RPSFillScores"
+
+[[entries]]
+rust  = "rps_rescale_pssm"
+other = "RPSRescalePssm"
+
+[[entries]]
+rust  = "CompressedReverseLookup"
+other = "CompressedReverseLookup"
+
+[[entries]]
+rust  = "s_build_compressed_translation"
+other = "s_BuildCompressedTranslation"
+
+[[entries]]
+rust  = "s_get_compressed_probs"
+other = "s_GetCompressedProbs"
+
+[[entries]]
+rust  = "SCompressedAlphabet"
+other = "SCompressedAlphabet"
+
+[[entries]]
+rust  = "s_build_compressed_score_matrix"
+other = "s_BuildCompressedScoreMatrix"
+
+[[entries]]
+rust  = "s_compressed_alphabet_new"
+other = "SCompressedAlphabetNew"
+
+[[entries]]
+rust  = "s_compressed_alphabet_free"
+other = "SCompressedAlphabetFree"
+
+# blast_parameters.c — link-HSP cutoff and debug output helpers
+[[entries]]
+rust  = "calculate_link_hsp_cutoffs"
+other = "CalculateLinkHSPCutoffs"
+
+[[entries]]
+rust  = "print_blast_scoring_parameters"
+other = "printBlastScoringParameters"
+
+[[entries]]
+rust  = "print_blast_initial_word_paramters"
+other = "printBlastInitialWordParamters"
+
+[[entries]]
+rust  = "print_blast_extension_parameters"
+other = "printBlastExtensionParameters"
+
+[[entries]]
+rust  = "print_blast_hit_saving_parameters"
+other = "printBlastHitSavingParameters"
+
+[[entries]]
+rust  = "print_all_parameters"
+other = "printAllParameters"
+
+# blast_hspstream.c — stream lifecycle wrappers
+[[entries]]
+rust  = "E_NONE"
+other = "eNone"
+
+[[entries]]
+rust  = "E_PRELIM_SEARCH"
+other = "ePrelimSearch"
+
+[[entries]]
+rust  = "E_TRACEBACK_SEARCH"
+other = "eTracebackSearch"
+
+[[entries]]
+rust  = "E_BOTH"
+other = "eBoth"
+
+[[entries]]
+rust  = "K_BLAST_HSP_STREAM_ERROR"
+other = "kBlastHSPStream_Error"
+
+[[entries]]
+rust  = "K_BLAST_HSP_STREAM_SUCCESS"
+other = "kBlastHSPStream_Success"
+
+[[entries]]
+rust  = "K_BLAST_HSP_STREAM_EOF"
+other = "kBlastHSPStream_Eof"
+
+[[entries]]
+rust  = "s_sort_hsp_list_by_oid"
+other = "s_SortHSPListByOid"
+
+[[entries]]
+rust  = "s_finalize_writer"
+other = "s_FinalizeWriter"
+
+[[entries]]
+rust  = "blast_hsp_stream_new"
+other = "BlastHSPStreamNew"
+
+[[entries]]
+rust  = "blast_hsp_stream_free"
+other = "BlastHSPStreamFree"
+
+[[entries]]
+rust  = "blast_hsp_stream_close"
+other = "BlastHSPStreamClose"
+
+[[entries]]
+rust  = "blast_hsp_stream_read"
+other = "BlastHSPStreamRead"
+
+[[entries]]
+rust  = "blast_hsp_stream_batch_read"
+other = "BlastHSPStreamBatchRead"
+
+[[entries]]
+rust  = "s_blast_hsp_stream_count_num_oids"
+other = "s_BlastHSPStreamCountNumOids"
+
+[[entries]]
+rust  = "blast_hsp_stream_to_hsp_stream_results_batch"
+other = "BlastHSPStreamToHSPStreamResultsBatch"
+
+[[entries]]
+rust  = "blast_hsp_stream_simple_close"
+other = "BlastHSPStreamSimpleClose"
+
+[[entries]]
+# Audit caveat: Rust closes/sorts the in-memory stream; C's mapper writer
+# vtable payload is represented outside this stream owner.
+rust  = "blast_hsp_stream_mapping_close"
+other = "BlastHSPStreamMappingClose"
+
+[[entries]]
+rust  = "blast_hsp_stream_tback_close"
+other = "BlastHSPStreamTBackClose"
+
+[[entries]]
+# Audit caveat: Rust merges in-memory hitlists. C also adjusts split-query
+# context offsets through `SSplitQueryBlk`, which is handled by translated
+# callers rather than this stream owner.
+rust  = "blast_hsp_stream_merge"
+other = "BlastHSPStreamMerge"
+
+[[entries]]
+rust  = "blast_hsp_stream_register_mt_lock"
+other = "BlastHSPStreamRegisterMTLock"
+
+[[entries]]
+rust  = "blast_hsp_stream_register_pipe"
+other = "BlastHSPStreamRegisterPipe"
+
+[[entries]]
+rust  = "blast_hsp_writer_new"
+other = "BlastHSPWriterNew"
+
+[[entries]]
+rust  = "blast_hsp_pipe_new"
+other = "BlastHSPPipeNew"
+
+[[entries]]
+rust  = "s_trim_hit_list"
+other = "s_TrimHitList"
+
+# blast_psi.c / blast_psi_priv.c — PSI allocation and lifecycle helpers
+[[entries]]
+rust  = "psi_msa_new"
+other = "PSIMsaNew"
+
+[[entries]]
+rust  = "psi_msa_free"
+other = "PSIMsaFree"
+
+[[entries]]
+rust  = "psi_matrix_new"
+other = "PSIMatrixNew"
+
+[[entries]]
+rust  = "psi_matrix_free"
+other = "PSIMatrixFree"
+
+[[entries]]
+rust  = "psi_diagnostics_request_new"
+other = "PSIDiagnosticsRequestNew"
+
+[[entries]]
+rust  = "psi_diagnostics_request_new_ex"
+other = "PSIDiagnosticsRequestNewEx"
+
+[[entries]]
+rust  = "psi_diagnostics_request_free"
+other = "PSIDiagnosticsRequestFree"
+
+[[entries]]
+rust  = "psi_diagnostics_response_new"
+other = "PSIDiagnosticsResponseNew"
+
+[[entries]]
+rust  = "psi_diagnostics_response_free"
+other = "PSIDiagnosticsResponseFree"
+
+[[entries]]
+rust  = "psi_packed_msa_new"
+other = "_PSIPackedMsaNew"
+
+[[entries]]
+rust  = "psi_packed_msa_free"
+other = "_PSIPackedMsaFree"
+
+[[entries]]
+rust  = "psi_packed_msa_get_number_of_aligned_seqs"
+other = "_PSIPackedMsaGetNumberOfAlignedSeqs"
+
+[[entries]]
+rust  = "psi_internal_msa_new"
+other = "_PSIMsaNew"
+
+[[entries]]
+rust  = "psi_internal_msa_free"
+other = "_PSIMsaFree"
+
+[[entries]]
+rust  = "psi_internal_pssm_data_free"
+other = "_PSIInternalPssmDataFree"
+
+[[entries]]
+rust  = "psi_aligned_block_new"
+other = "_PSIAlignedBlockNew"
+
+[[entries]]
+rust  = "psi_sequence_weights_new"
+other = "_PSISequenceWeightsNew"
+
+[[entries]]
+rust  = "psi_sequence_weights_free"
+other = "_PSISequenceWeightsFree"
+
+[[entries]]
+rust  = "get_matrix_freq_ratios_with_scale"
+other = "_PSIMatrixFrequencyRatiosNew"
+
+[[entries]]
+rust  = "print_msa_fp"
+other = "PrintMsaFP"
+
+[[entries]]
+rust  = "print_msa"
+other = "PrintMsa"
+
+[[entries]]
+rust  = "s_psi_validate_no_flanking_gaps"
+other = "s_PSIValidateNoFlankingGaps"
+
+[[entries]]
+rust  = "s_psi_validate_aligned_columns"
+other = "s_PSIValidateAlignedColumns"
+
+[[entries]]
+rust  = "s_psi_validate_participating_sequences"
+other = "s_PSIValidateParticipatingSequences"
+
+[[entries]]
+rust  = "psi_validate_msa"
+other = "_PSIValidateMSA"
+
+[[entries]]
+rust  = "psi_validate_msa_structure_group"
+other = "_PSIValidateMSA_StructureGroup"
+
+[[entries]]
+rust  = "psi_validate_cd_msa"
+other = "_PSIValidateCdMSA"
+
+[[entries]]
+rust  = "psi_create_pssm_with_diagnostics"
+other = "PSICreatePssmWithDiagnostics"
+
+[[entries]]
+rust  = "psi_sequence_length_without_x"
+other = "_PSISequenceLengthWithoutX"
+
+[[entries]]
+rust  = "blast_score_blk_protein_matrix_load"
+other = "BlastScoreBlkProteinMatrixLoad"
+
+[[entries]]
+rust  = "blast_hsp_cbs_stream_close"
+other = "BlastHSPCBSStreamClose"
+
+[[entries]]
+rust  = "s_blast_prune_extra_hits"
+other = "s_BlastPruneExtraHits"
+
+[[entries]]
+rust  = "s_hsp_list_post_traceback_update"
+other = "s_HSPListPostTracebackUpdate"
+
+[[entries]]
+rust  = "s_rps_gap_align_data_prepare"
+other = "s_RPSGapAlignDataPrepare"
+
+[[entries]]
+rust  = "s_rps_compute_traceback"
+other = "s_RPSComputeTraceback"
+
+[[entries]]
+rust  = "blast_setup_partial_fetching"
+other = "BLAST_SetupPartialFetching"
+
+[[entries]]
+rust  = "s_out_of_frame_align_with_traceback"
+other = "s_OutOfFrameAlignWithTraceback"
+
+[[entries]]
+rust  = "s_out_of_frame_gapped_align"
+other = "s_OutOfFrameGappedAlign"
+
+[[entries]]
+rust  = "s_out_of_frame_semi_gapped_align_wrap"
+other = "s_OutOfFrameSemiGappedAlignWrap"
+
+[[entries]]
+rust  = "s_blast_oof_traceback_to_gap_edit_script"
+other = "s_BlastOOFTracebackToGapEditScript"

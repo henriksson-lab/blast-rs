@@ -17,7 +17,68 @@
 //! Script/op constants match NCBI exactly (see `SCRIPT_SUB` etc.) —
 //! `blast_gapalign.c:363-371` and `gapinfo.h:45-51`.
 
-use crate::gapinfo::{GapAlignOpType, GapEditScript};
+pub use crate::extend::PhiInitialHit;
+use crate::gapinfo::{GapAlignOpType, GapEditScript, GapPrelimEditBlock};
+
+#[derive(Debug, Clone)]
+pub struct OutOfFrameScoring {
+    pub matrix: Vec<Vec<i32>>,
+    pub gap_open: i32,
+    pub gap_extend: i32,
+    pub shift_penalty: i32,
+    pub x_dropoff: i32,
+    pub pssm: Option<Vec<Vec<i32>>>,
+}
+
+impl OutOfFrameScoring {
+    fn matrix_score(&self, a: u8, b: u8) -> i32 {
+        self.matrix
+            .get(a as usize)
+            .and_then(|row| row.get(b as usize))
+            .copied()
+            .unwrap_or(if a == b { 1 } else { -1 })
+    }
+
+    fn oof_row_score(
+        &self,
+        query_offset: i32,
+        a: &[u8],
+        m: usize,
+        a_index: usize,
+        b_letter: u8,
+        reversed: bool,
+    ) -> i32 {
+        if let Some(pssm) = &self.pssm {
+            let row = if reversed {
+                m.saturating_sub(a_index)
+            } else {
+                (a_index as i32 + query_offset).max(0) as usize
+            };
+            return pssm
+                .get(row)
+                .and_then(|row| row.get(b_letter as usize))
+                .copied()
+                .unwrap_or_else(|| self.matrix_score(*a.get(a_index).unwrap_or(&0), b_letter));
+        }
+        self.matrix_score(*a.get(a_index).unwrap_or(&0), b_letter)
+    }
+}
+
+impl Default for OutOfFrameScoring {
+    fn default() -> Self {
+        Self {
+            matrix: crate::matrix::BLOSUM62
+                .iter()
+                .map(|row| row.to_vec())
+                .collect(),
+            gap_open: 11,
+            gap_extend: 1,
+            shift_penalty: 1,
+            x_dropoff: 25,
+            pssm: None,
+        }
+    }
+}
 
 /// Perform traceback alignment between query and subject sequences.
 /// This is the full dynamic programming alignment that produces
@@ -231,7 +292,9 @@ use crate::stat::MININT;
 const SCRIPT_SUB: u8 = 3;
 const SCRIPT_GAP_IN_A: u8 = 0; // gap in query = deletion
 const SCRIPT_GAP_IN_B: u8 = 6; // gap in subject = insertion
+const SCRIPT_NEXT_IN_FRAME: u8 = 3;
 const SCRIPT_OP_MASK: u8 = 0x07;
+const SCRIPT_OOF_OPEN_GAP: u8 = 0x08;
 const SCRIPT_EXTEND_GAP_A: u8 = 0x10;
 const SCRIPT_EXTEND_GAP_B: u8 = 0x40;
 
@@ -625,6 +688,55 @@ pub fn blast_gapped_score_only_packed_subject(
     .0
 }
 
+/// Name-aligned wrapper for NCBI `s_BlastDynProgNtGappedAlignment`
+/// (`blast_gapalign.c:2949`) on the packed-subject preliminary score path.
+///
+/// Audit note: this is a name-alignment shim over the existing Rust packed
+/// preliminary DP path, not a line-for-line port of the full C function. Treat
+/// it as potentially incomplete/hard to audit until the complete C control
+/// flow around prelim HSP construction has been compared.
+pub fn s_blast_dyn_prog_nt_gapped_alignment(
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    seed_q: usize,
+    seed_s: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    ungapped_score: i32,
+) -> (
+    i32,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    i32,
+    i32,
+) {
+    blast_gapped_score_extents_packed_subject(
+        query,
+        subject_packed,
+        subject_len,
+        seed_q,
+        seed_s,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+        ungapped_score,
+    )
+}
+
 /// Packed-subject preliminary DP that returns the same information NCBI's
 /// `s_BlastDynProgNtGappedAlignment` derives before saving a prelim HSP:
 /// score plus preliminary extents around the chosen start.
@@ -728,6 +840,40 @@ pub fn blast_gapped_score_extents_packed_subject(
         private_s_start,
         score_left,
         score_right,
+    )
+}
+
+/// Name-aligned wrapper for NCBI `s_BlastAlignPackedNucl`
+/// (`blast_gapalign.c:3034`).
+///
+/// Audit note: this delegates to the existing one-direction packed-subject DP.
+/// It exists to make the C function name visible to the audit, but should not
+/// by itself be considered proof that every C caller/context has been ported.
+pub fn s_blast_align_packed_nucl(
+    query: &[u8],
+    subject_packed: &[u8],
+    n: usize,
+    m: usize,
+    subject_base_offset: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize) {
+    let matrix = build_blastna_matrix(reward, penalty);
+    gapped_score_one_dir_packed_subject(
+        query,
+        subject_packed,
+        n,
+        m,
+        subject_base_offset,
+        &matrix,
+        gap_open + gap_extend,
+        gap_extend,
+        x_dropoff,
+        reverse,
     )
 }
 
@@ -874,6 +1020,948 @@ fn gapped_score_one_dir(
         }
     }
     best_score
+}
+
+fn generic_matrix_score(matrix: &[Vec<i32>], a: u8, b: u8) -> i32 {
+    matrix
+        .get(a as usize)
+        .and_then(|row| row.get(b as usize))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn prelim_block_set_ops(
+    block: &mut crate::gapinfo::GapPrelimEditBlock,
+    ops: Vec<(GapAlignOpType, i32)>,
+) {
+    crate::gapinfo::gap_prelim_edit_block_reset(Some(block));
+    for (op, count) in ops {
+        crate::gapinfo::gap_prelim_edit_block_add(block, op, count);
+    }
+}
+
+fn align_ex_generic(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    matrix: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    mut x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
+    let gap_oe = gap_open + gap_extend;
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return (0, 0, 0, Vec::new());
+    }
+
+    let extra = if gap_extend > 0 {
+        (x_dropoff / gap_extend) as usize + 3
+    } else {
+        n + 3
+    };
+    let mut sa = vec![
+        GapDP {
+            best: MININT,
+            best_gap: MININT
+        };
+        n + extra + 10
+    ];
+
+    sa[0] = GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    };
+    let mut score = -gap_oe;
+    let mut b_size = 1usize;
+    while b_size <= n && score >= -x_dropoff {
+        sa[b_size] = GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        };
+        score -= gap_extend;
+        b_size += 1;
+    }
+
+    let mut scripts: Vec<Vec<u8>> = Vec::with_capacity(m + 1);
+    let mut row_starts: Vec<usize> = Vec::with_capacity(m + 1);
+    scripts.push(vec![SCRIPT_GAP_IN_A; b_size]);
+    row_starts.push(0);
+
+    let mut best_score = 0i32;
+    let mut first_b = 0usize;
+    let mut a_off = 0usize;
+    let mut b_off = 0usize;
+
+    for ai in 1..=m {
+        let a_idx = if reverse { m - ai } else { ai };
+        let Some(&a_letter) = a.get(a_idx) else {
+            break;
+        };
+        let row_start = first_b;
+        let mut row_script = vec![0u8; (b_size - row_start) + extra + 10];
+        let mut sc = MININT;
+        let mut sgr = MININT;
+        let mut last_b = first_b;
+
+        #[allow(clippy::mut_range_bound)]
+        for bi in first_b..b_size {
+            let b_idx = if reverse {
+                n.checked_sub(1 + bi).unwrap_or(usize::MAX)
+            } else {
+                bi + 1
+            };
+            let sgc = sa[bi].best_gap;
+            let next_sc = if let Some(&b_letter) = b.get(b_idx) {
+                sa[bi].best + generic_matrix_score(matrix, a_letter, b_letter)
+            } else {
+                MININT
+            };
+
+            let mut script = SCRIPT_SUB;
+            if sc < sgc {
+                script = SCRIPT_GAP_IN_B;
+                sc = sgc;
+            }
+            if sc < sgr {
+                script = SCRIPT_GAP_IN_A;
+                sc = sgr;
+            }
+
+            if best_score - sc > x_dropoff {
+                if first_b == bi {
+                    first_b += 1;
+                } else {
+                    sa[bi].best = MININT;
+                }
+            } else {
+                last_b = bi;
+                if sc > best_score {
+                    best_score = sc;
+                    a_off = ai;
+                    b_off = bi;
+                }
+
+                if sgc - gap_extend < sc - gap_oe {
+                    sa[bi].best_gap = sc - gap_oe;
+                } else {
+                    sa[bi].best_gap = sgc - gap_extend;
+                    script |= SCRIPT_EXTEND_GAP_B;
+                }
+                if sgr - gap_extend < sc - gap_oe {
+                    sgr = sc - gap_oe;
+                } else {
+                    sgr -= gap_extend;
+                    script |= SCRIPT_EXTEND_GAP_A;
+                }
+                sa[bi].best = sc;
+            }
+            sc = next_sc;
+            let script_idx = bi.saturating_sub(row_start);
+            if script_idx < row_script.len() {
+                row_script[script_idx] = script;
+            }
+        }
+
+        if first_b >= b_size {
+            scripts.push(row_script);
+            row_starts.push(row_start);
+            break;
+        }
+
+        if last_b < b_size - 1 {
+            b_size = last_b + 1;
+        } else {
+            while sgr >= best_score - x_dropoff && b_size <= n && b_size < sa.len() {
+                sa[b_size] = GapDP {
+                    best: sgr,
+                    best_gap: sgr - gap_oe,
+                };
+                sgr -= gap_extend;
+                let script_idx = b_size.saturating_sub(row_start);
+                if script_idx < row_script.len() {
+                    row_script[script_idx] = SCRIPT_GAP_IN_A;
+                }
+                b_size += 1;
+            }
+        }
+        if b_size <= n && b_size < sa.len() {
+            sa[b_size] = GapDP {
+                best: MININT,
+                best_gap: MININT,
+            };
+            b_size += 1;
+        }
+        scripts.push(row_script);
+        row_starts.push(row_start);
+    }
+
+    let mut ops: Vec<(GapAlignOpType, i32)> = Vec::new();
+    let mut ai = a_off;
+    let mut bi = b_off;
+    let mut cur_script = SCRIPT_SUB;
+
+    while ai > 0 || bi > 0 {
+        if ai >= scripts.len() {
+            break;
+        }
+        let row_start = row_starts[ai];
+        if bi < row_start {
+            break;
+        }
+        let script_idx = bi - row_start;
+        if script_idx >= scripts[ai].len() {
+            break;
+        }
+        let s = scripts[ai][script_idx];
+
+        cur_script = match cur_script & SCRIPT_OP_MASK {
+            SCRIPT_GAP_IN_A => {
+                if s & SCRIPT_EXTEND_GAP_A != 0 {
+                    SCRIPT_GAP_IN_A
+                } else {
+                    s & SCRIPT_OP_MASK
+                }
+            }
+            SCRIPT_GAP_IN_B => {
+                if s & SCRIPT_EXTEND_GAP_B != 0 {
+                    SCRIPT_GAP_IN_B
+                } else {
+                    s & SCRIPT_OP_MASK
+                }
+            }
+            _ => s & SCRIPT_OP_MASK,
+        };
+
+        let op = script_to_op(cur_script);
+        match cur_script & SCRIPT_OP_MASK {
+            SCRIPT_GAP_IN_A => {
+                if bi == 0 {
+                    break;
+                }
+                bi -= 1;
+            }
+            SCRIPT_GAP_IN_B => {
+                if ai == 0 {
+                    break;
+                }
+                ai -= 1;
+            }
+            _ => {
+                if ai == 0 || bi == 0 {
+                    break;
+                }
+                ai -= 1;
+                bi -= 1;
+            }
+        }
+        if let Some(last) = ops.last_mut() {
+            if last.0 == op {
+                last.1 += 1;
+            } else {
+                ops.push((op, 1));
+            }
+        } else {
+            ops.push((op, 1));
+        }
+    }
+
+    (best_score, a_off, b_off, ops)
+}
+
+fn gapped_score_one_dir_generic(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    matrix: &[Vec<i32>],
+    gap_oe: i32,
+    gap_extend: i32,
+    mut x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize) {
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return (0, 0, 0);
+    }
+
+    let num_extra_cells = if gap_extend > 0 {
+        (x_dropoff / gap_extend) as usize + 3
+    } else {
+        n + 3
+    };
+    let mut sa = vec![
+        GapDP {
+            best: MININT,
+            best_gap: MININT
+        };
+        n + num_extra_cells + 10
+    ];
+
+    sa[0] = GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    };
+    let mut score = -gap_oe;
+    let mut b_size = 1usize;
+    while b_size <= n && score >= -x_dropoff {
+        sa[b_size] = GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        };
+        score -= gap_extend;
+        b_size += 1;
+    }
+
+    let mut best_score = 0i32;
+    let mut first_b = 0usize;
+    let mut a_off = 0usize;
+    let mut b_off = 0usize;
+
+    for ai in 1..=m {
+        let a_idx = if reverse { m - ai } else { ai };
+        let Some(&a_letter) = a.get(a_idx) else {
+            break;
+        };
+        let mut sc = MININT;
+        let mut sgr = MININT;
+        let mut last_b = first_b;
+
+        #[allow(clippy::mut_range_bound)]
+        for bi in first_b..b_size {
+            let b_idx = if reverse {
+                n.checked_sub(1 + bi).unwrap_or(usize::MAX)
+            } else {
+                bi + 1
+            };
+            let Some(&b_letter) = b.get(b_idx) else {
+                break;
+            };
+
+            let sgc = sa[bi].best_gap;
+            let next_sc = sa[bi].best + generic_matrix_score(matrix, a_letter, b_letter);
+
+            if sc < sgc {
+                sc = sgc;
+            }
+            if sc < sgr {
+                sc = sgr;
+            }
+
+            if best_score - sc > x_dropoff {
+                if first_b == bi {
+                    first_b += 1;
+                } else {
+                    sa[bi].best = MININT;
+                }
+            } else {
+                last_b = bi;
+                if sc > best_score {
+                    best_score = sc;
+                    a_off = ai;
+                    b_off = bi;
+                }
+                if sgc - gap_extend < sc - gap_oe {
+                    sa[bi].best_gap = sc - gap_oe;
+                } else {
+                    sa[bi].best_gap = sgc - gap_extend;
+                }
+                if sgr - gap_extend < sc - gap_oe {
+                    sgr = sc - gap_oe;
+                } else {
+                    sgr -= gap_extend;
+                }
+                sa[bi].best = sc;
+            }
+            sc = next_sc;
+        }
+
+        if first_b >= b_size {
+            break;
+        }
+
+        if last_b + num_extra_cells + 3 >= sa.len() {
+            sa.resize(
+                (last_b + num_extra_cells + 100).max(sa.len() * 2),
+                GapDP {
+                    best: MININT,
+                    best_gap: MININT,
+                },
+            );
+        }
+
+        if last_b < b_size - 1 {
+            b_size = last_b + 1;
+        } else {
+            while sgr >= best_score - x_dropoff && b_size <= n {
+                sa[b_size] = GapDP {
+                    best: sgr,
+                    best_gap: sgr - gap_oe,
+                };
+                sgr -= gap_extend;
+                b_size += 1;
+            }
+        }
+        if b_size <= n && b_size < sa.len() {
+            sa[b_size] = GapDP {
+                best: MININT,
+                best_gap: MININT,
+            };
+            b_size += 1;
+        }
+    }
+
+    (best_score, a_off, b_off)
+}
+
+/// Port-shaped Rust equivalent of NCBI `s_PHIGappedAlignment`
+/// (`phi_gapalign.c:670`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_phi_gapped_alignment(
+    query: &[u8],
+    subject: &[u8],
+    gap_align: Option<&mut crate::blast_kappa::BlastGapAlignWorkspace>,
+    matrix: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    query_offset: i32,
+    subject_offset: i32,
+    query_length: i32,
+    subject_length: i32,
+) -> i16 {
+    let Some(gap_align) = gap_align else {
+        return -1;
+    };
+    if query_offset < 0 || subject_offset < 0 || query_length < 0 || subject_length < 0 {
+        return -1;
+    }
+
+    let mut q_length = query_offset as usize;
+    let mut s_length = subject_offset as usize;
+    let gap_oe = gap_open + gap_extend;
+
+    let mut found_start = false;
+    let mut found_end = false;
+    let mut score_left = 0;
+
+    if q_length != 0 && s_length != 0 {
+        found_start = true;
+        let (score, private_q_start, private_s_start) = gapped_score_one_dir_generic(
+            query, subject, q_length, s_length, matrix, gap_oe, gap_extend, x_dropoff, true,
+        );
+        score_left = score;
+        gap_align.query_start = (q_length.saturating_sub(private_q_start) + 1) as i32;
+        gap_align.subject_start = (s_length.saturating_sub(private_s_start) + 1) as i32;
+    }
+
+    q_length += query_length.saturating_sub(1) as usize;
+    s_length += subject_length.saturating_sub(1) as usize;
+
+    let mut score_right = 0;
+    if q_length < query.len() && s_length < subject.len() {
+        found_end = true;
+        let (score, query_stop, subject_stop) = gapped_score_one_dir_generic(
+            query.get(q_length..).unwrap_or(&[]),
+            subject.get(s_length..).unwrap_or(&[]),
+            query.len().saturating_sub(q_length + 1),
+            subject.len().saturating_sub(s_length + 1),
+            matrix,
+            gap_oe,
+            gap_extend,
+            x_dropoff,
+            false,
+        );
+        score_right = score;
+        gap_align.query_stop = (query_stop + q_length) as i32;
+        gap_align.subject_stop = (subject_stop + s_length) as i32;
+    }
+
+    if !found_start {
+        gap_align.query_start = query_offset;
+        gap_align.subject_start = subject_offset;
+    }
+    if !found_end {
+        gap_align.query_stop = query_offset + query_length;
+        gap_align.subject_stop = subject_offset + subject_length;
+    }
+    gap_align.score = score_right + score_left;
+
+    0
+}
+
+/// Port-shaped Rust equivalent of NCBI `PHIGetGappedScore`
+/// (`phi_gapalign.c:739`) over Rust's explicit PHI initial-hit view.
+#[allow(clippy::too_many_arguments)]
+pub fn phi_get_gapped_score(
+    query: &[u8],
+    pattern_info: Option<&crate::pattern::SphiQueryInfo>,
+    subject: &[u8],
+    gap_align: Option<&mut crate::blast_kappa::BlastGapAlignWorkspace>,
+    matrix: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    cutoff_score_min: i32,
+    phi_hits: &[PhiInitialHit],
+    hsp_num_max: i32,
+    query_frame: i32,
+    subject_frame: i32,
+    hsp_list: &mut Option<crate::hspstream::HspList>,
+    mut gapped_extensions: Option<&mut i32>,
+) -> i16 {
+    let Some(pattern_info) = pattern_info else {
+        return -1;
+    };
+    let Some(gap_align) = gap_align else {
+        return -1;
+    };
+    if hsp_list.is_none() {
+        *hsp_list = Some(crate::hspstream::blast_hsp_list_new(hsp_num_max));
+    }
+    let Some(hsp_list) = hsp_list.as_mut() else {
+        return -1;
+    };
+    if phi_hits.is_empty() {
+        return 0;
+    }
+
+    for pattern_index in 0..pattern_info.num_patterns.max(0) as usize {
+        let Some(query_pattern) = pattern_info.occurrences.get(pattern_index) else {
+            break;
+        };
+        for init_hsp in phi_hits {
+            let subject_length = init_hsp.subject_end - init_hsp.subject_start + 1;
+            if subject_length < 0 {
+                continue;
+            }
+            if let Some(extensions) = gapped_extensions.as_deref_mut() {
+                *extensions += 1;
+            }
+
+            let status = s_phi_gapped_alignment(
+                query,
+                subject,
+                Some(gap_align),
+                matrix,
+                gap_open,
+                gap_extend,
+                x_dropoff,
+                query_pattern.offset,
+                init_hsp.subject_start,
+                query_pattern.length,
+                subject_length,
+            );
+            if status != 0 {
+                return status;
+            }
+
+            if gap_align.score >= cutoff_score_min {
+                let hsp = crate::hspstream::Hsp {
+                    score: gap_align.score,
+                    num_ident: 0,
+                    bit_score: 0.0,
+                    evalue: f64::MAX,
+                    query_offset: gap_align.query_start,
+                    query_end: gap_align.query_stop,
+                    query_gapped_start: query_pattern.offset,
+                    subject_offset: gap_align.subject_start,
+                    subject_end: gap_align.subject_stop,
+                    subject_gapped_start: init_hsp.subject_start,
+                    context: 0,
+                    query_frame,
+                    subject_frame,
+                    num_gaps: 0,
+                    comp_adjustment_method: 0,
+                    edit_script: gap_align.edit_script.clone(),
+                    pat_info: Some(crate::hspstream::PhiPatInfo {
+                        index: pattern_index,
+                        length: subject_length,
+                    }),
+                    map_info: None,
+                };
+                let _ = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, hsp);
+            }
+        }
+    }
+
+    let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
+    0
+}
+
+fn prefixed_segment(sequence: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sequence.len() + 1);
+    out.push(0);
+    out.extend_from_slice(sequence);
+    out
+}
+
+fn add_banded_or_sub_pattern_segment(
+    query_segment: &[u8],
+    subject_segment: &[u8],
+    align_script: &mut crate::gapinfo::GapPrelimEditBlock,
+    matrix: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+) -> i32 {
+    if query_segment.is_empty() && subject_segment.is_empty() {
+        return 0;
+    }
+    if query_segment.len() == subject_segment.len() {
+        crate::gapinfo::gap_prelim_edit_block_add(
+            align_script,
+            crate::gapinfo::GapAlignOpType::Sub,
+            query_segment.len() as i32,
+        );
+        return 0;
+    }
+
+    let query_prefixed = prefixed_segment(query_segment);
+    let subject_prefixed = prefixed_segment(subject_segment);
+    crate::gapinfo::s_banded_align(
+        &query_prefixed,
+        &subject_prefixed,
+        query_segment.len() as i32,
+        subject_segment.len() as i32,
+        -5,
+        5,
+        matrix,
+        gap_open,
+        gap_extend,
+        align_script,
+    )
+}
+
+/// Port-shaped Rust equivalent of NCBI static `s_PHIBlastAlignPatterns`
+/// (`phi_gapalign.c:497`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_phi_blast_align_patterns(
+    query_seq: &[u8],
+    db_seq: &[u8],
+    len_query_seq: i32,
+    len_db_seq: i32,
+    align_script: &mut crate::gapinfo::GapPrelimEditBlock,
+    gap_open: i32,
+    gap_extend: i32,
+    matrix: &[Vec<i32>],
+    pattern_blk: &crate::pattern::PhiPatternSearchBlk,
+) -> i32 {
+    let mut start_query_match = 0;
+    let mut end_query_match = len_query_seq - 1;
+    let mut start_db_match = 0;
+    let mut end_db_match = len_db_seq - 1;
+
+    match pattern_blk.flag_pattern_length {
+        crate::pattern::PatternType::OneWord => {
+            let _ = crate::pattern::s_phi_get_short_pattern(
+                query_seq,
+                len_query_seq,
+                &mut start_query_match,
+                &mut end_query_match,
+                pattern_blk,
+            );
+            let _ = crate::pattern::s_phi_get_short_pattern(
+                db_seq,
+                len_db_seq,
+                &mut start_db_match,
+                &mut end_db_match,
+                pattern_blk,
+            );
+        }
+        crate::pattern::PatternType::MultiWord => {
+            crate::pattern::s_phi_get_long_pattern(
+                query_seq,
+                len_query_seq,
+                &mut start_query_match,
+                &mut end_query_match,
+                pattern_blk,
+            );
+            crate::pattern::s_phi_get_long_pattern(
+                db_seq,
+                len_db_seq,
+                &mut start_db_match,
+                &mut end_db_match,
+                pattern_blk,
+            );
+        }
+        crate::pattern::PatternType::VeryLong => {
+            let mut query_offsets = Vec::new();
+            let mut db_offsets = Vec::new();
+            let _ = crate::pattern::s_phi_get_extra_long_pattern(
+                query_seq,
+                len_query_seq,
+                &mut query_offsets,
+                pattern_blk,
+            );
+            let _ = crate::pattern::s_phi_get_extra_long_pattern(
+                db_seq,
+                len_db_seq,
+                &mut db_offsets,
+                pattern_blk,
+            );
+            let mut score = 0;
+            let mut query_cursor = 0usize;
+            let mut db_cursor = 0usize;
+            for (&query_end, &db_end) in query_offsets.iter().zip(db_offsets.iter()) {
+                let query_end = query_end.max(0) as usize;
+                let db_end = db_end.max(0) as usize;
+                let query_len = query_end.saturating_sub(query_cursor);
+                let db_len = db_end.saturating_sub(db_cursor);
+                let query_slice = query_seq
+                    .get(query_cursor..query_cursor + query_len)
+                    .unwrap_or(&[]);
+                let db_slice = db_seq.get(db_cursor..db_cursor + db_len).unwrap_or(&[]);
+                score += add_banded_or_sub_pattern_segment(
+                    query_slice,
+                    db_slice,
+                    align_script,
+                    matrix,
+                    gap_open,
+                    gap_extend,
+                );
+                query_cursor = query_end;
+                db_cursor = db_end;
+            }
+            return score;
+        }
+    }
+
+    let prefix_query = start_query_match.max(0) as usize;
+    let prefix_db = start_db_match.max(0) as usize;
+    let mut local_score = add_banded_or_sub_pattern_segment(
+        query_seq.get(..prefix_query).unwrap_or(&[]),
+        db_seq.get(..prefix_db).unwrap_or(&[]),
+        align_script,
+        matrix,
+        gap_open,
+        gap_extend,
+    );
+
+    let query_match_len = (end_query_match - start_query_match + 1).max(0) as usize;
+    let db_match_len = (end_db_match - start_db_match + 1).max(0) as usize;
+    local_score += add_banded_or_sub_pattern_segment(
+        query_seq
+            .get(prefix_query..prefix_query + query_match_len)
+            .unwrap_or(&[]),
+        db_seq
+            .get(prefix_db..prefix_db + db_match_len)
+            .unwrap_or(&[]),
+        align_script,
+        matrix,
+        gap_open,
+        gap_extend,
+    );
+
+    let query_suffix_start = (end_query_match + 1).max(0) as usize;
+    let db_suffix_start = (end_db_match + 1).max(0) as usize;
+    local_score += add_banded_or_sub_pattern_segment(
+        query_seq.get(query_suffix_start..).unwrap_or(&[]),
+        db_seq.get(db_suffix_start..).unwrap_or(&[]),
+        align_script,
+        matrix,
+        gap_open,
+        gap_extend,
+    );
+
+    local_score
+}
+
+/// Port-shaped Rust equivalent of NCBI `PHIGappedAlignmentWithTraceback`
+/// (`phi_gapalign.c:837`).
+#[allow(clippy::too_many_arguments)]
+pub fn phi_gapped_alignment_with_traceback(
+    query: &[u8],
+    subject: &[u8],
+    gap_align: Option<&mut crate::blast_kappa::BlastGapAlignWorkspace>,
+    matrix: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    q_start: i32,
+    s_start: i32,
+    query_length: i32,
+    subject_length: i32,
+    q_pat_length: i32,
+    s_pat_length: i32,
+    pattern_blk: Option<&crate::pattern::PhiPatternSearchBlk>,
+) -> i16 {
+    let Some(gap_align) = gap_align else {
+        return -1;
+    };
+    let Some(pattern_blk) = pattern_blk else {
+        return -1;
+    };
+    if q_start < 0 || s_start < 0 || q_pat_length < 0 || s_pat_length < 0 {
+        return -1;
+    }
+
+    let mut rev_prelim_tback = crate::gapinfo::gap_prelim_edit_block_new();
+    let mut fwd_prelim_tback = crate::gapinfo::gap_prelim_edit_block_new();
+    let mut pat_prelim_tback = crate::gapinfo::gap_prelim_edit_block_new();
+
+    let q_start_usize = q_start as usize;
+    let s_start_usize = s_start as usize;
+    let (score_left, private_q_length, private_s_length, rev_ops) = align_ex_generic(
+        query,
+        subject,
+        q_start_usize,
+        s_start_usize,
+        matrix,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+        true,
+    );
+    gap_align.query_start = q_start - private_q_length as i32;
+    gap_align.subject_start = s_start - private_s_length as i32;
+    prelim_block_set_ops(&mut rev_prelim_tback, rev_ops);
+
+    let query_pattern = query
+        .get(q_start_usize..q_start_usize.saturating_add(q_pat_length as usize))
+        .unwrap_or(&[]);
+    let subject_pattern = subject
+        .get(s_start_usize..s_start_usize.saturating_add(s_pat_length as usize))
+        .unwrap_or(&[]);
+    let _ = s_phi_blast_align_patterns(
+        query_pattern,
+        subject_pattern,
+        q_pat_length,
+        s_pat_length,
+        &mut pat_prelim_tback,
+        gap_open,
+        gap_extend,
+        matrix,
+        pattern_blk,
+    );
+    crate::gapinfo::gap_prelim_edit_block_append(&mut rev_prelim_tback, &pat_prelim_tback);
+
+    let q_right_start = q_start + q_pat_length - 1;
+    let s_right_start = s_start + s_pat_length - 1;
+    let mut score_right = 0;
+    if q_right_start < query_length && s_right_start < subject_length {
+        let q_right_usize = q_right_start.max(0) as usize;
+        let s_right_usize = s_right_start.max(0) as usize;
+        let (score, private_q_right, private_s_right, fwd_ops) = align_ex_generic(
+            query.get(q_right_usize..).unwrap_or(&[]),
+            subject.get(s_right_usize..).unwrap_or(&[]),
+            (query_length - q_right_start - 1).max(0) as usize,
+            (subject_length - s_right_start - 1).max(0) as usize,
+            matrix,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            false,
+        );
+        score_right = score;
+        gap_align.query_stop = q_right_start + private_q_right as i32 + 1;
+        gap_align.subject_stop = s_right_start + private_s_right as i32 + 1;
+        prelim_block_set_ops(&mut fwd_prelim_tback, fwd_ops);
+    } else {
+        gap_align.query_stop = q_right_start;
+        gap_align.subject_stop = s_right_start;
+    }
+
+    gap_align.edit_script = crate::gapinfo::blast_prelim_edit_block_to_gap_edit_script(
+        Some(&rev_prelim_tback),
+        Some(&fwd_prelim_tback),
+    );
+    gap_align.score = score_right + score_left;
+    0
+}
+
+/// Port-shaped Rust equivalent of NCBI internal `s_PHITracebackFromHSPList`
+/// (`blast_traceback.c:752`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_phi_traceback_from_hsp_list(
+    program_number: crate::program::ProgramType,
+    hsp_list: &mut crate::hspstream::HspList,
+    query: &[u8],
+    subject: &[u8],
+    gap_align: &mut crate::blast_kappa::BlastGapAlignWorkspace,
+    matrix: &[Vec<i32>],
+    scoring_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    pattern_info: Option<&crate::pattern::SphiQueryInfo>,
+    pattern_blk: Option<&crate::pattern::PhiPatternSearchBlk>,
+    lambda: f64,
+    param_c: f64,
+) -> i16 {
+    if !crate::program::blast_program_is_phi_blast(program_number) {
+        return -1;
+    }
+    let Some(pattern_info) = pattern_info else {
+        return -1;
+    };
+    let Some(pattern_blk) = pattern_blk else {
+        return -1;
+    };
+    if hsp_list.hsps.is_empty() {
+        return 0;
+    }
+
+    let mut retained = Vec::with_capacity(hsp_list.hsps.len());
+    for mut hsp in hsp_list.hsps.drain(..) {
+        let Some(pat_info) = hsp.pat_info else {
+            continue;
+        };
+        let Some(query_pattern) = pattern_info.occurrences.get(pat_info.index) else {
+            continue;
+        };
+        let gap_x_dropoff = gap_align.gap_x_dropoff;
+        let status = phi_gapped_alignment_with_traceback(
+            query,
+            subject,
+            Some(gap_align),
+            matrix,
+            scoring_params.gap_open,
+            scoring_params.gap_extend,
+            gap_x_dropoff,
+            hsp.query_gapped_start,
+            hsp.subject_gapped_start,
+            query.len() as i32,
+            subject.len() as i32,
+            query_pattern.length,
+            pat_info.length,
+            Some(pattern_blk),
+        );
+        if status != 0 {
+            return status;
+        }
+        if gap_align.score >= hit_params.cutoff_score_min {
+            let _ =
+                crate::hspstream::blast_hsp_update_with_traceback(Some(gap_align), Some(&mut hsp));
+            retained.push(hsp);
+        } else {
+            gap_align.edit_script =
+                crate::gapinfo::gap_edit_script_delete(gap_align.edit_script.take());
+        }
+    }
+    hsp_list.hsps = retained;
+
+    let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
+    let _ = crate::hspstream::blast_hsp_list_purge_null_hsps(Some(hsp_list));
+    let occurrence_offsets: Vec<i32> = pattern_info
+        .occurrences
+        .iter()
+        .map(|occurrence| occurrence.offset)
+        .collect();
+    crate::hspstream::blast_hsp_list_phi_get_evalues(
+        hsp_list,
+        lambda,
+        param_c,
+        &occurrence_offsets,
+        pattern_blk.min_pattern_match_length,
+        pattern_blk.num_patterns_db,
+    );
+    let _ = crate::hspstream::blast_hsp_list_reap_by_evalue(Some(hsp_list), &hit_params.options);
+    crate::hspstream::blast_hsp_list_phi_get_bit_scores(hsp_list, lambda, param_c);
+    0
 }
 
 fn gapped_score_one_dir_packed_subject(
@@ -1153,10 +2241,6 @@ pub fn reevaluate_with_ambiguities_gapped(
 
     score /= factor;
 
-    if score < cutoff_score {
-        return true;
-    }
-
     // Post-processing: extend left and right from best_q_start/best_q_end
     // while exact matches continue. Only if both endpoints fall on Sub
     // runs (NCBI asserts this — blast_hits.c:616-617).
@@ -1209,35 +2293,103 @@ pub fn reevaluate_with_ambiguities_gapped(
         score += ext * reward;
     }
 
-    // Trim ops to [best_start_esp_index ..= best_end_esp_index] with
-    // best_end_esp_num controlling the last run's count.
-    if best_end_esp_index >= ops.len() || best_start_esp_index > best_end_esp_index {
+    tb.edit_script.ops = ops;
+    s_update_reevaluated_hsp(
+        tb,
+        true,
+        cutoff_score,
+        score,
+        best_q_start,
+        best_q_end,
+        best_s_start,
+        best_s_end,
+        best_start_esp_index,
+        best_end_esp_index,
+        best_end_esp_num,
+    )
+}
+
+/// Port of NCBI internal `s_UpdateReevaluatedHSP` (`blast_hits.c:440`).
+///
+/// Rust stores absolute offsets in `TracebackResult`; the C function receives
+/// raw sequence pointers and computes these same offsets by pointer
+/// subtraction.
+#[allow(clippy::too_many_arguments)]
+pub fn s_update_reevaluated_hsp(
+    tb: &mut TracebackResult,
+    gapped: bool,
+    cutoff_score: i32,
+    score: i32,
+    best_q_start: usize,
+    best_q_end: usize,
+    best_s_start: usize,
+    best_s_end: usize,
+    best_start_esp_index: usize,
+    best_end_esp_index: usize,
+    best_end_esp_num: i32,
+) -> bool {
+    tb.score = score;
+
+    if tb.score < cutoff_score {
         return true;
     }
-    let mut trimmed: Vec<(GapAlignOpType, i32)> = Vec::new();
-    for i in best_start_esp_index..=best_end_esp_index {
-        let (op, n) = ops[i];
-        if i == best_end_esp_index {
-            let effective = if best_end_esp_num > 0 {
-                best_end_esp_num
-            } else {
-                n
-            };
-            if effective > 0 {
-                trimmed.push((op, effective));
-            }
-        } else {
-            trimmed.push((op, n));
+
+    tb.query_start = best_q_start;
+    tb.query_end = best_q_start + best_q_end.saturating_sub(best_q_start);
+    tb.subject_start = best_s_start;
+    tb.subject_end = best_s_start + best_s_end.saturating_sub(best_s_start);
+
+    if gapped {
+        let last_num = match tb.edit_script.ops.len().checked_sub(1) {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        if best_end_esp_index >= tb.edit_script.ops.len()
+            || best_start_esp_index > best_end_esp_index
+        {
+            return false;
+        }
+
+        if best_end_esp_index != last_num || best_start_esp_index > 0 {
+            tb.edit_script.ops = tb.edit_script.ops[best_start_esp_index..=best_end_esp_index]
+                .iter()
+                .copied()
+                .collect();
+        }
+
+        if let Some(last) = tb.edit_script.ops.last_mut() {
+            last.1 = best_end_esp_num;
         }
     }
 
-    tb.score = score;
-    tb.edit_script.ops = trimmed;
-    tb.query_start = best_q_start;
-    tb.subject_start = best_s_start;
-    tb.query_end = best_q_end;
-    tb.subject_end = best_s_end;
     false
+}
+
+/// Port of NCBI internal `s_UpdateReevaluatedHSPUngapped` (`blast_hits.c:664`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_update_reevaluated_hsp_ungapped(
+    tb: &mut TracebackResult,
+    cutoff_score: i32,
+    score: i32,
+    best_q_start: usize,
+    best_q_end: usize,
+    best_s_start: usize,
+    best_s_end: usize,
+) -> bool {
+    s_update_reevaluated_hsp(
+        tb,
+        false,
+        cutoff_score,
+        score,
+        best_q_start,
+        best_q_end,
+        best_s_start,
+        best_s_end,
+        0,
+        0,
+        0,
+    )
 }
 
 pub fn blast_gapped_align(
@@ -1316,6 +2468,977 @@ pub fn blast_gapped_align(
         subject_start: s_start,
         subject_end,
     })
+}
+
+fn oof_script_to_op(script: u8) -> GapAlignOpType {
+    match script & SCRIPT_OP_MASK {
+        SCRIPT_GAP_IN_A => GapAlignOpType::Del,
+        1 => GapAlignOpType::Del2,
+        2 => GapAlignOpType::Del1,
+        SCRIPT_SUB => GapAlignOpType::Sub,
+        4 => GapAlignOpType::Ins1,
+        5 => GapAlignOpType::Ins2,
+        SCRIPT_GAP_IN_B => GapAlignOpType::Ins,
+        _ => GapAlignOpType::Sub,
+    }
+}
+
+fn oof_initial_trace_script(
+    frame: u8,
+    score_other_frame1: i32,
+    score_other_frame2: i32,
+    score_col1: i32,
+    score_col2: i32,
+    score_col3: i32,
+    shift_penalty: i32,
+) -> u8 {
+    let score_col = match frame {
+        0 => score_col1,
+        1 => score_col2,
+        _ => score_col3,
+    };
+    let shifted = score_other_frame1.max(score_other_frame2) - shift_penalty;
+    if score_col >= shifted {
+        return SCRIPT_NEXT_IN_FRAME;
+    }
+
+    match frame {
+        0 if shifted + shift_penalty == score_other_frame1 => {
+            if score_other_frame1 == score_col2 {
+                2
+            } else {
+                5
+            }
+        }
+        0 => {
+            if score_other_frame2 == score_col3 {
+                1
+            } else {
+                4
+            }
+        }
+        1 if shifted + shift_penalty == score_other_frame1 => {
+            if score_other_frame1 == score_col1 {
+                1
+            } else {
+                4
+            }
+        }
+        1 => {
+            if score_other_frame2 == score_col3 {
+                2
+            } else {
+                5
+            }
+        }
+        _ if shifted + shift_penalty == score_other_frame1 => {
+            if score_other_frame1 == score_col1 {
+                2
+            } else {
+                5
+            }
+        }
+        _ => {
+            if score_other_frame2 == score_col2 {
+                1
+            } else {
+                4
+            }
+        }
+    }
+}
+
+/// Port-shaped low-level OOF traceback entry for NCBI
+/// `s_OutOfFrameAlignWithTraceback` (`blast_gapalign.c:1334`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_out_of_frame_align_with_traceback(
+    a: &[u8],
+    b: &[u8],
+    m: i32,
+    n: i32,
+    a_offset: &mut i32,
+    b_offset: &mut i32,
+    edit_block: Option<&mut GapPrelimEditBlock>,
+    scoring: &OutOfFrameScoring,
+    query_offset: i32,
+    reversed: bool,
+) -> i32 {
+    *a_offset = 0;
+    *b_offset = -2;
+    if n <= 0 || m <= 0 {
+        return 0;
+    }
+
+    let m = m.min(a.len() as i32).max(0) as usize;
+    let n = n.min(b.len() as i32).max(0) as usize;
+    if m == 0 || n == 0 {
+        return 0;
+    }
+
+    let minint = i32::MIN / 4;
+    let gap_open_extend = scoring.gap_open + scoring.gap_extend;
+    let x_dropoff = scoring.x_dropoff.max(gap_open_extend);
+    let num_extra_cells = if scoring.gap_extend > 0 {
+        3 * (x_dropoff / scoring.gap_extend + 5)
+    } else {
+        n as i32 + 5
+    }
+    .max(0) as usize;
+
+    let mut score_array = vec![
+        OofScoreCell {
+            best: minint,
+            best_gap: minint,
+        };
+        n + num_extra_cells + 8
+    ];
+    let mut edit_script: Vec<Vec<u8>> = Vec::with_capacity(m + 1);
+    let mut edit_start_offset: Vec<usize> = Vec::with_capacity(m + 1);
+    edit_script.push(vec![SCRIPT_GAP_IN_B; score_array.len()]);
+    edit_start_offset.push(0);
+
+    let mut score = -gap_open_extend;
+    score_array[0].best = 0;
+    score_array[0].best_gap = -gap_open_extend;
+    let mut i = 3usize;
+    while i <= n + 2 {
+        if i + 2 >= score_array.len() {
+            score_array.resize(
+                i + 6,
+                OofScoreCell {
+                    best: minint,
+                    best_gap: minint,
+                },
+            );
+            edit_script[0].resize(i + 6, SCRIPT_GAP_IN_B);
+        }
+        score_array[i].best = score;
+        score_array[i].best_gap = score - gap_open_extend;
+        edit_script[0][i] = SCRIPT_GAP_IN_B;
+        score_array[i - 1].best = minint;
+        score_array[i - 1].best_gap = minint;
+        edit_script[0][i - 1] = SCRIPT_GAP_IN_B;
+        score_array[i - 2].best = minint;
+        score_array[i - 2].best_gap = minint;
+        edit_script[0][i - 2] = SCRIPT_GAP_IN_B;
+        if score < -x_dropoff {
+            break;
+        }
+        score -= scoring.gap_extend;
+        i += 3;
+    }
+
+    let mut b_size = i.saturating_sub(2);
+    if i >= score_array.len() {
+        score_array.resize(
+            i + 1,
+            OofScoreCell {
+                best: minint,
+                best_gap: minint,
+            },
+        );
+        edit_script[0].resize(i + 1, SCRIPT_GAP_IN_B);
+    }
+    score_array[i].best = minint;
+    score_array[i].best_gap = minint;
+
+    let mut best_score = 0;
+    let mut first_b_index = 0usize;
+    for a_index in 1..=m {
+        let mut row = vec![0u8; b_size.saturating_sub(first_b_index) + num_extra_cells + 8];
+        let row_offset = first_b_index;
+
+        let mut score_row1 = minint;
+        let mut score_row2 = minint;
+        let mut score_row3 = minint;
+        let mut score_col1 = minint;
+        let mut score_col2 = minint;
+        let mut score_col3 = minint;
+        let mut score_other_frame1 = minint;
+        let mut score_other_frame2 = minint;
+        let mut last_b_index = first_b_index;
+        let mut b_index = first_b_index;
+
+        while b_index < b_size {
+            let base = b_index - row_offset;
+            if base >= row.len() {
+                row.resize(base + 1, 0);
+            }
+
+            let frame_score = scoring.oof_row_score(
+                query_offset,
+                a,
+                m,
+                a_index,
+                oof_subject_letter(b, b_index, reversed),
+                reversed,
+            );
+            let script = oof_initial_trace_script(
+                0,
+                score_other_frame1,
+                score_other_frame2,
+                score_col1,
+                score_col2,
+                score_col3,
+                scoring.shift_penalty,
+            );
+            let script = oof_step_frame_with_script(
+                &mut score_array,
+                b_index,
+                &mut score_row1,
+                &mut score_col1,
+                &mut score_other_frame1,
+                &mut score_other_frame2,
+                &mut best_score,
+                a_offset,
+                b_offset,
+                a_index,
+                frame_score,
+                gap_open_extend,
+                scoring.gap_extend,
+                scoring.shift_penalty,
+                x_dropoff,
+                &mut first_b_index,
+                &mut last_b_index,
+                script,
+                false,
+            );
+            row[base] = script;
+            b_index += 1;
+            if b_index >= b_size {
+                let score = score_row1;
+                score_row1 = score_row2;
+                score_row2 = score_row3;
+                score_row3 = score;
+                let _ = (score_row1, score_row2, score_row3);
+                break;
+            }
+
+            let base = b_index - row_offset;
+            if base >= row.len() {
+                row.resize(base + 1, 0);
+            }
+            let frame_score = scoring.oof_row_score(
+                query_offset,
+                a,
+                m,
+                a_index,
+                oof_subject_letter(b, b_index, reversed),
+                reversed,
+            );
+            let script = oof_initial_trace_script(
+                1,
+                score_other_frame1,
+                score_other_frame2,
+                score_col1,
+                score_col2,
+                score_col3,
+                scoring.shift_penalty,
+            );
+            let script = oof_step_frame_with_script(
+                &mut score_array,
+                b_index,
+                &mut score_row2,
+                &mut score_col2,
+                &mut score_other_frame2,
+                &mut score_other_frame1,
+                &mut best_score,
+                a_offset,
+                b_offset,
+                a_index,
+                frame_score,
+                gap_open_extend,
+                scoring.gap_extend,
+                scoring.shift_penalty,
+                x_dropoff,
+                &mut first_b_index,
+                &mut last_b_index,
+                script,
+                true,
+            );
+            row[base] = script;
+            b_index += 1;
+            if b_index >= b_size {
+                let score = score_row2;
+                score_row2 = score_row1;
+                score_row1 = score_row3;
+                score_row3 = score;
+                let _ = (score_row1, score_row2, score_row3);
+                break;
+            }
+
+            let base = b_index - row_offset;
+            if base >= row.len() {
+                row.resize(base + 1, 0);
+            }
+            let frame_score = scoring.oof_row_score(
+                query_offset,
+                a,
+                m,
+                a_index,
+                oof_subject_letter(b, b_index, reversed),
+                reversed,
+            );
+            let frame2_old_other2 = score_other_frame2;
+            let script = oof_initial_trace_script(
+                2,
+                score_other_frame1,
+                score_other_frame2,
+                score_col1,
+                score_col2,
+                score_col3,
+                scoring.shift_penalty,
+            );
+            let script = oof_step_frame_with_script(
+                &mut score_array,
+                b_index,
+                &mut score_row3,
+                &mut score_col3,
+                &mut score_other_frame1,
+                &mut score_other_frame2,
+                &mut best_score,
+                a_offset,
+                b_offset,
+                a_index,
+                frame_score,
+                gap_open_extend,
+                scoring.gap_extend,
+                scoring.shift_penalty,
+                x_dropoff,
+                &mut first_b_index,
+                &mut last_b_index,
+                script,
+                true,
+            );
+            score_other_frame1 = frame2_old_other2;
+            row[base] = script;
+            b_index += 1;
+        }
+
+        if first_b_index == b_size {
+            edit_script.push(row);
+            edit_start_offset.push(row_offset);
+            break;
+        }
+
+        if b_size + num_extra_cells + 5 >= score_array.len() {
+            score_array.resize(
+                b_size + num_extra_cells + 100,
+                OofScoreCell {
+                    best: minint,
+                    best_gap: minint,
+                },
+            );
+        }
+
+        if last_b_index < b_size.saturating_sub(1) {
+            b_size = last_b_index + 1;
+        } else {
+            let mut score = score_row1.max(score_row2).max(score_row3);
+            while score >= best_score - x_dropoff && b_size < n + 1 {
+                let base = b_size - row_offset;
+                if base + 2 >= row.len() {
+                    row.resize(base + 3, 0);
+                }
+                score_array[b_size].best = score_row1;
+                score_array[b_size].best_gap = score_row1 - gap_open_extend;
+                score_row1 -= scoring.gap_extend;
+                row[base] = SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_B;
+
+                score_array[b_size + 1].best = score_row2;
+                score_array[b_size + 1].best_gap = score_row2 - gap_open_extend;
+                score_row2 -= scoring.gap_extend;
+                row[base + 1] = SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_B;
+
+                score_array[b_size + 2].best = score_row3;
+                score_array[b_size + 2].best_gap = score_row3 - gap_open_extend;
+                score_row3 -= scoring.gap_extend;
+                row[base + 2] = SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_B;
+
+                b_size += 3;
+                score -= scoring.gap_extend;
+            }
+        }
+
+        b_size = b_size.min(n + 1);
+        let used = b_index.max(b_size).saturating_sub(row_offset) + 1;
+        if used > row.len() {
+            row.resize(used, 0);
+        }
+        edit_script.push(row);
+        edit_start_offset.push(row_offset);
+
+        let last = (b_size + 4).min(n + 3);
+        while b_size < last {
+            if b_size >= score_array.len() {
+                score_array.resize(
+                    b_size + 1,
+                    OofScoreCell {
+                        best: minint,
+                        best_gap: minint,
+                    },
+                );
+            }
+            score_array[b_size].best = minint;
+            score_array[b_size].best_gap = minint;
+            b_size += 1;
+        }
+    }
+
+    if let Some(edit_block) = edit_block {
+        crate::gapinfo::gap_prelim_edit_block_reset(Some(edit_block));
+        let mut a_index = (*a_offset).max(0) as usize;
+        let mut b_index = (*b_offset).max(0) as usize;
+        let mut script = 1u8;
+
+        while a_index > 0 || b_index > 0 {
+            let row_offset = edit_start_offset.get(a_index).copied().unwrap_or(0);
+            let next_script = edit_script
+                .get(a_index)
+                .and_then(|row| row.get(b_index.saturating_sub(row_offset)))
+                .copied()
+                .unwrap_or(SCRIPT_SUB);
+
+            script = match script {
+                SCRIPT_GAP_IN_A => {
+                    let next_op = next_script & SCRIPT_OP_MASK;
+                    if next_script & (SCRIPT_OOF_OPEN_GAP | SCRIPT_EXTEND_GAP_A) != 0 {
+                        SCRIPT_GAP_IN_A
+                    } else {
+                        next_op
+                    }
+                }
+                SCRIPT_GAP_IN_B => {
+                    let next_op = next_script & SCRIPT_OP_MASK;
+                    if next_script & (SCRIPT_OOF_OPEN_GAP | SCRIPT_EXTEND_GAP_B) != 0 {
+                        SCRIPT_GAP_IN_B
+                    } else {
+                        next_op
+                    }
+                }
+                _ => next_script & SCRIPT_OP_MASK,
+            };
+
+            if script == SCRIPT_GAP_IN_B {
+                b_index = b_index.saturating_sub(3);
+            } else {
+                b_index = b_index.saturating_sub(script as usize);
+                a_index = a_index.saturating_sub(1);
+            }
+            crate::gapinfo::gap_prelim_edit_block_add(edit_block, oof_script_to_op(script), 1);
+        }
+    }
+
+    if !reversed {
+        *b_offset -= 2;
+    }
+    best_score
+}
+
+#[derive(Clone, Copy)]
+struct OofScoreCell {
+    best: i32,
+    best_gap: i32,
+}
+
+fn oof_subject_letter(b: &[u8], b_index: usize, reversed: bool) -> u8 {
+    if reversed {
+        b.get(b.len().saturating_sub(1).saturating_sub(b_index))
+            .copied()
+            .unwrap_or(0)
+    } else {
+        b_index
+            .checked_sub(2)
+            .and_then(|idx| b.get(idx))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn oof_step_frame_with_script(
+    score_array: &mut [OofScoreCell],
+    b_index: usize,
+    score_row: &mut i32,
+    score_col: &mut i32,
+    score_other_a: &mut i32,
+    score_other_b: &mut i32,
+    best_score: &mut i32,
+    a_offset: &mut i32,
+    b_offset: &mut i32,
+    a_index: usize,
+    frame_score: i32,
+    gap_open_extend: i32,
+    gap_extend: i32,
+    shift_penalty: i32,
+    x_dropoff: i32,
+    first_b_index: &mut usize,
+    last_b_index: &mut usize,
+    initial_script: u8,
+    gap_tie_prefers_column: bool,
+) -> u8 {
+    let minint = i32::MIN / 4;
+    let mut script = initial_script;
+    let mut score = (*score_other_a).max(*score_other_b) - shift_penalty;
+    score = score.max(*score_col) + frame_score;
+    *score_other_a = (*score_col).max(score_array[b_index].best);
+    *score_col = score_array[b_index].best;
+    let mut score_gap_col = score_array[b_index].best_gap;
+
+    if score < score_gap_col.max(*score_row) {
+        if score_gap_col > *score_row || (gap_tie_prefers_column && score_gap_col == *score_row) {
+            score = score_gap_col;
+            script = SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_A;
+        } else {
+            score = *score_row;
+            script = SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_B;
+        }
+
+        if *best_score - score > x_dropoff {
+            if *first_b_index == b_index {
+                *first_b_index = b_index + 1;
+            } else {
+                score_array[b_index].best = minint;
+            }
+        } else {
+            *last_b_index = b_index;
+            score_array[b_index].best = score;
+            score_array[b_index].best_gap = score_gap_col - gap_extend;
+            *score_row -= gap_extend;
+        }
+    } else if *best_score - score > x_dropoff {
+        if *first_b_index == b_index {
+            *first_b_index = b_index + 1;
+        } else {
+            score_array[b_index].best = minint;
+        }
+    } else {
+        *last_b_index = b_index;
+        score_array[b_index].best = score;
+        if score > *best_score {
+            *best_score = score;
+            *a_offset = a_index as i32;
+            *b_offset = b_index as i32;
+        }
+
+        score -= gap_open_extend;
+        *score_row -= gap_extend;
+        if score > *score_row {
+            *score_row = score;
+        } else {
+            script |= SCRIPT_EXTEND_GAP_B;
+        }
+
+        score_gap_col -= gap_extend;
+        if score < score_gap_col {
+            score_array[b_index].best_gap = score_gap_col;
+            script |= SCRIPT_EXTEND_GAP_A;
+        } else {
+            score_array[b_index].best_gap = score;
+        }
+    }
+
+    script
+}
+
+fn oof_step_frame(
+    score_array: &mut [OofScoreCell],
+    b_index: usize,
+    score_row: &mut i32,
+    score_col: &mut i32,
+    score_other_a: &mut i32,
+    score_other_b: &mut i32,
+    best_score: &mut i32,
+    a_offset: &mut i32,
+    b_offset: &mut i32,
+    a_index: usize,
+    frame_score: i32,
+    gap_open_extend: i32,
+    gap_extend: i32,
+    shift_penalty: i32,
+    x_dropoff: i32,
+    first_b_index: &mut usize,
+    last_b_index: &mut usize,
+) {
+    let minint = i32::MIN / 4;
+    let mut score = (*score_other_a).max(*score_other_b) - shift_penalty;
+    score = score.max(*score_col) + frame_score;
+    *score_other_a = (*score_col).max(score_array[b_index].best);
+    *score_col = score_array[b_index].best;
+    let score_gap_col = score_array[b_index].best_gap;
+
+    if score < score_gap_col.max(*score_row) {
+        score = score_gap_col.max(*score_row);
+        if *best_score - score > x_dropoff {
+            if *first_b_index == b_index {
+                *first_b_index = b_index + 1;
+            } else {
+                score_array[b_index].best = minint;
+            }
+        } else {
+            *last_b_index = b_index;
+            score_array[b_index].best = score;
+            score_array[b_index].best_gap = score_gap_col - gap_extend;
+            *score_row -= gap_extend;
+        }
+    } else if *best_score - score > x_dropoff {
+        if *first_b_index == b_index {
+            *first_b_index = b_index + 1;
+        } else {
+            score_array[b_index].best = minint;
+        }
+    } else {
+        *last_b_index = b_index;
+        score_array[b_index].best = score;
+        if score > *best_score {
+            *best_score = score;
+            *a_offset = a_index as i32;
+            *b_offset = b_index as i32;
+        }
+        score -= gap_open_extend;
+        *score_row -= gap_extend;
+        *score_row = score.max(*score_row);
+        score_array[b_index].best_gap = score.max(score_gap_col - gap_extend);
+    }
+}
+
+/// Port-shaped low-level OOF score/traceback dispatcher for NCBI
+/// `s_OutOfFrameGappedAlign` (`blast_gapalign.c:1950`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_out_of_frame_gapped_align(
+    a: &[u8],
+    b: &[u8],
+    m: i32,
+    n: i32,
+    a_offset: &mut i32,
+    b_offset: &mut i32,
+    score_only: bool,
+    edit_block: Option<&mut GapPrelimEditBlock>,
+    scoring: &OutOfFrameScoring,
+    query_offset: i32,
+    reversed: bool,
+) -> i32 {
+    if !score_only {
+        return s_out_of_frame_align_with_traceback(
+            a,
+            b,
+            m,
+            n,
+            a_offset,
+            b_offset,
+            edit_block,
+            scoring,
+            query_offset,
+            reversed,
+        );
+    }
+
+    *a_offset = 0;
+    *b_offset = -2;
+    if n <= 0 || m <= 0 {
+        return 0;
+    }
+
+    let m = m.min(a.len() as i32).max(0) as usize;
+    let n = n.min(b.len() as i32).max(0) as usize;
+    if m == 0 || n == 0 {
+        return 0;
+    }
+
+    let minint = i32::MIN / 4;
+    let gap_open_extend = scoring.gap_open + scoring.gap_extend;
+    let x_dropoff = scoring.x_dropoff.max(gap_open_extend);
+    let num_extra_cells = if scoring.gap_extend > 0 {
+        3 * (x_dropoff / scoring.gap_extend + 5)
+    } else {
+        n as i32 + 5
+    }
+    .max(0) as usize;
+    let mut score_array = vec![
+        OofScoreCell {
+            best: minint,
+            best_gap: minint,
+        };
+        n + num_extra_cells + 8
+    ];
+
+    let mut score = -gap_open_extend;
+    score_array[0].best = 0;
+    score_array[0].best_gap = -gap_open_extend;
+    let mut i = 3usize;
+    while i <= n + 2 {
+        if i + 2 >= score_array.len() {
+            score_array.resize(
+                i + 6,
+                OofScoreCell {
+                    best: minint,
+                    best_gap: minint,
+                },
+            );
+        }
+        score_array[i].best = score;
+        score_array[i].best_gap = score - gap_open_extend;
+        score_array[i - 1].best = minint;
+        score_array[i - 1].best_gap = minint;
+        score_array[i - 2].best = minint;
+        score_array[i - 2].best_gap = minint;
+        if score < -x_dropoff {
+            break;
+        }
+        score -= scoring.gap_extend;
+        i += 3;
+    }
+
+    let mut b_size = i.saturating_sub(2);
+    if i >= score_array.len() {
+        score_array.resize(
+            i + 1,
+            OofScoreCell {
+                best: minint,
+                best_gap: minint,
+            },
+        );
+    }
+    score_array[i].best = minint;
+    score_array[i].best_gap = minint;
+
+    let mut best_score = 0;
+    let mut first_b_index = 0usize;
+    for a_index in 1..=m {
+        let mut score_row1 = minint;
+        let mut score_row2 = minint;
+        let mut score_row3 = minint;
+        let mut score_col1 = minint;
+        let mut score_col2 = minint;
+        let mut score_col3 = minint;
+        let mut score_other_frame1 = minint;
+        let mut score_other_frame2 = minint;
+        let mut last_b_index = first_b_index;
+        let mut b_index = first_b_index;
+
+        while b_index < b_size {
+            let frame_score = scoring.oof_row_score(
+                query_offset,
+                a,
+                m,
+                a_index,
+                oof_subject_letter(b, b_index, reversed),
+                reversed,
+            );
+            oof_step_frame(
+                &mut score_array,
+                b_index,
+                &mut score_row1,
+                &mut score_col1,
+                &mut score_other_frame1,
+                &mut score_other_frame2,
+                &mut best_score,
+                a_offset,
+                b_offset,
+                a_index,
+                frame_score,
+                gap_open_extend,
+                scoring.gap_extend,
+                scoring.shift_penalty,
+                x_dropoff,
+                &mut first_b_index,
+                &mut last_b_index,
+            );
+            b_index += 1;
+            if b_index >= b_size {
+                let score = score_row1;
+                score_row1 = score_row2;
+                score_row2 = score_row3;
+                score_row3 = score;
+                let _ = (score_row1, score_row2, score_row3);
+                break;
+            }
+
+            let frame_score = scoring.oof_row_score(
+                query_offset,
+                a,
+                m,
+                a_index,
+                oof_subject_letter(b, b_index, reversed),
+                reversed,
+            );
+            oof_step_frame(
+                &mut score_array,
+                b_index,
+                &mut score_row2,
+                &mut score_col2,
+                &mut score_other_frame2,
+                &mut score_other_frame1,
+                &mut best_score,
+                a_offset,
+                b_offset,
+                a_index,
+                frame_score,
+                gap_open_extend,
+                scoring.gap_extend,
+                scoring.shift_penalty,
+                x_dropoff,
+                &mut first_b_index,
+                &mut last_b_index,
+            );
+            b_index += 1;
+            if b_index >= b_size {
+                let score = score_row2;
+                score_row2 = score_row1;
+                score_row1 = score_row3;
+                score_row3 = score;
+                let _ = (score_row1, score_row2, score_row3);
+                break;
+            }
+
+            let frame_score = scoring.oof_row_score(
+                query_offset,
+                a,
+                m,
+                a_index,
+                oof_subject_letter(b, b_index, reversed),
+                reversed,
+            );
+            let old_other2 = score_other_frame2;
+            oof_step_frame(
+                &mut score_array,
+                b_index,
+                &mut score_row3,
+                &mut score_col3,
+                &mut score_other_frame1,
+                &mut score_other_frame2,
+                &mut best_score,
+                a_offset,
+                b_offset,
+                a_index,
+                frame_score,
+                gap_open_extend,
+                scoring.gap_extend,
+                scoring.shift_penalty,
+                x_dropoff,
+                &mut first_b_index,
+                &mut last_b_index,
+            );
+            score_other_frame1 = old_other2;
+            b_index += 1;
+        }
+
+        if first_b_index == b_size {
+            break;
+        }
+
+        if b_size + num_extra_cells + 5 >= score_array.len() {
+            score_array.resize(
+                b_size + num_extra_cells + 100,
+                OofScoreCell {
+                    best: minint,
+                    best_gap: minint,
+                },
+            );
+        }
+
+        if last_b_index < b_size.saturating_sub(1) {
+            b_size = last_b_index + 1;
+        } else {
+            let mut score = score_row1.max(score_row2).max(score_row3);
+            while score >= best_score - x_dropoff && b_size < n + 1 {
+                if b_size + 2 >= score_array.len() {
+                    score_array.resize(
+                        b_size + 6,
+                        OofScoreCell {
+                            best: minint,
+                            best_gap: minint,
+                        },
+                    );
+                }
+                score_array[b_size].best = score_row1;
+                score_array[b_size].best_gap = score_row1 - gap_open_extend;
+                score_row1 -= scoring.gap_extend;
+
+                score_array[b_size + 1].best = score_row2;
+                score_array[b_size + 1].best_gap = score_row2 - gap_open_extend;
+                score_row2 -= scoring.gap_extend;
+
+                score_array[b_size + 2].best = score_row3;
+                score_array[b_size + 2].best_gap = score_row3 - gap_open_extend;
+                score_row3 -= scoring.gap_extend;
+
+                b_size += 3;
+                score -= scoring.gap_extend;
+            }
+        }
+
+        b_size = b_size.min(n + 1);
+        let last = (b_size + 4).min(n + 3);
+        while b_size < last {
+            if b_size >= score_array.len() {
+                score_array.resize(
+                    b_size + 1,
+                    OofScoreCell {
+                        best: minint,
+                        best_gap: minint,
+                    },
+                );
+            }
+            score_array[b_size].best = minint;
+            score_array[b_size].best_gap = minint;
+            b_size += 1;
+        }
+    }
+
+    if !reversed {
+        *b_offset -= 2;
+    }
+    best_score
+}
+
+/// Port of NCBI wrapper `s_OutOfFrameSemiGappedAlignWrap`
+/// (`blast_gapalign.c:4223`): BLASTX swaps query/subject for the underlying
+/// OOF DP, TBLASTN does not.
+#[allow(clippy::too_many_arguments)]
+pub fn s_out_of_frame_semi_gapped_align_wrap(
+    query: &[u8],
+    subject: &[u8],
+    q_off: i32,
+    s_off: i32,
+    private_q_start: &mut i32,
+    private_s_start: &mut i32,
+    score_only: bool,
+    edit_block: Option<&mut GapPrelimEditBlock>,
+    scoring: &OutOfFrameScoring,
+    psi_offset: i32,
+    reversed: bool,
+    switch_seq: bool,
+) -> i32 {
+    if switch_seq {
+        s_out_of_frame_gapped_align(
+            subject,
+            query,
+            s_off,
+            q_off,
+            private_s_start,
+            private_q_start,
+            score_only,
+            edit_block,
+            scoring,
+            psi_offset,
+            reversed,
+        )
+    } else {
+        s_out_of_frame_gapped_align(
+            query,
+            subject,
+            q_off,
+            s_off,
+            private_q_start,
+            private_s_start,
+            score_only,
+            edit_block,
+            scoring,
+            psi_offset,
+            reversed,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1511,6 +3634,65 @@ mod tests {
         assert_eq!(tb.score, 10);
         assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 10)]);
         assert_eq!((tb.query_start, tb.query_end), (0, 10));
+    }
+
+    #[test]
+    fn test_update_reevaluated_hsp_trims_gap_script_like_c() {
+        let mut tb = TracebackResult {
+            score: 0,
+            edit_script: GapEditScript {
+                ops: vec![
+                    (GapAlignOpType::Sub, 3),
+                    (GapAlignOpType::Ins, 2),
+                    (GapAlignOpType::Sub, 5),
+                    (GapAlignOpType::Del, 1),
+                ],
+            },
+            query_start: 2,
+            query_end: 13,
+            subject_start: 10,
+            subject_end: 21,
+        };
+
+        let delete = s_update_reevaluated_hsp(&mut tb, true, 20, 30, 4, 11, 12, 19, 1, 2, 4);
+
+        assert!(!delete);
+        assert_eq!(tb.score, 30);
+        assert_eq!((tb.query_start, tb.query_end), (4, 11));
+        assert_eq!((tb.subject_start, tb.subject_end), (12, 19));
+        assert_eq!(
+            tb.edit_script.ops,
+            vec![(GapAlignOpType::Ins, 2), (GapAlignOpType::Sub, 4)]
+        );
+    }
+
+    #[test]
+    fn test_update_reevaluated_hsp_ungapped_leaves_script_and_deletes_below_cutoff() {
+        let mut tb = TracebackResult {
+            score: 0,
+            edit_script: GapEditScript {
+                ops: vec![(GapAlignOpType::Sub, 6)],
+            },
+            query_start: 0,
+            query_end: 6,
+            subject_start: 0,
+            subject_end: 6,
+        };
+
+        assert!(s_update_reevaluated_hsp_ungapped(
+            &mut tb, 10, 7, 1, 5, 2, 6
+        ));
+        assert_eq!(tb.score, 7);
+        assert_eq!((tb.query_start, tb.query_end), (0, 6));
+        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 6)]);
+
+        assert!(!s_update_reevaluated_hsp_ungapped(
+            &mut tb, 10, 11, 1, 5, 2, 6
+        ));
+        assert_eq!(tb.score, 11);
+        assert_eq!((tb.query_start, tb.query_end), (1, 5));
+        assert_eq!((tb.subject_start, tb.subject_end), (2, 6));
+        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 6)]);
     }
 
     #[test]
@@ -1810,5 +3992,541 @@ mod tests {
             true,
         );
         assert_eq!(left_packed.0, left_decoded);
+    }
+
+    #[test]
+    fn test_c_named_packed_gapped_alignment_wrappers_match_existing_paths() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = vec![0u8, 1, 2, 3, 0, 1, 3, 3, 0, 1, 2, 3];
+        let packed = pack_ncbi2na_bases(&subject);
+
+        let extents = blast_gapped_score_extents_packed_subject(
+            &query,
+            &packed,
+            subject.len(),
+            5,
+            5,
+            1,
+            -3,
+            5,
+            2,
+            12,
+            8,
+        );
+        let wrapped_extents = s_blast_dyn_prog_nt_gapped_alignment(
+            &query,
+            &packed,
+            subject.len(),
+            5,
+            5,
+            1,
+            -3,
+            5,
+            2,
+            12,
+            8,
+        );
+        assert_eq!(wrapped_extents.0, extents.0);
+        assert_eq!(wrapped_extents.1, extents.1);
+        assert_eq!(wrapped_extents.2, extents.2);
+        assert_eq!(wrapped_extents.3, extents.3);
+        assert_eq!(wrapped_extents.4, extents.4);
+        assert_eq!(wrapped_extents.5, extents.5);
+        assert_eq!(wrapped_extents.6, extents.6);
+        assert_eq!(wrapped_extents.7, extents.7);
+        assert_eq!(wrapped_extents.8, extents.8);
+        assert_eq!(wrapped_extents.9, extents.9);
+        assert_eq!(wrapped_extents.10, extents.10);
+        assert_eq!(wrapped_extents.11, extents.11);
+        assert_eq!(wrapped_extents.12, extents.12);
+
+        let matrix = build_blastna_matrix(1, -3);
+        assert_eq!(
+            s_blast_align_packed_nucl(&query[..6], &packed, 6, 6, 0, 1, -3, 5, 2, 12, true),
+            gapped_score_one_dir_packed_subject(
+                &query[..6],
+                &packed,
+                6,
+                6,
+                0,
+                &matrix,
+                7,
+                2,
+                12,
+                true,
+            )
+        );
+    }
+
+    fn phi_test_matrix() -> Vec<Vec<i32>> {
+        let mut matrix = vec![vec![-3; 256]; 256];
+        for i in 0..256 {
+            matrix[i][i] = 2;
+        }
+        matrix
+    }
+
+    #[test]
+    fn translated_phi_gapped_alignment_matches_c_boundary_shape() {
+        let matrix = phi_test_matrix();
+        let mut gap_align = crate::blast_kappa::blast_gap_align_struct_new(12).expect("gap align");
+
+        assert_eq!(
+            s_phi_gapped_alignment(
+                b"AB",
+                b"AB",
+                Some(&mut gap_align),
+                &matrix,
+                5,
+                2,
+                12,
+                0,
+                0,
+                2,
+                2,
+            ),
+            0
+        );
+        assert_eq!(gap_align.score, 0);
+        assert_eq!((gap_align.query_start, gap_align.subject_start), (0, 0));
+        assert_eq!((gap_align.query_stop, gap_align.subject_stop), (1, 1));
+
+        assert_eq!(
+            s_phi_gapped_alignment(b"AB", b"AB", None, &matrix, 5, 2, 12, 0, 0, 2, 2,),
+            -1
+        );
+    }
+
+    #[test]
+    fn translated_phi_gapped_alignment_extends_around_pattern() {
+        let matrix = phi_test_matrix();
+        let mut gap_align = crate::blast_kappa::blast_gap_align_struct_new(12).expect("gap align");
+
+        assert_eq!(
+            s_phi_gapped_alignment(
+                b"XXABYY",
+                b"XXABYY",
+                Some(&mut gap_align),
+                &matrix,
+                5,
+                2,
+                12,
+                2,
+                2,
+                2,
+                2,
+            ),
+            0
+        );
+
+        assert_eq!(gap_align.score, 4);
+        assert_eq!((gap_align.query_start, gap_align.subject_start), (2, 2));
+        assert_eq!((gap_align.query_stop, gap_align.subject_stop), (4, 4));
+    }
+
+    #[test]
+    fn translated_phi_get_gapped_score_saves_pattern_hsps() {
+        let matrix = phi_test_matrix();
+        let mut gap_align = crate::blast_kappa::blast_gap_align_struct_new(12).expect("gap align");
+        let pattern_info = crate::pattern::SphiQueryInfo {
+            num_patterns: 1,
+            occurrences: vec![crate::pattern::SphiPatternInfo {
+                offset: 2,
+                length: 2,
+            }],
+            allocated_size: 1,
+            probability: 0.0,
+            pattern: None,
+        };
+        let phi_hits = [PhiInitialHit {
+            subject_start: 2,
+            subject_end: 3,
+        }];
+        let mut list = None;
+        let mut extensions = 0;
+
+        assert_eq!(
+            phi_get_gapped_score(
+                b"XXABYY",
+                Some(&pattern_info),
+                b"XXABYY",
+                Some(&mut gap_align),
+                &matrix,
+                5,
+                2,
+                12,
+                1,
+                &phi_hits,
+                10,
+                1,
+                0,
+                &mut list,
+                Some(&mut extensions),
+            ),
+            0
+        );
+
+        let list = list.expect("hsp list");
+        assert_eq!(extensions, 1);
+        assert_eq!(list.hsps.len(), 1);
+        let hsp = &list.hsps[0];
+        assert_eq!(hsp.score, 4);
+        assert_eq!((hsp.query_offset, hsp.query_end), (2, 4));
+        assert_eq!((hsp.subject_offset, hsp.subject_end), (2, 4));
+        assert_eq!(
+            hsp.pat_info,
+            Some(crate::hspstream::PhiPatInfo {
+                index: 0,
+                length: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn translated_phi_gapped_alignment_with_traceback_builds_pattern_script() {
+        let matrix = phi_test_matrix();
+        let pattern_blk =
+            crate::pattern::sphi_pattern_search_blk_new("A-B", false, None).expect("pattern");
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"XXABYY");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXABYY");
+        let mut gap_align = crate::blast_kappa::blast_gap_align_struct_new(12).expect("gap align");
+
+        assert_eq!(
+            phi_gapped_alignment_with_traceback(
+                &query,
+                &subject,
+                Some(&mut gap_align),
+                &matrix,
+                5,
+                2,
+                12,
+                2,
+                2,
+                query.len() as i32,
+                subject.len() as i32,
+                2,
+                2,
+                Some(&pattern_blk),
+            ),
+            0
+        );
+
+        assert_eq!(gap_align.score, 8);
+        assert_eq!((gap_align.query_start, gap_align.subject_start), (0, 0));
+        assert_eq!((gap_align.query_stop, gap_align.subject_stop), (6, 6));
+        assert_eq!(
+            gap_align
+                .edit_script
+                .as_ref()
+                .map(|script| script.ops.as_slice()),
+            Some(&[(GapAlignOpType::Sub, 6)][..])
+        );
+    }
+
+    #[test]
+    fn translated_phi_traceback_from_hsp_list_updates_and_reaps() {
+        let matrix = phi_test_matrix();
+        let pattern_blk =
+            crate::pattern::sphi_pattern_search_blk_new("A-B", false, None).expect("pattern");
+        let pattern_info = crate::pattern::SphiQueryInfo {
+            num_patterns: 1,
+            occurrences: vec![crate::pattern::SphiPatternInfo {
+                offset: 2,
+                length: 2,
+            }],
+            allocated_size: 1,
+            probability: 0.0,
+            pattern: None,
+        };
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"XXABYY");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXABYY");
+        let mut gap_align = crate::blast_kappa::blast_gap_align_struct_new(12).expect("gap align");
+        let mut hsp_list = crate::hspstream::blast_hsp_list_new(10);
+        crate::hspstream::blast_hsp_list_save_hsp(
+            &mut hsp_list,
+            crate::hspstream::Hsp {
+                score: 4,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: f64::MAX,
+                query_offset: 2,
+                query_end: 4,
+                query_gapped_start: 2,
+                subject_offset: 2,
+                subject_end: 4,
+                subject_gapped_start: 2,
+                context: 0,
+                query_frame: 1,
+                subject_frame: 0,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+                pat_info: Some(crate::hspstream::PhiPatInfo {
+                    index: 0,
+                    length: 2,
+                }),
+                map_info: None,
+            },
+        );
+        let scoring_options = crate::options::ScoringOptions::new_blastp();
+        let scoring_params = crate::parameters::ScoringParameters {
+            options: scoring_options,
+            reward: 0,
+            penalty: 0,
+            gap_open: 5,
+            gap_extend: 2,
+            scale_factor: 1.0,
+        };
+        let mut hit_options = crate::options::HitSavingOptions::default();
+        hit_options.program_number = crate::program::PHI_BLASTP;
+        hit_options.expect_value = f64::MAX;
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: hit_options,
+            cutoff_score_min: 1,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 0.0,
+        };
+
+        assert_eq!(
+            s_phi_traceback_from_hsp_list(
+                crate::program::PHI_BLASTP,
+                &mut hsp_list,
+                &query,
+                &subject,
+                &mut gap_align,
+                &matrix,
+                &scoring_params,
+                &hit_params,
+                Some(&pattern_info),
+                Some(&pattern_blk),
+                0.267,
+                0.041,
+            ),
+            0
+        );
+
+        assert_eq!(hsp_list.hsps.len(), 1);
+        let hsp = &hsp_list.hsps[0];
+        assert_eq!(hsp.score, 8);
+        assert!(hsp.edit_script.is_some());
+        assert!(hsp.evalue.is_finite());
+        assert!(hsp.bit_score.is_finite());
+    }
+
+    #[test]
+    fn out_of_frame_wrapper_switches_sequences_like_c() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDE");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"ACDF");
+        let scoring = OutOfFrameScoring::default();
+        let mut q_start = 0;
+        let mut s_start = 0;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+
+        let score = s_out_of_frame_semi_gapped_align_wrap(
+            &query,
+            &subject,
+            4,
+            4,
+            &mut q_start,
+            &mut s_start,
+            false,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+            true,
+        );
+
+        assert!(score > 0);
+        assert!(q_start > 0);
+        assert!(s_start > 0);
+        assert!(!block.edit_ops.is_empty());
+        assert!(block
+            .edit_ops
+            .iter()
+            .any(|op| op.op_type == GapAlignOpType::Sub));
+    }
+
+    #[test]
+    fn out_of_frame_gapped_align_score_only_uses_specialized_oof_dp() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
+        let scoring = OutOfFrameScoring::default();
+        let mut a_offset = 0;
+        let mut b_offset = 0;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+
+        let score = s_out_of_frame_gapped_align(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut a_offset,
+            &mut b_offset,
+            true,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+        );
+
+        assert!(score > 0);
+        assert!(a_offset > 0);
+        assert!(b_offset >= -2);
+        assert!(
+            block.edit_ops.is_empty(),
+            "score-only path must not populate traceback"
+        );
+    }
+
+    #[test]
+    fn out_of_frame_traceback_uses_same_oof_dp_score() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
+        let scoring = OutOfFrameScoring::default();
+        let mut score_a_offset = 0;
+        let mut score_b_offset = 0;
+        let score_only = s_out_of_frame_gapped_align(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut score_a_offset,
+            &mut score_b_offset,
+            true,
+            None,
+            &scoring,
+            0,
+            false,
+        );
+
+        let mut trace_a_offset = 0;
+        let mut trace_b_offset = 0;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+        let trace_score = s_out_of_frame_gapped_align(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut trace_a_offset,
+            &mut trace_b_offset,
+            false,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+        );
+
+        assert_eq!(trace_score, score_only);
+        assert_eq!(trace_a_offset, score_a_offset);
+        assert_eq!(trace_b_offset, score_b_offset);
+        assert!(!block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_traceback_step_records_gap_flags_like_c() {
+        let mut score_array = vec![OofScoreCell {
+            best: 0,
+            best_gap: 10,
+        }];
+        let mut score_row = 5;
+        let mut score_col = 0;
+        let mut other1 = i32::MIN / 4;
+        let mut other2 = i32::MIN / 4;
+        let mut best_score = 20;
+        let mut a_offset = 0;
+        let mut b_offset = 0;
+        let mut first_b_index = 0;
+        let mut last_b_index = 0;
+
+        let gap_open = oof_step_frame_with_script(
+            &mut score_array,
+            0,
+            &mut score_row,
+            &mut score_col,
+            &mut other1,
+            &mut other2,
+            &mut best_score,
+            &mut a_offset,
+            &mut b_offset,
+            1,
+            0,
+            2,
+            1,
+            1,
+            100,
+            &mut first_b_index,
+            &mut last_b_index,
+            SCRIPT_SUB,
+            false,
+        );
+        assert_eq!(gap_open, SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_A);
+
+        let mut score_array = vec![OofScoreCell {
+            best: 0,
+            best_gap: 10,
+        }];
+        let mut score_row = 0;
+        let mut score_col = 10;
+        let mut other1 = i32::MIN / 4;
+        let mut other2 = i32::MIN / 4;
+        let mut best_score = 0;
+        let mut first_b_index = 0;
+        let mut last_b_index = 0;
+        let extended = oof_step_frame_with_script(
+            &mut score_array,
+            0,
+            &mut score_row,
+            &mut score_col,
+            &mut other1,
+            &mut other2,
+            &mut best_score,
+            &mut a_offset,
+            &mut b_offset,
+            1,
+            0,
+            2,
+            1,
+            1,
+            100,
+            &mut first_b_index,
+            &mut last_b_index,
+            SCRIPT_SUB,
+            false,
+        );
+        assert_eq!(extended & SCRIPT_EXTEND_GAP_A, SCRIPT_EXTEND_GAP_A);
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_splits_frameshifts_and_truncates() {
+        let mut rev = crate::gapinfo::gap_prelim_edit_block_new();
+        crate::gapinfo::gap_prelim_edit_block_add(&mut rev, GapAlignOpType::Ins1, 2);
+        crate::gapinfo::gap_prelim_edit_block_add(&mut rev, GapAlignOpType::Sub, 2);
+        let mut fwd = crate::gapinfo::gap_prelim_edit_block_new();
+        crate::gapinfo::gap_prelim_edit_block_add(&mut fwd, GapAlignOpType::Sub, 3);
+        crate::gapinfo::gap_prelim_edit_block_add(&mut fwd, GapAlignOpType::Del, 1);
+        let mut script = None;
+
+        assert_eq!(
+            crate::gapinfo::s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                18,
+                Some(&mut script),
+            ),
+            0
+        );
+        let script = script.expect("script");
+        assert!(script
+            .ops
+            .iter()
+            .any(|(op, count)| *op == GapAlignOpType::Ins1 && *count == 1));
+        assert!(script
+            .ops
+            .iter()
+            .all(|(op, count)| (*op as u32) % 3 == 0 || *count == 1));
+        assert!(script.ops.iter().map(|(_, count)| *count).sum::<i32>() > 0);
     }
 }

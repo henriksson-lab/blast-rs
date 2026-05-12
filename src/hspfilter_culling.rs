@@ -57,7 +57,10 @@ impl<'a> BlastHSPCullingData<'a> {
     /// 1-1 port of `s_BlastHSPCullingNew` (`hspfilter_culling.c:666`).
     /// Allocates the writer-data struct and snapshots the
     /// `num_contexts = query_info.last_context + 1` derived value.
-    pub fn new(params: BlastHSPCullingParams, query_info: &'a crate::queryinfo::QueryInfo) -> Self {
+    pub fn s_blast_hspculling_new(
+        params: BlastHSPCullingParams,
+        query_info: &'a crate::queryinfo::QueryInfo,
+    ) -> Self {
         let num_contexts = query_info.contexts.len() as i32;
         Self {
             params,
@@ -70,21 +73,21 @@ impl<'a> BlastHSPCullingData<'a> {
     /// 1-1 port of `s_BlastHSPCullingInit` (`hspfilter_culling.c:487`).
     /// Allocates the per-context tree forest. Called before
     /// `cull_run` when the pipeline starts.
-    pub fn init(&mut self) {
+    pub fn s_blast_hspculling_init(&mut self) {
         self.c_tree = (0..self.num_contexts).map(|_| None).collect();
     }
 
     /// 1-1 port of `s_BlastHSPCullingRun` (`hspfilter_culling.c:602`).
     ///
     /// Walks an `HspList` and inserts each HSP into the appropriate
-    /// per-context culling tree via `save_hsp`. Handles blastn's
+    /// per-context culling tree via `s_save_hsp`. Handles blastn's
     /// strand-symmetric context normalization (NCBI's
     /// `cid = isBlastn ? (context - context % NUM_STRANDS) : context`).
     /// On insertion success the source slot is logically dropped
     /// (NCBI sets `hsp_array[i] = NULL`); we drain `hsp_list.hsps`
     /// regardless and free the (now-empty) list at the end —
     /// matching NCBI's `Blast_HSPListFree(hsp_list);` finalizer.
-    pub fn run(&mut self, hsp_list: &mut crate::hspstream::HspList) {
+    pub fn s_blast_hspculling_run(&mut self, hsp_list: &mut crate::hspstream::HspList) {
         let is_blastn = self.params.program == crate::program::BLASTN;
         let oid = hsp_list.oid;
 
@@ -126,13 +129,13 @@ impl<'a> BlastHSPCullingData<'a> {
                 self.c_tree.resize_with(cid_idx + 1, || None);
             }
             if self.c_tree[cid_idx].is_none() {
-                self.c_tree[cid_idx] = Some(ctree_new(qlen));
+                self.c_tree[cid_idx] = Some(s_ctree_new(qlen));
             }
             // Save into the tree; NCBI ignores the false return from
             // s_SaveHSP at the writer level — the dropped HSP is just
             // discarded.
             if let Some(tree) = self.c_tree[cid_idx].as_mut() {
-                let _ = save_hsp(tree, &mut node);
+                let _ = s_save_hsp(tree, &mut node);
             }
         }
         // The original `hsps` Vec is already drained; let it drop with
@@ -147,7 +150,7 @@ impl<'a> BlastHSPCullingData<'a> {
     /// `low_score` set, and each per-subject `HspList` gets
     /// `best_evalue` populated and is sorted by score (NCBI calls
     /// `Blast_HSPListSortByScore`).
-    pub fn finalize(&mut self) -> crate::hspstream::HspResults {
+    pub fn s_blast_hspculling_final(&mut self) -> crate::hspstream::HspResults {
         let num_queries = self.query_info.num_queries.max(1);
         let mut results = crate::hspstream::HspResults::new(num_queries);
 
@@ -169,7 +172,7 @@ impl<'a> BlastHSPCullingData<'a> {
             let hitlist = results.hitlists[qid_idx].as_mut().expect("just created");
 
             // Rip the tree into a flat linked list and consume it.
-            let mut cull = rip_hsp_off_ctree(tree_slot);
+            let mut cull = s_rip_hsp_off_ctree(tree_slot);
             while let Some(node) = cull.take() {
                 cull = node.next;
                 let sid = node.subject_id;
@@ -225,7 +228,7 @@ pub fn blast_hsp_culling_pipe_run(
     results: &mut crate::hspstream::HspResults,
 ) {
     // C: `s_BlastHSPCullingInit(data, results);` — fresh forest.
-    data.init();
+    data.s_blast_hspculling_init();
 
     // C step 1: sort each HspList by evalue and the HitList by
     // evalue.
@@ -259,7 +262,7 @@ pub fn blast_hsp_culling_pipe_run(
             continue;
         };
         for mut list in hitlist.hsp_lists {
-            data.run(&mut list);
+            data.s_blast_hspculling_run(&mut list);
         }
         // The `hitlist` value drops here, mirroring NCBI's
         // `Blast_HitListFree(...)`.
@@ -269,7 +272,7 @@ pub fn blast_hsp_culling_pipe_run(
     // C step 4: rebuild via finalize. The previous pass cleared every
     // hitlist slot, so finalize starts from an empty results shape and
     // populates fresh hitlists for each query that has surviving HSPs.
-    let new_results = data.finalize();
+    let new_results = data.s_blast_hspculling_final();
     *results = new_results;
 }
 
@@ -285,22 +288,195 @@ pub fn blast_hsp_culling_pipe_new<'a>(
     params: BlastHSPCullingParams,
     query_info: &'a crate::queryinfo::QueryInfo,
 ) -> BlastHSPCullingData<'a> {
-    BlastHSPCullingData::new(params, query_info)
+    BlastHSPCullingData::s_blast_hspculling_new(params, query_info)
+}
+
+/// 1-1 port of `s_BlastHSPCullingFree` (`hspfilter_culling.c:683`).
+/// `Drop` handles recursive cleanup of the owned culling trees; this
+/// direct wrapper preserves the C boundary where the data pointer is
+/// nulled after release.
+pub fn s_blast_hspculling_free(slot: &mut Option<BlastHSPCullingData<'_>>) {
+    *slot = None;
 }
 
 /// 1-1 port of `s_BlastHSPCullingPipeFree` (`hspfilter_culling.c:736`).
 /// `Drop` handles the actual deallocation; this hook is a parity
 /// marker for callers wanting to match NCBI's flow.
 pub fn blast_hsp_culling_pipe_free(slot: &mut Option<BlastHSPCullingData<'_>>) {
-    *slot = None;
+    s_blast_hspculling_free(slot);
 }
 
 /// 1-1 port of `BlastHSPCullingOptions`. NCBI's struct only carries
 /// `max_hits` (max HSPs per query region). Other fields would extend
 /// the configurability of the culling stage.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlastHSPCullingOptions {
     pub max_hits: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlastHSPBestHitOptions {
+    pub overhang: f64,
+    pub score_edge: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlastHSPFilteringOptions {
+    pub best_hit: Option<BlastHSPBestHitOptions>,
+    pub best_hit_stage: crate::util::EBlastStage,
+    pub culling_opts: Option<BlastHSPCullingOptions>,
+    pub culling_stage: crate::util::EBlastStage,
+}
+
+const K_BEST_HIT_OVERHANG_MIN: f64 = 0.0;
+const K_BEST_HIT_OVERHANG_MAX: f64 = 0.5;
+const K_BEST_HIT_SCORE_EDGE_MIN: f64 = 0.0;
+const K_BEST_HIT_SCORE_EDGE_MAX: f64 = 0.5;
+
+/// Rust ownership equivalent of `BlastHSPBestHitOptionsNew`
+/// (`blast_options.c:1816`).
+pub fn blast_hspbest_hit_options_new(overhang: f64, score_edge: f64) -> BlastHSPBestHitOptions {
+    BlastHSPBestHitOptions {
+        overhang,
+        score_edge,
+    }
+}
+
+/// Rust ownership equivalent of `BlastHSPBestHitOptionsFree`
+/// (`blast_options.c:1848`).
+pub fn blast_hspbest_hit_options_free(
+    opt: &mut Option<BlastHSPBestHitOptions>,
+) -> Option<BlastHSPBestHitOptions> {
+    *opt = None;
+    None
+}
+
+/// Rust ownership equivalent of `BlastHSPCullingOptionsNew`
+/// (`blast_options.c:1857`).
+pub fn blast_hspculling_options_new(max: i32) -> BlastHSPCullingOptions {
+    BlastHSPCullingOptions { max_hits: max }
+}
+
+/// Rust ownership equivalent of `BlastHSPCullingOptionsFree`
+/// (`blast_options.c:1880`).
+pub fn blast_hspculling_options_free(
+    culling_opts: &mut Option<BlastHSPCullingOptions>,
+) -> Option<BlastHSPCullingOptions> {
+    *culling_opts = None;
+    None
+}
+
+/// Rust ownership equivalent of `BlastHSPFilteringOptionsNew`
+/// (`blast_options.c:1890`).
+pub fn blast_hspfiltering_options_new() -> BlastHSPFilteringOptions {
+    BlastHSPFilteringOptions {
+        best_hit: None,
+        best_hit_stage: crate::util::EBlastStage::None,
+        culling_opts: None,
+        culling_stage: crate::util::EBlastStage::None,
+    }
+}
+
+/// Rust ownership equivalent of `BlastHSPFilteringOptions_AddBestHit`
+/// (`blast_options.c:1897`). On success, ownership moves from `best_hit`
+/// into `filt_opts`, matching the C pointer-to-pointer transfer.
+pub fn blast_hspfiltering_options_add_best_hit(
+    filt_opts: Option<&mut BlastHSPFilteringOptions>,
+    best_hit: &mut Option<BlastHSPBestHitOptions>,
+    stage: crate::util::EBlastStage,
+) -> i16 {
+    let Some(filt_opts) = filt_opts else {
+        return 1;
+    };
+    let Some(best_hit) = best_hit.take() else {
+        return 1;
+    };
+
+    filt_opts.best_hit = Some(best_hit);
+    filt_opts.best_hit_stage = stage;
+    0
+}
+
+/// Rust ownership equivalent of `BlastHSPFilteringOptions_AddCulling`
+/// (`blast_options.c:1913`). On success, ownership moves from `culling`
+/// into `filt_opts`, matching the C pointer-to-pointer transfer.
+pub fn blast_hspfiltering_options_add_culling(
+    filt_opts: Option<&mut BlastHSPFilteringOptions>,
+    culling: &mut Option<BlastHSPCullingOptions>,
+    stage: crate::util::EBlastStage,
+) -> i16 {
+    let Some(filt_opts) = filt_opts else {
+        return 1;
+    };
+    let Some(culling) = culling.take() else {
+        return 1;
+    };
+
+    filt_opts.culling_opts = Some(culling);
+    filt_opts.culling_stage = stage;
+    0
+}
+
+fn blast_stage_has_prelim(stage: crate::util::EBlastStage) -> bool {
+    (stage as i32 & crate::util::EBlastStage::PrelimSearch as i32) != 0
+}
+
+pub fn blast_hspbest_hit_options_validate(opts: &BlastHSPFilteringOptions) -> i16 {
+    let Some(best_hit) = opts.best_hit else {
+        return 0;
+    };
+
+    if best_hit.overhang <= K_BEST_HIT_OVERHANG_MIN || best_hit.overhang >= K_BEST_HIT_OVERHANG_MAX
+    {
+        return -1;
+    }
+    if best_hit.score_edge <= K_BEST_HIT_SCORE_EDGE_MIN
+        || best_hit.score_edge >= K_BEST_HIT_SCORE_EDGE_MAX
+    {
+        return -1;
+    }
+    0
+}
+
+pub fn blast_hspculling_options_validate(opts: &BlastHSPFilteringOptions) -> i16 {
+    let Some(culling_opts) = opts.culling_opts else {
+        return 0;
+    };
+
+    if culling_opts.max_hits < 0 {
+        return -1;
+    }
+    0
+}
+
+pub fn blast_hspfiltering_options_validate(opts: &BlastHSPFilteringOptions) -> i16 {
+    let status = blast_hspbest_hit_options_validate(opts);
+    if status != 0 {
+        return status;
+    }
+    let writer_found = blast_stage_has_prelim(opts.best_hit_stage);
+
+    let status = blast_hspculling_options_validate(opts);
+    if status != 0 {
+        return status;
+    }
+    if blast_stage_has_prelim(opts.culling_stage) && writer_found {
+        return 1;
+    }
+    0
+}
+
+/// Rust ownership equivalent of `BlastHSPFilteringOptionsFree`
+/// (`blast_options.c:1952`).
+pub fn blast_hspfiltering_options_free(
+    opts: &mut Option<BlastHSPFilteringOptions>,
+) -> Option<BlastHSPFilteringOptions> {
+    if let Some(opts) = opts {
+        blast_hspbest_hit_options_free(&mut opts.best_hit);
+        blast_hspculling_options_free(&mut opts.culling_opts);
+    }
+    *opts = None;
+    None
 }
 
 /// 1-1 port of `BlastHSPCullingParams` (`hspfilter_culling.h:57`).
@@ -326,11 +502,8 @@ pub struct BlastHSPCullingParams {
 ///
 /// NCBI builds an intermediate `BlastHSPCollectorParams` to derive
 /// `prelim_hitlist_size` and `hsp_num_max` from the hit-saving
-/// options; we pass `hsp_num_max` directly because our Rust
-/// `HitSavingOptions` doesn't carry that field. `compositionBasedStats`
-/// and `gapped_calculation` are accepted for parity but only affect
-/// `prelim_hitlist_size` calculation in the collector path (which we
-/// reproduce inline below).
+/// options; we pass `hsp_num_max` explicitly because Rust
+/// `HitSavingOptions` does not carry that field.
 pub fn blast_hsp_culling_params_new(
     hit_options: &crate::options::HitSavingOptions,
     culling_opts: &BlastHSPCullingOptions,
@@ -339,22 +512,15 @@ pub fn blast_hsp_culling_params_new(
     composition_based_stats: i32,
     gapped_calculation: bool,
 ) -> BlastHSPCullingParams {
-    // NCBI's `BlastHSPCollectorParamsNew` derives prelim_hitlist_size
-    // from the hit-saving options. The exact formula used by NCBI is
-    // `hitlist_size * 2` for compo-adjust-based searches and
-    // `hitlist_size` otherwise; gapped_calculation contributes
-    // indirectly via the upstream caller. We reproduce the
-    // observable rule to keep the resulting params usable by the
-    // culling driver.
-    let prelim_hitlist_size = if composition_based_stats > 0 && gapped_calculation {
-        hit_options.hitlist_size.saturating_mul(2)
-    } else {
-        hit_options.hitlist_size
-    };
+    let prelim_hitlist_size = crate::hspstream::get_prelim_hitlist_size(
+        hit_options.hitlist_size,
+        composition_based_stats,
+        gapped_calculation,
+    );
     BlastHSPCullingParams {
         program,
         prelim_hitlist_size,
-        hsp_num_max,
+        hsp_num_max: crate::hspstream::blast_hsp_num_max(gapped_calculation, hsp_num_max),
         culling_max: culling_opts.max_hits,
     }
 }
@@ -369,11 +535,10 @@ pub fn blast_hsp_culling_params_free(slot: &mut Option<BlastHSPCullingParams>) {
 ///
 /// NCBI bundles the params into a `BlastHSPWriterInfo` whose
 /// `NewFnPtr` points to `s_BlastHSPCullingNew`. The Rust port
-/// represents the writer info as a thin wrapper struct that records
-/// the params and a marker indicating which constructor should run
-/// later. The `NewFnPtr` indirection isn't needed in Rust (we don't
-/// have a vtable to populate); the constructor is invoked directly
-/// when the caller is ready.
+/// represents the writer info as a small Rust struct that records the
+/// params and a marker indicating which constructor should run later. The
+/// `NewFnPtr` indirection isn't needed in Rust (we don't have a vtable to
+/// populate); the constructor is invoked directly when the caller is ready.
 #[derive(Debug, Clone)]
 pub struct BlastHSPWriterInfo {
     pub params: BlastHSPCullingParams,
@@ -381,6 +546,601 @@ pub struct BlastHSPWriterInfo {
 
 pub fn blast_hsp_culling_info_new(params: BlastHSPCullingParams) -> BlastHSPWriterInfo {
     BlastHSPWriterInfo { params }
+}
+
+/// Port of NCBI `BlastHSPBestHitParams` (`hspfilter_besthit.h:38`).
+#[derive(Debug, Clone)]
+pub struct BlastHSPBestHitParams {
+    pub prelim_hitlist_size: i32,
+    pub hsp_num_max: i32,
+    pub program: ProgramType,
+    pub overhang: f64,
+    pub score_edge: f64,
+}
+
+/// Port of NCBI `LinkedHSP_BH` (`hspfilter_besthit.c:43`).
+#[derive(Debug, Clone)]
+pub struct LinkedHspBestHit {
+    pub hsp: Hsp,
+    pub sid: i32,
+    pub begin: i32,
+    pub end: i32,
+    pub len: i32,
+}
+
+/// Port of NCBI `BlastHSPBestHitData` (`hspfilter_besthit.c:52`).
+pub struct BlastHSPBestHitData<'a> {
+    pub params: BlastHSPBestHitParams,
+    pub query_info: &'a crate::queryinfo::QueryInfo,
+    pub best_list: Vec<Vec<LinkedHspBestHit>>,
+    pub num_hsps: Vec<i32>,
+    pub max_hsps: Vec<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlastHSPBestHitInfo {
+    pub params: BlastHSPBestHitParams,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlastHSPBestHitPipeInfo {
+    pub params: BlastHSPBestHitParams,
+    pub next: Option<Box<BlastHSPBestHitPipeInfo>>,
+}
+
+/// Port of NCBI `BlastHSPBestHitParamsNew` (`hspfilter_besthit.c:592`).
+pub fn blast_hsp_best_hit_params_new(
+    hit_options: &crate::options::HitSavingOptions,
+    best_hit_opts: &BlastHSPBestHitOptions,
+    composition_based_stats: i32,
+    gapped_calculation: bool,
+) -> BlastHSPBestHitParams {
+    BlastHSPBestHitParams {
+        prelim_hitlist_size: crate::hspstream::get_prelim_hitlist_size(
+            hit_options.hitlist_size,
+            composition_based_stats,
+            gapped_calculation,
+        ),
+        hsp_num_max: crate::hspstream::blast_hsp_num_max(
+            gapped_calculation,
+            hit_options.hsp_num_max,
+        ),
+        program: hit_options.program_number,
+        overhang: best_hit_opts.overhang,
+        score_edge: best_hit_opts.score_edge,
+    }
+}
+
+/// Rust ownership equivalent of `BlastHSPBestHitParamsFree`.
+pub fn blast_hsp_best_hit_params_free(
+    slot: &mut Option<BlastHSPBestHitParams>,
+) -> Option<BlastHSPBestHitParams> {
+    *slot = None;
+    None
+}
+
+/// Port of NCBI `BlastHSPBestHitInfoNew` (`hspfilter_besthit.c:619`).
+pub fn blast_hsp_best_hit_info_new(params: BlastHSPBestHitParams) -> BlastHSPBestHitInfo {
+    BlastHSPBestHitInfo { params }
+}
+
+/// Port of NCBI `BlastHSPBestHitPipeInfoNew` (`hspfilter_besthit.c:627`).
+pub fn blast_hsp_best_hit_pipe_info_new(params: BlastHSPBestHitParams) -> BlastHSPBestHitPipeInfo {
+    BlastHSPBestHitPipeInfo { params, next: None }
+}
+
+fn best_hit_query_begin_len(
+    hsp: &Hsp,
+    query_info: &crate::queryinfo::QueryInfo,
+    program: ProgramType,
+    rps: bool,
+    query_index: i32,
+) -> Option<(i32, i32, i32)> {
+    let qid = if rps {
+        query_index
+    } else {
+        crate::queryinfo::blast_get_query_index_from_context(hsp.context, program)
+    };
+    let context = query_info.contexts.get(hsp.context as usize);
+    let qlen = context.map(|ctx| ctx.query_length).unwrap_or_else(|| {
+        query_info
+            .contexts
+            .iter()
+            .find(|ctx| ctx.query_index == qid)
+            .map(|ctx| ctx.query_length)
+            .unwrap_or(0)
+    });
+    let frame = context.map(|ctx| ctx.frame).unwrap_or(0);
+    let len = hsp.query_end - hsp.query_offset;
+    if len <= 0 || qid < 0 {
+        return None;
+    }
+    let begin = if !rps && frame < 0 {
+        qlen - hsp.query_end
+    } else {
+        hsp.query_offset
+    };
+    Some((qid, begin, len))
+}
+
+fn s_blast_hsp_best_hit_init(
+    data: &mut BlastHSPBestHitData<'_>,
+    results: &crate::hspstream::HspResults,
+) -> i32 {
+    let num_queries = results.hitlists.len();
+    data.best_list = (0..num_queries).map(|_| Vec::new()).collect();
+    data.num_hsps = vec![0; num_queries];
+    data.max_hsps = vec![data.params.prelim_hitlist_size * 2; num_queries];
+    0
+}
+
+fn s_export_to_hitlist(
+    qid: usize,
+    data: &mut BlastHSPBestHitData<'_>,
+    hit_list: &mut crate::hspstream::HitList,
+) -> i32 {
+    if qid >= data.best_list.len() {
+        return -1;
+    }
+    let mut tmp_hit_list = crate::hspstream::blast_hit_list_new(data.num_hsps[qid]);
+    let nodes = std::mem::take(&mut data.best_list[qid]);
+    data.num_hsps[qid] = 0;
+    for node in nodes {
+        if let Some(list) = tmp_hit_list
+            .hsp_lists
+            .iter_mut()
+            .find(|list| list.oid == node.sid)
+        {
+            list.hsps.push(node.hsp);
+        } else {
+            let mut list = crate::hspstream::blast_hsp_list_new(data.params.hsp_num_max);
+            list.oid = node.sid;
+            list.hsps.push(node.hsp);
+            tmp_hit_list.hsp_lists.push(list);
+        }
+    }
+    for mut list in tmp_hit_list.hsp_lists.drain(..) {
+        let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(&mut list));
+        let _ = hit_list.blast_hit_list_update(list);
+    }
+    0
+}
+
+fn s_import_from_hitlist(
+    qid: usize,
+    data: &mut BlastHSPBestHitData<'_>,
+    hit_list: &mut crate::hspstream::HitList,
+) -> i32 {
+    if qid >= data.best_list.len() {
+        return -1;
+    }
+    let mut imported = Vec::new();
+    for list in hit_list.hsp_lists.drain(..) {
+        for hsp in list.hsps {
+            let Some((_, begin, len)) = best_hit_query_begin_len(
+                &hsp,
+                data.query_info,
+                data.params.program,
+                false,
+                qid as i32,
+            ) else {
+                continue;
+            };
+            imported.push(LinkedHspBestHit {
+                hsp,
+                sid: list.oid,
+                begin,
+                end: begin + len,
+                len,
+            });
+        }
+    }
+    imported.sort_by_key(|node| node.begin);
+    data.num_hsps[qid] = imported.len() as i32;
+    data.max_hsps[qid] = data.num_hsps[qid] * 2;
+    data.best_list[qid] = imported;
+    0
+}
+
+fn best_hit_insert(
+    data: &mut BlastHSPBestHitData<'_>,
+    sid: i32,
+    query_index: i32,
+    rps: bool,
+    mut hsp: Hsp,
+) {
+    let Some((qid, mut begin, len_a)) =
+        best_hit_query_begin_len(&hsp, data.query_info, data.params.program, rps, query_index)
+    else {
+        return;
+    };
+    let qid = qid as usize;
+    if qid >= data.best_list.len() {
+        return;
+    }
+    let mut end = begin + len_a;
+    let score_a = hsp.score;
+    let evalue_a = hsp.evalue;
+    let param_overhang = data.params.overhang;
+    let param_s = 1.0 - data.params.score_edge;
+    let den_a = score_a as f64 / len_a as f64 / param_s;
+
+    let list = &mut data.best_list[qid];
+    for node in list
+        .iter()
+        .filter(|node| node.end >= end && node.begin <= begin)
+    {
+        let score_b = node.hsp.score;
+        if node.end >= end
+            && node.hsp.evalue <= evalue_a
+            && score_b as f64 / node.len as f64 > den_a
+        {
+            return;
+        }
+    }
+
+    let allowed_overhang =
+        (2.0 * len_a as f64 * param_overhang / (1.0 - 2.0 * param_overhang)) as i32;
+    let allowed_begin = begin - allowed_overhang;
+    let allowed_end = end + allowed_overhang;
+    let overhang = (len_a as f64 * param_overhang) as i32;
+    begin -= overhang;
+    end += overhang;
+    let den_a = score_a as f64 / len_a as f64 * param_s;
+
+    let mut index = 0usize;
+    while index < list.len() {
+        if list[index].begin < allowed_begin || list[index].begin >= allowed_end {
+            index += 1;
+            continue;
+        }
+        let len_b = list[index].len;
+        let score_b = list[index].hsp.score;
+        let old_overhang = (list[index].end - list[index].begin - len_b) / 2;
+        if list[index].begin + old_overhang >= begin
+            && list[index].end - old_overhang <= end
+            && list[index].hsp.evalue >= evalue_a
+            && score_b as f64 / (len_b as f64) < den_a
+        {
+            list.remove(index);
+            data.num_hsps[qid] -= 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    if rps {
+        hsp.context = query_index;
+    }
+    let node = LinkedHspBestHit {
+        hsp,
+        sid,
+        begin,
+        end,
+        len: len_a,
+    };
+    let insert_at = list
+        .iter()
+        .position(|existing| existing.begin >= begin)
+        .unwrap_or(list.len());
+    list.insert(insert_at, node);
+    data.num_hsps[qid] += 1;
+
+    if data.num_hsps[qid] > data.max_hsps[qid] {
+        let mut hitlist = crate::hspstream::blast_hit_list_new(data.num_hsps[qid]);
+        let _ = s_export_to_hitlist(qid, data, &mut hitlist);
+        let _ = s_import_from_hitlist(qid, data, &mut hitlist);
+    }
+}
+
+/// Port of NCBI `s_BlastHSPBestHitFinal` (`hspfilter_besthit.c:195`).
+pub fn s_blast_hsp_best_hit_final(
+    data: &mut BlastHSPBestHitData<'_>,
+    results: &mut crate::hspstream::HspResults,
+) -> i32 {
+    for qid in 0..results.hitlists.len() {
+        if data
+            .best_list
+            .get(qid)
+            .map(|list| list.is_empty())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let mut hitlist = crate::hspstream::blast_hit_list_new(data.num_hsps[qid]);
+        let _ = s_export_to_hitlist(qid, data, &mut hitlist);
+        let _ = crate::hspstream::blast_hit_list_sort_by_evalue(&mut hitlist);
+        let target = results.hitlists[qid].get_or_insert_with(|| {
+            crate::hspstream::blast_hit_list_new(data.params.prelim_hitlist_size)
+        });
+        for list in hitlist.hsp_lists.drain(..) {
+            let _ = target.blast_hit_list_update(list);
+        }
+    }
+    data.best_list.clear();
+    data.num_hsps.clear();
+    data.max_hsps.clear();
+    0
+}
+
+/// Port of NCBI `s_BlastHSPBestHitRun` (`hspfilter_besthit.c:238`).
+pub fn s_blast_hsp_best_hit_run(
+    data: &mut BlastHSPBestHitData<'_>,
+    hsp_list: Option<crate::hspstream::HspList>,
+) -> i32 {
+    let Some(mut hsp_list) = hsp_list else {
+        return 0;
+    };
+    if data.best_list.is_empty() {
+        return 0;
+    }
+    let param_overhang = data.params.overhang;
+    let param_s = 1.0 - data.params.score_edge;
+    if param_overhang <= 0.0 || param_s <= 0.0 {
+        hsp_list.hsps.clear();
+        return 0;
+    }
+    let sid = hsp_list.oid;
+    for hsp in hsp_list.hsps.drain(..) {
+        let Some((qid, _begin, len)) =
+            best_hit_query_begin_len(&hsp, data.query_info, data.params.program, false, 0)
+        else {
+            continue;
+        };
+        if qid < 0 || qid as usize >= data.best_list.len() || len <= 0 {
+            continue;
+        }
+        best_hit_insert(data, sid, 0, false, hsp);
+    }
+    0
+}
+
+/// Port of NCBI `s_BlastHSPBestHitRun_RPS` (`hspfilter_besthit.c:359`).
+pub fn s_blast_hsp_best_hit_run_rps(
+    data: &mut BlastHSPBestHitData<'_>,
+    query_index: i32,
+    hsp_list: Option<crate::hspstream::HspList>,
+) -> i32 {
+    let Some(mut hsp_list) = hsp_list else {
+        return 0;
+    };
+    if data.best_list.is_empty() {
+        return 0;
+    }
+    let param_overhang = data.params.overhang;
+    let param_s = 1.0 - data.params.score_edge;
+    if param_overhang <= 0.0 || param_s <= 0.0 {
+        hsp_list.hsps.clear();
+        return 0;
+    }
+    if query_index < 0 || query_index as usize >= data.best_list.len() {
+        hsp_list.hsps.clear();
+        return 0;
+    }
+    for hsp in hsp_list.hsps.drain(..) {
+        if hsp.query_end <= hsp.query_offset {
+            continue;
+        }
+        best_hit_insert(data, hsp.context, query_index, true, hsp);
+    }
+    0
+}
+
+/// Port of NCBI `s_BlastHSPBestHitPipeRun` (`hspfilter_besthit.c:520`).
+pub fn s_blast_hsp_best_hit_pipe_run(
+    data: &mut BlastHSPBestHitData<'_>,
+    results: &mut crate::hspstream::HspResults,
+) -> i32 {
+    let _ = s_blast_hsp_best_hit_init(data, results);
+    let _ = crate::hspstream::blast_hsp_results_sort_by_evalue(results);
+    for qid in 0..results.hitlists.len() {
+        let Some(mut hitlist) = results.hitlists[qid].take() else {
+            continue;
+        };
+        for list in hitlist.hsp_lists.drain(..) {
+            let _ = s_blast_hsp_best_hit_run(data, Some(list));
+        }
+    }
+    s_blast_hsp_best_hit_final(data, results)
+}
+
+/// Rust ownership equivalent of `s_BlastHSPBestHitPipeFree`.
+pub fn s_blast_hsp_best_hit_pipe_free<'a>(
+    slot: &mut Option<BlastHSPBestHitData<'a>>,
+) -> Option<BlastHSPBestHitData<'a>> {
+    *slot = None;
+    None
+}
+
+/// Port of NCBI `s_BlastHSPBestHitPipeNew` (`hspfilter_besthit.c:560`).
+pub fn s_blast_hsp_best_hit_pipe_new<'a>(
+    params: BlastHSPBestHitParams,
+    query_info: &'a crate::queryinfo::QueryInfo,
+) -> BlastHSPBestHitData<'a> {
+    BlastHSPBestHitData {
+        params,
+        query_info,
+        best_list: Vec::new(),
+        num_hsps: Vec::new(),
+        max_hsps: Vec::new(),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BlastHSPCollectorParams {
+    pub program: ProgramType,
+    pub prelim_hitlist_size: i32,
+    pub hsp_num_max: i32,
+}
+
+/// Port of NCBI `BlastHSPCollectorParamsNew` (`hspfilter_collector.c:325`).
+pub fn blast_hsp_collector_params_new(
+    hit_options: &crate::options::HitSavingOptions,
+    program: ProgramType,
+    composition_based_stats: i32,
+    gapped_calculation: bool,
+    hsp_num_max: i32,
+) -> BlastHSPCollectorParams {
+    let prelim_hitlist_size = crate::hspstream::get_prelim_hitlist_size(
+        hit_options.hitlist_size,
+        composition_based_stats,
+        gapped_calculation,
+    );
+    BlastHSPCollectorParams {
+        program,
+        prelim_hitlist_size,
+        hsp_num_max: crate::hspstream::blast_hsp_num_max(gapped_calculation, hsp_num_max),
+    }
+}
+
+/// Rust ownership equivalent of `BlastHSPCollectorParamsFree`.
+pub fn blast_hsp_collector_params_free(
+    slot: &mut Option<BlastHSPCollectorParams>,
+) -> Option<BlastHSPCollectorParams> {
+    *slot = None;
+    None
+}
+
+#[derive(Debug, Clone)]
+pub struct BlastHSPCollectorData {
+    pub params: BlastHSPCollectorParams,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlastHSPCollectorWriter {
+    pub data: BlastHSPCollectorData,
+    pub rps_run: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlastHSPCollectorInfo {
+    pub params: BlastHSPCollectorParams,
+}
+
+/// Port of NCBI `s_BlastHSPCollectorFinal` (`hspfilter_collector.c:68`).
+pub fn s_blast_hspcollector_final(
+    _data: &mut BlastHSPCollectorData,
+    results: &mut crate::hspstream::HspResults,
+) -> i32 {
+    crate::hspstream::blast_hsp_results_sort_by_evalue(results)
+}
+
+/// Port of NCBI `s_BlastHSPCollectorRun` (`hspfilter_collector.c:82`).
+pub fn s_blast_hspcollector_run(
+    data: &mut BlastHSPCollectorData,
+    results: &mut crate::hspstream::HspResults,
+    hsp_list: Option<crate::hspstream::HspList>,
+) -> i32 {
+    let Some(mut hsp_list) = hsp_list else {
+        return 0;
+    };
+    if results.hitlists.is_empty() {
+        return -1;
+    }
+
+    if results.hitlists.len() > 1 {
+        let mut split_lists: Vec<Option<crate::hspstream::HspList>> =
+            (0..results.hitlists.len()).map(|_| None).collect();
+
+        for hsp in hsp_list.hsps.drain(..) {
+            let query_index = crate::queryinfo::blast_get_query_index_from_context(
+                hsp.context,
+                data.params.program,
+            ) as usize;
+            if query_index >= results.hitlists.len() {
+                return -1;
+            }
+            let split_list = split_lists[query_index].get_or_insert_with(|| {
+                let mut list = crate::hspstream::blast_hsp_list_new(data.params.hsp_num_max);
+                list.oid = hsp_list.oid;
+                list
+            });
+            split_list.hsps.push(hsp);
+        }
+
+        for (query_index, split_list) in split_lists.into_iter().enumerate() {
+            let Some(split_list) = split_list else {
+                continue;
+            };
+            let hitlist = results.hitlists[query_index].get_or_insert_with(|| {
+                crate::hspstream::blast_hit_list_new(data.params.prelim_hitlist_size)
+            });
+            hitlist.blast_hit_list_update(split_list);
+        }
+    } else if !hsp_list.hsps.is_empty() {
+        let hitlist = results.hitlists[0].get_or_insert_with(|| {
+            crate::hspstream::blast_hit_list_new(data.params.prelim_hitlist_size)
+        });
+        hsp_list.hsp_max = data.params.hsp_num_max;
+        hitlist.blast_hit_list_update(hsp_list);
+    }
+
+    0
+}
+
+/// Port of NCBI `s_BlastHSPCollectorRun_RPS` (`hspfilter_collector.c:204`).
+pub fn s_blast_hspcollector_run_rps(
+    data: &mut BlastHSPCollectorData,
+    results: &mut crate::hspstream::HspResults,
+    query_index: i32,
+    mut hsp_list: crate::hspstream::HspList,
+) -> i32 {
+    if hsp_list.hsps.is_empty() {
+        return 0;
+    }
+    let query_index = query_index as usize;
+    if query_index >= results.hitlists.len() {
+        return -1;
+    }
+    let hitlist = results.hitlists[query_index].get_or_insert_with(|| {
+        crate::hspstream::blast_hit_list_new(data.params.prelim_hitlist_size)
+    });
+
+    hsp_list.hsps.sort_by(|a, b| {
+        a.context
+            .cmp(&b.context)
+            .then_with(|| crate::hspstream::score_compare_hsps(a, b))
+    });
+
+    let mut index = 0usize;
+    while index < hsp_list.hsps.len() {
+        let oid = hsp_list.hsps[index].context;
+        let mut split_list = crate::hspstream::blast_hsp_list_new(data.params.hsp_num_max);
+        split_list.oid = oid;
+        while index < hsp_list.hsps.len() && hsp_list.hsps[index].context == oid {
+            let mut hsp = hsp_list.hsps[index].clone();
+            hsp.context = 0;
+            split_list.hsps.push(hsp);
+            index += 1;
+        }
+        split_list
+            .hsps
+            .sort_by(crate::hspstream::score_compare_hsps);
+        hitlist.blast_hit_list_update(split_list);
+    }
+
+    0
+}
+
+/// Rust ownership equivalent of `s_BlastHSPCollectorFree`.
+pub fn s_blast_hspcollector_free(
+    _: Option<BlastHSPCollectorWriter>,
+) -> Option<BlastHSPCollectorWriter> {
+    None
+}
+
+/// Port of NCBI `s_BlastHSPCollectorNew` (`hspfilter_collector.c:295`).
+pub fn s_blast_hspcollector_new(params: BlastHSPCollectorParams) -> BlastHSPCollectorWriter {
+    let rps_run = crate::program::blast_program_is_rps_blast(params.program);
+    BlastHSPCollectorWriter {
+        data: BlastHSPCollectorData { params },
+        rps_run,
+    }
+}
+
+/// Port of NCBI `BlastHSPCollectorInfoNew` (`hspfilter_collector.c:353`).
+pub fn blast_hsp_collector_info_new(params: BlastHSPCollectorParams) -> BlastHSPCollectorInfo {
+    BlastHSPCollectorInfo { params }
 }
 
 /// 1-1 port of `BlastHSPCullingPipeInfoNew` (`hspfilter_culling.c:822`).
@@ -397,6 +1157,22 @@ pub struct BlastHSPPipeInfo {
 
 pub fn blast_hsp_culling_pipe_info_new(params: BlastHSPCullingParams) -> BlastHSPPipeInfo {
     BlastHSPPipeInfo { params, next: None }
+}
+
+/// 1-1 port of `BlastHSPPipeInfo_Add` (`blast_hspstream.c:762`) for the Rust
+/// linked-list representation. C appends `node` to `*head` when present or
+/// installs it as the head otherwise, then returns the inserted node pointer.
+pub fn blast_hsp_pipe_info_add(
+    head: &mut Option<Box<BlastHSPPipeInfo>>,
+    mut node: Box<BlastHSPPipeInfo>,
+) -> *mut BlastHSPPipeInfo {
+    let node_ptr: *mut BlastHSPPipeInfo = &mut *node;
+    let mut tail = head;
+    while let Some(current) = tail {
+        tail = &mut current.next;
+    }
+    *tail = Some(node);
+    node_ptr
 }
 
 /// 1-1 port of `LinkedHSP` (`hspfilter_culling.c:52`). Singly-linked
@@ -425,7 +1201,7 @@ pub struct LinkedHsp {
 impl LinkedHsp {
     /// 1-1 port of `s_HSPCopy` (`hspfilter_culling.c:65`). Produces a
     /// detached copy (next pointer cleared in callers' usage).
-    pub fn copy(&self) -> LinkedHsp {
+    pub fn s_hsp_copy(&self) -> LinkedHsp {
         LinkedHsp {
             hsp: self.hsp.clone(),
             context_id: self.context_id,
@@ -438,6 +1214,16 @@ impl LinkedHsp {
     }
 }
 
+/// 1-1 port boundary for `s_HSPCopy` (`hspfilter_culling.c:65`).
+pub fn s_hsp_copy(hsp: &LinkedHsp) -> LinkedHsp {
+    hsp.s_hsp_copy()
+}
+
+/// Rust ownership equivalent of `s_HSPFree` (`hspfilter_culling.c:72`).
+pub fn s_hsp_free(_: Option<Box<LinkedHsp>>) -> Option<Box<LinkedHsp>> {
+    None
+}
+
 /// 1-1 port of `s_DominateTest` (`hspfilter_culling.c:79`).
 ///
 /// Returns `true` iff `p` dominates `y`. The dominance criterion is
@@ -446,7 +1232,7 @@ impl LinkedHsp {
 /// (identical score/begin/length) a deterministic tie-breaker is
 /// applied (`s1 > s2`, then `sid` ascending, then subject offset
 /// ascending), matching NCBI's tie-breaking exactly.
-pub fn dominate_test(p: &LinkedHsp, y: &LinkedHsp) -> bool {
+pub fn s_dominate_test(p: &LinkedHsp, y: &LinkedHsp) -> bool {
     // C uses Int8 throughout to keep intermediate products from
     // overflowing on long alignments.
     let b1 = p.begin as i64;
@@ -490,10 +1276,10 @@ pub fn dominate_test(p: &LinkedHsp, y: &LinkedHsp) -> bool {
 /// Walks `list` once and decrements `y.merit` every time a list member
 /// dominates `y`. Returns `false` (HSP should be dropped) as soon as
 /// `merit <= 0`, otherwise `true`.
-pub fn full_pass(list: &Option<Box<LinkedHsp>>, y: &mut LinkedHsp) -> bool {
+pub fn s_full_pass(list: &Option<Box<LinkedHsp>>, y: &mut LinkedHsp) -> bool {
     let mut cur = list.as_deref();
     while let Some(node) = cur {
-        if dominate_test(node, y) {
+        if s_dominate_test(node, y) {
             y.merit -= 1;
             if y.merit <= 0 {
                 return false;
@@ -506,7 +1292,7 @@ pub fn full_pass(list: &Option<Box<LinkedHsp>>, y: &mut LinkedHsp) -> bool {
 
 /// 1-1 port of `s_AddHSPtoList` (`hspfilter_culling.c:193`). Pushes
 /// `y` onto the head of `list`.
-pub fn add_hsp_to_list(list: &mut Option<Box<LinkedHsp>>, mut y: Box<LinkedHsp>) {
+pub fn s_add_hsp_to_list(list: &mut Option<Box<LinkedHsp>>, mut y: Box<LinkedHsp>) {
     y.next = list.take();
     *list = Some(y);
 }
@@ -520,7 +1306,7 @@ pub fn add_hsp_to_list(list: &mut Option<Box<LinkedHsp>>, mut y: Box<LinkedHsp>)
 /// `y` is identified by **pointer-equality** in NCBI; in Rust we
 /// compare by `(begin, end, score, subject_id)` since two adjacent
 /// references can't safely share an identity in safe code.
-pub fn process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32 {
+pub fn s_process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32 {
     fn matches_y(node: &LinkedHsp, y: &LinkedHsp) -> bool {
         node.begin == y.begin
             && node.end == y.end
@@ -537,7 +1323,7 @@ pub fn process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32
         // Decide whether to drop the head node based on dominance.
         let drop_head = if !head_is_y {
             if let Some(node) = cursor.as_mut() {
-                if dominate_test(y, node) {
+                if s_dominate_test(y, node) {
                     node.merit -= 1;
                     node.merit <= 0
                 } else {
@@ -566,7 +1352,7 @@ pub fn process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32
 ///
 /// Decrements every element's `merit`, removing those that fall to
 /// `<= 0`. Returns the number of elements remaining.
-pub fn mark_down_hsp_list(list: &mut Option<Box<LinkedHsp>>) -> i32 {
+pub fn s_mark_down_hsp_list(list: &mut Option<Box<LinkedHsp>>) -> i32 {
     let mut num = 0i32;
     let mut cursor = list;
     while cursor.is_some() {
@@ -607,6 +1393,16 @@ pub struct CTreeNode {
     pub hsp_list: Option<Box<LinkedHsp>>,
 }
 
+/// Rust allocation equivalent of `s_GetNode` (`hspfilter_culling.c:210`).
+pub fn s_get_node() -> Box<CTreeNode> {
+    Box::new(CTreeNode::default())
+}
+
+/// Rust ownership equivalent of `s_RetNode` (`hspfilter_culling.c:214`).
+pub fn s_ret_node(_: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>> {
+    None
+}
+
 impl CTreeNode {
     /// 1-1 port of `s_ForkChildren` (`hspfilter_culling.c:258`).
     ///
@@ -617,71 +1413,7 @@ impl CTreeNode {
     /// uses the `eLeft`/`eRight` constants for its child-direction
     /// enum; we use [`CTreeChild`].
     pub fn fork_children(&mut self) {
-        debug_assert!(self.left.is_none());
-        debug_assert!(self.right.is_none());
-        let midpt = (self.begin + self.end) / 2;
-
-        // Take the entire list off the parent so we can sort each entry
-        // into one of three buckets (stays / left / right). Reassemble
-        // at the end. Order is preserved within each bucket — NCBI
-        // treats the list as singly-linked and threads survivors through
-        // their original positions, which gives the same ordering as
-        // appending to the head of the per-bucket list.
-        let mut original = self.hsp_list.take();
-        let mut stays: Option<Box<LinkedHsp>> = None;
-        let mut left_list: Option<Box<LinkedHsp>> = None;
-        let mut right_list: Option<Box<LinkedHsp>> = None;
-        // Tails for stays / left / right to preserve original list
-        // order. Using a tail pointer style (functionally — by walking
-        // each list to its tail before appending) keeps Rust ownership
-        // happy.
-        fn append_tail(list: &mut Option<Box<LinkedHsp>>, mut node: Box<LinkedHsp>) {
-            node.next = None;
-            match list.as_mut() {
-                None => *list = Some(node),
-                Some(head) => {
-                    let mut cursor: &mut Box<LinkedHsp> = head;
-                    while cursor.next.is_some() {
-                        cursor = cursor.next.as_mut().unwrap();
-                    }
-                    cursor.next = Some(node);
-                }
-            }
-        }
-        while let Some(mut node) = original.take() {
-            let next = node.next.take();
-            original = next;
-            if node.end < midpt {
-                append_tail(&mut left_list, node);
-            } else if node.begin > midpt {
-                append_tail(&mut right_list, node);
-            } else {
-                append_tail(&mut stays, node);
-            }
-        }
-
-        if left_list.is_some() {
-            let mut child = CTreeNode::new_child(Some(self), CTreeChild::Left);
-            // C: the per-child list is built via `s_AddHSPtoList`,
-            // which prepends. NCBI's order ends up reversed; preserve
-            // that exactly so behavior is bitwise.
-            let mut node_ptr = left_list;
-            while let Some(mut n) = node_ptr.take() {
-                node_ptr = n.next.take();
-                add_hsp_to_list(&mut child.hsp_list, n);
-            }
-            self.left = Some(child);
-        }
-        if right_list.is_some() {
-            let mut child = CTreeNode::new_child(Some(self), CTreeChild::Right);
-            let mut node_ptr = right_list;
-            while let Some(mut n) = node_ptr.take() {
-                node_ptr = n.next.take();
-                add_hsp_to_list(&mut child.hsp_list, n);
-            }
-            self.right = Some(child);
-        }
-        self.hsp_list = stays;
+        s_fork_children(self);
     }
 
     /// 1-1 port of `s_CTreeNodeNew` (`hspfilter_culling.c:228`).
@@ -690,8 +1422,8 @@ impl CTreeNode {
     /// parent is supplied, the child's interval is `[parent.begin,
     /// midpt)` (left) or `[midpt, parent.end)` (right) where
     /// `midpt = (parent.begin + parent.end) / 2`.
-    pub fn new_child(parent: Option<&CTreeNode>, dir: CTreeChild) -> Box<CTreeNode> {
-        let mut node = Box::new(CTreeNode::default());
+    pub fn s_ctree_node_new(parent: Option<&CTreeNode>, dir: CTreeChild) -> Box<CTreeNode> {
+        let mut node = s_get_node();
         if let Some(p) = parent {
             let midpt = (p.begin + p.end) / 2;
             match dir {
@@ -709,16 +1441,110 @@ impl CTreeNode {
     }
 }
 
+/// 1-1 port boundary for `s_CTreeNodeNew` (`hspfilter_culling.c:228`).
+pub fn s_ctree_node_new(parent: Option<&CTreeNode>, dir: CTreeChild) -> Box<CTreeNode> {
+    CTreeNode::s_ctree_node_new(parent, dir)
+}
+
+/// 1-1 port boundary for `s_ForkChildren` (`hspfilter_culling.c:258`).
+pub fn s_fork_children(node: &mut CTreeNode) {
+    debug_assert!(node.left.is_none());
+    debug_assert!(node.right.is_none());
+    let midpt = (node.begin + node.end) / 2;
+
+    // Take the entire list off the parent so we can sort each entry
+    // into one of three buckets (stays / left / right). Reassemble
+    // at the end. NCBI advances `p` before moving `r` to a child,
+    // then leaves the predecessor `q` unchanged when a node moves.
+    let mut original = node.hsp_list.take();
+    let mut stays: Option<Box<LinkedHsp>> = None;
+    let mut left_list: Option<Box<LinkedHsp>> = None;
+    let mut right_list: Option<Box<LinkedHsp>> = None;
+
+    fn append_tail(list: &mut Option<Box<LinkedHsp>>, mut node: Box<LinkedHsp>) {
+        node.next = None;
+        match list.as_mut() {
+            None => *list = Some(node),
+            Some(head) => {
+                let mut cursor: &mut Box<LinkedHsp> = head;
+                while cursor.next.is_some() {
+                    cursor = cursor.next.as_mut().unwrap();
+                }
+                cursor.next = Some(node);
+            }
+        }
+    }
+
+    while let Some(mut hsp_node) = original.take() {
+        original = hsp_node.next.take();
+        if hsp_node.end < midpt {
+            append_tail(&mut left_list, hsp_node);
+        } else if hsp_node.begin > midpt {
+            append_tail(&mut right_list, hsp_node);
+        } else {
+            append_tail(&mut stays, hsp_node);
+        }
+    }
+
+    if left_list.is_some() {
+        let mut child = s_ctree_node_new(Some(node), CTreeChild::Left);
+        let mut child_list = left_list;
+        while let Some(mut hsp_node) = child_list.take() {
+            child_list = hsp_node.next.take();
+            s_add_hsp_to_list(&mut child.hsp_list, hsp_node);
+        }
+        node.left = Some(child);
+    }
+
+    if right_list.is_some() {
+        let mut child = s_ctree_node_new(Some(node), CTreeChild::Right);
+        let mut child_list = right_list;
+        while let Some(mut hsp_node) = child_list.take() {
+            child_list = hsp_node.next.take();
+            s_add_hsp_to_list(&mut child.hsp_list, hsp_node);
+        }
+        node.right = Some(child);
+    }
+
+    node.hsp_list = stays;
+}
+
+/// Rust ownership equivalent of `s_CTreeNodeFree` (`hspfilter_culling.c:250`).
+pub fn s_ctree_node_free(node: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>> {
+    if let Some(node) = node.as_ref() {
+        debug_assert!(node.left.is_none());
+        debug_assert!(node.right.is_none());
+        debug_assert!(node.hsp_list.is_none());
+    }
+    s_ret_node(node)
+}
+
+/// Disabled NCBI debug hook (`s_Debug`, `hspfilter_culling.c:302`).
+pub fn s_debug(node: Option<&CTreeNode>) {
+    let Some(node) = node else {
+        return;
+    };
+
+    let mut hsp = node.hsp_list.as_deref();
+    while let Some(current) = hsp {
+        let _ = (current.begin, current.end, current.hsp.score, current.merit);
+        hsp = current.next.as_deref();
+    }
+
+    s_debug(node.left.as_deref());
+    s_debug(node.right.as_deref());
+}
+
 /// 1-1 port of `s_MarkDownCTree` (`hspfilter_culling.c:319`).
 ///
 /// Recursively walks the tree, decrementing every HSP's `merit` and
 /// removing nodes whose lists are emptied AND that have no children.
 /// Caller passes the slot owning the tree (or subtree).
-pub fn mark_down_ctree(slot: &mut Option<Box<CTreeNode>>) {
+pub fn s_mark_down_ctree(slot: &mut Option<Box<CTreeNode>>) {
     let Some(node) = slot.as_mut() else { return };
-    mark_down_ctree(&mut node.left);
-    mark_down_ctree(&mut node.right);
-    let remaining = mark_down_hsp_list(&mut node.hsp_list);
+    s_mark_down_ctree(&mut node.left);
+    s_mark_down_ctree(&mut node.right);
+    let remaining = s_mark_down_hsp_list(&mut node.hsp_list);
     if remaining <= 0 && node.left.is_none() && node.right.is_none() {
         *slot = None;
     }
@@ -728,21 +1554,21 @@ pub fn mark_down_ctree(slot: &mut Option<Box<CTreeNode>>) {
 ///
 /// Walks the tree to update merit in response to a newly-added
 /// dominator `x`. If `x` covers the full range of a subtree, every
-/// element there gets decremented (`mark_down_ctree`). Otherwise
+/// element there gets decremented (`s_mark_down_ctree`). Otherwise
 /// the recursion descends into the half(s) that overlap `x`.
-pub fn process_ctree(slot: &mut Option<Box<CTreeNode>>, x: &LinkedHsp) {
+pub fn s_process_ctree(slot: &mut Option<Box<CTreeNode>>, x: &LinkedHsp) {
     let node = match slot.as_mut() {
         Some(n) => n,
         None => return,
     };
     // x covers full range → decrement everywhere.
     if x.begin <= node.begin && x.end >= node.end {
-        mark_down_ctree(slot);
+        s_mark_down_ctree(slot);
         return;
     }
     // Leaf: just process the local list and clean up if emptied.
     if node.left.is_none() && node.right.is_none() {
-        if process_hsp_list(&mut node.hsp_list, x) <= 0 {
+        if s_process_hsp_list(&mut node.hsp_list, x) <= 0 {
             *slot = None;
         }
         return;
@@ -750,13 +1576,13 @@ pub fn process_ctree(slot: &mut Option<Box<CTreeNode>>, x: &LinkedHsp) {
     // Internal: descend into the side(s) that overlap x.
     let midpt = (node.begin + node.end) / 2;
     if x.end < midpt {
-        process_ctree(&mut node.left, x);
+        s_process_ctree(&mut node.left, x);
     } else if x.begin > midpt {
-        process_ctree(&mut node.right, x);
+        s_process_ctree(&mut node.right, x);
     } else {
-        process_ctree(&mut node.left, x);
-        process_ctree(&mut node.right, x);
-        if process_hsp_list(&mut node.hsp_list, x) <= 0
+        s_process_ctree(&mut node.left, x);
+        s_process_ctree(&mut node.right, x);
+        if s_process_hsp_list(&mut node.hsp_list, x) <= 0
             && node.left.is_none()
             && node.right.is_none()
         {
@@ -767,11 +1593,20 @@ pub fn process_ctree(slot: &mut Option<Box<CTreeNode>>, x: &LinkedHsp) {
 
 /// 1-1 port of `s_CTreeNew` (`hspfilter_culling.c:376`). Root over
 /// `[0, qlen)`.
-pub fn ctree_new(qlen: i32) -> Box<CTreeNode> {
-    let mut tree = CTreeNode::new_child(None, CTreeChild::Left);
+pub fn s_ctree_new(qlen: i32) -> Box<CTreeNode> {
+    let mut tree = s_ctree_node_new(None, CTreeChild::Left);
     tree.begin = 0;
     tree.end = qlen;
     tree
+}
+
+/// Rust ownership equivalent of `s_CTreeFree` (`hspfilter_culling.c:384`).
+pub fn s_ctree_free(tree: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>> {
+    let Some(mut tree) = tree else { return None };
+    debug_assert!(tree.hsp_list.is_none());
+    let _ = s_ctree_free(tree.left.take());
+    let _ = s_ctree_free(tree.right.take());
+    s_ctree_node_free(Some(tree))
 }
 
 /// 1-1 port of `s_RipHSPOffCTree` (`hspfilter_culling.c:396`).
@@ -780,11 +1615,11 @@ pub fn ctree_new(qlen: i32) -> Box<CTreeNode> {
 /// single linked list. NCBI assumes the caller owns the tree; the
 /// Rust port consumes the tree (caller passes `Option::take()`-style
 /// ownership) and returns the linked list.
-pub fn rip_hsp_off_ctree(slot: Option<Box<CTreeNode>>) -> Option<Box<LinkedHsp>> {
+pub fn s_rip_hsp_off_ctree(slot: Option<Box<CTreeNode>>) -> Option<Box<LinkedHsp>> {
     let Some(mut node) = slot else { return None };
     let mut q = node.hsp_list.take();
-    let left_list = rip_hsp_off_ctree(node.left.take());
-    let right_list = rip_hsp_off_ctree(node.right.take());
+    let left_list = s_rip_hsp_off_ctree(node.left.take());
+    let right_list = s_rip_hsp_off_ctree(node.right.take());
 
     fn append_tail(list: &mut Option<Box<LinkedHsp>>, tail: Option<Box<LinkedHsp>>) {
         if list.is_none() {
@@ -812,7 +1647,7 @@ pub const K_NUM_HSP_TO_FORK: i32 = 20;
 ///
 /// `a` is consumed only when inserted; on `false` the caller can
 /// reuse / drop it.
-pub fn save_hsp(tree: &mut CTreeNode, a: &mut LinkedHsp) -> bool {
+pub fn s_save_hsp(tree: &mut CTreeNode, a: &mut LinkedHsp) -> bool {
     // C uses a single `tree` pointer that's advanced down the tree;
     // we recreate that with raw pointer-chasing inside a loop. Rust
     // doesn't make this clean across owned children, so we recurse
@@ -820,7 +1655,7 @@ pub fn save_hsp(tree: &mut CTreeNode, a: &mut LinkedHsp) -> bool {
     fn descend<'a>(node: &'a mut CTreeNode, a: &mut LinkedHsp) -> Option<&'a mut CTreeNode> {
         debug_assert!(node.begin <= a.begin);
         debug_assert!(node.end >= a.end);
-        if !full_pass(&node.hsp_list, a) {
+        if !s_full_pass(&node.hsp_list, a) {
             return None;
         }
         let midpt = (node.begin + node.end) / 2;
@@ -838,24 +1673,24 @@ pub fn save_hsp(tree: &mut CTreeNode, a: &mut LinkedHsp) -> bool {
     };
 
     // Insert a copy at the host node.
-    let copy = a.copy();
-    add_hsp_to_list(&mut host.hsp_list, Box::new(copy));
+    let copy = s_hsp_copy(a);
+    s_add_hsp_to_list(&mut host.hsp_list, Box::new(copy));
 
     // Take the freshly-inserted head as the dominator reference.
     // NCBI's C uses `x` (the inserted node), but in Rust it's safer to
     // work with the pre-insert clone since `host.hsp_list`'s head is
     // now `x`.
-    let x = a.copy();
+    let x = s_hsp_copy(a);
 
     if host.left.is_none() && host.right.is_none() {
-        if process_hsp_list(&mut host.hsp_list, &x) >= K_NUM_HSP_TO_FORK {
+        if s_process_hsp_list(&mut host.hsp_list, &x) >= K_NUM_HSP_TO_FORK {
             host.fork_children();
         }
         return true;
     }
-    process_hsp_list(&mut host.hsp_list, &x);
-    process_ctree(&mut host.left, &x);
-    process_ctree(&mut host.right, &x);
+    s_process_hsp_list(&mut host.hsp_list, &x);
+    s_process_ctree(&mut host.left, &x);
+    s_process_ctree(&mut host.right, &x);
     true
 }
 
@@ -882,6 +1717,8 @@ mod tests {
                 num_gaps: 0,
                 comp_adjustment_method: 0,
                 edit_script: None,
+                pat_info: None,
+                map_info: None,
             },
             context_id: 0,
             subject_id: sid,
@@ -892,6 +1729,29 @@ mod tests {
         })
     }
 
+    fn hsp(score: i32, context: i32, query_offset: i32, subject_offset: i32) -> Hsp {
+        Hsp {
+            score,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1.0 / score.max(1) as f64,
+            query_offset,
+            query_end: query_offset + 10,
+            query_gapped_start: query_offset,
+            subject_offset,
+            subject_end: subject_offset + 10,
+            subject_gapped_start: subject_offset,
+            context,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        }
+    }
+
     #[test]
     fn dominate_test_higher_score_dominates_lower_when_overlapping() {
         let p = mk(100, 0, 100, 0);
@@ -899,7 +1759,7 @@ mod tests {
         // p covers [0,100], y covers [10,90] (80 wide). Overlap = 80,
         // 2*80 = 160 >= l2 (80) → 50% overlap satisfied. Higher score
         // dominates.
-        assert!(dominate_test(&p, &y));
+        assert!(s_dominate_test(&p, &y));
     }
 
     #[test]
@@ -907,7 +1767,7 @@ mod tests {
         let p = mk(100, 0, 50, 0);
         let y = mk(50, 60, 100, 1);
         // Zero overlap → fails the 50% precondition.
-        assert!(!dominate_test(&p, &y));
+        assert!(!s_dominate_test(&p, &y));
     }
 
     #[test]
@@ -915,40 +1775,40 @@ mod tests {
         // Identical begin/end/score → tiebreak by subject_id (lower wins).
         let p = mk(100, 0, 100, 5);
         let y = mk(100, 0, 100, 9);
-        assert!(dominate_test(&p, &y)); // 5 < 9 → p dominates
-        assert!(!dominate_test(&y, &p));
+        assert!(s_dominate_test(&p, &y)); // 5 < 9 → p dominates
+        assert!(!s_dominate_test(&y, &p));
     }
 
     #[test]
     fn full_pass_drops_when_merit_reaches_zero() {
         let mut list: Option<Box<LinkedHsp>> = None;
-        add_hsp_to_list(&mut list, mk(100, 0, 100, 0));
-        add_hsp_to_list(&mut list, mk(90, 0, 100, 1));
+        s_add_hsp_to_list(&mut list, mk(100, 0, 100, 0));
+        s_add_hsp_to_list(&mut list, mk(90, 0, 100, 1));
         // y has merit 1 and is dominated by both → fails on first hit.
         let mut y = *mk(50, 10, 90, 2);
         y.merit = 1;
-        assert!(!full_pass(&list, &mut y));
+        assert!(!s_full_pass(&list, &mut y));
         assert_eq!(y.merit, 0);
     }
 
     #[test]
     fn full_pass_keeps_when_merit_survives() {
         let mut list: Option<Box<LinkedHsp>> = None;
-        add_hsp_to_list(&mut list, mk(100, 0, 100, 0));
+        s_add_hsp_to_list(&mut list, mk(100, 0, 100, 0));
         // y has merit 5 and only one dominator → still alive.
         let mut y = *mk(50, 10, 90, 1);
         y.merit = 5;
-        assert!(full_pass(&list, &mut y));
+        assert!(s_full_pass(&list, &mut y));
         assert_eq!(y.merit, 4);
     }
 
     #[test]
     fn process_hsp_list_drops_dominated_elements() {
         let mut list: Option<Box<LinkedHsp>> = None;
-        add_hsp_to_list(&mut list, mk(50, 10, 90, 1)); // dominated by y
-        add_hsp_to_list(&mut list, mk(60, 20, 80, 2)); // dominated by y
+        s_add_hsp_to_list(&mut list, mk(50, 10, 90, 1)); // dominated by y
+        s_add_hsp_to_list(&mut list, mk(60, 20, 80, 2)); // dominated by y
         let y = *mk(200, 0, 100, 0);
-        let remaining = process_hsp_list(&mut list, &y);
+        let remaining = s_process_hsp_list(&mut list, &y);
         assert_eq!(remaining, 0);
         assert!(list.is_none());
     }
@@ -958,11 +1818,11 @@ mod tests {
         let mut list: Option<Box<LinkedHsp>> = None;
         let mut a = mk(100, 0, 100, 0);
         a.merit = 1; // will fall to 0 → dropped
-        add_hsp_to_list(&mut list, a);
+        s_add_hsp_to_list(&mut list, a);
         let mut b = mk(100, 0, 100, 1);
         b.merit = 5;
-        add_hsp_to_list(&mut list, b);
-        let remaining = mark_down_hsp_list(&mut list);
+        s_add_hsp_to_list(&mut list, b);
+        let remaining = s_mark_down_hsp_list(&mut list);
         assert_eq!(remaining, 1);
         // Remaining one is the merit-5 entry decremented to 4.
         let head = list.as_ref().expect("head");
@@ -982,6 +1842,7 @@ mod tests {
                 query_index: 0,
                 frame: 0,
                 is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 1000,
         };
@@ -1012,6 +1873,8 @@ mod tests {
             num_gaps: 0,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         });
         list.add_hsp(Hsp {
             score: 50,
@@ -1030,6 +1893,8 @@ mod tests {
             num_gaps: 0,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         });
         let mut hitlist = crate::hspstream::HitList::new();
         hitlist.hsp_lists.push(list);
@@ -1063,6 +1928,35 @@ mod tests {
     }
 
     #[test]
+    fn s_blast_hspculling_free_clears_initialized_state() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 10,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 10,
+        };
+        let hit = crate::options::HitSavingOptions::default();
+        let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
+        let params =
+            blast_hsp_culling_params_new(&hit, &cull_opts, 10, crate::program::BLASTP, 0, true);
+        let mut data = BlastHSPCullingData::s_blast_hspculling_new(params, &qi);
+        data.s_blast_hspculling_init();
+        assert_eq!(data.c_tree.len(), 1);
+
+        let mut slot = Some(data);
+        s_blast_hspculling_free(&mut slot);
+        assert!(slot.is_none());
+    }
+
+    #[test]
     fn culling_data_init_run_finalize_round_trip() {
         // Build a 1-context query info.
         let qi = crate::queryinfo::QueryInfo {
@@ -1075,6 +1969,7 @@ mod tests {
                 query_index: 0,
                 frame: 0,
                 is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 1000,
         };
@@ -1082,8 +1977,8 @@ mod tests {
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
         let params =
             blast_hsp_culling_params_new(&hit, &cull_opts, 10, crate::program::BLASTP, 0, true);
-        let mut data = BlastHSPCullingData::new(params, &qi);
-        data.init();
+        let mut data = BlastHSPCullingData::s_blast_hspculling_new(params, &qi);
+        data.s_blast_hspculling_init();
         // Build an HSP list with a few HSPs.
         let mut list = crate::hspstream::HspList::new(42);
         list.add_hsp(Hsp {
@@ -1103,6 +1998,8 @@ mod tests {
             num_gaps: 0,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         });
         list.add_hsp(Hsp {
             score: 50,
@@ -1121,10 +2018,12 @@ mod tests {
             num_gaps: 0,
             comp_adjustment_method: 0,
             edit_script: None,
+            pat_info: None,
+            map_info: None,
         });
-        data.run(&mut list);
+        data.s_blast_hspculling_run(&mut list);
         // Finalize and check the shape.
-        let results = data.finalize();
+        let results = data.s_blast_hspculling_final();
         let hl = results.hitlists[0].as_ref().expect("hitlist");
         assert_eq!(hl.hsp_lists.len(), 1);
         assert_eq!(hl.hsp_lists[0].oid, 42);
@@ -1140,12 +2039,13 @@ mod tests {
             cutoff_score: 0,
             percent_identity: 0.0,
             min_hit_length: 0,
+            ..crate::options::HitSavingOptions::default()
         };
         let cull = BlastHSPCullingOptions { max_hits: 5 };
         let params =
             blast_hsp_culling_params_new(&hit, &cull, 100, crate::program::BLASTP, 0, true);
         assert_eq!(params.culling_max, 5);
-        assert_eq!(params.prelim_hitlist_size, 500); // composition_based_stats = 0 → no doubling
+        assert_eq!(params.prelim_hitlist_size, 550);
         assert_eq!(params.hsp_num_max, 100);
         assert_eq!(params.program, crate::program::BLASTP);
     }
@@ -1158,11 +2058,12 @@ mod tests {
             cutoff_score: 0,
             percent_identity: 0.0,
             min_hit_length: 0,
+            ..crate::options::HitSavingOptions::default()
         };
         let cull = BlastHSPCullingOptions { max_hits: 5 };
         let params =
             blast_hsp_culling_params_new(&hit, &cull, 100, crate::program::BLASTP, 2, true);
-        assert_eq!(params.prelim_hitlist_size, 1000);
+        assert_eq!(params.prelim_hitlist_size, 1050);
     }
 
     #[test]
@@ -1173,6 +2074,7 @@ mod tests {
             cutoff_score: 0,
             percent_identity: 0.0,
             min_hit_length: 0,
+            ..crate::options::HitSavingOptions::default()
         };
         let cull = BlastHSPCullingOptions { max_hits: 3 };
         let params =
@@ -1180,8 +2082,45 @@ mod tests {
         let info = blast_hsp_culling_info_new(params.clone());
         assert_eq!(info.params.culling_max, 3);
         let pipe = blast_hsp_culling_pipe_info_new(params);
-        assert_eq!(pipe.params.hsp_num_max, 50);
+        assert_eq!(pipe.params.hsp_num_max, i32::MAX);
         assert!(pipe.next.is_none());
+    }
+
+    #[test]
+    fn blast_hsp_pipe_info_add_appends_to_tail() {
+        let hit = crate::options::HitSavingOptions::default();
+        let cull = BlastHSPCullingOptions { max_hits: 3 };
+        let first_params =
+            blast_hsp_culling_params_new(&hit, &cull, 10, crate::program::BLASTN, 0, false);
+        let second_params =
+            blast_hsp_culling_params_new(&hit, &cull, 20, crate::program::BLASTP, 0, false);
+        let third_params =
+            blast_hsp_culling_params_new(&hit, &cull, 30, crate::program::TBLASTN, 0, false);
+        let mut head = None;
+
+        let first_ptr = blast_hsp_pipe_info_add(
+            &mut head,
+            Box::new(blast_hsp_culling_pipe_info_new(first_params)),
+        );
+        let second_ptr = blast_hsp_pipe_info_add(
+            &mut head,
+            Box::new(blast_hsp_culling_pipe_info_new(second_params)),
+        );
+        let third_ptr = blast_hsp_pipe_info_add(
+            &mut head,
+            Box::new(blast_hsp_culling_pipe_info_new(third_params)),
+        );
+
+        let first = head.as_ref().expect("head");
+        let second = first.next.as_ref().expect("second");
+        let third = second.next.as_ref().expect("third");
+        assert_eq!(first.params.hsp_num_max, i32::MAX);
+        assert_eq!(second.params.hsp_num_max, i32::MAX);
+        assert_eq!(third.params.hsp_num_max, i32::MAX);
+        assert!(third.next.is_none());
+        assert_eq!(first_ptr, first.as_ref() as *const _ as *mut _);
+        assert_eq!(second_ptr, second.as_ref() as *const _ as *mut _);
+        assert_eq!(third_ptr, third.as_ref() as *const _ as *mut _);
     }
 
     #[test]
@@ -1201,8 +2140,402 @@ mod tests {
     }
 
     #[test]
+    fn blast_hsp_best_hit_params_info_and_free_match_c_shape() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 200,
+            hsp_num_max: 7,
+            program_number: crate::program::BLASTP,
+            ..crate::options::HitSavingOptions::default()
+        };
+        let opts = BlastHSPBestHitOptions {
+            overhang: 0.1,
+            score_edge: 0.1,
+        };
+        let params = blast_hsp_best_hit_params_new(&hit, &opts, 0, true);
+        assert_eq!(params.prelim_hitlist_size, 250);
+        assert_eq!(params.hsp_num_max, 7);
+        assert_eq!(params.program, crate::program::BLASTP);
+        assert_eq!(params.overhang, 0.1);
+        assert_eq!(params.score_edge, 0.1);
+
+        let info = blast_hsp_best_hit_info_new(params.clone());
+        assert_eq!(info.params.hsp_num_max, 7);
+        let pipe_info = blast_hsp_best_hit_pipe_info_new(params.clone());
+        assert!(pipe_info.next.is_none());
+        assert_eq!(pipe_info.params.prelim_hitlist_size, 250);
+
+        let mut slot = Some(params);
+        assert!(blast_hsp_best_hit_params_free(&mut slot).is_none());
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn blast_hsp_best_hit_pipe_run_filters_contained_lower_density_hsp() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 200,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 200,
+        };
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 20,
+            hsp_num_max: 10,
+            program_number: crate::program::BLASTP,
+            ..crate::options::HitSavingOptions::default()
+        };
+        let opts = BlastHSPBestHitOptions {
+            overhang: 0.1,
+            score_edge: 0.1,
+        };
+        let params = blast_hsp_best_hit_params_new(&hit, &opts, 0, true);
+        let mut data = s_blast_hsp_best_hit_pipe_new(params, &qi);
+
+        let mut results = crate::hspstream::HspResults::new(1);
+        let mut hsp_list = crate::hspstream::HspList::new(42);
+        hsp_list.add_hsp(Hsp {
+            score: 200,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1e-40,
+            query_offset: 0,
+            query_end: 100,
+            query_gapped_start: 0,
+            subject_offset: 0,
+            subject_end: 100,
+            subject_gapped_start: 0,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        });
+        hsp_list.add_hsp(Hsp {
+            score: 50,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: 1e-5,
+            query_offset: 20,
+            query_end: 80,
+            query_gapped_start: 20,
+            subject_offset: 20,
+            subject_end: 80,
+            subject_gapped_start: 20,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        });
+        let mut hitlist = crate::hspstream::HitList::new();
+        hitlist.hsp_lists.push(hsp_list);
+        results.hitlists[0] = Some(hitlist);
+
+        assert_eq!(s_blast_hsp_best_hit_pipe_run(&mut data, &mut results), 0);
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 42);
+        assert_eq!(hitlist.hsp_lists[0].hsps.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 200);
+    }
+
+    #[test]
+    fn blast_hsp_best_hit_run_rps_uses_hsp_context_as_subject_oid() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+        };
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 20,
+            hsp_num_max: 10,
+            program_number: crate::program::RPS_BLAST,
+            ..crate::options::HitSavingOptions::default()
+        };
+        let opts = BlastHSPBestHitOptions {
+            overhang: 0.1,
+            score_edge: 0.1,
+        };
+        let params = blast_hsp_best_hit_params_new(&hit, &opts, 0, true);
+        let mut data = s_blast_hsp_best_hit_pipe_new(params, &qi);
+        let mut results = crate::hspstream::HspResults::new(1);
+        let _ = s_blast_hsp_best_hit_init(&mut data, &results);
+
+        let mut hsp_list = crate::hspstream::HspList::new(0);
+        hsp_list.add_hsp(hsp(100, 7, 10, 2));
+        assert_eq!(
+            s_blast_hsp_best_hit_run_rps(&mut data, 0, Some(hsp_list)),
+            0
+        );
+        assert_eq!(s_blast_hsp_best_hit_final(&mut data, &mut results), 0);
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].context, 0);
+    }
+
+    #[test]
+    fn translated_hsp_filtering_options_lifecycle_and_transfers() {
+        let mut filter = blast_hspfiltering_options_new();
+        assert!(filter.best_hit.is_none());
+        assert!(filter.culling_opts.is_none());
+
+        let mut best_hit = Some(blast_hspbest_hit_options_new(0.1, 0.2));
+        assert_eq!(
+            blast_hspfiltering_options_add_best_hit(
+                Some(&mut filter),
+                &mut best_hit,
+                crate::util::EBlastStage::PrelimSearch,
+            ),
+            0
+        );
+        assert!(best_hit.is_none());
+        assert_eq!(
+            filter.best_hit,
+            Some(BlastHSPBestHitOptions {
+                overhang: 0.1,
+                score_edge: 0.2,
+            })
+        );
+        assert_eq!(
+            filter.best_hit_stage,
+            crate::util::EBlastStage::PrelimSearch
+        );
+
+        let mut culling = Some(blast_hspculling_options_new(7));
+        assert_eq!(
+            blast_hspfiltering_options_add_culling(
+                Some(&mut filter),
+                &mut culling,
+                crate::util::EBlastStage::TracebackSearch,
+            ),
+            0
+        );
+        assert!(culling.is_none());
+        assert_eq!(
+            filter.culling_opts,
+            Some(BlastHSPCullingOptions { max_hits: 7 })
+        );
+        assert_eq!(
+            filter.culling_stage,
+            crate::util::EBlastStage::TracebackSearch
+        );
+        assert_eq!(blast_hspfiltering_options_validate(&filter), 0);
+
+        let mut slot = Some(filter);
+        assert!(blast_hspfiltering_options_free(&mut slot).is_none());
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn translated_hsp_filtering_options_validate_bounds_and_stage_conflicts() {
+        let mut invalid_best_hit = blast_hspfiltering_options_new();
+        invalid_best_hit.best_hit = Some(blast_hspbest_hit_options_new(0.0, 0.1));
+        assert_eq!(blast_hspbest_hit_options_validate(&invalid_best_hit), -1);
+        invalid_best_hit.best_hit = Some(blast_hspbest_hit_options_new(0.1, 0.5));
+        assert_eq!(blast_hspbest_hit_options_validate(&invalid_best_hit), -1);
+
+        let mut invalid_culling = blast_hspfiltering_options_new();
+        invalid_culling.culling_opts = Some(blast_hspculling_options_new(-1));
+        assert_eq!(blast_hspculling_options_validate(&invalid_culling), -1);
+
+        let mut conflict = blast_hspfiltering_options_new();
+        conflict.best_hit = Some(blast_hspbest_hit_options_new(0.1, 0.1));
+        conflict.best_hit_stage = crate::util::EBlastStage::PrelimSearch;
+        conflict.culling_opts = Some(blast_hspculling_options_new(3));
+        conflict.culling_stage = crate::util::EBlastStage::Both;
+        assert_eq!(blast_hspfiltering_options_validate(&conflict), 1);
+
+        let mut missing_best_hit = None;
+        assert_eq!(
+            blast_hspfiltering_options_add_best_hit(
+                Some(&mut conflict),
+                &mut missing_best_hit,
+                crate::util::EBlastStage::PrelimSearch,
+            ),
+            1
+        );
+        let mut missing_culling = None;
+        assert_eq!(
+            blast_hspfiltering_options_add_culling(
+                None,
+                &mut missing_culling,
+                crate::util::EBlastStage::PrelimSearch,
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn blast_hsp_collector_params_info_and_free() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 25,
+            ..Default::default()
+        };
+        let params = blast_hsp_collector_params_new(&hit, crate::program::BLASTP, 1, true, 7);
+        assert_eq!(params.prelim_hitlist_size, 1050);
+        assert_eq!(params.hsp_num_max, 7);
+
+        let info = blast_hsp_collector_info_new(params.clone());
+        assert_eq!(info.params.prelim_hitlist_size, 1050);
+        let writer = s_blast_hspcollector_new(params.clone());
+        assert!(!writer.rps_run);
+        assert!(s_blast_hspcollector_free(Some(writer)).is_none());
+
+        let mut slot = Some(params);
+        assert!(blast_hsp_collector_params_free(&mut slot).is_none());
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn blast_hsp_collector_run_splits_multiple_queries() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 10,
+            ..Default::default()
+        };
+        let params = blast_hsp_collector_params_new(&hit, crate::program::BLASTP, 0, true, 20);
+        let mut data = BlastHSPCollectorData { params };
+        let mut results = crate::hspstream::HspResults::new(2);
+        let mut input = crate::hspstream::blast_hsp_list_new(20);
+        input.oid = 42;
+        input.hsps.push(hsp(100, 0, 0, 0));
+        input.hsps.push(hsp(80, 0, 40, 20));
+        input.hsps.push(hsp(90, 1, 20, 5));
+
+        assert_eq!(
+            s_blast_hspcollector_run(&mut data, &mut results, Some(input)),
+            0
+        );
+        assert_eq!(results.hitlists.len(), 2);
+        assert_eq!(results.hitlists[0].as_ref().unwrap().hsp_lists[0].oid, 42);
+        assert_eq!(results.hitlists[0].as_ref().unwrap().hsp_lists.len(), 1);
+        assert_eq!(
+            results.hitlists[0].as_ref().unwrap().hsp_lists[0]
+                .hsps
+                .len(),
+            2
+        );
+        assert_eq!(
+            results.hitlists[1].as_ref().unwrap().hsp_lists[0].hsps[0].context,
+            1
+        );
+        assert_eq!(s_blast_hspcollector_final(&mut data, &mut results), 0);
+    }
+
+    #[test]
+    fn blast_hsp_collector_run_respects_prelim_hitlist_cap() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 1,
+            ..Default::default()
+        };
+        let params = blast_hsp_collector_params_new(&hit, crate::program::BLASTP, 0, false, 0);
+        assert_eq!(params.prelim_hitlist_size, 1);
+        assert_eq!(params.hsp_num_max, i32::MAX);
+        let mut data = BlastHSPCollectorData { params };
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        for &(oid, score) in &[(1, 30), (2, 90), (3, 40)] {
+            let mut list = crate::hspstream::blast_hsp_list_new(0);
+            list.oid = oid;
+            list.hsps.push(hsp(score, 0, 0, 0));
+            assert_eq!(
+                s_blast_hspcollector_run(&mut data, &mut results, Some(list)),
+                0
+            );
+        }
+
+        let hitlist = results.hitlists[0].as_ref().unwrap();
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 2);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 90);
+    }
+
+    #[test]
+    fn blast_hsp_collector_final_sorts_heap_hitlists_by_evalue() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 3,
+            ..Default::default()
+        };
+        let params = blast_hsp_collector_params_new(&hit, crate::program::BLASTP, 0, false, 0);
+        let mut data = BlastHSPCollectorData { params };
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        for &(oid, score) in &[(1, 30), (2, 90), (3, 40), (4, 80)] {
+            let mut list = crate::hspstream::blast_hsp_list_new(0);
+            list.oid = oid;
+            list.hsps.push(hsp(score, 0, 0, 0));
+            assert_eq!(
+                s_blast_hspcollector_run(&mut data, &mut results, Some(list)),
+                0
+            );
+        }
+
+        let hitlist = results.hitlists[0].as_ref().unwrap();
+        assert_eq!(hitlist.hsp_lists.len(), 3);
+        assert_eq!(hitlist.hsp_lists[0].oid, 3);
+
+        assert_eq!(s_blast_hspcollector_final(&mut data, &mut results), 0);
+        let ordered: Vec<i32> = results.hitlists[0]
+            .as_ref()
+            .unwrap()
+            .hsp_lists
+            .iter()
+            .map(|list| list.oid)
+            .collect();
+        assert_eq!(ordered, vec![2, 4, 3]);
+    }
+
+    #[test]
+    fn blast_hsp_collector_run_rps_groups_by_context_as_oid() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 10,
+            ..Default::default()
+        };
+        let params = blast_hsp_collector_params_new(&hit, crate::program::RPS_BLAST, 0, true, 20);
+        let mut writer = s_blast_hspcollector_new(params);
+        assert!(writer.rps_run);
+        let mut results = crate::hspstream::HspResults::new(1);
+        let mut input = crate::hspstream::blast_hsp_list_new(20);
+        input.hsps.push(hsp(50, 9, 0, 30));
+        input.hsps.push(hsp(80, 7, 0, 10));
+        input.hsps.push(hsp(70, 9, 0, 20));
+
+        assert_eq!(
+            s_blast_hspcollector_run_rps(&mut writer.data, &mut results, 0, input),
+            0
+        );
+        let hitlist = results.hitlists[0].as_ref().unwrap();
+        assert_eq!(hitlist.hsp_lists.len(), 2);
+        assert_eq!(hitlist.hsp_lists[0].oid, 7);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].context, 0);
+        assert_eq!(hitlist.hsp_lists[1].oid, 9);
+        assert_eq!(hitlist.hsp_lists[1].hsps[0].score, 70);
+    }
+
+    #[test]
     fn ctree_new_creates_root_with_full_range() {
-        let tree = ctree_new(1000);
+        let tree = s_ctree_new(1000);
         assert_eq!(tree.begin, 0);
         assert_eq!(tree.end, 1000);
         assert!(tree.left.is_none());
@@ -1211,29 +2544,29 @@ mod tests {
 
     #[test]
     fn save_hsp_inserts_until_dominated() {
-        let mut tree = *ctree_new(1000);
+        let mut tree = *s_ctree_new(1000);
         // Insert a few non-dominating HSPs.
         for (score, b, e, sid) in [(50, 0, 100, 1), (40, 200, 300, 2), (60, 500, 600, 3)] {
             let mut node = *mk(score, b, e, sid);
             node.merit = 5;
-            assert!(save_hsp(&mut tree, &mut node));
+            assert!(s_save_hsp(&mut tree, &mut node));
         }
         // Now insert one whose merit is too low to survive.
         let mut bad = *mk(20, 0, 100, 9);
         bad.merit = 0; // already at zero → first dominator drops it
-                       // Note: merit=0 plus full_pass decrement → drops on first match.
-        let _ = save_hsp(&mut tree, &mut bad);
+                       // Note: merit=0 plus s_full_pass decrement → drops on first match.
+        let _ = s_save_hsp(&mut tree, &mut bad);
     }
 
     #[test]
     fn rip_hsp_off_ctree_collects_all_nodes() {
-        let mut tree = *ctree_new(1000);
+        let mut tree = *s_ctree_new(1000);
         for (score, b, e, sid) in [(50, 0, 100, 1), (40, 200, 300, 2), (60, 500, 600, 3)] {
             let mut node = *mk(score, b, e, sid);
             node.merit = 5;
-            save_hsp(&mut tree, &mut node);
+            s_save_hsp(&mut tree, &mut node);
         }
-        let ripped = rip_hsp_off_ctree(Some(Box::new(tree)));
+        let ripped = s_rip_hsp_off_ctree(Some(Box::new(tree)));
         // Count survivors.
         let mut count = 0;
         let mut cur = ripped.as_deref();
@@ -1255,10 +2588,10 @@ mod tests {
         };
         // Three HSPs: one strictly left, one strictly right, one
         // spanning the midpoint.
-        add_hsp_to_list(&mut node.hsp_list, mk(50, 5, 25, 1)); // strictly left
-        add_hsp_to_list(&mut node.hsp_list, mk(60, 60, 90, 2)); // strictly right
-        add_hsp_to_list(&mut node.hsp_list, mk(70, 30, 70, 3)); // spans midpt 50
-        node.fork_children();
+        s_add_hsp_to_list(&mut node.hsp_list, mk(50, 5, 25, 1)); // strictly left
+        s_add_hsp_to_list(&mut node.hsp_list, mk(60, 60, 90, 2)); // strictly right
+        s_add_hsp_to_list(&mut node.hsp_list, mk(70, 30, 70, 3)); // spans midpt 50
+        s_fork_children(&mut node);
         // Spanning HSP stays.
         assert!(node.hsp_list.is_some());
         let stays = node.hsp_list.as_ref().unwrap();
@@ -1280,8 +2613,8 @@ mod tests {
             hsp_list: None,
         };
         let _ = &mut parent;
-        let left = CTreeNode::new_child(Some(&parent), CTreeChild::Left);
-        let right = CTreeNode::new_child(Some(&parent), CTreeChild::Right);
+        let left = s_ctree_node_new(Some(&parent), CTreeChild::Left);
+        let right = s_ctree_node_new(Some(&parent), CTreeChild::Right);
         assert_eq!(left.begin, 0);
         assert_eq!(left.end, 50);
         assert_eq!(right.begin, 50);
@@ -1290,9 +2623,27 @@ mod tests {
 
     #[test]
     fn ctree_node_new_child_root_is_uninitialized() {
-        let node = CTreeNode::new_child(None, CTreeChild::Left);
+        let node = s_ctree_node_new(None, CTreeChild::Left);
         assert_eq!(node.begin, 0);
         assert_eq!(node.end, 0);
+    }
+
+    #[test]
+    fn ctree_memory_wrappers_drop_owned_values() {
+        let node = s_get_node();
+        assert_eq!(node.begin, 0);
+        assert_eq!(node.end, 0);
+        assert!(s_ret_node(Some(node)).is_none());
+
+        let leaf = s_ctree_node_new(None, CTreeChild::Left);
+        assert!(s_ctree_node_free(Some(leaf)).is_none());
+
+        let mut tree = s_ctree_new(42);
+        tree.left = Some(s_ctree_node_new(Some(&tree), CTreeChild::Left));
+        tree.right = Some(s_ctree_node_new(Some(&tree), CTreeChild::Right));
+        s_debug(Some(&tree));
+        assert!(s_ctree_free(Some(tree)).is_none());
+        assert!(s_ctree_free(None).is_none());
     }
 
     #[test]
@@ -1315,6 +2666,8 @@ mod tests {
                 num_gaps: 0,
                 comp_adjustment_method: 0,
                 edit_script: None,
+                pat_info: None,
+                map_info: None,
             },
             context_id: 0,
             subject_id: 5,
@@ -1323,11 +2676,12 @@ mod tests {
             merit: 3,
             next: None,
         };
-        a.next = Some(Box::new(a.copy()));
-        let copy = a.copy();
+        a.next = Some(Box::new(s_hsp_copy(&a)));
+        let copy = s_hsp_copy(&a);
         assert_eq!(copy.subject_id, 5);
         assert_eq!(copy.merit, 3);
         // Detached: `next` should be None even though `a` had a next.
         assert!(copy.next.is_none());
+        assert!(s_hsp_free(Some(Box::new(copy))).is_none());
     }
 }

@@ -47,6 +47,7 @@ pub mod nlm_linear_algebra;
 pub mod optimize_target_freq;
 pub mod semi_gapped_align;
 pub mod smith_waterman;
+pub mod spliced_hits;
 
 // Re-export high-level API at crate root for convenience
 pub use api::{
@@ -133,6 +134,8 @@ pub mod gapinfo;
 #[allow(dead_code)]
 pub(crate) mod hspstream;
 #[allow(dead_code)]
+pub(crate) mod index_ungapped;
+#[allow(dead_code)]
 pub(crate) mod itree;
 #[allow(dead_code)]
 pub(crate) mod options;
@@ -162,6 +165,8 @@ pub mod math;
 #[allow(dead_code)]
 pub(crate) mod parameters;
 #[allow(dead_code)]
+pub(crate) mod pattern;
+#[allow(dead_code)]
 pub(crate) mod program;
 #[allow(dead_code)]
 pub(crate) mod queryinfo;
@@ -171,3 +176,5 @@ pub(crate) mod rps;
 pub(crate) mod seqsrc;
 #[allow(dead_code)]
 pub(crate) mod sequence;
+#[allow(dead_code)]
+pub(crate) mod split_query;

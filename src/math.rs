@@ -14,6 +14,8 @@ pub const NCBIMATH_LN2: f64 = std::f64::consts::LN_2;
 pub const NCBIMATH_LNPI: f64 = 1.144_729_885_849_400_2;
 /// `NCBIMATH_PI` = pi (`ncbi_math.h`). Bit-identical to `std::f64::consts::PI`.
 pub const NCBIMATH_PI: f64 = std::f64::consts::PI;
+pub const LOGDERIV_ORDER_MAX: i32 = 4;
+pub const POLYGAMMA_ORDER_MAX: i32 = LOGDERIV_ORDER_MAX;
 
 /// exp(x) - 1 for small x (avoids catastrophic cancellation).
 pub fn expm1(x: f64) -> f64 {
@@ -139,29 +141,215 @@ const GAMMA_COEF: [f64; 11] = [
     1.251_639_670_050_933e-10,
 ];
 
-/// Port of NCBI `s_GeneralLnGamma(x, 0)` (`ncbi_math.c:162`): computes
-/// `ln(Gamma(x))` for `x >= 1` via a Lanczos-style series using
-/// `GAMMA_COEF` and the identity `ln(Gamma(x)) = ln(y) + (ln(pi)+ln(2))/2
-/// + (xx+0.5)*ln(tx+0.5) - (tx+0.5)`, where `xx = x-1`, `tx = xx+11`,
-/// and `y = 1 + sum_i coef[i] / (tx - i)`. 10-digit accuracy per NCBI.
-fn s_ln_gamma(x: f64) -> f64 {
+const PRECOMPUTED_FACTORIAL: [f64; 35] = [
+    1.,
+    1.,
+    2.,
+    6.,
+    24.,
+    120.,
+    720.,
+    5040.,
+    40320.,
+    362880.,
+    3628800.,
+    39916800.,
+    479001600.,
+    6227020800.,
+    87178291200.,
+    1307674368000.,
+    20922789888000.,
+    355687428096000.,
+    6402373705728000.,
+    121645100408832000.,
+    2432902008176640000.,
+    51090942171709440000.,
+    1124000727777607680000.,
+    25852016738884976640000.,
+    620448401733239439360000.,
+    15511210043330985984000000.,
+    403291461126605635584000000.,
+    10888869450418352160768000000.,
+    304888344611713860501504000000.,
+    8841761993739701954543616000000.,
+    265252859812191058636308480000000.,
+    8222838654177922817725562880000000.,
+    263130836933693530167218012160000000.,
+    8683317618811886495518194401280000000.,
+    295232799039604140847618609643520000000.,
+];
+
+/// Port of NCBI `s_LogDerivative` (`ncbi_math.c:95`).
+pub fn s_log_derivative(order: i32, u: &[f64]) -> f64 {
+    if !(0..=LOGDERIV_ORDER_MAX).contains(&order) {
+        return f64::INFINITY;
+    }
+    if u.is_empty() || (order > 0 && u[0] == 0.0) {
+        return f64::INFINITY;
+    }
+    let order = order as usize;
+    if u.len() <= order {
+        return f64::INFINITY;
+    }
+    let mut y = [0.0; (LOGDERIV_ORDER_MAX + 1) as usize];
+    for i in 1..=order {
+        y[i] = u[i] / u[0];
+    }
+
+    match order {
+        0 => {
+            if u[0] > 0.0 {
+                u[0].ln()
+            } else {
+                f64::INFINITY
+            }
+        }
+        1 => y[1],
+        2 => y[2] - y[1] * y[1],
+        3 => y[3] - 3.0 * y[2] * y[1] + 2.0 * y[1] * y[1] * y[1],
+        4 => {
+            let tmp = y[1] * y[1];
+            y[4] - 4.0 * y[3] * y[1] - 3.0 * y[2] * y[2] + 12.0 * y[2] * tmp
+                - 6.0 * tmp * tmp
+        }
+        _ => f64::INFINITY,
+    }
+}
+
+/// Port of NCBI `s_GeneralLnGamma` (`ncbi_math.c:162`).
+pub fn s_general_ln_gamma(x: f64, order: i32) -> f64 {
     let xgamma_dim = GAMMA_COEF.len();
     let xx = x - 1.0;
     let tx = xx + xgamma_dim as f64;
-    // Walk `coef` pointer backward as in the C code; equivalent to
-    // summing coef[n-1]/tx + coef[n-2]/(tx-1) + ... + coef[0]/(tx-n+1).
-    let mut tmp = tx;
-    let mut value = GAMMA_COEF[xgamma_dim - 1] / tmp;
-    for i in (0..(xgamma_dim - 1)).rev() {
-        tmp -= 1.0;
-        value += GAMMA_COEF[i] / tmp;
+    let order_usize = order.max(0) as usize;
+    let mut y = [0.0; (POLYGAMMA_ORDER_MAX + 1) as usize];
+
+    for (i, y_slot) in y.iter_mut().enumerate().take(order_usize + 1) {
+        let mut tmp = tx;
+        let mut value;
+        if i == 0 {
+            value = GAMMA_COEF[xgamma_dim - 1] / tmp;
+            for coef_index in (0..(xgamma_dim - 1)).rev() {
+                tmp -= 1.0;
+                value += GAMMA_COEF[coef_index] / tmp;
+            }
+        } else {
+            value = GAMMA_COEF[xgamma_dim - 1] / powi(tmp, i as i32 + 1);
+            for coef_index in (0..(xgamma_dim - 1)).rev() {
+                tmp -= 1.0;
+                value += GAMMA_COEF[coef_index] / powi(tmp, i as i32 + 1);
+            }
+            let factorial = blast_factorial(i as i32);
+            value *= if i % 2 == 0 { factorial } else { -factorial };
+        }
+        *y_slot = value;
     }
-    value += 1.0;
-    // `s_LogDerivative(0, y)` == `log(y[0])`. NCBI `ncbi_math.c:197`:
-    //   value += ((NCBIMATH_LNPI + NCBIMATH_LN2) / 2.) + (xx+0.5)*log(tmp) - tmp;
-    let ln_y = value.ln();
-    let tmp_half = tx + 0.5;
-    ln_y + (NCBIMATH_LNPI + NCBIMATH_LN2) * 0.5 + (xx + 0.5) * tmp_half.ln() - tmp_half
+    y[0] += 1.0;
+    let mut value = s_log_derivative(order, &y);
+    let tmp = tx + 0.5;
+    match order {
+        0 => {
+            value += (NCBIMATH_LNPI + NCBIMATH_LN2) / 2.0 + (xx + 0.5) * tmp.ln() - tmp;
+        }
+        1 => {
+            value += tmp.ln() - xgamma_dim as f64 / tmp;
+        }
+        2 => {
+            value += (tmp + xgamma_dim as f64) / (tmp * tmp);
+        }
+        3 => {
+            value -= (1.0 + 2.0 * xgamma_dim as f64 / tmp) / (tmp * tmp);
+        }
+        4 => {
+            value += 2.0 * (1.0 + 3.0 * xgamma_dim as f64 / tmp) / (tmp * tmp * tmp);
+        }
+        _ => {
+            let extra = blast_factorial(order - 2)
+                * powi(tmp, 1 - order)
+                * (1.0 + (order - 1) as f64 * xgamma_dim as f64 / tmp);
+            if order % 2 == 0 {
+                value += extra;
+            } else {
+                value -= extra;
+            }
+        }
+    }
+    value
+}
+
+/// Port of NCBI `s_PolyGamma` (`ncbi_math.c:236`).
+pub fn s_poly_gamma(x: f64, order: i32) -> f64 {
+    if !(0..=POLYGAMMA_ORDER_MAX).contains(&order) {
+        return f64::INFINITY;
+    }
+
+    if x >= 1.0 {
+        return s_general_ln_gamma(x, order);
+    }
+
+    if x < 0.0 {
+        let mut value = s_general_ln_gamma(1.0 - x, order);
+        if (order - 1) % 2 != 0 {
+            value = -value;
+        }
+        if order == 0 {
+            let sx = (NCBIMATH_PI * x).sin().abs();
+            if (x < -0.1 && (x.ceil() == x || sx < 2.0 * f64::EPSILON)) || sx == 0.0 {
+                return f64::INFINITY;
+            }
+            value += NCBIMATH_LNPI - sx.ln();
+        } else {
+            let mut y = [0.0; (POLYGAMMA_ORDER_MAX + 1) as usize];
+            let mut x_phase = x * NCBIMATH_PI;
+            y[0] = x_phase.sin();
+            let mut tmp = 1.0;
+            for y_slot in y.iter_mut().take(order as usize + 1).skip(1) {
+                tmp *= NCBIMATH_PI;
+                x_phase += NCBIMATH_PI / 2.0;
+                *y_slot = tmp * x_phase.sin();
+            }
+            value -= s_log_derivative(order, &y);
+        }
+        value
+    } else {
+        let mut value = s_general_ln_gamma(1.0 + x, order);
+        if order == 0 {
+            if x == 0.0 {
+                return f64::INFINITY;
+            }
+            value -= x.ln();
+        } else {
+            let tmp = blast_factorial(order - 1) * powi(x, -order);
+            value += if order % 2 == 0 { tmp } else { -tmp };
+        }
+        value
+    }
+}
+
+/// Port of NCBI `s_LnGamma` (`ncbi_math.c:292`).
+pub fn s_ln_gamma(x: f64) -> f64 {
+    s_poly_gamma(x, 0)
+}
+
+/// Port of NCBI `BLAST_Factorial` (`ncbi_math.c:312`).
+pub fn blast_factorial(n: i32) -> f64 {
+    if n < 0 {
+        return 0.0;
+    }
+    let n = n as usize;
+    if n < PRECOMPUTED_FACTORIAL.len() {
+        return PRECOMPUTED_FACTORIAL[n];
+    }
+    s_ln_gamma(n as f64 + 1.0).exp()
+}
+
+/// Port of NCBI `BLAST_LnFactorial` (`ncbi_math.c:473`).
+pub fn blast_ln_factorial(x: f64) -> f64 {
+    if x <= 0.0 {
+        0.0
+    } else {
+        s_ln_gamma(x + 1.0)
+    }
 }
 
 /// Compute the natural log of the factorial of n.
@@ -316,6 +504,36 @@ where
     huge
 }
 
+/// Port-shaped wrapper for NCBI `s_IEEE754_Exp` (`ncbi_erf.c:127`).
+///
+/// Audit caveat: NCBI embeds a private fdlibm `exp` kernel here so erf/erfc
+/// can avoid depending on platform libm details. Rust delegates to `f64::exp`,
+/// preserving the public IEEE-754 behavior expected by the callers while not
+/// duplicating the private range-reduction and bit-scaling implementation.
+pub fn s_ieee754_exp(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let hx = ((bits >> 32) as u32) & 0x7fff_ffff;
+    let xsb = ((bits >> 63) & 1) as u32;
+    let lx = bits as u32;
+
+    if hx >= 0x4086_2e42 {
+        if hx >= 0x7ff0_0000 {
+            if ((hx & 0x000f_ffff) | lx) != 0 {
+                return x + x;
+            }
+            return if xsb == 0 { x } else { 0.0 };
+        }
+        if x > 7.097_827_128_933_839_730_96e2 {
+            return f64::INFINITY;
+        }
+        if x < -7.451_332_191_019_411_084_20e2 {
+            return 0.0;
+        }
+    }
+
+    x.exp()
+}
+
 /// Port of NCBI `NCBI_ErfC` (`ncbi_erf.c:407`): Sun-style fdlibm erfc
 /// with piecewise rational approximations and IEEE 754 bit manipulation.
 /// Aliased by NCBI to `BLAST_ErfC` (`ncbi_erf.c:492`). Accurate to full
@@ -458,7 +676,7 @@ pub fn erfc(x: f64) -> f64 {
         // z has low 32 bits zeroed (single-precision version of |x|)
         // NCBI: `z = x; __LO(z) = 0;` after `x = fabs(x)`.
         let z = f64::from_bits(ax.to_bits() & 0xFFFF_FFFF_0000_0000);
-        let rr = (-z * z - 0.5625).exp() * ((z - ax) * (z + ax) + r / ss).exp();
+        let rr = s_ieee754_exp(-z * z - 0.5625) * s_ieee754_exp((z - ax) * (z + ax) + r / ss);
         if hx >= 0 {
             rr / ax
         } else {
@@ -469,6 +687,202 @@ pub fn erfc(x: f64) -> f64 {
     } else {
         TWO - TINY
     }
+}
+
+/// Port-shaped wrapper for NCBI `NCBI_Erf` (`ncbi_erf.c:352`).
+///
+/// The C source implements `erf` and `erfc` from the same fdlibm coefficient
+/// tables. This Rust port keeps `erfc` as the full coefficient implementation
+/// above and derives the odd `erf` function from it, preserving the special
+/// values and sign behavior used by callers in BLAST math code.
+pub fn erf(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x == f64::INFINITY {
+        return 1.0;
+    }
+    if x == f64::NEG_INFINITY {
+        return -1.0;
+    }
+    if x == 0.0 {
+        return x;
+    }
+
+    let ax = x.abs();
+    let value = if ax >= 6.0 { 1.0 } else { 1.0 - erfc(ax) };
+    if x.is_sign_negative() {
+        -value
+    } else {
+        value
+    }
+}
+
+/// Port of NCBI Boost-style `ErfImpl` (`boost_erf.c:52`).
+pub fn erf_impl(z: f64, invert: bool) -> f64 {
+    let mut invert = invert;
+    if z < 0.0 {
+        if !invert {
+            return -erf_impl(-z, invert);
+        } else if z < -0.5 {
+            return 2.0 - erf_impl(-z, invert);
+        } else {
+            return 1.0 + erf_impl(-z, false);
+        }
+    }
+
+    let result;
+    if z < 0.5 {
+        if z < 1e-10 {
+            if z == 0.0 {
+                result = 0.0;
+            } else {
+                const C: f64 = 0.003_379_167_095_512_573_896_158_903_121_545_171_688;
+                result = z * 1.125 + z * C;
+            }
+        } else {
+            const Y: f64 = 1.044_948_577_880_859_375;
+            const P: [f64; 5] = [
+                0.083_430_589_214_653_183_290_7,
+                -0.338_165_134_459_360_935_041,
+                -0.050_999_073_514_677_743_284_1,
+                -0.007_727_583_458_021_332_884_87,
+                -0.000_322_780_120_964_605_683_831,
+            ];
+            const Q: [f64; 5] = [
+                1.0,
+                0.455_004_033_050_794_024_546,
+                0.087_522_260_014_225_254_955_4,
+                0.008_585_719_250_744_062_127_72,
+                0.000_370_900_071_787_748_000_569,
+            ];
+            let zz = z * z;
+            let p = (((P[4] * zz + P[3]) * zz + P[2]) * zz + P[1]) * zz + P[0];
+            let q = (((Q[4] * zz + Q[3]) * zz + Q[2]) * zz + Q[1]) * zz + Q[0];
+            result = z * (Y + p / q);
+        }
+    } else if if invert { z < 28.0 } else { z < 5.8 } {
+        invert = !invert;
+        if z < 1.5 {
+            const Y: f64 = 0.405_935_764_312_744_140_625;
+            const P: [f64; 6] = [
+                -0.098_090_592_216_281_240_205,
+                0.178_114_665_841_120_341_155,
+                0.191_003_695_796_775_433_986,
+                0.088_890_036_896_788_446_657_8,
+                0.019_504_900_125_121_880_135_9,
+                0.001_804_245_382_970_142_239_57,
+            ];
+            const Q: [f64; 7] = [
+                1.0,
+                1.847_590_709_830_022_178_45,
+                1.426_280_048_455_113_245_08,
+                0.578_052_804_889_902_404_909,
+                0.123_850_974_679_008_642_33,
+                0.011_338_523_357_700_141_101_7,
+                0.337_511_472_483_094_676_155e-5,
+            ];
+            let x = z - 0.5;
+            let p = ((((P[5] * x + P[4]) * x + P[3]) * x + P[2]) * x + P[1]) * x + P[0];
+            let q = (((((Q[6] * x + Q[5]) * x + Q[4]) * x + Q[3]) * x + Q[2])
+                * x
+                + Q[1])
+                * x
+                + Q[0];
+            result = (Y + p / q) * (-z * z).exp() / z;
+        } else if z < 2.5 {
+            const Y: f64 = 0.506_728_172_302_246_093_75;
+            const P: [f64; 6] = [
+                -0.024_350_047_620_769_844_127_2,
+                0.038_654_037_503_570_720_172_8,
+                0.043_948_189_642_095_162_96,
+                0.017_567_943_631_180_209_229_9,
+                0.003_239_624_062_908_421_335_84,
+                0.000_235_839_115_596_880_717_416,
+            ];
+            const Q: [f64; 6] = [
+                1.0,
+                1.539_914_949_485_524_471_82,
+                0.982_403_709_157_920_235_114,
+                0.325_732_924_782_444_448_493,
+                0.056_392_183_742_047_816_037_3,
+                0.004_103_697_239_789_045_758_84,
+            ];
+            let x = z - 1.5;
+            let p = ((((P[5] * x + P[4]) * x + P[3]) * x + P[2]) * x + P[1]) * x + P[0];
+            let q = ((((Q[5] * x + Q[4]) * x + Q[3]) * x + Q[2]) * x + Q[1]) * x + Q[0];
+            result = (Y + p / q) * (-z * z).exp() / z;
+        } else if z < 4.5 {
+            const Y: f64 = 0.540_575_027_465_820_312_5;
+            const P: [f64; 6] = [
+                0.002_952_767_165_309_716_626_34,
+                0.013_738_442_589_635_533_212_6,
+                0.008_408_076_155_555_853_830_07,
+                0.002_128_256_209_146_186_491_41,
+                0.000_250_269_961_544_794_627_958,
+                0.113_212_406_648_847_561_139e-4,
+            ];
+            const Q: [f64; 6] = [
+                1.0,
+                1.042_178_141_669_384_181_71,
+                0.442_597_659_481_563_127_003,
+                0.095_849_272_630_106_142_344_4,
+                0.010_598_290_648_487_653_148_9,
+                0.000_479_411_269_521_714_493_907,
+            ];
+            let x = z - 3.5;
+            let p = ((((P[5] * x + P[4]) * x + P[3]) * x + P[2]) * x + P[1]) * x + P[0];
+            let q = ((((Q[5] * x + Q[4]) * x + Q[3]) * x + Q[2]) * x + Q[1]) * x + Q[0];
+            result = (Y + p / q) * (-z * z).exp() / z;
+        } else {
+            const Y: f64 = 0.557_909_011_840_820_312_5;
+            const P: [f64; 7] = [
+                0.006_280_571_706_269_648_919_37,
+                0.017_538_983_405_249_330_881_8,
+                -0.212_652_252_872_804_219_852,
+                -0.687_717_681_153_649_930_619,
+                -2.551_855_172_731_152_399_6,
+                -3.227_294_517_641_437_185_17,
+                -2.817_540_111_451_337_877_1,
+            ];
+            const Q: [f64; 7] = [
+                1.0,
+                2.792_577_509_805_752_822_28,
+                11.056_723_792_780_016_156_5,
+                15.930_646_027_911_794_143,
+                22.936_737_652_288_057_722_4,
+                13.506_417_019_180_288_914_5,
+                5.484_091_822_386_417_415_84,
+            ];
+            let x = 1.0 / z;
+            let p = (((((P[6] * x + P[5]) * x + P[4]) * x + P[3]) * x + P[2])
+                * x
+                + P[1])
+                * x
+                + P[0];
+            let q = (((((Q[6] * x + Q[5]) * x + Q[4]) * x + Q[3]) * x + Q[2])
+                * x
+                + Q[1])
+                * x
+                + Q[0];
+            result = (Y + p / q) * (-z * z).exp() / z;
+        }
+    } else {
+        result = 0.0;
+        invert = !invert;
+    }
+
+    if invert { 1.0 - result } else { result }
+}
+
+/// Wrapper for NCBI Boost-style `Erf` (`boost_erf.c:247`).
+pub fn erf_boost(z: f64) -> f64 {
+    erf_impl(z, false)
+}
+
+/// Wrapper for NCBI Boost-style `ErfC` (`boost_erf.c:252`).
+pub fn erfc_boost(z: f64) -> f64 {
+    erf_impl(z, true)
 }
 
 #[cfg(test)]
@@ -557,6 +971,37 @@ mod tests {
     }
 
     #[test]
+    fn test_ieee754_exp_wrapper_matches_exp_behavior() {
+        let cases = [-745.0_f64, -1.0, -0.0, 0.0, 1.0, 709.0];
+        for x in cases {
+            assert_eq!(s_ieee754_exp(x), x.exp());
+        }
+        assert!(s_ieee754_exp(f64::NAN).is_nan());
+        assert_eq!(s_ieee754_exp(f64::INFINITY), f64::INFINITY);
+        assert_eq!(s_ieee754_exp(f64::NEG_INFINITY), 0.0);
+    }
+
+    #[test]
+    fn test_erf_uses_erfc_port_with_ncbi_special_values() {
+        let cases = [
+            (0.0_f64, 0.0_f64),
+            (1.0, 0.8427007929497149),
+            (-1.0, -0.8427007929497149),
+            (0.5, 0.5204998778130465),
+        ];
+        for (x, expected) in cases {
+            assert!((erf(x) - expected).abs() < 1e-14);
+        }
+        assert_eq!(erf(f64::INFINITY), 1.0);
+        assert_eq!(erf(f64::NEG_INFINITY), -1.0);
+        assert!(erf(f64::NAN).is_nan());
+        assert!((erf_impl(1.0, false) - 0.8427007929497148).abs() < 1e-15);
+        assert!((erf_boost(-1.0) + 0.8427007929497148).abs() < 1e-15);
+        assert!((erfc_boost(1.0) - 0.15729920705028513).abs() < 1e-15);
+        assert!((erfc_boost(-1.0) - 1.8427007929497148).abs() < 1e-15);
+    }
+
+    #[test]
     fn test_gcd_matches_ncbi_semantics() {
         // Standard mathematical cases.
         assert_eq!(gcd(12, 8), 4);
@@ -581,6 +1026,31 @@ mod tests {
         assert_eq!(powi(0.0, 0), 1.0);
         assert_eq!(powi(0.0, -1), f64::INFINITY);
         assert_eq!(powi(-3.0, 3), -27.0);
+    }
+
+    #[test]
+    fn test_log_derivative_and_polygamma_helpers_match_c_formulas() {
+        let u = [2.0, 6.0, 18.0, 54.0, 162.0];
+        assert_eq!(s_log_derivative(0, &u), 2.0_f64.ln());
+        assert_eq!(s_log_derivative(1, &u), 3.0);
+        assert_eq!(s_log_derivative(2, &u), 0.0);
+        assert_eq!(s_log_derivative(5, &u), f64::INFINITY);
+        assert_eq!(s_log_derivative(1, &[0.0, 1.0]), f64::INFINITY);
+
+        assert!((s_general_ln_gamma(5.0, 0) - 24.0_f64.ln()).abs() < 1e-10);
+        assert!((s_poly_gamma(5.0, 0) - 24.0_f64.ln()).abs() < 1e-10);
+        assert!((s_ln_gamma(5.0) - 24.0_f64.ln()).abs() < 1e-10);
+        assert_eq!(s_poly_gamma(0.0, 0), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_factorial_and_blast_ln_factorial_match_c_paths() {
+        assert_eq!(blast_factorial(-1), 0.0);
+        assert_eq!(blast_factorial(0), 1.0);
+        assert_eq!(blast_factorial(5), 120.0);
+        assert!((blast_factorial(35).ln() - ln_factorial(35)).abs() < 1e-10);
+        assert_eq!(blast_ln_factorial(0.0), 0.0);
+        assert!((blast_ln_factorial(5.0) - 120.0_f64.ln()).abs() < 1e-10);
     }
 
     #[test]

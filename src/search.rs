@@ -71,6 +71,35 @@ struct NaLookup<'a> {
     diag_mask: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmallNaScanSubject {
+    SBlastSmallNaScanSubject41,
+    SBlastSmallNaScanSubject51,
+    SBlastSmallNaScanSubject61,
+    SBlastSmallNaScanSubject62,
+    SBlastSmallNaScanSubject71,
+    SBlastSmallNaScanSubject72,
+    SBlastSmallNaScanSubject73,
+    SBlastSmallNaScanSubject81Mod4,
+    SBlastSmallNaScanSubject82Mod4,
+    SBlastSmallNaScanSubject83Mod4,
+    SBlastSmallNaScanSubject84,
+    SBlastSmallNaScanSubjectAny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MbScanSubject {
+    SMBScanSubject91,
+    SMBScanSubject92,
+    SMBScanSubject101,
+    SMBScanSubject102,
+    SMBScanSubject103,
+    SMBScanSubject111Mod4,
+    SMBScanSubject112Mod4,
+    SMBScanSubject113Mod4,
+    SMBScanSubjectAny,
+}
+
 #[derive(Clone, Copy)]
 struct PreliminarySeed {
     query: usize,
@@ -693,6 +722,39 @@ fn choose_contiguous_mb_lut_word(word_size: usize, approx_entries: usize) -> usi
                 12
             }
         }
+    }
+}
+
+/// Port of NCBI `s_SmallNaChooseScanSubject`'s dispatch table selection.
+fn s_small_na_choose_scan_subject(lookup: &NaLookup<'_>) -> SmallNaScanSubject {
+    match (lookup.lut_word, lookup.scan_step) {
+        (4, 1) => SmallNaScanSubject::SBlastSmallNaScanSubject41,
+        (5, 1) => SmallNaScanSubject::SBlastSmallNaScanSubject51,
+        (6, 1) => SmallNaScanSubject::SBlastSmallNaScanSubject61,
+        (6, 2) => SmallNaScanSubject::SBlastSmallNaScanSubject62,
+        (7, 1) => SmallNaScanSubject::SBlastSmallNaScanSubject71,
+        (7, 2) => SmallNaScanSubject::SBlastSmallNaScanSubject72,
+        (7, 3) => SmallNaScanSubject::SBlastSmallNaScanSubject73,
+        (8, step) if step % 4 == 0 => SmallNaScanSubject::SBlastSmallNaScanSubject84,
+        (8, step) if step % 4 == 1 => SmallNaScanSubject::SBlastSmallNaScanSubject81Mod4,
+        (8, step) if step % 4 == 2 => SmallNaScanSubject::SBlastSmallNaScanSubject82Mod4,
+        (8, step) if step % 4 == 3 => SmallNaScanSubject::SBlastSmallNaScanSubject83Mod4,
+        _ => SmallNaScanSubject::SBlastSmallNaScanSubjectAny,
+    }
+}
+
+/// Port of NCBI `s_MBChooseScanSubject`'s contiguous megablast dispatch table.
+fn s_mb_choose_scan_subject(lookup: &NaLookup<'_>) -> MbScanSubject {
+    match (lookup.lut_word, lookup.scan_step) {
+        (9, 1) => MbScanSubject::SMBScanSubject91,
+        (9, 2) => MbScanSubject::SMBScanSubject92,
+        (10, 1) => MbScanSubject::SMBScanSubject101,
+        (10, 2) => MbScanSubject::SMBScanSubject102,
+        (10, 3) => MbScanSubject::SMBScanSubject103,
+        (11, step) if step % 4 == 1 => MbScanSubject::SMBScanSubject111Mod4,
+        (11, step) if step % 4 == 2 => MbScanSubject::SMBScanSubject112Mod4,
+        (11, step) if step % 4 == 3 => MbScanSubject::SMBScanSubject113Mod4,
+        _ => MbScanSubject::SMBScanSubjectAny,
     }
 }
 
@@ -1492,6 +1554,70 @@ fn diag_initial_hit_core_packed(
     last_hit[real_diag] = s_end_pos;
 }
 
+/// Represented packed-nucleotide path for NCBI
+/// `s_BlastnDiagHashExtendInitialHit` (`na_ungapped.c:814`).
+///
+/// C also handles query masks, two-hit windows, and multiple lookup table
+/// layouts around this core. Rust routes those concerns through the surrounding
+/// scanner and calls this helper after the exact lookup word has been expanded
+/// to the configured word size.
+#[allow(clippy::too_many_arguments)]
+pub fn s_blastn_diag_hash_extend_initial_hit(
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    q_off: usize,
+    s_off: usize,
+    word_size: usize,
+    lut_word: usize,
+    last_hit: &mut [i32],
+    diag_mask: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    context: i32,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) -> i32 {
+    let Some(hit) = find_exact_word_hit_packed(
+        query,
+        subject_packed,
+        subject_len,
+        word_size,
+        lut_word,
+        q_off,
+        s_off,
+    ) else {
+        return 0;
+    };
+
+    let before = hsps.len();
+    diag_initial_hit_core_packed(
+        query,
+        subject_packed,
+        subject_len,
+        word_size,
+        last_hit,
+        diag_mask,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        context,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hit,
+        hsps,
+    );
+    i32::from(hsps.len() > before)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn diag_table_extend_initial_hit_packed(
     query: &[u8],
@@ -1743,7 +1869,7 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
         "last-hit scratch must match prepared lookup contexts"
     );
 
-    blast_na_word_finder_scan_subject_packed(
+    s_blast_na_scan_subject_any_packed(
         prepared,
         subject_packed,
         subject_len,
@@ -1773,7 +1899,7 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blast_na_word_finder_scan_subject_packed(
+fn s_blast_na_scan_subject_any_packed(
     prepared: &PreparedBlastnQuery<'_>,
     subject_packed: &[u8],
     subject_len: usize,
@@ -1789,7 +1915,7 @@ fn blast_na_word_finder_scan_subject_packed(
     last_hit_scratch: &mut [PackedDiagScratch],
     hsps: &mut Vec<SearchHsp>,
 ) {
-    if blast_na_hash_lookup_scan_subject_packed(
+    if s_blast_na_hash_scan_subject_any(
         prepared,
         subject_packed,
         subject_len,
@@ -1831,7 +1957,7 @@ fn blast_na_word_finder_scan_subject_packed(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blast_na_hash_lookup_scan_subject_packed(
+fn s_blast_na_hash_scan_subject_any(
     prepared: &PreparedBlastnQuery<'_>,
     subject_packed: &[u8],
     subject_len: usize,
@@ -1894,6 +2020,41 @@ fn blast_na_hash_lookup_scan_subject_packed(
     true
 }
 
+#[allow(clippy::too_many_arguments, dead_code)]
+fn s_blast_na_hash_scan_subject_any_packed(
+    prepared: &PreparedBlastnQuery<'_>,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    last_hit_scratch: &mut [PackedDiagScratch],
+    hsps: &mut Vec<SearchHsp>,
+) -> bool {
+    s_blast_na_hash_scan_subject_any(
+        prepared,
+        subject_packed,
+        subject_len,
+        end,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        last_hit_scratch,
+        hsps,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn blast_na_word_finder_scan_lookup_packed(
     word_size: usize,
@@ -1912,99 +2073,456 @@ fn blast_na_word_finder_scan_lookup_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    if lookup.lut_word == 8 && word_size >= 8 {
+    let mb_scan = s_mb_choose_scan_subject(lookup);
+    if lookup.lut_word >= 9 {
+        match mb_scan {
+            MbScanSubject::SMBScanSubject91 => s_mb_scan_subject_9_1_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubject92 => s_mb_scan_subject_9_2_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubject101 => s_mb_scan_subject_10_1_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubject102 => s_mb_scan_subject_10_2_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubject103 => s_mb_scan_subject_10_3_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubject111Mod4 => s_mb_scan_subject_11_1_mod4_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubject112Mod4 => s_mb_scan_subject_11_2_mod4_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubject113Mod4 => s_mb_scan_subject_11_3_mod4_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+            MbScanSubject::SMBScanSubjectAny => s_mb_scan_subject_any_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+        }
+    } else if lookup.lut_word == 8 && word_size >= 8 {
         let scan_step = word_size - lookup.lut_word + 1;
         let compact_subject_scan_step = if subject_len <= 1024 && lookup.scan_step > 1 {
             1
         } else {
             lookup.scan_step
         };
-        if scan_step == 4 && lookup.scan_start == 0 {
-            scan_step4_unrolled(
-                subject_packed,
-                subject_len,
-                word_size,
-                lookup.query_nomask,
-                &lookup.lut,
-                &lookup.next,
-                &lookup.pv,
-                &mut scratch.last_hit,
-                lookup.diag_mask,
-                reward,
-                penalty,
-                x_dropoff,
-                kbp,
-                search_space,
-                evalue_threshold,
-                lookup.context,
-                nucl_score_table,
-                reduced_nucl_cutoff_score,
-                hsps,
-            );
-        } else if compact_subject_scan_step % 4 == 1 {
-            scan_step1(
-                subject_packed,
-                subject_len,
-                end,
-                lookup.lut_word,
-                lookup.lut_mask,
-                lookup.scan_start,
-                compact_subject_scan_step,
-                lookup.query_nomask,
-                word_size,
-                &lookup.lut,
-                &lookup.next,
-                &lookup.pv,
-                &mut scratch.last_hit,
-                lookup.diag_mask,
-                reward,
-                penalty,
-                x_dropoff,
-                kbp,
-                search_space,
-                evalue_threshold,
-                lookup.context,
-                nucl_score_table,
-                reduced_nucl_cutoff_score,
-                hsps,
-            );
-        } else {
-            scan_step1(
+        match s_small_na_choose_scan_subject(lookup) {
+            SmallNaScanSubject::SBlastSmallNaScanSubject84 if scan_step == 4 => {
+                s_blast_small_na_scan_subject_8_4_packed(
+                    lookup,
+                    scratch,
+                    subject_packed,
+                    subject_len,
+                    end,
+                    word_size,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hsps,
+                );
+            }
+            SmallNaScanSubject::SBlastSmallNaScanSubject81Mod4
+            | SmallNaScanSubject::SBlastSmallNaScanSubject82Mod4
+            | SmallNaScanSubject::SBlastSmallNaScanSubject83Mod4
+            | SmallNaScanSubject::SBlastSmallNaScanSubject84 => {
+                s_scan_na_lookup_shape_packed(
+                    lookup,
+                    scratch,
+                    subject_packed,
+                    subject_len,
+                    end,
+                    word_size,
+                    8,
+                    lookup.scan_start,
+                    compact_subject_scan_step,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hsps,
+                );
+            }
+            _ => s_blast_small_na_scan_subject_any_packed(
+                lookup,
+                scratch,
                 subject_packed,
                 subject_len,
                 end,
-                lookup.lut_word,
-                lookup.lut_mask,
-                lookup.scan_start,
-                compact_subject_scan_step,
-                lookup.query_nomask,
                 word_size,
-                &lookup.lut,
-                &lookup.next,
-                &lookup.pv,
-                &mut scratch.last_hit,
-                lookup.diag_mask,
                 reward,
                 penalty,
                 x_dropoff,
                 kbp,
                 search_space,
                 evalue_threshold,
-                lookup.context,
                 nucl_score_table,
                 reduced_nucl_cutoff_score,
                 hsps,
-            );
+            ),
         }
     } else {
-        scan_byte_oriented_step1(
+        match s_small_na_choose_scan_subject(lookup) {
+            SmallNaScanSubject::SBlastSmallNaScanSubject51 => {
+                s_blast_small_na_scan_subject_5_1_packed(
+                    lookup,
+                    scratch,
+                    subject_packed,
+                    subject_len,
+                    end,
+                    word_size,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hsps,
+                )
+            }
+            SmallNaScanSubject::SBlastSmallNaScanSubject61 => {
+                s_blast_small_na_scan_subject_6_1_packed(
+                    lookup,
+                    scratch,
+                    subject_packed,
+                    subject_len,
+                    end,
+                    word_size,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hsps,
+                )
+            }
+            SmallNaScanSubject::SBlastSmallNaScanSubject62 => {
+                s_blast_small_na_scan_subject_6_2_packed(
+                    lookup,
+                    scratch,
+                    subject_packed,
+                    subject_len,
+                    end,
+                    word_size,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hsps,
+                )
+            }
+            SmallNaScanSubject::SBlastSmallNaScanSubject72 => {
+                s_blast_small_na_scan_subject_7_2_packed(
+                    lookup,
+                    scratch,
+                    subject_packed,
+                    subject_len,
+                    end,
+                    word_size,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hsps,
+                )
+            }
+            SmallNaScanSubject::SBlastSmallNaScanSubject73 => {
+                s_blast_small_na_scan_subject_7_3_packed(
+                    lookup,
+                    scratch,
+                    subject_packed,
+                    subject_len,
+                    end,
+                    word_size,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hsps,
+                )
+            }
+            _ => s_blast_small_na_scan_subject_any_packed(
+                lookup,
+                scratch,
+                subject_packed,
+                subject_len,
+                end,
+                word_size,
+                reward,
+                penalty,
+                x_dropoff,
+                kbp,
+                search_space,
+                evalue_threshold,
+                nucl_score_table,
+                reduced_nucl_cutoff_score,
+                hsps,
+            ),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_scan_na_lookup_shape_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    lut_word: usize,
+    scan_start: usize,
+    scan_step: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    if lut_word == 8 && scan_step % 4 == 0 {
+        scan_step4_unrolled(
+            subject_packed,
+            subject_len,
+            word_size,
+            lookup.query_nomask,
+            &lookup.lut,
+            &lookup.next,
+            &lookup.pv,
+            &mut scratch.last_hit,
+            lookup.diag_mask,
+            reward,
+            penalty,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+            lookup.context,
+            nucl_score_table,
+            reduced_nucl_cutoff_score,
+            hsps,
+        );
+    } else if lut_word == 8 {
+        scan_byte_oriented_lut8_mod1(
             subject_packed,
             subject_len,
             end,
-            lookup.lut_word,
             lookup.lut_mask,
-            lookup.scan_start,
-            lookup.scan_step,
+            scan_start,
+            scan_step,
+            lookup.query_nomask,
+            word_size,
+            &lookup.lut,
+            &lookup.next,
+            &lookup.pv,
+            &mut scratch.last_hit,
+            lookup.diag_mask,
+            reward,
+            penalty,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+            lookup.context,
+            nucl_score_table,
+            reduced_nucl_cutoff_score,
+            hsps,
+        );
+    } else if lut_word >= 9 {
+        scan_step1(
+            subject_packed,
+            subject_len,
+            end,
+            lut_word,
+            lookup.lut_mask,
+            scan_start,
+            scan_step,
+            lookup.query_nomask,
+            word_size,
+            &lookup.lut,
+            &lookup.next,
+            &lookup.pv,
+            &mut scratch.last_hit,
+            lookup.diag_mask,
+            reward,
+            penalty,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+            lookup.context,
+            nucl_score_table,
+            reduced_nucl_cutoff_score,
+            hsps,
+        );
+    } else {
+        s_blast_small_na_scan_subject_7_1_packed(
+            subject_packed,
+            subject_len,
+            end,
+            lut_word,
+            lookup.lut_mask,
+            scan_start,
+            scan_step,
             lookup.query_nomask,
             word_size,
             &lookup.lut,
@@ -2024,6 +2542,766 @@ fn blast_na_word_finder_scan_lookup_packed(
             hsps,
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_blast_small_na_scan_subject_5_1_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        5,
+        lookup.scan_start,
+        1,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_blast_small_na_scan_subject_6_1_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        6,
+        lookup.scan_start,
+        1,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_blast_small_na_scan_subject_6_2_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        6,
+        lookup.scan_start,
+        2,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_blast_small_na_scan_subject_7_2_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        7,
+        lookup.scan_start,
+        2,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_blast_small_na_scan_subject_7_3_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        7,
+        lookup.scan_start,
+        3,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn s_blast_small_na_scan_subject_8_1_mod4_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        8,
+        lookup.scan_start,
+        1,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn s_blast_small_na_scan_subject_8_2_mod4_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        8,
+        lookup.scan_start,
+        2,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn s_blast_small_na_scan_subject_8_3_mod4_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        8,
+        lookup.scan_start,
+        3,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_blast_small_na_scan_subject_8_4_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        8,
+        lookup.scan_start,
+        4,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_9_1_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        9,
+        lookup.scan_start,
+        1,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn s_mb_scan_subject_9_2_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        9,
+        lookup.scan_start,
+        2,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_10_1_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        10,
+        lookup.scan_start,
+        1,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_10_2_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        10,
+        lookup.scan_start,
+        2,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_10_3_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        10,
+        lookup.scan_start,
+        3,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_11_1_mod4_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        11,
+        lookup.scan_start,
+        1,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_11_2_mod4_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        11,
+        lookup.scan_start,
+        2,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_11_3_mod4_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        11,
+        lookup.scan_start,
+        3,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_blast_small_na_scan_subject_any_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        lookup.lut_word,
+        lookup.scan_start,
+        lookup.scan_step,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn s_mb_scan_subject_any_packed(
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    s_scan_na_lookup_shape_packed(
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        word_size,
+        lookup.lut_word,
+        lookup.scan_start,
+        lookup.scan_step,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2207,7 +3485,7 @@ fn scan_step4_unrolled(
 /// Reads packed bytes and extracts multiple hash values by shifting,
 /// processing 4 subject positions per byte advance.
 #[allow(clippy::too_many_arguments)]
-fn scan_byte_oriented_step1(
+fn s_blast_small_na_scan_subject_7_1_packed(
     subject_packed: &[u8],
     subject_len: usize,
     end: usize,
@@ -5614,6 +6892,59 @@ mod tests {
         // approximate table entries, and 12-base lookup above that.
         assert_eq!(choose_contiguous_mb_lut_word(28, 20_000), 11);
         assert_eq!(choose_contiguous_mb_lut_word(28, 300_000), 12);
+    }
+
+    #[test]
+    fn translated_na_scan_choosers_match_c_dispatch_shapes() {
+        let query = vec![0u8; 400_000];
+        let small_6_2 = NaLookup::new(0, &query[..8], &query[..8], 7, 8, choose_small_na_lut_word)
+            .expect("small lut6 step2");
+        assert_eq!(
+            s_small_na_choose_scan_subject(&small_6_2),
+            SmallNaScanSubject::SBlastSmallNaScanSubject62
+        );
+
+        let small_8_3 = NaLookup::new(
+            0,
+            &query[..20_000],
+            &query[..20_000],
+            10,
+            20_000,
+            choose_small_na_lut_word,
+        )
+        .expect("small lut8 step3");
+        assert_eq!(
+            s_small_na_choose_scan_subject(&small_8_3),
+            SmallNaScanSubject::SBlastSmallNaScanSubject83Mod4
+        );
+
+        let mb_10_2 = NaLookup::new(
+            0,
+            &query[..20_000],
+            &query[..20_000],
+            11,
+            20_000,
+            choose_contiguous_mb_lut_word,
+        )
+        .expect("mb lut10 step2");
+        assert_eq!(
+            s_mb_choose_scan_subject(&mb_10_2),
+            MbScanSubject::SMBScanSubject102
+        );
+
+        let mb_11_3 = NaLookup::new(
+            0,
+            &query[..200_000],
+            &query[..200_000],
+            13,
+            200_000,
+            choose_contiguous_mb_lut_word,
+        )
+        .expect("mb lut11 step3");
+        assert_eq!(
+            s_mb_choose_scan_subject(&mb_11_3),
+            MbScanSubject::SMBScanSubject113Mod4
+        );
     }
 
     #[test]

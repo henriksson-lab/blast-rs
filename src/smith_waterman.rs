@@ -28,6 +28,11 @@
 //! 4-bit BLASTNA for nucleotide), where the encoded byte indexes
 //! directly into the matrix row.
 
+use crate::gapinfo::{GapAlignOpType, GapEditScript};
+use crate::hspstream::{blast_hsp_list_new, blast_hsp_list_save_hsp, Hsp, HspList};
+use crate::program::ProgramType;
+use crate::queryinfo::QueryInfo;
+
 /// Per-position gap state for the SW DP — 1-1 port of NCBI's
 /// `SwGapInfo` (`smith_waterman.c:38`).
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +41,645 @@ struct SwGapInfo {
     no_gap: i32,
     /// score if a gap is open at this position
     gap_exists: i32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BlastSwGapDp {
+    best: i32,
+    best_gap: i32,
+}
+
+/// Values for the editing script operations in `blast_sw.c`.
+const EDIT_SUB: u8 = GapAlignOpType::Sub as u8;
+const EDIT_GAP_IN_A: u8 = GapAlignOpType::Del as u8;
+const EDIT_GAP_IN_B: u8 = GapAlignOpType::Ins as u8;
+const EDIT_OP_MASK: u8 = 0x07;
+const EDIT_START_GAP_A: u8 = 0x10;
+const EDIT_START_GAP_B: u8 = 0x20;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BlastGapSwTraceDp {
+    best: i32,
+    best_gap: i32,
+    path_score: i32,
+    path_stop_i: usize,
+    path_stop_j: usize,
+}
+
+/// Recovered local alignment from `SmithWatermanScoreWithTraceback`.
+///
+/// Coordinates are half-open offsets in the original `(A, B)` order passed by
+/// the caller. `b_start`/`b_end` include `start_shift`, matching NCBI's final
+/// `Blast_HSPAdjustSubjectOffset` step.
+#[derive(Debug, Clone)]
+pub struct SmithWatermanTracebackHit {
+    pub score: i32,
+    pub a_start: usize,
+    pub a_end: usize,
+    pub b_start: usize,
+    pub b_end: usize,
+    pub edit_script: GapEditScript,
+}
+
+pub struct BlastSmithWatermanGappedScoreParams<'a> {
+    pub program_number: ProgramType,
+    pub query: &'a [u8],
+    pub query_info: &'a QueryInfo,
+    pub subject: &'a [u8],
+    pub subject_length: usize,
+    pub subject_oid: i32,
+    pub subject_frame: i32,
+    pub protein_matrix: &'a [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    pub pssm: Option<&'a [Vec<i32>]>,
+    pub nucleotide_matrix:
+        &'a [[i32; crate::encoding::BLASTNA_SIZE]; crate::encoding::BLASTNA_SIZE],
+    pub gap_open: i32,
+    pub gap_extend: i32,
+    pub cutoffs: &'a [i32],
+    pub hsp_num_max: i32,
+}
+
+/// 1-1 port of `s_SmithWatermanScoreOnly` from `blast_sw.c`.
+///
+/// This is the BLAST traceback-stage SW score-only primitive, distinct from
+/// the composition-adjustment `Blast_SmithWatermanScoreOnly` helpers below.
+/// For ordinary square matrices it mirrors C's sequence swap when `A` is
+/// shorter than `B`; for PSSM input it keeps the query-position rows fixed.
+pub fn s_smith_waterman_score_only(
+    a: &[u8],
+    b: &[u8],
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    pssm: Option<&[Vec<i32>]>,
+    gap_open: i32,
+    gap_extend: i32,
+) -> i32 {
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+
+    let (a, b) = if pssm.is_none() && a.len() < b.len() {
+        (b, a)
+    } else {
+        (a, b)
+    };
+
+    let gap_open_extend = gap_open + gap_extend;
+    let mut scores = vec![BlastSwGapDp::default(); b.len() + 1];
+    let mut final_best_score = 0;
+
+    for i in 1..=a.len() {
+        let matrix_row: &[i32] = match pssm {
+            Some(pssm) => &pssm[i - 1],
+            None => &matrix[a[i - 1] as usize],
+        };
+        let mut insert_score = 0;
+        let mut row_score = 0;
+
+        for j in 1..=b.len() {
+            let mut best_score = scores[j].best_gap - gap_extend;
+            if scores[j].best - gap_open_extend > best_score {
+                best_score = scores[j].best - gap_open_extend;
+            }
+            scores[j].best_gap = best_score;
+
+            best_score = insert_score - gap_extend;
+            if row_score - gap_open_extend > best_score {
+                best_score = row_score - gap_open_extend;
+            }
+            insert_score = best_score;
+
+            best_score = (scores[j - 1].best + matrix_row[b[j - 1] as usize]).max(0);
+            if insert_score > best_score {
+                best_score = insert_score;
+            }
+            if scores[j].best_gap > best_score {
+                best_score = scores[j].best_gap;
+            }
+
+            if best_score > final_best_score {
+                final_best_score = best_score;
+            }
+
+            scores[j - 1].best = row_score;
+            row_score = best_score;
+        }
+
+        scores[b.len()].best = row_score;
+    }
+
+    final_best_score
+}
+
+fn blast_sw_frame_to_context_blastx(frame: i32) -> i32 {
+    match frame {
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        -1 => 3,
+        -2 => 4,
+        -3 => 5,
+        _ => 0,
+    }
+}
+
+fn blast_sw_cutoff_for_context(
+    params: &BlastSmithWatermanGappedScoreParams<'_>,
+    context: usize,
+) -> i32 {
+    if crate::program::blast_program_is_rps_blast(params.program_number) {
+        let mut rps_context = params.subject_oid.max(0) as usize;
+        if params.program_number == crate::program::RPS_TBLASTN {
+            rps_context = rps_context * crate::util::NUM_FRAMES
+                + blast_sw_frame_to_context_blastx(params.subject_frame).max(0) as usize;
+        }
+        params.cutoffs.get(rps_context).copied().unwrap_or(0)
+    } else {
+        params.cutoffs.get(context).copied().unwrap_or(0)
+    }
+}
+
+fn blast_sw_pssm_rows_for_context<'a>(
+    pssm: Option<&'a [Vec<i32>]>,
+    query_offset: i32,
+    query_length: i32,
+) -> Option<&'a [Vec<i32>]> {
+    let pssm = pssm?;
+    let start = query_offset.max(0) as usize;
+    let len = query_length.max(0) as usize;
+    if start + len <= pssm.len() {
+        Some(&pssm[start..start + len])
+    } else if len <= pssm.len() {
+        Some(&pssm[..len])
+    } else {
+        None
+    }
+}
+
+/// Rust ownership equivalent of NCBI `BLAST_SmithWatermanGetGappedScore`
+/// (`blast_sw.c:629`).
+///
+/// The C function ignores initial ungapped hits, scans each valid query
+/// context against the subject with score-only Smith-Waterman, and saves one
+/// placeholder HSP per context whose score reaches the context cutoff. The
+/// placeholder carries the score, context, query frame, and subject frame into
+/// the later traceback phase; this port preserves that boundary and returns
+/// the `HspList` directly.
+pub fn blast_smith_waterman_get_gapped_score(
+    params: &BlastSmithWatermanGappedScoreParams<'_>,
+    hsp_list: Option<HspList>,
+) -> (i16, HspList) {
+    let mut hsp_list = hsp_list.unwrap_or_else(|| {
+        let mut list = blast_hsp_list_new(crate::hspstream::blast_hsp_num_max(
+            true,
+            params.hsp_num_max,
+        ));
+        list.oid = params.subject_oid;
+        list
+    });
+
+    let is_prot = params.program_number != crate::program::BLASTN
+        && params.program_number != crate::program::PHI_BLASTN
+        && params.program_number != crate::program::MAPPING;
+
+    for (context, curr_ctx) in params.query_info.contexts.iter().enumerate() {
+        if !curr_ctx.is_valid {
+            continue;
+        }
+        let query_start = curr_ctx.query_offset.max(0) as usize;
+        let query_len = curr_ctx.query_length.max(0) as usize;
+        let Some(query_end) = query_start.checked_add(query_len) else {
+            continue;
+        };
+        let Some(query_segment) = params.query.get(query_start..query_end) else {
+            continue;
+        };
+
+        let cutoff_score = blast_sw_cutoff_for_context(params, context);
+        let score = if is_prot {
+            let pssm = blast_sw_pssm_rows_for_context(
+                params.pssm,
+                curr_ctx.query_offset,
+                curr_ctx.query_length,
+            );
+            s_smith_waterman_score_only(
+                query_segment,
+                params.subject,
+                params.protein_matrix,
+                pssm,
+                params.gap_open,
+                params.gap_extend,
+            )
+        } else {
+            s_nucl_smith_waterman(
+                params.subject,
+                params.subject_length,
+                query_segment,
+                params.nucleotide_matrix,
+                params.gap_open,
+                params.gap_extend,
+            )
+        };
+
+        if score >= cutoff_score {
+            let hsp = Hsp {
+                score,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: f64::MAX,
+                query_offset: 0,
+                query_end: curr_ctx.query_length,
+                query_gapped_start: 0,
+                subject_offset: 0,
+                subject_end: if is_prot {
+                    params.subject.len() as i32
+                } else {
+                    params.subject_length as i32
+                },
+                subject_gapped_start: 0,
+                context: context as i32,
+                query_frame: curr_ctx.frame,
+                subject_frame: params.subject_frame,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+                pat_info: None,
+            map_info: None,
+            };
+            let _ = blast_hsp_list_save_hsp(&mut hsp_list, hsp);
+        }
+    }
+
+    (0, hsp_list)
+}
+
+fn blast_sw_traceback_op(script: u8) -> Option<GapAlignOpType> {
+    match script {
+        EDIT_SUB => Some(GapAlignOpType::Sub),
+        EDIT_GAP_IN_A => Some(GapAlignOpType::Del),
+        EDIT_GAP_IN_B => Some(GapAlignOpType::Ins),
+        _ => None,
+    }
+}
+
+fn blast_sw_score(
+    a: &[u8],
+    b: &[u8],
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    pssm: Option<&[Vec<i32>]>,
+    i: usize,
+    j: usize,
+) -> Option<i32> {
+    if i == 0 || j == 0 {
+        return None;
+    }
+    match pssm {
+        Some(pssm) => pssm
+            .get(i - 1)
+            .and_then(|row| row.get(b[j - 1] as usize))
+            .copied(),
+        None => matrix
+            .get(a[i - 1] as usize)
+            .and_then(|row| row.get(b[j - 1] as usize))
+            .copied(),
+    }
+}
+
+/// Rust ownership equivalent of NCBI static `s_GetTraceback`
+/// (`blast_sw.c:278`).
+///
+/// The C routine reconstructs one local alignment from the traceback byte
+/// array, creates a `BlastHSP`, applies identity/length filters, adjusts the
+/// subject offset, then saves into a `BlastHSPList`. This port keeps the exact
+/// traceback walk and coordinate/script normalization, and returns the
+/// recovered alignment for the caller to filter/save.
+pub fn s_get_traceback(
+    trace: &[u8],
+    a: &[u8],
+    b: &[u8],
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    pssm: Option<&[Vec<i32>]>,
+    gap_open: i32,
+    gap_extend: i32,
+    a_end: usize,
+    b_end: usize,
+    best_score: i32,
+    swapped: bool,
+    start_shift: usize,
+) -> Option<SmithWatermanTracebackHit> {
+    let stride = b.len() + 1;
+    if best_score <= 0
+        || a_end > a.len()
+        || b_end > b.len()
+        || trace.len() < (a.len() + 1).checked_mul(stride)?
+    {
+        return None;
+    }
+
+    let mut i = a_end;
+    let mut j = b_end;
+    let mut script = trace[i * stride + j] & EDIT_OP_MASK;
+    let mut curr_score = -best_score;
+    let mut prelim = Vec::new();
+
+    while curr_score != 0 {
+        let op = blast_sw_traceback_op(script)?;
+        prelim.push(op);
+
+        let next_action = trace[i * stride + j];
+        match script {
+            EDIT_SUB => {
+                curr_score += blast_sw_score(a, b, matrix, pssm, i, j)?;
+                i = i.checked_sub(1)?;
+                j = j.checked_sub(1)?;
+                script = trace[i * stride + j] & EDIT_OP_MASK;
+            }
+            EDIT_GAP_IN_A => {
+                j = j.checked_sub(1)?;
+                if next_action & EDIT_START_GAP_A != 0 {
+                    script = trace[i * stride + j] & EDIT_OP_MASK;
+                    curr_score -= gap_open;
+                }
+                curr_score -= gap_extend;
+            }
+            EDIT_GAP_IN_B => {
+                i = i.checked_sub(1)?;
+                if next_action & EDIT_START_GAP_B != 0 {
+                    script = trace[i * stride + j] & EDIT_OP_MASK;
+                    curr_score -= gap_open;
+                }
+                curr_score -= gap_extend;
+            }
+            _ => return None,
+        }
+    }
+
+    let mut a_start = i;
+    let mut b_start = j;
+    let mut a_end = a_end;
+    let mut b_end = b_end;
+
+    let mut edit_script = GapEditScript::with_capacity(prelim.len());
+    for op in prelim.into_iter().rev() {
+        let op = if swapped {
+            match op {
+                GapAlignOpType::Ins => GapAlignOpType::Del,
+                GapAlignOpType::Del => GapAlignOpType::Ins,
+                _ => op,
+            }
+        } else {
+            op
+        };
+        edit_script.push(op, 1);
+    }
+
+    if swapped {
+        std::mem::swap(&mut a_start, &mut b_start);
+        std::mem::swap(&mut a_end, &mut b_end);
+    }
+
+    Some(SmithWatermanTracebackHit {
+        score: best_score,
+        a_start,
+        a_end,
+        b_start: b_start + start_shift,
+        b_end: b_end + start_shift,
+        edit_script,
+    })
+}
+
+/// 1-1 port of `SmithWatermanScoreWithTraceback` from `blast_sw.c`.
+///
+/// C saves accepted HSPs into a `BlastHSPList`; this Rust translation returns
+/// each recovered alignment so the surrounding translated traceback layer can
+/// apply its own hit-saving policy.
+pub fn smith_waterman_score_with_traceback(
+    a: &[u8],
+    b: &[u8],
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    pssm: Option<&[Vec<i32>]>,
+    gap_open: i32,
+    gap_extend: i32,
+    start_shift: usize,
+    cutoff: i32,
+) -> Vec<SmithWatermanTracebackHit> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+
+    let mut swapped = false;
+    let (a_work, b_work) = if pssm.is_none() && a.len() < b.len() {
+        swapped = true;
+        (b, a)
+    } else {
+        (a, b)
+    };
+
+    let gap_open_extend = gap_open + gap_extend;
+    let mut scores = vec![BlastGapSwTraceDp::default(); b_work.len() + 1];
+    let stride = b_work.len() + 1;
+    let mut traceback_array = vec![0u8; (a_work.len() + 1) * stride];
+    for cell in &mut traceback_array[..stride] {
+        *cell = EDIT_GAP_IN_A;
+    }
+
+    let mut hits = Vec::new();
+
+    for i in 1..=a_work.len() {
+        let mut insert_score = 0;
+        let mut row_score = 0;
+        let mut row_path_stop_i = 0usize;
+        let mut row_path_stop_j = 0usize;
+        let mut row_path_score = 0;
+        let row_offset = i * stride;
+        traceback_array[row_offset] = EDIT_GAP_IN_B;
+
+        for j in 1..=b_work.len() {
+            let mut best_score = scores[j].best_gap - gap_extend;
+            let mut script = 0u8;
+            if scores[j].best - gap_open_extend > best_score {
+                script |= EDIT_START_GAP_B;
+                best_score = scores[j].best - gap_open_extend;
+            }
+            scores[j].best_gap = best_score;
+
+            best_score = insert_score - gap_extend;
+            if row_score - gap_open_extend > best_score {
+                script |= EDIT_START_GAP_A;
+                best_score = row_score - gap_open_extend;
+            }
+            insert_score = best_score;
+
+            let sub_score = blast_sw_score(a_work, b_work, matrix, pssm, i, j).unwrap_or(0);
+            best_score = (scores[j - 1].best + sub_score).max(0);
+            traceback_array[row_offset + j] = script | EDIT_SUB;
+            let mut new_path_score = scores[j - 1].path_score;
+            let mut new_path_stop_i = scores[j - 1].path_stop_i;
+            let mut new_path_stop_j = scores[j - 1].path_stop_j;
+
+            if insert_score > best_score {
+                best_score = insert_score;
+                traceback_array[row_offset + j] = script | EDIT_GAP_IN_A;
+                new_path_score = row_path_score;
+                new_path_stop_i = row_path_stop_i;
+                new_path_stop_j = row_path_stop_j;
+            }
+            if scores[j].best_gap >= best_score {
+                best_score = scores[j].best_gap;
+                traceback_array[row_offset + j] = script | EDIT_GAP_IN_B;
+                new_path_score = scores[j].path_score;
+                new_path_stop_i = scores[j].path_stop_i;
+                new_path_stop_j = scores[j].path_stop_j;
+            }
+
+            if best_score == 0 {
+                if new_path_score >= cutoff {
+                    if let Some(hit) = s_get_traceback(
+                        &traceback_array,
+                        a_work,
+                        b_work,
+                        matrix,
+                        pssm,
+                        gap_open,
+                        gap_extend,
+                        new_path_stop_i,
+                        new_path_stop_j,
+                        new_path_score,
+                        swapped,
+                        start_shift,
+                    ) {
+                        hits.push(hit);
+                    }
+                }
+                new_path_score = 0;
+            }
+
+            if best_score > new_path_score {
+                new_path_score = best_score;
+                new_path_stop_i = i;
+                new_path_stop_j = j;
+            }
+
+            scores[j - 1].best = row_score;
+            scores[j - 1].path_score = row_path_score;
+            scores[j - 1].path_stop_i = row_path_stop_i;
+            scores[j - 1].path_stop_j = row_path_stop_j;
+
+            row_score = best_score;
+            row_path_score = new_path_score;
+            row_path_stop_i = new_path_stop_i;
+            row_path_stop_j = new_path_stop_j;
+        }
+
+        let last = b_work.len();
+        scores[last].best = row_score;
+        scores[last].path_score = row_path_score;
+        scores[last].path_stop_i = row_path_stop_i;
+        scores[last].path_stop_j = row_path_stop_j;
+
+        if scores[last].path_score >= cutoff {
+            if let Some(hit) = s_get_traceback(
+                &traceback_array,
+                a_work,
+                b_work,
+                matrix,
+                pssm,
+                gap_open,
+                gap_extend,
+                scores[last].path_stop_i,
+                scores[last].path_stop_j,
+                scores[last].path_score,
+                swapped,
+                start_shift,
+            ) {
+                hits.push(hit);
+            }
+        }
+    }
+
+    for i in 0..b_work.len() {
+        if scores[i].best != 0 && scores[i].path_score >= cutoff {
+            if let Some(hit) = s_get_traceback(
+                &traceback_array,
+                a_work,
+                b_work,
+                matrix,
+                pssm,
+                gap_open,
+                gap_extend,
+                scores[i].path_stop_i,
+                scores[i].path_stop_j,
+                scores[i].path_score,
+                swapped,
+                start_shift,
+            ) {
+                hits.push(hit);
+            }
+        }
+    }
+
+    hits
+}
+
+/// 1-1 port of `s_NuclSmithWaterman` from `blast_sw.c`.
+///
+/// `b_packed` is the packed NCBI2na sequence used by BLAST databases, while
+/// `a` is BLASTNA/2-bit query data. The outer loop unpacks `B` exactly where
+/// C uses `NCBI2NA_UNPACK_BASE`.
+pub fn s_nucl_smith_waterman(
+    b_packed: &[u8],
+    b_size: usize,
+    a: &[u8],
+    matrix: &[[i32; crate::encoding::BLASTNA_SIZE]; crate::encoding::BLASTNA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+) -> i32 {
+    if b_size == 0 || a.is_empty() {
+        return 0;
+    }
+
+    let gap_open_extend = gap_open + gap_extend;
+    let mut scores = vec![BlastSwGapDp::default(); a.len() + 1];
+    let mut final_best_score = 0;
+
+    for i in 1..=b_size {
+        let base_pair = crate::encoding::ncbi2na_base_at(b_packed, i - 1) as usize;
+        let matrix_row = &matrix[base_pair];
+        let mut insert_score = 0;
+        let mut row_score = 0;
+
+        for j in 1..=a.len() {
+            let mut best_score = scores[j].best_gap - gap_extend;
+            if scores[j].best - gap_open_extend > best_score {
+                best_score = scores[j].best - gap_open_extend;
+            }
+            scores[j].best_gap = best_score;
+
+            best_score = insert_score - gap_extend;
+            if row_score - gap_open_extend > best_score {
+                best_score = row_score - gap_open_extend;
+            }
+            insert_score = best_score;
+
+            best_score = (scores[j - 1].best + matrix_row[a[j - 1] as usize]).max(0);
+            if insert_score > best_score {
+                best_score = insert_score;
+            }
+            if scores[j].best_gap > best_score {
+                best_score = scores[j].best_gap;
+            }
+
+            if best_score > final_best_score {
+                final_best_score = best_score;
+            }
+
+            scores[j - 1].best = row_score;
+            row_score = best_score;
+        }
+
+        scores[a.len()].best = row_score;
+    }
+
+    final_best_score
 }
 
 /// Forward SW score-only — 1-1 port of `BLbasicSmithWatermanScoreOnly`
@@ -1088,6 +1732,217 @@ mod tests {
             pssm[offset + i][aa as usize] = 5;
         }
         pssm
+    }
+
+    #[test]
+    fn blast_sw_score_only_name_matched_port_matches_public_score() {
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
+        let m = blosum62();
+
+        let (expected, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
+        assert_eq!(
+            s_smith_waterman_score_only(&q, &s, &m, None, 11, 1),
+            expected
+        );
+        assert_eq!(
+            s_smith_waterman_score_only(&s, &q, &m, None, 11, 1),
+            expected
+        );
+    }
+
+    #[test]
+    fn blast_sw_traceback_name_matched_port_recovers_exact_hit() {
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
+        let m = blosum62();
+
+        let hits = smith_waterman_score_with_traceback(&q, &s, &m, None, 11, 1, 0, 38);
+        let hit = hits
+            .iter()
+            .find(|hit| hit.score == 38 && hit.a_start == 0 && hit.a_end == q.len())
+            .expect("expected exact query hit");
+
+        assert_eq!((hit.b_start, hit.b_end), (5, 13));
+        assert_eq!(hit.edit_script.ops, vec![(GapAlignOpType::Sub, 8)]);
+    }
+
+    #[test]
+    fn blast_sw_traceback_name_matched_port_swaps_square_matrix_inputs_back() {
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
+        let m = blosum62();
+
+        let hits = smith_waterman_score_with_traceback(&q, &s, &m, None, 11, 1, 100, 38);
+        let hit = hits
+            .iter()
+            .find(|hit| hit.score == 38 && hit.b_start == 105 && hit.b_end == 113)
+            .expect("expected subject-offset hit after internal swap");
+
+        assert_eq!((hit.a_start, hit.a_end), (0, 8));
+        assert_eq!(hit.edit_script.ops, vec![(GapAlignOpType::Sub, 8)]);
+    }
+
+    #[test]
+    fn blast_sw_traceback_name_matched_port_uses_pssm_without_swap() {
+        let q = vec![1u8, 2, 3, 4];
+        let s = q.clone();
+        let pssm = offset_identity_pssm(&q, 0);
+
+        let hits = smith_waterman_score_with_traceback(
+            &q,
+            &s,
+            &crate::matrix::BLOSUM62,
+            Some(&pssm),
+            11,
+            1,
+            7,
+            20,
+        );
+        let hit = hits
+            .iter()
+            .find(|hit| hit.score == 20)
+            .expect("expected pssm traceback hit");
+
+        assert_eq!((hit.a_start, hit.a_end), (0, 4));
+        assert_eq!((hit.b_start, hit.b_end), (7, 11));
+        assert_eq!(hit.edit_script.ops, vec![(GapAlignOpType::Sub, 4)]);
+    }
+
+    #[test]
+    fn blast_smith_waterman_get_gapped_score_saves_placeholder_hsp() {
+        let q = encode_ncbistdaa_sequence(b"MKFLILLF");
+        let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
+        let m = blosum62();
+        let qi = QueryInfo::new_blastp(&[q.len()]);
+        let nuc_matrix = crate::traceback::build_blastna_matrix(1, -3);
+        let params = BlastSmithWatermanGappedScoreParams {
+            program_number: crate::program::BLASTP,
+            query: &q,
+            query_info: &qi,
+            subject: &s,
+            subject_length: s.len(),
+            subject_oid: 42,
+            subject_frame: 0,
+            protein_matrix: &m,
+            pssm: None,
+            nucleotide_matrix: &nuc_matrix,
+            gap_open: 11,
+            gap_extend: 1,
+            cutoffs: &[38],
+            hsp_num_max: 10,
+        };
+
+        let (status, list) = blast_smith_waterman_get_gapped_score(&params, None);
+
+        assert_eq!(status, 0);
+        assert_eq!(list.oid, 42);
+        assert_eq!(list.hsps.len(), 1);
+        let hsp = &list.hsps[0];
+        assert_eq!(hsp.score, 38);
+        assert_eq!((hsp.query_offset, hsp.query_end), (0, q.len() as i32));
+        assert_eq!((hsp.subject_offset, hsp.subject_end), (0, s.len() as i32));
+        assert_eq!(hsp.context, 0);
+        assert!(hsp.edit_script.is_none());
+    }
+
+    #[test]
+    fn blast_smith_waterman_get_gapped_score_uses_pssm_context_rows() {
+        let q = vec![1u8, 2, 3, 4, 1, 2, 3, 4];
+        let s = vec![1u8, 2, 3, 4];
+        let pssm = offset_identity_pssm(&q, 0);
+        let qi = QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 4,
+                query_length: 4,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 4,
+        };
+        let nuc_matrix = crate::traceback::build_blastna_matrix(1, -3);
+        let params = BlastSmithWatermanGappedScoreParams {
+            program_number: crate::program::PSI_BLAST,
+            query: &q,
+            query_info: &qi,
+            subject: &s,
+            subject_length: s.len(),
+            subject_oid: 7,
+            subject_frame: 0,
+            protein_matrix: &crate::matrix::BLOSUM62,
+            pssm: Some(&pssm),
+            nucleotide_matrix: &nuc_matrix,
+            gap_open: 11,
+            gap_extend: 1,
+            cutoffs: &[20],
+            hsp_num_max: 10,
+        };
+
+        let (_, list) = blast_smith_waterman_get_gapped_score(&params, None);
+
+        assert_eq!(list.hsps.len(), 1);
+        assert_eq!(list.hsps[0].score, 20);
+        assert_eq!(list.hsps[0].context, 0);
+    }
+
+    #[test]
+    fn blast_smith_waterman_get_gapped_score_scores_packed_nucleotide_subject() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let qi = QueryInfo::new_blastn(&[query.len()]);
+        let prot_matrix = blosum62();
+        let nuc_matrix = crate::traceback::build_blastna_matrix(1, -3);
+        let params = BlastSmithWatermanGappedScoreParams {
+            program_number: crate::program::BLASTN,
+            query: &query,
+            query_info: &qi,
+            subject: &subject,
+            subject_length: query.len(),
+            subject_oid: 3,
+            subject_frame: 1,
+            protein_matrix: &prot_matrix,
+            pssm: None,
+            nucleotide_matrix: &nuc_matrix,
+            gap_open: 5,
+            gap_extend: 2,
+            cutoffs: &[8, 100],
+            hsp_num_max: 10,
+        };
+
+        let (_, list) = blast_smith_waterman_get_gapped_score(&params, None);
+
+        assert_eq!(list.hsps.len(), 1);
+        assert_eq!(list.hsps[0].score, 8);
+        assert_eq!(list.hsps[0].subject_end, query.len() as i32);
+    }
+
+    #[test]
+    fn blast_sw_score_only_name_matched_port_uses_pssm_rows_without_swap() {
+        let q = vec![1u8, 2, 3, 4];
+        let s = q.clone();
+        let pssm = offset_identity_pssm(&q, 0);
+
+        assert_eq!(
+            s_smith_waterman_score_only(&q, &s, &crate::matrix::BLOSUM62, Some(&pssm), 11, 1),
+            20
+        );
+    }
+
+    #[test]
+    fn nucl_smith_waterman_name_matched_port_scores_packed_subject() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let matrix = crate::traceback::build_blastna_matrix(1, -3);
+
+        assert_eq!(
+            s_nucl_smith_waterman(&subject, query.len(), &query, &matrix, 5, 2),
+            query.len() as i32
+        );
     }
 
     #[test]

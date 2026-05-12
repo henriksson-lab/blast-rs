@@ -34,7 +34,8 @@
 #![allow(non_camel_case_types)]
 
 use crate::program::{
-    query_is_nucleotide, query_is_translated, subject_is_translated, ProgramType, BLASTX,
+    blast_query_is_nucleotide, blast_query_is_translated, blast_subject_is_translated, ProgramType,
+    BLASTX,
 };
 use crate::queryinfo::QueryInfo;
 use crate::stat::{
@@ -204,6 +205,13 @@ impl LinkHspStruct {
     }
 }
 
+/// Port-shaped wrapper for `s_LinkHSPStructReset` (`link_hsps.c:384`).
+pub fn s_link_hsp_struct_reset(lhsp: Option<LinkHspStruct>) -> LinkHspStruct {
+    let mut lhsp = lhsp.unwrap_or_default();
+    lhsp.reset();
+    lhsp
+}
+
 /// Per-iteration inner-loop helper (port of `LinkHelpStruct`, `link_hsps.c:100`).
 #[derive(Debug, Clone, Copy, Default)]
 struct LinkHelpStruct {
@@ -370,7 +378,7 @@ pub fn s_BlastEvenGapLinkHSPs(
     let gap_prob = link_hsp_params.gap_prob;
     let gap_decay_rate = link_hsp_params.gap_decay_rate;
 
-    let num_subject_frames = if subject_is_translated(program_number) {
+    let num_subject_frames = if blast_subject_is_translated(program_number) {
         NUM_STRANDS
     } else {
         1
@@ -392,7 +400,7 @@ pub fn s_BlastEvenGapLinkHSPs(
     // NCBI sorts link_hsp_array by `RevCompareHSPsTbx` (translated query)
     // or `RevCompareHSPsTbn` (non-translated query). We compute an
     // ordering on node indices 1..=N.
-    let kTranslatedQuery = query_is_translated(program_number);
+    let kTranslatedQuery = blast_query_is_translated(program_number);
     let mut order: Vec<usize> = (1..num_nodes).collect();
     {
         let hsp_array = &hsp_list.hsp_array;
@@ -420,7 +428,7 @@ pub fn s_BlastEvenGapLinkHSPs(
     let ignore_small_gaps = cutoff[0] == 0;
 
     // `link_hsps.c:498-501`: if query is nucleotide, num_query_frames = 2 * num_queries.
-    let mut num_query_frames = if query_is_nucleotide(program_number) {
+    let mut num_query_frames = if blast_query_is_nucleotide(program_number) {
         NUM_STRANDS * query_info.num_queries
     } else {
         query_info.num_queries
@@ -510,7 +518,7 @@ pub fn s_BlastEvenGapLinkHSPs(
         query_length = std::cmp::max(query_length - length_adjustment, 1);
         let mut subject_length_eff = subject_length_orig;
         let mut length_adjustment_eff = length_adjustment;
-        if subject_is_translated(program_number) {
+        if blast_subject_is_translated(program_number) {
             length_adjustment_eff /= CODON_LENGTH;
             subject_length_eff /= CODON_LENGTH;
         }
@@ -1031,7 +1039,7 @@ fn s_SumHSPEvalue(
     head_idx: usize,
     new_idx: usize,
 ) -> (f64, f64) {
-    let subject_eff_length = if subject_is_translated(program_number) {
+    let subject_eff_length = if blast_subject_is_translated(program_number) {
         subject_length / 3
     } else {
         subject_length
@@ -1375,6 +1383,20 @@ fn s_LinkedHSPSetArraySetUp(
     link_hsp_array
 }
 
+/// Name-matched Rust ownership equivalent of NCBI static
+/// `s_LinkedHSPSetArrayCleanUp` (`link_hsps.c:1543`).
+pub fn s_linked_hsp_set_array_clean_up(
+    link_hsp_array: &mut Option<Vec<BlastLinkedHspSet>>,
+    hspcnt: i32,
+) -> Option<Vec<BlastLinkedHspSet>> {
+    if let Some(array) = link_hsp_array.as_mut() {
+        array.truncate(hspcnt.max(0) as usize);
+        array.clear();
+    }
+    *link_hsp_array = None;
+    None
+}
+
 /// Index query ends to enable `s_HSPOffsetEndBinarySearch`.
 /// Port of `s_LinkedHSPSetArrayIndexQueryEnds` (`link_hsps.c:1567`).
 fn s_LinkedHSPSetArrayIndexQueryEnds(
@@ -1691,7 +1713,7 @@ fn blast_hsp_list_get_evalues_for_linking(
                 if let Some(db_length) = sbp.link_gbp_db_length {
                     gbp.db_length = db_length.max(1);
                 }
-                let subject_stat_length = if subject_is_translated(program_number) {
+                let subject_stat_length = if blast_subject_is_translated(program_number) {
                     (subject_length / CODON_LENGTH).max(1)
                 } else {
                     subject_length.max(1)
@@ -1765,6 +1787,7 @@ mod tests {
                     query_index: qi,
                     frame: *frame,
                     is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
                 });
             }
         }
@@ -2039,6 +2062,42 @@ mod tests {
         let mut order = vec![0usize, 1, 2];
         order.sort_by(|&a, &b| sum_score_compare_linked_hsp_sets(&sets, &hsp_array, a, b));
         assert_eq!(order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn link_hsp_struct_reset_clears_link_state() {
+        let reset = s_link_hsp_struct_reset(Some(LinkHspStruct {
+            hsp_idx: 7,
+            prev: Some(1),
+            next: Some(2),
+            linked_set: true,
+            start_of_chain: true,
+            linked_to: -1000,
+            xsum: 4.0,
+            ordering_method: ELinkOrderingMethod::ELinkLargeGaps,
+            ..Default::default()
+        }));
+
+        assert_eq!(reset.hsp_idx, 0);
+        assert_eq!(reset.prev, None);
+        assert_eq!(reset.next, None);
+        assert!(!reset.linked_set);
+        assert_eq!(reset.linked_to, 0);
+        assert_eq!(reset.ordering_method, ELinkOrderingMethod::ELinkSmallGaps);
+    }
+
+    #[test]
+    fn linked_hsp_set_array_clean_up_clears_wrapper_array() {
+        let mut sets = Some(vec![BlastLinkedHspSet {
+            hsp_idx: 0,
+            queryId: 0,
+            next: Some(1),
+            prev: None,
+            sum_score: 1.0,
+        }]);
+
+        assert!(s_linked_hsp_set_array_clean_up(&mut sets, 1).is_none());
+        assert!(sets.is_none());
     }
 
     #[test]

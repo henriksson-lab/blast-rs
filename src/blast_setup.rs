@@ -3,22 +3,578 @@
 //! `BLAST_CalcEffLengths` and its private helpers; the rest of the file
 //! will be filled in incrementally.
 
-use crate::options::{EffectiveLengthsOptions, ScoringOptions};
-use crate::parameters::EffectiveLengthsParameters;
-use crate::program::{is_mapping, is_phi_blast, subject_is_translated, ProgramType, BLASTN};
-use crate::queryinfo::QueryInfo;
-use crate::stat::{
-    compute_length_adjustment_exact, lookup_matrix_params, lookup_matrix_ungapped_alpha_beta,
-    nucl_alpha_beta, KarlinBlk,
+use crate::filter::{
+    blast_complement_mask_locations, blast_filtering_options_from_string, blast_mask_loc_free,
+    blast_mask_loc_protein_to_dna, blast_setup_get_filtering_locations, blast_setup_mask_query,
+    sblast_filter_options_mask_at_hash, BlastMaskLoc,
 };
+use crate::options::{EffectiveLengthsOptions, QuerySetUpOptions, ScoringOptions};
+use crate::parameters::{
+    blast_hit_saving_parameters_update, blast_initial_word_parameters_update,
+    blast_link_hsp_parameters_update, EffectiveLengthsParameters, HitSavingParameters,
+    InitialWordParameters,
+};
+use crate::pattern::{
+    phi_get_pattern_occurrences, sphi_query_info_new, PhiPatternSearchBlk, SphiQueryInfo,
+};
+use crate::program::{
+    blast_program_is_mapping, blast_program_is_phi_blast, blast_query_is_pssm,
+    blast_query_is_translated, blast_subject_is_translated, ProgramType, BLASTN,
+};
+use crate::queryinfo::QueryInfo;
+use crate::seqsrc::{
+    blast_seq_src_get_num_seqs, blast_seq_src_get_num_seqs_stats, blast_seq_src_get_seq_len,
+    blast_seq_src_get_tot_len, blast_seq_src_get_tot_len_stats, BlastSeqSource,
+};
+use crate::stat::{
+    blast_gumbel_blk_calc, blast_karlin_blk_gapped_calc, blast_karlin_blk_nucl_gapped_calc,
+    blast_score_blk_kbp_ideal_calc, blast_score_blk_kbp_ungapped_calc, blast_score_blk_matrix_fill,
+    blast_score_blk_new, blast_score_freq_new, blast_score_set_ambig_res,
+    compute_length_adjustment_exact, lookup_matrix_params, lookup_matrix_ungapped_alpha_beta,
+    nucl_alpha_beta, BlastScoreBlk, KarlinBlk, BLAST_GAP_EXTN_MEGABLAST, BLAST_GAP_OPEN_MEGABLAST,
+};
+use crate::util::{BlastSequenceBlk, SSeqRange};
 
 /// `BLAST_REWARD` (`blast_options.h:152`).
 pub const BLAST_REWARD: i32 = 1;
 /// `BLAST_PENALTY` (`blast_options.h:151`).
 pub const BLAST_PENALTY: i32 = -3;
 
+/// Port of NCBI `BlastSetup_Validate` (`blast_setup.c:535`).
+///
+/// C asserts that per-context statistics pointers are NULL for invalid
+/// contexts. Rust stores most Karlin blocks by value, so only `sfp` keeps that
+/// nullable shape; the observable return remains 0 if any context is valid,
+/// otherwise 1.
+pub fn blast_setup_validate(query_info: &QueryInfo, score_blk: Option<&BlastScoreBlk>) -> i16 {
+    let mut valid_context_found = false;
+
+    for (index, context) in query_info.contexts.iter().enumerate() {
+        if context.is_valid {
+            valid_context_found = true;
+        } else if let Some(score_blk) = score_blk {
+            if index < score_blk.sfp.len() {
+                debug_assert!(score_blk.sfp[index].is_none());
+            }
+        }
+    }
+
+    if valid_context_found {
+        0
+    } else {
+        1
+    }
+}
+
+/// Port of NCBI `Blast_ScoreBlkMatrixInit` (`blast_setup.c:330`).
+pub fn blast_score_blk_matrix_init(
+    program_number: ProgramType,
+    scoring_options: Option<&ScoringOptions>,
+    sbp: Option<&mut BlastScoreBlk>,
+) -> i16 {
+    let (Some(scoring_options), Some(sbp)) = (scoring_options, sbp) else {
+        return 1;
+    };
+
+    sbp.matrix_only_scoring = false;
+
+    if program_number == crate::program::BLASTN || program_number == crate::program::MAPPING {
+        let _ = blast_score_set_ambig_res(Some(&mut *sbp), b'N');
+        let _ = blast_score_set_ambig_res(Some(&mut *sbp), b'-');
+
+        if scoring_options.penalty == 0 && scoring_options.reward == 0 {
+            sbp.matrix_only_scoring = true;
+            sbp.penalty = BLAST_PENALTY;
+            sbp.reward = BLAST_REWARD;
+        } else {
+            sbp.penalty = scoring_options.penalty;
+            sbp.reward = scoring_options.reward;
+        }
+
+        if let Some(matrix) = scoring_options
+            .matrix_name
+            .as_deref()
+            .filter(|matrix| !matrix.is_empty())
+        {
+            sbp.read_in_matrix = true;
+            sbp.name = Some(matrix.to_string());
+        } else {
+            sbp.read_in_matrix = false;
+            sbp.name = Some(format!("blastn matrix:{} {}", sbp.reward, sbp.penalty));
+        }
+    } else {
+        sbp.read_in_matrix = true;
+        let _ = blast_score_set_ambig_res(Some(&mut *sbp), b'X');
+        sbp.name = Some(
+            scoring_options
+                .matrix_name
+                .as_deref()
+                .unwrap_or("BLOSUM62")
+                .to_ascii_uppercase(),
+        );
+    }
+
+    blast_score_blk_matrix_fill(sbp)
+}
+
+/// Port of NCBI `Blast_ScoreBlkKbpGappedCalc` (`blast_setup.c:41`).
+pub fn blast_score_blk_kbp_gapped_calc(
+    sbp: Option<&mut BlastScoreBlk>,
+    scoring_options: Option<&ScoringOptions>,
+    program: ProgramType,
+    query_info: Option<&QueryInfo>,
+) -> i16 {
+    let (Some(sbp), Some(scoring_options), Some(query_info)) = (sbp, scoring_options, query_info)
+    else {
+        return 1;
+    };
+
+    if program == crate::program::BLASTN {
+        // C leaves the preliminary nucleotide Gumbel path disabled.
+    } else if let Some(gbp) = sbp.gbp.as_mut() {
+        let retval = blast_gumbel_blk_calc(
+            Some(gbp),
+            scoring_options.gap_open,
+            scoring_options.gap_extend,
+            sbp.name.as_deref(),
+            None,
+        );
+        if retval != 0 {
+            return retval;
+        }
+    }
+
+    let context_count = query_info.contexts.len();
+    if sbp.kbp_gap_std.len() < context_count {
+        sbp.kbp_gap_std.resize(context_count, KarlinBlk::default());
+    }
+    if sbp.kbp_gap_psi.len() < context_count {
+        sbp.kbp_gap_psi.resize(context_count, KarlinBlk::default());
+    }
+
+    for (index, context) in query_info.contexts.iter().enumerate() {
+        if !context.is_valid {
+            continue;
+        }
+
+        let retval = if program == crate::program::BLASTN {
+            let (reward, penalty) = if scoring_options.reward == 0 && scoring_options.penalty == 0 {
+                (BLAST_REWARD, BLAST_PENALTY)
+            } else {
+                (scoring_options.reward, scoring_options.penalty)
+            };
+            blast_karlin_blk_nucl_gapped_calc(
+                Some(&mut sbp.kbp_gap_std[index]),
+                scoring_options.gap_open,
+                scoring_options.gap_extend,
+                reward,
+                penalty,
+                sbp.kbp_std.get(index),
+                Some(&mut sbp.round_down),
+                None,
+            )
+        } else {
+            blast_karlin_blk_gapped_calc(
+                Some(&mut sbp.kbp_gap_std[index]),
+                scoring_options.gap_open,
+                scoring_options.gap_extend,
+                sbp.name.as_deref(),
+                None,
+            )
+        };
+        if retval != 0 {
+            return retval;
+        }
+
+        if program != crate::program::BLASTN && program != crate::program::MAPPING {
+            sbp.kbp_gap_psi[index] = sbp.kbp_gap_std[index].clone();
+        }
+    }
+
+    sbp.kbp_gap = if blast_query_is_pssm(program) {
+        sbp.kbp_gap_psi.clone()
+    } else {
+        sbp.kbp_gap_std.clone()
+    };
+
+    0
+}
+
+type PhiKbpResult = Result<(f64, f64), i16>;
+
+fn phi_blast_kbp_values(matrix: &str, gap_open: i32, gap_extend: i32) -> PhiKbpResult {
+    let matrix = matrix.to_ascii_uppercase();
+    let values = match matrix.as_str() {
+        "BLOSUM62" => match (gap_open, gap_extend) {
+            (11, 1) => Some((0.270, 0.047)),
+            (9, 2) => Some((0.285, 0.075)),
+            (8, 2) => Some((0.265, 0.046)),
+            (7, 2) => Some((0.243, 0.032)),
+            (12, 1) => Some((0.281, 0.057)),
+            (10, 1) => Some((0.250, 0.033)),
+            _ => None,
+        },
+        "PAM30" => match (gap_open, gap_extend) {
+            (9, 1) => Some((0.295, 0.13)),
+            (7, 2) => Some((0.306, 0.15)),
+            (6, 2) => Some((0.292, 0.13)),
+            (5, 2) => Some((0.263, 0.077)),
+            (10, 1) => Some((0.309, 0.15)),
+            (8, 1) => Some((0.270, 0.070)),
+            _ => None,
+        },
+        "PAM70" => match (gap_open, gap_extend) {
+            (10, 1) => Some((0.291, 0.089)),
+            (8, 2) => Some((0.303, 0.13)),
+            (7, 2) => Some((0.287, 0.095)),
+            (6, 2) => Some((0.269, 0.079)),
+            (11, 1) => Some((0.307, 0.13)),
+            (9, 1) => Some((0.269, 0.058)),
+            _ => None,
+        },
+        "BLOSUM80" => match (gap_open, gap_extend) {
+            (10, 1) => Some((0.300, 0.072)),
+            (8, 2) => Some((0.308, 0.089)),
+            (7, 2) => Some((0.295, 0.077)),
+            (6, 2) => Some((0.271, 0.051)),
+            (11, 1) => Some((0.314, 0.096)),
+            (9, 1) => Some((0.277, 0.046)),
+            _ => None,
+        },
+        "BLOSUM45" => match (gap_open, gap_extend) {
+            (14, 2) => Some((0.199, 0.040)),
+            (13, 3) => Some((0.209, 0.057)),
+            (12, 3) => Some((0.203, 0.049)),
+            (11, 3) => Some((0.193, 0.037)),
+            (10, 3) => Some((0.182, 0.029)),
+            (15, 2) => Some((0.206, 0.049)),
+            (13, 2) => Some((0.190, 0.032)),
+            (12, 2) => Some((0.177, 0.023)),
+            (19, 1) => Some((0.209, 0.049)),
+            (18, 1) => Some((0.202, 0.041)),
+            (17, 1) => Some((0.195, 0.034)),
+            (16, 1) => Some((0.183, 0.024)),
+            _ => None,
+        },
+        _ => return Err(-2),
+    };
+    values.ok_or(-1)
+}
+
+/// Port of NCBI internal `s_PHIScoreBlkFill` (`blast_setup.c:129`).
+pub fn s_phi_score_blk_fill(
+    sbp: Option<&mut BlastScoreBlk>,
+    options: Option<&ScoringOptions>,
+) -> i16 {
+    let (Some(sbp), Some(options)) = (sbp, options) else {
+        return 1;
+    };
+    sbp.read_in_matrix = true;
+    let status = blast_score_blk_matrix_fill(sbp);
+    if status != 0 {
+        return status;
+    }
+
+    if sbp.kbp_gap_std.is_empty() {
+        sbp.kbp_gap_std
+            .resize(sbp.number_of_contexts.max(1) as usize, KarlinBlk::default());
+    }
+    sbp.kbp_gap_std[0] = KarlinBlk {
+        h: 1.0,
+        ..KarlinBlk::default()
+    };
+    sbp.kbp_gap = sbp.kbp_gap_std.clone();
+    if !sbp.sfp.is_empty() {
+        sbp.sfp[0] = blast_score_freq_new(sbp.loscore, sbp.hiscore);
+    }
+
+    let status = blast_score_blk_kbp_ideal_calc(Some(&mut *sbp));
+    if status != 0 {
+        return status;
+    }
+
+    let matrix = options.matrix_name.as_deref().unwrap_or("BLOSUM62");
+    let (lambda, k) = match phi_blast_kbp_values(matrix, options.gap_open, options.gap_extend) {
+        Ok(values) => values,
+        Err(status) => return status,
+    };
+    sbp.kbp_gap_std[0].lambda = lambda;
+    sbp.kbp_gap_std[0].k = k;
+    sbp.kbp_gap_std[0].log_k = k.ln();
+    sbp.kbp_gap_std[0].h = 1.0;
+
+    let context_count = sbp.number_of_contexts.max(0) as usize;
+    if sbp.kbp_gap_std.len() < context_count {
+        sbp.kbp_gap_std.resize(context_count, KarlinBlk::default());
+    }
+    if sbp.kbp_std.len() < context_count {
+        sbp.kbp_std.resize(context_count, KarlinBlk::default());
+    }
+    for index in 1..context_count {
+        sbp.kbp_gap_std[index] = sbp.kbp_gap_std[0].clone();
+    }
+    for index in 0..context_count {
+        sbp.kbp_std[index] = sbp.kbp_gap_std[0].clone();
+    }
+    sbp.kbp = sbp.kbp_std.clone();
+    sbp.kbp_gap = sbp.kbp_gap_std.clone();
+
+    0
+}
+
+/// Port of NCBI internal `s_JumperScoreBlkFill` (`blast_setup.c:386`).
+pub fn s_jumper_score_blk_fill(
+    sbp: Option<&mut BlastScoreBlk>,
+    query_info: Option<&QueryInfo>,
+) -> i16 {
+    let (Some(sbp), Some(query_info)) = (sbp, query_info) else {
+        return 1;
+    };
+    let status = blast_score_blk_kbp_ideal_calc(Some(&mut *sbp));
+    if status != 0 {
+        return status;
+    }
+    let Some(ideal) = sbp.kbp_ideal.clone() else {
+        return 1;
+    };
+
+    let context_count = query_info.contexts.len();
+    if sbp.kbp_std.len() < context_count {
+        sbp.kbp_std.resize(context_count, KarlinBlk::default());
+    }
+    if sbp.kbp.len() < context_count {
+        sbp.kbp.resize(context_count, KarlinBlk::default());
+    }
+    if sbp.kbp_gap_std.len() < context_count {
+        sbp.kbp_gap_std.resize(context_count, KarlinBlk::default());
+    }
+
+    for (context, info) in query_info.contexts.iter().enumerate() {
+        if info.is_valid {
+            sbp.sfp[context] = None;
+            sbp.kbp_std[context] = ideal.clone();
+        }
+    }
+    sbp.kbp = sbp.kbp_std.clone();
+
+    let Some(first_valid) = query_info
+        .contexts
+        .iter()
+        .position(|context| context.is_valid)
+    else {
+        return 0;
+    };
+    let mut round_down = sbp.round_down;
+    let status = blast_karlin_blk_nucl_gapped_calc(
+        Some(&mut sbp.kbp_gap_std[first_valid]),
+        BLAST_GAP_OPEN_MEGABLAST,
+        BLAST_GAP_EXTN_MEGABLAST,
+        BLAST_REWARD,
+        BLAST_PENALTY,
+        Some(&sbp.kbp_std[first_valid]),
+        Some(&mut round_down),
+        None,
+    );
+    sbp.round_down = round_down;
+    if status != 0 {
+        return status;
+    }
+
+    let gapped = sbp.kbp_gap_std[first_valid].clone();
+    for context in first_valid + 1..context_count {
+        if query_info.contexts[context].is_valid {
+            sbp.kbp_gap_std[context] = gapped.clone();
+        }
+    }
+    sbp.kbp_gap = sbp.kbp_gap_std.clone();
+    0
+}
+
+/// Port of NCBI `BlastSetup_ScoreBlkInit` (`blast_setup.c:456`).
+pub fn blast_setup_score_blk_init(
+    query_blk: Option<&BlastSequenceBlk>,
+    query_info: Option<&mut QueryInfo>,
+    scoring_options: Option<&ScoringOptions>,
+    program_number: ProgramType,
+    sbpp: Option<&mut Option<BlastScoreBlk>>,
+    scale_factor: f64,
+) -> i16 {
+    let Some(sbpp) = sbpp else {
+        return 1;
+    };
+    let (Some(query_info), Some(scoring_options)) = (query_info, scoring_options) else {
+        *sbpp = None;
+        return 1;
+    };
+
+    let alphabet =
+        if program_number == crate::program::BLASTN || program_number == crate::program::MAPPING {
+            crate::encoding::BLASTNA_SEQ_CODE
+        } else {
+            crate::encoding::BLASTAA_SEQ_CODE
+        };
+    let Some(mut sbp) = blast_score_blk_new(alphabet, query_info.contexts.len() as i32) else {
+        *sbpp = None;
+        return 1;
+    };
+    if program_number == crate::program::BLASTN || program_number == crate::program::MAPPING {
+        sbp.gbp = None;
+    }
+    sbp.scale_factor = scale_factor;
+
+    let status = blast_score_blk_matrix_init(program_number, Some(scoring_options), Some(&mut sbp));
+    if status != 0 {
+        *sbpp = Some(sbp);
+        return status;
+    }
+
+    let status = if blast_program_is_phi_blast(program_number) {
+        s_phi_score_blk_fill(Some(&mut sbp), Some(scoring_options))
+    } else if blast_program_is_mapping(program_number) {
+        s_jumper_score_blk_fill(Some(&mut sbp), Some(query_info))
+    } else {
+        let Some(query_blk) = query_blk else {
+            *sbpp = Some(sbp);
+            return 1;
+        };
+        let status = blast_score_blk_kbp_ungapped_calc(
+            program_number,
+            Some(&mut sbp),
+            query_blk.sequence.as_deref(),
+            Some(query_info),
+            None,
+        );
+        if status != 0 {
+            status
+        } else if scoring_options.gapped_calculation {
+            blast_score_blk_kbp_gapped_calc(
+                Some(&mut sbp),
+                Some(scoring_options),
+                program_number,
+                Some(query_info),
+            )
+        } else {
+            sbp.kbp_gap.clear();
+            sbp.gbp = None;
+            0
+        }
+    };
+
+    *sbpp = Some(sbp);
+    status
+}
+
+/// Port of NCBI `BLAST_MainSetUp` (`blast_setup.c:563`).
+///
+/// Rust passes `translated_dna_lengths` explicitly for the optional
+/// protein-to-DNA mask conversion because `QueryInfo` stores translated context
+/// lengths, not the original nucleotide lengths.
+pub fn blast_main_set_up(
+    program_number: ProgramType,
+    qsup_options: Option<&QuerySetUpOptions>,
+    scoring_options: Option<&ScoringOptions>,
+    query_blk: Option<&mut BlastSequenceBlk>,
+    query_info: Option<&mut QueryInfo>,
+    lookup_segments: Option<&mut Option<Box<crate::filter::BlastSeqLoc>>>,
+    mask: Option<&mut Option<BlastMaskLoc>>,
+    sbpp: Option<&mut Option<BlastScoreBlk>>,
+    scale_factor: f64,
+    translated_dna_lengths: Option<&[i32]>,
+) -> i16 {
+    let (Some(qsup_options), Some(scoring_options), Some(query_blk), Some(query_info), Some(sbpp)) =
+        (qsup_options, scoring_options, query_blk, query_info, sbpp)
+    else {
+        return 1;
+    };
+
+    let mut parsed_filter_options = None;
+    let filter_options = if let Some(options) = qsup_options.filtering_options.as_ref() {
+        Some(options)
+    } else if let Some(filter_string) = qsup_options.filter_string.as_deref() {
+        let status = blast_filtering_options_from_string(
+            program_number,
+            Some(filter_string),
+            &mut parsed_filter_options,
+        );
+        if status != 0 {
+            return status;
+        }
+        parsed_filter_options.as_ref()
+    } else {
+        return 1;
+    };
+
+    let mut filter_maskloc = None;
+    let status = blast_setup_get_filtering_locations(
+        query_blk,
+        query_info,
+        program_number,
+        filter_options,
+        &mut filter_maskloc,
+        None,
+    );
+    if status != 0 {
+        return status;
+    }
+
+    let mask_at_hash = sblast_filter_options_mask_at_hash(filter_options);
+    let filter_maskloc_ref = filter_maskloc.as_ref();
+    if !mask_at_hash {
+        if let Some(filter_maskloc_ref) = filter_maskloc_ref {
+            blast_setup_mask_query(query_blk, query_info, filter_maskloc_ref, program_number);
+        }
+    }
+
+    if let Some(lookup_segments) = lookup_segments {
+        let _ = blast_complement_mask_locations(
+            program_number,
+            query_info,
+            filter_maskloc.as_ref(),
+            Some(lookup_segments),
+        );
+    }
+
+    if let Some(mask_out) = mask {
+        if blast_query_is_translated(program_number) {
+            let Some(dna_lengths) = translated_dna_lengths else {
+                return crate::util::BLASTERR_INVALIDPARAM;
+            };
+            if let Some(filter_maskloc) = filter_maskloc.as_mut() {
+                let status =
+                    blast_mask_loc_protein_to_dna(Some(filter_maskloc), query_info, dna_lengths);
+                if status != 0 {
+                    return status;
+                }
+            }
+        }
+        *mask_out = filter_maskloc.take();
+    } else {
+        let _ = blast_mask_loc_free(&mut filter_maskloc);
+    }
+
+    let status = blast_setup_score_blk_init(
+        Some(&*query_blk),
+        Some(&mut *query_info),
+        Some(scoring_options),
+        program_number,
+        Some(&mut *sbpp),
+        scale_factor,
+    );
+    if status != 0 {
+        return status;
+    }
+
+    if let Some(score_blk) = sbpp.as_ref() {
+        if blast_setup_validate(query_info, Some(score_blk)) != 0 {
+            return 1;
+        }
+    }
+
+    0
+}
+
 /// Port of `s_GetEffectiveSearchSpaceForContext` (`blast_setup.c:676`).
-fn get_effective_search_space_for_context(
+pub fn get_effective_search_space_for_context(
     eff_len_options: &EffectiveLengthsOptions,
     context_index: usize,
 ) -> i64 {
@@ -31,6 +587,45 @@ fn get_effective_search_space_for_context(
     } else {
         debug_assert!(context_index < eff_len_options.num_searchspaces as usize);
         eff_len_options.searchsp_eff[context_index]
+    }
+}
+
+/// Port of NCBI `BLAST_GetSubjectTotals` (`blast_setup.c:853`).
+pub fn blast_get_subject_totals(
+    seqsrc: Option<&dyn BlastSeqSource>,
+    total_length: Option<&mut i64>,
+    num_seqs: Option<&mut i32>,
+) {
+    let (Some(total_length), Some(num_seqs)) = (total_length, num_seqs) else {
+        return;
+    };
+
+    *total_length = -1;
+    *num_seqs = -1;
+
+    let Some(seqsrc) = seqsrc else {
+        return;
+    };
+
+    *total_length = blast_seq_src_get_tot_len_stats(seqsrc);
+    if *total_length <= 0 {
+        *total_length = blast_seq_src_get_tot_len(seqsrc);
+    }
+
+    if *total_length > 0 {
+        *num_seqs = blast_seq_src_get_num_seqs_stats(seqsrc);
+        if *num_seqs <= 0 {
+            *num_seqs = blast_seq_src_get_num_seqs(seqsrc);
+        }
+    } else {
+        let oid = 0;
+        *total_length = blast_seq_src_get_seq_len(seqsrc, oid) as i64;
+        if *total_length < 0 {
+            *total_length = -1;
+            *num_seqs = -1;
+            return;
+        }
+        *num_seqs = 1;
     }
 }
 
@@ -107,7 +702,7 @@ pub fn blast_calc_eff_lengths(
         return 0;
     }
 
-    if subject_is_translated(program_number) {
+    if blast_subject_is_translated(program_number) {
         db_length /= 3;
     }
 
@@ -117,14 +712,14 @@ pub fn blast_calc_eff_lengths(
         eff_len_params.real_num_seqs
     };
 
-    if is_mapping(program_number) {
+    if blast_program_is_mapping(program_number) {
         for ctx in &mut query_info.contexts {
             ctx.eff_searchsp = db_length;
         }
         return 0;
     }
 
-    if is_phi_blast(program_number) {
+    if blast_program_is_phi_blast(program_number) {
         for ctx in &mut query_info.contexts {
             let eff = db_length - (db_num_seqs as i64) * (ctx.length_adjustment as i64);
             ctx.eff_searchsp = eff;
@@ -217,10 +812,698 @@ pub fn blast_calc_eff_lengths(
     0
 }
 
+/// Port of NCBI `BLAST_CalcEffLengths` (`blast_setup.c:699`) with nullable
+/// pointer-shaped inputs.
+pub fn blast_calc_eff_lengths_c(
+    program_number: ProgramType,
+    scoring_options: Option<&ScoringOptions>,
+    eff_len_params: Option<&EffectiveLengthsParameters>,
+    kbp_array: Option<&[KarlinBlk]>,
+    kbp_std_array: Option<&[KarlinBlk]>,
+    matrix_name: Option<&str>,
+    query_info: Option<&mut QueryInfo>,
+) -> i32 {
+    let (Some(scoring_options), Some(eff_len_params), Some(kbp_array), Some(kbp_std_array)) =
+        (scoring_options, eff_len_params, kbp_array, kbp_std_array)
+    else {
+        return -1;
+    };
+    let Some(query_info) = query_info else {
+        return -1;
+    };
+    blast_calc_eff_lengths(
+        program_number,
+        scoring_options,
+        eff_len_params,
+        kbp_array,
+        kbp_std_array,
+        matrix_name.unwrap_or(""),
+        query_info,
+    )
+}
+
+/// Port of NCBI `BLAST_OneSubjectUpdateParameters` (`blast_setup.c:1001`).
+pub fn blast_one_subject_update_parameters(
+    program_number: ProgramType,
+    subject_length: u32,
+    scoring_options: Option<&ScoringOptions>,
+    query_info: Option<&mut QueryInfo>,
+    sbp: Option<&crate::stat::BlastScoreBlk>,
+    hit_params: Option<&mut HitSavingParameters>,
+    word_params: Option<&mut InitialWordParameters>,
+    eff_len_params: Option<&mut EffectiveLengthsParameters>,
+) -> i16 {
+    let (
+        Some(scoring_options),
+        Some(query_info),
+        Some(sbp),
+        Some(hit_params),
+        Some(eff_len_params),
+    ) = (scoring_options, query_info, sbp, hit_params, eff_len_params)
+    else {
+        return -1;
+    };
+
+    eff_len_params.real_db_length = subject_length as i64;
+    let kbp_array = if scoring_options.gapped_calculation {
+        &sbp.kbp_gap_std
+    } else {
+        &sbp.kbp
+    };
+    let status = blast_calc_eff_lengths(
+        program_number,
+        scoring_options,
+        eff_len_params,
+        kbp_array,
+        &sbp.kbp_std,
+        sbp.name.as_deref().unwrap_or(""),
+        query_info,
+    );
+    if status != 0 {
+        return status as i16;
+    }
+
+    let _ = blast_hit_saving_parameters_update(
+        program_number,
+        sbp,
+        query_info,
+        subject_length as i32,
+        0,
+        hit_params,
+    );
+
+    if let Some(word_params) = word_params {
+        let _ = blast_initial_word_parameters_update(
+            program_number,
+            hit_params,
+            sbp,
+            query_info,
+            subject_length,
+            word_params,
+        );
+        let _ = blast_link_hsp_parameters_update(
+            Some(word_params),
+            Some(hit_params),
+            scoring_options.gapped_calculation,
+        );
+    }
+
+    status as i16
+}
+
+/// Port of NCBI `Blast_SetPHIPatternInfo` (`blast_setup.c:1065`).
+///
+/// Rust keeps PHI pattern metadata separate from [`QueryInfo`], so this
+/// returns the allocated [`SphiQueryInfo`] through `pattern_info_out` while
+/// preserving C's `query_info->contexts[0].length_adjustment` side effect.
+pub fn blast_set_phi_pattern_info(
+    program: ProgramType,
+    pattern_blk: Option<&PhiPatternSearchBlk>,
+    query_sequence: Option<&[u8]>,
+    lookup_segments: Option<&[SSeqRange]>,
+    query_info: Option<&mut QueryInfo>,
+    pattern_info_out: Option<&mut Option<SphiQueryInfo>>,
+) -> i16 {
+    let (
+        Some(pattern_blk),
+        Some(query_sequence),
+        Some(lookup_segments),
+        Some(query_info),
+        Some(pattern_info_out),
+    ) = (
+        pattern_blk,
+        query_sequence,
+        lookup_segments,
+        query_info,
+        pattern_info_out,
+    )
+    else {
+        return -1;
+    };
+
+    let mut pattern_info = sphi_query_info_new().unwrap_or_default();
+    let is_na = (program == crate::program::PHI_BLASTN) as u8;
+    let num_patterns = phi_get_pattern_occurrences(
+        pattern_blk,
+        query_sequence,
+        lookup_segments,
+        is_na,
+        &mut pattern_info,
+        query_sequence.len() as i32,
+    );
+
+    if num_patterns == 0 || num_patterns == i32::MAX || num_patterns < 0 {
+        *pattern_info_out = Some(pattern_info);
+        return -1;
+    }
+
+    pattern_info.probability = pattern_blk.pattern_probability;
+    pattern_info.pattern = pattern_blk.pattern.clone();
+    if let Some(context) = query_info.contexts.get_mut(0) {
+        context.length_adjustment = pattern_blk.min_pattern_match_length;
+    }
+    *pattern_info_out = Some(pattern_info);
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link_hsps::LinkHSPParameters;
+    use crate::options::{HitSavingOptions, InitialWordOptions};
+    use crate::parameters::{BlastGappedCutoffs, BlastUngappedCutoffs};
+    use crate::pattern::sphi_pattern_search_blk_new;
     use crate::queryinfo::ContextInfo;
+    use crate::seqsrc::{GetSeqArg, SeqData, SeqEncoding};
+
+    struct SetupSeqSrc {
+        seqs: Vec<Vec<u8>>,
+        total_stats: i64,
+        num_stats: i32,
+    }
+
+    impl BlastSeqSource for SetupSeqSrc {
+        fn num_seqs(&self) -> i32 {
+            self.seqs.len() as i32
+        }
+
+        fn num_seqs_stats(&self) -> i32 {
+            self.num_stats
+        }
+
+        fn total_length(&self) -> i64 {
+            self.seqs.iter().map(|seq| seq.len() as i64).sum()
+        }
+
+        fn total_length_stats(&self) -> i64 {
+            self.total_stats
+        }
+
+        fn max_seq_len(&self) -> i32 {
+            self.seqs
+                .iter()
+                .map(|seq| seq.len() as i32)
+                .max()
+                .unwrap_or(0)
+        }
+
+        fn avg_seq_len(&self) -> i32 {
+            if self.seqs.is_empty() {
+                0
+            } else {
+                (self.total_length() / self.seqs.len() as i64) as i32
+            }
+        }
+
+        fn name(&self) -> &str {
+            "setup-test"
+        }
+
+        fn is_protein(&self) -> bool {
+            true
+        }
+
+        fn seq_len(&self, oid: i32) -> i32 {
+            self.seqs
+                .get(oid.max(0) as usize)
+                .map_or(-1, |seq| seq.len() as i32)
+        }
+
+        fn get_sequence(&self, arg: &GetSeqArg) -> Option<SeqData> {
+            let sequence = self.seqs.get(arg.oid.max(0) as usize)?.clone();
+            Some(SeqData {
+                length: sequence.len() as i32,
+                sequence,
+            })
+        }
+
+        fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+            Box::new(0..self.seqs.len() as i32)
+        }
+    }
+
+    #[test]
+    fn setup_validate_reports_any_valid_context() {
+        let mut query_info = QueryInfo {
+            num_queries: 2,
+            contexts: vec![
+                ContextInfo {
+                    query_offset: 0,
+                    query_length: 10,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 0,
+                    is_valid: false,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+                ContextInfo {
+                    query_offset: 11,
+                    query_length: 12,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 1,
+                    frame: 0,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+            ],
+            max_length: 12,
+        };
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 2).expect("sbp");
+        sbp.sfp[0] = None;
+
+        assert_eq!(blast_setup_validate(&query_info, Some(&sbp)), 0);
+
+        query_info.contexts[1].is_valid = false;
+        assert_eq!(blast_setup_validate(&query_info, Some(&sbp)), 1);
+        assert_eq!(blast_setup_validate(&query_info, None), 1);
+    }
+
+    #[test]
+    fn score_blk_matrix_init_matches_nucleotide_and_protein_setup() {
+        let nucleotide_options = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 0,
+            gap_extend: 0,
+            gapped_calculation: false,
+            matrix_name: None,
+            is_ooframe: false,
+        };
+        let mut nuc_sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 2).expect("sbp");
+
+        assert_eq!(
+            blast_score_blk_matrix_init(
+                crate::program::BLASTN,
+                Some(&nucleotide_options),
+                Some(&mut nuc_sbp),
+            ),
+            0
+        );
+        assert!(nuc_sbp.matrix_only_scoring);
+        assert_eq!(nuc_sbp.reward, BLAST_REWARD);
+        assert_eq!(nuc_sbp.penalty, BLAST_PENALTY);
+        assert_eq!(nuc_sbp.name.as_deref(), Some("blastn matrix:1 -3"));
+        assert!(!nuc_sbp.read_in_matrix);
+        assert!(nuc_sbp
+            .ambiguous_res
+            .contains(&crate::encoding::IUPACNA_TO_BLASTNA[b'N' as usize]));
+
+        let protein_options = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("blosum62".to_string()),
+            is_ooframe: false,
+        };
+        let mut protein_sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+
+        assert_eq!(
+            blast_score_blk_matrix_init(
+                crate::program::BLASTP,
+                Some(&protein_options),
+                Some(&mut protein_sbp),
+            ),
+            0
+        );
+        assert_eq!(protein_sbp.name.as_deref(), Some("BLOSUM62"));
+        assert!(protein_sbp.read_in_matrix);
+        assert!(!protein_sbp.matrix_only_scoring);
+        assert!(protein_sbp
+            .ambiguous_res
+            .contains(&crate::encoding::NCBISTDAA_X));
+        assert_eq!(
+            blast_score_blk_matrix_init(crate::program::BLASTP, None, Some(&mut protein_sbp)),
+            1
+        );
+    }
+
+    #[test]
+    fn score_blk_kbp_gapped_calc_fills_valid_contexts_and_alias_vec() {
+        let mut query_info = QueryInfo {
+            num_queries: 2,
+            contexts: vec![
+                ContextInfo {
+                    query_offset: 0,
+                    query_length: 10,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 0,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+                ContextInfo {
+                    query_offset: 11,
+                    query_length: 10,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 1,
+                    frame: 0,
+                    is_valid: false,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+            ],
+            max_length: 10,
+        };
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let mut protein_sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 2).expect("sbp");
+        protein_sbp.name = Some("BLOSUM62".to_string());
+
+        assert_eq!(
+            blast_score_blk_kbp_gapped_calc(
+                Some(&mut protein_sbp),
+                Some(&scoring),
+                crate::program::BLASTP,
+                Some(&query_info),
+            ),
+            0
+        );
+        assert!(protein_sbp.kbp_gap_std[0].lambda > 0.0);
+        assert_eq!(protein_sbp.kbp_gap_std[1].lambda, 0.0);
+        assert_eq!(
+            protein_sbp.kbp_gap_psi[0].lambda,
+            protein_sbp.kbp_gap_std[0].lambda
+        );
+        assert_eq!(
+            protein_sbp.kbp_gap[0].lambda,
+            protein_sbp.kbp_gap_std[0].lambda
+        );
+
+        query_info.contexts[1].is_valid = true;
+        let mut psi_sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 2).expect("sbp");
+        psi_sbp.name = Some("BLOSUM62".to_string());
+        assert_eq!(
+            blast_score_blk_kbp_gapped_calc(
+                Some(&mut psi_sbp),
+                Some(&scoring),
+                crate::program::PSI_BLAST,
+                Some(&query_info),
+            ),
+            0
+        );
+        assert_eq!(psi_sbp.kbp_gap[0].lambda, psi_sbp.kbp_gap_psi[0].lambda);
+        assert!(psi_sbp.kbp_gap[1].lambda > 0.0);
+
+        assert_eq!(
+            blast_score_blk_kbp_gapped_calc(
+                None,
+                Some(&scoring),
+                crate::program::BLASTP,
+                Some(&query_info)
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn score_blk_kbp_gapped_calc_uses_blastn_matrix_only_defaults() {
+        let query_info = QueryInfo {
+            num_queries: 1,
+            contexts: vec![ContextInfo {
+                query_offset: 0,
+                query_length: 20,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 1,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 20,
+        };
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 5,
+            gap_extend: 2,
+            gapped_calculation: true,
+            matrix_name: None,
+            is_ooframe: false,
+        };
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("sbp");
+        sbp.kbp_std[0] = KarlinBlk {
+            lambda: 1.37,
+            k: 0.711,
+            log_k: 0.711f64.ln(),
+            h: 1.31,
+            ..KarlinBlk::default()
+        };
+
+        assert_eq!(
+            blast_score_blk_kbp_gapped_calc(
+                Some(&mut sbp),
+                Some(&scoring),
+                crate::program::BLASTN,
+                Some(&query_info),
+            ),
+            0
+        );
+        assert!(sbp.kbp_gap_std[0].lambda > 0.0);
+        assert_eq!(sbp.kbp_gap[0].lambda, sbp.kbp_gap_std[0].lambda);
+    }
+
+    #[test]
+    fn phi_score_blk_fill_uses_phi_specific_gap_table() {
+        let options = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 2).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+
+        assert_eq!(s_phi_score_blk_fill(Some(&mut sbp), Some(&options)), 0);
+        assert!((sbp.kbp_gap_std[0].lambda - 0.270).abs() < 1e-12);
+        assert!((sbp.kbp_gap_std[0].k - 0.047).abs() < 1e-12);
+        assert_eq!(sbp.kbp_gap_std[0].h, 1.0);
+        assert!(sbp.sfp[0].is_some());
+        assert_eq!(sbp.kbp_gap[1].lambda, sbp.kbp_gap_std[0].lambda);
+        assert_eq!(sbp.kbp[1].lambda, sbp.kbp_gap_std[0].lambda);
+
+        let unsupported_gap = ScoringOptions {
+            gap_open: 99,
+            ..options.clone()
+        };
+        assert_eq!(
+            s_phi_score_blk_fill(Some(&mut sbp), Some(&unsupported_gap)),
+            -1
+        );
+
+        let unsupported_matrix = ScoringOptions {
+            matrix_name: Some("BLOSUM50".to_string()),
+            ..options
+        };
+        sbp.name = Some("BLOSUM50".to_string());
+        assert_eq!(
+            s_phi_score_blk_fill(Some(&mut sbp), Some(&unsupported_matrix)),
+            -2
+        );
+    }
+
+    #[test]
+    fn jumper_score_blk_fill_creates_mapping_fake_blocks() {
+        let query_info = QueryInfo {
+            num_queries: 2,
+            contexts: vec![
+                ContextInfo {
+                    query_offset: 0,
+                    query_length: 20,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 1,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+                ContextInfo {
+                    query_offset: 21,
+                    query_length: 20,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 1,
+                    frame: -1,
+                    is_valid: false,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+            ],
+            max_length: 20,
+        };
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 2).expect("sbp");
+        sbp.reward = BLAST_REWARD;
+        sbp.penalty = BLAST_PENALTY;
+
+        assert_eq!(
+            s_jumper_score_blk_fill(Some(&mut sbp), Some(&query_info)),
+            0
+        );
+        assert!(sbp.kbp_std[0].lambda > 0.0);
+        assert_eq!(sbp.kbp_std[1].lambda, 0.0);
+        assert!(sbp.kbp_gap_std[0].lambda > 0.0);
+        assert_eq!(sbp.kbp_gap[0].lambda, sbp.kbp_gap_std[0].lambda);
+        assert!(sbp.sfp[0].is_none());
+    }
+
+    #[test]
+    fn setup_score_blk_init_dispatches_program_specific_paths() {
+        let protein_query = crate::encoding::encode_ncbistdaa_sequence(b"ARNDCEQGHILKMFPSTWYV");
+        let query_blk = BlastSequenceBlk {
+            sequence: Some(protein_query.clone()),
+            sequence_start: Some(protein_query),
+            ..BlastSequenceBlk::default()
+        };
+        let mut query_info = QueryInfo::new_blastp(&[20]);
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let mut sbp = None;
+        assert_eq!(
+            blast_setup_score_blk_init(
+                Some(&query_blk),
+                Some(&mut query_info),
+                Some(&scoring),
+                crate::program::BLASTP,
+                Some(&mut sbp),
+                1.25,
+            ),
+            0
+        );
+        let sbp_ref = sbp.as_ref().expect("score block");
+        assert_eq!(sbp_ref.alphabet_code, crate::encoding::BLASTAA_SEQ_CODE);
+        assert_eq!(sbp_ref.scale_factor, 1.25);
+        assert!(sbp_ref.kbp[0].lambda > 0.0);
+        assert!(sbp_ref.kbp_gap[0].lambda > 0.0);
+
+        let mut mapping_query_info = QueryInfo::new_blastn(&[20]);
+        let mapping_scoring = ScoringOptions {
+            reward: BLAST_REWARD,
+            penalty: BLAST_PENALTY,
+            gap_open: BLAST_GAP_OPEN_MEGABLAST,
+            gap_extend: BLAST_GAP_EXTN_MEGABLAST,
+            gapped_calculation: true,
+            matrix_name: None,
+            is_ooframe: false,
+        };
+        let mut mapping_sbp = None;
+        assert_eq!(
+            blast_setup_score_blk_init(
+                None,
+                Some(&mut mapping_query_info),
+                Some(&mapping_scoring),
+                crate::program::MAPPING,
+                Some(&mut mapping_sbp),
+                1.0,
+            ),
+            0
+        );
+        let mapping_ref = mapping_sbp.as_ref().expect("mapping score block");
+        assert_eq!(mapping_ref.alphabet_code, crate::encoding::BLASTNA_SEQ_CODE);
+        assert!(mapping_ref.kbp_gap[0].lambda > 0.0);
+
+        let mut missing_out = None;
+        assert_eq!(
+            blast_setup_score_blk_init(
+                Some(&query_blk),
+                Some(&mut query_info),
+                None,
+                crate::program::BLASTP,
+                Some(&mut missing_out),
+                1.0,
+            ),
+            1
+        );
+        assert!(missing_out.is_none());
+    }
+
+    #[test]
+    fn main_setup_runs_filter_lookup_mask_and_score_init() {
+        let protein_query = crate::encoding::encode_ncbistdaa_sequence(b"ARNDCEQGHILKMFPSTWYV");
+        let original = protein_query.clone();
+        let mut query_blk = BlastSequenceBlk {
+            sequence: Some(protein_query.clone()),
+            sequence_start: Some(protein_query),
+            ..BlastSequenceBlk::default()
+        };
+        let mut query_info = QueryInfo::new_blastp(&[20]);
+        let qsup_options = QuerySetUpOptions {
+            filtering_options: Some(crate::filter::SBlastFilterOptions {
+                mask_at_hash: false,
+                dust_options: None,
+                seg_options: None,
+                repeat_filter_options: None,
+                window_masker_options: None,
+                read_quality_options: None,
+            }),
+            filter_string: None,
+            strand_option: 0,
+            genetic_code: 1,
+        };
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let mut lookup_segments = None;
+        let mut mask = None;
+        let mut sbp = None;
+
+        assert_eq!(
+            blast_main_set_up(
+                crate::program::BLASTP,
+                Some(&qsup_options),
+                Some(&scoring),
+                Some(&mut query_blk),
+                Some(&mut query_info),
+                Some(&mut lookup_segments),
+                Some(&mut mask),
+                Some(&mut sbp),
+                1.0,
+                None,
+            ),
+            0
+        );
+        assert_eq!(query_blk.sequence.as_deref(), Some(original.as_slice()));
+        assert_eq!(
+            lookup_segments.as_ref().map(|node| node.ssl),
+            Some(SSeqRange { left: 0, right: 19 })
+        );
+        assert_eq!(mask.as_ref().map(|mask| mask.masks.len()), Some(1));
+        assert!(mask.as_ref().is_some_and(|mask| mask.masks[0].is_none()));
+        assert!(sbp.as_ref().is_some_and(|sbp| sbp.kbp_gap[0].lambda > 0.0));
+    }
 
     fn protein_kbp() -> KarlinBlk {
         KarlinBlk {
@@ -245,6 +1528,7 @@ mod tests {
                 query_index: 0,
                 frame: 0,
                 is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
         };
@@ -290,6 +1574,7 @@ mod tests {
                 query_index: 0,
                 frame: 0,
                 is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
         };
@@ -355,6 +1640,7 @@ mod tests {
                 query_index: 0,
                 frame: 0,
                 is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
         };
@@ -389,5 +1675,273 @@ mod tests {
         );
         assert_eq!(rc, 0);
         assert_eq!(qi.contexts[0].eff_searchsp, 987_654_321);
+    }
+
+    #[test]
+    fn subject_totals_match_c_fallback_order() {
+        let src = SetupSeqSrc {
+            seqs: vec![b"AAAA".to_vec(), b"CC".to_vec()],
+            total_stats: 100,
+            num_stats: 5,
+        };
+        let mut total = 0;
+        let mut num = 0;
+        blast_get_subject_totals(Some(&src), Some(&mut total), Some(&mut num));
+        assert_eq!((total, num), (100, 5));
+
+        let src = SetupSeqSrc {
+            seqs: vec![b"AAAA".to_vec(), b"CC".to_vec()],
+            total_stats: 0,
+            num_stats: 0,
+        };
+        blast_get_subject_totals(Some(&src), Some(&mut total), Some(&mut num));
+        assert_eq!((total, num), (6, 2));
+
+        let empty = SetupSeqSrc {
+            seqs: Vec::new(),
+            total_stats: 0,
+            num_stats: 0,
+        };
+        blast_get_subject_totals(Some(&empty), Some(&mut total), Some(&mut num));
+        assert_eq!((total, num), (-1, -1));
+
+        total = 7;
+        num = 3;
+        blast_get_subject_totals(None, Some(&mut total), Some(&mut num));
+        assert_eq!((total, num), (-1, -1));
+
+        let arg = GetSeqArg {
+            oid: 0,
+            encoding: SeqEncoding::Protein,
+        };
+        let data =
+            crate::seqsrc::blast_seq_src_get_sequence(Some(&src), Some(&arg)).expect("sequence");
+        assert_eq!(data.length, 4);
+        assert!(crate::seqsrc::blast_seq_src_get_sequence(None, Some(&arg)).is_none());
+    }
+
+    #[test]
+    fn calc_eff_lengths_c_wrapper_preserves_null_status() {
+        let mut qi = QueryInfo {
+            num_queries: 1,
+            contexts: vec![ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+        };
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let eff = EffectiveLengthsParameters {
+            options: EffectiveLengthsOptions::default(),
+            real_db_length: 1_000_000,
+            real_num_seqs: 1000,
+        };
+        let kbp = vec![protein_kbp()];
+
+        assert_eq!(
+            blast_calc_eff_lengths_c(
+                crate::program::BLASTP,
+                Some(&scoring),
+                Some(&eff),
+                Some(&kbp),
+                Some(&kbp),
+                Some("BLOSUM62"),
+                Some(&mut qi),
+            ),
+            0
+        );
+        assert!(qi.contexts[0].eff_searchsp > 0);
+        assert_eq!(
+            blast_calc_eff_lengths_c(
+                crate::program::BLASTP,
+                Some(&scoring),
+                Some(&eff),
+                Some(&kbp),
+                Some(&kbp),
+                Some("BLOSUM62"),
+                None,
+            ),
+            -1
+        );
+        assert_eq!(
+            blast_calc_eff_lengths_c(
+                crate::program::BLASTP,
+                None,
+                Some(&eff),
+                Some(&kbp),
+                Some(&kbp),
+                Some("BLOSUM62"),
+                Some(&mut qi),
+            ),
+            -1
+        );
+    }
+
+    #[test]
+    fn one_subject_update_parameters_recomputes_dependent_cutoffs() {
+        let mut qi = QueryInfo {
+            num_queries: 1,
+            contexts: vec![ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+        };
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let kbp = protein_kbp();
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+        sbp.kbp = vec![kbp.clone()];
+        sbp.kbp_std = vec![kbp.clone()];
+        sbp.kbp_gap = vec![kbp.clone()];
+        sbp.kbp_gap_std = vec![kbp.clone()];
+
+        let mut hit = HitSavingParameters {
+            options: HitSavingOptions::default(),
+            cutoff_score_min: 0,
+            low_score: vec![0],
+            cutoffs: vec![BlastGappedCutoffs::default()],
+            link_hsp_params: Some(LinkHSPParameters::default()),
+            prelim_evalue: 0.0,
+        };
+        let mut word = InitialWordParameters {
+            options: InitialWordOptions::new_blastp(),
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: vec![BlastUngappedCutoffs::default()],
+            ungapped_extension: true,
+            nucl_score_table: InitialWordParameters::build_nucl_score_table(1, -3),
+        };
+        let mut eff = EffectiveLengthsParameters {
+            options: EffectiveLengthsOptions::default(),
+            real_db_length: 0,
+            real_num_seqs: 1,
+        };
+
+        assert_eq!(
+            blast_one_subject_update_parameters(
+                crate::program::BLASTP,
+                20_000,
+                Some(&scoring),
+                Some(&mut qi),
+                Some(&sbp),
+                Some(&mut hit),
+                Some(&mut word),
+                Some(&mut eff),
+            ),
+            0
+        );
+        assert_eq!(eff.real_db_length, 20_000);
+        assert!(qi.contexts[0].eff_searchsp > 0);
+        assert!(hit.cutoff_score_min > 0);
+        assert!(word.cutoff_score_min > 0);
+        assert_eq!(
+            hit.link_hsp_params
+                .as_ref()
+                .expect("link params")
+                .cutoff_small_gap,
+            word.cutoff_score_min
+        );
+
+        assert_eq!(
+            blast_one_subject_update_parameters(
+                crate::program::BLASTP,
+                20_000,
+                None,
+                Some(&mut qi),
+                Some(&sbp),
+                Some(&mut hit),
+                None,
+                Some(&mut eff),
+            ),
+            -1
+        );
+    }
+
+    #[test]
+    fn set_phi_pattern_info_populates_pattern_metadata_and_query_adjustment() {
+        let pattern_blk = sphi_pattern_search_blk_new("A-B", false, None).expect("pattern");
+        let mut query_info = QueryInfo::new_blastp(&[6]);
+        let lookup = [SSeqRange { left: 0, right: 5 }];
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"XXABAB");
+        let mut pattern_info = None;
+
+        assert_eq!(
+            blast_set_phi_pattern_info(
+                crate::program::PHI_BLASTP,
+                Some(&pattern_blk),
+                Some(&query),
+                Some(&lookup),
+                Some(&mut query_info),
+                Some(&mut pattern_info),
+            ),
+            0
+        );
+        let pattern_info = pattern_info.expect("pattern info");
+        assert_eq!(pattern_info.num_patterns, 2);
+        assert_eq!(pattern_info.occurrences[0].offset, 2);
+        assert_eq!(pattern_info.occurrences[1].offset, 4);
+        assert_eq!(pattern_info.pattern.as_deref(), Some("A-B"));
+        assert!((pattern_info.probability - pattern_blk.pattern_probability).abs() < 1e-12);
+        assert_eq!(
+            query_info.contexts[0].length_adjustment,
+            pattern_blk.min_pattern_match_length
+        );
+
+        let mut missing_info = None;
+        assert_eq!(
+            blast_set_phi_pattern_info(
+                crate::program::PHI_BLASTP,
+                Some(&pattern_blk),
+                Some(&crate::encoding::encode_ncbistdaa_sequence(b"XXXXXX")),
+                Some(&lookup),
+                Some(&mut query_info),
+                Some(&mut missing_info),
+            ),
+            -1
+        );
+        assert!(missing_info
+            .as_ref()
+            .is_some_and(|info| info.num_patterns == 0));
+        assert_eq!(
+            blast_set_phi_pattern_info(
+                crate::program::PHI_BLASTP,
+                None,
+                Some(&query),
+                Some(&lookup),
+                Some(&mut query_info),
+                Some(&mut missing_info),
+            ),
+            -1
+        );
     }
 }

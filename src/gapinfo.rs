@@ -20,6 +20,4778 @@ pub struct GapEditScript {
     pub ops: Vec<(GapAlignOpType, i32)>, // (operation, count) pairs
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GapStateArrayStruct {
+    pub state_array: Vec<i32>,
+    pub length: i32,
+    pub used: bool,
+    pub next: Option<Box<GapStateArrayStruct>>,
+}
+
+const GAP_STATE_CHUNKSIZE: usize = 2_097_152;
+const GAP_STATE_MIN_CELLS: usize = GAP_STATE_CHUNKSIZE / std::mem::size_of::<i32>();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapPrelimEditScript {
+    pub op_type: GapAlignOpType,
+    pub num: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct GapPrelimEditBlock {
+    pub edit_ops: Vec<GapPrelimEditScript>,
+    pub last_op: Option<GapAlignOpType>,
+}
+
+pub type JumperOpType = i32;
+pub const JUMPER_MISMATCH: JumperOpType = 0;
+pub const JUMPER_INSERTION: JumperOpType = -1;
+pub const JUMPER_DELETION: JumperOpType = -2;
+pub const MAPPER_EXON: u8 = 0x40;
+pub const MAPPER_SPLICE_SIGNAL: u8 = 0x80;
+pub const MAPPER_POLY_A: u8 = 0x20;
+pub const MAPPER_ADAPTER: u8 = 0x10;
+
+/// Port of NCBI static `s_GapCost` (`phi_gapalign.c:281`).
+pub fn s_gap_cost(gap_open: i32, gap_extend: i32, length: i32) -> i32 {
+    if length <= 0 {
+        0
+    } else {
+        gap_open + gap_extend * length
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PhiGapDp {
+    best: i32,
+    best_gap: i32,
+}
+
+const PHI_DIAGONAL_INSERT: i32 = 1;
+const PHI_DIAGONAL_DELETE: i32 = 2;
+const PHI_INSERT_CODE: i32 = 10;
+const PHI_DELETE_CODE: i32 = 20;
+
+fn phi_matrix_score(matrix: &[Vec<i32>], a: u8, b: u8) -> i32 {
+    matrix
+        .get(a as usize)
+        .and_then(|row| row.get(b as usize))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Port of NCBI `s_Align` (`phi_gapalign.c:93`), the banded PHI pattern
+/// alignment DP used by `s_BandedAlign`.
+fn s_align(
+    seq1: &[u8],
+    seq2: &[u8],
+    end1: i32,
+    end2: i32,
+    low_diag: i32,
+    high_diag: i32,
+    matrix: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    align_script: &mut GapPrelimEditBlock,
+) -> i32 {
+    let band = high_diag - low_diag + 1;
+    if end1 < 0 || end2 < 0 || band <= 0 {
+        return 0;
+    }
+
+    let band_cells = (band + 2).max(0) as usize;
+    let rows = (end1 + 1).max(0) as usize;
+    let mut score_array = vec![PhiGapDp::default(); band_cells];
+    let mut state = vec![vec![0i32; band_cells]; rows];
+    let k_min_score = i32::MIN / 2;
+    let gap_cost = gap_open + gap_extend;
+
+    let mut leftd = 1 - low_diag;
+    let mut rightd = high_diag - low_diag + 1;
+    score_array[leftd as usize].best = 0;
+    state[0][leftd as usize] = -1;
+    let mut initial_score = -gap_open;
+    for diag_index in leftd + 1..=rightd {
+        initial_score -= gap_extend;
+        score_array[diag_index as usize].best = initial_score;
+        score_array[(diag_index - 1) as usize].best_gap = initial_score - gap_cost;
+        state[0][diag_index as usize] = PHI_DIAGONAL_INSERT;
+    }
+    score_array[(rightd + 1) as usize].best = k_min_score;
+    score_array[rightd as usize].best_gap = k_min_score;
+    score_array[(leftd - 1) as usize].best_gap = -gap_cost;
+    score_array[(leftd - 1) as usize].best = k_min_score;
+
+    for i in 1..=end1 {
+        if i > end2 - high_diag {
+            rightd -= 1;
+        }
+        if leftd > 1 {
+            leftd -= 1;
+        }
+
+        let mut temp_indel_score = score_array[leftd as usize].best_gap;
+        let mut next_state = 0;
+        let index2 = leftd + low_diag - 1 + i;
+        let mut temp_sub_score = if index2 > 0 {
+            score_array[leftd as usize].best
+                + phi_matrix_score(matrix, seq1[i as usize], seq2[index2 as usize])
+        } else {
+            0
+        };
+        if temp_indel_score > temp_sub_score || index2 <= 0 {
+            temp_sub_score = temp_indel_score;
+            next_state = PHI_DIAGONAL_DELETE;
+        }
+        let mut temp_hor_score = temp_sub_score - gap_cost;
+        if leftd >= 1 {
+            temp_indel_score -= gap_extend;
+            if temp_indel_score >= temp_hor_score {
+                score_array[(leftd - 1) as usize].best_gap = temp_indel_score;
+                next_state += PHI_DELETE_CODE;
+            } else {
+                score_array[(leftd - 1) as usize].best_gap = temp_hor_score;
+            }
+        }
+        state[i as usize][leftd as usize] = next_state;
+        score_array[leftd as usize].best = temp_sub_score;
+
+        for curd in leftd + 1..=rightd {
+            let curd_usize = curd as usize;
+            temp_sub_score = score_array[curd_usize].best
+                + phi_matrix_score(
+                    matrix,
+                    seq1[i as usize],
+                    seq2[(curd + low_diag - 1 + i) as usize],
+                );
+            temp_indel_score = score_array[curd_usize].best_gap;
+            if temp_indel_score > temp_sub_score {
+                if temp_indel_score > temp_hor_score {
+                    score_array[curd_usize].best = temp_indel_score;
+                    temp_hor_score -= gap_extend;
+                    score_array[(curd - 1) as usize].best_gap = temp_indel_score - gap_extend;
+                    state[i as usize][curd_usize] =
+                        PHI_DELETE_CODE + PHI_INSERT_CODE + PHI_DIAGONAL_DELETE;
+                } else {
+                    score_array[curd_usize].best = temp_hor_score;
+                    temp_hor_score -= gap_extend;
+                    score_array[(curd - 1) as usize].best_gap = temp_indel_score - gap_extend;
+                    state[i as usize][curd_usize] =
+                        PHI_DELETE_CODE + PHI_INSERT_CODE + PHI_DIAGONAL_INSERT;
+                }
+            } else if temp_hor_score > temp_sub_score {
+                score_array[curd_usize].best = temp_hor_score;
+                temp_hor_score -= gap_extend;
+                score_array[(curd - 1) as usize].best_gap = temp_indel_score - gap_extend;
+                state[i as usize][curd_usize] =
+                    PHI_DELETE_CODE + PHI_INSERT_CODE + PHI_DIAGONAL_INSERT;
+            } else {
+                score_array[curd_usize].best = temp_sub_score;
+                temp_sub_score -= gap_cost;
+                temp_hor_score -= gap_extend;
+                if temp_sub_score > temp_hor_score {
+                    temp_hor_score = temp_sub_score;
+                    next_state = 0;
+                } else {
+                    next_state = PHI_INSERT_CODE;
+                }
+                temp_indel_score -= gap_extend;
+                if temp_sub_score > temp_indel_score {
+                    state[i as usize][curd_usize] = next_state;
+                    score_array[(curd - 1) as usize].best_gap = temp_sub_score;
+                } else {
+                    state[i as usize][curd_usize] = next_state + PHI_DELETE_CODE;
+                    score_array[(curd - 1) as usize].best_gap = temp_indel_score;
+                }
+            }
+        }
+    }
+
+    let score = score_array[rightd as usize].best;
+    let mut edit_instructions = Vec::with_capacity((end1 + end2).max(0) as usize);
+    let mut index1 = end1;
+    let mut diag_index = rightd;
+    let mut edit_step = 0;
+    while index1 >= 0 {
+        let state_decoder = state[index1 as usize][diag_index as usize];
+        let mut next_edit_step = state_decoder % PHI_INSERT_CODE;
+        if state_decoder == -1 {
+            break;
+        }
+        if edit_step == PHI_DIAGONAL_INSERT && ((state_decoder / PHI_INSERT_CODE) % 2) == 1 {
+            next_edit_step = PHI_DIAGONAL_INSERT;
+        }
+        if edit_step == PHI_DIAGONAL_DELETE && (state_decoder / PHI_DELETE_CODE) == 1 {
+            next_edit_step = PHI_DIAGONAL_DELETE;
+        }
+        if next_edit_step == PHI_DIAGONAL_INSERT {
+            diag_index -= 1;
+            index1 += 1;
+        } else if next_edit_step == PHI_DIAGONAL_DELETE {
+            diag_index += 1;
+        }
+        edit_step = next_edit_step;
+        edit_instructions.push(edit_step);
+        index1 -= 1;
+    }
+
+    for &instruction in edit_instructions.iter().rev() {
+        match instruction {
+            0 => gap_prelim_edit_block_add(align_script, GapAlignOpType::Sub, 1),
+            PHI_DIAGONAL_INSERT => gap_prelim_edit_block_add(align_script, GapAlignOpType::Del, 1),
+            PHI_DIAGONAL_DELETE => gap_prelim_edit_block_add(align_script, GapAlignOpType::Ins, 1),
+            _ => {}
+        }
+    }
+
+    score
+}
+
+/// Port of NCBI `s_BandedAlign` (`phi_gapalign.c:280`).
+pub fn s_banded_align(
+    seq1: &[u8],
+    seq2: &[u8],
+    start1: i32,
+    start2: i32,
+    mut low_diag: i32,
+    mut high_diag: i32,
+    matrix: &[Vec<i32>],
+    gap_open: i32,
+    gap_extend: i32,
+    align_script: &mut GapPrelimEditBlock,
+) -> i32 {
+    low_diag = (-start1).max(low_diag).min((start2 - start1).min(0));
+    high_diag = start2.min(high_diag).max((start2 - start1).max(0));
+    if start2 <= 0 {
+        if start1 > 0 {
+            gap_prelim_edit_block_add(align_script, GapAlignOpType::Ins, start1);
+        }
+        return -s_gap_cost(gap_open, gap_extend, start1);
+    }
+    if start1 <= 0 {
+        gap_prelim_edit_block_add(align_script, GapAlignOpType::Del, start2);
+        return -s_gap_cost(gap_open, gap_extend, start2);
+    }
+    if high_diag - low_diag < 1 {
+        let mut score = 0;
+        for i in 1..=start1 {
+            gap_prelim_edit_block_add(align_script, GapAlignOpType::Sub, 1);
+            score += phi_matrix_score(matrix, seq1[i as usize], seq2[i as usize]);
+        }
+        return score;
+    }
+
+    s_align(
+        seq1,
+        seq2,
+        start1,
+        start2,
+        low_diag,
+        high_diag,
+        matrix,
+        gap_open,
+        gap_extend,
+        align_script,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Jump {
+    pub dcp: i32,
+    pub dcq: i32,
+    pub lng: i32,
+    pub ok: i32,
+}
+
+/// NCBI `jumper_default` table (`jumper.c:41`).
+pub const JUMPER_DEFAULT: [Jump; 15] = [
+    Jump {
+        dcp: 1,
+        dcq: 1,
+        lng: 9,
+        ok: 0,
+    },
+    Jump {
+        dcp: 1,
+        dcq: 0,
+        lng: 10,
+        ok: 0,
+    },
+    Jump {
+        dcp: 0,
+        dcq: 1,
+        lng: 10,
+        ok: 0,
+    },
+    Jump {
+        dcp: 2,
+        dcq: 0,
+        lng: 10,
+        ok: 0,
+    },
+    Jump {
+        dcp: 0,
+        dcq: 2,
+        lng: 10,
+        ok: 0,
+    },
+    Jump {
+        dcp: 3,
+        dcq: 0,
+        lng: 13,
+        ok: 0,
+    },
+    Jump {
+        dcp: 0,
+        dcq: 3,
+        lng: 13,
+        ok: 0,
+    },
+    Jump {
+        dcp: 2,
+        dcq: 2,
+        lng: 12,
+        ok: 0,
+    },
+    Jump {
+        dcp: 1,
+        dcq: 0,
+        lng: 10,
+        ok: 2,
+    },
+    Jump {
+        dcp: 0,
+        dcq: 1,
+        lng: 10,
+        ok: 2,
+    },
+    Jump {
+        dcp: 2,
+        dcq: 0,
+        lng: 10,
+        ok: 2,
+    },
+    Jump {
+        dcp: 0,
+        dcq: 2,
+        lng: 10,
+        ok: 2,
+    },
+    Jump {
+        dcp: 3,
+        dcq: 0,
+        lng: 13,
+        ok: 2,
+    },
+    Jump {
+        dcp: 0,
+        dcq: 3,
+        lng: 13,
+        ok: 2,
+    },
+    Jump {
+        dcp: 1,
+        dcq: 1,
+        lng: 0,
+        ok: 0,
+    },
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JumperPrelimEditBlock {
+    pub edit_ops: Vec<JumperOpType>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JumperGapAlign {
+    pub left_prelim_block: Option<JumperPrelimEditBlock>,
+    pub right_prelim_block: Option<JumperPrelimEditBlock>,
+    pub table: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JumperEdit {
+    pub query_pos: i32,
+    pub query_base: u8,
+    pub subject_base: u8,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JumperEditsBlock {
+    pub edits: Vec<JumperEdit>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SequenceOverhangs {
+    pub left: Option<Vec<u8>>,
+    pub right: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubjectIndex {
+    pub num_lookups: i32,
+    pub width: i32,
+    pub word_size: i32,
+    pub positions_by_word: std::collections::BTreeMap<u32, Vec<i32>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubjectIndexIterator {
+    pub subject_index: Option<SubjectIndex>,
+    pub to: i32,
+    pub lookup_index: i32,
+    pub positions: Vec<i32>,
+    pub word_index: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JumperAlignParams {
+    pub max_mismatches: i32,
+    pub mismatch_window: i32,
+    pub gap_x_dropoff: i32,
+}
+
+/// Rust ownership equivalent of NCBI `GapStateFree` (`gapinfo.c:38`).
+pub fn gap_state_free(
+    state_struct: Option<Box<GapStateArrayStruct>>,
+) -> Option<Box<GapStateArrayStruct>> {
+    let mut state_struct = state_struct;
+    while let Some(mut current) = state_struct {
+        current.state_array.clear();
+        state_struct = current.next.take();
+    }
+    None
+}
+
+/// Port of NCBI `s_GapGetState` (`blast_gapalign.c:71`).
+///
+/// The C helper reuses the first unused state-array node whose allocation is
+/// long enough; otherwise it appends a new node whose backing storage is at
+/// least `CHUNKSIZE` bytes. The returned node is marked `used`.
+pub fn s_gap_get_state(
+    head: &mut Option<Box<GapStateArrayStruct>>,
+    length: i32,
+) -> Option<&mut GapStateArrayStruct> {
+    let requested_len = length.max(0) as usize;
+    if head.is_none() {
+        *head = Some(Box::new(gap_state_array_new(requested_len)));
+    }
+    let mut cursor = head.as_deref_mut();
+    while let Some(node) = cursor {
+        if !node.used && node.length as usize >= requested_len {
+            node.used = true;
+            return Some(node);
+        }
+        if node.next.is_none() {
+            node.next = Some(Box::new(gap_state_array_new(requested_len)));
+        }
+        cursor = node.next.as_deref_mut();
+    }
+    None
+}
+
+/// Port of NCBI `s_GapPurgeState` (`blast_gapalign.c:128`).
+///
+/// The C routine clears `used` on the supplied state node and following nodes,
+/// making the arrays available to later `s_GapGetState` calls.
+pub fn s_gap_purge_state(state_struct: &mut GapStateArrayStruct) -> bool {
+    let mut cursor = Some(state_struct);
+    while let Some(node) = cursor {
+        node.used = false;
+        cursor = node.next.as_deref_mut();
+    }
+    true
+}
+
+fn gap_state_array_new(requested_len: usize) -> GapStateArrayStruct {
+    let alloc_len = requested_len.max(GAP_STATE_MIN_CELLS);
+    GapStateArrayStruct {
+        state_array: vec![0; alloc_len],
+        length: alloc_len as i32,
+        used: false,
+        next: None,
+    }
+}
+
+/// Port of NCBI `GapEditScriptNew` (`gapinfo.c:55`).
+pub fn gap_edit_script_new(size: i32) -> Option<GapEditScript> {
+    if size <= 0 {
+        return None;
+    }
+    Some(GapEditScript::with_capacity(size as usize))
+}
+
+/// Rust ownership equivalent of NCBI `GapEditScriptDelete` (`gapinfo.c:74`).
+pub fn gap_edit_script_delete(_: Option<GapEditScript>) -> Option<GapEditScript> {
+    None
+}
+
+/// Port of NCBI `GapEditScriptDup` (`gapinfo.c:88`).
+pub fn gap_edit_script_dup(old: Option<&GapEditScript>) -> Option<GapEditScript> {
+    old.cloned()
+}
+
+/// Port of NCBI `GapEditScriptPartialCopy` (`gapinfo.c:104`).
+pub fn gap_edit_script_partial_copy(
+    new_script: &mut GapEditScript,
+    offset: i32,
+    old_script: Option<&GapEditScript>,
+    start: i32,
+    stop: i32,
+) -> i16 {
+    let Some(old_script) = old_script else {
+        return -1;
+    };
+    if offset < 0 || start < 0 || stop < start {
+        return -1;
+    }
+
+    let offset = offset as usize;
+    let start = start as usize;
+    let stop = stop as usize;
+    let size = stop - start + 1;
+    let needed = offset + size;
+    if stop >= old_script.ops.len() || needed > new_script.ops.capacity() {
+        return -1;
+    }
+
+    if new_script.ops.len() < needed {
+        new_script.ops.resize(needed, (GapAlignOpType::Sub, 0));
+    }
+    let mut old_index = start;
+    for new_index in offset..needed {
+        new_script.ops[new_index] = old_script.ops[old_index];
+        old_index += 1;
+    }
+    0
+}
+
+/// Port of NCBI `s_GapPrelimEditBlockRealloc` (`gapinfo.c:132`).
+pub fn s_gap_prelim_edit_block_realloc(edit_block: &mut GapPrelimEditBlock, total_ops: i32) -> i16 {
+    if total_ops < 0 {
+        return -1;
+    }
+    let total_ops = total_ops as usize;
+    if edit_block.edit_ops.capacity() <= total_ops {
+        let new_size = total_ops.saturating_mul(2).max(1);
+        let additional = new_size.saturating_sub(edit_block.edit_ops.capacity());
+        if edit_block.edit_ops.try_reserve_exact(additional).is_err() {
+            return -1;
+        }
+    }
+    0
+}
+
+/// Port of NCBI internal `s_GapPrelimEditBlockAddNew` (`gapinfo.c:157`).
+pub fn s_gap_prelim_edit_block_add_new(
+    edit_block: &mut GapPrelimEditBlock,
+    op_type: GapAlignOpType,
+    num_ops: i32,
+) -> i16 {
+    if op_type == GapAlignOpType::Decline {
+        return -1;
+    }
+    if s_gap_prelim_edit_block_realloc(edit_block, edit_block.edit_ops.len() as i32 + 2) != 0 {
+        return -1;
+    }
+    edit_block.last_op = Some(op_type);
+    edit_block.edit_ops.push(GapPrelimEditScript {
+        op_type,
+        num: num_ops,
+    });
+    0
+}
+
+/// Port of NCBI `GapPrelimEditBlockAdd` (`gapinfo.c:174`).
+pub fn gap_prelim_edit_block_add(
+    edit_block: &mut GapPrelimEditBlock,
+    op_type: GapAlignOpType,
+    num_ops: i32,
+) {
+    if num_ops == 0 {
+        return;
+    }
+    if edit_block.last_op == Some(op_type) {
+        if let Some(last) = edit_block.edit_ops.last_mut() {
+            last.num += num_ops;
+            return;
+        }
+    }
+    let _ = s_gap_prelim_edit_block_add_new(edit_block, op_type, num_ops);
+}
+
+/// Port of NCBI `GapPrelimEditBlockNew` (`gapinfo.c:187`).
+pub fn gap_prelim_edit_block_new() -> GapPrelimEditBlock {
+    let mut edit_block = GapPrelimEditBlock {
+        edit_ops: Vec::new(),
+        last_op: None,
+    };
+    let _ = s_gap_prelim_edit_block_realloc(&mut edit_block, 100);
+    edit_block
+}
+
+/// Rust ownership equivalent of NCBI `GapPrelimEditBlockFree`.
+pub fn gap_prelim_edit_block_free(_: Option<GapPrelimEditBlock>) -> Option<GapPrelimEditBlock> {
+    None
+}
+
+/// Port of NCBI `GapPrelimEditBlockReset` (`gapinfo.c:212`).
+pub fn gap_prelim_edit_block_reset(edit_block: Option<&mut GapPrelimEditBlock>) {
+    if let Some(edit_block) = edit_block {
+        edit_block.edit_ops.clear();
+        edit_block.last_op = None;
+    }
+}
+
+/// Port of NCBI `GapPrelimEditBlockAppend` (`gapinfo.c:221`).
+pub fn gap_prelim_edit_block_append(
+    edit_block1: &mut GapPrelimEditBlock,
+    edit_block2: &GapPrelimEditBlock,
+) {
+    for op in &edit_block2.edit_ops {
+        gap_prelim_edit_block_add(edit_block1, op.op_type, op.num);
+    }
+}
+
+/// Port of NCBI `Blast_PrelimEditBlockToGapEditScript`
+/// (`blast_gapalign.c:2481`).
+pub fn blast_prelim_edit_block_to_gap_edit_script(
+    rev_prelim_tback: Option<&GapPrelimEditBlock>,
+    fwd_prelim_tback: Option<&GapPrelimEditBlock>,
+) -> Option<GapEditScript> {
+    let rev_prelim_tback = rev_prelim_tback?;
+    let fwd_prelim_tback = fwd_prelim_tback?;
+
+    let merge_ops = fwd_prelim_tback
+        .edit_ops
+        .last()
+        .zip(rev_prelim_tback.edit_ops.last())
+        .is_some_and(|(fwd, rev)| fwd.op_type == rev.op_type);
+    let mut size = fwd_prelim_tback.edit_ops.len() + rev_prelim_tback.edit_ops.len();
+    if merge_ops {
+        size = size.saturating_sub(1);
+    }
+    if size == 0 {
+        return None;
+    }
+
+    let mut script = GapEditScript::with_capacity(size);
+    for op in &rev_prelim_tback.edit_ops {
+        script.ops.push((op.op_type, op.num));
+    }
+
+    if fwd_prelim_tback.edit_ops.is_empty() {
+        return Some(script);
+    }
+
+    let mut fwd_ops = fwd_prelim_tback.edit_ops.as_slice();
+    if merge_ops {
+        if let (Some(last_script), Some(last_fwd)) = (script.ops.last_mut(), fwd_ops.last()) {
+            last_script.1 += last_fwd.num;
+        }
+        fwd_ops = &fwd_ops[..fwd_ops.len() - 1];
+    }
+
+    for op in fwd_ops.iter().rev() {
+        script.ops.push((op.op_type, op.num));
+    }
+
+    Some(script)
+}
+
+fn oof_op_nucleotide_span(op: GapAlignOpType) -> i32 {
+    match op {
+        GapAlignOpType::Ins => GapAlignOpType::Sub as i32,
+        other => other as i32,
+    }
+}
+
+/// Port-shaped translation of NCBI static `s_BlastOOFTracebackToGapEditScript`
+/// (`blast_gapalign.c:4451`).
+///
+/// OOF traceback stores frame-shift operations in the same numeric space as
+/// `EGapAlignOpType` (`Del2`/`Del1`/`Ins1`/`Ins2`). This helper performs the C
+/// post-processing: prepend the shifted substitution, flow frame-shift ops
+/// through in-frame gaps, merge the left/right traceback halves, truncate by
+/// translated nucleotide alignment length, split multi-count frame shifts into
+/// single-op elements, and lengthen substitutions that follow a frame shift.
+pub fn s_blast_oof_traceback_to_gap_edit_script(
+    rev_prelim_tback: Option<&GapPrelimEditBlock>,
+    fwd_prelim_tback: Option<&GapPrelimEditBlock>,
+    nucl_align_length: i32,
+    edit_script_ptr: Option<&mut Option<GapEditScript>>,
+) -> i16 {
+    let (Some(rev_prelim_tback), Some(fwd_prelim_tback), Some(edit_script_ptr)) =
+        (rev_prelim_tback, fwd_prelim_tback, edit_script_ptr)
+    else {
+        return -1;
+    };
+
+    let mut tmp_prelim_tback = gap_prelim_edit_block_new();
+    let mut last_op = GapAlignOpType::Sub;
+    let mut last_num = 1;
+
+    for next in &rev_prelim_tback.edit_ops {
+        if next.op_type == last_op {
+            last_num += next.num;
+        } else if matches!(next.op_type, GapAlignOpType::Ins | GapAlignOpType::Del) {
+            if last_num > 1 {
+                gap_prelim_edit_block_add(&mut tmp_prelim_tback, last_op, last_num - 1);
+            }
+            gap_prelim_edit_block_add(&mut tmp_prelim_tback, next.op_type, next.num);
+            last_num = 1;
+        } else {
+            gap_prelim_edit_block_add(&mut tmp_prelim_tback, last_op, last_num);
+            last_op = next.op_type;
+            last_num = next.num;
+        }
+    }
+
+    last_num -= 1;
+    if last_num > 0 {
+        gap_prelim_edit_block_add(&mut tmp_prelim_tback, last_op, last_num);
+    }
+
+    let mut fwd_ops = fwd_prelim_tback.edit_ops.clone();
+    if last_op != GapAlignOpType::Sub {
+        let mut keep_len = fwd_ops.len();
+        for idx in (0..fwd_ops.len()).rev() {
+            let new_script = &mut fwd_ops[idx];
+            if matches!(
+                new_script.op_type,
+                GapAlignOpType::Ins | GapAlignOpType::Del
+            ) {
+                gap_prelim_edit_block_add(
+                    &mut tmp_prelim_tback,
+                    new_script.op_type,
+                    new_script.num,
+                );
+            } else {
+                let merged_value =
+                    last_op as u32 + new_script.op_type as u32 - GapAlignOpType::Sub as u32;
+                let merged_op = match merged_value {
+                    0 => GapAlignOpType::Del,
+                    1 => GapAlignOpType::Del2,
+                    2 => GapAlignOpType::Del1,
+                    3 => GapAlignOpType::Sub,
+                    4 => GapAlignOpType::Ins1,
+                    5 => GapAlignOpType::Ins2,
+                    6 => GapAlignOpType::Ins,
+                    _ => GapAlignOpType::Sub,
+                };
+                gap_prelim_edit_block_add(&mut tmp_prelim_tback, merged_op, 1);
+                new_script.num -= 1;
+                keep_len = if new_script.num == 0 { idx } else { idx + 1 };
+                break;
+            }
+        }
+        fwd_ops.truncate(keep_len);
+    }
+
+    let fwd_prelim = GapPrelimEditBlock {
+        last_op: fwd_ops.last().map(|op| op.op_type),
+        edit_ops: fwd_ops,
+    };
+    let Some(mut script) =
+        blast_prelim_edit_block_to_gap_edit_script(Some(&tmp_prelim_tback), Some(&fwd_prelim))
+    else {
+        *edit_script_ptr = None;
+        return 0;
+    };
+
+    let mut num_nuc = 0;
+    let mut keep_size = script.ops.len();
+    for (idx, (op, num)) in script.ops.iter_mut().enumerate() {
+        let span = oof_op_nucleotide_span(*op);
+        let total_actions = span * *num;
+        if num_nuc + total_actions >= nucl_align_length {
+            *num = (nucl_align_length - num_nuc + span - 1) / span;
+            keep_size = idx + 1;
+            break;
+        }
+        num_nuc += total_actions;
+    }
+    script.ops.truncate(keep_size);
+
+    let mut split_script = GapEditScript::new();
+    for (op, num) in script.ops {
+        if (op as u32) % 3 != 0 && num > 1 {
+            for _ in 0..num {
+                split_script.ops.push((op, 1));
+            }
+        } else {
+            split_script.ops.push((op, num));
+        }
+    }
+
+    if let Some((first, rest)) = split_script.ops.split_first_mut() {
+        let mut last_op = first.0;
+        for (op, num) in rest {
+            if *op == GapAlignOpType::Sub && (last_op as u32) % 3 != 0 {
+                *num += 1;
+            }
+            last_op = *op;
+        }
+    }
+
+    *edit_script_ptr = Some(split_script);
+    0
+}
+
+/// Port of NCBI `JumperPrelimEditBlockNew` (`jumper.c:108`).
+pub fn jumper_prelim_edit_block_new(size: i32) -> Option<JumperPrelimEditBlock> {
+    if size <= 0 {
+        return None;
+    }
+    Some(JumperPrelimEditBlock {
+        edit_ops: Vec::with_capacity(size as usize),
+    })
+}
+
+/// Rust ownership equivalent of NCBI `JumperPrelimEditBlockFree`.
+pub fn jumper_prelim_edit_block_free(
+    _: Option<JumperPrelimEditBlock>,
+) -> Option<JumperPrelimEditBlock> {
+    None
+}
+
+/// Port of NCBI `JumperPrelimEditBlockAdd` (`jumper.c:139`).
+pub fn jumper_prelim_edit_block_add(block: &mut JumperPrelimEditBlock, op: JumperOpType) -> i32 {
+    if !matches!(op, JUMPER_MISMATCH | JUMPER_INSERTION | JUMPER_DELETION) {
+        return -1;
+    }
+    if block.edit_ops.len() >= block.edit_ops.capacity() {
+        let grow_by = block.edit_ops.capacity().max(1);
+        if block.edit_ops.try_reserve_exact(grow_by).is_err() {
+            return -1;
+        }
+    }
+    block.edit_ops.push(op);
+    0
+}
+
+/// Port of NCBI `s_CreateTable` (`jumper.c:164`).
+pub fn s_create_table(table: &mut [u32]) {
+    for (byte, entry) in table.iter_mut().enumerate() {
+        let mut packed = 0u32;
+        for pos in 0..4 {
+            let base = ((byte >> (2 * (3 - pos))) & 3) as u32;
+            packed |= base << (pos * 8);
+        }
+        *entry = packed;
+    }
+}
+
+/// Rust ownership equivalent of NCBI `JumperGapAlignFree`.
+pub fn jumper_gap_align_free(_: Option<JumperGapAlign>) -> Option<JumperGapAlign> {
+    None
+}
+
+/// Port of NCBI `JumperGapAlignNew` (`jumper.c:199`).
+pub fn jumper_gap_align_new(size: i32) -> Option<JumperGapAlign> {
+    if size <= 0 {
+        return None;
+    }
+    let left_prelim_block = jumper_prelim_edit_block_new(size)?;
+    let right_prelim_block = jumper_prelim_edit_block_new(size)?;
+    let mut table = vec![0u32; 256];
+    s_create_table(&mut table);
+    Some(JumperGapAlign {
+        left_prelim_block: Some(left_prelim_block),
+        right_prelim_block: Some(right_prelim_block),
+        table,
+    })
+}
+
+/// Port of NCBI internal `s_ResetJumperPrelimEditBlocks` (`jumper.c:229`).
+pub fn s_reset_jumper_prelim_edit_blocks(
+    left: Option<&mut JumperPrelimEditBlock>,
+    right: Option<&mut JumperPrelimEditBlock>,
+) {
+    let (Some(left), Some(right)) = (left, right) else {
+        return;
+    };
+    left.edit_ops.clear();
+    right.edit_ops.clear();
+}
+
+/// Port of NCBI internal `s_GetSeqPositions` (`jumper.c:277`).
+pub fn s_get_seq_positions(
+    edit_script: Option<&JumperPrelimEditBlock>,
+    edit_index: i32,
+    query_pos: &mut i32,
+    subject_pos: &mut i32,
+) -> i32 {
+    let Some(edit_script) = edit_script else {
+        return -1;
+    };
+    if edit_index < 0 || edit_index as usize > edit_script.edit_ops.len() {
+        return -1;
+    }
+
+    for &op in edit_script.edit_ops.iter().take(edit_index as usize) {
+        if op == JUMPER_MISMATCH {
+            *query_pos += 1;
+            *subject_pos += 1;
+        } else if op == JUMPER_INSERTION {
+            *query_pos += 1;
+        } else if op == JUMPER_DELETION {
+            *subject_pos += 1;
+        } else {
+            *query_pos += op;
+            *subject_pos += op;
+        }
+    }
+
+    0
+}
+
+fn jumper_packed_subject_base(subject: &[u8], subject_pos: i32, subject_length: i32) -> Option<u8> {
+    if subject_pos < 0 || subject_pos >= subject_length {
+        return None;
+    }
+    Some(crate::encoding::ncbi2na_base_at(
+        subject,
+        subject_pos as usize,
+    ))
+}
+
+fn jumper_bases_match(
+    query: &[u8],
+    subject: &[u8],
+    query_pos: i32,
+    subject_pos: i32,
+    query_length: i32,
+    subject_length: i32,
+) -> bool {
+    if query_pos < 0 || query_pos >= query_length {
+        return false;
+    }
+    let Some(&query_base) = query.get(query_pos as usize) else {
+        return false;
+    };
+    let Some(subject_base) = jumper_packed_subject_base(subject, subject_pos, subject_length)
+    else {
+        return false;
+    };
+    query_base == subject_base
+}
+
+/// Port of NCBI internal `s_ShiftGapsRight` (`jumper.c:286`).
+pub fn s_shift_gaps_right(
+    edit_script: &mut JumperPrelimEditBlock,
+    query: &[u8],
+    subject: &[u8],
+    query_offset: i32,
+    subject_offset: i32,
+    query_length: i32,
+    subject_length: i32,
+    score: &mut i32,
+    err_score: i32,
+    num_identical: &mut i32,
+) -> i32 {
+    let mut i = 0usize;
+    while i < edit_script.edit_ops.len() {
+        if edit_script.edit_ops[i] < 0 {
+            let mut k = i + 1;
+            while k < edit_script.edit_ops.len()
+                && edit_script.edit_ops[k] == edit_script.edit_ops[i]
+            {
+                k += 1;
+            }
+
+            while k < edit_script.edit_ops.len() {
+                if edit_script.edit_ops[k] < 0 && edit_script.edit_ops[k] != edit_script.edit_ops[i]
+                {
+                    edit_script.edit_ops.remove(k);
+                    edit_script.edit_ops[i] = JUMPER_MISMATCH;
+                    i += 1;
+                    *score -= err_score;
+
+                    let mut q_pos = query_offset;
+                    let mut s_pos = subject_offset;
+                    let new_index = i as i32 - 1;
+                    s_get_seq_positions(Some(edit_script), new_index, &mut q_pos, &mut s_pos);
+                    if jumper_bases_match(
+                        query,
+                        subject,
+                        q_pos,
+                        s_pos,
+                        query_length,
+                        subject_length,
+                    ) {
+                        edit_script.edit_ops[i - 1] = 1;
+                        *score += 1;
+                        *num_identical += 1;
+                    }
+                    break;
+                }
+
+                if edit_script.edit_ops[k] == JUMPER_MISMATCH {
+                    edit_script.edit_ops.swap(i, k);
+                    i += 1;
+
+                    let mut q_pos = query_offset;
+                    let mut s_pos = subject_offset;
+                    let new_index = i as i32 - 1;
+                    s_get_seq_positions(Some(edit_script), new_index, &mut q_pos, &mut s_pos);
+                    if jumper_bases_match(
+                        query,
+                        subject,
+                        q_pos,
+                        s_pos,
+                        query_length,
+                        subject_length,
+                    ) {
+                        edit_script.edit_ops[i - 1] = 1;
+                        *score -= err_score;
+                        *score += 1;
+                        *num_identical += 1;
+                    }
+                }
+
+                if edit_script.edit_ops[k] > 0 {
+                    let num_matches = edit_script.edit_ops[k];
+                    let mut moved = 0;
+                    let mut q_pos = query_offset;
+                    let mut s_pos = subject_offset;
+                    s_get_seq_positions(Some(edit_script), i as i32, &mut q_pos, &mut s_pos);
+
+                    while moved < edit_script.edit_ops[k]
+                        && jumper_bases_match(
+                            query,
+                            subject,
+                            q_pos,
+                            s_pos,
+                            query_length,
+                            subject_length,
+                        )
+                    {
+                        moved += 1;
+                        q_pos += 1;
+                        s_pos += 1;
+                    }
+
+                    if moved == 0 {
+                        break;
+                    }
+
+                    debug_assert!(i > 0);
+                    if i == 0 {
+                        break;
+                    }
+
+                    if i > 0 && edit_script.edit_ops[i - 1] <= 0 {
+                        edit_script.edit_ops.push(JUMPER_MISMATCH);
+                        let mut j = edit_script.edit_ops.len() - 1;
+                        while j > i {
+                            edit_script.edit_ops[j] = edit_script.edit_ops[j - 1];
+                            j -= 1;
+                        }
+                        k += 1;
+                        i += 1;
+                        edit_script.edit_ops[i - 1] = 0;
+                    }
+
+                    if i > 0 {
+                        edit_script.edit_ops[i - 1] += moved;
+                    }
+                    edit_script.edit_ops[k] -= moved;
+
+                    if moved < num_matches {
+                        break;
+                    }
+                    edit_script.edit_ops.remove(k);
+                    k = k.saturating_sub(1);
+                }
+
+                k += 1;
+            }
+            i = k.saturating_sub(1);
+        }
+        i += 1;
+    }
+
+    0
+}
+
+/// Port of NCBI internal `s_ShiftGaps` (`jumper.c:457`).
+pub fn s_shift_gaps(
+    jumper: &mut JumperGapAlign,
+    query: &[u8],
+    subject: &[u8],
+    query_start: i32,
+    subject_start: i32,
+    query_stop: &mut i32,
+    subject_stop: &mut i32,
+    score: &mut i32,
+    query_length: i32,
+    subject_length: i32,
+    err_score: i32,
+    num_identical: &mut i32,
+) -> i32 {
+    let Some(left) = jumper.left_prelim_block.as_mut() else {
+        return -1;
+    };
+    let Some(right) = jumper.right_prelim_block.as_ref() else {
+        return -1;
+    };
+
+    let mut combined = JumperPrelimEditBlock {
+        edit_ops: Vec::with_capacity(right.edit_ops.capacity().max(right.edit_ops.len())),
+    };
+    for &op in left.edit_ops.iter().rev() {
+        combined.edit_ops.push(op);
+    }
+    for &op in &right.edit_ops {
+        combined.edit_ops.push(op);
+    }
+
+    let mut i = 1usize;
+    while i < combined.edit_ops.len() {
+        if combined.edit_ops[i - 1] > 0 && combined.edit_ops[i] > 0 {
+            combined.edit_ops[i - 1] += combined.edit_ops[i];
+            combined.edit_ops.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    s_shift_gaps_right(
+        &mut combined,
+        query,
+        subject,
+        query_start,
+        subject_start,
+        query_length,
+        subject_length,
+        score,
+        err_score,
+        num_identical,
+    );
+
+    while combined.edit_ops.last().is_some_and(|&op| op < 0) {
+        let op = combined.edit_ops.pop().unwrap();
+        if op == JUMPER_DELETION {
+            *subject_stop -= 1;
+        } else {
+            *query_stop -= 1;
+        }
+        *score -= err_score;
+    }
+
+    left.edit_ops.clear();
+    jumper.right_prelim_block = Some(combined);
+    0
+}
+
+/// Port of NCBI internal `s_TrimExtension` (`jumper.c:519`).
+pub fn s_trim_extension(
+    jops: &mut JumperPrelimEditBlock,
+    margin: i32,
+    cp: &mut i32,
+    cq: &mut i32,
+    num_identical: &mut i32,
+    is_right_ext: bool,
+) {
+    if jops.edit_ops.is_empty() || margin == 0 {
+        return;
+    }
+
+    let mut num_matches = 0;
+    let mut index = jops.edit_ops.len() as i32 - 1;
+    while index >= 1 && jops.edit_ops[index as usize] > 0 {
+        num_matches += jops.edit_ops[index as usize];
+        index -= 1;
+    }
+
+    while jops.edit_ops.len() > 1 && num_matches < margin {
+        let op = *jops.edit_ops.last().unwrap();
+        if op >= 0 {
+            if op > 0 {
+                let delta = if is_right_ext { -op } else { op };
+                *cp += delta;
+                *cq += delta;
+                *num_identical -= op;
+            } else if is_right_ext {
+                *cp -= 1;
+                *cq -= 1;
+            } else {
+                *cp += 1;
+                *cq += 1;
+            }
+        } else if op == JUMPER_INSERTION {
+            if is_right_ext {
+                *cp -= 1;
+            } else {
+                *cp += 1;
+            }
+        } else if op == JUMPER_DELETION {
+            if is_right_ext {
+                *cq -= 1;
+            } else {
+                *cq += 1;
+            }
+        }
+
+        jops.edit_ops.pop();
+        if index >= jops.edit_ops.len() as i32 {
+            num_matches = 0;
+            index = jops.edit_ops.len() as i32 - 1;
+            while index >= 1 && jops.edit_ops[index as usize] > 0 {
+                num_matches += jops.edit_ops[index as usize];
+                index -= 1;
+            }
+        }
+    }
+
+    if jops.edit_ops.len() == 1 && jops.edit_ops[0] <= 0 {
+        jops.edit_ops.clear();
+    }
+}
+
+/// Rust ownership equivalent of NCBI `JumperEditsBlockFree`.
+pub fn jumper_edits_block_free(_: Option<JumperEditsBlock>) -> Option<JumperEditsBlock> {
+    None
+}
+
+/// Port of NCBI `JumperEditsBlockNew` (`jumper.c:2718`).
+pub fn jumper_edits_block_new(num: i32) -> Option<JumperEditsBlock> {
+    if num < 0 {
+        return None;
+    }
+    Some(JumperEditsBlock {
+        edits: Vec::with_capacity(num as usize),
+    })
+}
+
+/// Port of NCBI `JumperEditsBlockDup` (`jumper.c:2737`).
+pub fn jumper_edits_block_dup(block: Option<&JumperEditsBlock>) -> Option<JumperEditsBlock> {
+    block.cloned()
+}
+
+/// Convert one Jumper preliminary operation to the corresponding BLAST gap op.
+fn jumper_op_to_gap_op(op: JumperOpType) -> GapAlignOpType {
+    if op >= 0 {
+        GapAlignOpType::Sub
+    } else if op == JUMPER_INSERTION {
+        GapAlignOpType::Ins
+    } else {
+        GapAlignOpType::Del
+    }
+}
+
+/// Convert one Jumper preliminary operation to its run length.
+fn jumper_op_to_num(op: JumperOpType) -> i32 {
+    if op > 0 {
+        op
+    } else {
+        1
+    }
+}
+
+/// Port of NCBI `JumperPrelimEditBlockToGapEditScript` (`jumper.c:610`).
+pub fn jumper_prelim_edit_block_to_gap_edit_script(
+    rev_prelim_block: &JumperPrelimEditBlock,
+    fwd_prelim_block: &JumperPrelimEditBlock,
+) -> Option<GapEditScript> {
+    if rev_prelim_block.edit_ops.is_empty() && fwd_prelim_block.edit_ops.is_empty() {
+        return None;
+    }
+
+    let mut script = GapEditScript::with_capacity(
+        rev_prelim_block.edit_ops.len() + fwd_prelim_block.edit_ops.len(),
+    );
+
+    for &op in rev_prelim_block.edit_ops.iter().rev() {
+        script.push(jumper_op_to_gap_op(op), jumper_op_to_num(op));
+    }
+    for &op in &fwd_prelim_block.edit_ops {
+        script.push(jumper_op_to_gap_op(op), jumper_op_to_num(op));
+    }
+
+    Some(script)
+}
+
+/// Port of NCBI `JumperEditsBlockCombine` (`jumper.c:2860`).
+pub fn jumper_edits_block_combine(
+    block: &mut Option<JumperEditsBlock>,
+    append: &mut Option<JumperEditsBlock>,
+) -> Option<JumperEditsBlock> {
+    let Some(base) = block.as_mut() else {
+        return None;
+    };
+
+    let Some(mut appended) = append.take() else {
+        return Some(base.clone());
+    };
+    if appended.edits.is_empty() {
+        return Some(base.clone());
+    }
+
+    if base.edits.try_reserve(appended.edits.len()).is_err() {
+        *append = Some(appended);
+        return None;
+    }
+    base.edits.append(&mut appended.edits);
+    Some(base.clone())
+}
+
+/// Port of NCBI internal `s_ComputeExtensionScore` (`jumper.c:722`).
+pub fn s_compute_extension_score(
+    edit_script: &JumperPrelimEditBlock,
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+) -> i32 {
+    let mut score = 0;
+    let mut i = 0;
+    while i < edit_script.edit_ops.len() {
+        let op = edit_script.edit_ops[i];
+        if op > 0 {
+            score += op * match_score;
+        } else if op == JUMPER_MISMATCH {
+            score += mismatch_score;
+        } else {
+            score += gap_open_score;
+            while i < edit_script.edit_ops.len() && edit_script.edit_ops[i] == op {
+                score += gap_extend_score;
+                i += 1;
+            }
+            i = i.saturating_sub(1);
+        }
+        i += 1;
+    }
+    score
+}
+
+/// Rust ownership equivalent of NCBI `SequenceOverhangsFree`.
+pub fn sequence_overhangs_free(_: Option<SequenceOverhangs>) -> Option<SequenceOverhangs> {
+    None
+}
+
+/// Port of NCBI `JumperGoodAlign` (`jumper.c:2650`).
+pub fn jumper_good_align(
+    score: i32,
+    query_start: i32,
+    query_stop: i32,
+    subject_start: i32,
+    subject_stop: i32,
+    num_identical: i32,
+    hit_options: &crate::options::HitSavingOptions,
+    query_length: i32,
+) -> bool {
+    let align_len = (query_stop - query_start).max(subject_stop - subject_start);
+    if align_len <= 0 {
+        return false;
+    }
+
+    if 100.0 * num_identical as f64 / (align_len as f64) < hit_options.percent_identity {
+        return false;
+    }
+
+    if hit_options.splice {
+        return true;
+    }
+
+    let cutoff_score = if hit_options.cutoff_score_fun[1] != 0 {
+        (hit_options.cutoff_score_fun[0] + query_length * hit_options.cutoff_score_fun[1]) / 100
+    } else if hit_options.cutoff_score == 0 {
+        crate::filter::get_cutoff_score(query_length)
+    } else {
+        hit_options.cutoff_score
+    };
+    if score < cutoff_score {
+        return false;
+    }
+
+    let edit_dist = align_len - num_identical;
+    edit_dist <= hit_options.max_edit_distance
+}
+
+/// Port of NCBI `JumperFindEdits` (`jumper.c:2755`).
+pub fn jumper_find_edits(
+    query: &[u8],
+    subject: &[u8],
+    query_start: i32,
+    subject_start: i32,
+    query_stop: i32,
+    subject_stop: i32,
+    left_ext: &JumperPrelimEditBlock,
+    right_ext: &JumperPrelimEditBlock,
+) -> Option<JumperEditsBlock> {
+    const GAP: u8 = 15;
+    let mut q_pos = query_start;
+    let mut s_pos = subject_start;
+    let mut edits = JumperEditsBlock {
+        edits: Vec::with_capacity(left_ext.edit_ops.len() + right_ext.edit_ops.len()),
+    };
+
+    for &op in left_ext.edit_ops.iter().rev() {
+        match op {
+            JUMPER_MISMATCH => {
+                edits.edits.push(JumperEdit {
+                    query_pos: q_pos,
+                    query_base: *query.get(q_pos as usize)?,
+                    subject_base: crate::encoding::ncbi2na_base_at(subject, s_pos as usize),
+                });
+                q_pos += 1;
+                s_pos += 1;
+            }
+            JUMPER_DELETION => {
+                edits.edits.push(JumperEdit {
+                    query_pos: q_pos,
+                    query_base: GAP,
+                    subject_base: crate::encoding::ncbi2na_base_at(subject, s_pos as usize),
+                });
+                s_pos += 1;
+            }
+            JUMPER_INSERTION => {
+                edits.edits.push(JumperEdit {
+                    query_pos: q_pos,
+                    query_base: *query.get(q_pos as usize)?,
+                    subject_base: GAP,
+                });
+                q_pos += 1;
+            }
+            run if run > 0 => {
+                q_pos += run;
+                s_pos += run;
+            }
+            _ => return None,
+        }
+    }
+
+    for &op in &right_ext.edit_ops {
+        match op {
+            JUMPER_MISMATCH => {
+                edits.edits.push(JumperEdit {
+                    query_pos: q_pos,
+                    query_base: *query.get(q_pos as usize)?,
+                    subject_base: crate::encoding::ncbi2na_base_at(subject, s_pos as usize),
+                });
+                q_pos += 1;
+                s_pos += 1;
+            }
+            JUMPER_DELETION => {
+                edits.edits.push(JumperEdit {
+                    query_pos: q_pos,
+                    query_base: GAP,
+                    subject_base: crate::encoding::ncbi2na_base_at(subject, s_pos as usize),
+                });
+                s_pos += 1;
+            }
+            JUMPER_INSERTION => {
+                edits.edits.push(JumperEdit {
+                    query_pos: q_pos,
+                    query_base: *query.get(q_pos as usize)?,
+                    subject_base: GAP,
+                });
+                q_pos += 1;
+            }
+            run if run > 0 => {
+                q_pos += run;
+                s_pos += run;
+            }
+            _ => return None,
+        }
+    }
+
+    debug_assert_eq!(q_pos, query_stop);
+    debug_assert_eq!(s_pos, subject_stop);
+    if q_pos != query_stop || s_pos != subject_stop {
+        return None;
+    }
+    Some(edits)
+}
+
+/// Port of NCBI `JumperFindSpliceSignals` (`jumper.c:2945`).
+pub fn jumper_find_splice_signals(
+    hsp: &crate::hspstream::Hsp,
+    map_info: &mut crate::hspstream::BlastHSPMappingInfo,
+    query_len: i32,
+    subject: &[u8],
+    subject_len: i32,
+) -> i32 {
+    if hsp.query_offset == 0 || hsp.subject_offset < 2 {
+        map_info.left_edge = MAPPER_EXON;
+    } else {
+        map_info.left_edge =
+            (crate::encoding::ncbi2na_base_at(subject, hsp.subject_offset as usize - 2) << 2)
+                | crate::encoding::ncbi2na_base_at(subject, hsp.subject_offset as usize - 1);
+    }
+
+    if hsp.query_end == query_len || hsp.subject_end == subject_len {
+        map_info.right_edge = MAPPER_EXON;
+    } else {
+        map_info.right_edge = (crate::encoding::ncbi2na_base_at(subject, hsp.subject_end as usize)
+            << 2)
+            | crate::encoding::ncbi2na_base_at(subject, hsp.subject_end as usize + 1);
+    }
+    0
+}
+
+/// Port of NCBI internal `s_SaveSubjectOverhangs` (`jumper.c:2995`).
+pub fn s_save_subject_overhangs(
+    hsp: &crate::hspstream::Hsp,
+    map_info: &mut crate::hspstream::BlastHSPMappingInfo,
+    subject: &[u8],
+    subject_len: i32,
+    query_len: i32,
+) -> i32 {
+    let max_subject_overhang = if query_len < 400 { 30 } else { 60 };
+    let mut overhangs = SequenceOverhangs::default();
+
+    if hsp.query_offset >= 0 {
+        let mut len = hsp.query_offset.max(2).min(max_subject_overhang);
+        if hsp.subject_offset < len {
+            len = hsp.subject_offset;
+        }
+        if len > 0 {
+            let start = hsp.subject_offset - len;
+            let left = (0..len)
+                .map(|i| crate::encoding::ncbi2na_base_at(subject, (start + i) as usize))
+                .collect::<Vec<_>>();
+            overhangs.left = Some(left);
+        }
+    }
+
+    if hsp.query_end <= query_len {
+        let len = if query_len - hsp.query_end + 1 < 6 {
+            (query_len - hsp.query_end + 1)
+                .max(2)
+                .min(max_subject_overhang)
+        } else {
+            max_subject_overhang
+        }
+        .min(subject_len.saturating_sub(hsp.subject_end));
+
+        if len > 0 {
+            let right = (0..len)
+                .map(|i| crate::encoding::ncbi2na_base_at(subject, (hsp.subject_end + i) as usize))
+                .collect::<Vec<_>>();
+            overhangs.right = Some(right);
+        }
+    }
+
+    map_info.subject_overhangs = Some(overhangs);
+    0
+}
+
+/// Port-shaped Rust equivalent of NCBI `s_CreateHSPForWordHit` (`jumper.c:3098`).
+///
+/// C stores mapper data inside `BlastHSP::map_info`; Rust keeps it as a
+/// separate [`crate::hspstream::BlastHSPMappingInfo`], so this returns both.
+pub fn s_create_hsp_for_word_hit(
+    q_offset: i32,
+    s_offset: i32,
+    length: i32,
+    context: i32,
+    query: &[u8],
+    query_frame: i32,
+    subject: &[u8],
+    subject_len: i32,
+    subject_frame: i32,
+    query_len: i32,
+) -> Option<(crate::hspstream::Hsp, crate::hspstream::BlastHSPMappingInfo)> {
+    if q_offset < 0 || s_offset < 0 || length < 0 {
+        return None;
+    }
+    let q_end = q_offset.checked_add(length)?;
+    let s_end = s_offset.checked_add(length)?;
+    if q_end as usize > query.len() || s_end > subject_len {
+        return None;
+    }
+
+    let mut edit_script = GapEditScript::new();
+    edit_script.ops.push((GapAlignOpType::Sub, length));
+    let mut hsp = crate::hspstream::Hsp {
+        score: length,
+        num_ident: length,
+        bit_score: 0.0,
+        evalue: 0.0,
+        query_offset: q_offset,
+        query_end: q_end,
+        query_gapped_start: q_offset,
+        subject_offset: s_offset,
+        subject_end: s_end,
+        subject_gapped_start: s_offset,
+        context,
+        query_frame,
+        subject_frame,
+        num_gaps: 0,
+        comp_adjustment_method: 0,
+        edit_script: Some(edit_script),
+        pat_info: None,
+        map_info: None,
+    };
+    let mut map_info = crate::hspstream::blast_hsp_mapping_info_new();
+    let mut edits = JumperEditsBlock::default();
+    for i in 0..length {
+        let query_base = query[(q_offset + i) as usize];
+        if query_base & 0xfc != 0 {
+            edits.edits.push(JumperEdit {
+                query_pos: q_offset + i,
+                query_base,
+                subject_base: crate::encoding::ncbi2na_base_at(subject, (s_offset + i) as usize),
+            });
+        }
+    }
+    hsp.num_ident = length - edits.edits.len() as i32;
+    map_info.edits = Some(edits);
+    jumper_find_splice_signals(&hsp, &mut map_info, query_len, subject, subject_len);
+    s_save_subject_overhangs(&hsp, &mut map_info, subject, subject_len, query_len);
+    hsp.map_info = Some(map_info.clone());
+    Some((hsp, map_info))
+}
+
+/// Port-shaped Rust equivalent of NCBI internal `s_CreateHSP` (`jumper.c:3188`).
+///
+/// Rust keeps C `BlastHSP::map_info` as a separate value, so this returns the
+/// created HSP with its mapping info side by side.
+pub fn s_create_hsp(
+    query_seq: &[u8],
+    query_len: i32,
+    context: i32,
+    query_frame: i32,
+    subject: &[u8],
+    subject_len: i32,
+    subject_frame: i32,
+    jumper: &mut JumperGapAlign,
+    query_start: i32,
+    mut query_stop: i32,
+    subject_start: i32,
+    mut subject_stop: i32,
+    mut score: i32,
+    scoring_penalty: i32,
+    splice: bool,
+) -> Option<(crate::hspstream::Hsp, crate::hspstream::BlastHSPMappingInfo)> {
+    let mut num_identical = 0;
+    if std::env::var_os("MAPPER_NO_GAP_SHIFT").is_none() {
+        s_shift_gaps(
+            jumper,
+            query_seq,
+            subject,
+            query_start,
+            subject_start,
+            &mut query_stop,
+            &mut subject_stop,
+            &mut score,
+            query_len,
+            subject_len,
+            scoring_penalty,
+            &mut num_identical,
+        );
+    }
+
+    let left = jumper.left_prelim_block.as_ref()?;
+    let right = jumper.right_prelim_block.as_ref()?;
+    let edit_script = jumper_prelim_edit_block_to_gap_edit_script(left, right);
+    let mut hsp = crate::hspstream::Hsp {
+        score,
+        num_ident: num_identical,
+        bit_score: 0.0,
+        evalue: 0.0,
+        query_offset: query_start,
+        query_end: query_stop,
+        query_gapped_start: query_start,
+        subject_offset: subject_start,
+        subject_end: subject_stop,
+        subject_gapped_start: subject_start,
+        context,
+        query_frame,
+        subject_frame,
+        num_gaps: 0,
+        comp_adjustment_method: 0,
+        edit_script,
+        pat_info: None,
+        map_info: None,
+    };
+    let mut map_info = crate::hspstream::blast_hsp_mapping_info_new();
+    map_info.edits = jumper_find_edits(
+        query_seq,
+        subject,
+        query_start,
+        subject_start,
+        query_stop,
+        subject_stop,
+        left,
+        right,
+    );
+
+    if splice {
+        jumper_find_splice_signals(&hsp, &mut map_info, query_len, subject, subject_len);
+        s_save_subject_overhangs(&hsp, &mut map_info, subject, subject_len, query_len);
+    }
+
+    hsp.evalue = 0.0;
+    hsp.map_info = Some(map_info.clone());
+    Some((hsp, map_info))
+}
+
+/// Rust ownership equivalent of NCBI `SubjectIndexIteratorFree`.
+pub fn subject_index_iterator_free(
+    _: Option<SubjectIndexIterator>,
+) -> Option<SubjectIndexIterator> {
+    None
+}
+
+fn subject_word_at(subject: &[u8], subject_len: i32, pos: i32, word_size: i32) -> Option<u32> {
+    if pos < 0 || word_size <= 0 || pos + word_size > subject_len {
+        return None;
+    }
+    let mut word = 0u32;
+    for i in 0..word_size {
+        word = (word << 2) | crate::encoding::ncbi2na_base_at(subject, (pos + i) as usize) as u32;
+    }
+    Some(word)
+}
+
+/// Port-shaped Rust equivalent of NCBI `SubjectIndexNew` (`jumper.c:3874`).
+pub fn subject_index_new(
+    subject: &[u8],
+    subject_len: i32,
+    width: i32,
+    word_size: i32,
+) -> Option<SubjectIndex> {
+    if subject_len < 0 || width <= 0 || word_size <= 0 {
+        return None;
+    }
+    let mut positions_by_word: std::collections::BTreeMap<u32, Vec<i32>> =
+        std::collections::BTreeMap::new();
+    let max_pos = subject_len - word_size;
+    for pos in 0..=max_pos.max(-1) {
+        let word = subject_word_at(subject, subject_len, pos, word_size)?;
+        positions_by_word.entry(word).or_default().push(pos);
+    }
+    Some(SubjectIndex {
+        num_lookups: subject_len / width + 1,
+        width,
+        word_size,
+        positions_by_word,
+    })
+}
+
+/// Port of NCBI `SubjectIndexIteratorNew` (`jumper.c:3982`).
+pub fn subject_index_iterator_new(
+    s_index: &SubjectIndex,
+    word: u32,
+    from: i32,
+    to: i32,
+) -> Option<SubjectIndexIterator> {
+    let positions = s_index
+        .positions_by_word
+        .get(&word)
+        .cloned()
+        .unwrap_or_default();
+    let start = positions.partition_point(|&pos| pos < from) as i32;
+    Some(SubjectIndexIterator {
+        subject_index: Some(s_index.clone()),
+        to,
+        lookup_index: if s_index.width > 0 {
+            from / s_index.width
+        } else {
+            0
+        },
+        positions,
+        word_index: start,
+    })
+}
+
+/// Port of NCBI `SubjectIndexIteratorNext` (`jumper.c:4035`).
+pub fn subject_index_iterator_next(it: &mut SubjectIndexIterator) -> i32 {
+    if it.word_index < 0 || it.word_index as usize >= it.positions.len() {
+        return -1;
+    }
+    let pos = it.positions[it.word_index as usize];
+    if pos > it.to {
+        return -1;
+    }
+    it.word_index += 1;
+    pos
+}
+
+/// Port of NCBI `SubjectIndexIteratorPrev` (`jumper.c:4087`).
+pub fn subject_index_iterator_prev(it: &mut SubjectIndexIterator) -> i32 {
+    if it.positions.is_empty() {
+        return -1;
+    }
+    if it.word_index < 0 {
+        return -1;
+    }
+    if it.word_index as usize >= it.positions.len() {
+        it.word_index = it.positions.len() as i32 - 1;
+    }
+    let pos = it.positions[it.word_index as usize];
+    if pos < it.to {
+        return -1;
+    }
+    it.word_index -= 1;
+    pos
+}
+
+/// Port of NCBI `GapEditScriptCombine` (`jumper.c:2895`).
+pub fn gap_edit_script_combine(
+    edit_script: &mut Option<GapEditScript>,
+    append: &mut Option<GapEditScript>,
+) -> Option<GapEditScript> {
+    let Some(mut append_script) = append.take() else {
+        return edit_script.clone();
+    };
+    if append_script.ops.is_empty() {
+        return edit_script.clone();
+    }
+    let Some(script) = edit_script.as_mut() else {
+        *edit_script = Some(append_script);
+        return edit_script.clone();
+    };
+
+    for (op, count) in append_script.ops.drain(..) {
+        script.push(op, count);
+    }
+    edit_script.clone()
+}
+
+fn jumper_trace_mask(max_mismatches: i32) -> u32 {
+    if max_mismatches <= 0 {
+        0
+    } else if max_mismatches >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << max_mismatches) - 1
+    }
+}
+
+fn jumper_shift_trace(trace: &mut u32, shift: i32, window: i32) {
+    if *trace == 0 {
+        return;
+    }
+    if shift < window {
+        *trace = trace.wrapping_shl(shift.max(0) as u32);
+    } else {
+        *trace = 0;
+    }
+}
+
+fn jumper_match_run_right(
+    query: &[u8],
+    subject: &[u8],
+    mut cp: i32,
+    mut cq: i32,
+    len: i32,
+    ok: i32,
+) -> bool {
+    let mut n = 0;
+    let mut i = len;
+    while i > 0 {
+        if cp < 0
+            || cq < 0
+            || cp as usize >= query.len()
+            || cq as usize >= subject.len()
+            || query[cp as usize] != subject[cq as usize]
+        {
+            n += 1;
+            if n > ok {
+                return false;
+            }
+        }
+        cp += 1;
+        cq += 1;
+        i -= 1;
+    }
+    true
+}
+
+fn jumper_match_run_left(
+    query: &[u8],
+    subject: &[u8],
+    mut cp: i32,
+    mut cq: i32,
+    len: i32,
+    ok: i32,
+) -> bool {
+    let mut n = 0;
+    let mut i = len;
+    while i > 0 {
+        if cp < 0
+            || cq < 0
+            || cp as usize >= query.len()
+            || cq as usize >= subject.len()
+            || query[cp as usize] != subject[cq as usize]
+        {
+            n += 1;
+            if n > ok {
+                return false;
+            }
+        }
+        cp -= 1;
+        cq -= 1;
+        i -= 1;
+    }
+    true
+}
+
+fn jumper_find_right(query: &[u8], subject: &[u8], cp: i32, cq: i32, jumps: &[Jump]) -> Jump {
+    let cpmax = query.len() as i32;
+    let cqmax = subject.len() as i32;
+    for &jump in jumps {
+        if jump.lng == 0 {
+            return jump;
+        }
+
+        let cp1 = cp + jump.dcp;
+        let cq1 = cq + jump.dcq;
+        if cp1 >= cpmax || cq1 >= cqmax {
+            continue;
+        }
+        if !jumper_match_run_right(query, subject, cp1, cq1, jump.ok, 0) {
+            continue;
+        }
+        if jump.lng + cp1 >= cpmax || jump.lng + cq1 >= cqmax {
+            continue;
+        }
+        if !jumper_match_run_right(query, subject, cp1, cq1, jump.lng, jump.ok) {
+            continue;
+        }
+        return jump;
+    }
+    jumps.last().copied().unwrap_or(Jump {
+        dcp: 1,
+        dcq: 1,
+        lng: 0,
+        ok: 0,
+    })
+}
+
+fn jumper_find_left(query: &[u8], subject: &[u8], cp: i32, cq: i32, jumps: &[Jump]) -> Jump {
+    for &jump in jumps {
+        if jump.lng == 0 {
+            return jump;
+        }
+
+        let cp1 = cp - jump.dcp;
+        let cq1 = cq - jump.dcq;
+        if cp1 < 0 || cq1 < 0 {
+            continue;
+        }
+        if !jumper_match_run_left(query, subject, cp1, cq1, jump.ok, 0) {
+            continue;
+        }
+        if cp1 - jump.lng < 0 || cq1 - jump.lng < 0 {
+            continue;
+        }
+        if !jumper_match_run_left(query, subject, cp1, cq1, jump.lng, jump.ok) {
+            continue;
+        }
+        return jump;
+    }
+    jumps.last().copied().unwrap_or(Jump {
+        dcp: 1,
+        dcq: 1,
+        lng: 0,
+        ok: 0,
+    })
+}
+
+fn jumper_packed_match_run_right(
+    query: &[u8],
+    subject: &[u8],
+    mut cp: i32,
+    mut cq: i32,
+    len: i32,
+    ok: i32,
+    subject_length: i32,
+) -> bool {
+    let mut n = 0;
+    let mut i = len;
+    while i > 0 {
+        if cp < 0
+            || cq < 0
+            || cp as usize >= query.len()
+            || cq >= subject_length
+            || query[cp as usize] != crate::encoding::ncbi2na_base_at(subject, cq as usize)
+        {
+            n += 1;
+            if n > ok {
+                return false;
+            }
+        }
+        cp += 1;
+        cq += 1;
+        i -= 1;
+    }
+    true
+}
+
+fn jumper_packed_match_run_left(
+    query: &[u8],
+    subject: &[u8],
+    mut cp: i32,
+    mut cq: i32,
+    len: i32,
+    ok: i32,
+) -> bool {
+    let mut n = 0;
+    let mut i = len;
+    while i > 0 {
+        if cp < 0
+            || cq < 0
+            || cp as usize >= query.len()
+            || query[cp as usize] != crate::encoding::ncbi2na_base_at(subject, cq as usize)
+        {
+            n += 1;
+            if n > ok {
+                return false;
+            }
+        }
+        cp -= 1;
+        cq -= 1;
+        i -= 1;
+    }
+    true
+}
+
+fn jumper_find_right_compressed(
+    query: &[u8],
+    subject: &[u8],
+    subject_length: i32,
+    cp: i32,
+    cq: i32,
+    jumps: &[Jump],
+) -> Jump {
+    let cpmax = query.len() as i32;
+    for &jump in jumps {
+        if jump.lng == 0 {
+            return jump;
+        }
+
+        let cp1 = cp + jump.dcp;
+        let cq1 = cq + jump.dcq;
+        if cp1 >= cpmax || cq1 >= subject_length {
+            continue;
+        }
+        if !jumper_packed_match_run_right(query, subject, cp1, cq1, jump.ok, 0, subject_length) {
+            continue;
+        }
+        if jump.lng + cp1 >= cpmax || jump.lng + cq1 >= subject_length {
+            continue;
+        }
+        if !jumper_packed_match_run_right(
+            query,
+            subject,
+            cp1,
+            cq1,
+            jump.lng,
+            jump.ok,
+            subject_length,
+        ) {
+            continue;
+        }
+        return jump;
+    }
+    jumps.last().copied().unwrap_or(Jump {
+        dcp: 1,
+        dcq: 1,
+        lng: 0,
+        ok: 0,
+    })
+}
+
+fn jumper_find_left_compressed(
+    query: &[u8],
+    subject: &[u8],
+    cp: i32,
+    cq: i32,
+    jumps: &[Jump],
+) -> Jump {
+    for &jump in jumps {
+        if jump.lng == 0 {
+            return jump;
+        }
+
+        let cp1 = cp - jump.dcp;
+        let cq1 = cq - jump.dcq;
+        if cp1 < 0 || cq1 < 0 {
+            continue;
+        }
+        if !jumper_packed_match_run_left(query, subject, cp1, cq1, jump.ok, 0) {
+            continue;
+        }
+        if cp1 - jump.lng < 0 || cq1 - jump.lng < 0 {
+            continue;
+        }
+        if !jumper_packed_match_run_left(query, subject, cp1, cq1, jump.lng, jump.ok) {
+            continue;
+        }
+        return jump;
+    }
+    jumps.last().copied().unwrap_or(Jump {
+        dcp: 1,
+        dcq: 1,
+        lng: 0,
+        ok: 0,
+    })
+}
+
+/// Port of NCBI `JumperExtendRight` (`jumper.c:1384`).
+pub fn jumper_extend_right(
+    query: &[u8],
+    subject: &[u8],
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    edit_script: &mut GapPrelimEditBlock,
+    left_extension: bool,
+) -> (i32, i32, i32) {
+    if query.is_empty() || subject.is_empty() {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = 1;
+    let mut cq = 1;
+    let mut score = 0;
+    let mut num_mismatches = 0;
+    let mut new_matches = if left_extension { 0 } else { 1 };
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+
+    while cp < query.len() as i32 && cq < subject.len() as i32 && num_mismatches < max_mismatches {
+        if query[cp as usize] == subject[cq as usize] {
+            score += match_score;
+            cp += 1;
+            cq += 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump = jumper_find_right(query, subject, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, new_matches);
+            jumper_shift_trace(&mut trace, new_matches, window);
+            new_matches = 0;
+        }
+
+        if jump.dcp == jump.dcq {
+            score += mismatch_score * jump.dcp;
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, jump.dcp);
+        } else if jump.dcp > jump.dcq {
+            let gap_len = jump.dcp - jump.dcq;
+            score += gap_open_score + gap_extend_score * gap_len;
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Ins, gap_len);
+        } else {
+            let gap_len = jump.dcq - jump.dcp;
+            score += gap_open_score + gap_extend_score * gap_len;
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Del, gap_len);
+        }
+
+        cp += jump.dcp;
+        cq += jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            score += match_score * jump.lng;
+            cp += jump.lng;
+            cq += jump.lng;
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, jump.lng);
+            trace = trace.wrapping_shl(jump.lng as u32);
+        }
+    }
+
+    if new_matches != 0 {
+        gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, new_matches);
+    }
+
+    (score, cp, cq)
+}
+
+/// Port of NCBI `JumperExtendRightWithTraceback` (`jumper.c:1552`).
+pub fn jumper_extend_right_with_traceback(
+    query: &[u8],
+    subject: &[u8],
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    edit_script: &mut JumperPrelimEditBlock,
+    num_identical: &mut i32,
+    left_extension: bool,
+    ungapped_ext_len: &mut i32,
+) -> (i32, i32, i32) {
+    if query.is_empty() || subject.is_empty() {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = 0;
+    let mut cq = 0;
+    let mut num_mismatches = 0;
+    let mut new_matches = 0;
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+    let mut is_ungapped = true;
+
+    if left_extension {
+        cp += 1;
+        cq += 1;
+    }
+
+    while cp < query.len() as i32 && cq < subject.len() as i32 && num_mismatches < max_mismatches {
+        if query[cp as usize] == subject[cq as usize] {
+            cp += 1;
+            cq += 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump = jumper_find_right(query, subject, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            edit_script.edit_ops.push(new_matches);
+            jumper_shift_trace(&mut trace, new_matches, window);
+            *num_identical += new_matches;
+            new_matches = 0;
+        }
+
+        if jump.dcp == jump.dcq {
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+            for _ in 0..jump.dcp {
+                edit_script.edit_ops.push(JUMPER_MISMATCH);
+            }
+        } else if jump.dcp > jump.dcq {
+            for _ in 0..(jump.dcp - jump.dcq) {
+                edit_script.edit_ops.push(JUMPER_INSERTION);
+            }
+        } else {
+            for _ in 0..(jump.dcq - jump.dcp) {
+                edit_script.edit_ops.push(JUMPER_DELETION);
+            }
+        }
+
+        if is_ungapped && jump.dcp != jump.dcq {
+            *ungapped_ext_len = cp - 1;
+            is_ungapped = false;
+        }
+
+        cp += jump.dcp;
+        cq += jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            cp += jump.lng;
+            cq += jump.lng;
+            edit_script.edit_ops.push(jump.lng);
+            trace = trace.wrapping_shl(jump.lng as u32);
+            *num_identical += jump.lng;
+            num_mismatches = 0;
+        }
+    }
+
+    if new_matches != 0 {
+        edit_script.edit_ops.push(new_matches);
+        *num_identical += new_matches;
+    }
+
+    s_trim_extension(
+        edit_script,
+        -mismatch_score,
+        &mut cp,
+        &mut cq,
+        num_identical,
+        true,
+    );
+
+    if is_ungapped {
+        *ungapped_ext_len = cp;
+    }
+
+    (
+        s_compute_extension_score(
+            edit_script,
+            match_score,
+            mismatch_score,
+            gap_open_score,
+            gap_extend_score,
+        ),
+        cp,
+        cq,
+    )
+}
+
+/// Port of NCBI `JumperExtendLeft` (`jumper.c:2354`).
+pub fn jumper_extend_left(
+    query: &[u8],
+    subject: &[u8],
+    query_offset: i32,
+    subject_offset: i32,
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    edit_script: &mut GapPrelimEditBlock,
+) -> (i32, i32, i32) {
+    if query.is_empty()
+        || subject.is_empty()
+        || query_offset < 0
+        || subject_offset < 0
+        || query_offset as usize >= query.len()
+        || subject_offset as usize >= subject.len()
+    {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = query_offset;
+    let mut cq = subject_offset;
+    let mut score = 0;
+    let mut num_mismatches = 0;
+    let mut new_matches = 0;
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+
+    while cp >= 0 && cq >= 0 && num_mismatches < max_mismatches {
+        if query[cp as usize] == subject[cq as usize] {
+            score += match_score;
+            cp -= 1;
+            cq -= 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump = jumper_find_left(query, subject, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, new_matches);
+            jumper_shift_trace(&mut trace, new_matches, window);
+            new_matches = 0;
+        }
+
+        if jump.dcp == jump.dcq {
+            score += mismatch_score * jump.dcp;
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, jump.dcp);
+        } else if jump.dcp > jump.dcq {
+            let gap_len = jump.dcp - jump.dcq;
+            score += gap_open_score + gap_extend_score * gap_len;
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Ins, gap_len);
+        } else {
+            let gap_len = jump.dcq - jump.dcp;
+            score += gap_open_score + gap_extend_score * gap_len;
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Del, gap_len);
+        }
+
+        cp -= jump.dcp;
+        cq -= jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            score += match_score * jump.lng;
+            cp -= jump.lng;
+            cq -= jump.lng;
+            gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, jump.lng);
+            trace = trace.wrapping_shl(jump.lng as u32);
+        }
+    }
+
+    if new_matches != 0 {
+        gap_prelim_edit_block_add(edit_script, GapAlignOpType::Sub, new_matches);
+    }
+
+    (score, query_offset - cp, subject_offset - cq)
+}
+
+/// Port of NCBI `JumperExtendRightCompressed` (`jumper.c:734`).
+pub fn jumper_extend_right_compressed(
+    query: &[u8],
+    subject: &[u8],
+    subject_length: i32,
+    match_score: i32,
+    mismatch_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    num_identical: &mut i32,
+    ungapped_ext_len: &mut i32,
+) -> (i32, i32, i32) {
+    if query.is_empty() || subject.is_empty() || subject_length <= 0 {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = 1;
+    let mut cq = 1;
+    let mut cpstop = 0;
+    let mut cqstop = 0;
+    let mut num_mismatches = 0;
+    let mut new_matches = 0;
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+    let mut score = 0;
+    let mut best_score = 0;
+    let mut is_ungapped = true;
+
+    while cp < query.len() as i32 && cq < subject_length && num_mismatches < max_mismatches {
+        if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
+            cp += 1;
+            cq += 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump =
+            jumper_find_right_compressed(query, subject, subject_length, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            jumper_shift_trace(&mut trace, new_matches, window);
+            *num_identical += new_matches;
+            score += new_matches * match_score;
+            new_matches = 0;
+        }
+
+        if jump.dcp == jump.dcq {
+            score += mismatch_score * jump.dcp;
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+        }
+
+        if is_ungapped && jump.dcp != jump.dcq {
+            *ungapped_ext_len = cp - 1;
+            is_ungapped = false;
+        }
+
+        cp += jump.dcp;
+        cq += jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            cp += jump.lng;
+            cq += jump.lng;
+            trace = trace.wrapping_shl(jump.lng as u32);
+            *num_identical += jump.lng;
+            score += jump.lng * match_score;
+        }
+
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            best_score = score;
+        }
+    }
+
+    if new_matches != 0 {
+        *num_identical += new_matches;
+        score += new_matches * match_score;
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            best_score = score;
+        }
+    }
+
+    if is_ungapped {
+        *ungapped_ext_len = cpstop;
+    }
+
+    (best_score, cpstop, cqstop)
+}
+
+/// Port of NCBI `JumperExtendLeftCompressed` (`jumper.c:1749`).
+pub fn jumper_extend_left_compressed(
+    query: &[u8],
+    subject: &[u8],
+    query_offset: i32,
+    subject_offset: i32,
+    match_score: i32,
+    mismatch_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    num_identical: &mut i32,
+) -> (i32, i32, i32) {
+    if query.is_empty()
+        || subject.is_empty()
+        || query_offset < 0
+        || subject_offset < 0
+        || query_offset as usize >= query.len()
+    {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = query_offset;
+    let mut cq = subject_offset;
+    let mut cpstop = query_offset;
+    let mut cqstop = subject_offset;
+    let mut num_mismatches = 0;
+    let mut new_matches = 0;
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+    let mut score = 0;
+    let mut best_score = 0;
+
+    while cp >= 0 && cq >= 0 && num_mismatches < max_mismatches {
+        if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
+            cp -= 1;
+            cq -= 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump = jumper_find_left_compressed(query, subject, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            jumper_shift_trace(&mut trace, new_matches, window);
+            *num_identical += new_matches;
+            score = new_matches * match_score;
+            new_matches = 0;
+        }
+
+        if jump.dcp == jump.dcq {
+            score += mismatch_score * jump.dcp;
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+        }
+
+        cp -= jump.dcp;
+        cq -= jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            cp -= jump.lng;
+            cq -= jump.lng;
+            trace = trace.wrapping_shl(jump.lng as u32);
+            *num_identical += jump.lng;
+            score += jump.lng * match_score;
+        }
+
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            best_score = score;
+        }
+    }
+
+    if new_matches != 0 {
+        *num_identical += new_matches;
+        score += new_matches * match_score;
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            best_score = score;
+        }
+    }
+
+    (best_score, query_offset - cpstop, subject_offset - cqstop)
+}
+
+/// Port of NCBI `JumperExtendRightCompressedWithTraceback` (`jumper.c:915`).
+pub fn jumper_extend_right_compressed_with_traceback(
+    query: &[u8],
+    subject: &[u8],
+    subject_length: i32,
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    edit_script: &mut JumperPrelimEditBlock,
+    num_identical: &mut i32,
+    left_extension: bool,
+    ungapped_ext_len: &mut i32,
+) -> (i32, i32, i32) {
+    if query.is_empty() || subject.is_empty() || subject_length <= 0 {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = 1;
+    let mut cq = 1;
+    let mut num_mismatches = 0;
+    let mut new_matches = if left_extension { 0 } else { 1 };
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+    let mut is_ungapped = true;
+
+    while cp < query.len() as i32 && cq < subject_length && num_mismatches < max_mismatches {
+        if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
+            cp += 1;
+            cq += 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump =
+            jumper_find_right_compressed(query, subject, subject_length, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            edit_script.edit_ops.push(new_matches);
+            jumper_shift_trace(&mut trace, new_matches, window);
+            *num_identical += new_matches;
+            new_matches = 0;
+        }
+
+        if jump.dcp == jump.dcq {
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+            for _ in 0..jump.dcp {
+                edit_script.edit_ops.push(JUMPER_MISMATCH);
+            }
+        } else if jump.dcp > jump.dcq {
+            for _ in 0..(jump.dcp - jump.dcq) {
+                edit_script.edit_ops.push(JUMPER_INSERTION);
+            }
+        } else {
+            for _ in 0..(jump.dcq - jump.dcp) {
+                edit_script.edit_ops.push(JUMPER_DELETION);
+            }
+        }
+
+        if is_ungapped && jump.dcp != jump.dcq {
+            *ungapped_ext_len = cp - 1;
+            is_ungapped = false;
+        }
+
+        cp += jump.dcp;
+        cq += jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            cp += jump.lng;
+            cq += jump.lng;
+            edit_script.edit_ops.push(jump.lng);
+            trace = trace.wrapping_shl(jump.lng as u32);
+            *num_identical += jump.lng;
+            num_mismatches = 0;
+        }
+    }
+
+    if new_matches != 0 {
+        edit_script.edit_ops.push(new_matches);
+        *num_identical += new_matches;
+    }
+
+    s_trim_extension(
+        edit_script,
+        -mismatch_score,
+        &mut cp,
+        &mut cq,
+        num_identical,
+        true,
+    );
+
+    if is_ungapped {
+        *ungapped_ext_len = cp;
+    }
+
+    (
+        s_compute_extension_score(
+            edit_script,
+            match_score,
+            mismatch_score,
+            gap_open_score,
+            gap_extend_score,
+        ),
+        cp,
+        cq,
+    )
+}
+
+/// Port of NCBI `JumperExtendLeftCompressedWithTraceback` (`jumper.c:1917`).
+pub fn jumper_extend_left_compressed_with_traceback(
+    query: &[u8],
+    subject: &[u8],
+    query_offset: i32,
+    subject_offset: i32,
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    edit_script: &mut JumperPrelimEditBlock,
+    num_identical: &mut i32,
+) -> (i32, i32, i32) {
+    if query.is_empty()
+        || subject.is_empty()
+        || query_offset < 0
+        || subject_offset < 0
+        || query_offset as usize >= query.len()
+    {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = query_offset;
+    let mut cq = subject_offset;
+    let mut num_mismatches = 0;
+    let mut new_matches = 0;
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+
+    while cp >= 0 && cq >= 0 && num_mismatches < max_mismatches {
+        if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
+            cp -= 1;
+            cq -= 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump = jumper_find_left_compressed(query, subject, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            edit_script.edit_ops.push(new_matches);
+            jumper_shift_trace(&mut trace, new_matches, window);
+            *num_identical += new_matches;
+            new_matches = 0;
+        }
+
+        if jump.dcp == jump.dcq {
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+            for _ in 0..jump.dcp {
+                edit_script.edit_ops.push(JUMPER_MISMATCH);
+            }
+        } else if jump.dcp > jump.dcq {
+            for _ in 0..(jump.dcp - jump.dcq) {
+                edit_script.edit_ops.push(JUMPER_INSERTION);
+            }
+        } else {
+            for _ in 0..(jump.dcq - jump.dcp) {
+                edit_script.edit_ops.push(JUMPER_DELETION);
+            }
+        }
+
+        cp -= jump.dcp;
+        cq -= jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            cp -= jump.lng;
+            cq -= jump.lng;
+            edit_script.edit_ops.push(jump.lng);
+            trace = trace.wrapping_shl(jump.lng as u32);
+            *num_identical += jump.lng;
+            num_mismatches = 0;
+        }
+    }
+
+    if new_matches != 0 {
+        edit_script.edit_ops.push(new_matches);
+        *num_identical += new_matches;
+    }
+
+    s_trim_extension(
+        edit_script,
+        -mismatch_score,
+        &mut cp,
+        &mut cq,
+        num_identical,
+        false,
+    );
+
+    (
+        s_compute_extension_score(
+            edit_script,
+            match_score,
+            mismatch_score,
+            gap_open_score,
+            gap_extend_score,
+        ),
+        query_offset - cp,
+        subject_offset - cq,
+    )
+}
+
+/// Port of NCBI `JumperExtendRightCompressedWithTracebackOptimal` (`jumper.c:1124`).
+pub fn jumper_extend_right_compressed_with_traceback_optimal(
+    query: &[u8],
+    subject: &[u8],
+    subject_length: i32,
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    x_drop: i32,
+    edit_script: &mut JumperPrelimEditBlock,
+    best_num_identical: &mut i32,
+    left_extension: bool,
+    ungapped_ext_len: &mut i32,
+) -> (i32, i32, i32) {
+    if query.is_empty() || subject.is_empty() || subject_length <= 0 {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = 1;
+    let mut cq = 1;
+    let mut cpstop = 0;
+    let mut cqstop = 0;
+    let mut num_mismatches = 0;
+    let mut new_matches = if left_extension { 0 } else { 1 };
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+    let mut is_ungapped = true;
+    let mut score = 0;
+    let mut best_score = 0;
+    let mut num_ops = 0usize;
+    let mut num_identical = *best_num_identical;
+    let mut last_gap_open = 0;
+
+    while cp < query.len() as i32 && cq < subject_length && num_mismatches < max_mismatches {
+        if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
+            cp += 1;
+            cq += 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump =
+            jumper_find_right_compressed(query, subject, subject_length, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            edit_script.edit_ops.push(new_matches);
+            jumper_shift_trace(&mut trace, new_matches, window);
+            num_identical += new_matches;
+            score += new_matches * match_score;
+            new_matches = 0;
+            last_gap_open = 0;
+        }
+
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            num_ops = edit_script.edit_ops.len();
+            best_score = score;
+            *best_num_identical = num_identical;
+        }
+        if best_score - score > x_drop {
+            break;
+        }
+
+        if jump.dcp == jump.dcq {
+            score += jump.dcp * mismatch_score;
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+            for _ in 0..jump.dcp {
+                edit_script.edit_ops.push(JUMPER_MISMATCH);
+            }
+        } else if jump.dcp > jump.dcq {
+            for _ in 0..(jump.dcp - jump.dcq) {
+                edit_script.edit_ops.push(JUMPER_INSERTION);
+                score += gap_extend_score;
+            }
+            if last_gap_open != JUMPER_INSERTION {
+                score += gap_open_score;
+            }
+            last_gap_open = JUMPER_INSERTION;
+        } else {
+            for _ in 0..(jump.dcq - jump.dcp) {
+                edit_script.edit_ops.push(JUMPER_DELETION);
+                score += gap_extend_score;
+            }
+            if last_gap_open != JUMPER_DELETION {
+                score += gap_open_score;
+            }
+            last_gap_open = JUMPER_DELETION;
+        }
+
+        if is_ungapped && jump.dcp != jump.dcq {
+            *ungapped_ext_len = cp - 1;
+            is_ungapped = false;
+        }
+
+        cp += jump.dcp;
+        cq += jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            cp += jump.lng;
+            cq += jump.lng;
+            edit_script.edit_ops.push(jump.lng);
+            trace = trace.wrapping_shl(jump.lng as u32);
+            num_identical += jump.lng;
+            score += jump.lng * match_score;
+            last_gap_open = 0;
+        }
+
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            num_ops = edit_script.edit_ops.len();
+            best_score = score;
+            *best_num_identical = num_identical;
+        }
+    }
+
+    if new_matches != 0 {
+        edit_script.edit_ops.push(new_matches);
+        num_identical += new_matches;
+        score += new_matches;
+    }
+
+    if score >= best_score {
+        cpstop = cp;
+        cqstop = cq;
+        num_ops = edit_script.edit_ops.len();
+        best_score = score;
+        *best_num_identical = num_identical;
+    }
+
+    edit_script.edit_ops.truncate(num_ops);
+    if is_ungapped {
+        *ungapped_ext_len = cpstop;
+    }
+
+    (best_score, cpstop, cqstop)
+}
+
+/// Port of NCBI `JumperExtendLeftCompressedWithTracebackOptimal` (`jumper.c:2110`).
+pub fn jumper_extend_left_compressed_with_traceback_optimal(
+    query: &[u8],
+    subject: &[u8],
+    query_offset: i32,
+    subject_offset: i32,
+    match_score: i32,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+    max_mismatches: i32,
+    window: i32,
+    x_drop: i32,
+    edit_script: &mut JumperPrelimEditBlock,
+    best_num_identical: &mut i32,
+) -> (i32, i32, i32) {
+    if query.is_empty()
+        || subject.is_empty()
+        || query_offset < 0
+        || subject_offset < 0
+        || query_offset as usize >= query.len()
+    {
+        return (-1, 0, 0);
+    }
+
+    let mut cp = query_offset;
+    let mut cq = subject_offset;
+    let mut cpstop = query_offset;
+    let mut cqstop = subject_offset;
+    let mut num_mismatches = 0;
+    let mut new_matches = 0;
+    let mut trace = 0u32;
+    let trace_mask = jumper_trace_mask(max_mismatches);
+    let mut score = 0;
+    let mut best_score = 0;
+    let mut num_ops = 0usize;
+    let mut num_identical = *best_num_identical;
+    let mut last_gap_open = 0;
+
+    while cp >= 0 && cq >= 0 && num_mismatches < max_mismatches {
+        if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
+            cp -= 1;
+            cq -= 1;
+            new_matches += 1;
+            continue;
+        }
+
+        let jump = jumper_find_left_compressed(query, subject, cp, cq, &JUMPER_DEFAULT);
+        if new_matches != 0 {
+            edit_script.edit_ops.push(new_matches);
+            jumper_shift_trace(&mut trace, new_matches, window);
+            num_identical += new_matches;
+            score += new_matches * match_score;
+            new_matches = 0;
+            last_gap_open = 0;
+        }
+
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            best_score = score;
+            num_ops = edit_script.edit_ops.len();
+            *best_num_identical = num_identical;
+        }
+        if best_score - score > x_drop {
+            break;
+        }
+
+        if jump.dcp == jump.dcq {
+            score += jump.dcp * mismatch_score;
+            if trace & trace_mask != 0 {
+                num_mismatches += jump.dcp;
+                trace = trace.wrapping_shl(jump.dcp as u32);
+                trace |= (1u32 << jump.dcp) - 1;
+            } else {
+                num_mismatches = jump.dcp;
+                trace = (1u32 << jump.dcp) - 1;
+            }
+            for _ in 0..jump.dcp {
+                edit_script.edit_ops.push(JUMPER_MISMATCH);
+            }
+        } else if jump.dcp > jump.dcq {
+            for _ in 0..(jump.dcp - jump.dcq) {
+                edit_script.edit_ops.push(JUMPER_INSERTION);
+                score += gap_extend_score;
+            }
+            if last_gap_open != JUMPER_INSERTION {
+                score += gap_open_score;
+            }
+            last_gap_open = JUMPER_INSERTION;
+        } else {
+            for _ in 0..(jump.dcq - jump.dcp) {
+                edit_script.edit_ops.push(JUMPER_DELETION);
+                score += gap_extend_score;
+            }
+            if last_gap_open != JUMPER_DELETION {
+                score += gap_open_score;
+            }
+            last_gap_open = JUMPER_DELETION;
+        }
+
+        cp -= jump.dcp;
+        cq -= jump.dcq;
+
+        if jump.ok == 0 && jump.lng != 0 {
+            cp -= jump.lng;
+            cq -= jump.lng;
+            edit_script.edit_ops.push(jump.lng);
+            trace = trace.wrapping_shl(jump.lng as u32);
+            num_identical += jump.lng;
+            score += jump.lng * match_score;
+            last_gap_open = 0;
+        }
+
+        if score >= best_score {
+            cpstop = cp;
+            cqstop = cq;
+            best_score = score;
+            num_ops = edit_script.edit_ops.len();
+            *best_num_identical = num_identical;
+        }
+    }
+
+    if new_matches != 0 {
+        edit_script.edit_ops.push(new_matches);
+        num_identical += new_matches;
+        score += new_matches * match_score;
+    }
+
+    if score >= best_score {
+        cpstop = cp;
+        cqstop = cq;
+        best_score = score;
+        num_ops = edit_script.edit_ops.len();
+        *best_num_identical = num_identical;
+    }
+
+    edit_script.edit_ops.truncate(num_ops);
+    (best_score, query_offset - cpstop, subject_offset - cqstop)
+}
+
+/// Port-shaped Rust equivalent of NCBI `JumperGappedAlignmentCompressedWithTraceback`
+/// (`jumper.c:2512`).
+#[allow(clippy::too_many_arguments)]
+pub fn jumper_gapped_alignment_compressed_with_traceback(
+    query: &[u8],
+    subject: &[u8],
+    query_length: i32,
+    subject_length: i32,
+    query_start: i32,
+    subject_start: i32,
+    jumper: &mut JumperGapAlign,
+    score_params: &crate::parameters::ScoringParameters,
+    align_params: JumperAlignParams,
+    num_identical: &mut i32,
+    right_ungapped_ext_len: &mut i32,
+) -> i32 {
+    if query_start < 0
+        || subject_start < 0
+        || query_length <= 0
+        || subject_length <= 0
+        || query_start >= query_length
+        || subject_start >= subject_length
+    {
+        return -1;
+    }
+
+    *num_identical = 0;
+    *right_ungapped_ext_len = 0;
+    jumper
+        .left_prelim_block
+        .get_or_insert_with(JumperPrelimEditBlock::default)
+        .edit_ops
+        .clear();
+    jumper
+        .right_prelim_block
+        .get_or_insert_with(JumperPrelimEditBlock::default)
+        .edit_ops
+        .clear();
+
+    let mut score_left = 0;
+    let mut score_right = 0;
+    let mut left_ext_done = false;
+    let offset_adjustment = 4 - (subject_start % 4);
+    let q_length = query_start + offset_adjustment;
+    let s_length = subject_start + offset_adjustment;
+
+    let mut query_align_start = query_start;
+    let mut subject_align_start = subject_start;
+    let mut query_align_stop = query_start;
+    let mut subject_align_stop = subject_start;
+
+    if query_start > 0 && subject_start > 0 && q_length < query_length && s_length < subject_length
+    {
+        let rev_prelim_block = jumper
+            .left_prelim_block
+            .as_mut()
+            .expect("left block initialized above");
+        let (score, q_ext_len, s_ext_len) = jumper_extend_left_compressed_with_traceback_optimal(
+            query,
+            subject,
+            q_length,
+            s_length,
+            score_params.reward,
+            score_params.penalty,
+            -score_params.gap_open,
+            -score_params.gap_extend,
+            align_params.max_mismatches,
+            align_params.mismatch_window,
+            align_params.gap_x_dropoff,
+            rev_prelim_block,
+            num_identical,
+        );
+        score_left = score;
+        query_align_start = q_length - q_ext_len + 1;
+        subject_align_start = s_length - s_ext_len + 1;
+        left_ext_done = true;
+    }
+
+    if query_start < query_length - 1 && subject_start < subject_length - 1 {
+        let subject_byte = ((s_length + 3) / 4).max(0) as usize;
+        let subject_right = subject.get(subject_byte..).unwrap_or(&[]);
+        let query_right = query.get(q_length.max(0) as usize..).unwrap_or(&[]);
+        let fwd_prelim_block = jumper
+            .right_prelim_block
+            .as_mut()
+            .expect("right block initialized above");
+        let (score, q_ext_len, s_ext_len) = jumper_extend_right_compressed_with_traceback_optimal(
+            query_right,
+            subject_right,
+            subject_length - s_length,
+            score_params.reward,
+            score_params.penalty,
+            -score_params.gap_open,
+            -score_params.gap_extend,
+            align_params.max_mismatches,
+            align_params.mismatch_window,
+            align_params.gap_x_dropoff,
+            fwd_prelim_block,
+            num_identical,
+            left_ext_done,
+            right_ungapped_ext_len,
+        );
+        score_right = score;
+        query_align_stop = q_length + q_ext_len;
+        subject_align_stop = s_length + s_ext_len;
+    }
+
+    let mut score = score_left + score_right;
+    if offset_adjustment != 0 && !left_ext_done {
+        if let Some(block) = jumper.left_prelim_block.as_mut() {
+            block.edit_ops.push(offset_adjustment);
+        }
+        *num_identical += offset_adjustment;
+        score += offset_adjustment * score_params.reward;
+    }
+    if offset_adjustment != 0 && *right_ungapped_ext_len != 0 {
+        *right_ungapped_ext_len += offset_adjustment;
+    }
+
+    const K_BASE_N: u8 = 14;
+    let start = query_align_start.max(0) as usize;
+    let stop = query_align_stop.max(query_align_start).min(query_length) as usize;
+    for &base in query.get(start..stop).unwrap_or(&[]) {
+        if base == K_BASE_N {
+            score -= score_params.penalty;
+        }
+    }
+
+    jumper.table.clear();
+    jumper.table.extend_from_slice(&[
+        score as u32,
+        query_align_start as u32,
+        query_align_stop as u32,
+        subject_align_start as u32,
+        subject_align_stop as u32,
+    ]);
+    0
+}
+
+fn jumper_lookup_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
+    match lookup_wrap {
+        crate::lookup::LookupTableWrap::SmallNa(table) => {
+            Some((table.word_length, table.word_length.min(8)))
+        }
+        crate::lookup::LookupTableWrap::Megablast(table) => {
+            if table.discontiguous {
+                let template_length = table.template_length.max(table.word_length);
+                Some((template_length, template_length))
+            } else {
+                Some((table.word_length, table.lut_word_length))
+            }
+        }
+        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => None,
+    }
+}
+
+fn jumper_alignment_outputs(jumper: &JumperGapAlign) -> Option<(i32, i32, i32, i32, i32)> {
+    let data = &jumper.table;
+    if data.len() < 5 {
+        return None;
+    }
+    Some((
+        data[0] as i32,
+        data[1] as i32,
+        data[2] as i32,
+        data[3] as i32,
+        data[4] as i32,
+    ))
+}
+
+fn packed_subject_word(
+    subject: &[u8],
+    subject_length: i32,
+    s_off: i32,
+    word_size: i32,
+) -> Option<i64> {
+    if s_off < 0 || word_size <= 0 || s_off + word_size > subject_length {
+        return None;
+    }
+    let mut word = 0i64;
+    for i in 0..word_size {
+        word = (word << 2) | crate::encoding::ncbi2na_base_at(subject, (s_off + i) as usize) as i64;
+    }
+    Some(word)
+}
+
+fn jumper_collect_word_hits_in_ranges(
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    subject: &[u8],
+    subject_length: i32,
+    word_length: i32,
+    lut_word_length: i32,
+    subject_ranges: Option<&[crate::util::SSeqRange]>,
+) -> Vec<crate::lookup::OffsetPair> {
+    let mut offset_pairs = Vec::new();
+    if subject_length <= 0 || word_length <= 0 || lut_word_length <= 0 {
+        return offset_pairs;
+    }
+    let scan_ranges: Vec<(i32, i32)> = if let Some(ranges) = subject_ranges {
+        ranges
+            .iter()
+            .map(|range| {
+                (
+                    range.left + word_length - lut_word_length,
+                    range.right - lut_word_length,
+                )
+            })
+            .collect()
+    } else {
+        vec![(0, subject_length - lut_word_length)]
+    };
+
+    match lookup_wrap {
+        crate::lookup::LookupTableWrap::Megablast(lookup) => {
+            if lookup.discontiguous {
+                for (start, end) in &scan_ranges {
+                    if start > end {
+                        continue;
+                    }
+                    offset_pairs.extend(crate::lookup::s_mb_disc_word_scan_subject(
+                        lookup,
+                        subject,
+                        subject_length.max(0) as usize,
+                        (*start).max(0) as usize,
+                        (*end).max(0) as usize,
+                    ));
+                }
+                return offset_pairs;
+            }
+            let lut_word = lut_word_length.max(1);
+            for (start, end) in &scan_ranges {
+                if start > end {
+                    continue;
+                }
+                for s_off in (*start).max(0)..=(*end).min(subject_length - lut_word) {
+                    if let Some(index) =
+                        packed_subject_word(subject, subject_length, s_off, lut_word)
+                    {
+                        crate::lookup::s_blast_mb_lookup_retrieve(
+                            lookup,
+                            index,
+                            &mut offset_pairs,
+                            s_off,
+                        );
+                    }
+                }
+            }
+        }
+        crate::lookup::LookupTableWrap::SmallNa(lookup) => {
+            let lut_word = lut_word_length.max(1);
+            let na_lookup = crate::lookup::BlastNaLookupTable {
+                mask: (1i32 << (2 * lut_word)) - 1,
+                word_length: lookup.word_length,
+                lut_word_length: lut_word,
+                scan_step: lookup.scan_step,
+                backbone_size: lookup.backbone.len() as i32,
+                longest_chain: lookup.longest_chain,
+                thick_backbone: lookup
+                    .backbone
+                    .iter()
+                    .map(|&q_off| crate::lookup::NaLookupBackboneCell {
+                        num_used: (q_off != 0) as i32,
+                        entries: [q_off, 0, 0],
+                        overflow_cursor: 0,
+                    })
+                    .collect(),
+                overflow: lookup.overflow.clone(),
+                overflow_size: lookup.overflow.len() as i32,
+                pv: lookup.pv_array.clone(),
+            };
+            for (start, end) in &scan_ranges {
+                if start > end {
+                    continue;
+                }
+                for s_off in (*start).max(0)..=(*end).min(subject_length - lut_word) {
+                    if let Some(index) =
+                        packed_subject_word(subject, subject_length, s_off, lut_word)
+                    {
+                        crate::lookup::s_blast_lookup_retrieve(
+                            &na_lookup,
+                            index as i32,
+                            &mut offset_pairs,
+                            s_off,
+                        );
+                    }
+                }
+            }
+        }
+        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {}
+    }
+    offset_pairs
+}
+
+/// Port-shaped Rust equivalent of NCBI `BlastNaExtendJumper` (`jumper.c:3253`).
+///
+/// This is the mapper/short-read driver around the already translated Jumper
+/// extension primitives: it sorts word hits by diagonal/query/subject, performs
+/// C's exact left/right pre-extension to the full word length, skips already
+/// explored diagonal spans, runs compressed Jumper traceback, applies
+/// `JumperGoodAlign`, and saves accepted HSPs. The optional `SubjectIndex`
+/// enables the environment-controlled small-word rescue branch.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_na_extend_jumper(
+    offset_pairs: &mut [crate::lookup::OffsetPair],
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    query: &[u8],
+    subject: &[u8],
+    subject_length: i32,
+    subject_frame: i32,
+    query_info: &crate::queryinfo::QueryInfo,
+    align_params: JumperAlignParams,
+    jumper: &mut JumperGapAlign,
+    hsp_list: &mut crate::hspstream::HspList,
+    s_range: u32,
+    subject_index: Option<&SubjectIndex>,
+) -> i32 {
+    let _ = word_params;
+    let Some((word_length, lut_word_length)) = jumper_lookup_lengths(lookup_wrap) else {
+        return -1;
+    };
+    let ext_to = word_length - lut_word_length;
+    let mut hits_extended = 0;
+    let mut skip_until = 0;
+    let mut last_diag = 0;
+
+    offset_pairs.sort_by(|a, b| {
+        let a_diag = a.subject_offset - a.query_offset;
+        let b_diag = b.subject_offset - b.query_offset;
+        a_diag
+            .cmp(&b_diag)
+            .then_with(|| a.query_offset.cmp(&b.query_offset))
+            .then_with(|| a.subject_offset.cmp(&b.subject_offset))
+    });
+
+    for pair in offset_pairs.iter().copied() {
+        let mut s_offset = pair.subject_offset;
+        let mut q_offset = pair.query_offset;
+        let diag = s_offset - q_offset;
+        if diag == last_diag && q_offset < skip_until {
+            continue;
+        }
+
+        let mut ext_left = 0;
+        while ext_left < ext_to && ext_left < s_offset && q_offset - ext_left > 0 {
+            let probe_s = s_offset - ext_left - 1;
+            let probe_q = q_offset - ext_left - 1;
+            if crate::encoding::ncbi2na_base_at(subject, probe_s as usize)
+                != query.get(probe_q as usize).copied().unwrap_or(0xff)
+            {
+                break;
+            }
+            ext_left += 1;
+        }
+
+        if ext_left < ext_to {
+            let mut ext_right = 0;
+            let mut s_off = s_offset + lut_word_length;
+            if s_off + ext_to - ext_left > s_range as i32 {
+                continue;
+            }
+            let mut q_off = q_offset + lut_word_length;
+            while ext_right < ext_to - ext_left {
+                if crate::encoding::ncbi2na_base_at(subject, s_off as usize)
+                    != query.get(q_off as usize).copied().unwrap_or(0xff)
+                {
+                    break;
+                }
+                s_off += 1;
+                q_off += 1;
+                ext_right += 1;
+            }
+            if ext_left + ext_right < ext_to {
+                continue;
+            }
+        }
+
+        q_offset -= ext_left;
+        s_offset -= ext_left;
+
+        let context = crate::queryinfo::bsearch_context_info(q_offset, query_info);
+        let Some(context_info) = query_info.contexts.get(context.max(0) as usize) else {
+            continue;
+        };
+        let query_start = context_info.query_offset;
+        let local_q_offset = q_offset - query_start;
+        if local_q_offset < 0 {
+            continue;
+        }
+        let query_len = context_info.query_length;
+        let query_slice = query
+            .get(query_start.max(0) as usize..)
+            .and_then(|slice| slice.get(..query_len.max(0) as usize))
+            .unwrap_or(&[]);
+        let mut num_identical = 0;
+        let mut right_ungapped_ext_len = 0;
+
+        let status = jumper_gapped_alignment_compressed_with_traceback(
+            query_slice,
+            subject,
+            query_len,
+            subject_length,
+            local_q_offset,
+            s_offset,
+            jumper,
+            score_params,
+            align_params,
+            &mut num_identical,
+            &mut right_ungapped_ext_len,
+        );
+        if status != 0 {
+            continue;
+        }
+        hits_extended += 1;
+        skip_until = local_q_offset + query_start + right_ungapped_ext_len;
+        last_diag = diag;
+
+        let Some((
+            score,
+            query_align_start,
+            query_align_stop,
+            subject_align_start,
+            subject_align_stop,
+        )) = jumper_alignment_outputs(jumper)
+        else {
+            continue;
+        };
+        if !jumper_good_align(
+            score,
+            query_align_start,
+            query_align_stop,
+            subject_align_start,
+            subject_align_stop,
+            num_identical,
+            &hit_params.options,
+            query_len,
+        ) {
+            continue;
+        }
+
+        let Some((new_hsp, _map_info)) = s_create_hsp(
+            query_slice,
+            query_len,
+            context,
+            context_info.frame,
+            subject,
+            subject_length,
+            subject_frame,
+            jumper,
+            query_align_start,
+            query_align_stop,
+            subject_align_start,
+            subject_align_stop,
+            score,
+            score_params.penalty,
+            hit_params.options.splice,
+        ) else {
+            return -1;
+        };
+        let saved_hsp = new_hsp.clone();
+        let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+        if status != 0 {
+            break;
+        }
+
+        if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
+            const SUBJECT_INDEX_WORD_LENGTH: i32 = 4;
+            const K_MIN_SUBJECT_OVERHANG: i32 = 100;
+            if let Some(s_index) = subject_index {
+                if query_len - saved_hsp.query_end < 16
+                    && query_len - saved_hsp.query_end >= SUBJECT_INDEX_WORD_LENGTH
+                    && subject_length - saved_hsp.subject_end >= K_MIN_SUBJECT_OVERHANG
+                    && query_len - saved_hsp.query_end < -score_params.penalty
+                {
+                    let mut i = 1;
+                    while i < query_len - saved_hsp.query_end {
+                        if query_slice[(saved_hsp.query_end + i) as usize]
+                            != crate::encoding::ncbi2na_base_at(
+                                subject,
+                                (saved_hsp.subject_end + i) as usize,
+                            )
+                        {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if i > SUBJECT_INDEX_WORD_LENGTH || i == query_len - saved_hsp.query_end {
+                        if let Some((word_hsp, _)) = s_create_hsp_for_word_hit(
+                            saved_hsp.query_end + 1,
+                            saved_hsp.subject_end + 1,
+                            i - 1,
+                            context,
+                            query_slice,
+                            context_info.frame,
+                            subject,
+                            subject_length,
+                            subject_frame,
+                            query_len,
+                        ) {
+                            let _ = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, word_hsp);
+                        }
+                    }
+                }
+
+                let _ = s_index;
+            }
+        }
+    }
+
+    hits_extended
+}
+
+/// Port-shaped Rust equivalent of NCBI `JumperNaWordFinder`
+/// (`na_ungapped.c:1995`) for the represented contiguous lookup-table path.
+///
+/// C obtains hits by dispatching through the selected `scansub_callback`; Rust
+/// performs the same represented work directly for the current typed
+/// `LookupTableWrap`, then delegates all hit extension and HSP saving to
+/// [`blast_na_extend_jumper`].
+#[allow(clippy::too_many_arguments)]
+pub fn jumper_na_word_finder(
+    subject: &[u8],
+    subject_length: i32,
+    subject_frame: i32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    jumper: &mut JumperGapAlign,
+    hsp_list: &mut crate::hspstream::HspList,
+) -> i16 {
+    jumper_na_word_finder_with_word_hits(
+        subject,
+        subject_length,
+        subject_frame,
+        query,
+        query_info,
+        lookup_wrap,
+        word_params,
+        score_params,
+        hit_params,
+        align_params,
+        jumper,
+        hsp_list,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Variant of [`jumper_na_word_finder_with_word_hits`] that takes subject
+/// unmasked ranges, matching the `subject->mask_type != eNoSubjMasking` branch
+/// of NCBI `JumperNaWordFinder`.
+#[allow(clippy::too_many_arguments)]
+pub fn jumper_na_word_finder_with_subject_ranges(
+    subject: &[u8],
+    subject_length: i32,
+    subject_frame: i32,
+    subject_ranges: &[crate::util::SSeqRange],
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    jumper: &mut JumperGapAlign,
+    hsp_list: &mut crate::hspstream::HspList,
+    word_hits: Option<&mut crate::lookup::MapperWordHits>,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
+) -> i16 {
+    jumper_na_word_finder_impl(
+        subject,
+        subject_length,
+        subject_frame,
+        Some(subject_ranges),
+        query,
+        query_info,
+        lookup_wrap,
+        word_params,
+        score_params,
+        hit_params,
+        align_params,
+        jumper,
+        hsp_list,
+        word_hits,
+        ungapped_stats,
+        gapped_stats,
+    )
+}
+
+fn mapper_word_hits_flush(
+    word_hits: &mut crate::lookup::MapperWordHits,
+    index: usize,
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    query: &[u8],
+    subject: &[u8],
+    subject_length: i32,
+    subject_frame: i32,
+    query_info: &crate::queryinfo::QueryInfo,
+    align_params: JumperAlignParams,
+    jumper: &mut JumperGapAlign,
+    hsp_list: &mut crate::hspstream::HspList,
+    s_range: u32,
+    subject_index: Option<&SubjectIndex>,
+) -> i32 {
+    let num = word_hits.num.get(index).copied().unwrap_or(0).max(0) as usize;
+    if num == 0 {
+        return 0;
+    }
+    let Some(pair_array) = word_hits.pair_arrays.get_mut(index) else {
+        return -1;
+    };
+    let extended = blast_na_extend_jumper(
+        &mut pair_array[..num],
+        word_params,
+        score_params,
+        hit_params,
+        lookup_wrap,
+        query,
+        subject,
+        subject_length,
+        subject_frame,
+        query_info,
+        align_params,
+        jumper,
+        hsp_list,
+        s_range,
+        subject_index,
+    );
+    word_hits.num[index] = 0;
+    extended
+}
+
+/// Port-shaped Rust equivalent of NCBI `JumperNaWordFinder`
+/// (`na_ungapped.c:1995`) including the optional `MapperWordHits` batching
+/// branch used by mapper searches.
+///
+/// When `word_hits` is present, this mirrors C's per-query-bucket batching:
+/// duplicate adjacent hits on the same diagonal are suppressed before batching,
+/// full buckets are extended immediately, and remaining buckets are flushed at
+/// the end. When `word_hits` is absent, this behaves like
+/// [`jumper_na_word_finder`].
+#[allow(clippy::too_many_arguments)]
+pub fn jumper_na_word_finder_with_word_hits(
+    subject: &[u8],
+    subject_length: i32,
+    subject_frame: i32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    jumper: &mut JumperGapAlign,
+    hsp_list: &mut crate::hspstream::HspList,
+    word_hits: Option<&mut crate::lookup::MapperWordHits>,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
+) -> i16 {
+    jumper_na_word_finder_impl(
+        subject,
+        subject_length,
+        subject_frame,
+        None,
+        query,
+        query_info,
+        lookup_wrap,
+        word_params,
+        score_params,
+        hit_params,
+        align_params,
+        jumper,
+        hsp_list,
+        word_hits,
+        ungapped_stats,
+        gapped_stats,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn jumper_na_word_finder_impl(
+    subject: &[u8],
+    subject_length: i32,
+    subject_frame: i32,
+    subject_ranges: Option<&[crate::util::SSeqRange]>,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    jumper: &mut JumperGapAlign,
+    hsp_list: &mut crate::hspstream::HspList,
+    word_hits: Option<&mut crate::lookup::MapperWordHits>,
+    mut ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
+) -> i16 {
+    if subject_length <= 0 {
+        return 0;
+    }
+    let Some((word_length, lut_word_length)) = jumper_lookup_lengths(lookup_wrap) else {
+        return -1;
+    };
+    if subject_length < lut_word_length {
+        return 0;
+    }
+    let mut offset_pairs = jumper_collect_word_hits_in_ranges(
+        lookup_wrap,
+        subject,
+        subject_length,
+        word_length,
+        lut_word_length,
+        subject_ranges,
+    );
+    if offset_pairs.is_empty() {
+        return 0;
+    }
+    let s_range = (subject_length - lut_word_length) as u32 + lut_word_length as u32;
+
+    let subject_index = if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
+        subject_index_new(subject, subject_length, 10000, 4)
+    } else {
+        None
+    };
+    let subject_index_ref = subject_index.as_ref();
+    let mut total_hits = 0;
+    let mut hits_extended = 0;
+
+    if let Some(word_hits) = word_hits {
+        for value in &mut word_hits.num {
+            *value = 0;
+        }
+        for value in &mut word_hits.last_pos {
+            *value = 0;
+        }
+
+        for pair in offset_pairs {
+            let q_off = pair.query_offset;
+            let s_off = pair.subject_offset;
+            let context = crate::queryinfo::bsearch_context_info(q_off, query_info);
+            let context_index = context.max(0) as usize;
+            if context_index >= word_hits.last_diag.len()
+                || context_index >= word_hits.last_pos.len()
+            {
+                continue;
+            }
+            let diag = s_off - q_off;
+            let last_d = word_hits.last_diag[context_index];
+            let last_p = word_hits.last_pos[context_index];
+            word_hits.last_diag[context_index] = diag;
+            word_hits.last_pos[context_index] = s_off;
+            if last_p != 0 && last_d == diag && s_off - last_p < lut_word_length + 1 {
+                continue;
+            }
+
+            if word_hits.divisor <= 0 {
+                return -1;
+            }
+            let index = (q_off / word_hits.divisor) as usize;
+            if index >= word_hits.num_arrays.max(0) as usize || index >= word_hits.pair_arrays.len()
+            {
+                return -1;
+            }
+            if word_hits.num[index] >= word_hits.array_size {
+                let extended = mapper_word_hits_flush(
+                    word_hits,
+                    index,
+                    word_params,
+                    score_params,
+                    hit_params,
+                    lookup_wrap,
+                    query,
+                    subject,
+                    subject_length,
+                    subject_frame,
+                    query_info,
+                    align_params,
+                    jumper,
+                    hsp_list,
+                    s_range,
+                    subject_index_ref,
+                );
+                if extended < 0 {
+                    return -1;
+                }
+                hits_extended += extended;
+            }
+
+            let slot = word_hits.num[index].max(0) as usize;
+            if slot < word_hits.pair_arrays[index].len() {
+                word_hits.pair_arrays[index][slot] = pair;
+            } else {
+                word_hits.pair_arrays[index].push(pair);
+            }
+            word_hits.num[index] += 1;
+        }
+
+        for index in 0..word_hits.num_arrays.max(0) as usize {
+            let extended = mapper_word_hits_flush(
+                word_hits,
+                index,
+                word_params,
+                score_params,
+                hit_params,
+                lookup_wrap,
+                query,
+                subject,
+                subject_length,
+                subject_frame,
+                query_info,
+                align_params,
+                jumper,
+                hsp_list,
+                s_range,
+                subject_index_ref,
+            );
+            if extended < 0 {
+                return -1;
+            }
+            hits_extended += extended;
+        }
+    } else {
+        total_hits += offset_pairs.len() as i32;
+        hits_extended += blast_na_extend_jumper(
+            &mut offset_pairs,
+            word_params,
+            score_params,
+            hit_params,
+            lookup_wrap,
+            query,
+            subject,
+            subject_length,
+            subject_frame,
+            query_info,
+            align_params,
+            jumper,
+            hsp_list,
+            s_range,
+            subject_index_ref,
+        );
+    }
+
+    crate::diagnostics::blast_ungapped_stats_update(
+        ungapped_stats.as_deref_mut(),
+        total_hits,
+        0,
+        0,
+    );
+    if let Some(gapped_stats) = gapped_stats {
+        gapped_stats.extensions = hits_extended;
+        if let Some(ungapped_stats) = ungapped_stats.as_deref_mut() {
+            ungapped_stats.good_init_extends = hits_extended;
+        }
+    }
+    0
+}
+
+fn unpacked_query_word(query: &[u8], start: i32, word_size: i32) -> Option<u32> {
+    if start < 0 || word_size <= 0 || start + word_size > query.len() as i32 {
+        return None;
+    }
+    let mut word = 0u32;
+    for i in 0..word_size {
+        let base = query[(start + i) as usize];
+        if base & 0xfc != 0 {
+            return None;
+        }
+        word = (word << 2) | base as u32;
+    }
+    Some(word)
+}
+
+/// Port-shaped Rust equivalent of NCBI static `DoAnchoredScan`
+/// (`jumper.c:4139`).
+#[allow(clippy::too_many_arguments)]
+pub fn do_anchored_scan(
+    query_seq: &[u8],
+    query_len: i32,
+    query_from: i32,
+    context: i32,
+    subject: &[u8],
+    subject_len: i32,
+    subject_frame: i32,
+    subject_from: i32,
+    subject_to: i32,
+    query_info: &crate::queryinfo::QueryInfo,
+    jumper: &mut JumperGapAlign,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    hsp_list: &mut crate::hspstream::HspList,
+) -> i32 {
+    const WORD_SIZE: i32 = 12;
+    const MAX_NUM_MATCHES: usize = 100;
+    let is_right = subject_from < subject_to;
+    let big_word_size = if is_right {
+        (query_len - query_from - 5).max(WORD_SIZE).min(24)
+    } else {
+        (query_from - 5).max(WORD_SIZE).min(24)
+    };
+    let scan_step = if is_right {
+        big_word_size - WORD_SIZE + 1
+    } else {
+        -(big_word_size - WORD_SIZE + 1)
+    };
+    let scan_to = if is_right {
+        subject_to.min(subject_len - 1)
+    } else {
+        subject_to
+    };
+
+    if (is_right
+        && (query_len - query_from + 1 < big_word_size || scan_to - subject_from < big_word_size))
+        || (!is_right && (query_from < big_word_size || subject_from - scan_to < big_word_size))
+    {
+        return 0;
+    }
+
+    let mut words = Vec::<(u32, i32)>::new();
+    if is_right {
+        let mut q = query_from;
+        while q + big_word_size < query_len && words.len() < MAX_NUM_MATCHES {
+            while q + big_word_size <= query_len {
+                let mut ok = true;
+                for i in 0..big_word_size {
+                    if query_seq[(q + i) as usize] & 0xfc != 0 {
+                        q += i + 1;
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    break;
+                }
+                q += 1;
+            }
+            if q + big_word_size - 1 >= query_len {
+                break;
+            }
+            if let Some(word) = unpacked_query_word(query_seq, q, WORD_SIZE) {
+                if word != 0 && word != 0x00ff_ffff {
+                    words.push((word, q));
+                }
+            }
+            q += 1;
+        }
+    } else {
+        let mut q = query_from - big_word_size;
+        while q >= 0 && words.len() < MAX_NUM_MATCHES {
+            while q >= 0 {
+                let mut ok = true;
+                for i in 0..big_word_size {
+                    if query_seq[(q + i) as usize] & 0xfc != 0 {
+                        q = q - big_word_size + i;
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    break;
+                }
+                q -= 1;
+            }
+            if q < 0 {
+                break;
+            }
+            if let Some(word) = unpacked_query_word(query_seq, q, WORD_SIZE) {
+                if word != 0 && word != 0x00ff_ffff {
+                    words.push((word, q));
+                }
+            }
+            q -= 1;
+        }
+    }
+
+    if words.is_empty() {
+        return 0;
+    }
+
+    let mut best_score = 0;
+    let mut best_hsp = None;
+    let mut i = subject_from;
+    while (subject_from < scan_to && i < scan_to) || (subject_from > scan_to && i > scan_to) {
+        let Some(index) = packed_subject_word(subject, subject_len, i, WORD_SIZE) else {
+            i += scan_step;
+            continue;
+        };
+        let Some((_, q_offset)) = words
+            .iter()
+            .find(|(word, _)| *word as i64 == index)
+            .copied()
+        else {
+            i += scan_step;
+            continue;
+        };
+        let mut k = WORD_SIZE;
+        while k < big_word_size {
+            if query_seq[(q_offset + k) as usize]
+                != crate::encoding::ncbi2na_base_at(subject, (i + k) as usize)
+            {
+                break;
+            }
+            k += 1;
+        }
+        if k < big_word_size {
+            i += scan_step;
+            continue;
+        }
+
+        let mut num_identical = 0;
+        let mut right_ungapped_ext_len = 0;
+        if jumper_gapped_alignment_compressed_with_traceback(
+            query_seq,
+            subject,
+            query_len,
+            subject_len,
+            q_offset,
+            i,
+            jumper,
+            score_params,
+            align_params,
+            &mut num_identical,
+            &mut right_ungapped_ext_len,
+        ) != 0
+        {
+            i += scan_step;
+            continue;
+        }
+        let Some((
+            score,
+            query_align_start,
+            query_align_stop,
+            subject_align_start,
+            subject_align_stop,
+        )) = jumper_alignment_outputs(jumper)
+        else {
+            i += scan_step;
+            continue;
+        };
+        if score > best_score {
+            best_score = score;
+            let query_frame = query_info
+                .contexts
+                .get(context.max(0) as usize)
+                .map_or(0, |ctx| ctx.frame);
+            if let Some((hsp, _)) = s_create_hsp(
+                query_seq,
+                query_len,
+                context,
+                query_frame,
+                subject,
+                subject_len,
+                subject_frame,
+                jumper,
+                query_align_start,
+                query_align_stop,
+                subject_align_start,
+                subject_align_stop,
+                score,
+                score_params.penalty,
+                hit_params.options.splice,
+            ) {
+                if hsp.score >= query_len - query_from {
+                    best_hsp = Some(hsp);
+                    break;
+                }
+                best_hsp = Some(hsp);
+            }
+        }
+
+        i += scan_step;
+    }
+
+    if let Some(hsp) = best_hsp {
+        let _ = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, hsp);
+        1
+    } else {
+        0
+    }
+}
+
+/// Port-shaped Rust equivalent of NCBI static `DoAnchoredSearch`
+/// (`jumper.c:4394`).
+///
+/// C pulls partially covered mapper chains from the stream writer state, runs
+/// `DoAnchoredScan` on uncovered query flanks, and writes a subject HSP list
+/// back to the stream. Rust takes the mapper data directly and returns the
+/// assembled list so callers and tests can inspect the same side effect.
+#[allow(clippy::too_many_arguments)]
+pub fn do_anchored_search(
+    query: &[u8],
+    subject: &[u8],
+    subject_len: i32,
+    subject_oid: i32,
+    subject_frame: i32,
+    word_size: i32,
+    longest_intron: i32,
+    mapper_data: Option<&crate::spliced_hits::BlastHSPMapperData>,
+    query_info: &crate::queryinfo::QueryInfo,
+    jumper: &mut JumperGapAlign,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    hsp_stream: Option<&crate::hspstream::HspStream>,
+) -> Option<crate::hspstream::HspList> {
+    let hsp_list = do_anchored_search_build_list(
+        query,
+        subject,
+        subject_len,
+        subject_oid,
+        subject_frame,
+        word_size,
+        longest_intron,
+        mapper_data,
+        query_info,
+        jumper,
+        score_params,
+        hit_params,
+        align_params,
+    )?;
+
+    if let Some(stream) = hsp_stream {
+        let query_index = query_index_for_hsp_list(&hsp_list, query_info);
+        let _ = stream.blast_hspstream_write(query_index, hsp_list.clone());
+    }
+
+    if hsp_list.hsps.is_empty() {
+        None
+    } else {
+        Some(hsp_list)
+    }
+}
+
+/// C-shaped status wrapper for NCBI `DoAnchoredSearch`.
+///
+/// Unlike [`do_anchored_search`], this keeps the C contract: a missing stream is
+/// an error, and a subject list is written to the stream even when no anchored
+/// flanks were recovered.
+#[allow(clippy::too_many_arguments)]
+pub fn do_anchored_search_to_stream(
+    query: &[u8],
+    subject: &[u8],
+    subject_len: i32,
+    subject_oid: i32,
+    subject_frame: i32,
+    word_size: i32,
+    longest_intron: i32,
+    mapper_data: Option<&crate::spliced_hits::BlastHSPMapperData>,
+    query_info: &crate::queryinfo::QueryInfo,
+    jumper: &mut JumperGapAlign,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    hsp_stream: Option<&crate::hspstream::HspStream>,
+) -> i16 {
+    let Some(stream) = hsp_stream else {
+        return -1;
+    };
+    let Some(hsp_list) = do_anchored_search_build_list(
+        query,
+        subject,
+        subject_len,
+        subject_oid,
+        subject_frame,
+        word_size,
+        longest_intron,
+        mapper_data,
+        query_info,
+        jumper,
+        score_params,
+        hit_params,
+        align_params,
+    ) else {
+        return -1;
+    };
+    let query_index = query_index_for_hsp_list(&hsp_list, query_info);
+    stream.blast_hspstream_write(query_index, hsp_list) as i16
+}
+
+fn query_index_for_hsp_list(
+    hsp_list: &crate::hspstream::HspList,
+    query_info: &crate::queryinfo::QueryInfo,
+) -> i32 {
+    hsp_list
+        .hsps
+        .first()
+        .and_then(|hsp| query_info.contexts.get(hsp.context.max(0) as usize))
+        .map_or(0, |ctx| ctx.query_index)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_anchored_search_build_list(
+    query: &[u8],
+    subject: &[u8],
+    subject_len: i32,
+    subject_oid: i32,
+    subject_frame: i32,
+    word_size: i32,
+    longest_intron: i32,
+    mapper_data: Option<&crate::spliced_hits::BlastHSPMapperData>,
+    query_info: &crate::queryinfo::QueryInfo,
+    jumper: &mut JumperGapAlign,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+) -> Option<crate::hspstream::HspList> {
+    let mut hsp_list = crate::hspstream::HspList::new(subject_oid);
+    let chains =
+        crate::spliced_hits::find_partialy_covered_queries(mapper_data, subject_oid, word_size);
+    let Some(chains) = chains else {
+        return mapper_data.map(|_| hsp_list);
+    };
+    let mut chain = Some(&*chains);
+
+    while let Some(current) = chain {
+        let Some(first_container) = current.hsps.as_deref() else {
+            chain = current.next.as_deref();
+            continue;
+        };
+        let context = first_container.hsp.context;
+        let Some(ctx) = query_info.contexts.get(context.max(0) as usize) else {
+            chain = current.next.as_deref();
+            continue;
+        };
+        if ctx.query_offset < 0 || ctx.query_length <= 0 {
+            chain = current.next.as_deref();
+            continue;
+        }
+        let query_start = ctx.query_offset as usize;
+        let query_stop = query_start.saturating_add(ctx.query_length.max(0) as usize);
+        let Some(query_seq) = query.get(query_start..query_stop.min(query.len())) else {
+            chain = current.next.as_deref();
+            continue;
+        };
+        if query_seq.len() < ctx.query_length as usize {
+            chain = current.next.as_deref();
+            continue;
+        }
+        let before_count = hsp_list.hsps.len();
+        if first_container.hsp.query_offset >= 12 {
+            let subject_to = first_container.hsp.subject_offset - 1 - longest_intron;
+            let _ = do_anchored_scan(
+                query_seq,
+                ctx.query_length,
+                first_container.hsp.query_offset - 1,
+                context,
+                subject,
+                subject_len,
+                subject_frame,
+                first_container.hsp.subject_offset - 1,
+                subject_to,
+                query_info,
+                jumper,
+                score_params,
+                hit_params,
+                align_params,
+                &mut hsp_list,
+            );
+        }
+
+        let mut last_container = first_container;
+        while let Some(next) = last_container.next.as_deref() {
+            last_container = next;
+        }
+        if ctx.query_length - last_container.hsp.query_end > 12 {
+            let subject_to = last_container.hsp.subject_end + longest_intron;
+            let _ = do_anchored_scan(
+                query_seq,
+                ctx.query_length,
+                last_container.hsp.query_end,
+                context,
+                subject,
+                subject_len,
+                subject_frame,
+                last_container.hsp.subject_end,
+                subject_to,
+                query_info,
+                jumper,
+                score_params,
+                hit_params,
+                align_params,
+                &mut hsp_list,
+            );
+        }
+
+        if hsp_list.hsps.len() > before_count {
+            let mut container = Some(first_container);
+            while let Some(hsp_container) = container {
+                let _ = crate::hspstream::blast_hsp_list_save_hsp(
+                    &mut hsp_list,
+                    hsp_container.hsp.clone(),
+                );
+                container = hsp_container.next.as_deref();
+            }
+        }
+
+        chain = current.next.as_deref();
+    }
+
+    Some(hsp_list)
+}
+
+/// Port-shaped Rust equivalent of NCBI `MB_IndexedWordFinder`
+/// (`na_ungapped.c:1762`) for subjects already known to be indexed.
+///
+/// The C function obtains initial hits from indexed database callbacks, then
+/// runs the same diagonal hash suppression and ungapped extension filter as the
+/// normal megablast path. Rust models the callbacks as closures that fill the
+/// supplied [`crate::extend::InitHitList`].
+#[allow(clippy::too_many_arguments)]
+pub fn mb_indexed_word_finder<CheckOid, GetResults>(
+    subject: &[u8],
+    subject_len: i32,
+    subject_oid: i32,
+    subject_chunk: i32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    init_hitlist: &mut crate::extend::InitHitList,
+    check_index_oid: CheckOid,
+    get_results: GetResults,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> i16
+where
+    CheckOid: FnMut(i32) -> bool,
+    GetResults: FnMut(i32, i32, &mut crate::extend::InitHitList) -> u32,
+{
+    mb_indexed_word_finder_with_fallback(
+        subject,
+        subject_len,
+        subject_oid,
+        subject_chunk,
+        query,
+        query_info,
+        word_params,
+        score_params,
+        init_hitlist,
+        check_index_oid,
+        get_results,
+        || 0,
+        ungapped_stats,
+    )
+}
+
+/// C-shaped dispatcher for NCBI `MB_IndexedWordFinder`.
+///
+/// Upstream falls back to `BlastNaWordFinder` when the indexed database reports
+/// that an OID is not indexed. The narrow [`mb_indexed_word_finder`] helper
+/// preserves its historical return-zero behavior by passing an empty fallback;
+/// callers that carry the normal nucleotide word-finder state should use this
+/// variant and route `fallback` to their represented `BlastNaWordFinder` path.
+#[allow(clippy::too_many_arguments)]
+pub fn mb_indexed_word_finder_with_fallback<CheckOid, GetResults, Fallback>(
+    subject: &[u8],
+    subject_len: i32,
+    subject_oid: i32,
+    subject_chunk: i32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    word_params: &crate::parameters::InitialWordParameters,
+    score_params: &crate::parameters::ScoringParameters,
+    init_hitlist: &mut crate::extend::InitHitList,
+    mut check_index_oid: CheckOid,
+    mut get_results: GetResults,
+    mut fallback: Fallback,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> i16
+where
+    CheckOid: FnMut(i32) -> bool,
+    GetResults: FnMut(i32, i32, &mut crate::extend::InitHitList) -> u32,
+    Fallback: FnMut() -> i16,
+{
+    if !check_index_oid(subject_oid) {
+        return fallback();
+    }
+
+    init_hitlist.reset();
+    let word_size = get_results(subject_oid, subject_chunk, init_hitlist);
+    let total_hits = init_hitlist.total() as i32;
+    let mut hits_extended = 0;
+    let mut saved_hits = 0;
+
+    if word_size > 0 && word_params.ungapped_extension {
+        let mut hash = crate::index_ungapped::ir_hash_create().expect("indexed diagonal hash");
+        let mut kept = Vec::with_capacity(init_hitlist.hits.len());
+
+        for hsp in init_hitlist.hits.iter().cloned() {
+            let q_off = hsp.query_offset.max(0) as u32;
+            let s_off = hsp.subject_offset.max(0) as u32;
+            let diag = crate::index_ungapped::ir_diag(q_off, s_off);
+            let key = crate::index_ungapped::ir_key(diag);
+            let Some(entry_index) = crate::index_ungapped::ir_locate_macro(&mut hash, diag, key)
+            else {
+                kept.push(hsp);
+                continue;
+            };
+            let qend = crate::index_ungapped::ir_hash_entry_mut(&mut hash, entry_index)
+                .map_or(0, |entry| entry.diag_data.qend);
+            if q_off + word_size - 1 <= qend {
+                continue;
+            }
+
+            let context = crate::queryinfo::bsearch_context_info(hsp.query_offset, query_info);
+            let cutoffs = word_params.cutoffs.get(context.max(0) as usize);
+            let x_dropoff = cutoffs
+                .map(|cutoff| cutoff.x_dropoff_init)
+                .unwrap_or(word_params.x_dropoff_max)
+                .max(0);
+            hits_extended += 1;
+
+            let Some(ungapped_data) = crate::extend::na_ungapped_extend_len(
+                query,
+                subject,
+                subject_len.max(0) as usize,
+                hsp.query_offset,
+                hsp.subject_offset,
+                score_params.reward,
+                score_params.penalty,
+                x_dropoff,
+            ) else {
+                if let Some(entry) =
+                    crate::index_ungapped::ir_hash_entry_mut(&mut hash, entry_index)
+                {
+                    entry.diag_data.diag = diag;
+                    entry.diag_data.qend = q_off + word_size - 1;
+                }
+                continue;
+            };
+
+            let cutoff_score = cutoffs
+                .map(|cutoff| cutoff.cutoff_score)
+                .unwrap_or(word_params.cutoff_score_min);
+            let qend_new = (ungapped_data.q_start + ungapped_data.length - 1).max(0) as u32;
+            if let Some(entry) = crate::index_ungapped::ir_hash_entry_mut(&mut hash, entry_index) {
+                entry.diag_data.diag = diag;
+                entry.diag_data.qend = qend_new;
+            }
+
+            if ungapped_data.score >= cutoff_score {
+                let mut kept_hsp = hsp;
+                kept_hsp.ungapped_data = Some(ungapped_data);
+                kept.push(kept_hsp);
+                saved_hits += 1;
+            }
+        }
+
+        init_hitlist.hits = kept;
+        let _ = crate::index_ungapped::ir_hash_destroy(Some(hash));
+    }
+
+    if word_params.ungapped_extension {
+        crate::diagnostics::blast_ungapped_stats_update(
+            ungapped_stats,
+            total_hits,
+            hits_extended,
+            saved_hits,
+        );
+        crate::extend::blast_init_hit_list_sort_by_score(init_hitlist);
+    }
+    0
+}
+
+/// Port-shaped Rust equivalent of NCBI `ShortRead_IndexedWordFinder`
+/// (`na_ungapped.c:2227`) for subjects already known to be indexed.
+///
+/// For indexed subjects, C consumes indexed initial hits and immediately runs
+/// Jumper gapped traceback per non-redundant diagonal.
+#[allow(clippy::too_many_arguments)]
+pub fn short_read_indexed_word_finder<CheckOid, GetResults>(
+    subject: &[u8],
+    subject_len: i32,
+    subject_frame: i32,
+    subject_oid: i32,
+    subject_chunk: i32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    init_hitlist: &mut crate::extend::InitHitList,
+    hsp_list: &mut crate::hspstream::HspList,
+    jumper: &mut JumperGapAlign,
+    check_index_oid: CheckOid,
+    get_results: GetResults,
+    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
+) -> i16
+where
+    CheckOid: FnMut(i32) -> bool,
+    GetResults: FnMut(i32, i32, &mut crate::extend::InitHitList) -> u32,
+{
+    short_read_indexed_word_finder_with_fallback(
+        subject,
+        subject_len,
+        subject_frame,
+        subject_oid,
+        subject_chunk,
+        query,
+        query_info,
+        score_params,
+        hit_params,
+        align_params,
+        init_hitlist,
+        hsp_list,
+        jumper,
+        check_index_oid,
+        get_results,
+        || 0,
+        gapped_stats,
+    )
+}
+
+/// C-shaped dispatcher for NCBI `ShortRead_IndexedWordFinder`.
+///
+/// Upstream falls back to `JumperNaWordFinder` when an OID is not indexed. This
+/// wrapper exposes that branch explicitly without forcing the indexed callback
+/// helper to know about lookup-table state.
+#[allow(clippy::too_many_arguments)]
+pub fn short_read_indexed_word_finder_with_fallback<CheckOid, GetResults, Fallback>(
+    subject: &[u8],
+    subject_len: i32,
+    subject_frame: i32,
+    subject_oid: i32,
+    subject_chunk: i32,
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    score_params: &crate::parameters::ScoringParameters,
+    hit_params: &crate::parameters::HitSavingParameters,
+    align_params: JumperAlignParams,
+    init_hitlist: &mut crate::extend::InitHitList,
+    hsp_list: &mut crate::hspstream::HspList,
+    jumper: &mut JumperGapAlign,
+    mut check_index_oid: CheckOid,
+    mut get_results: GetResults,
+    mut fallback: Fallback,
+    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
+) -> i16
+where
+    CheckOid: FnMut(i32) -> bool,
+    GetResults: FnMut(i32, i32, &mut crate::extend::InitHitList) -> u32,
+    Fallback: FnMut() -> i16,
+{
+    if !check_index_oid(subject_oid) {
+        return fallback();
+    }
+
+    init_hitlist.reset();
+    let word_size = get_results(subject_oid, subject_chunk, init_hitlist);
+    if word_size == 0 {
+        return 0;
+    }
+
+    let mut hash = crate::index_ungapped::ir_hash_create().expect("indexed diagonal hash");
+    let mut extensions = 0;
+    let mut good_extensions = 0;
+
+    for hsp in init_hitlist.hits.iter() {
+        let q_off = hsp.query_offset.max(0) as u32;
+        let s_off = hsp.subject_offset.max(0) as u32;
+        let diag = crate::index_ungapped::ir_diag(q_off, s_off);
+        let key = crate::index_ungapped::ir_key(diag);
+        let Some(entry_index) = crate::index_ungapped::ir_locate_macro(&mut hash, diag, key) else {
+            continue;
+        };
+        let qend = crate::index_ungapped::ir_hash_entry_mut(&mut hash, entry_index)
+            .map_or(0, |entry| entry.diag_data.qend);
+        if q_off + word_size - 1 <= qend {
+            continue;
+        }
+
+        let context = crate::queryinfo::bsearch_context_info(hsp.query_offset, query_info);
+        let Some(ctx) = query_info.contexts.get(context.max(0) as usize) else {
+            continue;
+        };
+        let query_start = ctx.query_offset.max(0) as usize;
+        let query_stop = query_start.saturating_add(ctx.query_length.max(0) as usize);
+        let Some(query_seq) = query.get(query_start..query_stop.min(query.len())) else {
+            continue;
+        };
+        if query_seq.len() < ctx.query_length.max(0) as usize {
+            continue;
+        }
+
+        let mut num_identical = 0;
+        let mut right_ungapped_ext_len = 0;
+        extensions += 1;
+        if jumper_gapped_alignment_compressed_with_traceback(
+            query_seq,
+            subject,
+            ctx.query_length,
+            subject_len,
+            hsp.query_offset - ctx.query_offset,
+            hsp.subject_offset,
+            jumper,
+            score_params,
+            align_params,
+            &mut num_identical,
+            &mut right_ungapped_ext_len,
+        ) == 0
+        {
+            if let Some((
+                score,
+                query_align_start,
+                query_align_stop,
+                subject_align_start,
+                subject_align_stop,
+            )) = jumper_alignment_outputs(jumper)
+            {
+                if jumper_good_align(
+                    score,
+                    query_align_start,
+                    query_align_stop,
+                    subject_align_start,
+                    subject_align_stop,
+                    num_identical,
+                    &hit_params.options,
+                    ctx.query_length,
+                ) {
+                    if let Some((new_hsp, _)) = s_create_hsp(
+                        query_seq,
+                        ctx.query_length,
+                        context,
+                        ctx.frame,
+                        subject,
+                        subject_len,
+                        subject_frame,
+                        jumper,
+                        query_align_start,
+                        query_align_stop,
+                        subject_align_start,
+                        subject_align_stop,
+                        score,
+                        score_params.penalty,
+                        hit_params.options.splice,
+                    ) {
+                        let _ = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+                        good_extensions += 1;
+                    }
+                }
+            }
+        }
+
+        if let Some(entry) = crate::index_ungapped::ir_hash_entry_mut(&mut hash, entry_index) {
+            entry.diag_data.diag = diag;
+            entry.diag_data.qend = (hsp.query_offset + right_ungapped_ext_len - 1).max(0) as u32;
+        }
+    }
+
+    if let Some(stats) = gapped_stats {
+        stats.extensions += extensions;
+        stats.good_extensions += good_extensions;
+    }
+    let _ = crate::index_ungapped::ir_hash_destroy(Some(hash));
+    0
+}
+
 impl GapEditScript {
     pub fn new() -> Self {
         Self::default()
@@ -205,6 +4977,1992 @@ mod tests {
         assert_eq!(len, 10);
         assert_eq!(ident, 8);
         assert_eq!(gaps, 1);
+    }
+
+    #[test]
+    fn gapinfo_c_lifecycle_helpers_match_allocation_and_copy_rules() {
+        let state = Some(Box::new(GapStateArrayStruct {
+            state_array: vec![1, 2, 3],
+            length: 3,
+            used: true,
+            next: Some(Box::new(GapStateArrayStruct {
+                state_array: vec![4],
+                length: 1,
+                used: false,
+                next: None,
+            })),
+        }));
+        assert!(gap_state_free(state).is_none());
+
+        let mut state_pool = None;
+        {
+            let state = s_gap_get_state(&mut state_pool, 16).expect("allocated state");
+            assert!(state.used);
+            assert!(state.length as usize >= GAP_STATE_MIN_CELLS);
+            assert_eq!(state.state_array.len(), state.length as usize);
+        }
+        {
+            let state = s_gap_get_state(&mut state_pool, 32).expect("second state");
+            assert!(state.used);
+            assert!(state.length as usize >= GAP_STATE_MIN_CELLS);
+        }
+        let mut first = state_pool.as_mut().expect("head state");
+        assert!(first.used);
+        assert!(first.next.as_ref().expect("next state").used);
+        assert!(s_gap_purge_state(&mut first));
+        assert!(!first.used);
+        assert!(!first.next.as_ref().expect("next state").used);
+        let reused = s_gap_get_state(&mut state_pool, 8).expect("reused state");
+        assert!(reused.used);
+
+        assert!(gap_edit_script_new(0).is_none());
+        let mut source = gap_edit_script_new(3).expect("source script");
+        source.push(GapAlignOpType::Sub, 5);
+        source.push(GapAlignOpType::Del, 2);
+        source.push(GapAlignOpType::Ins, 1);
+
+        let duplicate = gap_edit_script_dup(Some(&source)).expect("duplicate script");
+        assert_eq!(duplicate.ops, source.ops);
+        assert!(gap_edit_script_dup(None).is_none());
+
+        let mut dest = gap_edit_script_new(3).expect("destination script");
+        assert_eq!(
+            gap_edit_script_partial_copy(&mut dest, 1, Some(&source), 0, 1),
+            0
+        );
+        assert_eq!(dest.ops[1..3], source.ops[0..2]);
+        assert_eq!(
+            gap_edit_script_partial_copy(&mut dest, 2, Some(&source), 0, 2),
+            -1
+        );
+        assert_eq!(
+            gap_edit_script_partial_copy(&mut dest, 0, Some(&source), 2, 1),
+            -1
+        );
+
+        assert!(gap_edit_script_delete(Some(source)).is_none());
+        assert!(gap_edit_script_delete(None).is_none());
+    }
+
+    #[test]
+    fn prelim_edit_block_helpers_merge_reset_append_and_reserve() {
+        let mut block = gap_prelim_edit_block_new();
+        assert!(block.edit_ops.capacity() >= 100);
+        assert_eq!(s_gap_prelim_edit_block_realloc(&mut block, -1), -1);
+        assert_eq!(s_gap_prelim_edit_block_realloc(&mut block, 150), 0);
+        assert!(block.edit_ops.capacity() >= 150);
+
+        gap_prelim_edit_block_add(&mut block, GapAlignOpType::Sub, 0);
+        assert!(block.edit_ops.is_empty());
+        gap_prelim_edit_block_add(&mut block, GapAlignOpType::Sub, 5);
+        gap_prelim_edit_block_add(&mut block, GapAlignOpType::Sub, 3);
+        gap_prelim_edit_block_add(&mut block, GapAlignOpType::Del, 2);
+        assert_eq!(
+            block.edit_ops,
+            vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 8,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 2,
+                },
+            ]
+        );
+
+        let mut other = gap_prelim_edit_block_new();
+        gap_prelim_edit_block_add(&mut other, GapAlignOpType::Del, 4);
+        gap_prelim_edit_block_add(&mut other, GapAlignOpType::Ins, 1);
+        gap_prelim_edit_block_append(&mut block, &other);
+        assert_eq!(block.edit_ops[1].num, 6);
+        assert_eq!(
+            block.edit_ops.last().map(|op| (op.op_type, op.num)),
+            Some((GapAlignOpType::Ins, 1))
+        );
+
+        gap_prelim_edit_block_reset(Some(&mut block));
+        assert!(block.edit_ops.is_empty());
+        assert_eq!(block.last_op, None);
+        gap_prelim_edit_block_reset(None);
+        assert!(gap_prelim_edit_block_free(Some(block)).is_none());
+    }
+
+    #[test]
+    fn translated_phi_gap_cost_matches_c_formula() {
+        assert_eq!(s_gap_cost(5, 2, -3), 0);
+        assert_eq!(s_gap_cost(5, 2, 0), 0);
+        assert_eq!(s_gap_cost(5, 2, 1), 7);
+        assert_eq!(s_gap_cost(5, 2, 4), 13);
+    }
+
+    fn phi_test_matrix() -> Vec<Vec<i32>> {
+        let mut matrix = vec![vec![-3; 8]; 8];
+        for i in 0..8 {
+            matrix[i][i] = 2;
+        }
+        matrix
+    }
+
+    #[test]
+    fn translated_phi_banded_align_matches_c_boundary_cases() {
+        let matrix = phi_test_matrix();
+
+        let mut script = gap_prelim_edit_block_new();
+        assert_eq!(
+            s_banded_align(&[0, 1, 2, 3], &[0], 3, 0, -4, 4, &matrix, 5, 2, &mut script),
+            -11
+        );
+        assert_eq!(
+            script.edit_ops,
+            vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Ins,
+                num: 3,
+            }]
+        );
+
+        let mut script = gap_prelim_edit_block_new();
+        assert_eq!(
+            s_banded_align(&[0], &[0, 1, 2], 0, 2, -4, 4, &matrix, 5, 2, &mut script),
+            -9
+        );
+        assert_eq!(
+            script.edit_ops,
+            vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Del,
+                num: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn translated_phi_banded_align_scores_single_diagonal_and_dp_paths() {
+        let matrix = phi_test_matrix();
+        let seq = [0, 1, 2, 3, 4];
+        let mut script = gap_prelim_edit_block_new();
+
+        assert_eq!(
+            s_banded_align(&seq, &seq, 4, 4, 0, 0, &matrix, 5, 2, &mut script),
+            8
+        );
+        assert_eq!(
+            script.edit_ops,
+            vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Sub,
+                num: 4,
+            }]
+        );
+
+        let seq1 = [0, 1, 2, 3];
+        let seq2 = [0, 1, 7, 2, 3];
+        let mut script = gap_prelim_edit_block_new();
+        assert_eq!(
+            s_banded_align(&seq1, &seq2, 3, 4, -1, 1, &matrix, 5, 2, &mut script),
+            -1
+        );
+        assert_eq!(
+            script.edit_ops,
+            vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn blast_prelim_edit_block_to_gap_edit_script_reverses_forward_half() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 4,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 2,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Del),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 3,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Sub),
+        };
+
+        let script = blast_prelim_edit_block_to_gap_edit_script(Some(&rev), Some(&fwd))
+            .expect("edit script");
+
+        assert_eq!(
+            script.ops,
+            vec![
+                (GapAlignOpType::Sub, 4),
+                (GapAlignOpType::Del, 2),
+                (GapAlignOpType::Sub, 3),
+                (GapAlignOpType::Ins, 1),
+            ]
+        );
+        assert!(blast_prelim_edit_block_to_gap_edit_script(None, Some(&fwd)).is_none());
+    }
+
+    #[test]
+    fn blast_prelim_edit_block_to_gap_edit_script_merges_boundary_op() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Sub,
+                num: 4,
+            }],
+            last_op: Some(GapAlignOpType::Sub),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 3,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Sub),
+        };
+
+        let script = blast_prelim_edit_block_to_gap_edit_script(Some(&rev), Some(&fwd))
+            .expect("edit script");
+
+        assert_eq!(
+            script.ops,
+            vec![(GapAlignOpType::Sub, 7), (GapAlignOpType::Del, 2)]
+        );
+        let empty = GapPrelimEditBlock {
+            edit_ops: Vec::new(),
+            last_op: None,
+        };
+        assert!(blast_prelim_edit_block_to_gap_edit_script(Some(&empty), Some(&empty)).is_none());
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_flows_frameshift_through_in_frame_gap() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Ins1,
+                num: 1,
+            }],
+            last_op: Some(GapAlignOpType::Ins1),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 1,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Del),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                100,
+                Some(&mut script),
+            ),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![
+                (GapAlignOpType::Sub, 1),
+                (GapAlignOpType::Del, 1),
+                (GapAlignOpType::Ins1, 1),
+                (GapAlignOpType::Sub, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn jumper_lifecycle_helpers_allocate_copy_and_free_owned_buffers() {
+        assert!(jumper_prelim_edit_block_new(0).is_none());
+        let mut prelim = jumper_prelim_edit_block_new(1).expect("prelim block");
+        assert_eq!(
+            jumper_prelim_edit_block_add(&mut prelim, JUMPER_MISMATCH),
+            0
+        );
+        assert_eq!(
+            jumper_prelim_edit_block_add(&mut prelim, JUMPER_INSERTION),
+            0
+        );
+        assert_eq!(jumper_prelim_edit_block_add(&mut prelim, 9), -1);
+        assert_eq!(prelim.edit_ops, vec![JUMPER_MISMATCH, JUMPER_INSERTION]);
+        assert!(jumper_prelim_edit_block_free(Some(prelim)).is_none());
+
+        let mut table = vec![0u32; 256];
+        s_create_table(&mut table);
+        assert_eq!(table[0], 0);
+        assert_eq!(table[0b01_10_11_00], 0x0003_0201);
+
+        let gap_align = jumper_gap_align_new(4).expect("jumper gap align");
+        assert!(gap_align.left_prelim_block.is_some());
+        assert!(gap_align.right_prelim_block.is_some());
+        assert_eq!(gap_align.table.len(), 256);
+        assert!(jumper_gap_align_new(0).is_none());
+        assert!(jumper_gap_align_free(Some(gap_align)).is_none());
+
+        let mut edits = jumper_edits_block_new(2).expect("edits");
+        edits.edits.push(JumperEdit {
+            query_pos: 3,
+            query_base: 1,
+            subject_base: 2,
+        });
+        let dup = jumper_edits_block_dup(Some(&edits)).expect("dup");
+        assert_eq!(dup, edits);
+        assert!(jumper_edits_block_dup(None).is_none());
+        assert!(jumper_edits_block_free(Some(edits)).is_none());
+
+        let overhangs = SequenceOverhangs {
+            left: Some(vec![1, 2]),
+            right: Some(vec![3]),
+        };
+        assert!(sequence_overhangs_free(Some(overhangs)).is_none());
+    }
+
+    #[test]
+    fn jumper_reset_convert_and_combine_match_c_edit_rules() {
+        let mut left = jumper_prelim_edit_block_new(4).expect("left block");
+        let mut right = jumper_prelim_edit_block_new(4).expect("right block");
+        left.edit_ops.extend([JUMPER_INSERTION, 3, JUMPER_MISMATCH]);
+        right.edit_ops.extend([2, JUMPER_DELETION]);
+
+        let script =
+            jumper_prelim_edit_block_to_gap_edit_script(&left, &right).expect("gap script");
+        assert_eq!(
+            script.ops,
+            vec![
+                (GapAlignOpType::Sub, 4),
+                (GapAlignOpType::Ins, 1),
+                (GapAlignOpType::Sub, 2),
+                (GapAlignOpType::Del, 1),
+            ]
+        );
+
+        s_reset_jumper_prelim_edit_blocks(Some(&mut left), Some(&mut right));
+        assert!(left.edit_ops.is_empty());
+        assert!(right.edit_ops.is_empty());
+        s_reset_jumper_prelim_edit_blocks(Some(&mut left), None);
+
+        right
+            .edit_ops
+            .extend([2, JUMPER_MISMATCH, JUMPER_INSERTION, JUMPER_DELETION, 3]);
+        let mut query_pos = 10;
+        let mut subject_pos = 20;
+        assert_eq!(
+            s_get_seq_positions(Some(&right), 4, &mut query_pos, &mut subject_pos),
+            0
+        );
+        assert_eq!((query_pos, subject_pos), (14, 24));
+        assert_eq!(
+            s_get_seq_positions(Some(&right), 6, &mut query_pos, &mut subject_pos),
+            -1
+        );
+
+        assert_eq!(s_compute_extension_score(&right, 2, -3, -5, -1), -5);
+
+        let mut base = Some(JumperEditsBlock {
+            edits: vec![JumperEdit {
+                query_pos: 1,
+                query_base: 2,
+                subject_base: 3,
+            }],
+        });
+        let mut append = Some(JumperEditsBlock {
+            edits: vec![JumperEdit {
+                query_pos: 4,
+                query_base: 5,
+                subject_base: 6,
+            }],
+        });
+        let combined = jumper_edits_block_combine(&mut base, &mut append).expect("combined");
+        assert_eq!(combined.edits.len(), 2);
+        assert!(append.is_none());
+        assert_eq!(base.as_ref().unwrap().edits, combined.edits);
+
+        let mut missing_base = None;
+        let mut append_only = Some(JumperEditsBlock::default());
+        assert!(jumper_edits_block_combine(&mut missing_base, &mut append_only).is_none());
+
+        let it = SubjectIndexIterator {
+            subject_index: Some(SubjectIndex {
+                num_lookups: 3,
+                width: 100,
+                ..Default::default()
+            }),
+            to: 250,
+            lookup_index: 1,
+            ..Default::default()
+        };
+        assert!(subject_index_iterator_free(Some(it)).is_none());
+    }
+
+    #[test]
+    fn subject_index_new_and_iterators_find_packed_words() {
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0];
+        let packed = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let index = subject_index_new(&packed, subject_bases.len() as i32, 4, 2).expect("index");
+        assert_eq!(index.num_lookups, 3);
+        let word_ac = (0u32 << 2) | 1;
+
+        let mut it = subject_index_iterator_new(&index, word_ac, 1, 7).expect("iterator");
+        assert_eq!(subject_index_iterator_next(&mut it), 4);
+        assert_eq!(subject_index_iterator_next(&mut it), -1);
+
+        let mut rev = subject_index_iterator_new(&index, word_ac, 99, 0).expect("iterator");
+        assert_eq!(subject_index_iterator_prev(&mut rev), 4);
+        assert_eq!(subject_index_iterator_prev(&mut rev), 0);
+        assert_eq!(subject_index_iterator_prev(&mut rev), -1);
+    }
+
+    #[test]
+    fn jumper_shift_gaps_right_collapses_opposite_indels_into_match() {
+        let query = [0u8, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let mut script = JumperPrelimEditBlock {
+            edit_ops: vec![JUMPER_INSERTION, JUMPER_DELETION],
+        };
+        let mut score = 10;
+        let mut num_identical = 0;
+
+        assert_eq!(
+            s_shift_gaps_right(
+                &mut script,
+                &query,
+                &subject,
+                0,
+                0,
+                query.len() as i32,
+                query.len() as i32,
+                &mut score,
+                -3,
+                &mut num_identical,
+            ),
+            0
+        );
+
+        assert_eq!(script.edit_ops, vec![1]);
+        assert_eq!(score, 14);
+        assert_eq!(num_identical, 1);
+    }
+
+    #[test]
+    fn jumper_shift_gaps_merges_halves_and_trims_flanking_gap() {
+        let query = [0u8, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![2] }),
+            right_prelim_block: Some(JumperPrelimEditBlock {
+                edit_ops: vec![3, JUMPER_DELETION],
+            }),
+            table: Vec::new(),
+        };
+        let mut query_stop = 4;
+        let mut subject_stop = 5;
+        let mut score = 20;
+        let mut num_identical = 5;
+
+        assert_eq!(
+            s_shift_gaps(
+                &mut jumper,
+                &query,
+                &subject,
+                0,
+                0,
+                &mut query_stop,
+                &mut subject_stop,
+                &mut score,
+                query.len() as i32,
+                query.len() as i32,
+                -3,
+                &mut num_identical,
+            ),
+            0
+        );
+
+        assert_eq!(
+            jumper.left_prelim_block.as_ref().unwrap().edit_ops,
+            Vec::<JumperOpType>::new()
+        );
+        assert_eq!(
+            jumper.right_prelim_block.as_ref().unwrap().edit_ops,
+            vec![5]
+        );
+        assert_eq!((query_stop, subject_stop), (4, 4));
+        assert_eq!(score, 23);
+        assert_eq!(num_identical, 5);
+    }
+
+    #[test]
+    fn jumper_trim_extension_tracks_c_pointer_arithmetic() {
+        let mut script = JumperPrelimEditBlock {
+            edit_ops: vec![1, JUMPER_MISMATCH, 2],
+        };
+        let mut cp = 10;
+        let mut cq = 20;
+        let mut num_identical = 3;
+
+        s_trim_extension(&mut script, 3, &mut cp, &mut cq, &mut num_identical, true);
+
+        assert_eq!(script.edit_ops, vec![1]);
+        assert_eq!((cp, cq), (7, 17));
+        assert_eq!(num_identical, 1);
+
+        let mut left_script = JumperPrelimEditBlock {
+            edit_ops: vec![1, JUMPER_INSERTION],
+        };
+        s_trim_extension(
+            &mut left_script,
+            2,
+            &mut cp,
+            &mut cq,
+            &mut num_identical,
+            false,
+        );
+        assert_eq!(left_script.edit_ops, vec![1]);
+        assert_eq!((cp, cq), (8, 17));
+    }
+
+    #[test]
+    fn jumper_extend_right_matches_c_seed_and_trace_shape() {
+        let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let mut script = gap_prelim_edit_block_new();
+
+        let (score, q_len, s_len) =
+            jumper_extend_right(&query, &subject, 2, -3, -5, -1, 3, 8, &mut script, false);
+
+        assert_eq!(score, 18);
+        assert_eq!((q_len, s_len), (14, 13));
+        assert_eq!(
+            script
+                .edit_ops
+                .iter()
+                .map(|op| (op.op_type, op.num))
+                .collect::<Vec<_>>(),
+            vec![
+                (GapAlignOpType::Sub, 1),
+                (GapAlignOpType::Ins, 1),
+                (GapAlignOpType::Sub, 12),
+            ]
+        );
+    }
+
+    #[test]
+    fn jumper_extend_right_with_traceback_records_raw_c_ops() {
+        let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let mut script = JumperPrelimEditBlock {
+            edit_ops: Vec::new(),
+        };
+        let mut num_identical = 0;
+        let mut ungapped_ext_len = -1;
+
+        let (score, q_len, s_len) = jumper_extend_right_with_traceback(
+            &query,
+            &subject,
+            2,
+            -3,
+            -5,
+            -1,
+            3,
+            8,
+            &mut script,
+            &mut num_identical,
+            false,
+            &mut ungapped_ext_len,
+        );
+
+        assert_eq!(score, 20);
+        assert_eq!((q_len, s_len), (14, 13));
+        assert_eq!(script.edit_ops, vec![1, JUMPER_INSERTION, 10, 2]);
+        assert_eq!(num_identical, 13);
+        assert_eq!(ungapped_ext_len, 0);
+    }
+
+    #[test]
+    fn jumper_extend_left_matches_c_reverse_walk() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 9];
+        let subject = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let mut script = gap_prelim_edit_block_new();
+
+        let (score, q_len, s_len) =
+            jumper_extend_left(&query, &subject, 12, 11, 2, -3, -5, -1, 3, 8, &mut script);
+
+        assert_eq!(score, 18);
+        assert_eq!((q_len, s_len), (13, 12));
+        assert_eq!(
+            script
+                .edit_ops
+                .iter()
+                .map(|op| (op.op_type, op.num))
+                .collect::<Vec<_>>(),
+            vec![(GapAlignOpType::Ins, 1), (GapAlignOpType::Sub, 12)]
+        );
+    }
+
+    #[test]
+    fn jumper_extend_right_compressed_tracks_best_prefix_and_ungapped_len() {
+        let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut num_identical = 0;
+        let mut ungapped_ext_len = -1;
+
+        let (score, q_len, s_len) = jumper_extend_right_compressed(
+            &query,
+            &subject,
+            subject_bases.len() as i32,
+            2,
+            -3,
+            3,
+            8,
+            &mut num_identical,
+            &mut ungapped_ext_len,
+        );
+
+        assert_eq!(score, 24);
+        assert_eq!((q_len, s_len), (14, 13));
+        assert_eq!(num_identical, 12);
+        assert_eq!(ungapped_ext_len, 0);
+    }
+
+    #[test]
+    fn jumper_extend_left_compressed_walks_packed_subject_backwards() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 9];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut num_identical = 0;
+
+        let (score, q_len, s_len) = jumper_extend_left_compressed(
+            &query,
+            &subject,
+            12,
+            11,
+            2,
+            -3,
+            3,
+            8,
+            &mut num_identical,
+        );
+
+        assert_eq!(score, 24);
+        assert_eq!((q_len, s_len), (13, 12));
+        assert_eq!(num_identical, 12);
+    }
+
+    #[test]
+    fn jumper_extend_right_compressed_with_traceback_records_raw_ops() {
+        let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut script = JumperPrelimEditBlock::default();
+        let mut num_identical = 0;
+        let mut ungapped_ext_len = -1;
+
+        let (score, q_len, s_len) = jumper_extend_right_compressed_with_traceback(
+            &query,
+            &subject,
+            subject_bases.len() as i32,
+            2,
+            -3,
+            -5,
+            -1,
+            3,
+            8,
+            &mut script,
+            &mut num_identical,
+            false,
+            &mut ungapped_ext_len,
+        );
+
+        assert_eq!(score, 20);
+        assert_eq!((q_len, s_len), (14, 13));
+        assert_eq!(script.edit_ops, vec![1, JUMPER_INSERTION, 10, 2]);
+        assert_eq!(num_identical, 13);
+        assert_eq!(ungapped_ext_len, 0);
+    }
+
+    #[test]
+    fn jumper_extend_left_compressed_with_traceback_records_raw_ops() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 9];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut script = JumperPrelimEditBlock::default();
+        let mut num_identical = 0;
+
+        let (score, q_len, s_len) = jumper_extend_left_compressed_with_traceback(
+            &query,
+            &subject,
+            12,
+            11,
+            2,
+            -3,
+            -5,
+            -1,
+            3,
+            8,
+            &mut script,
+            &mut num_identical,
+        );
+
+        assert_eq!(score, 18);
+        assert_eq!((q_len, s_len), (13, 12));
+        assert_eq!(script.edit_ops, vec![JUMPER_INSERTION, 10, 2]);
+        assert_eq!(num_identical, 12);
+    }
+
+    #[test]
+    fn jumper_extend_right_compressed_optimal_keeps_best_prefix() {
+        let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut script = JumperPrelimEditBlock::default();
+        let mut best_num_identical = 0;
+        let mut ungapped_ext_len = -1;
+
+        let (score, q_len, s_len) = jumper_extend_right_compressed_with_traceback_optimal(
+            &query,
+            &subject,
+            subject_bases.len() as i32,
+            2,
+            -3,
+            -5,
+            -1,
+            3,
+            8,
+            100,
+            &mut script,
+            &mut best_num_identical,
+            false,
+            &mut ungapped_ext_len,
+        );
+
+        assert_eq!(score, 18);
+        assert_eq!((q_len, s_len), (14, 13));
+        assert_eq!(script.edit_ops, vec![1, JUMPER_INSERTION, 10, 2]);
+        assert_eq!(best_num_identical, 13);
+        assert_eq!(ungapped_ext_len, 0);
+    }
+
+    #[test]
+    fn jumper_extend_left_compressed_optimal_keeps_best_prefix() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 9];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut script = JumperPrelimEditBlock::default();
+        let mut best_num_identical = 0;
+
+        let (score, q_len, s_len) = jumper_extend_left_compressed_with_traceback_optimal(
+            &query,
+            &subject,
+            12,
+            11,
+            2,
+            -3,
+            -5,
+            -1,
+            3,
+            8,
+            100,
+            &mut script,
+            &mut best_num_identical,
+        );
+
+        assert_eq!(score, 18);
+        assert_eq!((q_len, s_len), (13, 12));
+        assert_eq!(script.edit_ops, vec![JUMPER_INSERTION, 10, 2]);
+        assert_eq!(best_num_identical, 12);
+    }
+
+    #[test]
+    fn jumper_good_align_applies_identity_score_and_edit_distance() {
+        let mut options = crate::options::HitSavingOptions {
+            cutoff_score: 10,
+            percent_identity: 80.0,
+            max_edit_distance: 2,
+            ..Default::default()
+        };
+
+        assert!(jumper_good_align(12, 0, 10, 5, 15, 8, &options, 10));
+        assert!(!jumper_good_align(12, 0, 10, 5, 15, 7, &options, 10));
+        assert!(!jumper_good_align(9, 0, 10, 5, 15, 8, &options, 10));
+        assert!(!jumper_good_align(12, 0, 10, 5, 15, 7, &options, 10));
+
+        options.splice = true;
+        options.cutoff_score = 1000;
+        options.max_edit_distance = 0;
+        assert!(jumper_good_align(12, 0, 10, 5, 15, 8, &options, 10));
+    }
+
+    #[test]
+    fn jumper_find_edits_extracts_mismatch_insertions_and_deletions() {
+        let query = [0u8, 1, 2, 3, 0];
+        let subject_bases = [0u8, 2, 2, 3, 1];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let left = JumperPrelimEditBlock::default();
+        let right = JumperPrelimEditBlock {
+            edit_ops: vec![1, JUMPER_MISMATCH, JUMPER_INSERTION, JUMPER_DELETION, 1],
+        };
+
+        let edits = jumper_find_edits(&query, &subject, 0, 0, 4, 4, &left, &right).expect("edits");
+
+        assert_eq!(
+            edits.edits,
+            vec![
+                JumperEdit {
+                    query_pos: 1,
+                    query_base: 1,
+                    subject_base: 2,
+                },
+                JumperEdit {
+                    query_pos: 2,
+                    query_base: 2,
+                    subject_base: 15,
+                },
+                JumperEdit {
+                    query_pos: 3,
+                    query_base: 15,
+                    subject_base: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn jumper_word_hit_hsp_records_mapper_info_edges_and_overhangs() {
+        let query = [0u8, 1, 0, 0xff, 2, 3, 1, 1, 2, 3];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+
+        let (hsp, map_info) =
+            s_create_hsp_for_word_hit(2, 4, 4, 1, &query, 1, &subject, 16, 0, 10).expect("hsp");
+
+        assert_eq!((hsp.query_offset, hsp.query_end), (2, 6));
+        assert_eq!((hsp.subject_offset, hsp.subject_end), (4, 8));
+        assert_eq!(hsp.num_ident, 3);
+        assert_eq!(
+            map_info.edits.as_ref().unwrap().edits,
+            vec![JumperEdit {
+                query_pos: 3,
+                query_base: 0xff,
+                subject_base: 1,
+            }]
+        );
+        assert_eq!(map_info.left_edge, (2 << 2) | 3);
+        assert_eq!(map_info.right_edge, 1);
+        assert_eq!(
+            map_info.subject_overhangs.as_ref().unwrap().left,
+            Some(vec![2, 3])
+        );
+        assert_eq!(
+            map_info.subject_overhangs.as_ref().unwrap().right,
+            Some(vec![0, 1, 2, 3, 0])
+        );
+        assert_eq!(hsp.map_info.as_ref(), Some(&map_info));
+    }
+
+    #[test]
+    fn jumper_create_hsp_returns_hsp_and_separate_mapping_info() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
+        let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![4] }),
+            table: Vec::new(),
+        };
+
+        let (hsp, map_info) = s_create_hsp(
+            &query,
+            query.len() as i32,
+            2,
+            1,
+            &subject,
+            subject_bases.len() as i32,
+            0,
+            &mut jumper,
+            2,
+            6,
+            3,
+            7,
+            8,
+            -3,
+            true,
+        )
+        .expect("hsp");
+
+        assert_eq!(hsp.score, 8);
+        assert_eq!((hsp.query_offset, hsp.query_end), (2, 6));
+        assert_eq!((hsp.subject_offset, hsp.subject_end), (3, 7));
+        assert_eq!(
+            hsp.edit_script.as_ref().unwrap().ops,
+            vec![(GapAlignOpType::Sub, 4)]
+        );
+        assert_eq!(
+            map_info.edits.as_ref().unwrap().edits,
+            Vec::<JumperEdit>::new()
+        );
+        assert_eq!(map_info.left_edge, (1 << 2) | 2);
+        assert_eq!(map_info.right_edge, (3 << 2) | 0);
+        assert!(map_info.subject_overhangs.is_some());
+        assert_eq!(hsp.map_info.as_ref(), Some(&map_info));
+    }
+
+    #[test]
+    fn blast_na_extend_jumper_sorts_extends_and_saves_hsp() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let mut pairs = vec![
+            crate::lookup::OffsetPair {
+                query_offset: 4,
+                subject_offset: 4,
+            },
+            crate::lookup::OffsetPair {
+                query_offset: 0,
+                subject_offset: 0,
+            },
+        ];
+        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
+            word_length: 4,
+            lut_word_length: 4,
+            discontiguous: false,
+            template_length: 0,
+            template_type: crate::lookup::DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
+            hashtable: Vec::new(),
+            hashtable2: Vec::new(),
+            next_pos: Vec::new(),
+            next_pos2: Vec::new(),
+            pv_array: Vec::new(),
+            pv_array_bts: 0,
+            longest_chain: 0,
+            scan_step: 1,
+        });
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_options = crate::options::InitialWordOptions::new_blastn();
+        let word_params = crate::parameters::InitialWordParameters {
+            options: word_options,
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut list = crate::hspstream::HspList::new(7);
+
+        let extended = blast_na_extend_jumper(
+            &mut pairs,
+            &word_params,
+            &score_params,
+            &hit_params,
+            &lookup,
+            &query,
+            &subject,
+            query.len() as i32,
+            0,
+            &query_info,
+            JumperAlignParams {
+                max_mismatches: 5,
+                mismatch_window: 10,
+                gap_x_dropoff: 30,
+            },
+            &mut jumper,
+            &mut list,
+            query.len() as u32,
+            None,
+        );
+
+        assert!(extended >= 1);
+        assert!(!list.hsps.is_empty());
+        assert_eq!(list.hsps[0].query_offset, 0);
+        assert_eq!(list.hsps[0].subject_offset, 0);
+        assert!(list.hsps[0].score > 0);
+    }
+
+    #[test]
+    fn jumper_na_word_finder_scans_lookup_and_extends_hits() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let mut hashtable = vec![0; 1 << 8];
+        hashtable[0b00011011] = 1;
+        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
+            word_length: 4,
+            lut_word_length: 4,
+            discontiguous: false,
+            template_length: 0,
+            template_type: crate::lookup::DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
+            hashtable,
+            hashtable2: Vec::new(),
+            next_pos: vec![0, 0],
+            next_pos2: Vec::new(),
+            pv_array: Vec::new(),
+            pv_array_bts: 0,
+            longest_chain: 1,
+            scan_step: 1,
+        });
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut list = crate::hspstream::HspList::new(9);
+
+        assert_eq!(
+            jumper_na_word_finder(
+                &subject,
+                query.len() as i32,
+                0,
+                &query,
+                &query_info,
+                &lookup,
+                &word_params,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                &mut jumper,
+                &mut list,
+            ),
+            0
+        );
+        assert!(!list.hsps.is_empty());
+    }
+
+    #[test]
+    fn jumper_na_word_finder_batches_mapper_word_hits_like_c() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let mut hashtable = vec![0; 1 << 8];
+        hashtable[0b00011011] = 1;
+        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
+            word_length: 4,
+            lut_word_length: 4,
+            discontiguous: false,
+            template_length: 0,
+            template_type: crate::lookup::DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
+            hashtable,
+            hashtable2: Vec::new(),
+            next_pos: vec![0, 0],
+            next_pos2: Vec::new(),
+            pv_array: Vec::new(),
+            pv_array_bts: 0,
+            longest_chain: 1,
+            scan_step: 1,
+        });
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut list = crate::hspstream::HspList::new(10);
+        let mut word_hits = crate::lookup::MapperWordHits {
+            pair_arrays: vec![vec![crate::lookup::OffsetPair {
+                query_offset: 0,
+                subject_offset: 0,
+            }]],
+            num: vec![0],
+            num_arrays: 1,
+            array_size: 1,
+            divisor: query.len() as i32 + 1,
+            last_diag: vec![0; query_info.contexts.len()],
+            last_pos: vec![0; query_info.contexts.len()],
+        };
+        let mut ungapped_stats = crate::diagnostics::UngappedStats::default();
+        let mut gapped_stats = crate::diagnostics::GappedStats::default();
+
+        assert_eq!(
+            jumper_na_word_finder_with_word_hits(
+                &subject,
+                query.len() as i32,
+                0,
+                &query,
+                &query_info,
+                &lookup,
+                &word_params,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                &mut jumper,
+                &mut list,
+                Some(&mut word_hits),
+                Some(&mut ungapped_stats),
+                Some(&mut gapped_stats),
+            ),
+            0
+        );
+        assert!(gapped_stats.extensions > 0);
+        assert_eq!(ungapped_stats.good_init_extends, gapped_stats.extensions);
+        assert!(word_hits.num.iter().all(|&num| num == 0));
+        assert!(!list.hsps.is_empty());
+    }
+
+    #[test]
+    fn jumper_na_word_finder_honors_masked_subject_scan_ranges() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let mut subject_bases = vec![0u8, 1, 2, 3];
+        subject_bases.extend_from_slice(&query);
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut hashtable = vec![0; 1 << 8];
+        hashtable[0b00011011] = 1;
+        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
+            word_length: 4,
+            lut_word_length: 4,
+            discontiguous: false,
+            template_length: 0,
+            template_type: crate::lookup::DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
+            hashtable,
+            hashtable2: Vec::new(),
+            next_pos: vec![0, 0],
+            next_pos2: Vec::new(),
+            pv_array: Vec::new(),
+            pv_array_bts: 0,
+            longest_chain: 1,
+            scan_step: 1,
+        });
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut list = crate::hspstream::HspList::new(11);
+        let ranges = [crate::util::SSeqRange {
+            left: 4,
+            right: subject_bases.len() as i32,
+        }];
+
+        assert_eq!(
+            jumper_na_word_finder_with_subject_ranges(
+                &subject,
+                subject_bases.len() as i32,
+                0,
+                &ranges,
+                &query,
+                &query_info,
+                &lookup,
+                &word_params,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                &mut jumper,
+                &mut list,
+                None,
+                None,
+                None,
+            ),
+            0
+        );
+        assert!(!list.hsps.is_empty());
+        assert!(list.hsps.iter().all(|hsp| hsp.subject_offset >= 4));
+    }
+
+    #[test]
+    fn jumper_na_word_finder_scans_discontiguous_mb_templates() {
+        let query: Vec<u8> = (0..18).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let mut mb_table = crate::lookup::MbLookupTable {
+            word_length: 18,
+            lut_word_length: 11,
+            discontiguous: false,
+            template_length: 0,
+            template_type: crate::lookup::DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
+            hashtable: vec![0; 1 << 22],
+            hashtable2: Vec::new(),
+            next_pos: Vec::new(),
+            next_pos2: Vec::new(),
+            pv_array: vec![0; (1 << 22) / 32],
+            pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
+            longest_chain: 0,
+            scan_step: 0,
+        };
+        let lookup_options = crate::options::LookupTableOptions {
+            word_size: 11,
+            mb_template_length: 18,
+            mb_template_type: crate::lookup::DiscWordType::Coding as i32,
+            ..crate::options::LookupTableOptions::default()
+        };
+        assert_eq!(
+            crate::lookup::s_fill_disc_mb_table(
+                &query,
+                &[crate::util::SSeqRange { left: 0, right: 17 }],
+                &mut mb_table,
+                &lookup_options,
+            ),
+            0
+        );
+        let lookup = crate::lookup::LookupTableWrap::Megablast(mb_table);
+
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut list = crate::hspstream::HspList::new(12);
+
+        assert_eq!(
+            jumper_na_word_finder(
+                &subject,
+                query.len() as i32,
+                0,
+                &query,
+                &query_info,
+                &lookup,
+                &word_params,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                &mut jumper,
+                &mut list,
+            ),
+            0
+        );
+        assert!(!list.hsps.is_empty());
+        assert_eq!(list.hsps[0].query_offset, 0);
+        assert_eq!(list.hsps[0].subject_offset, 0);
+    }
+
+    #[test]
+    fn do_anchored_scan_saves_best_matching_flank_hsp() {
+        let query: Vec<u8> = (0..32).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut list = crate::hspstream::HspList::new(11);
+
+        assert_eq!(
+            do_anchored_scan(
+                &query,
+                query.len() as i32,
+                0,
+                0,
+                &subject,
+                query.len() as i32,
+                0,
+                0,
+                query.len() as i32 - 1,
+                &query_info,
+                &mut jumper,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                &mut list,
+            ),
+            1
+        );
+        assert_eq!(list.hsps[0].query_offset, 0);
+        assert_eq!(list.hsps[0].subject_offset, 0);
+    }
+
+    #[test]
+    fn do_anchored_search_scans_partial_mapper_chain_and_copies_original_hsps() {
+        let query: Vec<u8> = (0..40).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let chain_hsp = crate::hspstream::Hsp {
+            score: 35,
+            num_ident: 10,
+            bit_score: 0.0,
+            evalue: 0.0,
+            query_offset: 13,
+            query_end: 23,
+            query_gapped_start: 13,
+            subject_offset: 13,
+            subject_end: 23,
+            subject_gapped_start: 13,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        };
+        let chain = Box::new(crate::spliced_hits::HSPChain {
+            context: 0,
+            oid: 21,
+            score: 35,
+            hsps: Some(Box::new(crate::spliced_hits::HSPContainer {
+                hsp: chain_hsp,
+                next: None,
+            })),
+            count: 1,
+            pair: None,
+            pair_score: None,
+            pair_conf: crate::spliced_hits::PAIR_NONE,
+            adapter: -1,
+            poly_a: 0,
+            next: None,
+        });
+        let mapper_data = crate::spliced_hits::BlastHSPMapperData {
+            query_info: Some(query_info.clone()),
+            saved_chains: vec![Some(chain)],
+            ..Default::default()
+        };
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+
+        let list = do_anchored_search(
+            &query,
+            &subject,
+            query.len() as i32,
+            21,
+            0,
+            12,
+            12,
+            Some(&mapper_data),
+            &query_info,
+            &mut jumper,
+            &score_params,
+            &hit_params,
+            JumperAlignParams {
+                max_mismatches: 5,
+                mismatch_window: 10,
+                gap_x_dropoff: 30,
+            },
+            None,
+        )
+        .expect("anchored search should produce a list");
+
+        assert_eq!(list.oid, 21);
+        assert!(list.hsps.iter().any(|hsp| hsp.query_offset == 0));
+        assert!(list.hsps.iter().any(|hsp| hsp.query_offset == 13));
+    }
+
+    #[test]
+    fn do_anchored_search_to_stream_writes_recovered_subject_list() {
+        let query: Vec<u8> = (0..40).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let chain_hsp = crate::hspstream::Hsp {
+            score: 35,
+            num_ident: 10,
+            bit_score: 0.0,
+            evalue: 0.0,
+            query_offset: 13,
+            query_end: 23,
+            query_gapped_start: 13,
+            subject_offset: 13,
+            subject_end: 23,
+            subject_gapped_start: 13,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        };
+        let chain = Box::new(crate::spliced_hits::HSPChain {
+            context: 0,
+            oid: 22,
+            score: 35,
+            hsps: Some(Box::new(crate::spliced_hits::HSPContainer {
+                hsp: chain_hsp,
+                next: None,
+            })),
+            count: 1,
+            pair: None,
+            pair_score: None,
+            pair_conf: crate::spliced_hits::PAIR_NONE,
+            adapter: -1,
+            poly_a: 0,
+            next: None,
+        });
+        let mapper_data = crate::spliced_hits::BlastHSPMapperData {
+            query_info: Some(query_info.clone()),
+            saved_chains: vec![Some(chain)],
+            ..Default::default()
+        };
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+
+        assert_eq!(
+            do_anchored_search_to_stream(
+                &query,
+                &subject,
+                query.len() as i32,
+                22,
+                0,
+                12,
+                12,
+                Some(&mapper_data),
+                &query_info,
+                &mut jumper,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                Some(&stream),
+            ),
+            0
+        );
+
+        let (status, written) = crate::hspstream::blast_hsp_stream_read(Some(&stream));
+        assert_eq!(status, crate::hspstream::K_BLAST_HSP_STREAM_SUCCESS);
+        let written = written.expect("anchored search should write a list");
+        assert_eq!(written.oid, 22);
+        assert!(written.hsps.iter().any(|hsp| hsp.query_offset == 0));
+        assert!(written.hsps.iter().any(|hsp| hsp.query_offset == 13));
+    }
+
+    #[test]
+    fn mb_indexed_word_finder_filters_redundant_diagonal_hits() {
+        let query: Vec<u8> = (0..24).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let mut word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 8,
+            cutoff_score_min: 1,
+            cutoffs: vec![crate::parameters::BlastUngappedCutoffs {
+                x_dropoff_init: 8,
+                cutoff_score: 1,
+            }],
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        word_params.options.word_size = 4;
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        assert_eq!(
+            mb_indexed_word_finder(
+                &subject,
+                query.len() as i32,
+                5,
+                0,
+                &query,
+                &query_info,
+                &word_params,
+                &score_params,
+                &mut init_hitlist,
+                |oid| oid == 5,
+                |_oid, _chunk, list| {
+                    let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
+                    let _ = crate::extend::blast_save_initial_hit(list, 1, 1, None);
+                    4
+                },
+                Some(&mut stats),
+            ),
+            0
+        );
+
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.init_extends, 1);
+        assert_eq!(init_hitlist.total(), 1);
+        assert!(init_hitlist.hits[0].ungapped_data.is_some());
+    }
+
+    #[test]
+    fn mb_indexed_word_finder_preserves_hits_when_ungapped_extension_disabled() {
+        let query: Vec<u8> = (0..24).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let mut word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 8,
+            cutoff_score_min: 1,
+            cutoffs: vec![crate::parameters::BlastUngappedCutoffs {
+                x_dropoff_init: 8,
+                cutoff_score: 1,
+            }],
+            ungapped_extension: false,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        word_params.options.word_size = 4;
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        assert_eq!(
+            mb_indexed_word_finder(
+                &subject,
+                query.len() as i32,
+                5,
+                0,
+                &query,
+                &query_info,
+                &word_params,
+                &score_params,
+                &mut init_hitlist,
+                |oid| oid == 5,
+                |_oid, _chunk, list| {
+                    let _ = crate::extend::blast_save_initial_hit(list, 3, 3, None);
+                    let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
+                    4
+                },
+                Some(&mut stats),
+            ),
+            0
+        );
+
+        assert_eq!(stats.lookup_hits, 0);
+        assert_eq!(stats.init_extends, 0);
+        assert_eq!(init_hitlist.total(), 2);
+        assert_eq!(init_hitlist.hits[0].query_offset, 3);
+        assert_eq!(init_hitlist.hits[1].query_offset, 0);
+        assert!(init_hitlist
+            .hits
+            .iter()
+            .all(|hsp| hsp.ungapped_data.is_none()));
+    }
+
+    #[test]
+    fn mb_indexed_word_finder_falls_back_for_nonindexed_oid() {
+        let query: Vec<u8> = (0..16).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 8,
+            cutoff_score_min: 1,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut fallback_called = false;
+        let mut get_results_called = false;
+
+        let status = mb_indexed_word_finder_with_fallback(
+            &subject,
+            query.len() as i32,
+            5,
+            0,
+            &query,
+            &query_info,
+            &word_params,
+            &score_params,
+            &mut init_hitlist,
+            |_oid| false,
+            |_oid, _chunk, _list| {
+                get_results_called = true;
+                0
+            },
+            || {
+                fallback_called = true;
+                7
+            },
+            None,
+        );
+
+        assert_eq!(status, 7);
+        assert!(fallback_called);
+        assert!(!get_results_called);
+    }
+
+    #[test]
+    fn short_read_indexed_word_finder_runs_jumper_traceback_from_index_hits() {
+        let query: Vec<u8> = (0..24).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut hsp_list = crate::hspstream::HspList::new(8);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut stats = crate::diagnostics::GappedStats::default();
+
+        assert_eq!(
+            short_read_indexed_word_finder(
+                &subject,
+                query.len() as i32,
+                0,
+                8,
+                0,
+                &query,
+                &query_info,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                &mut init_hitlist,
+                &mut hsp_list,
+                &mut jumper,
+                |oid| oid == 8,
+                |_oid, _chunk, list| {
+                    let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
+                    4
+                },
+                Some(&mut stats),
+            ),
+            0
+        );
+
+        assert_eq!(stats.extensions, 1);
+        assert!(!hsp_list.hsps.is_empty());
+        assert_eq!(hsp_list.hsps[0].query_offset, 0);
+        assert_eq!(hsp_list.hsps[0].subject_offset, 0);
+    }
+
+    #[test]
+    fn short_read_indexed_word_finder_falls_back_for_nonindexed_oid() {
+        let query: Vec<u8> = (0..16).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut hsp_list = crate::hspstream::HspList::new(8);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut fallback_called = false;
+        let mut get_results_called = false;
+
+        let status = short_read_indexed_word_finder_with_fallback(
+            &subject,
+            query.len() as i32,
+            0,
+            8,
+            0,
+            &query,
+            &query_info,
+            &score_params,
+            &hit_params,
+            JumperAlignParams {
+                max_mismatches: 5,
+                mismatch_window: 10,
+                gap_x_dropoff: 30,
+            },
+            &mut init_hitlist,
+            &mut hsp_list,
+            &mut jumper,
+            |_oid| false,
+            |_oid, _chunk, _list| {
+                get_results_called = true;
+                0
+            },
+            || {
+                fallback_called = true;
+                9
+            },
+            None,
+        );
+
+        assert_eq!(status, 9);
+        assert!(fallback_called);
+        assert!(!get_results_called);
+    }
+
+    #[test]
+    fn gap_edit_script_combine_moves_append_and_merges_same_ops() {
+        let mut base = Some(GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 3)],
+        });
+        let mut append = Some(GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 2), (GapAlignOpType::Del, 1)],
+        });
+        let combined = gap_edit_script_combine(&mut base, &mut append).expect("combined");
+        assert_eq!(
+            combined.ops,
+            vec![(GapAlignOpType::Sub, 5), (GapAlignOpType::Del, 1)]
+        );
+        assert!(append.is_none());
+
+        let mut empty_base = None;
+        let mut append_only = Some(GapEditScript {
+            ops: vec![(GapAlignOpType::Ins, 4)],
+        });
+        assert_eq!(
+            gap_edit_script_combine(&mut empty_base, &mut append_only)
+                .unwrap()
+                .ops,
+            vec![(GapAlignOpType::Ins, 4)]
+        );
     }
 
     /// Helper: BLASTNA byte to IUPAC char (A=0,C=1,G=2,T=3).
