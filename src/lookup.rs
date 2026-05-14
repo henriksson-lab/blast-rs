@@ -4104,6 +4104,70 @@ mod tests {
     }
 
     #[test]
+    fn translated_disc_mb_subject_scan_retrieves_two_template_secondary_diagonals() {
+        let query = crate::encoding::encode_blastna_sequence(
+            b"ACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGT",
+        );
+        let subject = crate::encoding::encode_blastna_sequence(
+            b"GGGGACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTCCCC",
+        );
+        let packed_subject = crate::encoding::pack_ncbi2na_bases(&subject);
+        let mut table = MbLookupTable {
+            word_length: 16,
+            lut_word_length: 11,
+            discontiguous: false,
+            template_length: 0,
+            template_type: DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: DiscTemplateType::Contiguous,
+            hashtable: vec![0; 1 << 22],
+            hashtable2: Vec::new(),
+            next_pos: Vec::new(),
+            next_pos2: Vec::new(),
+            pv_array: vec![0; (1 << 22) / 32],
+            pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
+            longest_chain: 0,
+            scan_step: 0,
+        };
+        let options = crate::options::LookupTableOptions {
+            word_size: 11,
+            mb_template_length: 16,
+            mb_template_type: DiscWordType::TwoTemplates as i32,
+            ..crate::options::LookupTableOptions::default()
+        };
+        assert_eq!(
+            s_fill_disc_mb_table(
+                &query,
+                &[crate::util::SSeqRange {
+                    left: 0,
+                    right: query.len() as i32 - 1,
+                }],
+                &mut table,
+                &options,
+            ),
+            0
+        );
+
+        let hits =
+            s_mb_disc_word_scan_subject(&table, &packed_subject, subject.len(), 0, subject.len());
+        assert!(
+            hits.iter()
+                .any(|pair| pair.query_offset == 0 && pair.subject_offset == 4),
+            "primary full-length diagonal seed missing from two-template scan: {hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|pair| pair.query_offset == 18 && pair.subject_offset == 4),
+            "secondary left-overlap diagonal seed missing from two-template scan: {hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|pair| pair.query_offset == 0 && pair.subject_offset == 22),
+            "secondary right-overlap diagonal seed missing from two-template scan: {hits:?}"
+        );
+    }
+
+    #[test]
     fn translated_lookup_destructors_drop_owned_tables() {
         let mut small = Some(SmallNaLookupTable {
             word_length: 8,

@@ -303,7 +303,7 @@ pub fn blast_smith_waterman_get_gapped_score(
                 comp_adjustment_method: 0,
                 edit_script: None,
                 pat_info: None,
-            map_info: None,
+                map_info: None,
             };
             let _ = blast_hsp_list_save_hsp(&mut hsp_list, hsp);
         }
@@ -1861,7 +1861,7 @@ mod tests {
                 query_index: 0,
                 frame: 0,
                 is_valid: true,
-                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 4,
         };

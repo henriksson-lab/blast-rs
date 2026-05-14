@@ -151,7 +151,8 @@ pub fn find_partialy_covered_queries(
                         }
                         let context = last.hsp.context.max(0) as usize;
                         if let Some(ctx) = query_info.contexts.get(context) {
-                            should_clone = ctx.query_length - last.hsp.query_end > word_size;
+                            should_clone =
+                                ctx.query_length.saturating_sub(last.hsp.query_end) > word_size;
                         }
                     }
                     if should_clone {
@@ -378,16 +379,18 @@ pub fn s_test_cutoffs(chain: Option<&HSPChain>, cutoff_score: i32, cutoff_edit_d
         return true;
     }
 
-    let mut align_len = 0;
-    let mut num_identical = 0;
+    let mut align_len: i32 = 0;
+    let mut num_identical: i32 = 0;
     let mut container = chain.hsps.as_deref();
     while let Some(hsp_container) = container {
         let hsp = &hsp_container.hsp;
-        align_len += (hsp.query_end - hsp.query_offset).max(hsp.subject_end - hsp.subject_offset);
-        num_identical += hsp.num_ident;
+        let query_span = hsp.query_end.saturating_sub(hsp.query_offset).max(0);
+        let subject_span = hsp.subject_end.saturating_sub(hsp.subject_offset).max(0);
+        align_len = align_len.saturating_add(query_span.max(subject_span));
+        num_identical = num_identical.saturating_add(hsp.num_ident);
         container = hsp_container.next.as_deref();
     }
-    align_len - num_identical <= cutoff_edit_dist
+    align_len.saturating_sub(num_identical) <= cutoff_edit_dist
 }
 
 /// Port of NCBI `s_HSPChainListInsertOne` (`hspfilter_mapper.c:165`).
@@ -567,16 +570,16 @@ pub fn s_get_overlap_cost(a: &Hsp, b: &Hsp, edit_penalty: i32) -> i32 {
         (b, a, b_edit_positions, a_edit_positions)
     };
 
-    let mut first_overlap = first.query_end - second.query_offset;
+    let mut first_overlap = first.query_end.saturating_sub(second.query_offset);
     let mut second_overlap = first_overlap;
     for &query_pos in first_edits {
         if query_pos >= second.query_offset {
-            first_overlap -= edit_penalty;
+            first_overlap = first_overlap.saturating_sub(edit_penalty);
         }
     }
     for &query_pos in second_edits {
         if query_pos < first.query_end {
-            second_overlap -= edit_penalty;
+            second_overlap = second_overlap.saturating_sub(edit_penalty);
         }
     }
     first_overlap.min(second_overlap)
@@ -604,16 +607,16 @@ pub fn s_get_overlap_cost_with_edits(
         (b, a, b_edit_positions, a_edit_positions)
     };
 
-    let mut first_overlap = first.query_end - second.query_offset;
+    let mut first_overlap = first.query_end.saturating_sub(second.query_offset);
     let mut second_overlap = first_overlap;
     for &query_pos in first_edits {
         if query_pos >= second.query_offset {
-            first_overlap -= edit_penalty;
+            first_overlap = first_overlap.saturating_sub(edit_penalty);
         }
     }
     for &query_pos in second_edits {
         if query_pos < first.query_end {
-            second_overlap -= edit_penalty;
+            second_overlap = second_overlap.saturating_sub(edit_penalty);
         }
     }
     first_overlap.min(second_overlap)
@@ -683,8 +686,11 @@ pub fn s_compute_chain_score(
             hsp.score
         };
 
-        let query_gap = (hsp.query_offset - previous.query_end).max(0);
-        let subject_gap = (hsp.subject_offset - previous.subject_end).max(0);
+        let query_gap = hsp.query_offset.saturating_sub(previous.query_end).max(0);
+        let subject_gap = hsp
+            .subject_offset
+            .saturating_sub(previous.subject_end)
+            .max(0);
         score += s_compute_gap_score(query_gap, -12, -1, -4);
         score += s_compute_gap_score(subject_gap, -12, -1, -4);
 
@@ -712,7 +718,7 @@ pub fn s_find_fragment_start(chain: Option<&HSPChain>) -> i32 {
     while let Some(next) = last.next.as_deref() {
         last = next;
     }
-    last.hsp.subject_end - 1
+    last.hsp.subject_end.saturating_sub(1)
 }
 
 /// Port of NCBI debug helper `s_TestHSPRanges` (`hspfilter_mapper.c:577`).
@@ -727,19 +733,20 @@ pub fn s_test_hsp_ranges(hsp: &Hsp) -> bool {
         return false;
     }
 
-    let query_span = hsp.query_end - hsp.query_offset;
-    let subject_span = hsp.subject_end - hsp.subject_offset;
+    let query_span = i64::from(hsp.query_end.saturating_sub(hsp.query_offset));
+    let subject_span = i64::from(hsp.subject_end.saturating_sub(hsp.subject_offset));
     if query_span == 0 && subject_span == 0 {
         return false;
     }
 
     if let Some(script) = hsp.edit_script.as_ref() {
-        let mut query_used = 0;
-        let mut subject_used = 0;
+        let mut query_used = 0i64;
+        let mut subject_used = 0i64;
         for &(op, count) in &script.ops {
             if count < 0 {
                 return false;
             }
+            let count = i64::from(count);
             match op {
                 GapAlignOpType::Sub => {
                     query_used += count;
@@ -800,18 +807,21 @@ fn mapper_trim_score_from_script(
     gap_extend_score: i32,
 ) -> i32 {
     let Some(script) = hsp.edit_script.as_ref() else {
-        hsp.num_ident =
-            (hsp.query_end - hsp.query_offset).min(hsp.subject_end - hsp.subject_offset);
+        hsp.num_ident = hsp
+            .query_end
+            .saturating_sub(hsp.query_offset)
+            .min(hsp.subject_end.saturating_sub(hsp.subject_offset))
+            .max(0);
         return hsp.num_ident;
     };
 
-    let mut score = 0;
-    let mut num_ident = 0;
+    let mut score: i32 = 0;
+    let mut num_ident: i32 = 0;
     for &(op, count) in &script.ops {
         match op {
             GapAlignOpType::Sub => {
-                score += count;
-                num_ident += count;
+                score = score.saturating_add(count);
+                num_ident = num_ident.saturating_add(count);
             }
             GapAlignOpType::Ins
             | GapAlignOpType::Ins1
@@ -819,8 +829,12 @@ fn mapper_trim_score_from_script(
             | GapAlignOpType::Del
             | GapAlignOpType::Del1
             | GapAlignOpType::Del2 => {
-                score +=
-                    s_compute_gap_score(count, gap_open_score, gap_extend_score, mismatch_score);
+                score = score.saturating_add(s_compute_gap_score(
+                    count,
+                    gap_open_score,
+                    gap_extend_score,
+                    mismatch_score,
+                ));
             }
             GapAlignOpType::Decline => {}
         }
@@ -848,14 +862,14 @@ pub fn s_trim_hsp(
         return 0;
     }
 
-    let query_span = hsp.query_end - hsp.query_offset;
-    let subject_span = hsp.subject_end - hsp.subject_offset;
+    let query_span = hsp.query_end.saturating_sub(hsp.query_offset).max(0);
+    let subject_span = hsp.subject_end.saturating_sub(hsp.subject_offset).max(0);
     if (is_query && num > query_span) || (!is_query && num > subject_span) {
         return -1;
     }
 
-    let mut delta_query = 0;
-    let mut delta_subject = 0;
+    let mut delta_query: i32 = 0;
+    let mut delta_subject: i32 = 0;
     if let Some(script) = hsp.edit_script.as_mut() {
         let mut num_left = num;
         while num_left > 0 && !script.ops.is_empty() {
@@ -874,9 +888,9 @@ pub fn s_trim_hsp(
             if consumes_target {
                 let trim = count.min(num_left);
                 let (dq, ds) = mapper_trim_op_deltas(op, trim);
-                delta_query += dq;
-                delta_subject += ds;
-                num_left -= trim;
+                delta_query = delta_query.saturating_add(dq);
+                delta_subject = delta_subject.saturating_add(ds);
+                num_left = num_left.saturating_sub(trim);
                 if trim == count {
                     script.ops.remove(idx);
                 } else {
@@ -884,8 +898,8 @@ pub fn s_trim_hsp(
                 }
             } else {
                 let (dq, ds) = mapper_trim_op_deltas(op, count);
-                delta_query += dq;
-                delta_subject += ds;
+                delta_query = delta_query.saturating_add(dq);
+                delta_subject = delta_subject.saturating_add(ds);
                 script.ops.remove(idx);
             }
         }
@@ -903,13 +917,13 @@ pub fn s_trim_hsp(
     mapper_trim_map_info(hsp, delta_query, delta_subject, is_start, query_seq);
 
     if is_start {
-        hsp.query_offset += delta_query;
-        hsp.subject_offset += delta_subject;
+        hsp.query_offset = hsp.query_offset.saturating_add(delta_query);
+        hsp.subject_offset = hsp.subject_offset.saturating_add(delta_subject);
         hsp.query_gapped_start = hsp.query_gapped_start.max(hsp.query_offset);
         hsp.subject_gapped_start = hsp.subject_gapped_start.max(hsp.subject_offset);
     } else {
-        hsp.query_end -= delta_query;
-        hsp.subject_end -= delta_subject;
+        hsp.query_end = hsp.query_end.saturating_sub(delta_query);
+        hsp.subject_end = hsp.subject_end.saturating_sub(delta_subject);
     }
 
     hsp.score =
@@ -938,12 +952,15 @@ fn mapper_trim_map_info(
                 left.resize(old_len + delta_subject as usize, 0);
                 if let Some(bases) = query_seq.get(
                     hsp.query_offset as usize
-                        ..(hsp.query_offset + delta_subject).max(hsp.query_offset) as usize,
+                        ..hsp
+                            .query_offset
+                            .saturating_add(delta_subject)
+                            .max(hsp.query_offset) as usize,
                 ) {
                     left[old_len..old_len + bases.len()].copy_from_slice(bases);
                 }
 
-                let mut offset = 0;
+                let mut offset: i32 = 0;
                 if let Some(edits) = info.edits.as_ref() {
                     for edit in edits
                         .edits
@@ -951,9 +968,9 @@ fn mapper_trim_map_info(
                         .take_while(|edit| edit.query_pos < hsp.query_offset)
                     {
                         if edit.subject_base == gap_base {
-                            offset -= 1;
+                            offset = offset.saturating_sub(1);
                         } else {
-                            let pos = edit.query_pos + offset;
+                            let pos = edit.query_pos.saturating_add(offset);
                             if pos >= 0 {
                                 if let Some(slot) = left.get_mut(old_len + pos as usize) {
                                     *slot = edit.subject_base;
@@ -967,29 +984,30 @@ fn mapper_trim_map_info(
             let old_right = overhangs.right.take().unwrap_or_default();
             let mut right = vec![0; delta_subject as usize + old_right.len()];
             right[delta_subject as usize..].copy_from_slice(&old_right);
-            if let Some(bases) = query_seq
-                .get((hsp.query_end - delta_subject).max(0) as usize..hsp.query_end.max(0) as usize)
-            {
+            if let Some(bases) = query_seq.get(
+                hsp.query_end.saturating_sub(delta_subject).max(0) as usize
+                    ..hsp.query_end.max(0) as usize,
+            ) {
                 right[..bases.len()].copy_from_slice(bases);
             }
 
             let mut k = 0;
             if let Some(edits) = info.edits.as_ref() {
                 while k < edits.edits.len()
-                    && edits.edits[k].query_pos < hsp.query_end - delta_query
+                    && edits.edits[k].query_pos < hsp.query_end.saturating_sub(delta_query)
                 {
                     k += 1;
                 }
 
-                let mut offset = -(hsp.query_end - delta_query);
+                let mut offset = hsp.query_end.saturating_sub(delta_query).saturating_neg();
                 for edit in edits.edits.iter().skip(k) {
                     if edit.query_pos >= hsp.query_end {
                         continue;
                     }
                     if edit.subject_base == gap_base {
-                        offset -= 1;
+                        offset = offset.saturating_sub(1);
                     } else {
-                        let pos = edit.query_pos + offset;
+                        let pos = edit.query_pos.saturating_add(offset);
                         if pos >= 0 {
                             if let Some(slot) = right.get_mut(pos as usize) {
                                 *slot = edit.subject_base;
@@ -1011,13 +1029,13 @@ fn mapper_trim_map_info(
 
     if is_start {
         let mut k = edits.edits.len();
-        let mut p = hsp.query_end - 1;
+        let mut p = hsp.query_end.saturating_sub(1);
         for &(op, count) in script.ops.iter().rev() {
             if !matches!(
                 op,
                 GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2
             ) {
-                p -= count;
+                p = p.saturating_sub(count);
                 while k > 0
                     && edits.edits[k - 1].query_pos > p
                     && edits.edits[k - 1].query_base != gap_base
@@ -1043,7 +1061,7 @@ fn mapper_trim_map_info(
                 op,
                 GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2
             ) {
-                p += count;
+                p = p.saturating_add(count);
                 while k < edits.edits.len()
                     && edits.edits[k].query_pos < p
                     && edits.edits[k].query_base != gap_base
@@ -1067,9 +1085,9 @@ fn mapper_trim_map_info(
 /// Audit caveat: overlap removal delegates to `s_trim_hsp`, so it inherits its
 /// simplified mapper edit/overhang trimming behavior.
 pub fn s_trim_overlap(first: &mut Hsp, second: &mut Hsp, query: Option<&[u8]>) -> i32 {
-    let query_overlap = first.query_end - second.query_offset;
+    let query_overlap = first.query_end.saturating_sub(second.query_offset);
     if query_overlap > 0 {
-        let second_span = second.query_end - second.query_offset;
+        let second_span = second.query_end.saturating_sub(second.query_offset);
         let status = if second_span > query_overlap {
             s_trim_hsp(second, query_overlap, true, true, -4, -4, -4, query)
         } else {
@@ -1080,9 +1098,9 @@ pub fn s_trim_overlap(first: &mut Hsp, second: &mut Hsp, query: Option<&[u8]>) -
         }
     }
 
-    let subject_overlap = first.subject_end - second.subject_offset;
+    let subject_overlap = first.subject_end.saturating_sub(second.subject_offset);
     if subject_overlap > 0 {
-        let second_span = second.subject_end - second.subject_offset;
+        let second_span = second.subject_end.saturating_sub(second.subject_offset);
         let status = if second_span > subject_overlap {
             s_trim_hsp(second, subject_overlap, false, true, -4, -4, -4, query)
         } else {
@@ -1218,7 +1236,7 @@ pub fn s_trim_chain_end_to_subj_pos(
             return 0;
         }
 
-        let num_left = h.hsp.subject_end - subj_pos;
+        let num_left = h.hsp.subject_end.saturating_sub(subj_pos);
         let old_score = h.hsp.score;
         let status = s_trim_hsp(
             &mut h.hsp,
@@ -1296,7 +1314,7 @@ pub fn s_set_adapter(
             while let Some(next) = last.next.as_deref() {
                 last = next;
             }
-            if query_len - last.hsp.query_end < MIN_ADAPTER_LEN {
+            if query_len.saturating_sub(last.hsp.query_end) < MIN_ADAPTER_LEN {
                 kept.push(chain);
                 continue;
             }
@@ -1313,7 +1331,7 @@ pub fn s_set_adapter(
                 .position(|container| container.hsp.query_end > adapter_pos)
             {
                 if hsps[idx].hsp.query_offset < adapter_pos {
-                    let trim_by = hsps[idx].hsp.query_end - adapter_pos;
+                    let trim_by = hsps[idx].hsp.query_end.saturating_sub(adapter_pos);
                     let old_score = hsps[idx].hsp.score;
                     let _ = s_trim_hsp(
                         &mut hsps[idx].hsp,
@@ -1351,7 +1369,7 @@ pub fn s_set_adapter(
             }
 
             chain.adapter = adapter_pos;
-            let pos_minus = query_len - adapter_pos - 1;
+            let pos_minus = query_len.saturating_sub(adapter_pos).saturating_sub(1);
             let mut hsps = drain_hspcontainer_list(chain.hsps.take());
             let Some(idx) = hsps
                 .iter()
@@ -1366,7 +1384,9 @@ pub fn s_set_adapter(
             if let Some(first_kept) = hsps.first_mut() {
                 mapper_mark_left_edge(&mut first_kept.hsp, MAPPER_ADAPTER | MAPPER_EXON);
                 if pos_minus >= first_kept.hsp.query_offset {
-                    let trim_by = pos_minus - first_kept.hsp.query_offset + 1;
+                    let trim_by = pos_minus
+                        .saturating_sub(first_kept.hsp.query_offset)
+                        .saturating_add(1);
                     let old_score = first_kept.hsp.score;
                     let _ = s_trim_hsp(
                         &mut first_kept.hsp,
@@ -1457,8 +1477,8 @@ fn chain_query_coverage(chain: &HSPChain, query_len: i32) -> Option<(i32, i32)> 
             last = next;
         }
         Some((
-            query_len - last.hsp.query_end,
-            query_len - first.hsp.query_offset,
+            query_len.saturating_sub(last.hsp.query_end),
+            query_len.saturating_sub(first.hsp.query_offset),
         ))
     }
 }
@@ -1470,7 +1490,7 @@ fn chain_adapter_overhang(chain: &HSPChain, query_len: i32) -> Option<i32> {
         while let Some(next) = last.next.as_deref() {
             last = next;
         }
-        Some(query_len - last.hsp.query_end)
+        Some(query_len.saturating_sub(last.hsp.query_end))
     } else {
         Some(first.hsp.query_offset + 1)
     }
@@ -1485,8 +1505,8 @@ fn chain_adapter_search_bounds(chain: &HSPChain, query_len: i32) -> Option<(i32,
         Some((hsp.hsp.query_offset, hsp.hsp.query_end))
     } else {
         Some((
-            query_len - hsp.hsp.query_end,
-            query_len - hsp.hsp.query_offset,
+            query_len.saturating_sub(hsp.hsp.query_end),
+            query_len.saturating_sub(hsp.hsp.query_offset),
         ))
     }
 }
@@ -1531,7 +1551,7 @@ pub fn s_find_adapters(
         let Some((from, to)) = best.and_then(|chain| chain_query_coverage(chain, query_len)) else {
             continue;
         };
-        if from < 20 && to > query_len - 3 {
+        if from < 20 && to > query_len.saturating_sub(3) {
             continue;
         }
 
@@ -1551,7 +1571,7 @@ pub fn s_find_adapters(
         let Some((from, to)) = search_bounds else {
             continue;
         };
-        if to >= query_len - 3 {
+        if to >= query_len.saturating_sub(3) {
             continue;
         }
 
@@ -1586,13 +1606,13 @@ pub fn s_merge_hsps(
         return None;
     }
 
-    let mut query_gap = second.subject_offset - first.subject_end;
-    let mut subject_gap = second.query_offset - first.query_end;
+    let mut query_gap = second.subject_offset.saturating_sub(first.subject_end);
+    let mut subject_gap = second.query_offset.saturating_sub(first.query_end);
     let mut mismatches = 0;
     if query_gap.max(subject_gap) < 4 {
         mismatches = query_gap.min(subject_gap);
-        query_gap -= mismatches;
-        subject_gap -= mismatches;
+        query_gap = query_gap.saturating_sub(mismatches);
+        subject_gap = subject_gap.saturating_sub(mismatches);
     }
 
     let mut merged = first.clone();
@@ -1603,7 +1623,10 @@ pub fn s_merge_hsps(
     if script.ops.is_empty() && first.query_end > first.query_offset {
         script.push(
             GapAlignOpType::Sub,
-            (first.query_end - first.query_offset).min(first.subject_end - first.subject_offset),
+            first
+                .query_end
+                .saturating_sub(first.query_offset)
+                .min(first.subject_end.saturating_sub(first.subject_offset)),
         );
     }
     if mismatches > 0 {
@@ -1622,8 +1645,10 @@ pub fn s_merge_hsps(
     } else if second.query_end > second.query_offset {
         script.push(
             GapAlignOpType::Sub,
-            (second.query_end - second.query_offset)
-                .min(second.subject_end - second.subject_offset),
+            second
+                .query_end
+                .saturating_sub(second.query_offset)
+                .min(second.subject_end.saturating_sub(second.subject_offset)),
         );
     }
 
@@ -1674,12 +1699,12 @@ fn merge_hsp_map_info(
     let mut edits = info.edits.take().unwrap_or_default();
     let first_edit_count = edits.edits.len();
     let gap_base = 15;
-    let mut offset = merged.subject_offset - merged.query_offset;
+    let mut offset = merged.subject_offset.saturating_sub(merged.query_offset);
     for edit in edits.edits.iter().take(first_edit_count) {
         if edit.query_base == gap_base {
-            offset += 1;
+            offset = offset.saturating_add(1);
         } else if edit.subject_base == gap_base {
-            offset -= 1;
+            offset = offset.saturating_sub(1);
         }
     }
 
@@ -1689,11 +1714,13 @@ fn merge_hsp_map_info(
         .and_then(|overhangs| overhangs.right.as_ref());
 
     for k in 0..mismatches {
-        let query_pos = merged.query_end + k;
+        let query_pos = merged.query_end.saturating_add(k);
         let query_base = query
             .and_then(|query| query.get(query_pos as usize).copied())
             .unwrap_or(0);
-        let subject_pos = query_pos + offset - merged.subject_end;
+        let subject_pos = query_pos
+            .saturating_add(offset)
+            .saturating_sub(merged.subject_end);
         let subject_base = right_overhang
             .and_then(|bases| bases.get(subject_pos as usize).copied())
             .unwrap_or(query_base);
@@ -1705,8 +1732,10 @@ fn merge_hsp_map_info(
     }
 
     for _ in 0..query_gap {
-        let query_pos = merged.query_end + mismatches;
-        let subject_pos = query_pos + offset - merged.subject_end;
+        let query_pos = merged.query_end.saturating_add(mismatches);
+        let subject_pos = query_pos
+            .saturating_add(offset)
+            .saturating_sub(merged.subject_end);
         let subject_base = right_overhang
             .and_then(|bases| bases.get(subject_pos as usize).copied())
             .unwrap_or(0);
@@ -1715,11 +1744,14 @@ fn merge_hsp_map_info(
             query_base: gap_base,
             subject_base,
         });
-        offset += 1;
+        offset = offset.saturating_add(1);
     }
 
     for k in 0..subject_gap {
-        let query_pos = merged.query_end + mismatches + k;
+        let query_pos = merged
+            .query_end
+            .saturating_add(mismatches)
+            .saturating_add(k);
         let query_base = query
             .and_then(|query| query.get(query_pos as usize).copied())
             .unwrap_or(0);
@@ -1830,14 +1862,14 @@ pub fn s_find_splice_junctions(
                 let h = &mut *h_ptr;
                 let (query_gap, overlaps_query, can_short_merge, score_pair) = {
                     let next = h.next.as_ref().expect("checked above");
-                    let query_gap = next.hsp.query_offset - h.hsp.query_end;
-                    let subject_gap = next.hsp.subject_offset - h.hsp.subject_end;
+                    let query_gap = next.hsp.query_offset.saturating_sub(h.hsp.query_end);
+                    let subject_gap = next.hsp.subject_offset.saturating_sub(h.hsp.subject_end);
                     (
                         query_gap,
                         next.hsp.query_offset <= h.hsp.query_end
                             && next.hsp.query_offset > h.hsp.query_offset,
                         subject_gap >= 0
-                            && subject_gap - query_gap < 30
+                            && subject_gap.saturating_sub(query_gap) < 30
                             && next.hsp.subject_offset >= h.hsp.subject_end,
                         h.hsp.score > 50 && next.hsp.score > 50,
                     )
@@ -2226,14 +2258,73 @@ fn chain_from_hsp(mut hsp: Hsp, oid: i32, query_info: &QueryInfo) -> Option<Box<
     Some(chain)
 }
 
+fn hspchain_list_append_splice_candidate(
+    list: &mut Option<Box<HSPChain>>,
+    hsp: Hsp,
+    oid: i32,
+    query_info: &QueryInfo,
+    cutoff_score: i32,
+    cutoff_edit_dist: i32,
+) -> i32 {
+    let Some(mut chain) = chain_from_hsp(hsp, oid, query_info) else {
+        return 0;
+    };
+    if cutoff_score > 0 && !s_test_cutoffs(Some(&chain), cutoff_score, cutoff_edit_dist) {
+        return 0;
+    }
+
+    let Some(new_hsp) = first_hsp(&chain) else {
+        return -1;
+    };
+    let new_query_offset = new_hsp.query_offset;
+    let new_subject_offset = new_hsp.subject_offset;
+    let new_query_frame = new_hsp.query_frame;
+    let new_context = chain.context;
+    let new_oid = chain.oid;
+
+    let mut chains = drain_chain_list(list.take());
+    for existing in chains.iter_mut().rev() {
+        let Some(existing_first) = first_hsp(existing) else {
+            continue;
+        };
+        let Some(existing_last) = last_container(existing) else {
+            continue;
+        };
+        if existing.oid == new_oid
+            && existing.context == new_context
+            && existing_first.query_frame == new_query_frame
+            && new_query_offset >= existing_last.hsp.query_end
+            && new_subject_offset >= existing_last.hsp.subject_end
+        {
+            let Some(new_container) = chain.hsps.take() else {
+                *list = build_chain_list(chains);
+                return -1;
+            };
+            let Some(last) = last_container_mut(existing) else {
+                *list = build_chain_list(chains);
+                return -1;
+            };
+            last.next = Some(new_container);
+            existing.score = existing.score.saturating_add(chain.score);
+            *list = build_chain_list(chains);
+            return 0;
+        }
+    }
+
+    chains.push(chain);
+    *list = build_chain_list(chains);
+    0
+}
+
 /// Conservative Rust port of NCBI `s_BlastHSPMapperSplicedPairedRun`
 /// (`hspfilter_mapper.c:3864`).
 ///
 /// Audit caveat: C builds optimal paths with `s_FindBestPath` and mutates raw
 /// `BlastHSPList`/`HSPChain` ownership. Rust receives an owned `HspList`,
-/// creates one-HSP chains for the representable mapper hits, uses
-/// `ContextInfo::segment_flags` to identify paired read segments, and then
-/// reuses the audited chain insert, splice-junction, pairing, and trim helpers.
+/// groups same-query/same-subject splice candidates into representable
+/// multi-HSP chains, uses `ContextInfo::segment_flags` to identify paired read
+/// segments, and then reuses the audited chain insert, splice-junction, pairing,
+/// and trim helpers.
 pub fn s_blast_hspmapper_spliced_paired_run(
     data: &mut BlastHSPMapperData,
     hsp_list: Option<HspList>,
@@ -2294,14 +2385,25 @@ pub fn s_blast_hspmapper_spliced_paired_run(
         }
 
         let cutoff_score = s_mapper_cutoff_score(&params, context_info.query_length);
-        let mut chain = chain_from_hsp(hsp, hsp_list.oid, &query_info);
-        let status = hspchain_list_insert(
-            &mut per_query[query_idx],
-            &mut chain,
-            cutoff_score,
-            params.cutoff_edit_dist,
-            true,
-        );
+        let status = if params.splice {
+            hspchain_list_append_splice_candidate(
+                &mut per_query[query_idx],
+                hsp,
+                hsp_list.oid,
+                &query_info,
+                cutoff_score,
+                params.cutoff_edit_dist,
+            )
+        } else {
+            let mut chain = chain_from_hsp(hsp, hsp_list.oid, &query_info);
+            hspchain_list_insert(
+                &mut per_query[query_idx],
+                &mut chain,
+                cutoff_score,
+                params.cutoff_edit_dist,
+                true,
+            )
+        };
         if status != 0 {
             return status;
         }
@@ -2894,21 +2996,21 @@ pub fn s_find_splice_junctions_for_overlaps(
         return -1;
     }
 
-    let overlap_len = first.query_end - second.query_offset;
+    let overlap_len = first.query_end.saturating_sub(second.query_offset);
     if overlap_len <= 0 {
         return 0;
     }
 
-    let first_query_span = first.query_end - first.query_offset;
-    let second_query_span = second.query_end - second.query_offset;
+    let first_query_span = first.query_end.saturating_sub(first.query_offset);
+    let second_query_span = second.query_end.saturating_sub(second.query_offset);
     if overlap_len >= first_query_span || overlap_len >= second_query_span {
         return -1;
     }
 
     if let Some(query) = query {
         let query_len = query_len.max(0).min(query.len() as i32);
-        let left = second.query_offset - 2;
-        let right = first.query_end + 2;
+        let left = second.query_offset.saturating_sub(2);
+        let right = first.query_end.saturating_add(2);
         if left >= 0 && right <= query_len {
             let mut subject = Vec::with_capacity(overlap_len as usize + 4);
             subject.extend_from_slice(&query[left as usize..second.query_offset as usize]);
@@ -2923,7 +3025,9 @@ pub fn s_find_splice_junctions_for_overlaps(
                         continue;
                     }
 
-                    let trim_first = first.query_end - (second.query_offset + i as i32);
+                    let trim_first = first
+                        .query_end
+                        .saturating_sub(second.query_offset.saturating_add(i as i32));
                     if trim_first > 0 {
                         let status =
                             s_trim_hsp(first, trim_first, true, false, -4, -4, -4, Some(query));
@@ -2978,9 +3082,9 @@ fn mapper_append_extension_ops(
         script.push(GapAlignOpType::Sub, matches);
     }
     if query_len > subject_len {
-        script.push(GapAlignOpType::Ins, query_len - subject_len);
+        script.push(GapAlignOpType::Ins, query_len.saturating_sub(subject_len));
     } else if subject_len > query_len {
-        script.push(GapAlignOpType::Del, subject_len - query_len);
+        script.push(GapAlignOpType::Del, subject_len.saturating_sub(query_len));
     }
 }
 
@@ -3008,7 +3112,9 @@ fn mapper_extend_hsp(
     if script.ops.is_empty() && hsp.query_end > hsp.query_offset {
         script.push(
             GapAlignOpType::Sub,
-            (hsp.query_end - hsp.query_offset).min(hsp.subject_end - hsp.subject_offset),
+            hsp.query_end
+                .saturating_sub(hsp.query_offset)
+                .min(hsp.subject_end.saturating_sub(hsp.subject_offset)),
         );
     }
 
@@ -3017,8 +3123,8 @@ fn mapper_extend_hsp(
             extension.push(op, count);
         }
         hsp.edit_script = Some(extension);
-        hsp.query_offset -= query_len;
-        hsp.subject_offset -= subject_len;
+        hsp.query_offset = hsp.query_offset.saturating_sub(query_len);
+        hsp.subject_offset = hsp.subject_offset.saturating_sub(subject_len);
         hsp.query_gapped_start = hsp.query_offset;
         hsp.subject_gapped_start = hsp.subject_offset;
     } else {
@@ -3026,8 +3132,8 @@ fn mapper_extend_hsp(
             script.push(op, count);
         }
         hsp.edit_script = Some(script);
-        hsp.query_end += query_len;
-        hsp.subject_end += subject_len;
+        hsp.query_end = hsp.query_end.saturating_add(query_len);
+        hsp.subject_end = hsp.subject_end.saturating_add(subject_len);
     }
 
     hsp.score = mapper_trim_score_from_script(
@@ -3121,7 +3227,7 @@ pub fn s_find_splice_junctions_for_gap(
     };
 
     let query_len = query_len.max(0).min(query.len() as i32);
-    let query_gap = second.query_offset - first.query_end;
+    let query_gap = second.query_offset.saturating_sub(first.query_end);
     if query_gap < 0 {
         return 0;
     }
@@ -3134,7 +3240,7 @@ pub fn s_find_splice_junctions_for_gap(
     let second_len = second_left.len() as i32;
 
     for q in 0..4 {
-        if first.query_end - q <= first.query_offset {
+        if first.query_end.saturating_sub(q) <= first.query_offset {
             break;
         }
         let Some(high) = (match q {
@@ -3142,11 +3248,15 @@ pub fn s_find_splice_junctions_for_gap(
                 .first()
                 .zip(first_right.get(1))
                 .map(|(a, b)| (*a << 6) | (*b << 4)),
-            1 => mapper_query_base(query, first.query_end - 1, query_len)
+            1 => mapper_query_base(query, first.query_end.saturating_sub(1), query_len)
                 .zip(first_right.first().copied())
                 .map(|(a, b)| (a << 6) | (b << 4)),
-            _ => mapper_query_base(query, first.query_end - q, query_len)
-                .zip(mapper_query_base(query, first.query_end - q + 1, query_len))
+            _ => mapper_query_base(query, first.query_end.saturating_sub(q), query_len)
+                .zip(mapper_query_base(
+                    query,
+                    first.query_end.saturating_sub(q).saturating_add(1),
+                    query_len,
+                ))
                 .map(|(a, b)| (a << 6) | (b << 4)),
         }) else {
             continue;
@@ -3156,16 +3266,21 @@ pub fn s_find_splice_junctions_for_gap(
             if high != (signal & 0xf0) {
                 continue;
             }
-            let start = second_len - query_gap + q - 2;
-            let lo = (start - 1).max(0);
-            let hi = (start + 1).min(second_len - 2);
+            let start = second_len
+                .saturating_sub(query_gap)
+                .saturating_add(q)
+                .saturating_sub(2);
+            let lo = start.saturating_sub(1).max(0);
+            let hi = start.saturating_add(1).min(second_len.saturating_sub(2));
             for i in lo..=hi {
                 let low = (second_left[i as usize] << 2) | second_left[i as usize + 1];
                 if high | low != signal {
                     continue;
                 }
-                let subject_gap = second_len - (i + 2) + q;
-                if (query_gap - subject_gap).abs() > 1 {
+                let subject_gap = second_len
+                    .saturating_sub(i.saturating_add(2))
+                    .saturating_add(q);
+                if query_gap.abs_diff(subject_gap) > 1 {
                     continue;
                 }
                 if q > 0 {
@@ -3183,8 +3298,8 @@ pub fn s_find_splice_junctions_for_gap(
                         return status;
                     }
                 }
-                let query_ext = second.query_offset - first.query_end;
-                let subject_ext = second_len - (i + 2);
+                let query_ext = second.query_offset.saturating_sub(first.query_end);
+                let subject_ext = second_len.saturating_sub(i.saturating_add(2));
                 let status = mapper_extend_hsp(second, query_ext, subject_ext, true, score_opts);
                 if status == 0 {
                     mapper_set_splice_signal(first, second, signal);
@@ -3195,7 +3310,7 @@ pub fn s_find_splice_junctions_for_gap(
     }
 
     for q in 0..4 {
-        if second.query_offset + q >= second.query_end {
+        if second.query_offset.saturating_add(q) >= second.query_end {
             break;
         }
         let Some(low) = (match q {
@@ -3208,13 +3323,17 @@ pub fn s_find_splice_junctions_for_gap(
                 .copied()
                 .zip(mapper_query_base(query, second.query_offset, query_len))
                 .map(|(a, b)| (a << 2) | b),
-            _ => mapper_query_base(query, second.query_offset + q - 2, query_len)
-                .zip(mapper_query_base(
-                    query,
-                    second.query_offset + q - 1,
-                    query_len,
-                ))
-                .map(|(a, b)| (a << 2) | b),
+            _ => mapper_query_base(
+                query,
+                second.query_offset.saturating_add(q).saturating_sub(2),
+                query_len,
+            )
+            .zip(mapper_query_base(
+                query,
+                second.query_offset.saturating_add(q).saturating_sub(1),
+                query_len,
+            ))
+            .map(|(a, b)| (a << 2) | b),
         }) else {
             continue;
         };
@@ -3223,16 +3342,16 @@ pub fn s_find_splice_junctions_for_gap(
             if low != (signal & 0x0f) {
                 continue;
             }
-            let end = query_gap + q;
-            let lo = (end - 1).max(0);
-            let hi = (end + 1).min(first_len - 2);
+            let end = query_gap.saturating_add(q);
+            let lo = end.saturating_sub(1).max(0);
+            let hi = end.saturating_add(1).min(first_len.saturating_sub(2));
             for i in lo..=hi {
                 let high = (first_right[i as usize] << 6) | (first_right[i as usize + 1] << 4);
                 if high | low != signal {
                     continue;
                 }
-                let subject_gap = i - q;
-                if (query_gap - subject_gap).abs() > 1 {
+                let subject_gap = i.saturating_sub(q);
+                if query_gap.abs_diff(subject_gap) > 1 {
                     continue;
                 }
                 if q > 0 {
@@ -3250,7 +3369,7 @@ pub fn s_find_splice_junctions_for_gap(
                         return status;
                     }
                 }
-                let query_ext = second.query_offset - first.query_end;
+                let query_ext = second.query_offset.saturating_sub(first.query_end);
                 let status = mapper_extend_hsp(first, query_ext, i, false, score_opts);
                 if status == 0 {
                     mapper_set_splice_signal(first, second, signal);
@@ -3333,7 +3452,7 @@ pub fn s_set_poly_a_tail(
     while let Some(chain) = ch {
         let poly_a = if let Some(last) = last_container_mut(chain) {
             let hsp = &mut last.hsp;
-            if query_len - hsp.query_end >= 5
+            if query_len.saturating_sub(hsp.query_end) >= 5
                 && ((hsp.query_frame < 0 && negative_start >= 0)
                     || (hsp.query_frame > 0 && positive_start >= 0))
             {
@@ -3402,11 +3521,11 @@ pub fn s_find_poly_a_tails(
             (first.hsp.query_offset, last.hsp.query_end)
         } else {
             (
-                query_len - last.hsp.query_end,
-                query_len - first.hsp.query_offset,
+                query_len.saturating_sub(last.hsp.query_end),
+                query_len.saturating_sub(first.hsp.query_offset),
             )
         };
-        if from < 4 && to > query_len - 3 {
+        if from < 4 && to > query_len.saturating_sub(3) {
             continue;
         }
 
@@ -3578,6 +3697,10 @@ mod tests {
 
     #[test]
     fn hsp_container_new_dup_free_take_ownership() {
+        let mut missing_hsp = None;
+        assert!(hspcontainer_new(&mut missing_hsp).is_none());
+        assert!(hspcontainer_dup(None).is_none());
+
         let mut hsp_slot = Some(hsp(10, 0, 0, 0, 8));
         let container = hspcontainer_new(&mut hsp_slot).unwrap();
         assert!(hsp_slot.is_none());
@@ -3595,10 +3718,13 @@ mod tests {
         assert_eq!(cloned.context, 2);
         assert_eq!(cloned.oid, 5);
         assert!(cloned.next.is_none());
+        assert!(clone_chain(None).is_none());
         assert!(hspchain_free(Some(chain)).is_none());
+        assert!(hspchain_free(None).is_none());
         let results = blast_mapping_results_new();
         assert_eq!(results.num_queries, 0);
         assert!(blast_mapping_results_free(Some(results)).is_none());
+        assert!(blast_mapping_results_free(None).is_none());
     }
 
     #[test]
@@ -3650,6 +3776,35 @@ mod tests {
     }
 
     #[test]
+    fn find_partialy_covered_queries_handles_extreme_trailing_endpoint() {
+        let mut malformed = chain(35, 0, 7, 0, 0);
+        malformed.hsps.as_mut().unwrap().hsp.query_end = i32::MIN;
+        let query_info = QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 30,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 30,
+        };
+        let data = BlastHSPMapperData {
+            query_info: Some(query_info),
+            saved_chains: vec![Some(malformed)],
+            ..Default::default()
+        };
+
+        let found = find_partialy_covered_queries(Some(&data), 7, 5);
+
+        assert_eq!(scores(&found), vec![35]);
+    }
+
+    #[test]
     fn chain_list_insert_old_sorts_and_skips_duplicates() {
         let mut list = None;
         assert_eq!(
@@ -3684,6 +3839,16 @@ mod tests {
 
         assert!(s_test_cutoffs(list.as_deref(), 30, 1));
         assert!(!s_test_cutoffs(list.as_deref(), 30, 0));
+        assert!(!s_test_cutoffs(None, 30, 0));
+
+        let mut extreme = chain(100, 0, i32::MIN, 0, 0);
+        extreme.hsps.as_mut().unwrap().hsp.query_end = i32::MAX;
+        extreme.hsps.as_mut().unwrap().hsp.num_ident = 0;
+        assert!(!s_test_cutoffs(Some(&extreme), 30, i32::MAX - 1));
+
+        assert_eq!(s_hspchain_list_insert_one_old(&mut list, None, true), -1);
+        assert_eq!(s_hspchain_list_insert_one(&mut list, None, true), -1);
+        assert_eq!(scores(&list), vec![40]);
     }
 
     #[test]
@@ -3693,6 +3858,12 @@ mod tests {
         incoming.as_mut().unwrap().next.as_mut().unwrap().next = Some(chain(20, 0, 3, 40, 40));
 
         let mut list = None;
+        let mut missing_incoming = None;
+        assert_eq!(
+            hspchain_list_insert(&mut list, &mut missing_incoming, 0, -1, false),
+            0
+        );
+        assert!(list.is_none());
         assert_eq!(
             hspchain_list_insert(&mut list, &mut incoming, 0, -1, false),
             0
@@ -3702,6 +3873,30 @@ mod tests {
         assert_eq!(hspchain_list_trim(&mut list, 5), 0);
         assert_eq!(scores(&list), vec![50, 45]);
         assert!(s_test_chains_sorted(list.as_deref()));
+
+        let mut empty = None;
+        assert_eq!(hspchain_list_trim(&mut empty, 5), -1);
+
+        let mut below_cutoff = Some(chain(10, 0, 4, 60, 60));
+        assert_eq!(
+            hspchain_list_insert(&mut list, &mut below_cutoff, 30, -1, false),
+            0
+        );
+        assert!(below_cutoff.is_none());
+        assert_eq!(scores(&list), vec![50, 45]);
+
+        let mut bad_context = chain(30, 0, 5, 0, 0);
+        bad_context.hsps.as_mut().unwrap().hsp.context = 1;
+        assert!(!s_test_chains(Some(&bad_context)));
+
+        let mut bad_order = chain(30, 0, 6, 10, 10);
+        let mut previous_hsp = Some(hsp(20, 0, 5, 5, 10));
+        bad_order.hsps.as_mut().unwrap().next = hspcontainer_new(&mut previous_hsp);
+        assert!(!s_test_chains(Some(&bad_order)));
+
+        let mut unsorted = chain(20, 0, 7, 0, 0);
+        unsorted.next = Some(chain(30, 0, 8, 20, 20));
+        assert!(!s_test_chains_sorted(Some(&unsorted)));
     }
 
     #[test]
@@ -3709,6 +3904,10 @@ mod tests {
         let mut data = BlastHSPMapperData::default();
         assert_eq!(s_blast_hspmapper_paired_init(&mut data, 3), 0);
         assert_eq!(data.saved_chains.len(), 3);
+        assert!(data.saved_chains.iter().all(Option::is_none));
+        data.saved_chains[1] = Some(chain(20, 0, 1, 0, 0));
+        assert_eq!(s_blast_hspmapper_paired_init(&mut data, 2), 0);
+        assert_eq!(data.saved_chains.len(), 2);
         assert!(data.saved_chains.iter().all(Option::is_none));
         assert_eq!(s_blast_hspmapper_paired_init(&mut data, -1), 0);
         assert!(data.saved_chains.is_empty());
@@ -3733,6 +3932,7 @@ mod tests {
             -scoring_options.gap_extend
         );
         assert!(blast_hspmapper_params_new(None, Some(&scoring_options)).is_none());
+        assert!(blast_hspmapper_params_new(Some(&hit_options), None).is_none());
 
         let info = blast_hspmapper_info_new(params.clone());
         assert_eq!(info.new_fn, BlastHSPMapperCallback::PairedNew);
@@ -3750,6 +3950,13 @@ mod tests {
             Some(1)
         );
         assert!(s_blast_hspmapper_free(Some(writer)).is_none());
+
+        let missing_writer = s_blast_hspmapper_paired_new(None, None, None);
+        assert!(missing_writer.data.params.is_none());
+        assert!(missing_writer.data.query.is_none());
+        assert!(missing_writer.data.query_info.is_none());
+        assert!(missing_writer.data.saved_chains.is_empty());
+
         assert!(blast_hspmapper_params_free(None).is_none());
     }
 
@@ -3766,20 +3973,100 @@ mod tests {
         let mut d = hsp(30, 0, 6, 6, 9);
         d.query_end = 16;
         assert_eq!(s_get_overlap_cost_with_edits(&a, &d, 2, &[11], &[8]), 2);
+        assert_eq!(s_get_overlap_cost_with_edits(&d, &a, 2, &[8], &[11]), 2);
+
+        let mut reverse_containment = hsp(70, 0, -2, -2, 10);
+        reverse_containment.query_end = 20;
+        assert_eq!(s_get_overlap_cost(&a, &reverse_containment, 4), 50);
+
+        let mut extreme_first = hsp(10, 0, i32::MIN, 0, 1);
+        extreme_first.query_end = 0;
+        let mut extreme_second = hsp(11, 0, -1, 0, 1);
+        extreme_second.query_end = i32::MAX;
+        assert_eq!(
+            s_get_overlap_cost_with_edits(&extreme_first, &extreme_second, i32::MAX, &[0], &[-1],),
+            i32::MIN + 2
+        );
     }
 
     #[test]
     fn compute_chain_score_adds_hsps_and_gap_penalties() {
-        let mut chain = chain(30, 0, 1, 0, 0);
+        let mut scored_chain = chain(30, 0, 1, 0, 0);
         let mut second_hsp = Some(hsp(20, 0, 15, 14, 8));
-        chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_hsp);
+        scored_chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_hsp);
         let opts = ScoringOptions::new_blastn();
         assert_eq!(
-            s_compute_chain_score(Some(&mut chain), Some(&opts), 100, false),
+            s_compute_chain_score(Some(&mut scored_chain), Some(&opts), 100, false),
             18
         );
-        assert_eq!(chain.score, 18);
+        assert_eq!(scored_chain.score, 18);
+
+        assert_eq!(
+            s_compute_chain_score(Some(&mut scored_chain), None, 100, false),
+            -1
+        );
+        assert_eq!(scored_chain.score, 18);
+
+        let mut empty_chain = hspchain_new(0);
+        empty_chain.score = 27;
+        assert_eq!(
+            s_compute_chain_score(Some(&mut empty_chain), Some(&opts), 100, false),
+            0
+        );
+        assert_eq!(empty_chain.score, 0);
+
+        let mut scripted = chain(99, 0, 2, 0, 0);
+        scripted.hsps.as_mut().unwrap().hsp.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 5), (GapAlignOpType::Ins, 2)],
+        });
+        assert_eq!(
+            s_compute_chain_score(Some(&mut scripted), Some(&opts), 100, true),
+            -4
+        );
+        assert_eq!(scripted.score, -4);
+
+        let mut extreme_chain = chain(30, 0, 1, i32::MIN, i32::MIN);
+        let mut extreme_second_hsp = hsp(20, 0, 0, 0, 1);
+        extreme_second_hsp.query_offset = i32::MAX;
+        extreme_second_hsp.subject_offset = i32::MAX;
+        let mut extreme_second = Some(extreme_second_hsp);
+        extreme_chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut extreme_second);
+        assert_eq!(
+            s_compute_chain_score(Some(&mut extreme_chain), Some(&opts), 100, false),
+            18
+        );
+
         assert_eq!(s_compute_chain_score(None, Some(&opts), 100, false), -1);
+    }
+
+    #[test]
+    fn mapper_cutoff_and_chain_from_hsp_follow_context_rules() {
+        let mut hit_options = HitSavingOptions::default();
+        hit_options.cutoff_score = 0;
+        let scores = ScoringOptions::new_blastn();
+        let mut params = blast_hspmapper_params_new(Some(&hit_options), Some(&scores)).unwrap();
+        params.cutoff_score_fun = [1000, 200];
+        assert_eq!(s_mapper_cutoff_score(&params, 50), 110);
+
+        params.cutoff_score_fun = [0, 0];
+        params.cutoff_score = 37;
+        assert_eq!(s_mapper_cutoff_score(&params, 50), 37);
+
+        let query_info = QueryInfo::new_blastn(&[20]);
+        let mut minus_frame_hsp = hsp(30, 1, 0, 0, 10);
+        minus_frame_hsp.query_frame = 0;
+        let chain = chain_from_hsp(minus_frame_hsp, 7, &query_info).unwrap();
+        assert_eq!(chain.oid, 7);
+        assert_eq!(chain.context, 1);
+        assert_eq!(chain.count, 1);
+        assert_eq!(chain.hsps.as_ref().unwrap().hsp.query_frame, -1);
+
+        let mut preserved_frame = hsp(30, 0, 0, 0, 10);
+        preserved_frame.query_frame = 2;
+        let chain = chain_from_hsp(preserved_frame, 8, &query_info).unwrap();
+        assert_eq!(chain.hsps.as_ref().unwrap().hsp.query_frame, 2);
+
+        assert!(chain_from_hsp(hsp(30, -1, 0, 0, 10), 7, &query_info).is_none());
     }
 
     #[test]
@@ -3792,6 +4079,18 @@ mod tests {
         assert_eq!(s_find_fragment_start(Some(&plus)), 11);
         assert_eq!(s_find_fragment_start(Some(&minus)), 59);
         assert_eq!(s_find_fragment_start(None), -1);
+        assert_eq!(s_find_fragment_start(Some(&hspchain_new(0))), -1);
+        let mut extreme_minus = minus.clone();
+        extreme_minus
+            .hsps
+            .as_mut()
+            .unwrap()
+            .next
+            .as_mut()
+            .unwrap()
+            .hsp
+            .subject_end = i32::MIN;
+        assert_eq!(s_find_fragment_start(Some(&extreme_minus)), i32::MIN);
 
         assert_eq!(s_compare_chains_by_score(&plus, &minus), 1);
         plus.score = 40;
@@ -3801,6 +4100,9 @@ mod tests {
         assert_eq!(s_compare_chains_by_oid(&plus, &minus), -1);
         plus.oid = 4;
         assert_eq!(s_compare_chains_by_oid(&plus, &minus), -1);
+        minus.hsps.as_mut().unwrap().next = None;
+        minus.hsps.as_mut().unwrap().hsp.subject_end = 12;
+        assert_eq!(s_compare_chains_by_oid(&plus, &minus), 0);
     }
 
     #[test]
@@ -3814,6 +4116,115 @@ mod tests {
         let mut invalid = valid.clone();
         invalid.query_end = invalid.query_offset + 9;
         assert!(!s_test_hsp_ranges(&invalid));
+
+        let mut negative = valid.clone();
+        negative.query_offset = -1;
+        assert!(!s_test_hsp_ranges(&negative));
+
+        let mut reversed_subject = valid.clone();
+        reversed_subject.subject_end = reversed_subject.subject_offset;
+        assert!(!s_test_hsp_ranges(&reversed_subject));
+
+        let mut oversized_script = hsp(0, 0, 0, 0, 1);
+        oversized_script.query_end = i32::MAX;
+        oversized_script.subject_end = i32::MAX;
+        oversized_script.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, i32::MAX), (GapAlignOpType::Ins, 1)],
+        });
+        assert!(!s_test_hsp_ranges(&oversized_script));
+    }
+
+    #[test]
+    fn trim_hsp_rejects_oversized_trims_and_preserves_noop_state() {
+        let mut hsp = hsp(10, 0, 4, 8, 10);
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![JumperEdit {
+                    query_pos: 6,
+                    query_base: 1,
+                    subject_base: 2,
+                }],
+            }),
+            subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left: Some(vec![1]),
+                right: Some(vec![2]),
+            }),
+            left_edge: 3,
+            right_edge: 4,
+        });
+        let original = hsp.clone();
+        let assert_unchanged = |hsp: &Hsp| {
+            assert_eq!(hsp.score, original.score);
+            assert_eq!(hsp.num_ident, original.num_ident);
+            assert_eq!(hsp.query_offset, original.query_offset);
+            assert_eq!(hsp.query_end, original.query_end);
+            assert_eq!(hsp.subject_offset, original.subject_offset);
+            assert_eq!(hsp.subject_end, original.subject_end);
+            assert_eq!(
+                hsp.edit_script.as_ref().map(|script| script.ops.clone()),
+                original
+                    .edit_script
+                    .as_ref()
+                    .map(|script| script.ops.clone())
+            );
+            assert_eq!(
+                hsp.map_info.as_ref().and_then(|info| info.edits.clone()),
+                original
+                    .map_info
+                    .as_ref()
+                    .and_then(|info| info.edits.clone())
+            );
+            assert_eq!(
+                hsp.map_info
+                    .as_ref()
+                    .and_then(|info| info.subject_overhangs.clone()),
+                original
+                    .map_info
+                    .as_ref()
+                    .and_then(|info| info.subject_overhangs.clone())
+            );
+            assert_eq!(
+                hsp.map_info.as_ref().map(|info| info.left_edge),
+                original.map_info.as_ref().map(|info| info.left_edge)
+            );
+            assert_eq!(
+                hsp.map_info.as_ref().map(|info| info.right_edge),
+                original.map_info.as_ref().map(|info| info.right_edge)
+            );
+        };
+
+        assert_eq!(s_trim_hsp(&mut hsp, 0, true, true, -4, -12, -1, None), 0);
+        assert_unchanged(&hsp);
+
+        assert_eq!(s_trim_hsp(&mut hsp, 11, true, true, -4, -12, -1, None), -1);
+        assert_unchanged(&hsp);
+
+        assert_eq!(
+            s_trim_hsp(&mut hsp, 11, false, false, -4, -12, -1, None),
+            -1
+        );
+        assert_unchanged(&hsp);
+
+        let mut extreme_score = original.clone();
+        extreme_score.query_offset = 0;
+        extreme_score.subject_offset = 0;
+        extreme_score.query_end = i32::MAX;
+        extreme_score.subject_end = i32::MAX;
+        extreme_score.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![
+                (GapAlignOpType::Sub, i32::MAX),
+                (GapAlignOpType::Sub, i32::MAX),
+            ],
+        });
+        assert_eq!(
+            s_trim_hsp(&mut extreme_score, 1, true, true, -4, -12, -1, None),
+            0
+        );
+        assert_eq!(extreme_score.score, i32::MAX);
+        assert_eq!(extreme_score.num_ident, i32::MAX);
     }
 
     #[test]
@@ -4020,6 +4431,20 @@ mod tests {
     }
 
     #[test]
+    fn trim_overlap_rejects_extreme_malformed_overlap_without_overflow() {
+        let mut first = hsp(0, 0, 0, 0, 10);
+        first.query_end = i32::MAX;
+        first.subject_end = i32::MAX;
+        let mut second = hsp(0, 0, 0, 0, 10);
+        second.query_offset = i32::MIN;
+        second.subject_offset = i32::MIN;
+        second.query_end = 0;
+        second.subject_end = 0;
+
+        assert_eq!(s_trim_overlap(&mut first, &mut second, None), -1);
+    }
+
+    #[test]
     fn trim_chain_start_to_subject_pos_drops_and_trims_boundary_hsp() {
         let mut first = hsp(8, 0, 0, 0, 8);
         first.query_end = 8;
@@ -4175,6 +4600,46 @@ mod tests {
     }
 
     #[test]
+    fn set_adapter_and_poly_a_tail_report_invalid_inputs_without_mutating_chain() {
+        let mut missing_chain = None;
+        let scores = ScoringOptions::new_blastn();
+        assert_eq!(
+            s_set_adapter(&mut missing_chain, 20, None, 40, Some(&scores)),
+            -1
+        );
+        assert!(missing_chain.is_none());
+        assert_eq!(s_set_poly_a_tail(&mut missing_chain, 12, -1, 20), -1);
+        assert!(missing_chain.is_none());
+
+        let mut list = Some(chain(30, 1, 1, 0, 0));
+        let original_score = list.as_ref().unwrap().score;
+        let original_adapter = list.as_ref().unwrap().adapter;
+        let original_query_end = list.as_ref().unwrap().hsps.as_ref().unwrap().hsp.query_end;
+
+        assert_eq!(s_set_adapter(&mut list, -1, None, 40, Some(&scores)), -1);
+        assert_eq!(s_set_adapter(&mut list, 20, None, 40, None), -1);
+        let chain = list.as_ref().unwrap();
+        assert_eq!(chain.score, original_score);
+        assert_eq!(chain.adapter, original_adapter);
+        let hsp = &chain.hsps.as_ref().unwrap().hsp;
+        assert_eq!(hsp.query_end, original_query_end);
+        assert!(hsp.map_info.is_none());
+
+        assert_eq!(
+            s_set_adapter(&mut list, 20, None, i32::MIN, Some(&scores)),
+            0
+        );
+        let chain = list.as_ref().unwrap();
+        assert_eq!(chain.score, original_score);
+        assert_eq!(chain.adapter, original_adapter);
+        assert_eq!(
+            chain.hsps.as_ref().unwrap().hsp.query_end,
+            original_query_end
+        );
+        assert!(chain.hsps.as_ref().unwrap().hsp.map_info.is_none());
+    }
+
+    #[test]
     fn find_adapters_searches_longest_overhang_and_sets_adapter() {
         let mut query = vec![3; 122];
         query[30..42].copy_from_slice(&[0, 2, 0, 3, 1, 2, 2, 0, 0, 2, 0, 2]);
@@ -4195,6 +4660,37 @@ mod tests {
         let hsp = &chain.hsps.as_ref().unwrap().hsp;
         assert_eq!(hsp.query_offset, 24);
         assert_eq!(hsp.query_end, 30);
+    }
+
+    #[test]
+    fn find_adapters_skips_missing_query_and_full_coverage() {
+        let query_info = QueryInfo::new_blastn(&[60]);
+        let scores = ScoringOptions::new_blastn();
+
+        let mut short_query_saved = vec![Some(chain(30, 1, 1, 24, 24))];
+        assert_eq!(
+            s_find_adapters(&mut short_query_saved, &[3; 10], &query_info, &scores),
+            0
+        );
+        assert_eq!(short_query_saved[0].as_ref().unwrap().adapter, -1);
+
+        let mut full_coverage = Some(chain(40, 1, 2, 0, 0));
+        full_coverage
+            .as_mut()
+            .unwrap()
+            .hsps
+            .as_mut()
+            .unwrap()
+            .hsp
+            .query_end = 58;
+        let mut query = vec![3; 122];
+        query[30..42].copy_from_slice(&[0, 2, 0, 3, 1, 2, 2, 0, 0, 2, 0, 2]);
+        let mut full_saved = vec![full_coverage];
+        assert_eq!(
+            s_find_adapters(&mut full_saved, &query, &query_info, &scores),
+            0
+        );
+        assert_eq!(full_saved[0].as_ref().unwrap().adapter, -1);
     }
 
     #[test]
@@ -4307,6 +4803,25 @@ mod tests {
         let second = hsp(8, 1, 5, 12, 8);
         let scores = ScoringOptions::new_blastn();
         assert!(s_merge_hsps(&first, &second, None, Some(&scores)).is_none());
+
+        let non_overlapping = hsp(8, 1, 12, 12, 8);
+        assert!(s_merge_hsps(&first, &non_overlapping, None, None).is_none());
+
+        let mut extreme_first = hsp(10, 1, 0, 0, 10);
+        extreme_first.query_end = i32::MAX - 2;
+        extreme_first.subject_end = i32::MAX - 2;
+        extreme_first.edit_script = None;
+        let mut extreme_second = hsp(8, 1, 1, 1, 8);
+        extreme_second.query_offset = i32::MAX - 1;
+        extreme_second.subject_offset = i32::MAX - 1;
+        extreme_second.query_end = i32::MAX;
+        extreme_second.subject_end = i32::MAX;
+        extreme_second.edit_script = None;
+        let merged =
+            s_merge_hsps(&extreme_first, &extreme_second, None, Some(&scores)).expect("merged");
+        assert_eq!(merged.query_end, i32::MAX);
+        assert_eq!(merged.subject_end, i32::MAX);
+        assert_eq!(merged.num_ident, i32::MAX);
     }
 
     #[test]
@@ -4375,6 +4890,36 @@ mod tests {
                 (GapAlignOpType::Sub, 8)
             ]
         );
+    }
+
+    #[test]
+    fn intron_to_gap_rejects_missing_state_without_unlinking_next_hsp() {
+        let scores = ScoringOptions::new_blastn();
+        let mut first = hsp(10, 0, 0, 0, 10);
+        first.query_end = 10;
+        first.subject_end = 10;
+        let mut second = Some(hsp(10, 0, 14, 14, 10));
+        let mut head = HSPContainer {
+            hsp: first,
+            next: hspcontainer_new(&mut second),
+        };
+
+        assert_eq!(s_intron_to_gap(&mut head, None, Some(&scores)), -1);
+        assert!(head.next.is_some());
+        assert_eq!(head.next.as_ref().unwrap().hsp.query_offset, 14);
+
+        assert_eq!(s_intron_to_gap(&mut head, Some(&[0; 40]), None), -1);
+        assert!(head.next.is_some());
+
+        let mut single = HSPContainer {
+            hsp: hsp(10, 0, 0, 0, 10),
+            next: None,
+        };
+        assert_eq!(
+            s_intron_to_gap(&mut single, Some(&[0; 40]), Some(&scores)),
+            -1
+        );
+        assert!(single.next.is_none());
     }
 
     #[test]
@@ -4449,6 +4994,51 @@ mod tests {
         assert_eq!(
             second.hsp.edit_script.as_ref().unwrap().ops,
             vec![(GapAlignOpType::Sub, 8)]
+        );
+    }
+
+    #[test]
+    fn find_splice_junctions_rejects_missing_state_and_scores_empty_chain() {
+        let scores = ScoringOptions::new_blastn();
+        let mut empty_chain = hspchain_new(0);
+        empty_chain.score = 42;
+        empty_chain.next = Some(chain(30, 0, 1, 0, 0));
+
+        assert_eq!(
+            s_find_splice_junctions(None, Some(&[0; 40]), 40, Some(&scores)),
+            -1
+        );
+        assert_eq!(
+            s_find_splice_junctions(Some(&mut empty_chain), None, 40, Some(&scores)),
+            -1
+        );
+        assert_eq!(
+            s_find_splice_junctions(Some(&mut empty_chain), Some(&[0; 40]), 40, None),
+            -1
+        );
+        assert_eq!(
+            s_find_splice_junctions(Some(&mut empty_chain), Some(&[0; 40]), 40, Some(&scores)),
+            0
+        );
+        assert_eq!(empty_chain.score, 0);
+        assert_eq!(empty_chain.next.as_ref().unwrap().score, 30);
+
+        let mut extreme_first = hsp(60, 0, 0, 0, 1);
+        extreme_first.query_end = i32::MAX;
+        extreme_first.subject_end = i32::MAX;
+        let mut extreme_second = hsp(60, 0, 0, 0, 1);
+        extreme_second.query_offset = i32::MIN;
+        extreme_second.subject_offset = i32::MIN;
+        extreme_second.query_end = 0;
+        extreme_second.subject_end = 0;
+        let mut extreme_first_slot = Some(extreme_first);
+        let mut extreme_second_slot = Some(extreme_second);
+        let mut extreme_chain = hspchain_new(0);
+        extreme_chain.hsps = hspcontainer_new(&mut extreme_first_slot);
+        extreme_chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut extreme_second_slot);
+        assert_eq!(
+            s_find_splice_junctions(Some(&mut extreme_chain), Some(&[0; 40]), 40, Some(&scores)),
+            -1
         );
     }
 
@@ -4532,10 +5122,174 @@ mod tests {
     }
 
     #[test]
+    fn find_best_pairs_preserves_lists_when_no_candidate_passes_cutoff() {
+        let mut first_list = Some(chain(20, 1, 1, 0, 100));
+        let mut second_list = Some(chain(19, -1, 1, 0, 180));
+        let mut pair_info = Vec::new();
+
+        assert!(!s_find_best_pairs(
+            &mut first_list,
+            &mut second_list,
+            100,
+            &mut pair_info,
+            false,
+            None,
+            None,
+        ));
+
+        assert!(pair_info.is_empty());
+        assert_eq!(first_list.as_ref().unwrap().score, 20);
+        assert_eq!(second_list.as_ref().unwrap().score, 19);
+        assert_eq!(first_list.as_ref().unwrap().pair, None);
+        assert_eq!(second_list.as_ref().unwrap().pair, None);
+    }
+
+    #[test]
+    fn find_best_pairs_marks_parallel_same_strand_pair_without_trimming() {
+        let mut first_list = Some(chain(30, 1, 1, 0, 100));
+        let mut second_list = Some(chain(25, 1, 1, 0, 180));
+        let mut pair_info = Vec::new();
+
+        assert!(s_find_best_pairs(
+            &mut first_list,
+            &mut second_list,
+            0,
+            &mut pair_info,
+            false,
+            None,
+            None,
+        ));
+
+        assert_eq!(pair_info[0].conf, PAIR_PARALLEL);
+        assert_eq!(pair_info[0].score, 54);
+        assert_eq!(pair_info[0].trim_first, 0);
+        assert_eq!(pair_info[0].trim_second, 0);
+        assert_eq!(first_list.as_ref().unwrap().pair_conf, PAIR_PARALLEL);
+        assert_eq!(second_list.as_ref().unwrap().pair_conf, PAIR_PARALLEL);
+    }
+
+    #[test]
     fn spliced_paired_run_returns_zero_for_absent_hsp_list() {
         let mut data = BlastHSPMapperData::default();
         assert_eq!(s_blast_hspmapper_spliced_paired_run(&mut data, None), 0);
         assert!(data.saved_chains.is_empty());
+    }
+
+    #[test]
+    fn spliced_paired_run_rejects_missing_required_state() {
+        let mut hsp_list = HspList::new(7);
+        hsp_list.hsps.push(hsp(30, 0, 0, 100, 10));
+
+        let mut missing_params = BlastHSPMapperData {
+            query_info: Some(QueryInfo::new_blastn(&[20])),
+            ..Default::default()
+        };
+        assert_eq!(
+            s_blast_hspmapper_spliced_paired_run(&mut missing_params, Some(hsp_list.clone())),
+            -1
+        );
+        assert!(missing_params.saved_chains.is_empty());
+
+        let scores = ScoringOptions::new_blastn();
+        let mut params =
+            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+        params.splice = false;
+        let mut missing_query_info = BlastHSPMapperData {
+            params: Some(params.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            s_blast_hspmapper_spliced_paired_run(&mut missing_query_info, Some(hsp_list.clone())),
+            -1
+        );
+        assert!(missing_query_info.saved_chains.is_empty());
+
+        params.splice = true;
+        let mut missing_splice_query = BlastHSPMapperData {
+            params: Some(params),
+            query_info: Some(QueryInfo::new_blastn(&[20])),
+            query: None,
+            saved_chains: vec![None],
+        };
+        assert_eq!(
+            s_blast_hspmapper_spliced_paired_run(&mut missing_splice_query, Some(hsp_list),),
+            -1
+        );
+        assert!(missing_splice_query
+            .saved_chains
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
+    fn spliced_paired_run_skips_invalid_contexts_duplicates_and_cutoff_failures() {
+        let query_info = QueryInfo::new_blastn(&[50]);
+        let scores = ScoringOptions::new_blastn();
+        let mut params =
+            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+        params.cutoff_score = 25;
+        params.cutoff_edit_dist = -1;
+
+        let mut valid = hsp(40, 0, 0, 5, 10);
+        valid.query_frame = 0;
+        let duplicate = valid.clone();
+        let low_score = hsp(20, 0, 10, 20, 10);
+        let invalid_context = hsp(50, -1, 0, 30, 10);
+        let out_of_range_context = hsp(60, 99, 0, 40, 10);
+
+        let mut hsp_list = HspList::new(11);
+        hsp_list.hsps.push(low_score);
+        hsp_list.hsps.push(out_of_range_context);
+        hsp_list.hsps.push(duplicate);
+        hsp_list.hsps.push(invalid_context);
+        hsp_list.hsps.push(valid);
+
+        let mut data = BlastHSPMapperData {
+            params: Some(params),
+            query: Some(vec![0; 100]),
+            query_info: Some(query_info),
+            saved_chains: Vec::new(),
+        };
+
+        assert_eq!(
+            s_blast_hspmapper_spliced_paired_run(&mut data, Some(hsp_list)),
+            0
+        );
+
+        assert_eq!(data.saved_chains.len(), 1);
+        let saved = data.saved_chains[0].as_ref().unwrap();
+        assert_eq!(saved.score, 40);
+        assert_eq!(saved.oid, 11);
+        assert_eq!(saved.hsps.as_ref().unwrap().hsp.query_frame, 1);
+        assert!(saved.next.is_none());
+    }
+
+    #[test]
+    fn spliced_paired_run_uses_cutoff_function_when_present() {
+        let query_info = QueryInfo::new_blastn(&[50]);
+        let scores = ScoringOptions::new_blastn();
+        let mut params =
+            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+        params.cutoff_score = 1;
+        params.cutoff_score_fun = [1000, 200];
+        params.cutoff_edit_dist = -1;
+
+        let mut hsp_list = HspList::new(12);
+        hsp_list.hsps.push(hsp(100, 0, 0, 5, 10));
+
+        let mut data = BlastHSPMapperData {
+            params: Some(params),
+            query: Some(vec![0; 100]),
+            query_info: Some(query_info),
+            saved_chains: Vec::new(),
+        };
+
+        assert_eq!(
+            s_blast_hspmapper_spliced_paired_run(&mut data, Some(hsp_list)),
+            0
+        );
+        assert_eq!(data.saved_chains.len(), 1);
+        assert!(data.saved_chains[0].is_none());
     }
 
     #[test]
@@ -4583,6 +5337,59 @@ mod tests {
         assert_eq!(second_chain.pair_score, Some(30));
         assert_eq!(first_chain.pair_conf, PAIR_CONVERGENT);
         assert_eq!(second_chain.pair_conf, PAIR_CONVERGENT);
+    }
+
+    #[test]
+    fn spliced_paired_run_invokes_splice_junction_pass() {
+        let query_info = QueryInfo::new_blastn(&[40]);
+        let scores = ScoringOptions::new_blastn();
+        let mut params =
+            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+        params.splice = true;
+        params.cutoff_score = 1;
+        params.cutoff_edit_dist = -1;
+
+        let mut first = hsp(12, 0, 0, 0, 10);
+        first.query_frame = 1;
+        first.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        let mut second = hsp(10, 0, 12, 12, 8);
+        second.query_frame = 1;
+        second.query_end = 20;
+        second.subject_end = 20;
+        second.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 8)],
+        });
+
+        let mut hsp_list = HspList::new(13);
+        hsp_list.hsps.push(second);
+        hsp_list.hsps.push(first);
+
+        let mut data = BlastHSPMapperData {
+            params: Some(params),
+            query: Some(vec![0; 82]),
+            query_info: Some(query_info),
+            saved_chains: Vec::new(),
+        };
+
+        assert_eq!(
+            s_blast_hspmapper_spliced_paired_run(&mut data, Some(hsp_list)),
+            0
+        );
+
+        let saved = data.saved_chains[0].as_ref().unwrap();
+        let head = saved.hsps.as_ref().unwrap();
+        assert_eq!(saved.oid, 13);
+        assert!(saved.score > 0);
+        assert_eq!(head.hsp.query_offset, 0);
+        assert_eq!(head.hsp.query_end, 20);
+        assert_eq!(head.hsp.subject_end, 20);
+        assert!(head.next.is_none());
+        assert_eq!(
+            head.hsp.edit_script.as_ref().unwrap().ops,
+            vec![(GapAlignOpType::Sub, 20)]
+        );
     }
 
     #[test]
@@ -4700,6 +5507,21 @@ mod tests {
     }
 
     #[test]
+    fn prune_chains_tolerates_empty_and_out_of_range_query_counts() {
+        let mut empty: Vec<Option<Box<HSPChain>>> = Vec::new();
+        assert_eq!(s_prune_chains(&mut empty, 3, 5), 0);
+        assert!(empty.is_empty());
+
+        let mut saved = vec![Some(chain(22, 1, 1, 0, 0)), None];
+        assert_eq!(s_prune_chains(&mut saved, -1, 5), 0);
+        assert_eq!(saved[0].as_ref().unwrap().count, 0);
+
+        assert_eq!(s_prune_chains(&mut saved, 10, 5), 0);
+        assert_eq!(saved[0].as_ref().unwrap().count, 1);
+        assert!(saved[1].is_none());
+    }
+
+    #[test]
     fn remove_overlaps_splits_adjacent_query_overlap_into_new_chain() {
         let mut list = Some(chain(30, 1, 1, 0, 0));
         let mut second = hsp(20, 1, 8, 20, 10);
@@ -4744,6 +5566,55 @@ mod tests {
     }
 
     #[test]
+    fn remove_overlaps_reports_invalid_inputs_without_mutating_chain() {
+        let mut empty = None;
+        let scores = ScoringOptions::new_blastn();
+        assert_eq!(s_remove_overlaps(&mut empty, Some(&scores), 40), -1);
+        assert!(empty.is_none());
+
+        let mut list = Some(chain(30, 1, 1, 0, 0));
+        let original_score = list.as_ref().unwrap().score;
+        let original_pair = list.as_ref().unwrap().pair;
+        let original_query_offset = list
+            .as_ref()
+            .unwrap()
+            .hsps
+            .as_ref()
+            .unwrap()
+            .hsp
+            .query_offset;
+
+        assert_eq!(s_remove_overlaps(&mut list, None, 40), -1);
+        let chain = list.as_ref().unwrap();
+        assert_eq!(chain.score, original_score);
+        assert_eq!(chain.pair, original_pair);
+        assert_eq!(
+            chain.hsps.as_ref().unwrap().hsp.query_offset,
+            original_query_offset
+        );
+        assert!(chain.next.is_none());
+    }
+
+    #[test]
+    fn overlap_list_helpers_handle_empty_and_no_hsp_chains() {
+        let scores = ScoringOptions::new_blastn();
+        let mut empty = None;
+        assert_eq!(remove_overlaps_from_chain_list(&mut empty, &scores, 40), 0);
+        assert!(empty.is_none());
+
+        let mut no_hsps = hspchain_new(1);
+        no_hsps.oid = 9;
+        no_hsps.score = 17;
+        let mut list = Some(no_hsps);
+        assert_eq!(remove_overlaps_from_chain_list(&mut list, &scores, 40), 0);
+        let chain = list.as_ref().unwrap();
+        assert_eq!(chain.oid, 9);
+        assert_eq!(chain.score, 17);
+        assert!(chain.hsps.is_none());
+        assert!(chain.next.is_none());
+    }
+
+    #[test]
     fn finalize_sorts_filters_counts_and_moves_saved_chains_to_results() {
         let query_info = QueryInfo::new_blastn(&[12]);
         let query = vec![3; 100];
@@ -4779,6 +5650,42 @@ mod tests {
     }
 
     #[test]
+    fn finalize_helpers_sort_by_oid_and_count_unique_fragments() {
+        let mut list = Some(chain(30, 1, 3, 10, 30));
+        list.as_mut().unwrap().next = Some(chain(30, 1, 1, 0, 10));
+        list.as_mut().unwrap().next.as_mut().unwrap().next = Some(chain(30, 1, 1, 0, 10));
+        list.as_mut()
+            .unwrap()
+            .next
+            .as_mut()
+            .unwrap()
+            .next
+            .as_mut()
+            .unwrap()
+            .next = Some(chain(30, 1, 2, 5, 20));
+
+        sort_chain_list_by_oid(&mut list);
+        let mut cursor = list.as_deref();
+        let mut order = Vec::new();
+        while let Some(chain) = cursor {
+            order.push((chain.oid, s_find_fragment_start(Some(chain))));
+            cursor = chain.next.as_deref();
+        }
+        assert_eq!(order, vec![(1, 10), (1, 10), (2, 20), (3, 30)]);
+
+        set_unique_mapping_counts(&mut list);
+        let mut cursor = list.as_deref();
+        while let Some(chain) = cursor {
+            assert_eq!(chain.count, 3);
+            cursor = chain.next.as_deref();
+        }
+
+        let mut empty = None;
+        set_unique_mapping_counts(&mut empty);
+        assert!(empty.is_none());
+    }
+
+    #[test]
     fn blast_hspmapper_final_delegates_finalize_and_clears_saved_chains() {
         let query_info = QueryInfo::new_blastn(&[12]);
         let query = vec![3; 100];
@@ -4800,6 +5707,110 @@ mod tests {
         assert!(data.saved_chains.is_empty());
         assert_eq!(results.num_queries, 1);
         assert_eq!(results.chain_array[0].as_ref().unwrap().oid, 1);
+    }
+
+    #[test]
+    fn blast_hspmapper_final_runs_adapter_and_poly_a_passes() {
+        let query_info = QueryInfo::new_blastn(&[60, 20]);
+        let mut query = vec![3; 164];
+        query[30..42].copy_from_slice(&[0, 2, 0, 3, 1, 2, 2, 0, 0, 2, 0, 2]);
+        query[143 + 14..143 + 20].copy_from_slice(&[0, 0, 0, 0, 0, 0]);
+
+        let mut adapter_chain = chain(30, 1, 1, 24, 24);
+        {
+            let hsp = &mut adapter_chain.hsps.as_mut().unwrap().hsp;
+            hsp.query_end = 42;
+            hsp.subject_end = 42;
+        }
+        let poly_chain = chain(30, -1, 2, 2, 0);
+
+        let scores = ScoringOptions::new_blastn();
+        let mut params =
+            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+        params.cutoff_score = i32::MIN;
+        params.cutoff_edit_dist = -1;
+
+        let mut data = BlastHSPMapperData {
+            params: Some(params),
+            query: Some(query),
+            query_info: Some(query_info),
+            saved_chains: vec![Some(adapter_chain), Some(poly_chain)],
+        };
+        let mut results = blast_mapping_results_new();
+
+        assert_eq!(s_blast_hspmapper_final(&mut data, &mut results), 0);
+        assert!(data.saved_chains.is_empty());
+
+        let adapter = results.chain_array[0].as_ref().unwrap();
+        assert_eq!(adapter.adapter, 30);
+        let adapter_hsp = &adapter.hsps.as_ref().unwrap().hsp;
+        assert_eq!(adapter_hsp.query_offset, 24);
+        assert_eq!(adapter_hsp.query_end, 30);
+        let adapter_edge = adapter_hsp.map_info.as_ref().unwrap().right_edge;
+        assert_eq!(adapter_edge & MAPPER_ADAPTER, MAPPER_ADAPTER);
+        assert_eq!(adapter_edge & MAPPER_EXON, MAPPER_EXON);
+
+        let poly = results.chain_array[1].as_ref().unwrap();
+        assert_eq!(poly.poly_a, 14);
+        let poly_edge = last_container(poly)
+            .unwrap()
+            .hsp
+            .map_info
+            .as_ref()
+            .unwrap()
+            .right_edge;
+        assert_eq!(poly_edge & MAPPER_POLY_A, MAPPER_POLY_A);
+        assert_eq!(poly_edge & MAPPER_EXON, MAPPER_EXON);
+    }
+
+    #[test]
+    fn blast_hspmapper_final_rejects_missing_required_state() {
+        let mut empty = BlastHSPMapperData::default();
+        let mut results = blast_mapping_results_new();
+        assert_eq!(s_blast_hspmapper_final(&mut empty, &mut results), 0);
+        assert_eq!(results.num_queries, 0);
+
+        let query_info = QueryInfo::new_blastn(&[12]);
+        let query = vec![3; 100];
+        let scores = ScoringOptions::new_blastn();
+        let params =
+            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+
+        let mut missing_params = BlastHSPMapperData {
+            params: None,
+            query: Some(query.clone()),
+            query_info: Some(query_info.clone()),
+            saved_chains: vec![Some(chain(30, 1, 1, 0, 0))],
+        };
+        assert_eq!(
+            s_blast_hspmapper_final(&mut missing_params, &mut results),
+            -1
+        );
+        assert!(missing_params.saved_chains[0].is_some());
+
+        let mut missing_query_info = BlastHSPMapperData {
+            params: Some(params.clone()),
+            query: Some(query.clone()),
+            query_info: None,
+            saved_chains: vec![Some(chain(30, 1, 1, 0, 0))],
+        };
+        assert_eq!(
+            s_blast_hspmapper_final(&mut missing_query_info, &mut results),
+            -1
+        );
+        assert!(missing_query_info.saved_chains[0].is_some());
+
+        let mut missing_query = BlastHSPMapperData {
+            params: Some(params),
+            query: None,
+            query_info: Some(query_info),
+            saved_chains: vec![Some(chain(30, 1, 1, 0, 0))],
+        };
+        assert_eq!(
+            s_blast_hspmapper_final(&mut missing_query, &mut results),
+            -1
+        );
+        assert!(missing_query.saved_chains[0].is_some());
     }
 
     #[test]
@@ -4857,6 +5868,22 @@ mod tests {
         assert_eq!(
             first.edit_script.as_ref().unwrap().ops,
             vec![(GapAlignOpType::Sub, 15)]
+        );
+    }
+
+    #[test]
+    fn find_splice_junctions_for_overlaps_rejects_extreme_malformed_overlap() {
+        let mut first = hsp(10, 0, 0, 0, 20);
+        first.query_offset = i32::MIN;
+        first.query_end = i32::MAX;
+        first.subject_end = 20;
+        let mut second = hsp(20, 0, -1, 40, 15);
+        second.query_end = i32::MAX;
+        second.subject_end = 55;
+
+        assert_eq!(
+            s_find_splice_junctions_for_overlaps(&mut first, &mut second, None, 30, false),
+            -1
         );
     }
 
@@ -5015,6 +6042,106 @@ mod tests {
     }
 
     #[test]
+    fn find_splice_junctions_for_gap_rejects_missing_state_and_clears_stale_edges() {
+        let scores = ScoringOptions::new_blastn();
+        let query = vec![1; 40];
+        let mut first = hsp(10, 0, 0, 0, 10);
+        first.query_end = 10;
+        first.subject_end = 10;
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 7,
+        });
+        let mut second = hsp(10, 0, 14, 100, 10);
+        second.query_end = 24;
+        second.subject_end = 110;
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: None,
+            left_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 3,
+            right_edge: 0,
+        });
+
+        assert_eq!(
+            s_find_splice_junctions_for_gap(
+                &mut first,
+                &mut second,
+                None,
+                query.len() as i32,
+                Some(&scores),
+                Some(&[1, 1, 1, 1, 1, 1]),
+                Some(&[1, 1, 1, 1, 1, 1]),
+            ),
+            -1
+        );
+        assert_ne!(
+            first.map_info.as_ref().unwrap().right_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+
+        assert_eq!(
+            s_find_splice_junctions_for_gap(
+                &mut first,
+                &mut second,
+                Some(&query),
+                query.len() as i32,
+                None,
+                Some(&[1, 1, 1, 1, 1, 1]),
+                Some(&[1, 1, 1, 1, 1, 1]),
+            ),
+            -1
+        );
+        assert_ne!(
+            second.map_info.as_ref().unwrap().left_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+
+        assert_eq!(
+            s_find_splice_junctions_for_gap(
+                &mut first,
+                &mut second,
+                Some(&query),
+                query.len() as i32,
+                Some(&scores),
+                Some(&[1, 1, 1, 1, 1, 1]),
+                Some(&[1, 1, 1, 1, 1, 1]),
+            ),
+            0
+        );
+        assert_eq!(
+            first.map_info.as_ref().unwrap().right_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+        assert_eq!(
+            second.map_info.as_ref().unwrap().left_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+
+        let mut extreme_first = hsp(10, 0, 0, 0, 10);
+        extreme_first.query_end = i32::MAX;
+        extreme_first.subject_end = i32::MAX;
+        let mut extreme_second = hsp(10, 0, 0, 0, 10);
+        extreme_second.query_offset = i32::MIN;
+        extreme_second.query_end = 0;
+        extreme_second.subject_offset = i32::MIN;
+        extreme_second.subject_end = 0;
+        assert_eq!(
+            s_find_splice_junctions_for_gap(
+                &mut extreme_first,
+                &mut extreme_second,
+                Some(&query),
+                query.len() as i32,
+                Some(&scores),
+                Some(&[1, 1, 1, 1, 1, 1]),
+                Some(&[1, 1, 1, 1, 1, 1]),
+            ),
+            0
+        );
+    }
+
+    #[test]
     fn find_splice_junctions_for_gap_reads_overhangs_from_hsp_map_info() {
         let scores = ScoringOptions::new_blastn();
         let query = vec![0; 40];
@@ -5081,6 +6208,7 @@ mod tests {
         assert_eq!(s_find_adapter_in_sequence(0, 22, Some(&query), 30), 10);
         query[15] = 0;
         assert_eq!(s_find_adapter_in_sequence(0, 22, Some(&query), 30), 10);
+        assert_eq!(s_find_adapter_in_sequence(12, 12, Some(&query), 30), -1);
         assert_eq!(s_find_adapter_in_sequence(0, 30, None, 30), -1);
     }
 
@@ -5092,6 +6220,7 @@ mod tests {
             1
         );
         assert_eq!(s_find_poly_a_in_sequence(Some(&[1, 2, 0, 0]), 4), -1);
+        assert_eq!(s_find_poly_a_in_sequence(Some(&[0, 0, 0, 0]), -3), -1);
         assert_eq!(s_find_poly_a_in_sequence(None, 4), -1);
     }
 
@@ -5118,6 +6247,19 @@ mod tests {
             .hsp
             .map_info
             .is_none());
+
+        let mut no_hsps = Some(hspchain_new(1));
+        assert_eq!(s_set_poly_a_tail(&mut no_hsps, 12, -1, 20), 0);
+        assert_eq!(no_hsps.as_ref().unwrap().poly_a, 0);
+
+        let mut malformed_len = Some(chain(30, 1, 1, 0, 0));
+        assert_eq!(s_set_poly_a_tail(&mut malformed_len, 12, -1, i32::MIN), 0);
+        assert_eq!(malformed_len.as_ref().unwrap().poly_a, 0);
+        assert!(last_container(malformed_len.as_ref().unwrap())
+            .unwrap()
+            .hsp
+            .map_info
+            .is_none());
     }
 
     #[test]
@@ -5131,17 +6273,72 @@ mod tests {
     }
 
     #[test]
+    fn find_poly_a_tails_skips_adapter_full_coverage_and_missing_query_slices() {
+        let query_info = QueryInfo::new_blastn(&[20]);
+
+        let mut adapter_marked = Some(chain(30, 1, 1, 2, 0));
+        adapter_marked.as_mut().unwrap().adapter = 12;
+        let mut saved = vec![adapter_marked];
+        let query = vec![0; 42];
+        assert_eq!(s_find_poly_a_tails(&mut saved, &query, &query_info), 0);
+        assert_eq!(saved[0].as_ref().unwrap().poly_a, 0);
+
+        let mut full_coverage = Some(chain(30, 1, 2, 0, 0));
+        full_coverage
+            .as_mut()
+            .unwrap()
+            .hsps
+            .as_mut()
+            .unwrap()
+            .hsp
+            .query_end = 19;
+        let mut saved = vec![full_coverage];
+        assert_eq!(s_find_poly_a_tails(&mut saved, &query, &query_info), 0);
+        assert_eq!(saved[0].as_ref().unwrap().poly_a, 0);
+
+        let mut short_query_saved = vec![Some(chain(30, 1, 3, 2, 0))];
+        assert_eq!(
+            s_find_poly_a_tails(&mut short_query_saved, &[0; 10], &query_info),
+            0
+        );
+        assert_eq!(short_query_saved[0].as_ref().unwrap().poly_a, 0);
+    }
+
+    #[test]
     fn sort_and_filter_chains_operate_on_linked_lists() {
         let mut list = Some(chain(10, 1, 1, 0, 0));
         list.as_mut().unwrap().next = Some(chain(50, 1, 2, 20, 20));
         list.as_mut().unwrap().next.as_mut().unwrap().next = Some(chain(30, 1, 3, 40, 40));
 
-        let mut saved = vec![list];
+        let mut saved = vec![None, list];
         assert_eq!(s_sort_chains(&mut saved), 0);
-        assert_eq!(scores(&saved[0]), vec![50, 30, 10]);
+        assert!(saved[0].is_none());
+        assert_eq!(scores(&saved[1]), vec![50, 30, 10]);
 
-        assert_eq!(s_filter_chains(&mut saved[0], 25, -1), 0);
-        assert_eq!(scores(&saved[0]), vec![50, 30]);
+        assert_eq!(s_filter_chains(&mut saved[1], 25, -1), 0);
+        assert_eq!(scores(&saved[1]), vec![50, 30]);
+    }
+
+    #[test]
+    fn filter_chains_applies_edit_distance_and_handles_empty_lists() {
+        let mut empty = None;
+        assert_eq!(s_filter_chains(&mut empty, 10, 0), 0);
+        assert!(empty.is_none());
+
+        let perfect = chain(30, 1, 1, 0, 0);
+        let mut one_edit = chain(30, 1, 2, 20, 20);
+        one_edit.hsps.as_mut().unwrap().hsp.num_ident = 9;
+        let mut two_edits = chain(30, 1, 3, 40, 40);
+        two_edits.hsps.as_mut().unwrap().hsp.num_ident = 8;
+
+        let mut list = Some(two_edits);
+        list.as_mut().unwrap().next = Some(one_edit);
+        list.as_mut().unwrap().next.as_mut().unwrap().next = Some(perfect);
+
+        assert_eq!(s_filter_chains(&mut list, 25, 1), 0);
+        assert_eq!(scores(&list), vec![30, 30]);
+        assert_eq!(list.as_ref().unwrap().oid, 2);
+        assert_eq!(list.as_ref().unwrap().next.as_ref().unwrap().oid, 1);
     }
 
     #[test]
@@ -5161,7 +6358,10 @@ mod tests {
         let mut dest = vec![HSPNode::default(); 2];
         assert_eq!(s_hspnode_array_copy(&mut dest, &source, 2), 0);
         assert_eq!(dest, source);
+        assert_eq!(s_hspnode_array_copy(&mut dest, &source, 0), 0);
+        assert_eq!(s_hspnode_array_copy(&mut dest, &source, -1), -1);
         assert_eq!(s_hspnode_array_copy(&mut dest[..1], &source, 2), -1);
+        assert_eq!(s_hspnode_array_copy(&mut dest, &source[..1], 2), -1);
 
         let invalid = vec![HSPNode {
             hsp_index: Some(0),

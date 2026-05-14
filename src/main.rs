@@ -702,6 +702,14 @@ impl BlastnArgs {
             .as_deref()
             .map(|value| parse_validated_i32("template_length", value))
     }
+    fn template_type_value(&self) -> Option<i32> {
+        self.template_type.as_deref().map(|value| match value {
+            "coding" => 0,
+            "optimal" => 1,
+            "coding_and_optimal" => 2,
+            _ => parse_validated_i32("template_type", value),
+        })
+    }
     fn gapopen(&self) -> i32 {
         self.gapopen
             .as_deref()
@@ -1711,6 +1719,7 @@ fn main_inner() {
     validate_greedy_gap_options(&args);
 
     emit_seqidlist_performance_warnings(program, &args);
+    emit_thread_option_warnings(program, &args);
     emit_sort_option_warnings(program, &args);
     emit_hitlist_size_warnings(program, &args);
     emit_formatting_option_warnings(program, &args);
@@ -1761,6 +1770,19 @@ fn main_inner() {
                     emit_database_error(&format!("Error: File ({}) not found.", path));
                 }
             }
+        }
+        let message = e.to_string();
+        if message.starts_with("BLAST query error:") {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        if message.starts_with("BLAST engine error:") {
+            eprintln!("{message}");
+            std::process::exit(3);
+        }
+        if message.starts_with("NCBI C++ Exception:") {
+            eprintln!("Error: {message}");
+            std::process::exit(255);
         }
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -2083,6 +2105,14 @@ fn emit_sort_option_warnings(program: &str, args: &BlastnArgs) {
     }
 }
 
+fn emit_thread_option_warnings(program: &str, args: &BlastnArgs) {
+    if program == "deltablast" && args.subject.is_some() && args.num_threads.is_some() {
+        eprintln!(
+            "Warning: [deltablast] 'num_threads' is currently ignored when 'subject' is specified."
+        );
+    }
+}
+
 fn emit_hitlist_size_warnings(program: &str, args: &BlastnArgs) {
     let hitlist_size = if outfmt_number(&args.outfmt) == 0 {
         pairwise_num_descriptions(args).max(pairwise_num_alignments(args)) as i32
@@ -2386,15 +2416,14 @@ fn validate_boolean_options(program: &str, args: &BlastnArgs) {
 
 fn validate_index_options(args: &BlastnArgs) {
     if index_options_require_unsupported_database_index(args) {
-        eprintln!("BLAST query/options error: Indexed BLAST database search is not supported");
+        eprintln!("BLAST query/options error: Named MegaBLAST database indices are not supported");
         eprintln!("Please refer to the BLAST+ user manual.");
         std::process::exit(1);
     }
 }
 
 fn index_options_require_unsupported_database_index(args: &BlastnArgs) -> bool {
-    args.db.is_some()
-        && (ncbi_bool_enabled(Some(&args.use_index), false) || args.index_name.is_some())
+    args.db.is_some() && args.index_name.is_some()
 }
 
 fn validate_choice_options(args: &BlastnArgs) {
@@ -3213,10 +3242,39 @@ fn validate_option_relationships(program: &str, args: &BlastnArgs) {
         ),
         (
             matches!(program, "psiblast" | "deltablast")
+                && args.msa_master_idx.is_some()
+                && args.ignore_msa_master,
+            "msa_master_idx",
+            "ignore_msa_master",
+        ),
+        (
+            matches!(program, "psiblast" | "deltablast")
+                && args.in_pssm.is_some()
+                && args.ignore_msa_master,
+            "in_pssm",
+            "ignore_msa_master",
+        ),
+        (
+            matches!(program, "psiblast" | "deltablast")
+                && args.msa_master_idx.is_some()
+                && args.in_pssm.is_some()
+                && args.in_msa.is_none(),
+            "msa_master_idx",
+            "in_pssm",
+        ),
+        (
+            matches!(program, "psiblast" | "deltablast")
                 && args.query.is_some()
                 && args.ignore_msa_master,
             "query",
             "ignore_msa_master",
+        ),
+        (
+            matches!(program, "psiblast" | "deltablast")
+                && args.in_pssm.is_some()
+                && args.in_msa.is_some(),
+            "in_pssm",
+            "in_msa",
         ),
         (
             matches!(program, "psiblast" | "deltablast")
@@ -3231,13 +3289,6 @@ fn validate_option_relationships(program: &str, args: &BlastnArgs) {
                 && args.in_pssm.is_some(),
             "query",
             "in_pssm",
-        ),
-        (
-            matches!(program, "psiblast" | "deltablast")
-                && args.in_pssm.is_some()
-                && args.in_msa.is_some(),
-            "in_pssm",
-            "in_msa",
         ),
         (
             program == "deltablast" && args.subject.is_some() && args.show_domain_hits,
@@ -3677,6 +3728,7 @@ fn run_blastp_with_output_labels(
     if queries.is_empty() {
         return Err("No sequences found in query file".into());
     }
+    let psiblast_restart_query_ids = psiblast_restart_msa_display_ids(args);
 
     if let Some(ref subject_path) = args.subject {
         let subject_file = open_input_file("subject", subject_path);
@@ -3706,8 +3758,12 @@ fn run_blastp_with_output_labels(
         emit_identity_comp_stats_warnings("blastp", args, &queries);
 
         let mut hits = Vec::new();
+        let mut psiblast_converged = false;
         for qrec in &queries {
-            let query_ids = fasta_record_ids(qrec, args.parse_deflines);
+            let query_ids = psiblast_restart_query_ids
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| fasta_record_ids(qrec, args.parse_deflines));
             let (results, pssm) = protein_search_results_with_pssm(
                 &db,
                 &qrec.sequence,
@@ -3717,8 +3773,12 @@ fn run_blastp_with_output_labels(
             );
             if let Some(artifacts) = pssm.as_ref() {
                 write_psiblast_pssm_artifacts(args, &qrec.sequence, artifacts)?;
+                psiblast_converged |= artifacts.converged;
+                emit_psiblast_pssm_comp_stats_warning(args, psiblast_pairwise, qrec, artifacts);
             }
-            for sr in results {
+            let result_rounds =
+                psiblast_tabular_iteration_rounds(args, psiblast_pairwise, &results, pssm.as_ref());
+            for sr in result_rounds.into_iter().flatten() {
                 let subject_id = if sr.subject_accession.is_empty()
                     || sr.subject_accession.starts_with("oid_")
                 {
@@ -3731,7 +3791,7 @@ fn run_blastp_with_output_labels(
                     sr.subject_accession.clone()
                 };
                 let subject_ids = parsed_fasta_id(&subject_id);
-                for hsp in sr.hsps {
+                for hsp in &sr.hsps {
                     let qseq = if hsp.query_aln.is_empty() {
                         None
                     } else {
@@ -3788,7 +3848,9 @@ fn run_blastp_with_output_labels(
             }
         }
 
-        all_hits_sort_by_evalue(&mut hits);
+        if !preserve_psiblast_iteration_tabular_order(args, psiblast_pairwise) {
+            all_hits_sort_by_evalue(&mut hits);
+        }
         apply_filters(&mut hits, args, 0, None, CliProgram::Blastp, false);
 
         let stdout = io::stdout();
@@ -3845,8 +3907,20 @@ fn run_blastp_with_output_labels(
                 args.parse_deflines && commented_iteration.is_none(),
                 commented_iteration,
             )?;
+            write_psiblast_convergence_marker(
+                &mut writer,
+                args,
+                psiblast_pairwise,
+                psiblast_converged,
+            )?;
         } else {
             write_tabular_output(&mut writer, &hits, &args.outfmt)?;
+            write_psiblast_convergence_marker(
+                &mut writer,
+                args,
+                psiblast_pairwise,
+                psiblast_converged,
+            )?;
         }
         writer.flush()?;
         return Ok(());
@@ -3866,16 +3940,24 @@ fn run_blastp_with_output_labels(
     emit_identity_comp_stats_warnings("blastp", args, &queries);
 
     let mut all_hits = Vec::new();
+    let mut psiblast_converged = false;
     let mut subject_deflines = std::collections::HashMap::new();
     let mut xml_hit_metadata = std::collections::HashMap::new();
     for qrec in &queries {
-        let query_ids = fasta_record_ids(qrec, args.parse_deflines);
+        let query_ids = psiblast_restart_query_ids
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| fasta_record_ids(qrec, args.parse_deflines));
         let (results, pssm) =
             protein_search_results_with_pssm(&db, &qrec.sequence, &params, args, psiblast_pairwise);
         if let Some(artifacts) = pssm.as_ref() {
             write_psiblast_pssm_artifacts(args, &qrec.sequence, artifacts)?;
+            psiblast_converged |= artifacts.converged;
+            emit_psiblast_pssm_comp_stats_warning(args, psiblast_pairwise, qrec, artifacts);
         }
-        for sr in results {
+        let result_rounds =
+            psiblast_tabular_iteration_rounds(args, psiblast_pairwise, &results, pssm.as_ref());
+        for sr in result_rounds.into_iter().flatten() {
             let subject_id = db_output_subject_id(&db, sr.subject_oid, &sr.subject_accession);
             xml_hit_metadata
                 .entry(subject_id.clone())
@@ -3889,7 +3971,7 @@ fn run_blastp_with_output_labels(
             }
             let subject_title =
                 db_subject_defline(&db, sr.subject_oid, &subject_id).unwrap_or_default();
-            for hsp in sr.hsps {
+            for hsp in &sr.hsps {
                 let qseq = if hsp.query_aln.is_empty() {
                     None
                 } else {
@@ -3945,7 +4027,9 @@ fn run_blastp_with_output_labels(
         }
     }
 
-    all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
+    if !preserve_psiblast_iteration_tabular_order(args, psiblast_pairwise) {
+        all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
+    }
     apply_filters(
         &mut all_hits,
         args,
@@ -4009,8 +4093,20 @@ fn run_blastp_with_output_labels(
             args.parse_deflines,
             false,
         )?;
+        write_psiblast_convergence_marker(
+            &mut writer,
+            args,
+            psiblast_pairwise,
+            psiblast_converged,
+        )?;
     } else {
         write_tabular_output(&mut writer, &all_hits, &args.outfmt)?;
+        write_psiblast_convergence_marker(
+            &mut writer,
+            args,
+            psiblast_pairwise,
+            psiblast_converged,
+        )?;
     }
     writer.flush()?;
     Ok(())
@@ -4380,11 +4476,14 @@ fn protein_search_results_with_pssm(
         psiblast_params = apply_psiblast_checkpoint(psiblast_params, args, query);
         psiblast_params = apply_psiblast_restart_msa(psiblast_params, args, query);
         let run = blast_rs::api::psiblast_with_rounds(db, query, &psiblast_params);
+        let round_results = psiblast_cli_round_results(db, query, params, args, &run);
         (
             run.results,
             Some(PsiblastArtifacts {
                 final_pssm: run.pssm,
+                round_results,
                 round_pssms: run.round_pssms,
+                converged: run.converged,
             }),
         )
     } else {
@@ -4394,12 +4493,90 @@ fn protein_search_results_with_pssm(
 
 struct PsiblastArtifacts {
     final_pssm: blast_rs::pssm::Pssm,
+    round_results: Vec<Vec<blast_rs::api::SearchResult>>,
     round_pssms: Vec<blast_rs::pssm::Pssm>,
+    converged: bool,
+}
+
+fn psiblast_cli_round_results(
+    db: &BlastDb,
+    query: &[u8],
+    params: &blast_rs::api::SearchParams,
+    args: &BlastnArgs,
+    run: &blast_rs::api::PsiblastRun,
+) -> Vec<Vec<blast_rs::api::SearchResult>> {
+    if args.num_iterations_value() != Some(0) {
+        return run.round_results.clone();
+    }
+    let mut rounds = vec![blast_rs::api::blastp(db, query, params)];
+    rounds.extend(run.round_results.iter().skip(1).cloned());
+    if rounds.len() == 1 && !run.results.is_empty() {
+        rounds.push(run.results.clone());
+    }
+    rounds
+}
+
+fn psiblast_tabular_iteration_rounds<'a>(
+    args: &BlastnArgs,
+    psiblast: bool,
+    final_results: &'a [blast_rs::api::SearchResult],
+    artifacts: Option<&'a PsiblastArtifacts>,
+) -> Vec<&'a [blast_rs::api::SearchResult]> {
+    let outfmt = outfmt_number(&args.outfmt);
+    let emit_convergence_rounds =
+        psiblast && args.num_iterations_value() == Some(0) && matches!(outfmt, 6 | 7 | 10);
+    if emit_convergence_rounds {
+        if let Some(artifacts) = artifacts {
+            if !artifacts.round_results.is_empty() {
+                return artifacts.round_results.iter().map(Vec::as_slice).collect();
+            }
+        }
+    }
+    vec![final_results]
+}
+
+fn preserve_psiblast_iteration_tabular_order(args: &BlastnArgs, psiblast: bool) -> bool {
+    let outfmt = outfmt_number(&args.outfmt);
+    psiblast && args.num_iterations_value() == Some(0) && matches!(outfmt, 6 | 7 | 10)
+}
+
+fn write_psiblast_convergence_marker<W: Write>(
+    writer: &mut W,
+    args: &BlastnArgs,
+    psiblast: bool,
+    converged: bool,
+) -> io::Result<()> {
+    if preserve_psiblast_iteration_tabular_order(args, psiblast) && converged {
+        writeln!(writer, "\nSearch has CONVERGED!")?;
+    }
+    Ok(())
+}
+
+fn emit_psiblast_pssm_comp_stats_warning(
+    args: &BlastnArgs,
+    psiblast: bool,
+    qrec: &FastaRecord,
+    artifacts: &PsiblastArtifacts,
+) {
+    if !preserve_psiblast_iteration_tabular_order(args, psiblast) || !artifacts.converged {
+        return;
+    }
+    let comp_based_stats = args
+        .comp_based_stats
+        .as_deref()
+        .map(|value| parse_validated_i32("comp_based_stats", value))
+        .unwrap_or(2);
+    if comp_based_stats <= 0 {
+        return;
+    }
+    eprintln!(
+        "Warning: [psiblast] Query_1 {}: Composition-based score adjustment conditioned on sequence properties and unconditional composition-based score adjustment is not supported with PSSMs, resetting to default value of standard composition-based statistics Frequency ratios for PSSM are all zeros, frequency ratios for BLOSUM62 will be used during traceback in composition based statistics ",
+        qrec.id
+    );
 }
 
 fn should_run_iterative_psiblast(args: &BlastnArgs) -> bool {
-    args.gap_trigger.is_some()
-        || args.num_iterations.is_some()
+    args.num_iterations.is_some()
         || args.inclusion_ethresh.is_some()
         || args.pseudocount.is_some()
         || args.in_msa.is_some()
@@ -4517,7 +4694,7 @@ fn write_psiblast_pssm_artifacts(
 ) -> io::Result<()> {
     if let Some(path) = args.out_pssm.as_ref() {
         if args.save_each_pssm {
-            for (idx, round_pssm) in artifacts.round_pssms.iter().enumerate() {
+            for (idx, round_pssm) in artifacts.intermediate_round_pssms().enumerate() {
                 let round_path = pssm_round_output_path(path, idx + 1);
                 let mut writer = BufWriter::new(create_output_file(&round_path));
                 write_pssm_checkpoint(&mut writer, query, round_pssm)?;
@@ -4531,7 +4708,7 @@ fn write_psiblast_pssm_artifacts(
     }
     if let Some(path) = args.out_ascii_pssm.as_ref() {
         if args.save_each_pssm {
-            for (idx, round_pssm) in artifacts.round_pssms.iter().enumerate() {
+            for (idx, round_pssm) in artifacts.intermediate_round_pssms().enumerate() {
                 let round_path = pssm_round_output_path(path, idx + 1);
                 let mut writer = BufWriter::new(create_output_file(&round_path));
                 write_ascii_pssm(&mut writer, query, round_pssm)?;
@@ -4544,6 +4721,15 @@ fn write_psiblast_pssm_artifacts(
         }
     }
     Ok(())
+}
+
+impl PsiblastArtifacts {
+    fn intermediate_round_pssms(
+        &self,
+    ) -> impl Iterator<Item = &blast_rs::pssm::Pssm> + ExactSizeIterator {
+        let intermediate_count = self.round_pssms.len().saturating_sub(1);
+        self.round_pssms.iter().take(intermediate_count)
+    }
 }
 
 fn pssm_round_output_path(base: &PathBuf, round: usize) -> PathBuf {
@@ -5497,20 +5683,68 @@ fn psiblast_query_from_msa(
     msa_path: &PathBuf,
     master_idx_value: Option<i32>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let records = parse_fasta_with_default_id(open_input_file("in_msa", msa_path), "MSA_1");
+    const BAD_RESTART_MSA_ERROR: &str =
+        "BLAST query error: CAlnReader::GetSeqEntry(): Seq_entry is not available until after Read()";
+    const RESTART_MSA_STOP_RESIDUE_ERROR: &str = "NCBI C++ Exception:\n    T0 \"c++/include/corelib/ncbidiag.hpp\", line 99: Error: (CInvalidChoiceSelection::eFail) CSeq_entry::GetSeq(): Invalid choice selection: NCBI-Seqset::Seq-entry.not set\n";
+    let msa_bytes = read_input_bytes("in_msa", msa_path);
+    if matches!(msa_bytes.first(), Some(b'\n' | b'\r')) {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
+    if !trim_ascii_bytes(&msa_bytes).starts_with(b">") {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
+    if restart_msa_has_bad_comment_or_empty_defline(&msa_bytes)
+        || restart_msa_has_blank_before_sequence_continuation(&msa_bytes)
+    {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
+    let records = parse_restart_msa_records(&msa_bytes, "MSA_1");
+    if records.iter().any(|record| record.sequence.contains(&b'*')) {
+        return Err(RESTART_MSA_STOP_RESIDUE_ERROR.into());
+    }
+    if records
+        .iter()
+        .any(|record| record.defline.trim().is_empty())
+        || records.iter().any(|record| {
+            record.sequence.iter().any(|&residue| {
+                residue == b'.' || !(residue.is_ascii_alphabetic() || residue == b'-')
+            })
+        })
+    {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
+    if records.len() < 2 {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
     let master_idx = master_idx_value
         .and_then(|idx| usize::try_from(idx).ok())
         .and_then(|idx| idx.checked_sub(1))
         .unwrap_or(0);
-    let master = records
-        .get(master_idx)
-        .ok_or("MSA master index is out of range")?;
+    let master = records.get(master_idx).ok_or(BAD_RESTART_MSA_ERROR)?;
+    if master.id.contains('|') {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
+    if master.sequence.is_empty() {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
+    let master_len = master.sequence.len();
+    if records
+        .iter()
+        .any(|record| !record.sequence.is_empty() && record.sequence.len() != master_len)
+    {
+        return Err(BAD_RESTART_MSA_ERROR.into());
+    }
     let query_seq: Vec<u8> = master
         .sequence
         .iter()
         .copied()
         .filter(|&residue| !is_msa_gap(residue))
         .collect();
+    if query_seq.is_empty() {
+        return Err("BLAST engine error: Query length provided by IPssmInputData is 0".into());
+    }
+    let query_id = psiblast_restart_msa_query_id(master);
+    emit_psiblast_o_residue_warning(master.defline.trim(), &query_seq);
     let path = std::env::temp_dir().join(format!(
         "blast-cli-psiblast-msa-query-{}-{}.fa",
         std::process::id(),
@@ -5518,14 +5752,151 @@ fn psiblast_query_from_msa(
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     ));
-    let mut data = Vec::with_capacity(master.id.len() + query_seq.len() + 4);
+    let mut data = Vec::with_capacity(query_id.len() + query_seq.len() + 4);
     data.extend_from_slice(b">");
-    data.extend_from_slice(master.id.as_bytes());
+    data.extend_from_slice(query_id.as_bytes());
     data.extend_from_slice(b"\n");
     data.extend_from_slice(&query_seq);
     data.extend_from_slice(b"\n");
     fs::write(&path, data)?;
     Ok(path)
+}
+
+fn restart_msa_has_bad_comment_or_empty_defline(msa_bytes: &[u8]) -> bool {
+    let mut saw_blank_separator = false;
+    for line in restart_msa_logical_lines(msa_bytes) {
+        let trimmed = trim_ascii_bytes(line);
+        if trimmed.is_empty() {
+            saw_blank_separator = true;
+            continue;
+        }
+        if trimmed == b">" {
+            return true;
+        }
+        if matches!(trimmed.first(), Some(b';' | b'#')) {
+            if saw_blank_separator {
+                saw_blank_separator = false;
+                continue;
+            }
+            return true;
+        }
+        saw_blank_separator = false;
+    }
+    false
+}
+
+fn psiblast_restart_msa_query_id(master: &FastaRecord) -> String {
+    let trimmed = master.defline.trim();
+    if let Some(first_tab) = trimmed.find('\t') {
+        let rest = trimmed[first_tab + 1..].trim();
+        if !rest.is_empty() {
+            return rest.to_string();
+        }
+    }
+    let mut tokens = master.defline.split_whitespace();
+    let first = tokens.next().unwrap_or(master.id.as_str());
+    tokens.next().unwrap_or(first).to_string()
+}
+
+fn emit_psiblast_o_residue_warning(query_id: &str, query_seq: &[u8]) {
+    let positions: Vec<String> = query_seq
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &residue)| residue.eq_ignore_ascii_case(&b'O').then(|| idx.to_string()))
+        .collect();
+    if positions.is_empty() {
+        return;
+    }
+    eprintln!(
+        "Warning: [psiblast] {query_id}: One or more O characters replaced by X for alignment score calculations at positions {} ",
+        positions.join(", ")
+    );
+}
+
+fn restart_msa_has_blank_before_sequence_continuation(msa_bytes: &[u8]) -> bool {
+    let mut in_record = false;
+    let mut blank_in_record = false;
+    for line in restart_msa_logical_lines(msa_bytes) {
+        let trimmed = trim_ascii_bytes(line);
+        if trimmed.is_empty() {
+            if in_record {
+                blank_in_record = true;
+            }
+            continue;
+        }
+        if trimmed.first() == Some(&b'>') {
+            in_record = true;
+            blank_in_record = false;
+            continue;
+        }
+        if blank_in_record && matches!(trimmed.first(), Some(b';' | b'#')) {
+            continue;
+        }
+        if in_record && blank_in_record {
+            return true;
+        }
+    }
+    false
+}
+
+fn restart_msa_logical_lines(msa_bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    msa_bytes.split(|&byte| byte == b'\n').map(|line| {
+        if line.last() == Some(&b'\r') {
+            &line[..line.len() - 1]
+        } else {
+            line
+        }
+    })
+}
+
+fn parse_restart_msa_records(msa_bytes: &[u8], default_id: &str) -> Vec<FastaRecord> {
+    let mut records = Vec::new();
+    let mut current_id: Option<String> = None;
+    let mut current_defline = String::new();
+    let mut current_sequence = Vec::new();
+
+    for line in restart_msa_logical_lines(msa_bytes) {
+        let trimmed = trim_ascii_bytes(line);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.first() == Some(&b'>') {
+            if let Some(id) = current_id.take() {
+                records.push(FastaRecord {
+                    id,
+                    defline: current_defline,
+                    sequence: std::mem::take(&mut current_sequence),
+                });
+            }
+            let defline_bytes = trim_ascii_bytes(&trimmed[1..]);
+            let defline = std::str::from_utf8(defline_bytes).unwrap_or("").to_string();
+            let id = defline
+                .split_whitespace()
+                .next()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(default_id)
+                .to_string();
+            current_id = Some(id);
+            current_defline = defline;
+        } else if current_id.is_some() && !matches!(trimmed.first(), Some(b';' | b'#')) {
+            current_sequence.extend(
+                trimmed
+                    .iter()
+                    .copied()
+                    .filter(|b| !matches!(*b, b' ' | b'\t')),
+            );
+        }
+    }
+
+    if let Some(id) = current_id {
+        records.push(FastaRecord {
+            id,
+            defline: current_defline,
+            sequence: current_sequence,
+        });
+    }
+
+    records
 }
 
 fn psiblast_query_from_checkpoint(
@@ -6386,6 +6757,11 @@ fn run_blastn_rust(
     let gapopen = args.gapopen();
     let gapextend = args.gapextend();
     let evalue = args.evalue();
+    let dc_template_length = args.template_length_value();
+    let dc_template_type = args.template_type_value();
+    let use_dc_megablast_template = args.task.as_deref() == Some("dc-megablast")
+        && dc_template_length.is_some()
+        && dc_template_type.is_some();
 
     let mut all_hits: Vec<(u32, TabularHit)> = Vec::new();
 
@@ -6636,7 +7012,34 @@ fn run_blastn_rust(
                             hsps
                         }
                     } else {
-                        let hsps = if let Some(amb) = ambiguity_data {
+                        let hsps = if use_dc_megablast_template {
+                            let subject_decoded = if let Some(amb) = ambiguity_data {
+                                blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                    packed, seq_len, amb,
+                                )
+                            } else {
+                                blast_rs::search::decode_packed_ncbi2na(packed, seq_len)
+                            };
+                            blast_rs::search::blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
+                                &eq.plus_masked,
+                                &eq.minus_masked,
+                                &eq.plus_nomask,
+                                &eq.minus_nomask,
+                                &subject_decoded,
+                                word_size,
+                                dc_template_length.unwrap(),
+                                dc_template_type.unwrap(),
+                                reward,
+                                penalty,
+                                gapopen,
+                                gapextend,
+                                gapped_x_dropoff,
+                                gapped_x_dropoff_final,
+                                kbp,
+                                search_space,
+                                evalue,
+                            )
+                        } else if let Some(amb) = ambiguity_data {
                             let subject_decoded =
                                 blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
                                     packed, seq_len, amb,
@@ -6936,7 +7339,37 @@ fn run_blastn_rust(
                                             hsps
                                         }
                                     } else {
-                                        let hsps = if let Some(amb) = ambiguity_data {
+                                        let hsps = if use_dc_megablast_template {
+                                            let subject_decoded = if let Some(amb) = ambiguity_data
+                                            {
+                                                blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                                    packed, seq_len, amb,
+                                                )
+                                            } else {
+                                                blast_rs::search::decode_packed_ncbi2na(
+                                                    packed, seq_len,
+                                                )
+                                            };
+                                            blast_rs::search::blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
+                                                &eq.plus_masked,
+                                                &eq.minus_masked,
+                                                &eq.plus_nomask,
+                                                &eq.minus_nomask,
+                                                &subject_decoded,
+                                                word_size,
+                                                dc_template_length.unwrap(),
+                                                dc_template_type.unwrap(),
+                                                reward,
+                                                penalty,
+                                                gapopen,
+                                                gapextend,
+                                                gapped_x_dropoff,
+                                                gapped_x_dropoff_final,
+                                                kbp,
+                                                search_space,
+                                                evalue,
+                                            )
+                                        } else if let Some(amb) = ambiguity_data {
                                             let subject_decoded = blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
                                                 packed, seq_len, amb,
                                             );
@@ -7165,6 +7598,30 @@ fn run_blastn_rust(
                                     evalue,
                                 )
                             }
+                        } else if use_dc_megablast_template {
+                            let subject_decoded =
+                                subject_decoded_with_ambiguity.clone().unwrap_or_else(|| {
+                                    blast_rs::search::decode_packed_ncbi2na(packed, seq_len)
+                                });
+                            blast_rs::search::blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
+                                &eq.plus_masked,
+                                &eq.minus_masked,
+                                &eq.plus_nomask,
+                                &eq.minus_nomask,
+                                &subject_decoded,
+                                word_size,
+                                dc_template_length.unwrap(),
+                                dc_template_type.unwrap(),
+                                reward,
+                                penalty,
+                                gapopen,
+                                gapextend,
+                                gapped_x_dropoff,
+                                gapped_x_dropoff_final,
+                                kbp,
+                                search_space,
+                                evalue,
+                            )
                         } else if let Some(subject_decoded) =
                             subject_decoded_with_ambiguity.as_ref()
                         {
@@ -7449,6 +7906,17 @@ fn run_blastn_rust(
                     } else {
                         score_order
                             .then_with(|| a_subject_lo.cmp(&b_subject_lo))
+                            .then_with(|| {
+                                same_subject_interval_long_query_strand_order(
+                                    a,
+                                    b,
+                                    a_subject_lo,
+                                    b_subject_lo,
+                                    a_subject_hi,
+                                    b_subject_hi,
+                                )
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                            })
                             .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
                             .then_with(|| b.sframe.cmp(&a.sframe))
                             .then_with(|| b_subject_hi.cmp(&a_subject_hi))
@@ -8092,6 +8560,25 @@ fn parsed_fasta_id(raw_id: &str) -> FastaDisplayIds {
     }
 }
 
+fn psiblast_restart_msa_display_ids(args: &BlastnArgs) -> Option<FastaDisplayIds> {
+    let path = args.in_msa.as_ref()?;
+    let msa_bytes = fs::read(path).ok()?;
+    let records = parse_restart_msa_records(&msa_bytes, "MSA_1");
+    let master_idx = args
+        .msa_master_idx_value()
+        .and_then(|idx| usize::try_from(idx).ok())
+        .and_then(|idx| idx.checked_sub(1))
+        .unwrap_or(0);
+    let master = records.get(master_idx)?;
+    let id = psiblast_restart_msa_query_id(master);
+    Some(FastaDisplayIds {
+        id: id.clone(),
+        gi: None,
+        acc: Some(id.clone()),
+        accver: Some(id),
+    })
+}
+
 fn fasta_pairwise_display_defline(
     record: &blast_rs::input::FastaRecord,
     parse_deflines: bool,
@@ -8225,6 +8712,29 @@ fn run_blastn_subject(
                     search_space,
                     args.evalue(),
                 )
+            } else if args.task.as_deref() == Some("dc-megablast")
+                && args.template_length_value().is_some()
+                && args.template_type_value().is_some()
+            {
+                blast_rs::search::blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
+                    &query_plus,
+                    &query_minus,
+                    &query_plus_nomask,
+                    &query_minus_nomask,
+                    &subject,
+                    word_size,
+                    args.template_length_value().unwrap(),
+                    args.template_type_value().unwrap(),
+                    args.reward(),
+                    args.penalty(),
+                    args.gapopen(),
+                    args.gapextend(),
+                    gapped_x_dropoff,
+                    gapped_x_dropoff_final,
+                    &kbp,
+                    search_space,
+                    args.evalue(),
+                )
             } else {
                 blast_rs::search::blastn_gapped_search_nomask_with_split_xdrop(
                     &query_plus,
@@ -8354,6 +8864,17 @@ fn run_blastn_subject(
             })
             .then_with(|| b.subject_id.cmp(&a.subject_id))
             .then_with(|| a_subject_lo.cmp(&b_subject_lo))
+            .then_with(|| {
+                same_subject_interval_long_query_strand_order(
+                    a,
+                    b,
+                    a_subject_lo,
+                    b_subject_lo,
+                    a_subject_hi,
+                    b_subject_hi,
+                )
+                .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
             .then_with(|| b.sframe.cmp(&a.sframe))
             .then_with(|| b_subject_hi.cmp(&a_subject_hi))
@@ -8571,16 +9092,14 @@ fn sort_blastn_subject_tabular_output_hits(
         .collect();
     let original = std::mem::take(hits);
     let mut groups: Vec<Vec<TabularHit>> = Vec::new();
+    let mut group_index: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
     for hit in original {
-        if groups
-            .last()
-            .and_then(|group| group.first())
-            .is_some_and(|first| {
-                first.query_id == hit.query_id && first.subject_id == hit.subject_id
-            })
-        {
-            groups.last_mut().expect("group exists").push(hit);
+        let key = (hit.query_id.clone(), hit.subject_id.clone());
+        if let Some(&idx) = group_index.get(&key) {
+            groups[idx].push(hit);
         } else {
+            group_index.insert(key, groups.len());
             groups.push(vec![hit]);
         }
     }
@@ -8605,7 +9124,7 @@ fn sort_blastn_subject_tabular_output_hits(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b_best.1.cmp(&a_best.1))
             .then_with(|| a_rank.cmp(&b_rank))
-            .then_with(|| a_best.2.cmp(&b_best.2))
+            .then_with(|| b_best.2.cmp(&a_best.2))
             .then_with(|| b_best.3.cmp(&a_best.3))
             .then_with(|| a_first.subject_id.cmp(&b_first.subject_id))
     });
@@ -8657,6 +9176,26 @@ fn hsp_query_order_start(hit: &TabularHit) -> i32 {
         hit.query_len - hit.query_start.max(hit.query_end) + 1
     } else {
         hit.query_start.min(hit.query_end)
+    }
+}
+
+fn same_subject_interval_long_query_strand_order(
+    a: &TabularHit,
+    b: &TabularHit,
+    a_subject_lo: i32,
+    b_subject_lo: i32,
+    a_subject_hi: i32,
+    b_subject_hi: i32,
+) -> Option<std::cmp::Ordering> {
+    if a_subject_lo == b_subject_lo
+        && a_subject_hi == b_subject_hi
+        && a.sframe != b.sframe
+        && a.query_len >= 36
+        && b.query_len >= 36
+    {
+        Some(a.sframe.cmp(&b.sframe))
+    } else {
+        None
     }
 }
 
@@ -14412,7 +14951,7 @@ mod tests {
             "--db",
             db_base.to_str().unwrap(),
             "--num_iterations",
-            "1",
+            "2",
             "--outfmt",
             "0",
             "--num_descriptions",
@@ -14643,6 +15182,164 @@ mod tests {
     }
 
     #[test]
+    fn psiblast_query_from_msa_uses_first_description_token_as_query_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master desc extra\nACD\n>hit1\nAWD\n").unwrap();
+
+        let query_path = psiblast_query_from_msa(&msa_path, None).expect("derive MSA query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">desc\nACD\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_preserves_tabbed_description_query_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\tdesc\textra\nACD\n>hit1\nAWD\n").unwrap();
+
+        let query_path = psiblast_query_from_msa(&msa_path, None).expect("derive MSA query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">desc\textra\nACD\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_restart_msa_display_ids_preserve_tabbed_description_query_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\tdesc\textra\nACD\n>hit1\nAWD\n").unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--in_msa",
+            msa_path.to_str().unwrap(),
+            "--subject",
+            "subject.fa",
+        ]);
+
+        let ids = psiblast_restart_msa_display_ids(&args).expect("restart display ids");
+
+        assert_eq!(ids.id, "desc\textra");
+        assert_eq!(ids.acc.as_deref(), Some("desc\textra"));
+        assert_eq!(ids.accver.as_deref(), Some("desc\textra"));
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_accepts_crlf_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\r\nACD\r\n>hit1\r\nAWD\r\n").unwrap();
+
+        let query_path = psiblast_query_from_msa(&msa_path, None).expect("derive MSA query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">master\nACD\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_allows_comment_after_blank_separator() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\nACD\n\n;comment\n>hit1\nAWD\n").unwrap();
+
+        let query_path = psiblast_query_from_msa(&msa_path, None).expect("derive MSA query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">master\nACD\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_rejects_second_comment_after_blank_separator() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(
+            &msa_path,
+            b">master\nACD\n\n;comment\n#comment2\n>hit1\nAWD\n",
+        )
+        .unwrap();
+
+        let err = psiblast_query_from_msa(&msa_path, None).expect_err("reject bad MSA");
+
+        assert_eq!(
+            err.to_string(),
+            "BLAST query error: CAlnReader::GetSeqEntry(): Seq_entry is not available until after Read()"
+        );
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_allows_empty_non_master_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\nACD\n>empty\n\n>hit1\nAWD\n").unwrap();
+
+        let query_path = psiblast_query_from_msa(&msa_path, None).expect("derive MSA query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">master\nACD\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_allows_unselected_pipe_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\nACD\n>hit|bad\nAWD\n").unwrap();
+
+        let query_path = psiblast_query_from_msa(&msa_path, None).expect("derive MSA query");
+        let query_text = std::fs::read_to_string(&query_path).expect("read derived query");
+
+        assert_eq!(query_text, ">master\nACD\n");
+        let _ = std::fs::remove_file(query_path);
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_rejects_ncbi_bad_restart_msa_lines() {
+        for msa in [
+            b">master\nACD\n".as_slice(),
+            b">master\nA.CD\n>hit1\nAWCD\n".as_slice(),
+            b">master\nA1CD\n>hit1\nAWCD\n".as_slice(),
+            b">master\nA~CD\n>hit1\nAWCD\n".as_slice(),
+            b">master|bad\nACD\n>hit1\nAWD\n".as_slice(),
+            b"\n>master\nACD\n>hit1\nAWD\n".as_slice(),
+            b">master\n\nACD\n>hit1\nAWD\n".as_slice(),
+            b">master\nA\n\nCD\n>hit1\nAWD\n".as_slice(),
+            b">master\n;comment\nACD\n>hit1\nAWD\n".as_slice(),
+            b">master\nACD\n;comment\n>hit1\nAWD\n".as_slice(),
+            b">master\nACD\n#comment\n>hit1\nAWD\n".as_slice(),
+            b">master\nAC\x0cD\n>hit1\nAWD\n".as_slice(),
+            b">master\nACD\n>\nAWD\n".as_slice(),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let msa_path = tmp.path().join("restart.msa");
+            std::fs::write(&msa_path, msa).unwrap();
+
+            let err = psiblast_query_from_msa(&msa_path, None).expect_err("reject bad MSA");
+            assert_eq!(
+                err.to_string(),
+                "BLAST query error: CAlnReader::GetSeqEntry(): Seq_entry is not available until after Read()"
+            );
+        }
+    }
+
+    #[test]
+    fn psiblast_query_from_msa_rejects_ncbi_stop_residue_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let msa_path = tmp.path().join("restart.msa");
+        std::fs::write(&msa_path, b">master\nMK*\n>hit1\nMKF\n").unwrap();
+
+        let err = psiblast_query_from_msa(&msa_path, None).expect_err("reject stop residue");
+        assert_eq!(
+            err.to_string(),
+            "NCBI C++ Exception:\n    T0 \"c++/include/corelib/ncbidiag.hpp\", line 99: Error: (CInvalidChoiceSelection::eFail) CSeq_entry::GetSeq(): Invalid choice selection: NCBI-Seqset::Seq-entry.not set\n"
+        );
+    }
+
+    #[test]
     fn psiblast_restart_msa_can_ignore_master_and_strip_row_gaps() {
         let row = project_restart_msa_row_to_query(b"A-WD", None, 3, true)
             .expect("row should project without master");
@@ -14718,6 +15415,149 @@ mod tests {
         assert!(!should_run_iterative_psiblast(&plain_paths));
         assert!(should_run_iterative_psiblast(&save_last));
         assert!(should_run_iterative_psiblast(&save_each));
+    }
+
+    #[test]
+    fn psiblast_gap_trigger_alone_does_not_trigger_iterations() {
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "tests/fixtures/psi_query.fa",
+            "--subject",
+            "tests/fixtures/psi_subject.fa",
+            "--gap_trigger",
+            "-1",
+        ]);
+
+        assert_eq!(args.gap_trigger_value(), Some(-1.0));
+        assert!(!should_run_iterative_psiblast(&args));
+    }
+
+    #[test]
+    fn psiblast_num_iterations_zero_cli_rounds_start_with_blastp_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let db = BlastDb::open(&db_base).unwrap();
+        let query = b"MKKWLFGFLG";
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "query.fa",
+            "--subject",
+            "subject.fa",
+            "--num_iterations",
+            "0",
+        ]);
+        let search = build_blastp_params(&args);
+        let params = build_psiblast_params(&args);
+        let ordinary = blast_rs::api::blastp(&db, query, &search);
+        let run = blast_rs::api::psiblast_with_rounds(&db, query, &params);
+
+        let rounds = psiblast_cli_round_results(&db, query, &search, &args, &run);
+
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds[0][0].hsps[0].evalue, ordinary[0].hsps[0].evalue);
+        assert_eq!(
+            rounds[0][0].hsps[0].bit_score,
+            ordinary[0].hsps[0].bit_score
+        );
+        assert_eq!(rounds[1][0].hsps[0].evalue, run.results[0].hsps[0].evalue);
+    }
+
+    #[test]
+    fn psiblast_num_iterations_zero_tabular_preserves_iteration_order() {
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "query.fa",
+            "--subject",
+            "subject.fa",
+            "--outfmt",
+            "6",
+            "--num_iterations",
+            "0",
+        ]);
+
+        assert!(preserve_psiblast_iteration_tabular_order(&args, true));
+        assert!(!preserve_psiblast_iteration_tabular_order(&args, false));
+    }
+
+    #[test]
+    fn psiblast_num_iterations_zero_convergence_marker_uses_output_stream() {
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "query.fa",
+            "--subject",
+            "subject.fa",
+            "--outfmt",
+            "6",
+            "--num_iterations",
+            "0",
+        ]);
+        let mut output = Vec::new();
+
+        write_psiblast_convergence_marker(&mut output, &args, true, true).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "\nSearch has CONVERGED!\n"
+        );
+    }
+
+    #[test]
+    fn psiblast_num_iterations_zero_comp_stats_warning_is_gated() {
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "query.fa",
+            "--subject",
+            "subject.fa",
+            "--outfmt",
+            "6",
+            "--num_iterations",
+            "0",
+        ]);
+        let disabled = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            "query.fa",
+            "--subject",
+            "subject.fa",
+            "--outfmt",
+            "6",
+            "--num_iterations",
+            "0",
+            "--comp_based_stats",
+            "0",
+        ]);
+        let artifacts = PsiblastArtifacts {
+            final_pssm: blast_rs::pssm::Pssm::from_sequence(
+                &blast_rs::encoding::encode_ncbistdaa_sequence(b"ACD"),
+                blast_rs::get_matrix(blast_rs::api::MatrixType::Blosum62),
+            ),
+            round_results: Vec::new(),
+            round_pssms: Vec::new(),
+            converged: true,
+        };
+        let qrec = FastaRecord {
+            id: "q".to_string(),
+            defline: "q".to_string(),
+            sequence: b"ACD".to_vec(),
+        };
+
+        assert!(preserve_psiblast_iteration_tabular_order(&args, true));
+        assert!(!preserve_psiblast_iteration_tabular_order(&disabled, false));
+        emit_psiblast_pssm_comp_stats_warning(&args, true, &qrec, &artifacts);
+        emit_psiblast_pssm_comp_stats_warning(&disabled, true, &qrec, &artifacts);
     }
 
     #[test]
@@ -14907,7 +15747,7 @@ mod tests {
             "--db",
             db_base.to_str().unwrap(),
             "--num_iterations",
-            "1",
+            "2",
             "--outfmt",
             "6",
             "--out",
@@ -15038,7 +15878,7 @@ mod tests {
             "--db",
             db_base.to_str().unwrap(),
             "--num_iterations",
-            "1",
+            "2",
             "--evalue",
             "1e20",
             "--outfmt",
@@ -15052,13 +15892,61 @@ mod tests {
 
         run_psiblast(&args).expect("psiblast should write round checkpoints");
         let round_path = pssm_round_output_path(&checkpoint_path, 1);
+        let final_round_path = pssm_round_output_path(&checkpoint_path, 2);
 
         assert!(!checkpoint_path.is_file());
         assert!(round_path.is_file());
+        assert!(!final_round_path.is_file());
         let round_pssm =
             parse_pssm_checkpoint(&std::fs::read(&round_path).unwrap(), b"MKKWLFGFLG".len())
                 .expect("round checkpoint should parse");
         assert_eq!(round_pssm.length, b"MKKWLFGFLG".len());
+    }
+
+    #[test]
+    fn psiblast_save_each_pssm_skips_single_final_round() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = tmp.path().join("psidb");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "psidb");
+        builder.add(blast_rs::api::SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: b"MKKWLFGFLG".to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).unwrap();
+        let query_path = tmp.path().join("query.fa");
+        let output_path = tmp.path().join("out.txt");
+        let checkpoint_path = tmp.path().join("round.chk");
+        let ascii_path = tmp.path().join("round.ascii");
+        std::fs::write(&query_path, b">q\nMKKWLFGFLG\n").unwrap();
+        let args = BlastnArgs::parse_from([
+            "psiblast",
+            "--query",
+            query_path.to_str().unwrap(),
+            "--db",
+            db_base.to_str().unwrap(),
+            "--num_iterations",
+            "1",
+            "--evalue",
+            "1e20",
+            "--outfmt",
+            "6",
+            "--out",
+            output_path.to_str().unwrap(),
+            "--out_pssm",
+            checkpoint_path.to_str().unwrap(),
+            "--out_ascii_pssm",
+            ascii_path.to_str().unwrap(),
+            "--save_each_pssm",
+        ]);
+
+        run_psiblast(&args).expect("psiblast should accept save-each for one round");
+
+        assert!(!checkpoint_path.is_file());
+        assert!(!ascii_path.is_file());
+        assert!(!pssm_round_output_path(&checkpoint_path, 1).is_file());
+        assert!(!pssm_round_output_path(&ascii_path, 1).is_file());
     }
 
     #[test]
@@ -15084,7 +15972,7 @@ mod tests {
             "--db",
             db_base.to_str().unwrap(),
             "--num_iterations",
-            "1",
+            "2",
             "--evalue",
             "1e20",
             "--outfmt",
@@ -15098,9 +15986,11 @@ mod tests {
 
         run_psiblast(&args).expect("psiblast should write ASCII round PSSMs");
         let round_path = pssm_round_output_path(&ascii_path, 1);
+        let final_round_path = pssm_round_output_path(&ascii_path, 2);
 
         assert!(!ascii_path.is_file());
         assert!(round_path.is_file());
+        assert!(!final_round_path.is_file());
         let round_text = std::fs::read_to_string(&round_path).expect("read round ASCII PSSM");
         assert!(round_text.contains("Last position-specific scoring matrix computed"));
         assert!(round_text.contains("    1 M"));
@@ -15265,7 +16155,7 @@ mod tests {
     }
 
     #[test]
-    fn database_index_options_fail_for_database_mode_only() {
+    fn database_index_name_fails_for_database_mode_only() {
         let subject_cli = Cli::parse_from([
             "blast-cli",
             "blastn",
@@ -15298,7 +16188,7 @@ mod tests {
         let Commands::Blastn(db_args) = db_cli.command else {
             panic!("expected blastn command");
         };
-        assert!(index_options_require_unsupported_database_index(&db_args));
+        assert!(!index_options_require_unsupported_database_index(&db_args));
 
         let db_index_name_cli = Cli::parse_from([
             "blast-cli",

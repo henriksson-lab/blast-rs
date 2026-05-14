@@ -202,6 +202,101 @@ fn assert_blastn_subject_task_outfmt_matches_ncbi(
     );
 }
 
+fn assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+    query_fasta: &str,
+    subject_fasta: &str,
+    task: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists() {
+        eprintln!("Skipping: /usr/bin/blastn not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&subject, subject_fasta).expect("write subject FASTA");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--task")
+        .arg(task)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli subject parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-task")
+        .arg(task)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastn subject parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let sort_lines = |bytes: Vec<u8>| {
+        let mut lines: Vec<String> = String::from_utf8(bytes)
+            .expect("UTF-8 tabular output")
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    };
+    let rust = sort_lines(std::fs::read(&rust_out).expect("read rust output"));
+    let ncbi = sort_lines(std::fs::read(&ncbi_out).expect("read ncbi output"));
+    assert_eq!(
+        rust, ncbi,
+        "Rust --subject sorted output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
 fn assert_blastp_subject_outfmt_matches_ncbi(
     query_fasta: &str,
     subject_fasta: &str,
@@ -684,6 +779,30 @@ fn assert_translated_db_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
+    assert_translated_db_outfmt_matches_ncbi_with_num_threads(
+        program,
+        ncbi_program,
+        dbtype,
+        query_fasta,
+        db_fasta,
+        outfmt,
+        rust_extra_args,
+        ncbi_extra_args,
+        "1",
+    );
+}
+
+fn assert_translated_db_outfmt_matches_ncbi_with_num_threads(
+    program: &str,
+    ncbi_program: &str,
+    dbtype: &str,
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+    num_threads: &str,
+) {
     if !std::path::Path::new(ncbi_program).exists()
         || !std::path::Path::new("/usr/bin/makeblastdb").exists()
     {
@@ -732,7 +851,7 @@ fn assert_translated_db_outfmt_matches_ncbi(
         .arg("--outfmt")
         .arg(outfmt)
         .arg("--num_threads")
-        .arg("1")
+        .arg(num_threads)
         .arg("--out")
         .arg(&rust_out);
     for arg in rust_extra_args {
@@ -756,7 +875,7 @@ fn assert_translated_db_outfmt_matches_ncbi(
         .arg("-outfmt")
         .arg(outfmt)
         .arg("-num_threads")
-        .arg("1")
+        .arg(num_threads)
         .arg("-out")
         .arg(&ncbi_out);
     for arg in ncbi_extra_args {
@@ -1092,6 +1211,26 @@ fn assert_blastn_db_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
+    assert_blastn_db_outfmt_matches_ncbi_with_num_threads(
+        query_fasta,
+        db_fasta,
+        outfmt,
+        makeblastdb_extra_args,
+        rust_extra_args,
+        ncbi_extra_args,
+        "1",
+    );
+}
+
+fn assert_blastn_db_outfmt_matches_ncbi_with_num_threads(
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    makeblastdb_extra_args: &[&str],
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+    num_threads: &str,
+) {
     if !std::path::Path::new("/usr/bin/blastn").exists()
         || !std::path::Path::new("/usr/bin/makeblastdb").exists()
     {
@@ -1157,7 +1296,7 @@ fn assert_blastn_db_outfmt_matches_ncbi(
         .arg("--outfmt")
         .arg(outfmt)
         .arg("--num_threads")
-        .arg("1")
+        .arg(num_threads)
         .arg("--out")
         .arg(&rust_out);
     for arg in rust_extra_args {
@@ -1185,7 +1324,7 @@ fn assert_blastn_db_outfmt_matches_ncbi(
         .arg("-outfmt")
         .arg(outfmt)
         .arg("-num_threads")
-        .arg("1")
+        .arg(num_threads)
         .arg("-out")
         .arg(&ncbi_out);
     for arg in ncbi_extra_args {
@@ -1209,6 +1348,243 @@ fn assert_blastn_db_outfmt_matches_ncbi(
     assert_eq!(
         rust, ncbi,
         "Rust DB output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+fn assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    makeblastdb_extra_args: &[&str],
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+    let rust_has_task = rust_extra_args
+        .iter()
+        .any(|arg| matches!(*arg, "--task" | "-task"));
+    let ncbi_has_task = ncbi_extra_args
+        .iter()
+        .any(|arg| matches!(*arg, "--task" | "-task"));
+
+    let mut make_cmd = std::process::Command::new("/usr/bin/makeblastdb");
+    make_cmd
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null());
+    for arg in makeblastdb_extra_args {
+        make_cmd.arg(arg);
+    }
+    let make_status = make_cmd.status().expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db);
+    if !rust_has_task {
+        rust_cmd.arg("--task").arg("blastn-short");
+    }
+    rust_cmd
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli DB parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd.arg("-query").arg(&query).arg("-db").arg(&db);
+    if !ncbi_has_task {
+        ncbi_cmd.arg("-task").arg("blastn-short");
+    }
+    ncbi_cmd
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastn DB parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let sort_lines = |bytes: Vec<u8>| {
+        let mut lines: Vec<String> = String::from_utf8(bytes)
+            .expect("UTF-8 tabular output")
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    };
+    let rust = sort_lines(std::fs::read(&rust_out).expect("read rust output"));
+    let ncbi = sort_lines(std::fs::read(&ncbi_out).expect("read ncbi output"));
+    assert_eq!(
+        rust, ncbi,
+        "Rust DB sorted output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
+fn assert_blastn_indexed_db_outfmt_matches_ncbi(
+    query_fasta: &str,
+    db_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastn").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+        || !std::path::Path::new("/usr/bin/makembindex").exists()
+    {
+        eprintln!("Skipping: /usr/bin/blastn, makeblastdb, or makembindex not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let db_fasta_path = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
+
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta_path)
+        .arg("-dbtype")
+        .arg("nucl")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    let index_status = std::process::Command::new("/usr/bin/makembindex")
+        .arg("-input")
+        .arg(&db)
+        .arg("-iformat")
+        .arg("blastdb")
+        .arg("-verbosity")
+        .arg("quiet")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makembindex");
+    assert!(
+        index_status.success(),
+        "makembindex exited with {index_status}"
+    );
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastn")
+        .arg("--query")
+        .arg(&query)
+        .arg("--db")
+        .arg(&db)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd.status().expect("run blast-cli indexed DB parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-db")
+        .arg(&db)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI indexed DB parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastn exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust indexed DB output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
         rust_out, ncbi_out
     );
 }
@@ -2052,6 +2428,1099 @@ fn blastn_subject_ncbi_parity_dc_megablast_defaults() {
         "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen",
         &["--dust", "no", "--max_target_seqs", "10"],
         &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_dc_megablast_discontiguous_template_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s1\nTTTTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA\n",
+        "dc-megablast",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--template_type",
+            "coding",
+            "--template_length",
+            "18",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-template_type",
+            "coding",
+            "-template_length",
+            "18",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_dc_megablast_two_template_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s1\nGGGGACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTCCCC\n",
+        "dc-megablast",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--template_type",
+            "coding_and_optimal",
+            "--template_length",
+            "16",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-template_type",
+            "coding_and_optimal",
+            "-template_length",
+            "16",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_dc_megablast_multi_subject_two_template_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s_primary\nGGGGACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTCCCC\n>s_shifted\nTTTTTTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA\n>s_noise\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "dc-megablast",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--template_type",
+            "coding_and_optimal",
+            "--template_length",
+            "16",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-template_type",
+            "coding_and_optimal",
+            "-template_length",
+            "16",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_dc_megablast_masked_discontiguous_template_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTgacttaccGTACGTACGTGACTTACCGTACGTACGTGACTTACCGT\n",
+        ">s1\nTTTTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTAAAA\n",
+        "dc-megablast",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "true",
+            "--template_type",
+            "coding",
+            "--template_length",
+            "18",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-lcase_masking",
+            "-soft_masking",
+            "true",
+            "-template_type",
+            "coding",
+            "-template_length",
+            "18",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_masked_query_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTacgtacgtGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s1\nTTTTACGTACGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "true",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-lcase_masking",
+            "-soft_masking",
+            "true",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_masked_query_minus_strand_mapper_fixture() {
+    let subject = format!(
+        ">s1\n{}\n",
+        ascii_reverse_complement("TTTTACGTACGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA")
+    );
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTACGTacgtacgtGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        &subject,
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "true",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-lcase_masking",
+            "-soft_masking",
+            "true",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_terminal_overhang_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_terminal_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_minus_strand_terminal_overhang_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTACGGTAAGTCACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_minus_strand_terminal_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTACGGTAAGTCACGTACGT\n>s2\nACGTACGTACGGTAAGTCACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_adapter_like_trailing_overhang_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_adapter_like_trailing_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_poly_a_trailing_overhang_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_poly_a_trailing_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_exact_adapter_trimming_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_exact_adapter_trimming_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "documents the remaining exact multi-subject adapter tie-ordering gap"]
+fn blastn_subject_ncbi_parity_exact_adapter_trimming_mapper_multi_subject_order() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "blastn-short",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_terminal_overhang_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_terminal_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_coordinates() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTACGGTAAGTCACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_multi_subject_coordinates(
+) {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTACGGTAAGTCACGTACGT\n>s2\nACGTACGTACGGTAAGTCACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "documents the remaining rmblastn minus-strand terminal secondary-HSP scoring gap"]
+fn blastn_subject_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_scored() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTACGGTAAGTCACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "documents the remaining rmblastn minus-strand terminal secondary-HSP scoring gap"]
+fn blastn_subject_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_multi_subject_scored()
+{
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1\nACGTACGTACGGTAAGTCACGTACGT\n>s2\nACGTACGTACGGTAAGTCACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_adapter_like_trailing_overhang_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_adapter_like_trailing_overhang_mapper_multi_subject_fixture()
+{
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_poly_a_trailing_overhang_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_poly_a_trailing_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_exact_adapter_trimming_mapper_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_subject_ncbi_parity_rmblastn_exact_adapter_trimming_mapper_multi_subject_fixture() {
+    assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "documents the remaining exact multi-subject adapter tie-ordering gap"]
+fn blastn_subject_ncbi_parity_rmblastn_exact_adapter_trimming_mapper_multi_subject_order() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1\nACGTACGTGACTTACCGTACGTACGT\n>s2\nACGTACGTGACTTACCGTACGTACGT\n>s3\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "rmblastn",
+        "6 qseqid sseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
     );
 }
 
@@ -4814,6 +6283,1335 @@ fn blastn_db_ncbi_parity_pairwise_no_hit() {
         &[],
         &["--dust", "no", "--max_target_seqs", "10"],
         &["-dust", "no", "-max_target_seqs", "10"],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_short_read_masked_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTacgtacgtGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s1 subject one\nTTTTACGTACGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA\n>s2 subject two\nACGTACGTACGTACGTGACTTACCGTACGTAAAAACGTGACTTACCGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[],
+        &[
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "true",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-lcase_masking",
+            "-soft_masking",
+            "true",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_terminal_overhang_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_terminal_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_minus_strand_terminal_overhang_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTACGGTAAGTCACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_minus_strand_terminal_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTACGGTAAGTCACGTACGT\n>s2 subject two\nACGTACGTACGGTAAGTCACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_adapter_like_trailing_overhang_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_adapter_like_trailing_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_poly_a_trailing_overhang_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_poly_a_trailing_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_exact_adapter_trimming_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_exact_adapter_trimming_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "blastn-short",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_terminal_overhang_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_terminal_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_coordinates() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTACGGTAAGTCACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_multi_subject_coordinates()
+{
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTACGGTAAGTCACGTACGT\n>s2 subject two\nACGTACGTACGGTAAGTCACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "documents the remaining rmblastn minus-strand terminal secondary-HSP scoring gap"]
+fn blastn_db_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_scored() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTACGGTAAGTCACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "documents the remaining rmblastn minus-strand terminal secondary-HSP scoring gap"]
+fn blastn_db_ncbi_parity_rmblastn_minus_strand_terminal_overhang_mapper_multi_subject_scored() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAA\n",
+        ">s1 subject one\nACGTACGTACGGTAAGTCACGTACGT\n>s2 subject two\nACGTACGTACGGTAAGTCACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--strand",
+            "minus",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-strand",
+            "minus",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_adapter_like_trailing_overhang_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_adapter_like_trailing_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTACACGGAAGAC\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_poly_a_trailing_overhang_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_poly_a_trailing_overhang_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAAAAAA\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_exact_adapter_trimming_mapper_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_rmblastn_exact_adapter_trimming_mapper_multi_subject_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
+        ">q1\nTTTTACGTACGTGACTTACCGTACGTACGTAGATCGGAAGAG\n",
+        ">s1 subject one\nACGTACGTGACTTACCGTACGTACGT\n>s2 subject two\nACGTACGTGACTTACCGTACGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore qseq sseq btop",
+        &[],
+        &[
+            "--task",
+            "rmblastn",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "rmblastn",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_indexed_megablast_fixture() {
+    assert_blastn_indexed_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nTTTTACGTACGTACGTACGTACGTACGTACGTACGTAAAA\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--task",
+            "megablast",
+            "--use_index",
+            "true",
+            "--dust",
+            "no",
+            "--word_size",
+            "16",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "6",
+        ],
+        &[
+            "-task",
+            "megablast",
+            "-use_index",
+            "true",
+            "-dust",
+            "no",
+            "-word_size",
+            "16",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "6",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_indexed_megablast_no_hit_fixture() {
+    assert_blastn_indexed_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--task",
+            "megablast",
+            "--use_index",
+            "true",
+            "--dust",
+            "no",
+            "--word_size",
+            "16",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "6",
+        ],
+        &[
+            "-task",
+            "megablast",
+            "-use_index",
+            "true",
+            "-dust",
+            "no",
+            "-word_size",
+            "16",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "6",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_indexed_megablast_multi_subject_fixture() {
+    assert_blastn_indexed_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTTGCAAGTCGATCGTACGATTCGGA\n",
+        ">s1 subject one\nTTTTACGTACGTTGCAAGTCGATCGTACGATTCGGAAAAA\n>s2 subject two\nGGGGACGTACGTTGCAAGTCGATCGTACGATTCGGACCCC\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--task",
+            "megablast",
+            "--use_index",
+            "true",
+            "--dust",
+            "no",
+            "--word_size",
+            "16",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "6",
+        ],
+        &[
+            "-task",
+            "megablast",
+            "-use_index",
+            "true",
+            "-dust",
+            "no",
+            "-word_size",
+            "16",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "6",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_indexed_short_read_masked_fixture() {
+    assert_blastn_indexed_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTacgtacgtGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s1 subject one\nTTTTACGTACGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA\n>s2 subject two\nACGTACGTACGTACGTGACTTACCGTACGTAAAAACGTGACTTACCGTACGT\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--task",
+            "blastn-short",
+            "--use_index",
+            "true",
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "true",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-use_index",
+            "true",
+            "-dust",
+            "no",
+            "-lcase_masking",
+            "-soft_masking",
+            "true",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_indexed_short_read_multi_subject_fixture() {
+    assert_blastn_indexed_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTTGCAAGTCGATCGTACGATT\n",
+        ">s1 subject one\nTTTTACGTACGTTGCAAGTCGATCGTACGATTAAAA\n>s2 subject two\nGGGGACGTACGTTGCAAGTCGATCGTACGATTCCCC\n>s3 subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--task",
+            "blastn-short",
+            "--use_index",
+            "true",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "6",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-use_index",
+            "true",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "6",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_indexed_short_read_no_hit_fixture() {
+    assert_blastn_indexed_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTACGTACGTACGTACGTACGT\n",
+        ">s1 subject one\nTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[
+            "--task",
+            "blastn-short",
+            "--use_index",
+            "true",
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "6",
+        ],
+        &[
+            "-task",
+            "blastn-short",
+            "-use_index",
+            "true",
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "6",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_dc_megablast_discontiguous_template_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s1 subject one\nTTTTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[],
+        &[
+            "--task",
+            "dc-megablast",
+            "--dust",
+            "no",
+            "--template_type",
+            "coding",
+            "--template_length",
+            "18",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "dc-megablast",
+            "-dust",
+            "no",
+            "-template_type",
+            "coding",
+            "-template_length",
+            "18",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_dc_megablast_two_template_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s1 subject one\nGGGGACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[],
+        &[
+            "--task",
+            "dc-megablast",
+            "--dust",
+            "no",
+            "--template_type",
+            "coding_and_optimal",
+            "--template_length",
+            "16",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "dc-megablast",
+            "-dust",
+            "no",
+            "-template_type",
+            "coding_and_optimal",
+            "-template_length",
+            "16",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_dc_megablast_multi_subject_two_template_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGT\n",
+        ">s_primary subject one\nGGGGACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTCCCC\n>s_shifted subject two\nTTTTTTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTAAAA\n>s_noise subject three\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[],
+        &[
+            "--task",
+            "dc-megablast",
+            "--dust",
+            "no",
+            "--template_type",
+            "coding_and_optimal",
+            "--template_length",
+            "16",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "dc-megablast",
+            "-dust",
+            "no",
+            "-template_type",
+            "coding_and_optimal",
+            "-template_length",
+            "16",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
+    );
+}
+
+#[test]
+fn blastn_db_ncbi_parity_dc_megablast_masked_discontiguous_template_fixture() {
+    assert_blastn_db_outfmt_matches_ncbi(
+        ">q1\nACGTACGTgacttaccGTACGTACGTGACTTACCGTACGTACGTGACTTACCGT\n",
+        ">s1 subject one\nTTTTACGTACGTGACTTACCGTACGTACGTGACTTACCGTACGTACGTGACTTACCGTAAAA\n>s2 subject two\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+        "6 qseqid qstart qend sstart send length mismatch gapopen score bitscore btop",
+        &[],
+        &[
+            "--task",
+            "dc-megablast",
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "true",
+            "--template_type",
+            "coding",
+            "--template_length",
+            "18",
+            "--evalue",
+            "1000",
+            "--max_target_seqs",
+            "20",
+            "--max_hsps",
+            "10",
+        ],
+        &[
+            "-task",
+            "dc-megablast",
+            "-dust",
+            "no",
+            "-lcase_masking",
+            "-soft_masking",
+            "true",
+            "-template_type",
+            "coding",
+            "-template_length",
+            "18",
+            "-evalue",
+            "1000",
+            "-max_target_seqs",
+            "20",
+            "-max_hsps",
+            "10",
+        ],
     );
 }
 
@@ -12189,6 +14987,63 @@ GGGACGTACGTACGTACGTACGTCCC
 }
 
 #[test]
+fn blastn_db_ncbi_parity_num_threads_two_gapped_traceback() {
+    assert_blastn_db_outfmt_matches_ncbi_with_num_threads(
+        ">q
+ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT
+",
+        ">s1
+ACGTTGCAACGATCGTACGATTCGAGCTTAGGCTAGGGGGGGGGGGGGGGGTAATCGGATCCTAGCTAGGCTAATCGATCGTAGCTAGCATCGAT
+>s2
+TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
+",
+        "6 qseqid sseqid qstart qend sstart send score length nident mismatch gaps gapopen qseq sseq btop",
+        &[],
+        &[
+            "--dust",
+            "no",
+            "--strand",
+            "plus",
+            "--word_size",
+            "7",
+            "--reward",
+            "1",
+            "--penalty",
+            "-2",
+            "--gapopen",
+            "0",
+            "--gapextend",
+            "2",
+            "--max_target_seqs",
+            "10",
+            "--max_hsps",
+            "5",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-strand",
+            "plus",
+            "-word_size",
+            "7",
+            "-reward",
+            "1",
+            "-penalty",
+            "-2",
+            "-gapopen",
+            "0",
+            "-gapextend",
+            "2",
+            "-max_target_seqs",
+            "10",
+            "-max_hsps",
+            "5",
+        ],
+        "2",
+    );
+}
+
+#[test]
 fn blastn_db_ncbi_parity_gapped_ambiguity_display() {
     assert_blastn_db_outfmt_matches_ncbi(
         ">q
@@ -13669,6 +16524,65 @@ fn rpstblastn_db_ncbi_parity_supported_outfmts_reach_missing_database() {
             "rpstblastn outfmt {outfmt} stderr differs"
         );
     }
+}
+
+#[test]
+fn rpstblastn_db_ncbi_parity_num_threads_two_reaches_missing_database() {
+    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
+        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let rust = std::process::Command::new(&blast_cli)
+        .arg("rpstblastn")
+        .arg("-query")
+        .arg("tests/fixtures/tblastx_nuc_query.fa")
+        .arg("-db")
+        .arg("missing")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-num_threads")
+        .arg("2")
+        .output()
+        .expect("run blast-cli rpstblastn num_threads 2");
+    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+        .arg("-query")
+        .arg("tests/fixtures/tblastx_nuc_query.fa")
+        .arg("-db")
+        .arg("missing")
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-num_threads")
+        .arg("2")
+        .output()
+        .expect("run NCBI rpstblastn num_threads 2");
+
+    assert!(
+        !rust.status.success(),
+        "blast-cli should reject rpstblastn num_threads 2 without CDD"
+    );
+    assert!(
+        !ncbi.status.success(),
+        "NCBI should reject rpstblastn num_threads 2 without CDD"
+    );
+    assert_eq!(
+        rust.status.code(),
+        ncbi.status.code(),
+        "rpstblastn num_threads 2 status differs"
+    );
+    assert_eq!(
+        rust.stdout, ncbi.stdout,
+        "rpstblastn num_threads 2 stdout differs"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "rpstblastn num_threads 2 stderr differs"
+    );
 }
 
 #[test]
@@ -15407,6 +18321,134 @@ fn psiblast_ncbi_parity_domain_inclusion_is_unknown_argument() {
 }
 
 #[test]
+fn psiblast_ncbi_parity_restart_input_constraint_order() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists() {
+        eprintln!("Skipping: /usr/bin/psiblast not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    for (rust_args, ncbi_args) in [
+        (
+            vec!["--query", "q.fa", "--in_msa", "restart.msa"],
+            vec!["-query", "q.fa", "-in_msa", "restart.msa"],
+        ),
+        (
+            vec!["--in_msa", "restart.msa", "--in_pssm", "restart.chk"],
+            vec!["-in_msa", "restart.msa", "-in_pssm", "restart.chk"],
+        ),
+        (
+            vec!["--in_pssm", "restart.chk", "--ignore_msa_master"],
+            vec!["-in_pssm", "restart.chk", "-ignore_msa_master"],
+        ),
+        (
+            vec!["--in_pssm", "restart.chk", "--msa_master_idx", "2"],
+            vec!["-in_pssm", "restart.chk", "-msa_master_idx", "2"],
+        ),
+        (
+            vec![
+                "--in_msa",
+                "restart.msa",
+                "--in_pssm",
+                "restart.chk",
+                "--ignore_msa_master",
+            ],
+            vec![
+                "-in_msa",
+                "restart.msa",
+                "-in_pssm",
+                "restart.chk",
+                "-ignore_msa_master",
+            ],
+        ),
+        (
+            vec![
+                "--query",
+                "q.fa",
+                "--ignore_msa_master",
+                "--in_pssm",
+                "restart.chk",
+            ],
+            vec![
+                "-query",
+                "q.fa",
+                "-ignore_msa_master",
+                "-in_pssm",
+                "restart.chk",
+            ],
+        ),
+        (
+            vec![
+                "--query",
+                "q.fa",
+                "--in_msa",
+                "restart.msa",
+                "--in_pssm",
+                "restart.chk",
+                "--ignore_msa_master",
+                "--msa_master_idx",
+                "2",
+            ],
+            vec![
+                "-query",
+                "q.fa",
+                "-in_msa",
+                "restart.msa",
+                "-in_pssm",
+                "restart.chk",
+                "-ignore_msa_master",
+                "-msa_master_idx",
+                "2",
+            ],
+        ),
+        (
+            vec![
+                "--query",
+                "q.fa",
+                "--in_msa",
+                "restart.msa",
+                "--in_pssm",
+                "restart.chk",
+            ],
+            vec![
+                "-query",
+                "q.fa",
+                "-in_msa",
+                "restart.msa",
+                "-in_pssm",
+                "restart.chk",
+            ],
+        ),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("psiblast")
+            .args(&rust_args)
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli psiblast {rust_args:?}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+            .args(&ncbi_args)
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI psiblast {ncbi_args:?}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject input conflict"
+        );
+        assert!(!ncbi.status.success(), "NCBI should reject input conflict");
+        assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
+        assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "stderr differs for {rust_args:?}"
+        );
+    }
+}
+
+#[test]
 fn psiblast_ncbi_parity_psi_numeric_constraints() {
     if !std::path::Path::new("/usr/bin/psiblast").exists() {
         eprintln!("Skipping: /usr/bin/psiblast not found");
@@ -15489,6 +18531,1515 @@ fn psiblast_ncbi_parity_psi_numeric_constraints() {
             "NCBI should accept {ncbi_option} {value}: {}",
             String::from_utf8_lossy(&ncbi.stderr)
         );
+    }
+
+    let restart_msa = tmp.path().join("restart.msa");
+    std::fs::write(&restart_msa, ">master\nMKKWLFGFLG\n>seq2\nMKKWLFGFLG\n")
+        .expect("write restart MSA");
+    for value in ["0", "-1"] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("psiblast")
+            .arg("--in_msa")
+            .arg(&restart_msa)
+            .arg("--subject")
+            .arg(&subject)
+            .arg("--msa_master_idx")
+            .arg(value)
+            .arg("--outfmt")
+            .arg("6")
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli psiblast msa_master_idx {value}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+            .arg("-in_msa")
+            .arg(&restart_msa)
+            .arg("-subject")
+            .arg(&subject)
+            .arg("-msa_master_idx")
+            .arg(value)
+            .arg("-outfmt")
+            .arg("6")
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI psiblast msa_master_idx {value}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject msa_master_idx {value}"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject msa_master_idx {value}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            ncbi.status.code(),
+            "msa_master_idx {value} status differs"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "msa_master_idx {value} stderr differs"
+        );
+    }
+}
+
+#[test]
+#[ignore = "documents remaining PSI iteration-output gap for num_iterations=0 convergence output"]
+fn psiblast_ncbi_parity_num_iterations_zero_iteration_output() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists() {
+        eprintln!("Skipping: /usr/bin/psiblast not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
+    std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
+
+    let rust = std::process::Command::new(&blast_cli)
+        .arg("psiblast")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--num_iterations")
+        .arg("0")
+        .output()
+        .expect("run blast-cli psiblast num_iterations 0");
+    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-num_iterations")
+        .arg("0")
+        .output()
+        .expect("run NCBI psiblast num_iterations 0");
+
+    assert!(rust.status.success(), "blast-cli psiblast failed");
+    assert!(ncbi.status.success(), "NCBI psiblast failed");
+    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "stderr differs"
+    );
+}
+
+#[test]
+fn psiblast_ncbi_parity_num_iterations_zero_output_shape() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists() {
+        eprintln!("Skipping: /usr/bin/psiblast not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.out");
+    let ncbi_out = tmp.path().join("ncbi.out");
+    std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
+    std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
+
+    let rust = std::process::Command::new(&blast_cli)
+        .arg("psiblast")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--num_iterations")
+        .arg("0")
+        .arg("--out")
+        .arg(&rust_out)
+        .output()
+        .expect("run blast-cli psiblast num_iterations 0");
+    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-num_iterations")
+        .arg("0")
+        .arg("-out")
+        .arg(&ncbi_out)
+        .output()
+        .expect("run NCBI psiblast num_iterations 0");
+
+    assert!(rust.status.success(), "blast-cli psiblast failed");
+    assert!(ncbi.status.success(), "NCBI psiblast failed");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "stderr differs"
+    );
+
+    let rust_stdout = std::fs::read_to_string(&rust_out).expect("read rust output");
+    let ncbi_stdout = std::fs::read_to_string(&ncbi_out).expect("read NCBI output");
+    let rust_lines: Vec<&str> = rust_stdout.lines().collect();
+    let ncbi_lines: Vec<&str> = ncbi_stdout.lines().collect();
+
+    assert_eq!(
+        rust_lines.len(),
+        ncbi_lines.len(),
+        "stdout line count differs"
+    );
+    assert_eq!(rust_lines[0], ncbi_lines[0], "first-round hit differs");
+    assert_eq!(rust_lines[2], ncbi_lines[2], "blank separator differs");
+    assert_eq!(
+        rust_lines[3], ncbi_lines[3],
+        "convergence marker should be written to the output stream"
+    );
+
+    let rust_final_fields: Vec<&str> = rust_lines[1].split('\t').collect();
+    let ncbi_final_fields: Vec<&str> = ncbi_lines[1].split('\t').collect();
+    assert_eq!(
+        &rust_final_fields[..10],
+        &ncbi_final_fields[..10],
+        "final-round coordinates differ"
+    );
+}
+
+#[test]
+fn psiblast_ncbi_parity_gap_trigger_negative_one_iteration_output() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists() {
+        eprintln!("Skipping: /usr/bin/psiblast not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
+    std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
+
+    let rust = std::process::Command::new(&blast_cli)
+        .arg("psiblast")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--outfmt")
+        .arg("6")
+        .arg("--gap_trigger")
+        .arg("-1")
+        .output()
+        .expect("run blast-cli psiblast gap_trigger -1");
+    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-outfmt")
+        .arg("6")
+        .arg("-gap_trigger")
+        .arg("-1")
+        .output()
+        .expect("run NCBI psiblast gap_trigger -1");
+
+    assert!(rust.status.success(), "blast-cli psiblast failed");
+    assert!(ncbi.status.success(), "NCBI psiblast failed");
+    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&rust.stderr),
+        String::from_utf8_lossy(&ncbi.stderr),
+        "stderr differs"
+    );
+}
+
+#[test]
+fn psiblast_subject_ncbi_parity_restart_msa_master_selection() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists() {
+        eprintln!("Skipping: /usr/bin/psiblast not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    for (msa, rust_extra, ncbi_extra) in [
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master desc extra
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">   master desc
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master desc|bad
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master\tdesc\textra
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master\r\nMKFLIFALILFATVALAPKSSSHEI\r\n>seq2\r\nMKFLIFALILFATVALAPKSSSHEI\r\n",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+
+;comment
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">seq1
+M-FLIFALILFATVALAPKSSSHEI
+>master2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            vec!["--msa_master_idx", "2"],
+            vec!["-msa_master_idx", "2"],
+        ),
+        (
+            ">seq1
+M-FLIFALILFATVALAPKSSSHEI
+>master2 desc2 extra
+MKFLIFALILFATVALAPKSSSHEI
+",
+            vec!["--msa_master_idx", "2"],
+            vec!["-msa_master_idx", "2"],
+        ),
+        (
+            ">master
+M-KFLIFALILFATVALAPKSSSHEI
+>seq2
+MAKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>empty
+
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKF LIF\tALILFATVALAPKSSSHEI
+
+>seq2
+MKF LIF\tALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>seq|bad
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MBZJOUXKLF
+>seq2
+MBZJOUXKLF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+M-oF
+>seq2
+M-oF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master label
+M-oF
+>seq2
+M-oF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            vec!["--ignore_msa_master"],
+            vec!["-ignore_msa_master"],
+        ),
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let msa_path = tmp.path().join("restart.msa");
+        let subject = tmp.path().join("subject.fa");
+        std::fs::write(&msa_path, msa).expect("write restart MSA");
+        std::fs::write(&subject, ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n").expect("write subject");
+
+        let mut rust_cmd = std::process::Command::new(&blast_cli);
+        rust_cmd
+            .arg("psiblast")
+            .arg("--in_msa")
+            .arg(&msa_path)
+            .arg("--subject")
+            .arg(&subject)
+            .arg("--outfmt")
+            .arg("6 qseqid sseqid length qstart qend sstart send")
+            .arg("--seg")
+            .arg("no")
+            .arg("--comp_based_stats")
+            .arg("0");
+        rust_cmd.args(&rust_extra);
+        let rust = rust_cmd
+            .output()
+            .expect("run blast-cli psiblast restart MSA");
+
+        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        ncbi_cmd
+            .arg("-in_msa")
+            .arg(&msa_path)
+            .arg("-subject")
+            .arg(&subject)
+            .arg("-outfmt")
+            .arg("6 qseqid sseqid length qstart qend sstart send")
+            .arg("-seg")
+            .arg("no")
+            .arg("-comp_based_stats")
+            .arg("0");
+        ncbi_cmd.args(&ncbi_extra);
+        let ncbi = ncbi_cmd.output().expect("run NCBI psiblast restart MSA");
+
+        assert!(rust.status.success(), "blast-cli psiblast failed");
+        assert!(ncbi.status.success(), "NCBI psiblast failed");
+        assert_eq!(
+            rust.stdout, ncbi.stdout,
+            "psiblast restart MSA stdout differs"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "psiblast restart MSA stderr differs"
+        );
+    }
+}
+
+#[test]
+fn psiblast_db_ncbi_parity_restart_msa_master_selection() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    for (msa, rust_extra, ncbi_extra) in [
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master desc extra
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">   master desc
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master desc|bad
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master\tdesc\textra
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master\r\nMKFLIFALILFATVALAPKSSSHEI\r\n>seq2\r\nMKFLIFALILFATVALAPKSSSHEI\r\n",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+
+;comment
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">seq1
+M-FLIFALILFATVALAPKSSSHEI
+>master2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            vec!["--msa_master_idx", "2"],
+            vec!["-msa_master_idx", "2"],
+        ),
+        (
+            ">seq1
+M-FLIFALILFATVALAPKSSSHEI
+>master2 desc2 extra
+MKFLIFALILFATVALAPKSSSHEI
+",
+            vec!["--msa_master_idx", "2"],
+            vec!["-msa_master_idx", "2"],
+        ),
+        (
+            ">master
+M-KFLIFALILFATVALAPKSSSHEI
+>seq2
+MAKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>empty
+
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKF LIF\tALILFATVALAPKSSSHEI
+
+>seq2
+MKF LIF\tALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>seq|bad
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MBZJOUXKLF
+>seq2
+MBZJOUXKLF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+M-oF
+>seq2
+M-oF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master label
+M-oF
+>seq2
+M-oF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+>seq2
+MKFLIFALILFATVALAPKSSSHEI
+",
+            vec!["--ignore_msa_master"],
+            vec!["-ignore_msa_master"],
+        ),
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let msa_path = tmp.path().join("restart.msa");
+        let db_fasta = tmp.path().join("db.fa");
+        let db = tmp.path().join("testdb");
+        let rust_out = tmp.path().join("rust.tsv");
+        let ncbi_out = tmp.path().join("ncbi.tsv");
+        std::fs::write(&msa_path, msa).expect("write restart MSA");
+        std::fs::write(&db_fasta, ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n").expect("write DB FASTA");
+
+        let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+            .arg("-in")
+            .arg(&db_fasta)
+            .arg("-dbtype")
+            .arg("prot")
+            .arg("-out")
+            .arg(&db)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("run makeblastdb");
+        assert!(
+            make_status.success(),
+            "makeblastdb exited with {make_status}"
+        );
+
+        let mut rust_cmd = std::process::Command::new(&blast_cli);
+        rust_cmd
+            .arg("psiblast")
+            .arg("--in_msa")
+            .arg(&msa_path)
+            .arg("--db")
+            .arg(&db)
+            .arg("--outfmt")
+            .arg("6 qseqid sseqid length qstart qend sstart send")
+            .arg("--seg")
+            .arg("no")
+            .arg("--comp_based_stats")
+            .arg("0")
+            .arg("--num_threads")
+            .arg("1")
+            .arg("--out")
+            .arg(&rust_out);
+        rust_cmd.args(&rust_extra);
+        let rust_status = rust_cmd
+            .status()
+            .expect("run blast-cli psiblast restart MSA DB");
+
+        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        ncbi_cmd
+            .arg("-in_msa")
+            .arg(&msa_path)
+            .arg("-db")
+            .arg(&db)
+            .arg("-outfmt")
+            .arg("6 qseqid sseqid length qstart qend sstart send")
+            .arg("-seg")
+            .arg("no")
+            .arg("-comp_based_stats")
+            .arg("0")
+            .arg("-num_threads")
+            .arg("1")
+            .arg("-out")
+            .arg(&ncbi_out);
+        ncbi_cmd.args(&ncbi_extra);
+        let ncbi_status = ncbi_cmd.status().expect("run NCBI psiblast restart MSA DB");
+
+        assert!(
+            rust_status.success(),
+            "blast-cli psiblast exited with {rust_status}"
+        );
+        assert!(
+            ncbi_status.success(),
+            "NCBI psiblast exited with {ncbi_status}"
+        );
+        assert_eq!(
+            std::fs::read(&rust_out).expect("read rust output"),
+            std::fs::read(&ncbi_out).expect("read ncbi output"),
+            "psiblast DB restart MSA output differs"
+        );
+    }
+}
+
+#[test]
+fn psiblast_ncbi_parity_bad_restart_msa_master_errors() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    for (msa, rust_extra, ncbi_extra) in [
+        ("", Vec::<&str>::new(), Vec::<&str>::new()),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKFLIFALILFATVALAPKSSSHEI
+",
+            vec!["--msa_master_idx", "3"],
+            vec!["-msa_master_idx", "3"],
+        ),
+        (
+            ">master
+---
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            "not-a-defline
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ";comment
+>master
+MKF
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            "#comment
+>master
+MKF
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKF
+>seq2
+MKFXX
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MK.F
+>seq2
+MK.F
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MK1F
+>seq2
+MK1F
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MK~F
+>seq2
+MK~F
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MK\u{000c}F
+>seq2
+MK\u{000c}F
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MK@F
+>seq2
+MK@F
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MK?F
+>seq2
+MK?F
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MK*F
+>seq2
+MK*F
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master|bad
+MKF
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            "
+>master
+MKF
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+
+MKF
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+M
+
+KF
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKF
+
+;comment
+#comment2
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKF
+;comment
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+;comment
+MKF
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKF
+#comment
+>seq2
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+        (
+            ">master
+MKF
+>
+MKF
+",
+            Vec::<&str>::new(),
+            Vec::<&str>::new(),
+        ),
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let msa_path = tmp.path().join("restart.msa");
+        let subject = tmp.path().join("subject.fa");
+        let db_fasta = tmp.path().join("db.fa");
+        let db = tmp.path().join("testdb");
+        std::fs::write(&msa_path, msa).expect("write restart MSA");
+        std::fs::write(&subject, ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n").expect("write subject");
+        std::fs::write(&db_fasta, ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n").expect("write DB FASTA");
+
+        let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+            .arg("-in")
+            .arg(&db_fasta)
+            .arg("-dbtype")
+            .arg("prot")
+            .arg("-out")
+            .arg(&db)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("run makeblastdb");
+        assert!(
+            make_status.success(),
+            "makeblastdb exited with {make_status}"
+        );
+
+        for search_source in ["subject", "db"] {
+            let mut rust_cmd = std::process::Command::new(&blast_cli);
+            rust_cmd.arg("psiblast").arg("--in_msa").arg(&msa_path);
+            if search_source == "subject" {
+                rust_cmd.arg("--subject").arg(&subject);
+            } else {
+                rust_cmd.arg("--db").arg(&db);
+            }
+            rust_cmd.arg("--outfmt").arg("6").args(&rust_extra);
+            let rust = rust_cmd
+                .output()
+                .expect("run blast-cli psiblast bad restart MSA");
+
+            let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+            ncbi_cmd.arg("-in_msa").arg(&msa_path);
+            if search_source == "subject" {
+                ncbi_cmd.arg("-subject").arg(&subject);
+            } else {
+                ncbi_cmd.arg("-db").arg(&db).arg("-num_threads").arg("1");
+            }
+            ncbi_cmd.arg("-outfmt").arg("6").args(&ncbi_extra);
+            let ncbi = ncbi_cmd
+                .output()
+                .expect("run NCBI psiblast bad restart MSA");
+
+            assert!(
+                !rust.status.success(),
+                "blast-cli should reject bad restart MSA"
+            );
+            assert!(!ncbi.status.success(), "NCBI should reject bad restart MSA");
+            assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
+            assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+            assert_eq!(
+                String::from_utf8_lossy(&rust.stderr),
+                String::from_utf8_lossy(&ncbi.stderr),
+                "stderr differs for {search_source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn psiblast_ncbi_parity_save_pssm_flags_require_output_path() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists() {
+        eprintln!("Skipping: /usr/bin/psiblast not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
+    std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
+
+    for (rust_flag, ncbi_flag) in [
+        ("--save_each_pssm", "-save_each_pssm"),
+        (
+            "--save_pssm_after_last_round",
+            "-save_pssm_after_last_round",
+        ),
+    ] {
+        let rust = std::process::Command::new(&blast_cli)
+            .arg("psiblast")
+            .arg("--query")
+            .arg(&query)
+            .arg("--subject")
+            .arg(&subject)
+            .arg(rust_flag)
+            .arg("--outfmt")
+            .arg("6")
+            .output()
+            .unwrap_or_else(|err| panic!("run blast-cli psiblast {rust_flag}: {err}"));
+        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+            .arg("-query")
+            .arg(&query)
+            .arg("-subject")
+            .arg(&subject)
+            .arg(ncbi_flag)
+            .arg("-outfmt")
+            .arg("6")
+            .output()
+            .unwrap_or_else(|err| panic!("run NCBI psiblast {ncbi_flag}: {err}"));
+
+        assert!(
+            !rust.status.success(),
+            "blast-cli should reject {rust_flag} without output path"
+        );
+        assert!(
+            !ncbi.status.success(),
+            "NCBI should reject {ncbi_flag} without output path"
+        );
+        assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
+        assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "stderr differs for {rust_flag}"
+        );
+    }
+}
+
+#[test]
+fn psiblast_ncbi_parity_pssm_output_paths_without_save_flags_do_not_write() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let db_fasta = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
+    std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
+    std::fs::write(&db_fasta, ">s\nMKKWLFGFLG\n").expect("write DB FASTA");
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta)
+        .arg("-dbtype")
+        .arg("prot")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    for search_source in ["subject", "db"] {
+        let rust_checkpoint = tmp.path().join(format!("rust-{search_source}.chk"));
+        let rust_ascii = tmp.path().join(format!("rust-{search_source}.ascii"));
+        let ncbi_checkpoint = tmp.path().join(format!("ncbi-{search_source}.chk"));
+        let ncbi_ascii = tmp.path().join(format!("ncbi-{search_source}.ascii"));
+
+        let mut rust_cmd = std::process::Command::new(&blast_cli);
+        rust_cmd.arg("psiblast").arg("--query").arg(&query);
+        if search_source == "subject" {
+            rust_cmd.arg("--subject").arg(&subject);
+        } else {
+            rust_cmd.arg("--db").arg(&db).arg("--num_threads").arg("1");
+        }
+        let rust = rust_cmd
+            .arg("--out_pssm")
+            .arg(&rust_checkpoint)
+            .arg("--out_ascii_pssm")
+            .arg(&rust_ascii)
+            .arg("--outfmt")
+            .arg("6 qseqid sseqid")
+            .output()
+            .expect("run blast-cli psiblast PSSM output paths");
+
+        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        ncbi_cmd.arg("-query").arg(&query);
+        if search_source == "subject" {
+            ncbi_cmd.arg("-subject").arg(&subject);
+        } else {
+            ncbi_cmd.arg("-db").arg(&db).arg("-num_threads").arg("1");
+        }
+        let ncbi = ncbi_cmd
+            .arg("-out_pssm")
+            .arg(&ncbi_checkpoint)
+            .arg("-out_ascii_pssm")
+            .arg(&ncbi_ascii)
+            .arg("-outfmt")
+            .arg("6 qseqid sseqid")
+            .output()
+            .expect("run NCBI psiblast PSSM output paths");
+
+        assert!(rust.status.success(), "blast-cli psiblast failed");
+        assert!(ncbi.status.success(), "NCBI psiblast failed");
+        assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "stderr differs"
+        );
+        assert!(
+            !rust_checkpoint.exists(),
+            "blast-cli should not write checkpoint without save flag"
+        );
+        assert!(
+            !rust_ascii.exists(),
+            "blast-cli should not write ASCII PSSM without save flag"
+        );
+        assert!(
+            !ncbi_checkpoint.exists(),
+            "NCBI should not write checkpoint without save flag"
+        );
+        assert!(
+            !ncbi_ascii.exists(),
+            "NCBI should not write ASCII PSSM without save flag"
+        );
+    }
+
+    for search_source in ["subject", "db"] {
+        for output_kind in ["checkpoint", "ascii"] {
+            let rust_artifact = if output_kind == "checkpoint" {
+                tmp.path().join(format!("rust-{search_source}-only.chk"))
+            } else {
+                tmp.path().join(format!("rust-{search_source}-only.ascii"))
+            };
+            let ncbi_artifact = if output_kind == "checkpoint" {
+                tmp.path().join(format!("ncbi-{search_source}-only.chk"))
+            } else {
+                tmp.path().join(format!("ncbi-{search_source}-only.ascii"))
+            };
+
+            let mut rust_cmd = std::process::Command::new(&blast_cli);
+            rust_cmd.arg("psiblast").arg("--query").arg(&query);
+            if search_source == "subject" {
+                rust_cmd.arg("--subject").arg(&subject);
+            } else {
+                rust_cmd.arg("--db").arg(&db).arg("--num_threads").arg("1");
+            }
+            if output_kind == "checkpoint" {
+                rust_cmd.arg("--out_pssm").arg(&rust_artifact);
+            } else {
+                rust_cmd.arg("--out_ascii_pssm").arg(&rust_artifact);
+            }
+            let rust = rust_cmd
+                .arg("--outfmt")
+                .arg("6 qseqid sseqid")
+                .output()
+                .expect("run blast-cli psiblast single PSSM output path");
+
+            let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+            ncbi_cmd.arg("-query").arg(&query);
+            if search_source == "subject" {
+                ncbi_cmd.arg("-subject").arg(&subject);
+            } else {
+                ncbi_cmd.arg("-db").arg(&db).arg("-num_threads").arg("1");
+            }
+            if output_kind == "checkpoint" {
+                ncbi_cmd.arg("-out_pssm").arg(&ncbi_artifact);
+            } else {
+                ncbi_cmd.arg("-out_ascii_pssm").arg(&ncbi_artifact);
+            }
+            let ncbi = ncbi_cmd
+                .arg("-outfmt")
+                .arg("6 qseqid sseqid")
+                .output()
+                .expect("run NCBI psiblast single PSSM output path");
+
+            assert!(rust.status.success(), "blast-cli psiblast failed");
+            assert!(ncbi.status.success(), "NCBI psiblast failed");
+            assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+            assert_eq!(
+                String::from_utf8_lossy(&rust.stderr),
+                String::from_utf8_lossy(&ncbi.stderr),
+                "stderr differs for {search_source} {output_kind}"
+            );
+            assert!(
+                !rust_artifact.exists(),
+                "blast-cli should not write single {output_kind} PSSM without save flag"
+            );
+            assert!(
+                !ncbi_artifact.exists(),
+                "NCBI should not write single {output_kind} PSSM without save flag"
+            );
+        }
+    }
+}
+
+fn pssm_round_output_path(base: &std::path::Path, round: usize) -> std::path::PathBuf {
+    let mut path = base.as_os_str().to_os_string();
+    path.push(format!(".{round}"));
+    std::path::PathBuf::from(path)
+}
+
+#[test]
+fn psiblast_ncbi_parity_save_each_single_round_writes_no_pssm_artifacts() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let db = tmp.path().join("testdb");
+    std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
+    std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&subject)
+        .arg("-dbtype")
+        .arg("prot")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    for search_source in ["subject", "db"] {
+        let rust_checkpoint = tmp.path().join(format!("rust-{search_source}.chk"));
+        let rust_ascii = tmp.path().join(format!("rust-{search_source}.ascii"));
+        let ncbi_checkpoint = tmp.path().join(format!("ncbi-{search_source}.chk"));
+        let ncbi_ascii = tmp.path().join(format!("ncbi-{search_source}.ascii"));
+
+        let mut rust_cmd = std::process::Command::new(&blast_cli);
+        rust_cmd.arg("psiblast").arg("--query").arg(&query);
+        if search_source == "subject" {
+            rust_cmd.arg("--subject").arg(&subject);
+        } else {
+            rust_cmd.arg("--db").arg(&db).arg("--num_threads").arg("1");
+        }
+        let rust = rust_cmd
+            .arg("--num_iterations")
+            .arg("1")
+            .arg("--out_pssm")
+            .arg(&rust_checkpoint)
+            .arg("--out_ascii_pssm")
+            .arg(&rust_ascii)
+            .arg("--save_each_pssm")
+            .arg("--outfmt")
+            .arg("6 qseqid sseqid")
+            .output()
+            .expect("run blast-cli psiblast save-each single round");
+
+        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        ncbi_cmd.arg("-query").arg(&query);
+        if search_source == "subject" {
+            ncbi_cmd.arg("-subject").arg(&subject);
+        } else {
+            ncbi_cmd.arg("-db").arg(&db).arg("-num_threads").arg("1");
+        }
+        let ncbi = ncbi_cmd
+            .arg("-num_iterations")
+            .arg("1")
+            .arg("-out_pssm")
+            .arg(&ncbi_checkpoint)
+            .arg("-out_ascii_pssm")
+            .arg(&ncbi_ascii)
+            .arg("-save_each_pssm")
+            .arg("-outfmt")
+            .arg("6 qseqid sseqid")
+            .output()
+            .expect("run NCBI psiblast save-each single round");
+
+        assert!(rust.status.success(), "blast-cli psiblast failed");
+        assert!(ncbi.status.success(), "NCBI psiblast failed");
+        assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "stderr differs for {search_source}"
+        );
+        for path in [&rust_checkpoint, &rust_ascii, &ncbi_checkpoint, &ncbi_ascii] {
+            assert!(
+                !path.exists(),
+                "save-each one-round run should not write base artifact: {path:?}"
+            );
+            assert!(
+                !pssm_round_output_path(path, 1).exists(),
+                "save-each one-round run should not write round artifact: {path:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn psiblast_ncbi_parity_save_last_writes_pssm_artifacts() {
+    if !std::path::Path::new("/usr/bin/psiblast").exists()
+        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    {
+        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        return;
+    }
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        eprintln!("Skipping: build blast-cli first or set BLAST_RS_CLI_BIN");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let db_fasta = tmp.path().join("db.fa");
+    let db = tmp.path().join("testdb");
+    std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
+    std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
+    std::fs::write(&db_fasta, ">s\nMKKWLFGFLG\n").expect("write DB FASTA");
+    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        .arg("-in")
+        .arg(&db_fasta)
+        .arg("-dbtype")
+        .arg("prot")
+        .arg("-out")
+        .arg(&db)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run makeblastdb");
+    assert!(
+        make_status.success(),
+        "makeblastdb exited with {make_status}"
+    );
+
+    for search_source in ["subject", "db"] {
+        let rust_checkpoint = tmp.path().join(format!("rust-{search_source}.chk"));
+        let rust_ascii = tmp.path().join(format!("rust-{search_source}.ascii"));
+        let ncbi_checkpoint = tmp.path().join(format!("ncbi-{search_source}.chk"));
+        let ncbi_ascii = tmp.path().join(format!("ncbi-{search_source}.ascii"));
+
+        let mut rust_cmd = std::process::Command::new(&blast_cli);
+        rust_cmd.arg("psiblast").arg("--query").arg(&query);
+        if search_source == "subject" {
+            rust_cmd.arg("--subject").arg(&subject);
+        } else {
+            rust_cmd.arg("--db").arg(&db).arg("--num_threads").arg("1");
+        }
+        let rust = rust_cmd
+            .arg("--out_pssm")
+            .arg(&rust_checkpoint)
+            .arg("--out_ascii_pssm")
+            .arg(&rust_ascii)
+            .arg("--save_pssm_after_last_round")
+            .arg("--outfmt")
+            .arg("6 qseqid sseqid")
+            .output()
+            .expect("run blast-cli psiblast save last PSSM");
+
+        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        ncbi_cmd.arg("-query").arg(&query);
+        if search_source == "subject" {
+            ncbi_cmd.arg("-subject").arg(&subject);
+        } else {
+            ncbi_cmd.arg("-db").arg(&db).arg("-num_threads").arg("1");
+        }
+        let ncbi = ncbi_cmd
+            .arg("-out_pssm")
+            .arg(&ncbi_checkpoint)
+            .arg("-out_ascii_pssm")
+            .arg(&ncbi_ascii)
+            .arg("-save_pssm_after_last_round")
+            .arg("-outfmt")
+            .arg("6 qseqid sseqid")
+            .output()
+            .expect("run NCBI psiblast save last PSSM");
+
+        assert!(rust.status.success(), "blast-cli psiblast failed");
+        assert!(ncbi.status.success(), "NCBI psiblast failed");
+        assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+        assert_eq!(
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&ncbi.stderr),
+            "stderr differs"
+        );
+        for path in [&rust_checkpoint, &rust_ascii, &ncbi_checkpoint, &ncbi_ascii] {
+            assert!(path.is_file(), "PSSM artifact should exist: {path:?}");
+            assert!(
+                std::fs::metadata(path).expect("stat PSSM artifact").len() > 0,
+                "PSSM artifact should be non-empty: {path:?}"
+            );
+        }
+    }
+
+    for search_source in ["subject", "db"] {
+        for output_kind in ["checkpoint", "ascii"] {
+            let rust_artifact = if output_kind == "checkpoint" {
+                tmp.path().join(format!("rust-{search_source}-only.chk"))
+            } else {
+                tmp.path().join(format!("rust-{search_source}-only.ascii"))
+            };
+            let ncbi_artifact = if output_kind == "checkpoint" {
+                tmp.path().join(format!("ncbi-{search_source}-only.chk"))
+            } else {
+                tmp.path().join(format!("ncbi-{search_source}-only.ascii"))
+            };
+
+            let mut rust_cmd = std::process::Command::new(&blast_cli);
+            rust_cmd.arg("psiblast").arg("--query").arg(&query);
+            if search_source == "subject" {
+                rust_cmd.arg("--subject").arg(&subject);
+            } else {
+                rust_cmd.arg("--db").arg(&db).arg("--num_threads").arg("1");
+            }
+            if output_kind == "checkpoint" {
+                rust_cmd.arg("--out_pssm").arg(&rust_artifact);
+            } else {
+                rust_cmd.arg("--out_ascii_pssm").arg(&rust_artifact);
+            }
+            let rust = rust_cmd
+                .arg("--save_pssm_after_last_round")
+                .arg("--outfmt")
+                .arg("6 qseqid sseqid")
+                .output()
+                .expect("run blast-cli psiblast save last single PSSM output");
+
+            let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+            ncbi_cmd.arg("-query").arg(&query);
+            if search_source == "subject" {
+                ncbi_cmd.arg("-subject").arg(&subject);
+            } else {
+                ncbi_cmd.arg("-db").arg(&db).arg("-num_threads").arg("1");
+            }
+            if output_kind == "checkpoint" {
+                ncbi_cmd.arg("-out_pssm").arg(&ncbi_artifact);
+            } else {
+                ncbi_cmd.arg("-out_ascii_pssm").arg(&ncbi_artifact);
+            }
+            let ncbi = ncbi_cmd
+                .arg("-save_pssm_after_last_round")
+                .arg("-outfmt")
+                .arg("6 qseqid sseqid")
+                .output()
+                .expect("run NCBI psiblast save last single PSSM output");
+
+            assert!(rust.status.success(), "blast-cli psiblast failed");
+            assert!(ncbi.status.success(), "NCBI psiblast failed");
+            assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+            assert_eq!(
+                String::from_utf8_lossy(&rust.stderr),
+                String::from_utf8_lossy(&ncbi.stderr),
+                "stderr differs for {search_source} {output_kind}"
+            );
+            for path in [&rust_artifact, &ncbi_artifact] {
+                assert!(
+                    path.is_file(),
+                    "single PSSM artifact should exist: {path:?}"
+                );
+                assert!(
+                    std::fs::metadata(path)
+                        .expect("stat single PSSM artifact")
+                        .len()
+                        > 0,
+                    "single PSSM artifact should be non-empty: {path:?}"
+                );
+            }
+        }
     }
 }
 
@@ -15691,6 +20242,7 @@ fn deltablast_ncbi_parity_pairwise_subject_reaches_missing_rpsdb_with_preamble()
             vec!["-rpsdb", "missing_cdd"],
         ),
         (vec!["--subject_loc", "1-10"], vec!["-subject_loc", "1-10"]),
+        (vec!["--num_threads", "2"], vec!["-num_threads", "2"]),
     ] {
         let rust = std::process::Command::new(&blast_cli)
             .arg("deltablast")
@@ -18041,6 +22593,141 @@ fn tblastx_subject_ncbi_parity_indel_remains_ungapped() {
 }
 
 #[test]
+fn tblastx_subject_ncbi_parity_frame_offset_insertion_remains_ungapped() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTTAATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_frameshift_pattern_remains_ungapped() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_subject_ncbi_parity_complex_frameshift_top_hsps() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_indel_remains_ungapped() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLFKFMKFLILLF\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--comp_based_stats", "0", "--evalue", "1000"],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_indel_remains_ungapped() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nMKFLILLFKFMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--comp_based_stats", "0", "--evalue", "1000"],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn blastx_subject_ncbi_parity_frameshift_gap_script() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1000",
+            "--gapopen",
+            "9",
+            "--gapextend",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-evalue",
+            "1000",
+            "-gapopen",
+            "9",
+            "-gapextend",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn tblastn_subject_ncbi_parity_frameshift_gap_script() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        ">q1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1000",
+            "--gapopen",
+            "9",
+            "--gapextend",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-evalue",
+            "1000",
+            "-gapopen",
+            "9",
+            "-gapextend",
+            "1",
+        ],
+    );
+}
+
+#[test]
 fn blastx_subject_ncbi_parity_commented_tabular_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
@@ -19381,6 +24068,64 @@ fn tblastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
 }
 
 #[test]
+fn blastx_db_ncbi_parity_reverse_frame_coordinates_and_frames() {
+    let query = format!(
+        ">q1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        &query,
+        ">s1\nMKFLILLF\n",
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_reverse_frame_coordinates_and_frames() {
+    let subject = format!(
+        ">s1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLF\n",
+        &subject,
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_reverse_frame_coordinates_and_frames() {
+    let query = format!(
+        ">q1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
+    let subject = format!(
+        ">s1\n{}\n",
+        ascii_reverse_complement("ATGAAATTTCTGATTCTGCTGTTT")
+    );
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        &query,
+        &subject,
+        "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
+        &[],
+        &[],
+    );
+}
+
+#[test]
 fn translated_db_ncbi_parity_custom_field_parser_edges() {
     for (program, ncbi_bin, dbtype, query, db_fasta) in [
         (
@@ -19746,6 +24491,39 @@ fn blastx_db_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
             "-evalue",
             "1000",
         ],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_num_threads_two_gapped_traceback() {
+    assert_translated_db_outfmt_matches_ncbi_with_num_threads(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLFMKFLILLF\n",
+        "6 qseqid sseqid score bitscore evalue length gaps qstart qend sstart send qseq sseq btop",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--sum_stats",
+            "true",
+            "--evalue",
+            "1000",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-sum_stats",
+            "true",
+            "-evalue",
+            "1000",
+        ],
+        "2",
     );
 }
 
@@ -20432,6 +25210,162 @@ fn tblastx_db_ncbi_parity_pairwise_multi_hsp_same_subject() {
         "0",
         &["--seg", "no", "--evalue", "1000"],
         &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_indel_remains_ungapped() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTAATATTCTGTGTCTGTTTCCTGTTCTGGCTGCTGATAATCATGGTGTTTCTATGAATGCTTCT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTTATTCTGTGTCTGTTTCCTGTTCTGGCTGCTGATAATCATGGTGTTTCTATGAATGCTTCT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps qframe sframe frames qseq sseq",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_frame_offset_insertion_remains_ungapped() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTTAATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_frameshift_pattern_remains_ungapped() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000"],
+        &["-seg", "no", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_complex_frameshift_top_hsps() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_indel_remains_ungapped() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
+        ">s1\nMKFLILLFKFMKFLILLF\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--comp_based_stats", "0", "--evalue", "1000"],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_indel_remains_ungapped() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nMKFLILLFKFMKFLILLF\n",
+        ">s1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--comp_based_stats", "0", "--evalue", "1000"],
+        &["-seg", "no", "-comp_based_stats", "0", "-evalue", "1000"],
+    );
+}
+
+#[test]
+fn blastx_db_ncbi_parity_frameshift_gap_script() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "blastx",
+        "/usr/bin/blastx",
+        "prot",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1000",
+            "--gapopen",
+            "9",
+            "--gapextend",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-evalue",
+            "1000",
+            "-gapopen",
+            "9",
+            "-gapextend",
+            "1",
+        ],
+    );
+}
+
+#[test]
+fn tblastn_db_ncbi_parity_frameshift_gap_script() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastn",
+        "/usr/bin/tblastn",
+        "nucl",
+        ">q1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--evalue",
+            "1000",
+            "--gapopen",
+            "9",
+            "--gapextend",
+            "1",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-evalue",
+            "1000",
+            "-gapopen",
+            "9",
+            "-gapextend",
+            "1",
+        ],
     );
 }
 

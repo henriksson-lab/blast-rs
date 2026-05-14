@@ -282,6 +282,19 @@ pub fn psi_msa_free(mut msa: Option<PSIMsa>) -> Option<PSIMsa> {
     None
 }
 
+fn psi_public_msa_has_shape(msa: &PSIMsa) -> bool {
+    let rows = msa.dimensions.num_seqs.saturating_add(1) as usize;
+    let cols = msa.dimensions.query_length as usize;
+    msa.data.len() >= rows
+        && msa.data.iter().take(rows).all(|row| {
+            row.len() >= cols
+                && row
+                    .iter()
+                    .take(cols)
+                    .all(|cell| cell.letter as usize <= crate::encoding::BLASTAA_SIZE)
+        })
+}
+
 /// Port of NCBI `PSIMatrixNew` (`blast_psi.c:541`).
 pub fn psi_matrix_new(query_length: u32, alphabet_size: u32) -> Option<PSIMatrix> {
     Some(PSIMatrix {
@@ -373,6 +386,9 @@ pub fn psi_create_pssm_with_diagnostics(
     let mut diagnostics = diagnostics;
     if let Some(diags) = diagnostics.as_deref_mut() {
         *diags = None;
+    }
+    if !psi_public_msa_has_shape(msap) {
+        return PSIERR_BADPARAM;
     }
 
     let Some(mut packed_msa) = psi_packed_msa_new(Some(msap)) else {
@@ -563,6 +579,143 @@ pub fn psi_diagnostics_response_free(
         diags.alphabet_size = 0;
     }
     None
+}
+
+fn psi_diag_vec_has_len<T>(values: &Option<Vec<T>>, query_length: usize) -> bool {
+    values
+        .as_ref()
+        .is_none_or(|values| values.len() >= query_length)
+}
+
+fn psi_diag_matrix_has_shape<T>(
+    values: &Option<Vec<Vec<T>>>,
+    query_length: usize,
+    alphabet_size: usize,
+) -> bool {
+    values.as_ref().is_none_or(|rows| {
+        rows.len() >= query_length
+            && rows
+                .iter()
+                .take(query_length)
+                .all(|row| row.len() >= alphabet_size)
+    })
+}
+
+fn psi_diagnostics_response_buffers_are_large_enough(
+    diagnostics: &PSIDiagnosticsResponse,
+    query_length: usize,
+    alphabet_size: usize,
+) -> bool {
+    psi_diag_vec_has_len(&diagnostics.information_content, query_length)
+        && psi_diag_matrix_has_shape(&diagnostics.residue_freqs, query_length, alphabet_size)
+        && psi_diag_matrix_has_shape(
+            &diagnostics.weighted_residue_freqs,
+            query_length,
+            alphabet_size,
+        )
+        && psi_diag_matrix_has_shape(&diagnostics.frequency_ratios, query_length, alphabet_size)
+        && psi_diag_vec_has_len(&diagnostics.gapless_column_weights, query_length)
+        && psi_diag_vec_has_len(&diagnostics.sigma, query_length)
+        && psi_diag_vec_has_len(&diagnostics.interval_sizes, query_length)
+        && psi_diag_vec_has_len(&diagnostics.num_matching_seqs, query_length)
+        && psi_diag_vec_has_len(&diagnostics.independent_observations, query_length)
+}
+
+fn psi_matrix_has_shape<T>(rows: &[Vec<T>], query_length: usize, alphabet_size: usize) -> bool {
+    rows.len() >= query_length
+        && rows
+            .iter()
+            .take(query_length)
+            .all(|row| row.len() >= alphabet_size)
+}
+
+fn psi_save_diagnostics_sources_are_large_enough(
+    msa: &PsiMsa,
+    aligned_block: &PsiAlignedBlock,
+    seq_weights: &PsiSequenceWeights,
+    internal_pssm: &PsiInternalPssmData,
+    diagnostics: &PSIDiagnosticsResponse,
+    query_length: usize,
+    alphabet_size: usize,
+) -> bool {
+    if diagnostics.information_content.is_some()
+        && (seq_weights.std_prob.len() < alphabet_size
+            || !psi_matrix_has_shape(&internal_pssm.freq_ratios, query_length, alphabet_size))
+    {
+        return false;
+    }
+    if diagnostics.residue_freqs.is_some()
+        && !psi_matrix_has_shape(&msa.residue_counts, query_length, alphabet_size)
+    {
+        return false;
+    }
+    if diagnostics.weighted_residue_freqs.is_some()
+        && !psi_matrix_has_shape(&seq_weights.match_weights, query_length, alphabet_size)
+    {
+        return false;
+    }
+    if diagnostics.frequency_ratios.is_some()
+        && !psi_matrix_has_shape(&internal_pssm.freq_ratios, query_length, alphabet_size)
+    {
+        return false;
+    }
+    if diagnostics.gapless_column_weights.is_some()
+        && (msa.num_matching_seqs.len() < query_length
+            || msa.cell.is_empty()
+            || msa.cell[0].len() < query_length
+            || seq_weights.gapless_column_weights.len() < query_length
+            || seq_weights.sigma.len() < query_length
+            || aligned_block.size.len() < query_length
+            || internal_pssm.pseudocounts.len() < query_length)
+    {
+        return false;
+    }
+    if diagnostics.sigma.is_some() && seq_weights.sigma.len() < query_length {
+        return false;
+    }
+    if diagnostics.interval_sizes.is_some() && aligned_block.size.len() < query_length {
+        return false;
+    }
+    if diagnostics.num_matching_seqs.is_some() && msa.num_matching_seqs.len() < query_length {
+        return false;
+    }
+    if diagnostics.independent_observations.is_some()
+        && seq_weights.independent_observations.len() < query_length
+    {
+        return false;
+    }
+    true
+}
+
+fn psi_save_cd_diagnostics_sources_are_large_enough(
+    seq_weights: &PsiSequenceWeights,
+    internal_pssm: &PsiInternalPssmData,
+    diagnostics: &PSIDiagnosticsResponse,
+    query_length: usize,
+    alphabet_size: usize,
+) -> bool {
+    if diagnostics.information_content.is_some()
+        && (seq_weights.std_prob.len() < alphabet_size
+            || !psi_matrix_has_shape(&internal_pssm.freq_ratios, query_length, alphabet_size))
+    {
+        return false;
+    }
+    if diagnostics.weighted_residue_freqs.is_some()
+        && !psi_matrix_has_shape(&seq_weights.match_weights, query_length, alphabet_size)
+    {
+        return false;
+    }
+    if diagnostics.frequency_ratios.is_some()
+        && !psi_matrix_has_shape(&internal_pssm.freq_ratios, query_length, alphabet_size)
+    {
+        return false;
+    }
+    if diagnostics.independent_observations.is_some()
+        && seq_weights.independent_observations.len() < query_length
+    {
+        return false;
+    }
+    true
 }
 
 /// Port of NCBI `_PSIPackedMsaNew` (`blast_psi_priv.c:129`).
@@ -1049,6 +1202,16 @@ pub fn psi_compute_alignment_blocks(
     let (Some(msa), Some(aligned_blocks)) = (msa, aligned_blocks) else {
         return PSIERR_BADPARAM;
     };
+    let q = msa.dimensions.query_length as usize;
+    let rows = msa.dimensions.num_seqs.saturating_add(1) as usize;
+    if msa.cell.len() < rows
+        || !msa.cell.iter().take(rows).all(|row| row.len() >= q)
+        || msa.query.len() < q
+        || aligned_blocks.pos_extnt.len() < q
+        || aligned_blocks.size.len() < q
+    {
+        return PSIERR_BADPARAM;
+    }
     for s in (K_QUERY_INDEX + 1)..msa.dimensions.num_seqs.saturating_add(1) as usize {
         psi_get_left_extents(msa, s as u32);
         psi_get_right_extents(msa, s as u32);
@@ -1275,29 +1438,41 @@ pub fn psi_compute_frequencies_from_cds(
     }
 
     let alphabet_size = sbp.alphabet_size;
+    let q = dimensions.query_length as usize;
+    let rows = dimensions.num_seqs as usize;
+    if alphabet_size > AA_SIZE
+        || cd_msa.query.len() < q
+        || cd_msa.msa.len() < rows
+        || !cd_msa.msa.iter().take(rows).all(|row| row.len() >= q)
+        || seq_weights.independent_observations.len() < q
+        || !psi_matrix_has_shape(&seq_weights.match_weights, q, alphabet_size)
+    {
+        return PSIERR_BADPARAM;
+    }
     let x_residue = crate::encoding::AMINOACID_TO_NCBISTDAA[b'X' as usize] as usize;
     let mut sum_weights = vec![0.0; alphabet_size];
-    for pos in 0..dimensions.query_length as usize {
+    for pos in 0..q {
         let mut total_observations = 0.0;
         sum_weights.fill(0.0);
 
-        for msa_index in 0..dimensions.num_seqs as usize {
-            let Some(cell) = cd_msa.msa.get(msa_index).and_then(|row| row.get(pos)) else {
-                continue;
-            };
+        for msa_index in 0..rows {
+            let cell = &cd_msa.msa[msa_index][pos];
             if !cell.is_aligned {
                 continue;
             }
             let Some(data) = cell.data.as_ref() else {
                 return PSIERR_BADPROFILE;
             };
+            if data.wfreqs.len() < alphabet_size {
+                return PSIERR_BADPROFILE;
+            }
             total_observations += data.iobsr;
             for (residue, value) in sum_weights.iter_mut().enumerate().take(alphabet_size) {
-                *value += data.wfreqs.get(residue).copied().unwrap_or(0.0) * data.iobsr;
+                *value += data.wfreqs[residue] * data.iobsr;
             }
         }
 
-        let query_residue = cd_msa.query.get(pos).copied().unwrap_or(0) as usize;
+        let query_residue = cd_msa.query[pos] as usize;
         if total_observations > 0.0
             && query_residue != x_residue
             && query_residue < alphabet_size
@@ -1350,15 +1525,19 @@ pub fn psi_scale_matrix(
     let Some(ideal) = sbp.kbp_ideal.as_ref() else {
         return PSIERR_BADPARAM;
     };
-    if sbp.kbp_psi.is_empty()
-        || internal_pssm.pssm.len() < internal_pssm.ncols as usize
-        || internal_pssm.scaled_pssm.len() < internal_pssm.ncols as usize
+    let query_length = internal_pssm.ncols as usize;
+    let alphabet_size = internal_pssm.nrows as usize;
+    if alphabet_size > AA_SIZE
+        || query.len() < query_length
+        || std_probs.len() < alphabet_size
+        || sbp.kbp_psi.is_empty()
+        || !psi_matrix_has_shape(&internal_pssm.pssm, query_length, alphabet_size)
+        || !psi_matrix_has_shape(&internal_pssm.scaled_pssm, query_length, alphabet_size)
     {
         return PSIERR_BADPARAM;
     }
 
     let ideal_lambda = ideal.lambda;
-    let query_length = internal_pssm.ncols as usize;
     let mut first_time = true;
     let mut factor_low = 1.0;
     let mut factor_high = 1.0;
@@ -1453,6 +1632,17 @@ pub fn psi_compute_freq_ratios_from_cds(
     if pseudo_count < 0 {
         return PSIERR_BADPARAM;
     }
+    let q = dimensions.query_length as usize;
+    let a = sbp.alphabet_size;
+    if a > AA_SIZE
+        || cd_msa.query.len() < q
+        || seq_weights.independent_observations.len() < q
+        || seq_weights.std_prob.len() < a
+        || !psi_matrix_has_shape(&seq_weights.match_weights, q, a)
+        || !psi_matrix_has_shape(&internal_pssm.freq_ratios, q, a)
+    {
+        return PSIERR_BADPARAM;
+    }
     let Some(freq_ratios) =
         crate::matrix::get_matrix_freq_ratios(sbp.name.as_deref().unwrap_or("BLOSUM62"))
     else {
@@ -1465,7 +1655,7 @@ pub fn psi_compute_freq_ratios_from_cds(
         *value = seq_weights.std_prob.get(i).copied().unwrap_or(0.0);
     }
 
-    for p in 0..dimensions.query_length as usize {
+    for p in 0..q {
         let mut observations = 0.0;
         let mut column_counts = 0.0;
         if cd_msa.query.get(p).copied() != Some(x_residue) {
@@ -1488,14 +1678,14 @@ pub fn psi_compute_freq_ratios_from_cds(
             column_counts
         };
 
-        for r in 0..sbp.alphabet_size {
+        for r in 0..a {
             if cd_msa.query.get(p).copied() == Some(x_residue)
                 || seq_weights.std_prob.get(r).copied().unwrap_or(0.0) <= POS_EPSILON
             {
                 internal_pssm.freq_ratios[p][r] = 0.0;
             } else {
                 let mut pseudo = 0.0;
-                for i in 0..sbp.alphabet_size {
+                for i in 0..a {
                     if sbp
                         .matrix
                         .data
@@ -1652,9 +1842,34 @@ pub fn psi_compute_sequence_weights(
     else {
         return PSIERR_BADPARAM;
     };
+    let q = msa.dimensions.query_length as usize;
+    let rows = msa.dimensions.num_seqs.saturating_add(1) as usize;
+    let a = msa.alphabet_size as usize;
+    if a > AA_SIZE
+        || msa.cell.len() < rows
+        || !msa.cell.iter().take(rows).all(|row| row.len() >= q)
+        || msa.num_matching_seqs.len() < q
+        || aligned_blocks.pos_extnt.len() < q
+        || aligned_blocks.size.len() < q
+        || seq_weights.norm_seq_weights.len() < rows
+        || seq_weights.row_sigma.len() < rows
+        || seq_weights.sigma.len() < q
+        || seq_weights.gapless_column_weights.len() < q
+        || seq_weights.std_prob.len() < a
+        || seq_weights.pos_num_participating.len() < q
+        || seq_weights.pos_distinct_distrib.len() < q
+        || !seq_weights
+            .pos_distinct_distrib
+            .iter()
+            .take(q)
+            .all(|row| row.len() > EFFECTIVE_ALPHABET)
+        || !psi_matrix_has_shape(&seq_weights.match_weights, q, a)
+    {
+        return PSIERR_BADPARAM;
+    }
     let expected_num_matching = if nsg_compatibility_mode { 0 } else { 1 };
 
-    for pos in 0..msa.dimensions.query_length as usize {
+    for pos in 0..q {
         if aligned_blocks.size.get(pos).copied().unwrap_or(0) == 0
             || msa.num_matching_seqs.get(pos).copied().unwrap_or(0) <= expected_num_matching
         {
@@ -1760,6 +1975,28 @@ pub fn psi_compute_freq_ratios(
     if pseudo_count < 0 || sbp.alphabet_size != msa.alphabet_size as usize {
         return PSIERR_BADPARAM;
     }
+    let q = msa.dimensions.query_length as usize;
+    let a = msa.alphabet_size as usize;
+    if a > AA_SIZE
+        || msa.cell.len() <= K_QUERY_INDEX
+        || msa.cell[K_QUERY_INDEX].len() < q
+        || msa.num_matching_seqs.len() < q
+        || aligned_blocks.pos_extnt.len() < q
+        || aligned_blocks.size.len() < q
+        || seq_weights.std_prob.len() < a
+        || seq_weights.pos_num_participating.len() < q
+        || seq_weights.pos_distinct_distrib.len() < q
+        || !seq_weights
+            .pos_distinct_distrib
+            .iter()
+            .take(q)
+            .all(|row| row.len() > EFFECTIVE_ALPHABET)
+        || !psi_matrix_has_shape(&seq_weights.match_weights, q, a)
+        || !psi_matrix_has_shape(&internal_pssm.freq_ratios, q, a)
+        || internal_pssm.pseudocounts.len() < q
+    {
+        return PSIERR_BADPARAM;
+    }
     let Some(freq_ratios) =
         crate::matrix::get_matrix_freq_ratios(sbp.name.as_deref().unwrap_or("BLOSUM62"))
     else {
@@ -1769,17 +2006,12 @@ pub fn psi_compute_freq_ratios(
     let expno = initialize_exp_num_observations(&effective_bg_probs(&std_prob_array));
     let x_residue = crate::encoding::NCBISTDAA_X;
 
-    for p in 0..msa.dimensions.query_length as usize {
+    for p in 0..q {
         let mut column_counts = 0.0;
         let mut observations = 0.0;
         if msa.cell[K_QUERY_INDEX][p].letter != x_residue {
-            observations = psi_effective_observations_from_blocks(
-                aligned_blocks,
-                seq_weights,
-                p,
-                msa.dimensions.query_length as usize,
-                &expno,
-            );
+            observations =
+                psi_effective_observations_from_blocks(aligned_blocks, seq_weights, p, q, &expno);
             if pseudo_count == 0 {
                 let mut match_weights = [0.0; AA_SIZE];
                 for (r, value) in match_weights.iter_mut().enumerate() {
@@ -1865,13 +2097,24 @@ pub fn psi_convert_freq_ratios_to_pssm(
     let star_residue = crate::encoding::NCBISTDAA_STOP as usize;
     let ncols = internal_pssm.ncols as usize;
     let nrows = internal_pssm.nrows as usize;
+    if nrows > AA_SIZE
+        || query.len() < ncols
+        || std_probs.len() < nrows
+        || !psi_matrix_has_shape(&internal_pssm.freq_ratios, ncols, nrows)
+        || !psi_matrix_has_shape(&internal_pssm.pssm, ncols, nrows)
+        || !psi_matrix_has_shape(&internal_pssm.scaled_pssm, ncols, nrows)
+    {
+        return PSIERR_BADPARAM;
+    }
 
     for i in 0..ncols {
         let mut is_unaligned_column = true;
-        let residue = query
-            .get(i)
-            .copied()
-            .unwrap_or(crate::encoding::NCBISTDAA_X) as usize;
+        let residue = query[i] as usize;
+        let matrix_residue = if residue < AA_SIZE {
+            residue
+        } else {
+            x_residue
+        };
         for j in 0..nrows {
             let q_over_p = if std_probs.get(j).copied().unwrap_or(0.0) > POS_EPSILON {
                 internal_pssm.freq_ratios[i][j] / std_probs[j]
@@ -1891,7 +2134,7 @@ pub fn psi_convert_freq_ratios_to_pssm(
                 && sbp
                     .matrix
                     .data
-                    .get(residue)
+                    .get(matrix_residue)
                     .and_then(|row| row.get(x_residue))
                     .copied()
                     .unwrap_or(crate::stat::BLAST_SCORE_MIN)
@@ -1900,7 +2143,7 @@ pub fn psi_convert_freq_ratios_to_pssm(
                 internal_pssm.scaled_pssm[i][j] = sbp
                     .matrix
                     .data
-                    .get(residue)
+                    .get(matrix_residue)
                     .and_then(|row| row.get(j))
                     .copied()
                     .unwrap_or(crate::stat::BLAST_SCORE_MIN)
@@ -1913,15 +2156,15 @@ pub fn psi_convert_freq_ratios_to_pssm(
                 internal_pssm.pssm[i][j] = sbp
                     .matrix
                     .data
-                    .get(residue)
+                    .get(matrix_residue)
                     .and_then(|row| row.get(j))
                     .copied()
                     .unwrap_or(crate::stat::BLAST_SCORE_MIN);
-                internal_pssm.scaled_pssm[i][j] = if freq_ratios.data[residue][j] != 0.0 {
+                internal_pssm.scaled_pssm[i][j] = if freq_ratios.data[matrix_residue][j] != 0.0 {
                     crate::math::nint(
                         K_PSI_SCALE_FACTOR
                             * freq_ratios.bit_scale_factor as f64
-                            * freq_ratios.data[residue][j].ln()
+                            * freq_ratios.data[matrix_residue][j].ln()
                             / crate::math::NCBIMATH_LN2,
                     ) as i32
                 } else {
@@ -2041,6 +2284,20 @@ pub fn psi_save_diagnostics(
     if msa.dimensions.query_length as usize != q {
         return PSIERR_BADPARAM;
     }
+    if !psi_diagnostics_response_buffers_are_large_enough(diagnostics, q, a) {
+        return PSIERR_BADPARAM;
+    }
+    if !psi_save_diagnostics_sources_are_large_enough(
+        msa,
+        aligned_block,
+        seq_weights,
+        internal_pssm,
+        diagnostics,
+        q,
+        a,
+    ) {
+        return PSIERR_BADPARAM;
+    }
 
     if let Some(out) = diagnostics.information_content.as_mut() {
         let Some(info) = psi_calculate_information_content_from_freq_ratios(
@@ -2121,15 +2378,34 @@ pub fn psi_save_cd_diagnostics(
     if internal_pssm.freq_ratios.is_empty() {
         return PSIERR_BADPARAM;
     }
-    if cd_msa
-        .dimensions
-        .is_none_or(|dims| dims.query_length != diagnostics.query_length)
-    {
+    let Some(dimensions) = cd_msa.dimensions else {
+        return PSIERR_BADPARAM;
+    };
+    if dimensions.query_length != diagnostics.query_length {
         return PSIERR_BADPARAM;
     }
 
     let q = diagnostics.query_length as usize;
     let a = diagnostics.alphabet_size as usize;
+    let rows = dimensions.num_seqs as usize;
+    if cd_msa.query.len() < q
+        || cd_msa.msa.len() < rows
+        || !cd_msa.msa.iter().take(rows).all(|row| row.len() >= q)
+    {
+        return PSIERR_BADPARAM;
+    }
+    if !psi_diagnostics_response_buffers_are_large_enough(diagnostics, q, a) {
+        return PSIERR_BADPARAM;
+    }
+    if !psi_save_cd_diagnostics_sources_are_large_enough(
+        seq_weights,
+        internal_pssm,
+        diagnostics,
+        q,
+        a,
+    ) {
+        return PSIERR_BADPARAM;
+    }
     if let Some(out) = diagnostics.information_content.as_mut() {
         let Some(info) = psi_calculate_information_content_from_freq_ratios(
             &internal_pssm.freq_ratios,
@@ -2282,11 +2558,22 @@ fn psi_validate_no_gaps_in_query(msa: &PsiMsa) -> i32 {
     }
 }
 
+fn psi_msa_has_validation_shape(msa: &PsiMsa) -> bool {
+    let q = msa.dimensions.query_length as usize;
+    let rows = msa.dimensions.num_seqs.saturating_add(1) as usize;
+    msa.cell.len() >= rows
+        && msa.cell.iter().take(rows).all(|row| row.len() >= q)
+        && msa.query.len() >= q
+}
+
 /// Port of NCBI `_PSIValidateMSA`.
 pub fn psi_validate_msa(msa: Option<&PsiMsa>, ignore_unaligned_positions: bool) -> i32 {
     let Some(msa) = msa else {
         return PSIERR_BADPARAM;
     };
+    if !psi_msa_has_validation_shape(msa) {
+        return PSIERR_BADPARAM;
+    }
     let mut retval = s_psi_validate_no_flanking_gaps(Some(msa));
     if retval != PSI_SUCCESS {
         return retval;
@@ -2309,6 +2596,9 @@ pub fn psi_validate_msa_structure_group(msa: Option<&PsiMsa>) -> i32 {
     let Some(msa) = msa else {
         return PSIERR_BADPARAM;
     };
+    if !psi_msa_has_validation_shape(msa) {
+        return PSIERR_BADPARAM;
+    }
     s_psi_validate_participating_sequences(Some(msa))
 }
 
@@ -2320,14 +2610,22 @@ pub fn psi_validate_cd_msa(cd_msa: Option<&PSICdMsa>, alphabet_size: u32) -> i32
     let Some(dimensions) = cd_msa.dimensions else {
         return PSIERR_BADPARAM;
     };
+    let q = dimensions.query_length as usize;
+    let rows = dimensions.num_seqs as usize;
+    if cd_msa.query.len() < q
+        || cd_msa.msa.len() < rows
+        || !cd_msa.msa.iter().take(rows).all(|row| row.len() >= q)
+    {
+        return PSIERR_BADPARAM;
+    }
     let gap = crate::encoding::NCBISTDAA_GAP;
-    for &letter in cd_msa.query.iter().take(dimensions.query_length as usize) {
+    for &letter in cd_msa.query.iter().take(q) {
         if letter == gap {
             return PSIERR_GAPINQUERY;
         }
     }
-    for row in cd_msa.msa.iter().take(dimensions.num_seqs as usize) {
-        for cell in row.iter().take(dimensions.query_length as usize) {
+    for row in cd_msa.msa.iter().take(rows) {
+        for cell in row.iter().take(q) {
             if !cell.is_aligned {
                 continue;
             }
@@ -4283,6 +4581,41 @@ mod tests {
             s_psi_save_pssm(None, Some(&sbp), Some(&mut out)),
             PSIERR_BADPARAM
         );
+        assert_eq!(
+            s_psi_save_pssm(Some(&internal), Some(&sbp), None),
+            PSIERR_BADPARAM
+        );
+
+        let mut wrong_dims = psi_matrix_new(1, 3).expect("matrix");
+        assert_eq!(
+            s_psi_save_pssm(Some(&internal), Some(&sbp), Some(&mut wrong_dims)),
+            PSIERR_BADPARAM
+        );
+
+        let mut truncated = internal.clone();
+        truncated.pssm[1].truncate(2);
+        assert_eq!(
+            s_psi_save_pssm(Some(&truncated), Some(&sbp), Some(&mut out)),
+            PSIERR_BADPARAM
+        );
+
+        let mut missing_gap_stats = sbp.clone();
+        missing_gap_stats.kbp_gap_psi.clear();
+        assert_eq!(
+            s_psi_save_pssm(Some(&internal), Some(&missing_gap_stats), Some(&mut out)),
+            PSIERR_BADPARAM
+        );
+
+        let mut missing_ungapped_stats = sbp.clone();
+        missing_ungapped_stats.kbp_psi.clear();
+        assert_eq!(
+            s_psi_save_pssm(
+                Some(&internal),
+                Some(&missing_ungapped_stats),
+                Some(&mut out)
+            ),
+            PSIERR_BADPARAM
+        );
     }
 
     #[test]
@@ -4294,9 +4627,11 @@ mod tests {
         assert!(ascii.information_content);
         assert!(ascii.weighted_residue_frequencies);
         assert!(ascii.num_matching_seqs);
+        let mut with_observations = ascii.clone();
+        with_observations.independent_observations = true;
 
-        let response =
-            psi_diagnostics_response_new(4, AA_SIZE as u32, Some(&ascii)).expect("response");
+        let response = psi_diagnostics_response_new(4, AA_SIZE as u32, Some(&with_observations))
+            .expect("response");
         assert_eq!(response.query_length, 4);
         assert_eq!(response.alphabet_size, AA_SIZE as u32);
         assert_eq!(response.information_content.as_ref().unwrap().len(), 4);
@@ -4305,9 +4640,11 @@ mod tests {
             response.frequency_ratios.as_ref().unwrap()[0].len(),
             AA_SIZE
         );
+        assert_eq!(response.independent_observations.as_ref().unwrap().len(), 4);
+        let mut freed = Some(response);
+        assert!(psi_diagnostics_response_free(freed.take()).is_none());
         assert!(psi_diagnostics_response_new(4, AA_SIZE as u32, None).is_none());
         assert!(psi_diagnostics_request_free(Some(ascii)).is_none());
-        assert!(psi_diagnostics_response_free(Some(response)).is_none());
     }
 
     #[test]
@@ -4619,6 +4956,156 @@ mod tests {
     }
 
     #[test]
+    fn translated_psi_save_diagnostics_rejects_bad_inputs_and_dimensions() {
+        let dims = PSIMsaDimensions {
+            query_length: 1,
+            num_seqs: 1,
+        };
+        let aligned = |letter| PsiMsaCell {
+            letter,
+            is_aligned: true,
+            extents: SSeqRange { left: 0, right: 0 },
+        };
+        let msa = PsiMsa {
+            dimensions: dims,
+            cell: vec![vec![aligned(crate::encoding::NCBISTDAA_A)]],
+            query: vec![crate::encoding::NCBISTDAA_A],
+            residue_counts: vec![vec![1, 0]],
+            alphabet_size: 2,
+            num_matching_seqs: vec![1],
+        };
+        let aligned_block = PsiAlignedBlock {
+            pos_extnt: vec![SSeqRange { left: 0, right: 0 }],
+            size: vec![1],
+        };
+        let mut seq_weights = psi_sequence_weights_new(Some(&dims), 2).expect("weights");
+        seq_weights.std_prob = vec![0.25, 0.75];
+        seq_weights.match_weights = vec![vec![1.0, 0.0]];
+        let internal = PsiInternalPssmData {
+            ncols: 1,
+            nrows: 2,
+            pssm: vec![vec![0; 2]],
+            scaled_pssm: vec![vec![0; 2]],
+            freq_ratios: vec![vec![0.5, 0.5]],
+            pseudocounts: vec![1.0],
+        };
+        let request = PSIDiagnosticsRequest {
+            information_content: true,
+            frequency_ratios: true,
+            ..PSIDiagnosticsRequest::default()
+        };
+        let mut diagnostics =
+            psi_diagnostics_response_new(1, 2, Some(&request)).expect("diagnostics");
+
+        assert_eq!(
+            psi_save_diagnostics(
+                None,
+                Some(&aligned_block),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let empty_internal = PsiInternalPssmData {
+            freq_ratios: Vec::new(),
+            ..internal.clone()
+        };
+        assert_eq!(
+            psi_save_diagnostics(
+                Some(&msa),
+                Some(&aligned_block),
+                Some(&seq_weights),
+                Some(&empty_internal),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut wrong_dims =
+            psi_diagnostics_response_new(2, 2, Some(&request)).expect("diagnostics");
+        assert_eq!(
+            psi_save_diagnostics(
+                Some(&msa),
+                Some(&aligned_block),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut wrong_dims),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_sources = seq_weights.clone();
+        short_sources.sigma.clear();
+        let sigma_request = PSIDiagnosticsRequest {
+            sigma: true,
+            ..PSIDiagnosticsRequest::default()
+        };
+        let mut sigma_diagnostics =
+            psi_diagnostics_response_new(1, 2, Some(&sigma_request)).expect("diagnostics");
+        assert_eq!(
+            psi_save_diagnostics(
+                Some(&msa),
+                Some(&aligned_block),
+                Some(&short_sources),
+                Some(&internal),
+                Some(&mut sigma_diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let ratio_only_request = PSIDiagnosticsRequest {
+            frequency_ratios: true,
+            ..PSIDiagnosticsRequest::default()
+        };
+        let mut ratio_only_diagnostics =
+            psi_diagnostics_response_new(1, 2, Some(&ratio_only_request)).expect("diagnostics");
+        assert_eq!(
+            psi_save_diagnostics(
+                Some(&msa),
+                Some(&aligned_block),
+                Some(&short_sources),
+                Some(&internal),
+                Some(&mut ratio_only_diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let empty_request = PSIDiagnosticsRequest::default();
+        let mut no_payload_diagnostics =
+            psi_diagnostics_response_new(1, 2, Some(&empty_request)).expect("diagnostics");
+        let mut short_unrequested_sources = seq_weights.clone();
+        short_unrequested_sources.match_weights.clear();
+        short_unrequested_sources.sigma.clear();
+        short_unrequested_sources.independent_observations.clear();
+        assert_eq!(
+            psi_save_diagnostics(
+                Some(&msa),
+                Some(&aligned_block),
+                Some(&short_unrequested_sources),
+                Some(&internal),
+                Some(&mut no_payload_diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let mut short_output =
+            psi_diagnostics_response_new(1, 2, Some(&request)).expect("diagnostics");
+        short_output.frequency_ratios = Some(vec![vec![0.0]]);
+        assert_eq!(
+            psi_save_diagnostics(
+                Some(&msa),
+                Some(&aligned_block),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut short_output),
+            ),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
     fn translated_psi_save_cd_diagnostics_copies_cdd_subset() {
         let dims = PSIMsaDimensions {
             query_length: 1,
@@ -4685,6 +5172,132 @@ mod tests {
                 Some(&seq_weights),
                 Some(&internal),
                 Some(&mut diagnostics)
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let empty_internal = PsiInternalPssmData {
+            freq_ratios: Vec::new(),
+            ..internal.clone()
+        };
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&cd_msa),
+                Some(&seq_weights),
+                Some(&empty_internal),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let wrong_dims_cd_msa = PSICdMsa {
+            dimensions: Some(PSIMsaDimensions {
+                query_length: 2,
+                num_seqs: 1,
+            }),
+            ..cd_msa.clone()
+        };
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&wrong_dims_cd_msa),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_query_cd_msa = cd_msa.clone();
+        short_query_cd_msa.query.clear();
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&short_query_cd_msa),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut missing_rows_cd_msa = cd_msa.clone();
+        missing_rows_cd_msa.msa.clear();
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&missing_rows_cd_msa),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_row_cd_msa = cd_msa.clone();
+        short_row_cd_msa.msa[0].clear();
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&short_row_cd_msa),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_cd_sources = seq_weights.clone();
+        short_cd_sources.match_weights[0].truncate(1);
+        let mut cd_source_diagnostics =
+            psi_diagnostics_response_new(1, 2, Some(&request)).expect("diagnostics");
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&cd_msa),
+                Some(&short_cd_sources),
+                Some(&internal),
+                Some(&mut cd_source_diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let cd_ratio_only_request = PSIDiagnosticsRequest {
+            frequency_ratios: true,
+            ..PSIDiagnosticsRequest::default()
+        };
+        let mut cd_ratio_only_diagnostics =
+            psi_diagnostics_response_new(1, 2, Some(&cd_ratio_only_request)).expect("diagnostics");
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&cd_msa),
+                Some(&short_cd_sources),
+                Some(&internal),
+                Some(&mut cd_ratio_only_diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let no_payload_request = PSIDiagnosticsRequest::default();
+        let mut no_payload_diagnostics =
+            psi_diagnostics_response_new(1, 2, Some(&no_payload_request)).expect("diagnostics");
+        let mut short_unrequested_sources = seq_weights.clone();
+        short_unrequested_sources.match_weights.clear();
+        short_unrequested_sources.independent_observations.clear();
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&cd_msa),
+                Some(&short_unrequested_sources),
+                Some(&internal),
+                Some(&mut no_payload_diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let mut short_cd_output =
+            psi_diagnostics_response_new(1, 2, Some(&request)).expect("diagnostics");
+        short_cd_output.weighted_residue_freqs = Some(vec![vec![0.0]]);
+        assert_eq!(
+            psi_save_cd_diagnostics(
+                Some(&cd_msa),
+                Some(&seq_weights),
+                Some(&internal),
+                Some(&mut short_cd_output),
             ),
             PSIERR_BADPARAM
         );
@@ -4771,6 +5384,56 @@ mod tests {
         assert_eq!(
             psi_validate_msa(Some(&no_aligned_sequences), false),
             PSIERR_NOALIGNEDSEQS
+        );
+    }
+
+    #[test]
+    fn translated_psi_msa_validation_rejects_malformed_shapes() {
+        let dims = PSIMsaDimensions {
+            query_length: 2,
+            num_seqs: 1,
+        };
+        let aligned = |letter| PsiMsaCell {
+            letter,
+            is_aligned: true,
+            extents: SSeqRange { left: 0, right: 1 },
+        };
+        let valid = PsiMsa {
+            dimensions: dims,
+            cell: vec![
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize]),
+                ],
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'D' as usize]),
+                ],
+            ],
+            query: vec![
+                crate::encoding::NCBISTDAA_A,
+                crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize],
+            ],
+            residue_counts: vec![vec![0; AA_SIZE]; 2],
+            alphabet_size: AA_SIZE as u32,
+            num_matching_seqs: vec![1, 1],
+        };
+
+        let mut short_row = valid.clone();
+        short_row.cell[1].truncate(1);
+        assert_eq!(psi_validate_msa(Some(&short_row), false), PSIERR_BADPARAM);
+        assert_eq!(psi_validate_msa(Some(&short_row), true), PSIERR_BADPARAM);
+        assert_eq!(
+            psi_validate_msa_structure_group(Some(&short_row)),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_query = valid;
+        short_query.query.truncate(1);
+        assert_eq!(psi_validate_msa(Some(&short_query), false), PSIERR_BADPARAM);
+        assert_eq!(
+            psi_validate_msa_structure_group(Some(&short_query)),
+            PSIERR_BADPARAM
         );
     }
 
@@ -4878,6 +5541,64 @@ mod tests {
     }
 
     #[test]
+    fn translated_psi_alignment_blocks_reject_malformed_shapes() {
+        let dims = PSIMsaDimensions {
+            query_length: 2,
+            num_seqs: 1,
+        };
+        let aligned = |letter| PsiMsaCell {
+            letter,
+            is_aligned: true,
+            extents: SSeqRange { left: 0, right: 1 },
+        };
+        let msa = PsiMsa {
+            dimensions: dims,
+            cell: vec![
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize]),
+                ],
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'D' as usize]),
+                ],
+            ],
+            query: vec![
+                crate::encoding::NCBISTDAA_A,
+                crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize],
+            ],
+            residue_counts: vec![vec![0; AA_SIZE]; 2],
+            alphabet_size: AA_SIZE as u32,
+            num_matching_seqs: vec![0; 2],
+        };
+        let blocks = psi_aligned_block_new(2).expect("blocks");
+
+        let mut short_row = msa.clone();
+        short_row.cell[1].truncate(1);
+        let mut blocks_for_short_row = blocks.clone();
+        assert_eq!(
+            psi_compute_alignment_blocks(Some(&mut short_row), Some(&mut blocks_for_short_row)),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_query = msa.clone();
+        short_query.query.truncate(1);
+        let mut blocks_for_short_query = blocks.clone();
+        assert_eq!(
+            psi_compute_alignment_blocks(Some(&mut short_query), Some(&mut blocks_for_short_query)),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_blocks = blocks;
+        short_blocks.size.truncate(1);
+        let mut valid_msa = msa;
+        assert_eq!(
+            psi_compute_alignment_blocks(Some(&mut valid_msa), Some(&mut short_blocks)),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
     fn translated_psi_sequence_weight_helpers_match_henikoff_shape() {
         let dims = PSIMsaDimensions {
             query_length: 2,
@@ -4924,6 +5645,99 @@ mod tests {
         assert_eq!(weights.match_weights[0][gap as usize], 0.0);
         let row_sum: f64 = weights.match_weights[0].iter().sum();
         assert!((row_sum - 1.0).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn translated_psi_compute_sequence_weights_rejects_malformed_shapes() {
+        let dims = PSIMsaDimensions {
+            query_length: 2,
+            num_seqs: 1,
+        };
+        let aligned = |letter| PsiMsaCell {
+            letter,
+            is_aligned: true,
+            extents: SSeqRange { left: 0, right: 1 },
+        };
+        let msa = PsiMsa {
+            dimensions: dims,
+            cell: vec![
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize]),
+                ],
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'D' as usize]),
+                ],
+            ],
+            query: vec![
+                crate::encoding::NCBISTDAA_A,
+                crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize],
+            ],
+            residue_counts: vec![vec![0; AA_SIZE]; 2],
+            alphabet_size: AA_SIZE as u32,
+            num_matching_seqs: vec![2, 2],
+        };
+        let blocks = PsiAlignedBlock {
+            pos_extnt: vec![SSeqRange { left: 0, right: 1 }; 2],
+            size: vec![2, 2],
+        };
+        let mut weights = psi_sequence_weights_new(Some(&dims), AA_SIZE).expect("weights");
+
+        assert_eq!(
+            psi_compute_sequence_weights(Some(&msa), Some(&blocks), false, Some(&mut weights)),
+            PSI_SUCCESS
+        );
+
+        let mut short_msa = msa.clone();
+        short_msa.cell[1].truncate(1);
+        assert_eq!(
+            psi_compute_sequence_weights(
+                Some(&short_msa),
+                Some(&blocks),
+                false,
+                Some(&mut weights)
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_blocks = blocks.clone();
+        short_blocks.pos_extnt.truncate(1);
+        assert_eq!(
+            psi_compute_sequence_weights(
+                Some(&msa),
+                Some(&short_blocks),
+                false,
+                Some(&mut weights)
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_norm = weights.clone();
+        short_norm.norm_seq_weights.truncate(1);
+        assert_eq!(
+            psi_compute_sequence_weights(Some(&msa), Some(&blocks), false, Some(&mut short_norm)),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_distrib = weights.clone();
+        short_distrib.pos_distinct_distrib[0].truncate(EFFECTIVE_ALPHABET);
+        assert_eq!(
+            psi_compute_sequence_weights(
+                Some(&msa),
+                Some(&blocks),
+                false,
+                Some(&mut short_distrib),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_match = weights;
+        short_match.match_weights[1].truncate(AA_SIZE - 1);
+        assert_eq!(
+            psi_compute_sequence_weights(Some(&msa), Some(&blocks), false, Some(&mut short_match)),
+            PSIERR_BADPARAM
+        );
     }
 
     #[test]
@@ -5049,6 +5863,184 @@ mod tests {
     }
 
     #[test]
+    fn translated_psi_compute_frequencies_from_cds_handles_edges_and_observation_cap() {
+        let dims = PSIMsaDimensions {
+            query_length: 1,
+            num_seqs: 1,
+        };
+        let a = crate::encoding::NCBISTDAA_A as usize;
+        let c = crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize] as usize;
+        let sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        let options = crate::options::PSIBlastOptions::default();
+        let mut weights = psi_sequence_weights_new(Some(&dims), AA_SIZE).expect("weights");
+
+        let missing_dimensions = PSICdMsa {
+            dimensions: None,
+            query: vec![crate::encoding::NCBISTDAA_A],
+            msa: Vec::new(),
+        };
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&missing_dimensions),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let no_sequences = PSICdMsa {
+            dimensions: Some(PSIMsaDimensions {
+                query_length: 1,
+                num_seqs: 0,
+            }),
+            query: vec![crate::encoding::NCBISTDAA_A],
+            msa: Vec::new(),
+        };
+        weights.match_weights[0][a] = 0.25;
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&no_sequences),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSI_SUCCESS
+        );
+        assert_eq!(weights.match_weights[0][a], 0.25);
+
+        let missing_profile = PSICdMsa {
+            dimensions: Some(dims),
+            query: vec![crate::encoding::NCBISTDAA_A],
+            msa: vec![vec![PSICdMsaCell {
+                is_aligned: true,
+                data: None,
+            }]],
+        };
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&missing_profile),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSIERR_BADPROFILE
+        );
+
+        let mut short_query = missing_profile.clone();
+        short_query.query.clear();
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&short_query),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut missing_rows = missing_profile.clone();
+        missing_rows.msa.clear();
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&missing_rows),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_row = missing_profile.clone();
+        short_row.msa[0].clear();
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&short_row),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let short_profile = PSICdMsa {
+            dimensions: Some(dims),
+            query: vec![crate::encoding::NCBISTDAA_A],
+            msa: vec![vec![PSICdMsaCell {
+                is_aligned: true,
+                data: Some(PSICdMsaCellData {
+                    wfreqs: vec![1.0],
+                    iobsr: 1.0,
+                }),
+            }]],
+        };
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&short_profile),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSIERR_BADPROFILE
+        );
+
+        let mut short_observations = weights.clone();
+        short_observations.independent_observations.clear();
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&missing_profile),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut short_observations),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_match_weights = weights.clone();
+        short_match_weights.match_weights[0].truncate(AA_SIZE - 1);
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&missing_profile),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut short_match_weights),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let capped = PSICdMsa {
+            dimensions: Some(dims),
+            query: vec![crate::encoding::NCBISTDAA_A],
+            msa: vec![vec![PSICdMsaCell {
+                is_aligned: true,
+                data: Some(PSICdMsaCellData {
+                    wfreqs: {
+                        let mut row = vec![0.0; AA_SIZE];
+                        row[c] = 1.0;
+                        row
+                    },
+                    iobsr: MAX_IND_OBSERVATIONS as f64 + 50.0,
+                }),
+            }]],
+        };
+        assert_eq!(
+            psi_compute_frequencies_from_cds(
+                Some(&capped),
+                Some(&sbp),
+                Some(&options),
+                Some(&mut weights),
+            ),
+            PSI_SUCCESS
+        );
+        assert_eq!(
+            weights.independent_observations[0],
+            MAX_IND_OBSERVATIONS as f64
+        );
+        assert!(weights.match_weights[0][c] > weights.match_weights[0][a]);
+    }
+
+    #[test]
     fn translated_psi_scale_matrix_brackets_and_updates_lambda() {
         let query = vec![
             crate::encoding::NCBISTDAA_A,
@@ -5097,6 +6089,241 @@ mod tests {
         assert_eq!(
             psi_scale_matrix(None, Some(&probs), Some(&mut internal), Some(&mut sbp)),
             PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
+    fn translated_psi_scale_matrix_rejects_malformed_shapes() {
+        let query = vec![
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize],
+        ];
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.kbp_ideal = Some(crate::stat::KarlinBlk {
+            lambda: 0.3176,
+            k: 0.134,
+            log_k: 0.134_f64.ln(),
+            h: 0.401,
+            round_down: false,
+        });
+        let probs = crate::stat::protein_std_freq_ncbistdaa();
+        let internal = PsiInternalPssmData {
+            ncols: 2,
+            nrows: AA_SIZE as u32,
+            pssm: vec![vec![0; AA_SIZE]; 2],
+            scaled_pssm: vec![vec![0; AA_SIZE]; 2],
+            freq_ratios: vec![vec![0.0; AA_SIZE]; 2],
+            pseudocounts: vec![0.0; 2],
+        };
+
+        let mut short_query = internal.clone();
+        assert_eq!(
+            psi_scale_matrix(
+                Some(&query[..1]),
+                Some(&probs),
+                Some(&mut short_query),
+                Some(&mut sbp),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_probs = internal.clone();
+        assert_eq!(
+            psi_scale_matrix(
+                Some(&query),
+                Some(&probs[..AA_SIZE - 1]),
+                Some(&mut short_probs),
+                Some(&mut sbp),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_pssm = PsiInternalPssmData {
+            pssm: vec![vec![0; AA_SIZE], vec![0; AA_SIZE - 1]],
+            ..internal.clone()
+        };
+        assert_eq!(
+            psi_scale_matrix(
+                Some(&query),
+                Some(&probs),
+                Some(&mut short_pssm),
+                Some(&mut sbp),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_scaled = PsiInternalPssmData {
+            scaled_pssm: vec![vec![0; AA_SIZE]],
+            ..internal
+        };
+        assert_eq!(
+            psi_scale_matrix(
+                Some(&query),
+                Some(&probs),
+                Some(&mut short_scaled),
+                Some(&mut sbp),
+            ),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
+    fn translated_psi_convert_freq_ratios_to_pssm_rejects_malformed_shapes() {
+        let query = vec![crate::encoding::NCBISTDAA_A, 250];
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+        sbp.matrix.data = crate::matrix::BLOSUM62
+            .iter()
+            .map(|row| row.to_vec())
+            .collect();
+        sbp.kbp_ideal = Some(crate::stat::KarlinBlk {
+            lambda: 0.3176,
+            k: 0.134,
+            log_k: 0.134_f64.ln(),
+            h: 0.401,
+            round_down: false,
+        });
+        let probs = crate::stat::protein_std_freq_ncbistdaa();
+        let mut internal = PsiInternalPssmData {
+            ncols: 2,
+            nrows: AA_SIZE as u32,
+            pssm: vec![vec![0; AA_SIZE]; 2],
+            scaled_pssm: vec![vec![0; AA_SIZE]; 2],
+            freq_ratios: vec![vec![0.0; AA_SIZE]; 2],
+            pseudocounts: vec![0.0; 2],
+        };
+
+        assert_eq!(
+            psi_convert_freq_ratios_to_pssm(
+                Some(&mut internal),
+                Some(&query),
+                Some(&sbp),
+                Some(&probs),
+            ),
+            PSI_SUCCESS
+        );
+        assert_eq!(
+            internal.pssm[1][crate::encoding::NCBISTDAA_A as usize],
+            sbp.matrix.data[crate::encoding::NCBISTDAA_X as usize]
+                [crate::encoding::NCBISTDAA_A as usize]
+        );
+
+        let mut short_query_internal = internal.clone();
+        assert_eq!(
+            psi_convert_freq_ratios_to_pssm(
+                Some(&mut short_query_internal),
+                Some(&query[..1]),
+                Some(&sbp),
+                Some(&probs),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_probs_internal = internal.clone();
+        assert_eq!(
+            psi_convert_freq_ratios_to_pssm(
+                Some(&mut short_probs_internal),
+                Some(&query),
+                Some(&sbp),
+                Some(&probs[..AA_SIZE - 1]),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_freq_ratios = PsiInternalPssmData {
+            freq_ratios: vec![vec![0.0; AA_SIZE]],
+            ..internal.clone()
+        };
+        assert_eq!(
+            psi_convert_freq_ratios_to_pssm(
+                Some(&mut short_freq_ratios),
+                Some(&query),
+                Some(&sbp),
+                Some(&probs),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_scaled = PsiInternalPssmData {
+            scaled_pssm: vec![vec![0; AA_SIZE], vec![0; AA_SIZE - 1]],
+            ..internal
+        };
+        assert_eq!(
+            psi_convert_freq_ratios_to_pssm(
+                Some(&mut short_scaled),
+                Some(&query),
+                Some(&sbp),
+                Some(&probs),
+            ),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
+    fn translated_psi_create_and_scale_pssm_from_frequency_ratios_reports_hard_errors() {
+        let query = vec![crate::encoding::NCBISTDAA_A];
+        let probs = crate::stat::protein_std_freq_ncbistdaa();
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+        sbp.matrix.data = crate::matrix::BLOSUM62
+            .iter()
+            .map(|row| row.to_vec())
+            .collect();
+        sbp.kbp_ideal = Some(crate::stat::KarlinBlk {
+            lambda: 0.3176,
+            k: 0.134,
+            log_k: 0.134_f64.ln(),
+            h: 0.401,
+            round_down: false,
+        });
+        let internal = PsiInternalPssmData {
+            ncols: 1,
+            nrows: AA_SIZE as u32,
+            pssm: vec![vec![0; AA_SIZE]],
+            scaled_pssm: vec![vec![0; AA_SIZE]],
+            freq_ratios: vec![vec![0.0; AA_SIZE]],
+            pseudocounts: vec![0.0],
+        };
+
+        let mut short_query = internal.clone();
+        assert_eq!(
+            psi_create_and_scale_pssm_from_frequency_ratios(
+                Some(&mut short_query),
+                Some(&[]),
+                Some(&probs),
+                Some(&mut sbp),
+                crate::options::K_PSSM_NO_IMPALA_SCALING,
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut missing_ideal = internal.clone();
+        let mut sbp_without_ideal = sbp.clone();
+        sbp_without_ideal.kbp_ideal = None;
+        assert_eq!(
+            psi_create_and_scale_pssm_from_frequency_ratios(
+                Some(&mut missing_ideal),
+                Some(&query),
+                Some(&probs),
+                Some(&mut sbp_without_ideal),
+                crate::options::K_PSSM_NO_IMPALA_SCALING,
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut zero_impala_scale = internal;
+        assert_eq!(
+            psi_create_and_scale_pssm_from_frequency_ratios(
+                Some(&mut zero_impala_scale),
+                Some(&query),
+                Some(&probs),
+                Some(&mut sbp),
+                0.0,
+            ),
+            PSIERR_POSITIVEAVGSCORE
         );
     }
 
@@ -5177,6 +6404,263 @@ mod tests {
     }
 
     #[test]
+    fn translated_psi_compute_freq_ratios_from_cds_rejects_malformed_shapes() {
+        let dims = PSIMsaDimensions {
+            query_length: 2,
+            num_seqs: 1,
+        };
+        let cd_msa = PSICdMsa {
+            dimensions: Some(dims),
+            query: vec![
+                crate::encoding::NCBISTDAA_A,
+                crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize],
+            ],
+            msa: vec![vec![
+                PSICdMsaCell {
+                    is_aligned: true,
+                    data: Some(PSICdMsaCellData {
+                        wfreqs: vec![0.0; AA_SIZE],
+                        iobsr: 1.0,
+                    }),
+                },
+                PSICdMsaCell {
+                    is_aligned: true,
+                    data: Some(PSICdMsaCellData {
+                        wfreqs: vec![0.0; AA_SIZE],
+                        iobsr: 1.0,
+                    }),
+                },
+            ]],
+        };
+        let mut seq_weights = psi_sequence_weights_new(Some(&dims), AA_SIZE).expect("weights");
+        seq_weights.independent_observations[0] = 3.0;
+        seq_weights.independent_observations[1] = 3.0;
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+        let mut internal = PsiInternalPssmData {
+            ncols: 2,
+            nrows: AA_SIZE as u32,
+            pssm: vec![vec![0; AA_SIZE]; 2],
+            scaled_pssm: vec![vec![0; AA_SIZE]; 2],
+            freq_ratios: vec![vec![0.0; AA_SIZE]; 2],
+            pseudocounts: vec![0.0; 2],
+        };
+
+        let mut short_query = cd_msa.clone();
+        short_query.query.pop();
+        assert_eq!(
+            psi_compute_freq_ratios_from_cds(
+                Some(&short_query),
+                Some(&seq_weights),
+                Some(&sbp),
+                5,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_observations = seq_weights.clone();
+        short_observations.independent_observations.truncate(1);
+        assert_eq!(
+            psi_compute_freq_ratios_from_cds(
+                Some(&cd_msa),
+                Some(&short_observations),
+                Some(&sbp),
+                5,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_std_prob = seq_weights.clone();
+        short_std_prob.std_prob.truncate(AA_SIZE - 1);
+        assert_eq!(
+            psi_compute_freq_ratios_from_cds(
+                Some(&cd_msa),
+                Some(&short_std_prob),
+                Some(&sbp),
+                5,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_match_weights = seq_weights.clone();
+        short_match_weights.match_weights[1].truncate(AA_SIZE - 1);
+        assert_eq!(
+            psi_compute_freq_ratios_from_cds(
+                Some(&cd_msa),
+                Some(&short_match_weights),
+                Some(&sbp),
+                5,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_internal = PsiInternalPssmData {
+            freq_ratios: vec![vec![0.0; AA_SIZE]],
+            ..internal.clone()
+        };
+        assert_eq!(
+            psi_compute_freq_ratios_from_cds(
+                Some(&cd_msa),
+                Some(&seq_weights),
+                Some(&sbp),
+                5,
+                Some(&mut short_internal),
+            ),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
+    fn translated_psi_compute_freq_ratios_rejects_malformed_shapes() {
+        let dims = PSIMsaDimensions {
+            query_length: 2,
+            num_seqs: 1,
+        };
+        let aligned = |letter| PsiMsaCell {
+            letter,
+            is_aligned: true,
+            extents: SSeqRange { left: 0, right: 1 },
+        };
+        let msa = PsiMsa {
+            dimensions: dims,
+            cell: vec![
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize]),
+                ],
+                vec![
+                    aligned(crate::encoding::NCBISTDAA_A),
+                    aligned(crate::encoding::AMINOACID_TO_NCBISTDAA[b'D' as usize]),
+                ],
+            ],
+            query: vec![
+                crate::encoding::NCBISTDAA_A,
+                crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize],
+            ],
+            residue_counts: vec![vec![0; AA_SIZE]; 2],
+            alphabet_size: AA_SIZE as u32,
+            num_matching_seqs: vec![2, 2],
+        };
+        let blocks = PsiAlignedBlock {
+            pos_extnt: vec![SSeqRange { left: 0, right: 1 }; 2],
+            size: vec![2, 2],
+        };
+        let mut seq_weights = psi_sequence_weights_new(Some(&dims), AA_SIZE).expect("weights");
+        seq_weights.match_weights[0][crate::encoding::NCBISTDAA_A as usize] = 1.0;
+        seq_weights.match_weights[1]
+            [crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize] as usize] = 1.0;
+        seq_weights.pos_num_participating = vec![2, 2];
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+        let mut internal = PsiInternalPssmData {
+            ncols: 2,
+            nrows: AA_SIZE as u32,
+            pssm: vec![vec![0; AA_SIZE]; 2],
+            scaled_pssm: vec![vec![0; AA_SIZE]; 2],
+            freq_ratios: vec![vec![0.0; AA_SIZE]; 2],
+            pseudocounts: vec![0.0; 2],
+        };
+
+        let mut short_query_row = msa.clone();
+        short_query_row.cell[0].truncate(1);
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&short_query_row),
+                Some(&seq_weights),
+                Some(&sbp),
+                Some(&blocks),
+                5,
+                false,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_blocks = blocks.clone();
+        short_blocks.size.truncate(1);
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&msa),
+                Some(&seq_weights),
+                Some(&sbp),
+                Some(&short_blocks),
+                5,
+                false,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_std_prob = seq_weights.clone();
+        short_std_prob.std_prob.truncate(AA_SIZE - 1);
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&msa),
+                Some(&short_std_prob),
+                Some(&sbp),
+                Some(&blocks),
+                5,
+                false,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_distrib = seq_weights.clone();
+        short_distrib.pos_distinct_distrib[1].truncate(EFFECTIVE_ALPHABET);
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&msa),
+                Some(&short_distrib),
+                Some(&sbp),
+                Some(&blocks),
+                5,
+                false,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_match_weights = seq_weights.clone();
+        short_match_weights.match_weights[1].truncate(AA_SIZE - 1);
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&msa),
+                Some(&short_match_weights),
+                Some(&sbp),
+                Some(&blocks),
+                5,
+                false,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_internal = PsiInternalPssmData {
+            pseudocounts: vec![0.0],
+            ..internal.clone()
+        };
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&msa),
+                Some(&seq_weights),
+                Some(&sbp),
+                Some(&blocks),
+                5,
+                false,
+                Some(&mut short_internal),
+            ),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
     fn translated_psi_cd_msa_validation_checks_profile_data() {
         let dims = PSIMsaDimensions {
             query_length: 2,
@@ -5211,6 +6695,65 @@ mod tests {
         let mut bad_sum = cd_msa;
         bad_sum.msa[0][1].data.as_mut().unwrap().wfreqs = vec![0.1, 0.1];
         assert_eq!(psi_validate_cd_msa(Some(&bad_sum), 2), PSIERR_BADPROFILE);
+    }
+
+    #[test]
+    fn translated_psi_cd_msa_validation_rejects_malformed_profile_shapes() {
+        let dims = PSIMsaDimensions {
+            query_length: 1,
+            num_seqs: 1,
+        };
+        let cd_msa = PSICdMsa {
+            dimensions: Some(dims),
+            query: vec![crate::encoding::NCBISTDAA_A],
+            msa: vec![vec![PSICdMsaCell {
+                is_aligned: true,
+                data: Some(PSICdMsaCellData {
+                    wfreqs: vec![0.25, 0.75],
+                    iobsr: 1.0,
+                }),
+            }]],
+        };
+
+        let mut missing_dimensions = cd_msa.clone();
+        missing_dimensions.dimensions = None;
+        assert_eq!(
+            psi_validate_cd_msa(Some(&missing_dimensions), 2),
+            PSIERR_BADPARAM
+        );
+
+        let mut short_query = cd_msa.clone();
+        short_query.query.clear();
+        assert_eq!(psi_validate_cd_msa(Some(&short_query), 2), PSIERR_BADPARAM);
+
+        let mut missing_rows = cd_msa.clone();
+        missing_rows.msa.clear();
+        assert_eq!(psi_validate_cd_msa(Some(&missing_rows), 2), PSIERR_BADPARAM);
+
+        let mut short_row = cd_msa.clone();
+        short_row.msa[0].clear();
+        assert_eq!(psi_validate_cd_msa(Some(&short_row), 2), PSIERR_BADPARAM);
+
+        let mut short_weights = cd_msa.clone();
+        short_weights.msa[0][0].data.as_mut().unwrap().wfreqs = vec![1.0];
+        assert_eq!(
+            psi_validate_cd_msa(Some(&short_weights), 2),
+            PSIERR_BADPROFILE
+        );
+
+        let mut negative_weight = cd_msa.clone();
+        negative_weight.msa[0][0].data.as_mut().unwrap().wfreqs = vec![1.25, -0.25];
+        assert_eq!(
+            psi_validate_cd_msa(Some(&negative_weight), 2),
+            PSIERR_BADPROFILE
+        );
+
+        let mut tiny_observation = cd_msa;
+        tiny_observation.msa[0][0].data.as_mut().unwrap().iobsr = 0.0;
+        assert_eq!(
+            psi_validate_cd_msa(Some(&tiny_observation), 2),
+            PSIERR_BADPROFILE
+        );
     }
 
     #[test]
@@ -5380,6 +6923,192 @@ mod tests {
     }
 
     #[test]
+    fn psi_create_pssm_with_diagnostics_populates_requested_payloads() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = PSIDiagnosticsRequest {
+            information_content: true,
+            residue_frequencies: true,
+            weighted_residue_frequencies: true,
+            frequency_ratios: true,
+            gapless_column_weights: true,
+            sigma: true,
+            interval_sizes: true,
+            num_matching_seqs: true,
+            independent_observations: true,
+        };
+        let mut pssm = None;
+        let mut diagnostics = None;
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let diagnostics = diagnostics.expect("diagnostics");
+        assert_eq!(
+            diagnostics.residue_freqs.as_ref().unwrap()[0][crate::encoding::NCBISTDAA_A as usize],
+            2
+        );
+        assert!(
+            diagnostics.weighted_residue_freqs.as_ref().unwrap()[0]
+                [crate::encoding::NCBISTDAA_A as usize]
+                > 0.0
+        );
+        assert!(
+            diagnostics.frequency_ratios.as_ref().unwrap()[0]
+                [crate::encoding::NCBISTDAA_A as usize]
+                > 0.0
+        );
+        assert!(diagnostics.information_content.as_ref().unwrap()[0].is_finite());
+        assert!(diagnostics.gapless_column_weights.as_ref().unwrap()[0] > 0.0);
+        assert!(diagnostics.sigma.as_ref().unwrap()[0] > 0.0);
+        assert_eq!(diagnostics.interval_sizes.as_ref().unwrap()[0], 3);
+        assert_eq!(diagnostics.num_matching_seqs.as_ref().unwrap()[0], 3);
+        let independent_observations = diagnostics.independent_observations.as_ref().unwrap();
+        assert_eq!(independent_observations.len(), 3);
+        assert!(independent_observations
+            .iter()
+            .all(|value| value.is_finite()));
+        assert!(pssm.expect("pssm").pssm[0][crate::encoding::NCBISTDAA_A as usize] > 0);
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_ignores_request_without_diagnostics_output() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = None;
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                None,
+            ),
+            PSI_SUCCESS
+        );
+
+        let pssm = pssm.expect("pssm");
+        assert_eq!(pssm.ncols, 3);
+        assert_eq!(pssm.nrows, AA_SIZE as u32);
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_clears_diagnostics_output_without_request() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = None;
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                None,
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let pssm = pssm.expect("pssm");
+        assert_eq!(pssm.ncols, 3);
+        assert!(diagnostics.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_allows_no_payload_diagnostics_request() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new();
+        let mut pssm = None;
+        let mut diagnostics = None;
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let pssm = pssm.expect("pssm");
+        assert_eq!(pssm.ncols, 3);
+        let diagnostics = diagnostics.expect("diagnostics");
+        assert_eq!(diagnostics.query_length, 3);
+        assert_eq!(diagnostics.alphabet_size, AA_SIZE as u32);
+        assert!(diagnostics.information_content.is_none());
+        assert!(diagnostics.residue_freqs.is_none());
+        assert!(diagnostics.weighted_residue_freqs.is_none());
+        assert!(diagnostics.frequency_ratios.is_none());
+        assert!(diagnostics.gapless_column_weights.is_none());
+        assert!(diagnostics.sigma.is_none());
+        assert!(diagnostics.interval_sizes.is_none());
+        assert!(diagnostics.num_matching_seqs.is_none());
+        assert!(diagnostics.independent_observations.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_rejects_missing_pssm_output_pointer() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                None,
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+        assert!(diagnostics.is_some());
+    }
+
+    #[test]
     fn psi_create_pssm_with_diagnostics_cleans_outputs_on_validation_error() {
         let mut msa = psi_public_test_msa();
         msa.data[0][1].letter = crate::encoding::NCBISTDAA_GAP;
@@ -5414,5 +7143,369 @@ mod tests {
             ),
             PSIERR_BADPARAM
         );
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_cleans_outputs_on_scaling_hard_error() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        sbp.kbp_ideal = None;
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+        assert!(pssm.is_none());
+        assert!(diagnostics.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_cleans_outputs_on_frequency_ratio_error() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: -1,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+        assert!(pssm.is_none());
+        assert!(diagnostics.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_cleans_outputs_on_bad_alphabet_size() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        sbp.alphabet_size = crate::encoding::BLASTAA_SIZE + 1;
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+        assert!(pssm.is_none());
+        assert!(diagnostics.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_preserves_outputs_on_required_input_error() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                None,
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+        assert!(pssm.is_some());
+        assert!(diagnostics.is_some());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                None,
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+        assert!(pssm.is_some());
+        assert!(diagnostics.is_some());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                None,
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_BADPARAM
+        );
+        assert!(pssm.is_some());
+        assert!(diagnostics.is_some());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_reports_public_msa_validation_errors() {
+        let options = crate::options::PSIBlastOptions::default();
+        let request = psi_diagnostics_request_new_ex(true);
+        let assert_public_validation_error = |msa: &PSIMsa, expected_status: i32| {
+            let mut sbp = psi_public_test_score_block();
+            let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+            let mut diagnostics =
+                Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+            assert_eq!(
+                psi_create_pssm_with_diagnostics(
+                    Some(msa),
+                    Some(&options),
+                    Some(&mut sbp),
+                    Some(&request),
+                    Some(&mut pssm),
+                    Some(&mut diagnostics),
+                ),
+                expected_status
+            );
+            assert!(pssm.is_none());
+            assert!(diagnostics.is_none());
+        };
+
+        let mut unaligned_column = psi_public_test_msa();
+        for row in &mut unaligned_column.data {
+            row[1].is_aligned = false;
+        }
+        assert_public_validation_error(&unaligned_column, PSIERR_UNALIGNEDCOLUMN);
+
+        let mut starting_gap = psi_public_test_msa();
+        starting_gap.data[1][0].letter = crate::encoding::NCBISTDAA_GAP;
+        assert_public_validation_error(&starting_gap, PSIERR_STARTINGGAP);
+
+        let mut ending_gap = psi_public_test_msa();
+        ending_gap.data[1][2].letter = crate::encoding::NCBISTDAA_GAP;
+        assert_public_validation_error(&ending_gap, PSIERR_ENDINGGAP);
+
+        let mut column_of_gaps = psi_public_test_msa();
+        for row in &mut column_of_gaps.data {
+            row[1].letter = crate::encoding::NCBISTDAA_GAP;
+            row[1].is_aligned = true;
+        }
+        assert_public_validation_error(&column_of_gaps, PSIERR_COLUMNOFGAPS);
+
+        let mut no_aligned = psi_public_test_msa();
+        no_aligned.dimensions.num_seqs = 0;
+        no_aligned.data.truncate(1);
+        let mut sbp = psi_public_test_score_block();
+        let mut pssm = None;
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&no_aligned),
+                Some(&options),
+                Some(&mut sbp),
+                None,
+                Some(&mut pssm),
+                None,
+            ),
+            PSIERR_NOALIGNEDSEQS
+        );
+        assert!(pssm.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_rejects_malformed_public_msa_shapes() {
+        let options = crate::options::PSIBlastOptions::default();
+        let request = psi_diagnostics_request_new_ex(true);
+        let assert_bad_public_msa = |msa: &PSIMsa| {
+            let mut sbp = psi_public_test_score_block();
+            let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+            let mut diagnostics =
+                Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+            assert_eq!(
+                psi_create_pssm_with_diagnostics(
+                    Some(msa),
+                    Some(&options),
+                    Some(&mut sbp),
+                    Some(&request),
+                    Some(&mut pssm),
+                    Some(&mut diagnostics),
+                ),
+                PSIERR_BADPARAM
+            );
+            assert!(pssm.is_none());
+            assert!(diagnostics.is_none());
+        };
+
+        let mut missing_rows = psi_public_test_msa();
+        missing_rows.data.truncate(1);
+        assert_bad_public_msa(&missing_rows);
+
+        let mut short_query = psi_public_test_msa();
+        short_query.data[0].truncate(2);
+        assert_bad_public_msa(&short_query);
+
+        let mut short_aligned_row = psi_public_test_msa();
+        short_aligned_row.data[1].truncate(2);
+        assert_bad_public_msa(&short_aligned_row);
+
+        let invalid_letter = crate::encoding::BLASTAA_SIZE as u8 + 1;
+        let mut invalid_query_letter = psi_public_test_msa();
+        invalid_query_letter.data[0][0].letter = invalid_letter;
+        assert_bad_public_msa(&invalid_query_letter);
+
+        let mut invalid_aligned_letter = psi_public_test_msa();
+        invalid_aligned_letter.data[1][1].letter = invalid_letter;
+        assert_bad_public_msa(&invalid_aligned_letter);
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_structure_group_accepts_query_unaligned_column() {
+        let mut msa = psi_public_test_msa();
+        msa.data[0][1].is_aligned = false;
+        let options = crate::options::PSIBlastOptions {
+            nsg_compatibility_mode: true,
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let mut pssm = None;
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                None,
+                Some(&mut pssm),
+                None,
+            ),
+            PSI_SUCCESS
+        );
+        assert_eq!(pssm.expect("pssm").ncols, 3);
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_ignore_unaligned_positions_accepts_unaligned_column() {
+        let mut msa = psi_public_test_msa();
+        for row in &mut msa.data {
+            row[1].is_aligned = false;
+        }
+        let mut sbp = psi_public_test_score_block();
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut diagnostics = None;
+        let request = PSIDiagnosticsRequest {
+            frequency_ratios: true,
+            interval_sizes: true,
+            num_matching_seqs: true,
+            ..psi_diagnostics_request_new()
+        };
+        let strict_options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&strict_options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_UNALIGNEDCOLUMN
+        );
+        assert!(pssm.is_none());
+        assert!(diagnostics.is_none());
+
+        let ignore_options = crate::options::PSIBlastOptions {
+            ignore_unaligned_positions: true,
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let mut pssm = None;
+        let mut diagnostics = None;
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&ignore_options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        let pssm = pssm.expect("pssm");
+        assert_eq!(pssm.ncols, 3);
+        assert_eq!(pssm.nrows, AA_SIZE as u32);
+        let diagnostics = diagnostics.expect("diagnostics");
+        assert_eq!(diagnostics.num_matching_seqs.as_ref().unwrap()[1], 0);
+        assert!(diagnostics.interval_sizes.as_ref().unwrap()[1] >= 3);
+        assert!(diagnostics.frequency_ratios.as_ref().unwrap()[1]
+            .iter()
+            .all(|ratio| ratio.is_finite()));
+
+        let mut query_gap = msa;
+        query_gap.data[0][1].letter = crate::encoding::NCBISTDAA_GAP;
+        let mut sbp = psi_public_test_score_block();
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&query_gap),
+                Some(&ignore_options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_GAPINQUERY
+        );
+        assert!(pssm.is_none());
+        assert!(diagnostics.is_none());
     }
 }

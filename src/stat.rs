@@ -4562,14 +4562,13 @@ pub fn rps_rescale_pssm(
     let mut res_prob = vec![0.0; crate::encoding::BLASTAA_SIZE];
     blast_fill_residue_probability(&rps_query_seq[..query_len], &mut res_prob);
 
-    let alphabet_size = pos_matrix
-        .iter()
-        .take(db_seq_length)
-        .map(|row| row.len())
-        .min()
-        .unwrap_or(0)
-        .min(crate::encoding::BLASTAA_SIZE);
-    if alphabet_size == 0 {
+    let alphabet_size = sbp.alphabet_size.min(crate::encoding::BLASTAA_SIZE);
+    if alphabet_size == 0
+        || pos_matrix
+            .iter()
+            .take(db_seq_length)
+            .any(|row| row.len() < alphabet_size)
+    {
         return None;
     }
     let mut return_sfp = ScoreFreq {
@@ -5998,7 +5997,7 @@ mod tests {
                 comp_adjustment_method: 0,
                 edit_script: None,
                 pat_info: None,
-            map_info: None,
+                map_info: None,
             }
         }
 
@@ -7469,6 +7468,23 @@ mod tests {
         assert!(
             rps_rescale_pssm(2.0, 1, Some(&sequence), 3, Some(&pos_matrix), Some(&sbp)).is_none()
         );
+        let mut short_row_matrix = pos_matrix.clone();
+        short_row_matrix[0].truncate(crate::encoding::BLASTAA_SIZE - 1);
+        assert!(rps_rescale_pssm(
+            2.0,
+            1,
+            Some(&sequence),
+            1,
+            Some(&short_row_matrix),
+            Some(&sbp)
+        )
+        .is_none());
+        assert!(
+            rps_rescale_pssm(2.0, -1, Some(&sequence), 1, Some(&pos_matrix), Some(&sbp)).is_none()
+        );
+        assert!(rps_rescale_pssm(2.0, 1, None, 1, Some(&pos_matrix), Some(&sbp)).is_none());
+        assert!(rps_rescale_pssm(2.0, 1, Some(&sequence), 1, None, Some(&sbp)).is_none());
+        assert!(rps_rescale_pssm(2.0, 1, Some(&sequence), 1, Some(&pos_matrix), None).is_none());
         sbp.name = Some("NOT_A_MATRIX".to_string());
         assert!(
             rps_rescale_pssm(2.0, 1, Some(&sequence), 1, Some(&pos_matrix), Some(&sbp)).is_none()

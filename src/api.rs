@@ -5904,7 +5904,9 @@ pub struct PsiblastParams {
 pub struct PsiblastRun {
     pub results: Vec<SearchResult>,
     pub pssm: crate::pssm::Pssm,
+    pub round_results: Vec<Vec<SearchResult>>,
     pub round_pssms: Vec<crate::pssm::Pssm>,
+    pub converged: bool,
 }
 
 impl PsiblastParams {
@@ -6001,12 +6003,20 @@ pub fn psiblast_with_rounds(db: &BlastDb, query: &[u8], params: &PsiblastParams)
     .1;
 
     let mut final_results = Vec::new();
+    let mut round_results = Vec::new();
     let mut round_pssms = Vec::new();
+    let mut converged = false;
 
     // Build subject pairs for PSI-BLAST iteration
     let subj_pairs = pssm_subject_pairs(db);
+    let until_convergence = params.num_iterations == 0;
+    let iteration_limit = if until_convergence {
+        100
+    } else {
+        params.num_iterations
+    };
 
-    for _iter in 0..params.num_iterations {
+    for _iter in 0..iteration_limit {
         let hits = crate::pssm::psi_blast_iteration(
             &pssm,
             &query_aa,
@@ -6028,6 +6038,7 @@ pub fn psiblast_with_rounds(db: &BlastDb, query: &[u8], params: &PsiblastParams)
 
         final_results =
             pssm_hits_to_search_results(db, &hits, &query_aa, &pssm, &prot_kbp, &params.search);
+        round_results.push(final_results.clone());
 
         // Update PSSM from aligned sequences
         let aligned: Vec<Vec<u8>> = hits
@@ -6059,19 +6070,31 @@ pub fn psiblast_with_rounds(db: &BlastDb, query: &[u8], params: &PsiblastParams)
             .collect();
 
         if !aligned.is_empty() {
+            let previous_scores = until_convergence.then(|| pssm.scores.clone());
             pssm.update_from_alignment_with_matrix_and_pseudocount(
                 &aligned,
                 protein_matrix_name(params.search.matrix),
                 (params.pseudocount > 0).then_some(params.pseudocount as f64),
             );
+            let converged_now = previous_scores
+                .as_ref()
+                .is_some_and(|scores| scores == &pssm.scores);
             round_pssms.push(pssm.clone());
+            if converged_now {
+                converged = true;
+                break;
+            }
+        } else if until_convergence {
+            break;
         }
     }
 
     PsiblastRun {
         results: final_results,
         pssm,
+        round_results,
         round_pssms,
+        converged,
     }
 }
 
@@ -7181,7 +7204,49 @@ mod tests {
         let run = psiblast_with_rounds(&db, query, &params);
 
         assert_eq!(run.round_pssms.len(), 1);
+        assert_eq!(run.round_results.len(), 1);
         assert_eq!(run.round_pssms[0].length, query.len());
         assert_eq!(run.pssm.scores, run.round_pssms[0].scores);
+        assert!(!run.converged);
+    }
+
+    #[test]
+    fn test_psiblast_num_iterations_zero_runs_until_convergence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("db");
+        let query = b"MKKWLFGFLG";
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "db");
+        builder.add(SequenceEntry {
+            title: "protein_subject".to_string(),
+            accession: "protein_subject".to_string(),
+            sequence: query.to_vec(),
+            taxid: None,
+        });
+        builder.write(&base).unwrap();
+        let db = BlastDb::open(&base).unwrap();
+
+        let params = PsiblastParams::new(
+            SearchParams::blastp()
+                .filter_low_complexity(false)
+                .comp_adjust(0)
+                .evalue(1.0e20),
+        )
+        .num_iterations(0);
+
+        let run = psiblast_with_rounds(&db, query, &params);
+
+        assert!(
+            !run.results.is_empty(),
+            "num_iterations=0 should not degenerate into a zero-round search"
+        );
+        assert_eq!(
+            run.round_pssms.len(),
+            2,
+            "exact repeat fixture should converge after the second update"
+        );
+        assert_eq!(run.round_results.len(), 2);
+        assert!(run.converged);
+        assert_eq!(run.round_pssms[0].length, query.len());
+        assert_eq!(run.pssm.scores, run.round_pssms[1].scores);
     }
 }

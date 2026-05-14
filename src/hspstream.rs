@@ -1018,6 +1018,7 @@ pub fn s_blast_hsp_list_rps_update(program: crate::program::ProgramType, hsp_lis
 pub const RPS_MAGIC_NUM: i32 = 0x72707362;
 pub const RPS_MAGIC_NUM_28: i32 = 0x72707364;
 pub const RPS_K_MULT: f64 = 1.2;
+pub const RPS_FREQ_RATIO_SCALE: f64 = 100_000.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpsProfileHeader {
@@ -1045,15 +1046,16 @@ pub struct RpsGapAlignData {
     pub concat_db_info: crate::queryinfo::QueryInfo,
     pub rps_pssm: Vec<Vec<i32>>,
     pub rps_freq: Option<Vec<Vec<i32>>>,
+    pub rps_freq_ratios: Option<Vec<Vec<f64>>>,
     pub alphabet_size: usize,
     pub position_based: bool,
 }
 
-fn rps_alphabet_size(magic_number: i32) -> usize {
-    if magic_number == RPS_MAGIC_NUM {
-        26
-    } else {
-        28
+fn rps_alphabet_size(magic_number: i32) -> Option<usize> {
+    match magic_number {
+        RPS_MAGIC_NUM => Some(26),
+        RPS_MAGIC_NUM_28 => Some(28),
+        _ => None,
     }
 }
 
@@ -1068,6 +1070,97 @@ fn rps_rows_from_values(
         rows.chunks_exact(alphabet_size)
             .map(|row| row.to_vec())
             .collect(),
+    )
+}
+
+/// Owned Rust equivalent of NCBI static `s_RPSFillFreqRatiosInPsiMatrix`
+/// (`blast_traceback.c:1001`).
+///
+/// C allocates `ncol x BLASTAA_SIZE` doubles, copies the on-disk integer
+/// ratios divided by `FREQ_RATIO_SCALE` through the profile alphabet size, and
+/// pads the remaining BLASTAA columns with zero.
+pub fn s_rps_fill_freq_ratios_in_psi_matrix(
+    freq: &[Vec<i32>],
+    ncol: usize,
+    alphabet_size: usize,
+) -> Option<Vec<Vec<f64>>> {
+    if alphabet_size > crate::encoding::BLASTAA_SIZE || freq.len() < ncol {
+        return None;
+    }
+    let mut ratios = vec![vec![0.0; crate::encoding::BLASTAA_SIZE]; ncol];
+    for (ic, row) in freq.iter().take(ncol).enumerate() {
+        if row.len() < alphabet_size {
+            return None;
+        }
+        for ir in 0..alphabet_size {
+            ratios[ic][ir] = row[ir] as f64 / RPS_FREQ_RATIO_SCALE;
+        }
+    }
+    Some(ratios)
+}
+
+/// Port-shaped fetch for the `BlastSeqSrcGetSequence` call inside
+/// `s_RPSComputeTraceback` (`blast_traceback.c:1182`).
+///
+/// The C loop chooses the traceback encoding from the program, fetches the RPS
+/// consensus sequence for the current HSP-list OID, and skips that list if the
+/// fetch fails. Rust returns `None` for the same skip condition.
+pub fn s_rps_fetch_consensus_sequence(
+    program_number: crate::program::ProgramType,
+    seq_src: Option<&dyn crate::seqsrc::BlastSeqSource>,
+    oid: i32,
+) -> Option<crate::seqsrc::SeqData> {
+    let arg = crate::seqsrc::GetSeqArg {
+        oid,
+        encoding: blast_traceback_get_encoding(program_number),
+    };
+    crate::seqsrc::blast_seq_src_get_sequence(seq_src, Some(&arg))
+}
+
+/// Port-shaped profile PSSM setup for `s_RPSComputeTraceback`
+/// (`blast_traceback.c:1196-1248`).
+///
+/// For CBS, C allocates a fresh `seq_length x BLASTAA_SIZE` PSSM scratch matrix
+/// before redo alignment fills it. Without CBS, C calls `RPSRescalePssm` on the
+/// selected profile rows. Rust keeps both shapes explicit and owned.
+pub fn s_rps_profile_pssm_for_traceback(
+    gap_data: &RpsGapAlignData,
+    profile_index: usize,
+    query_sequence: &[u8],
+    consensus_length: usize,
+    scale_factor: f64,
+    sbp: &crate::stat::BlastScoreBlk,
+    composition_based_stats: bool,
+) -> Option<Vec<Vec<i32>>> {
+    let profile_context = gap_data.concat_db_info.contexts.get(profile_index)?;
+    if !profile_context.is_valid {
+        return None;
+    }
+    let db_seq_start = profile_context.query_offset.max(0) as usize;
+    let db_seq_end = db_seq_start.checked_add(consensus_length)?;
+    if db_seq_end > gap_data.rps_pssm.len() {
+        return None;
+    }
+    if composition_based_stats {
+        return Some(vec![
+            vec![0; crate::encoding::BLASTAA_SIZE];
+            consensus_length
+        ]);
+    }
+    if gap_data.alphabet_size > crate::encoding::BLASTAA_SIZE
+        || !gap_data.rps_pssm[db_seq_start..db_seq_end]
+            .iter()
+            .all(|row| row.len() >= gap_data.alphabet_size)
+    {
+        return None;
+    }
+    crate::stat::rps_rescale_pssm(
+        scale_factor,
+        query_sequence.len() as i32,
+        Some(query_sequence),
+        consensus_length as i32,
+        Some(&gap_data.rps_pssm[db_seq_start..db_seq_end]),
+        Some(sbp),
     )
 }
 
@@ -1086,12 +1179,17 @@ pub fn s_rps_gap_align_data_prepare(
         return Err(-1);
     };
     let profile_header = &rps_info.profile_header;
+    if profile_header.num_profiles < 0 {
+        return Err(-1);
+    }
     let num_profiles = profile_header.num_profiles.max(0) as usize;
     if profile_header.start_offsets.len() < num_profiles + 1 {
         return Err(-1);
     }
 
-    let alphabet_size = rps_alphabet_size(profile_header.magic_number);
+    let Some(alphabet_size) = rps_alphabet_size(profile_header.magic_number) else {
+        return Err(-1);
+    };
     let num_pssm_rows = profile_header.start_offsets[num_profiles];
     if num_pssm_rows < 0 {
         return Err(-1);
@@ -1104,8 +1202,28 @@ pub fn s_rps_gap_align_data_prepare(
         if freq_header.start_offsets.len() < num_profiles + 1 {
             return Err(-1);
         }
+        for profile_index in 0..num_profiles {
+            let start = freq_header.start_offsets[profile_index];
+            let end = freq_header.start_offsets[profile_index + 1];
+            if start < 0 || end < start {
+                return Err(-1);
+            }
+            if start != profile_header.start_offsets[profile_index]
+                || end != profile_header.start_offsets[profile_index + 1]
+            {
+                return Err(-1);
+            }
+        }
         Some(
             rps_rows_from_values(&freq_header.freq_values, num_pssm_rows, alphabet_size)
+                .ok_or(-1i16)?,
+        )
+    } else {
+        None
+    };
+    let rps_freq_ratios = if let Some(freq) = &rps_freq {
+        Some(
+            s_rps_fill_freq_ratios_in_psi_matrix(freq, num_pssm_rows + 1, alphabet_size)
                 .ok_or(-1i16)?,
         )
     } else {
@@ -1117,7 +1235,7 @@ pub fn s_rps_gap_align_data_prepare(
     for profile_index in 0..num_profiles {
         let start = profile_header.start_offsets[profile_index];
         let end = profile_header.start_offsets[profile_index + 1];
-        if end < start {
+        if start < 0 || end < start {
             return Err(-1);
         }
         let query_length = end - start;
@@ -1142,6 +1260,7 @@ pub fn s_rps_gap_align_data_prepare(
         },
         rps_pssm,
         rps_freq,
+        rps_freq_ratios,
         alphabet_size,
         position_based: true,
     })
@@ -1213,6 +1332,9 @@ where
         let Some(profile_context) = gap_data.concat_db_info.contexts.get(profile_index) else {
             continue;
         };
+        if !profile_context.is_valid {
+            continue;
+        }
         let db_seq_start = profile_context.query_offset.max(0) as usize;
         if db_seq_start >= gap_data.rps_pssm.len() {
             continue;
@@ -2321,7 +2443,9 @@ pub fn phiblast_hsp_results_split(
 pub fn blast_traceback_get_encoding(
     program_number: crate::program::ProgramType,
 ) -> crate::seqsrc::SeqEncoding {
-    if crate::program::blast_subject_is_protein(program_number) {
+    if crate::program::blast_subject_is_protein(program_number)
+        || crate::program::blast_subject_is_pssm(program_number)
+    {
         crate::seqsrc::SeqEncoding::Protein
     } else if crate::program::blast_subject_is_translated(program_number) {
         crate::seqsrc::SeqEncoding::Ncbi4na
@@ -2500,8 +2624,8 @@ pub fn s_trim_results_by_total_hsp_limit_ex(
             if let Some(flag) = flags.get_mut(query_index) {
                 *flag = true;
             }
-            any_hsp_limit_exceeded = true;
         }
+        any_hsp_limit_exceeded = true;
 
         let max_hit_list_size = hitlist.hsplist_max;
         let mut everything: Vec<(i32, Hsp)> = Vec::with_capacity(total_hsps);
@@ -3010,6 +3134,36 @@ fn query_index_for_hsp_list(hsp_list: &HspList, query_info: &crate::queryinfo::Q
         .map_or(0, |ctx| ctx.query_index)
 }
 
+/// Top-level traceback route used by NCBI `BLAST_ComputeTraceback_MT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TracebackDispatchKind {
+    Rps,
+    RedoAlignment,
+    Phi,
+    Ordinary,
+}
+
+/// Port-shaped branch classifier for NCBI `BLAST_ComputeTraceback_MT`
+/// (`blast_traceback.c:1488`).
+///
+/// C checks RPS first, then composition-based/Smith-Waterman redo alignment,
+/// then dispatches per-HSP-list PHI traceback inside the ordinary stream loop.
+pub fn blast_traceback_dispatch_kind(
+    program_number: crate::program::ProgramType,
+    composition_based_stats: i32,
+    smith_waterman_traceback: bool,
+) -> TracebackDispatchKind {
+    if crate::program::blast_program_is_rps_blast(program_number) {
+        TracebackDispatchKind::Rps
+    } else if composition_based_stats > 0 || smith_waterman_traceback {
+        TracebackDispatchKind::RedoAlignment
+    } else if crate::program::blast_program_is_phi_blast(program_number) {
+        TracebackDispatchKind::Phi
+    } else {
+        TracebackDispatchKind::Ordinary
+    }
+}
+
 /// Port-shaped Rust equivalent of NCBI `BLAST_ComputeTraceback`
 /// (`blast_traceback.c:1390`) for the represented stream/list layer.
 ///
@@ -3047,6 +3201,7 @@ where
 
     let (batch_status, batches) = blast_hsp_stream_to_hsp_stream_results_batch(Some(stream));
     if batch_status != K_BLAST_HSP_STREAM_SUCCESS {
+        blast_hsp_stream_tback_close(Some(stream));
         return (batch_status as i16, None);
     }
 
@@ -3073,6 +3228,7 @@ where
                 let query_index = query_index_for_hsp_list(&hsp_list, query_info);
                 let status = traceback_hsp_list(&mut hsp_list);
                 if status != 0 {
+                    blast_hsp_stream_tback_close(Some(stream));
                     return (status, None);
                 }
                 if !hsp_list.hsps.is_empty() {
@@ -3083,12 +3239,15 @@ where
                         hit_options.hitlist_size,
                     );
                     if insert_status != 0 {
+                        blast_hsp_stream_tback_close(Some(stream));
                         return (insert_status as i16, None);
                     }
                 }
             }
         }
     }
+
+    blast_hsp_stream_tback_close(Some(stream));
 
     if interrupted {
         return (crate::diagnostics::BLASTERR_INTERRUPTED, None);
@@ -3117,7 +3276,6 @@ where
         let _ = blast_hsp_results_sort_by_evalue(&mut results);
     }
     s_blast_prune_extra_hits(&mut results, hit_options.hitlist_size);
-    blast_hsp_stream_tback_close(Some(stream));
 
     let _ = program_number;
     (0, Some(results))
@@ -3149,6 +3307,9 @@ where
     let Some(stream) = hsp_stream else {
         return (crate::util::BLASTERR_INVALIDPARAM, None);
     };
+    if query_info.is_none() {
+        return (crate::util::BLASTERR_INVALIDPARAM, None);
+    }
     let _num_threads = if num_threads == 0 { 1 } else { num_threads };
     if use_cbs_close {
         blast_hsp_cbs_stream_close(Some(stream), hit_options.hitlist_size);
@@ -3468,6 +3629,64 @@ mod tests {
     use std::sync::Mutex as TestMutex;
 
     static ENV_LOCK: TestMutex<()> = TestMutex::new(());
+
+    struct RecordingSeqSrc {
+        seqs: Vec<Vec<u8>>,
+        encodings: TestMutex<Vec<crate::seqsrc::SeqEncoding>>,
+    }
+
+    impl crate::seqsrc::BlastSeqSource for RecordingSeqSrc {
+        fn num_seqs(&self) -> i32 {
+            self.seqs.len() as i32
+        }
+
+        fn total_length(&self) -> i64 {
+            self.seqs.iter().map(|seq| seq.len() as i64).sum()
+        }
+
+        fn max_seq_len(&self) -> i32 {
+            self.seqs
+                .iter()
+                .map(|seq| seq.len() as i32)
+                .max()
+                .unwrap_or(0)
+        }
+
+        fn avg_seq_len(&self) -> i32 {
+            if self.seqs.is_empty() {
+                0
+            } else {
+                (self.total_length() / self.seqs.len() as i64) as i32
+            }
+        }
+
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        fn is_protein(&self) -> bool {
+            true
+        }
+
+        fn seq_len(&self, oid: i32) -> i32 {
+            self.seqs
+                .get(oid.max(0) as usize)
+                .map_or(0, |seq| seq.len() as i32)
+        }
+
+        fn get_sequence(&self, arg: &crate::seqsrc::GetSeqArg) -> Option<crate::seqsrc::SeqData> {
+            self.encodings.lock().unwrap().push(arg.encoding);
+            let seq = self.seqs.get(arg.oid as usize)?;
+            Some(crate::seqsrc::SeqData {
+                sequence: seq.clone(),
+                length: seq.len() as i32,
+            })
+        }
+
+        fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+            Box::new(0..self.num_seqs())
+        }
+    }
 
     #[test]
     fn test_hsp_stream() {
@@ -4250,6 +4469,53 @@ mod tests {
     }
 
     #[test]
+    fn target_translation_view_handles_pretranslated_and_invalid_inputs() {
+        let mut target = crate::util::SBlastTargetTranslation {
+            program_number: crate::program::TBLASTN,
+            gen_code_string: crate::util::STANDARD_GENETIC_CODE,
+            translations: vec![None; crate::util::NUM_FRAMES],
+            partial: false,
+            num_frames: crate::util::NUM_FRAMES as i32,
+            range: Some(vec![0; 2 * crate::util::NUM_FRAMES]),
+            subject_blk: None,
+        };
+        target.translations[0] = Some(vec![10, 11, 12, 13, 14, 15]);
+        target.range.as_mut().unwrap()[0] = 2;
+        target.range.as_mut().unwrap()[1] = 5;
+        let mut hsp = make_hsp(30, 1.0e-6);
+        hsp.subject_frame = 1;
+
+        let view = blast_hsp_get_target_translation(&mut target, Some(&hsp)).expect("view");
+        assert_eq!(view.pointer_offset, -1);
+        assert_eq!(view.translated_length, 5);
+        assert_eq!(view.get(2), Some(11));
+        assert_eq!(view.get(3), Some(12));
+
+        assert!(blast_hsp_get_target_translation(&mut target, None).is_none());
+
+        let mut no_range = target.clone();
+        no_range.range = None;
+        assert!(blast_hsp_get_target_translation(&mut no_range, Some(&hsp)).is_none());
+
+        let mut no_translation = target;
+        no_translation.translations[0] = None;
+        assert!(blast_hsp_get_target_translation(&mut no_translation, Some(&hsp)).is_none());
+
+        let mut partial_without_subject = crate::util::SBlastTargetTranslation {
+            program_number: crate::program::TBLASTN,
+            gen_code_string: crate::util::STANDARD_GENETIC_CODE,
+            translations: vec![None; crate::util::NUM_FRAMES],
+            partial: true,
+            num_frames: crate::util::NUM_FRAMES as i32,
+            range: Some(vec![0; 2 * crate::util::NUM_FRAMES]),
+            subject_blk: None,
+        };
+        assert!(
+            blast_hsp_get_target_translation(&mut partial_without_subject, Some(&hsp)).is_none()
+        );
+    }
+
+    #[test]
     fn test_cut_off_gap_edit_script_matches_c_begin_and_end_cuts() {
         let mut begin = make_hsp(50, 1e-8);
         begin.query_offset = 10;
@@ -4398,6 +4664,43 @@ mod tests {
     }
 
     #[test]
+    fn test_blast_hsp_results_insert_hsp_list_edges() {
+        let mut results = blast_hsp_results_new(1);
+
+        assert_eq!(
+            blast_hsp_results_insert_hsp_list(&mut results, 0, HspList::new(99), 10),
+            0
+        );
+        assert!(results.hitlists[0].is_none());
+
+        let mut negative_index = HspList::new(7);
+        negative_index.add_hsp(make_hsp(50, 1e-6));
+        assert_eq!(
+            blast_hsp_results_insert_hsp_list(&mut results, -1, negative_index, 10),
+            1
+        );
+        assert!(results.hitlists[0].is_none());
+
+        let mut out_of_range = HspList::new(8);
+        out_of_range.add_hsp(make_hsp(60, 1e-8));
+        assert_eq!(
+            blast_hsp_results_insert_hsp_list(&mut results, 2, out_of_range, 10),
+            1
+        );
+        assert!(results.hitlists[0].is_none());
+
+        let mut valid = HspList::new(9);
+        valid.add_hsp(make_hsp(70, 1e-10));
+        assert_eq!(
+            blast_hsp_results_insert_hsp_list(&mut results, 0, valid, 10),
+            0
+        );
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 9);
+    }
+
+    #[test]
     fn test_sthread_local_data_array_lifecycle_and_setup() {
         let mut array = sthread_local_data_array_new(2);
         assert_eq!(array.num_elems, 2);
@@ -4405,6 +4708,7 @@ mod tests {
         assert!(array.tld.iter().all(Option::is_some));
 
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[11, 7]);
+        assert_eq!(sthread_local_data_array_setup(None, &query_info, 9), -1);
         assert_eq!(
             sthread_local_data_array_setup(Some(&mut array), &query_info, 9),
             0
@@ -4421,6 +4725,16 @@ mod tests {
             );
         }
 
+        let mut broken = sthread_local_data_array_new(2);
+        broken.tld[1] = None;
+        assert_eq!(
+            sthread_local_data_array_setup(Some(&mut broken), &query_info, 9),
+            -1
+        );
+
+        sthread_local_data_array_trim(Some(&mut array), 3);
+        assert_eq!(array.num_elems, 2);
+        sthread_local_data_array_trim(None, 1);
         sthread_local_data_array_trim(Some(&mut array), 1);
         assert_eq!(array.num_elems, 1);
         assert_eq!(array.tld.len(), 1);
@@ -4514,6 +4828,9 @@ mod tests {
 
         let mut batches = blast_hsp_stream_results_batch_new();
         assert_eq!(batches.num_allocated, 1);
+        let default_batches = s_blast_hsp_stream_results_batch_array_new(0);
+        assert_eq!(default_batches.num_allocated, 10);
+        assert_eq!(default_batches.array_of_batches.len(), 10);
         assert_eq!(
             s_blast_hsp_stream_results_batch_array_append(
                 Some(&mut batches),
@@ -4532,6 +4849,13 @@ mod tests {
         assert_eq!(batches.num_allocated, 2);
         assert_eq!(
             s_blast_hsp_stream_results_batch_array_append(Some(&mut batches), None),
+            -1
+        );
+        assert_eq!(
+            s_blast_hsp_stream_results_batch_array_append(
+                None,
+                Some(blast_hsp_stream_result_batch_init(1)),
+            ),
             -1
         );
 
@@ -4653,11 +4977,31 @@ mod tests {
             crate::seqsrc::SeqEncoding::Protein
         );
         assert_eq!(
+            blast_traceback_get_encoding(crate::program::BLASTX),
+            crate::seqsrc::SeqEncoding::Protein
+        );
+        assert_eq!(
+            blast_traceback_get_encoding(crate::program::RPS_TBLASTN),
+            crate::seqsrc::SeqEncoding::Protein
+        );
+        assert_eq!(
             blast_traceback_get_encoding(crate::program::TBLASTN),
             crate::seqsrc::SeqEncoding::Ncbi4na
         );
         assert_eq!(
+            blast_traceback_get_encoding(crate::program::TBLASTX),
+            crate::seqsrc::SeqEncoding::Ncbi4na
+        );
+        assert_eq!(
+            blast_traceback_get_encoding(crate::program::PSI_TBLASTN),
+            crate::seqsrc::SeqEncoding::Ncbi4na
+        );
+        assert_eq!(
             blast_traceback_get_encoding(crate::program::BLASTN),
+            crate::seqsrc::SeqEncoding::Nucleotide
+        );
+        assert_eq!(
+            blast_traceback_get_encoding(crate::program::PHI_BLASTN),
             crate::seqsrc::SeqEncoding::Nucleotide
         );
     }
@@ -4690,6 +5034,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
+
+        s_blast_prune_extra_hits(&mut results, -1);
+        assert!(results
+            .hitlists
+            .iter()
+            .flatten()
+            .all(|hitlist| hitlist.hsp_lists.is_empty()));
     }
 
     #[test]
@@ -4805,8 +5156,16 @@ mod tests {
             index: 0,
             length: 4,
         });
+        let missing_pattern = make_hsp(90, 1e-9);
+        let mut out_of_range_pattern = make_hsp(100, 1e-10);
+        out_of_range_pattern.pat_info = Some(PhiPatInfo {
+            index: 5,
+            length: 8,
+        });
         let _ = blast_hsp_list_save_hsp(&mut list, pattern_two);
         let _ = blast_hsp_list_save_hsp(&mut list, pattern_zero);
+        let _ = blast_hsp_list_save_hsp(&mut list, missing_pattern);
+        let _ = blast_hsp_list_save_hsp(&mut list, out_of_range_pattern);
         let _ = blast_hsp_results_insert_hsp_list(&mut results, 0, list, 100);
 
         let split = phiblast_hsp_results_split(Some(&results), 3).expect("split results");
@@ -4822,7 +5181,18 @@ mod tests {
             p2.hitlists[0].as_ref().unwrap().hsp_lists[0].hsps[0].score,
             40
         );
+        assert_eq!(p0.hitlists[0].as_ref().unwrap().hsp_lists[0].hsps.len(), 1);
+        assert_eq!(p2.hitlists[0].as_ref().unwrap().hsp_lists[0].hsps.len(), 1);
         assert!(phiblast_hsp_results_split(Some(&results), 0).is_none());
+
+        let empty_split = phiblast_hsp_results_split(None, 2).expect("empty split");
+        assert_eq!(empty_split.len(), 2);
+        assert!(empty_split.iter().all(Option::is_none));
+
+        let no_hitlist = blast_hsp_results_new(1);
+        let no_hitlist_split = phiblast_hsp_results_split(Some(&no_hitlist), 2).expect("split");
+        assert_eq!(no_hitlist_split.len(), 2);
+        assert!(no_hitlist_split.iter().all(Option::is_none));
     }
 
     #[test]
@@ -4950,6 +5320,60 @@ mod tests {
         assert!((by_context(1).evalue - kbp1.raw_to_evalue(20, 2_000.0)).abs() < 1e-12);
         assert!((by_context(0).bit_score - kbp0.raw_to_bit(20)).abs() < 1e-12);
         assert!((by_context(1).bit_score - kbp1.raw_to_bit(20)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hsp_list_post_traceback_update_falls_back_for_missing_hsp_context() {
+        let mut scoring_options = crate::options::ScoringOptions::new_blastp();
+        scoring_options.gapped_calculation = true;
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                expect_value: 1000.0,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 1000.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[50]);
+        let kbp = crate::stat::KarlinBlk {
+            lambda: 0.3,
+            k: 0.2,
+            log_k: 0.2f64.ln(),
+            h: 0.4,
+            round_down: false,
+        };
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).unwrap();
+        sbp.kbp = vec![kbp.clone()];
+        sbp.kbp_gap = vec![kbp.clone()];
+
+        let mut list = blast_hsp_list_new(0);
+        let mut hsp = make_hsp(12, f64::MAX);
+        hsp.context = 4;
+        let _ = blast_hsp_list_save_hsp(&mut list, hsp);
+
+        assert_eq!(
+            s_hsp_list_post_traceback_update(
+                crate::program::BLASTP,
+                &mut list,
+                &query_info,
+                &score_params,
+                &hit_params,
+                &sbp,
+                75,
+            ),
+            0
+        );
+
+        assert_eq!(list.hsps.len(), 1);
+        assert_eq!(list.hsps[0].context, 4);
+        assert!((list.hsps[0].evalue - kbp.raw_to_evalue(12, 75.0)).abs() < 1e-12);
+        assert!((list.hsps[0].bit_score - kbp.raw_to_bit(12)).abs() < 1e-12);
     }
 
     #[test]
@@ -5101,6 +5525,61 @@ mod tests {
 
         assert_eq!(minus.hsps[0].subject_end, 9);
         assert_eq!(minus.hsps[0].query_end, 13);
+    }
+
+    #[test]
+    fn test_adjust_subject_for_translated_sra_search_covers_positive_offset_branches() {
+        let mut offset2 = HspList::new(3);
+        let mut frame1 = make_hsp(40, 1e-6);
+        frame1.subject_offset = 4;
+        frame1.subject_end = 12;
+        frame1.subject_gapped_start = 5;
+        frame1.subject_frame = 1;
+        offset2.hsps.push(frame1);
+        let mut frame2 = make_hsp(30, 1e-5);
+        frame2.subject_offset = 0;
+        frame2.subject_end = 10;
+        frame2.subject_gapped_start = 0;
+        frame2.subject_frame = 2;
+        offset2.hsps.push(frame2);
+        let mut frame3 = make_hsp(20, 1e-4);
+        frame3.subject_offset = 7;
+        frame3.subject_end = 16;
+        frame3.subject_gapped_start = 8;
+        frame3.subject_frame = 3;
+        offset2.hsps.push(frame3);
+
+        s_adjust_subject_for_translated_sra_search(&mut offset2, 2, 100);
+
+        assert_eq!(offset2.hsps[0].subject_frame, 2);
+        assert_eq!(offset2.hsps[0].subject_offset, 3);
+        assert_eq!(offset2.hsps[0].subject_end, 11);
+        assert_eq!(offset2.hsps[0].subject_gapped_start, 4);
+        assert_eq!(offset2.hsps[1].subject_frame, 3);
+        assert_eq!(offset2.hsps[1].query_offset, 1);
+        assert_eq!(offset2.hsps[1].subject_offset, 0);
+        assert_eq!(offset2.hsps[1].subject_end, 9);
+        assert_eq!(offset2.hsps[1].subject_gapped_start, -1);
+        assert_eq!(offset2.hsps[2].subject_frame, 1);
+        assert_eq!(offset2.hsps[2].subject_offset, 7);
+        assert_eq!(offset2.hsps[2].subject_end, 16);
+
+        let mut offset3 = HspList::new(1);
+        let mut hsp = make_hsp(10, 1e-3);
+        hsp.query_offset = 5;
+        hsp.subject_offset = 2;
+        hsp.subject_end = 8;
+        hsp.subject_gapped_start = 3;
+        hsp.subject_frame = 3;
+        offset3.hsps.push(hsp);
+
+        s_adjust_subject_for_translated_sra_search(&mut offset3, 3, 100);
+
+        assert_eq!(offset3.hsps[0].subject_frame, 3);
+        assert_eq!(offset3.hsps[0].query_offset, 5);
+        assert_eq!(offset3.hsps[0].subject_offset, 1);
+        assert_eq!(offset3.hsps[0].subject_end, 7);
+        assert_eq!(offset3.hsps[0].subject_gapped_start, 2);
     }
 
     #[test]
@@ -5317,6 +5796,81 @@ mod tests {
     }
 
     #[test]
+    fn test_s_trim_results_by_total_hsp_limit_ex_reports_without_flags() {
+        let mut results = blast_hsp_results_new(1);
+        let mut hitlist = blast_hit_list_new(9);
+        let mut list = HspList::new(10);
+        list.add_hsp(make_hsp(80, 1.0e-10));
+        list.add_hsp(make_hsp(70, 1.0e-20));
+        list.add_hsp(make_hsp(60, 1.0e-30));
+        hitlist.hsp_lists.push(list);
+        results.hitlists[0] = Some(hitlist);
+
+        assert!(s_trim_results_by_total_hsp_limit_ex(&mut results, 2, None));
+
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(
+            hitlist.hsp_lists[0]
+                .hsps
+                .iter()
+                .map(|hsp| hsp.score)
+                .collect::<Vec<_>>(),
+            vec![60, 70]
+        );
+    }
+
+    #[test]
+    fn test_s_trim_results_by_total_hsp_limit_ex_noop_clears_exceeded_flags() {
+        let mut results = blast_hsp_results_new(2);
+        let mut hitlist = blast_hit_list_new(9);
+        let mut list = HspList::new(10);
+        list.add_hsp(make_hsp(80, 1.0e-10));
+        list.add_hsp(make_hsp(70, 1.0e-20));
+        hitlist.hsp_lists.push(list);
+        results.hitlists[0] = Some(hitlist);
+
+        let mut flags = vec![true, true];
+        assert!(!s_trim_results_by_total_hsp_limit_ex(
+            &mut results,
+            3,
+            Some(&mut flags)
+        ));
+
+        assert_eq!(flags, vec![false, false]);
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps.len(), 2);
+    }
+
+    #[test]
+    fn test_s_trim_results_by_total_hsp_limit_ex_tolerates_short_flag_slice() {
+        let mut results = blast_hsp_results_new(2);
+        for query_index in 0..2 {
+            let mut hitlist = blast_hit_list_new(9);
+            let mut list = HspList::new(query_index as i32);
+            list.add_hsp(make_hsp(80, 1.0e-10));
+            list.add_hsp(make_hsp(70, 1.0e-20));
+            list.add_hsp(make_hsp(60, 1.0e-30));
+            hitlist.hsp_lists.push(list);
+            results.hitlists[query_index] = Some(hitlist);
+        }
+
+        let mut flags = vec![false];
+        assert!(s_trim_results_by_total_hsp_limit_ex(
+            &mut results,
+            2,
+            Some(&mut flags)
+        ));
+
+        assert_eq!(flags, vec![true]);
+        for hitlist in results.hitlists.iter().flatten() {
+            assert_eq!(hitlist.hsp_lists.len(), 1);
+            assert_eq!(hitlist.hsp_lists[0].hsps.len(), 2);
+        }
+    }
+
+    #[test]
     fn test_filter_blast_results_trims_and_reaps_query_coverage() {
         let mut results = blast_hsp_results_new(1);
         let mut hitlist = blast_hit_list_new(10);
@@ -5367,6 +5921,69 @@ mod tests {
             })
             .collect();
         assert_eq!(summary, vec![(11, vec![100])]);
+    }
+
+    #[test]
+    fn test_direct_max_hsp_and_query_coverage_filter_edges() {
+        let mut list = blast_hsp_list_new(0);
+        list.hsps = vec![
+            make_hsp(100, 1e-20),
+            make_hsp(90, 1e-10),
+            make_hsp(80, 1e-5),
+        ];
+        list.best_evalue = s_blast_get_best_evalue(&list);
+
+        let negative_max = HitSavingOptions {
+            max_hsps_per_subject: -1,
+            ..HitSavingOptions::default()
+        };
+        assert_eq!(
+            blast_trim_hsp_list_by_max_hsps(Some(&mut list), &negative_max),
+            0
+        );
+        assert_eq!(list.hsps.len(), 3);
+        assert_eq!(blast_trim_hsp_list_by_max_hsps(None, &negative_max), 0);
+
+        let max_two = HitSavingOptions {
+            max_hsps_per_subject: 2,
+            ..HitSavingOptions::default()
+        };
+        assert_eq!(
+            blast_trim_hsp_list_by_max_hsps(Some(&mut list), &max_two),
+            0
+        );
+        assert_eq!(
+            list.hsps.iter().map(|hsp| hsp.score).collect::<Vec<_>>(),
+            vec![100, 90]
+        );
+        assert_eq!(list.best_evalue, 1e-20);
+
+        let zero_cov = HitSavingOptions {
+            query_cov_hsp_perc: 0.0,
+            ..HitSavingOptions::default()
+        };
+        assert_eq!(
+            blast_hsp_list_reap_by_query_coverage(Some(&mut list), &zero_cov, &[]),
+            0
+        );
+        assert_eq!(list.hsps.len(), 2);
+
+        list.hsps[0].context = 7;
+        list.hsps[1].context = 8;
+        let strict_cov = HitSavingOptions {
+            query_cov_hsp_perc: 1.0,
+            ..HitSavingOptions::default()
+        };
+        assert_eq!(
+            blast_hsp_list_reap_by_query_coverage(Some(&mut list), &strict_cov, &[100]),
+            0
+        );
+        assert!(list.hsps.is_empty());
+        assert_eq!(list.best_evalue, f64::MAX);
+        assert_eq!(
+            blast_hsp_list_reap_by_query_coverage(None, &strict_cov, &[100]),
+            0
+        );
     }
 
     #[test]
@@ -5509,6 +6126,558 @@ mod tests {
     }
 
     #[test]
+    fn blast_compute_traceback_rejects_missing_required_inputs() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            None,
+            Some(&query_info),
+            &HitSavingOptions::default(),
+            30,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+        assert_eq!(status, crate::util::BLASTERR_INVALIDPARAM);
+        assert!(results.is_none());
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            None,
+            &HitSavingOptions::default(),
+            30,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+        assert_eq!(status, crate::util::BLASTERR_INVALIDPARAM);
+        assert!(results.is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+    }
+
+    #[test]
+    fn blast_compute_traceback_accepts_empty_stream_without_callbacks() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let mut callback_called = false;
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &HitSavingOptions::default(),
+            30,
+            true,
+            |_hsp_list| {
+                callback_called = true;
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(!callback_called);
+        let results = results.expect("empty traceback results");
+        assert_eq!(results.hitlists.len(), 1);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn blast_compute_traceback_collates_same_oid_batch_by_query_context() {
+        let stream = HspStream::new(2);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30, 40]);
+
+        let mut q0_list = HspList::new(17);
+        let mut q0_hsp = make_hsp(20, 1.0e-3);
+        q0_hsp.context = 0;
+        q0_list.add_hsp(q0_hsp);
+        assert_eq!(stream.blast_hspstream_write(0, q0_list), 0);
+
+        let mut q1_list = HspList::new(17);
+        let mut q1_hsp = make_hsp(30, 1.0e-4);
+        q1_hsp.context = 1;
+        q1_list.add_hsp(q1_hsp);
+        assert_eq!(stream.blast_hspstream_write(1, q1_list), 0);
+
+        let hit_options = HitSavingOptions {
+            hitlist_size: 10,
+            mask_level: 101,
+            ..HitSavingOptions::default()
+        };
+        let mut seen_contexts = Vec::new();
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            40,
+            true,
+            |hsp_list| {
+                seen_contexts.push(hsp_list.hsps[0].context);
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(seen_contexts, vec![0, 1]);
+        let results = results.expect("results");
+        let q0 = results.hitlists[0].as_ref().expect("query 0 hitlist");
+        let q1 = results.hitlists[1].as_ref().expect("query 1 hitlist");
+        assert_eq!(q0.hsp_lists.len(), 1);
+        assert_eq!(q1.hsp_lists.len(), 1);
+        assert_eq!(q0.hsp_lists[0].oid, 17);
+        assert_eq!(q0.hsp_lists[0].hsps[0].context, 0);
+        assert_eq!(q1.hsp_lists[0].oid, 17);
+        assert_eq!(q1.hsp_lists[0].hsps[0].context, 1);
+    }
+
+    #[test]
+    fn blast_compute_traceback_skips_empty_lists_after_callback() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let mut list = HspList::new(42);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut callback_called = false;
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &HitSavingOptions::default(),
+            30,
+            true,
+            |hsp_list| {
+                callback_called = true;
+                hsp_list.hsps.clear();
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(callback_called);
+        let results = results.expect("results");
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn blast_compute_traceback_closes_stream_on_callback_error() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let mut list = HspList::new(42);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &HitSavingOptions::default(),
+            30,
+            true,
+            |_hsp_list| 7,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 7);
+        assert!(results.is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn blast_compute_traceback_closes_stream_on_result_insert_error() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 0,
+            contexts: Vec::new(),
+            max_length: 0,
+        };
+        let mut list = HspList::new(42);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &HitSavingOptions::default(),
+            30,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 1);
+        assert!(results.is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn blast_compute_traceback_rejects_context_query_index_out_of_range() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 30,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 2,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 30,
+        };
+        let mut list = HspList::new(43);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &HitSavingOptions::default(),
+            30,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 1);
+        assert!(results.is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn blast_compute_traceback_interrupts_before_later_batch_callbacks() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        for oid in [1, 2] {
+            let mut list = HspList::new(oid);
+            let mut hsp = make_hsp(20 + oid, 1.0e-3);
+            hsp.context = 0;
+            list.add_hsp(hsp);
+            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        }
+        let hit_options = HitSavingOptions {
+            mask_level: 101,
+            ..HitSavingOptions::default()
+        };
+        let mut progress = crate::util::s_blast_progress_new(None);
+        let mut interrupt_calls = 0usize;
+        let mut interrupt = |_progress: &crate::util::SBlastProgress| {
+            interrupt_calls += 1;
+            interrupt_calls == 2
+        };
+        let mut callback_oids = Vec::new();
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            30,
+            true,
+            |hsp_list| {
+                callback_oids.push(hsp_list.oid);
+                0
+            },
+            Some(&mut interrupt),
+            Some(&mut progress),
+        );
+
+        assert_eq!(status, crate::diagnostics::BLASTERR_INTERRUPTED);
+        assert!(results.is_none());
+        assert_eq!(interrupt_calls, 2);
+        assert_eq!(callback_oids, vec![1]);
+        assert_eq!(progress.stage, crate::util::EBlastStage::TracebackSearch);
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn blast_compute_traceback_sorts_database_results_then_prunes_hitlist_size() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        for &(oid, evalue) in &[(7, 1.0e-3), (3, 1.0e-20)] {
+            let mut list = HspList::new(oid);
+            let mut hsp = make_hsp(20, evalue);
+            hsp.context = 0;
+            list.add_hsp(hsp);
+            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        }
+        let hit_options = HitSavingOptions {
+            hitlist_size: 1,
+            ..HitSavingOptions::default()
+        };
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            30,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let results = results.expect("results");
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 3);
+        assert_eq!(hitlist.hsp_lists[0].best_evalue, 1.0e-20);
+    }
+
+    #[test]
+    fn blast_compute_traceback_skips_database_sort_for_non_database_search() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        for &(oid, evalue) in &[(3, 1.0e-2), (7, 1.0e-20)] {
+            let mut list = HspList::new(oid);
+            let mut hsp = make_hsp(20, evalue);
+            hsp.context = 0;
+            list.add_hsp(hsp);
+            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        }
+        let hit_options = HitSavingOptions {
+            hitlist_size: 1,
+            mask_level: 101,
+            ..HitSavingOptions::default()
+        };
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            30,
+            false,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let results = results.expect("results");
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 3);
+        assert_eq!(hitlist.hsp_lists[0].best_evalue, 1.0e-2);
+    }
+
+    #[test]
+    fn blast_compute_traceback_applies_masklevel_after_result_collation() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[100]);
+
+        let mut strong_list = HspList::new(1);
+        let mut strong = make_hsp(100, 1.0e-30);
+        strong.context = 0;
+        strong.query_offset = 0;
+        strong.query_end = 100;
+        strong.subject_offset = 0;
+        strong.subject_end = 100;
+        strong_list.add_hsp(strong);
+        assert_eq!(stream.blast_hspstream_write(0, strong_list), 0);
+
+        let mut weak_list = HspList::new(2);
+        let mut weak = make_hsp(10, 1.0e-2);
+        weak.context = 0;
+        weak.query_offset = 10;
+        weak.query_end = 90;
+        weak.subject_offset = 10;
+        weak.subject_end = 90;
+        weak_list.add_hsp(weak);
+        assert_eq!(stream.blast_hspstream_write(0, weak_list), 0);
+
+        let hit_options = HitSavingOptions {
+            hitlist_size: 10,
+            mask_level: 100,
+            ..HitSavingOptions::default()
+        };
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            100,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let results = results.expect("results");
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 100);
+    }
+
+    #[test]
+    fn blast_compute_traceback_applies_max_hsps_and_query_coverage_filters() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[100]);
+
+        let mut kept_list = HspList::new(11);
+        let mut high_cov = make_hsp(100, 1.0e-20);
+        high_cov.context = 0;
+        high_cov.query_offset = 0;
+        high_cov.query_end = 80;
+        kept_list.add_hsp(high_cov);
+        let mut low_cov = make_hsp(90, 1.0e-10);
+        low_cov.context = 0;
+        low_cov.query_offset = 0;
+        low_cov.query_end = 10;
+        kept_list.add_hsp(low_cov);
+        let mut trimmed_before_coverage = make_hsp(80, 1.0e-5);
+        trimmed_before_coverage.context = 0;
+        trimmed_before_coverage.query_offset = 0;
+        trimmed_before_coverage.query_end = 90;
+        kept_list.add_hsp(trimmed_before_coverage);
+        assert_eq!(stream.blast_hspstream_write(0, kept_list), 0);
+
+        let mut emptied_list = HspList::new(22);
+        let mut weak_coverage = make_hsp(50, 1.0e-2);
+        weak_coverage.context = 0;
+        weak_coverage.query_offset = 0;
+        weak_coverage.query_end = 5;
+        emptied_list.add_hsp(weak_coverage);
+        assert_eq!(stream.blast_hspstream_write(0, emptied_list), 0);
+
+        let hit_options = HitSavingOptions {
+            hitlist_size: 10,
+            mask_level: 101,
+            max_hsps_per_subject: 2,
+            query_cov_hsp_perc: 50.0,
+            ..HitSavingOptions::default()
+        };
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            100,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let results = results.expect("results");
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 11);
+        assert_eq!(
+            hitlist.hsp_lists[0]
+                .hsps
+                .iter()
+                .map(|hsp| hsp.score)
+                .collect::<Vec<_>>(),
+            vec![100]
+        );
+    }
+
+    #[test]
+    fn blast_compute_traceback_query_coverage_reaps_missing_context_lengths() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[100]);
+        let mut list = HspList::new(44);
+        let mut hsp = make_hsp(90, 1.0e-20);
+        hsp.context = 7;
+        hsp.query_offset = 0;
+        hsp.query_end = 90;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let hit_options = HitSavingOptions {
+            hitlist_size: 10,
+            mask_level: 101,
+            query_cov_hsp_perc: 1.0,
+            ..HitSavingOptions::default()
+        };
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            100,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let results = results.expect("results");
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert!(hitlist.hsp_lists.is_empty());
+    }
+
+    #[test]
+    fn blast_traceback_dispatch_kind_matches_c_branch_order() {
+        assert_eq!(
+            blast_traceback_dispatch_kind(crate::program::RPS_BLAST, 0, false),
+            TracebackDispatchKind::Rps
+        );
+        assert_eq!(
+            blast_traceback_dispatch_kind(crate::program::RPS_BLAST, 1, true),
+            TracebackDispatchKind::Rps
+        );
+        assert_eq!(
+            blast_traceback_dispatch_kind(crate::program::BLASTP, 1, false),
+            TracebackDispatchKind::RedoAlignment
+        );
+        assert_eq!(
+            blast_traceback_dispatch_kind(crate::program::BLASTP, 0, true),
+            TracebackDispatchKind::RedoAlignment
+        );
+        assert_eq!(
+            blast_traceback_dispatch_kind(crate::program::PHI_BLASTP, 0, false),
+            TracebackDispatchKind::Phi
+        );
+        assert_eq!(
+            blast_traceback_dispatch_kind(crate::program::PHI_BLASTP, 1, false),
+            TracebackDispatchKind::RedoAlignment
+        );
+        assert_eq!(
+            blast_traceback_dispatch_kind(crate::program::BLASTP, 0, false),
+            TracebackDispatchKind::Ordinary
+        );
+    }
+
+    #[test]
     fn blast_run_traceback_search_with_interrupt_closes_stream_and_honors_interrupt() {
         let stream = HspStream::new(1);
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
@@ -5539,6 +6708,139 @@ mod tests {
         assert!(results.is_none());
         assert_eq!(progress.stage, crate::util::EBlastStage::TracebackSearch);
         assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn blast_run_traceback_search_with_interrupt_rejects_missing_stream() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+
+        let (status, results) = blast_run_traceback_search_with_interrupt(
+            crate::program::BLASTP,
+            None,
+            Some(&query_info),
+            &HitSavingOptions::default(),
+            30,
+            true,
+            false,
+            |_hsp_list| 0,
+            None,
+            None,
+            0,
+        );
+
+        assert_eq!(status, crate::util::BLASTERR_INVALIDPARAM);
+        assert!(results.is_none());
+    }
+
+    #[test]
+    fn blast_run_traceback_search_with_interrupt_rejects_missing_query_before_close() {
+        let stream = HspStream::new(1);
+
+        let (status, results) = blast_run_traceback_search_with_interrupt(
+            crate::program::BLASTP,
+            Some(&stream),
+            None,
+            &HitSavingOptions::default(),
+            30,
+            true,
+            false,
+            |_hsp_list| 0,
+            None,
+            None,
+            0,
+        );
+
+        assert_eq!(status, crate::util::BLASTERR_INVALIDPARAM);
+        assert!(results.is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+    }
+
+    #[test]
+    fn blast_run_traceback_search_with_interrupt_closes_ordinary_stream_before_callbacks() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let mut list = HspList::new(7);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let hit_options = HitSavingOptions {
+            hitlist_size: 10,
+            mask_level: 101,
+            ..HitSavingOptions::default()
+        };
+        let mut callback_write_status = 0;
+
+        let (status, results) = blast_run_traceback_search_with_interrupt(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            30,
+            true,
+            false,
+            |_hsp_list| {
+                callback_write_status = stream.blast_hspstream_write(0, HspList::new(9));
+                0
+            },
+            None,
+            None,
+            0,
+        );
+
+        assert_eq!(status, 0);
+        assert!(results.is_some());
+        assert_eq!(callback_write_status, -1);
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(10)), -1);
+    }
+
+    #[test]
+    fn blast_run_traceback_search_with_interrupt_uses_cbs_close_before_callbacks() {
+        let stream = blast_hsp_stream_new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        for index in 0..1305 {
+            let mut list = HspList::new(index);
+            let evalue = if index <= 500 {
+                1.0e-50
+            } else {
+                1.0e-5 + index as f64 * 1.0e-8
+            };
+            let mut hsp = make_hsp(100 - (index % 10), evalue);
+            hsp.context = 0;
+            list.add_hsp(hsp);
+            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        }
+        let hit_options = HitSavingOptions {
+            hitlist_size: 500,
+            mask_level: 101,
+            ..HitSavingOptions::default()
+        };
+        let mut callbacks = 0usize;
+
+        let (status, results) = blast_run_traceback_search_with_interrupt(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            30,
+            true,
+            true,
+            |_hsp_list| {
+                callbacks += 1;
+                0
+            },
+            None,
+            None,
+            0,
+        );
+
+        assert_eq!(status, 0);
+        assert!(callbacks < 1305);
+        assert_eq!(callbacks, 1100);
+        let results = results.expect("results");
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 500);
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9999)), -1);
     }
 
     fn make_rps_traceback_info() -> RpsTracebackInfo {
@@ -5578,7 +6880,292 @@ mod tests {
         assert_eq!(data.rps_pssm[2][0], 52);
         let freqs = data.rps_freq.as_ref().expect("freq rows");
         assert_eq!(freqs[5][25], 10_155);
+        let ratios = data.rps_freq_ratios.as_ref().expect("freq ratio rows");
+        assert!((ratios[5][25] - 0.10155).abs() < 1e-12);
         assert!(s_rps_gap_align_data_prepare(None).is_err());
+    }
+
+    #[test]
+    fn rps_gap_align_data_prepare_rejects_malformed_owned_profile_views() {
+        let mut short_offsets = make_rps_traceback_info();
+        short_offsets.profile_header.start_offsets = vec![0, 2];
+        assert!(s_rps_gap_align_data_prepare(Some(&short_offsets)).is_err());
+
+        let mut negative_profile_count = make_rps_traceback_info();
+        negative_profile_count.profile_header.num_profiles = -1;
+        negative_profile_count.profile_header.start_offsets = vec![0];
+        negative_profile_count.profile_header.pssm_values = vec![0; 26];
+        assert!(s_rps_gap_align_data_prepare(Some(&negative_profile_count)).is_err());
+
+        let mut unknown_magic = make_rps_traceback_info();
+        unknown_magic.profile_header.magic_number = 0x1234_5678;
+        assert!(s_rps_gap_align_data_prepare(Some(&unknown_magic)).is_err());
+
+        let mut negative_final_offset = make_rps_traceback_info();
+        negative_final_offset.profile_header.start_offsets = vec![0, 2, -1];
+        assert!(s_rps_gap_align_data_prepare(Some(&negative_final_offset)).is_err());
+
+        let mut negative_profile_start = make_rps_traceback_info();
+        negative_profile_start.profile_header.start_offsets = vec![-1, 2, 5];
+        assert!(s_rps_gap_align_data_prepare(Some(&negative_profile_start)).is_err());
+
+        let mut decreasing_offsets = make_rps_traceback_info();
+        decreasing_offsets.profile_header.start_offsets = vec![0, 5, 2];
+        assert!(s_rps_gap_align_data_prepare(Some(&decreasing_offsets)).is_err());
+
+        let mut truncated_pssm = make_rps_traceback_info();
+        truncated_pssm.profile_header.pssm_values.truncate(26);
+        assert!(s_rps_gap_align_data_prepare(Some(&truncated_pssm)).is_err());
+
+        let mut short_freq_offsets = make_rps_traceback_info();
+        short_freq_offsets
+            .freq_ratios_header
+            .as_mut()
+            .expect("freq header")
+            .start_offsets = vec![0, 2];
+        assert!(s_rps_gap_align_data_prepare(Some(&short_freq_offsets)).is_err());
+
+        let mut decreasing_freq_offsets = make_rps_traceback_info();
+        decreasing_freq_offsets
+            .freq_ratios_header
+            .as_mut()
+            .expect("freq header")
+            .start_offsets = vec![0, 5, 2];
+        assert!(s_rps_gap_align_data_prepare(Some(&decreasing_freq_offsets)).is_err());
+
+        let mut mismatched_freq_offsets = make_rps_traceback_info();
+        mismatched_freq_offsets
+            .freq_ratios_header
+            .as_mut()
+            .expect("freq header")
+            .start_offsets = vec![0, 1, 5];
+        assert!(s_rps_gap_align_data_prepare(Some(&mismatched_freq_offsets)).is_err());
+
+        let mut truncated_freq = make_rps_traceback_info();
+        truncated_freq
+            .freq_ratios_header
+            .as_mut()
+            .expect("freq header")
+            .freq_values
+            .truncate(26);
+        assert!(s_rps_gap_align_data_prepare(Some(&truncated_freq)).is_err());
+    }
+
+    #[test]
+    fn rps_fill_freq_ratios_in_psi_matrix_scales_and_zero_pads() {
+        let freq = vec![vec![100_000, 250_000, -50_000], vec![0, 1, 2]];
+
+        let ratios = s_rps_fill_freq_ratios_in_psi_matrix(&freq, 1, 3).expect("ratios");
+
+        assert_eq!(ratios.len(), 1);
+        assert_eq!(ratios[0][0], 1.0);
+        assert_eq!(ratios[0][1], 2.5);
+        assert_eq!(ratios[0][2], -0.5);
+        assert!(ratios[0][3..].iter().all(|&value| value == 0.0));
+        assert!(s_rps_fill_freq_ratios_in_psi_matrix(&freq, 3, 3).is_none());
+        assert!(s_rps_fill_freq_ratios_in_psi_matrix(&freq, 1, 29).is_none());
+    }
+
+    #[test]
+    fn rps_gap_align_data_prepare_accepts_absent_frequency_ratios() {
+        let mut rps_info = make_rps_traceback_info();
+        rps_info.freq_ratios_header = None;
+
+        let data = s_rps_gap_align_data_prepare(Some(&rps_info)).expect("RPS data");
+
+        assert!(data.rps_freq.is_none());
+        assert!(data.rps_freq_ratios.is_none());
+        assert_eq!(data.rps_pssm.len(), 6);
+        assert_eq!(data.concat_db_info.contexts[1].query_offset, 2);
+        assert_eq!(data.concat_db_info.contexts[1].query_length, 3);
+    }
+
+    #[test]
+    fn rps_fetch_consensus_sequence_uses_traceback_encoding_and_skips_missing_oid() {
+        let seq_src = RecordingSeqSrc {
+            seqs: vec![vec![1, 2, 3], vec![4, 5]],
+            encodings: TestMutex::new(Vec::new()),
+        };
+
+        let data = s_rps_fetch_consensus_sequence(crate::program::RPS_BLAST, Some(&seq_src), 1)
+            .expect("sequence");
+        assert_eq!(data.sequence, vec![4, 5]);
+        assert_eq!(data.length, 2);
+        assert_eq!(
+            seq_src.encodings.lock().unwrap().as_slice(),
+            &[crate::seqsrc::SeqEncoding::Protein]
+        );
+
+        let data = s_rps_fetch_consensus_sequence(crate::program::RPS_TBLASTN, Some(&seq_src), 0)
+            .expect("sequence");
+        assert_eq!(data.sequence, vec![1, 2, 3]);
+        assert_eq!(data.length, 3);
+
+        assert!(
+            s_rps_fetch_consensus_sequence(crate::program::RPS_TBLASTN, Some(&seq_src), 9)
+                .is_none()
+        );
+        assert_eq!(
+            seq_src.encodings.lock().unwrap().as_slice(),
+            &[
+                crate::seqsrc::SeqEncoding::Protein,
+                crate::seqsrc::SeqEncoding::Protein,
+                crate::seqsrc::SeqEncoding::Protein
+            ]
+        );
+        assert!(s_rps_fetch_consensus_sequence(crate::program::RPS_BLAST, None, 0).is_none());
+    }
+
+    #[test]
+    fn rps_profile_pssm_for_traceback_allocates_cbs_or_rescales_profile_rows() {
+        let query = [
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_A,
+            crate::encoding::NCBISTDAA_C,
+        ];
+        let profile_rows: Vec<Vec<i32>> = crate::matrix::BLOSUM62
+            .iter()
+            .map(|row| row.to_vec())
+            .collect();
+        let profile_len = profile_rows.len();
+        let gap_data = RpsGapAlignData {
+            concat_db_info: crate::queryinfo::QueryInfo {
+                num_queries: 1,
+                contexts: vec![crate::queryinfo::ContextInfo {
+                    query_offset: 0,
+                    query_length: profile_len as i32,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 0,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                }],
+                max_length: profile_len as u32,
+            },
+            rps_pssm: profile_rows,
+            rps_freq: None,
+            rps_freq_ratios: None,
+            alphabet_size: crate::encoding::BLASTAA_SIZE,
+            position_based: true,
+        };
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+
+        let scratch =
+            s_rps_profile_pssm_for_traceback(&gap_data, 0, &query, profile_len, 2.0, &sbp, true)
+                .expect("cbs scratch");
+        assert_eq!(
+            scratch,
+            vec![vec![0; crate::encoding::BLASTAA_SIZE]; profile_len]
+        );
+
+        let rescaled =
+            s_rps_profile_pssm_for_traceback(&gap_data, 0, &query, profile_len, 2.0, &sbp, false)
+                .expect("rescaled pssm");
+        assert_eq!(rescaled.len(), profile_len);
+        assert_eq!(rescaled[0].len(), crate::encoding::BLASTAA_SIZE);
+        assert_ne!(
+            rescaled[0][crate::encoding::NCBISTDAA_A as usize],
+            gap_data.rps_pssm[0][crate::encoding::NCBISTDAA_A as usize]
+        );
+        assert!(s_rps_profile_pssm_for_traceback(
+            &gap_data,
+            1,
+            &query,
+            profile_len,
+            2.0,
+            &sbp,
+            false
+        )
+        .is_none());
+        assert!(s_rps_profile_pssm_for_traceback(
+            &gap_data,
+            0,
+            &query,
+            profile_len + 1,
+            2.0,
+            &sbp,
+            false
+        )
+        .is_none());
+
+        let mut short_profile_row = gap_data.clone();
+        short_profile_row.rps_pssm[0].truncate(crate::encoding::BLASTAA_SIZE - 1);
+        assert!(s_rps_profile_pssm_for_traceback(
+            &short_profile_row,
+            0,
+            &query,
+            profile_len,
+            2.0,
+            &sbp,
+            false
+        )
+        .is_none());
+
+        let mut invalid_profile_context = gap_data.clone();
+        invalid_profile_context.concat_db_info.contexts[0].is_valid = false;
+        assert!(s_rps_profile_pssm_for_traceback(
+            &invalid_profile_context,
+            0,
+            &query,
+            profile_len,
+            2.0,
+            &sbp,
+            true
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rps_gap_align_data_prepare_uses_28_column_profile_format() {
+        let alphabet_size = 28;
+        let num_rows = 3 + 1;
+        let rps_info = RpsTracebackInfo {
+            profile_header: RpsProfileHeader {
+                magic_number: RPS_MAGIC_NUM_28,
+                num_profiles: 1,
+                start_offsets: vec![0, 3],
+                pssm_values: (0..(num_rows * alphabet_size)).map(|v| v as i32).collect(),
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.3],
+        };
+
+        let data = s_rps_gap_align_data_prepare(Some(&rps_info)).expect("RPS data");
+
+        assert_eq!(data.alphabet_size, 28);
+        assert_eq!(data.rps_pssm.len(), 4);
+        assert_eq!(data.rps_pssm[3][27], 111);
+        assert!(data.rps_freq.is_none());
+    }
+
+    #[test]
+    fn rps_gap_align_data_prepare_marks_zero_length_profile_context_invalid() {
+        let alphabet_size = 26;
+        let num_rows = 2 + 1;
+        let rps_info = RpsTracebackInfo {
+            profile_header: RpsProfileHeader {
+                magic_number: RPS_MAGIC_NUM,
+                num_profiles: 2,
+                start_offsets: vec![0, 0, 2],
+                pssm_values: (0..(num_rows * alphabet_size)).map(|v| v as i32).collect(),
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.1, 0.2],
+        };
+
+        let data = s_rps_gap_align_data_prepare(Some(&rps_info)).expect("RPS data");
+
+        assert_eq!(data.concat_db_info.num_queries, 2);
+        assert_eq!(data.concat_db_info.max_length, 2);
+        assert_eq!(data.concat_db_info.contexts[0].query_offset, 0);
+        assert_eq!(data.concat_db_info.contexts[0].query_length, 0);
+        assert!(!data.concat_db_info.contexts[0].is_valid);
+        assert_eq!(data.concat_db_info.contexts[1].query_offset, 0);
+        assert_eq!(data.concat_db_info.contexts[1].query_length, 2);
+        assert!(data.concat_db_info.contexts[1].is_valid);
     }
 
     #[test]
@@ -5617,6 +7204,8 @@ mod tests {
                 assert_eq!(profile_index, 1);
                 assert_eq!(gap_data.concat_db_info.contexts[1].query_offset, 2);
                 assert_eq!(gap_data.rps_pssm[2][0], 52);
+                let ratios = gap_data.rps_freq_ratios.as_ref().expect("freq ratios");
+                assert!((ratios[2][0] - 0.10052).abs() < 1e-12);
                 assert!((karlin_k.expect("K") - 0.24).abs() < 1e-12);
                 hsp_list.hsps[0].score += 5;
                 0
@@ -5636,5 +7225,485 @@ mod tests {
         let script = hsp.edit_script.as_ref().expect("edit script");
         assert_eq!(script.ops[0].0, GapAlignOpType::Del);
         assert_eq!(script.ops[1].0, GapAlignOpType::Ins);
+    }
+
+    #[test]
+    fn rps_compute_traceback_rejects_missing_required_inputs() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let rps_info = make_rps_traceback_info();
+        let mut results = HspResults::new(1);
+
+        assert_eq!(
+            s_rps_compute_traceback(
+                crate::program::RPS_BLAST,
+                None,
+                Some(&query_info),
+                Some(&rps_info),
+                &HitSavingOptions::default(),
+                Some(&mut results),
+                |_hsp_list, _gap_data, _profile_index, _karlin_k| 0,
+                None,
+                None,
+            ),
+            -1
+        );
+        assert_eq!(
+            s_rps_compute_traceback(
+                crate::program::RPS_BLAST,
+                Some(&stream),
+                None,
+                Some(&rps_info),
+                &HitSavingOptions::default(),
+                Some(&mut results),
+                |_hsp_list, _gap_data, _profile_index, _karlin_k| 0,
+                None,
+                None,
+            ),
+            -1
+        );
+        assert_eq!(
+            s_rps_compute_traceback(
+                crate::program::RPS_BLAST,
+                Some(&stream),
+                Some(&query_info),
+                None,
+                &HitSavingOptions::default(),
+                Some(&mut results),
+                |_hsp_list, _gap_data, _profile_index, _karlin_k| 0,
+                None,
+                None,
+            ),
+            -1
+        );
+        assert_eq!(
+            s_rps_compute_traceback(
+                crate::program::RPS_BLAST,
+                Some(&stream),
+                Some(&query_info),
+                Some(&rps_info),
+                &HitSavingOptions::default(),
+                None,
+                |_hsp_list, _gap_data, _profile_index, _karlin_k| 0,
+                None,
+                None,
+            ),
+            -1
+        );
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+    }
+
+    #[test]
+    fn rps_compute_traceback_accepts_empty_stream_without_callbacks() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let rps_info = make_rps_traceback_info();
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                callback_called = true;
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(!callback_called);
+        assert_eq!(results.hitlists.len(), 1);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn rps_compute_traceback_rejects_malformed_profile_before_stream_drain() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let mut bad_rps_info = make_rps_traceback_info();
+        bad_rps_info.profile_header.start_offsets = vec![0, 5, 2];
+        let mut list = HspList::new(1);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        assert_eq!(
+            s_rps_compute_traceback(
+                crate::program::RPS_BLAST,
+                Some(&stream),
+                Some(&query_info),
+                Some(&bad_rps_info),
+                &HitSavingOptions::default(),
+                Some(&mut results),
+                |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                    callback_called = true;
+                    0
+                },
+                None,
+                None,
+            ),
+            -1
+        );
+
+        assert!(!callback_called);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+    }
+
+    #[test]
+    fn rps_compute_traceback_sorts_inserted_results_by_evalue() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let rps_info = make_rps_traceback_info();
+        for &(oid, evalue) in &[(0, 1.0e-2), (1, 1.0e-20)] {
+            let mut list = HspList::new(oid);
+            let mut hsp = make_hsp(20, evalue);
+            hsp.context = 0;
+            list.add_hsp(hsp);
+            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        }
+        let mut results = HspResults::new(1);
+        let hit_options = HitSavingOptions {
+            hitlist_size: 10,
+            ..HitSavingOptions::default()
+        };
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &hit_options,
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        let summary: Vec<(i32, f64)> = hitlist
+            .hsp_lists
+            .iter()
+            .map(|list| (list.oid, list.best_evalue))
+            .collect();
+        assert_eq!(summary, vec![(1, 1.0e-20), (0, 1.0e-2)]);
+    }
+
+    #[test]
+    fn rps_compute_traceback_closes_stream_on_traceback_error() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let rps_info = make_rps_traceback_info();
+        let mut list = HspList::new(1);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| 7,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 7);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn rps_compute_traceback_skips_empty_post_traceback_lists() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let rps_info = make_rps_traceback_info();
+        let mut list = HspList::new(1);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |hsp_list, _gap_data, _profile_index, _karlin_k| {
+                callback_called = true;
+                hsp_list.hsps.clear();
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(callback_called);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn rps_compute_traceback_closes_stream_on_result_insert_error() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 30,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 3,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 30,
+        };
+        let rps_info = make_rps_traceback_info();
+        let mut list = HspList::new(1);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                callback_called = true;
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 1);
+        assert!(callback_called);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn rps_compute_traceback_closes_stream_on_interrupt_before_traceback() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let rps_info = make_rps_traceback_info();
+        let mut list = HspList::new(1);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut progress = crate::util::s_blast_progress_new(None);
+        let mut interrupted = false;
+        let mut interrupt = |_progress: &crate::util::SBlastProgress| {
+            interrupted = true;
+            true
+        };
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                panic!("traceback callback must not run after interrupt")
+            },
+            Some(&mut interrupt),
+            Some(&mut progress),
+        );
+
+        assert_eq!(status, crate::diagnostics::BLASTERR_INTERRUPTED);
+        assert!(interrupted);
+        assert_eq!(progress.stage, crate::util::EBlastStage::TracebackSearch);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn rps_compute_traceback_skips_hsplists_without_profile_context() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let rps_info = make_rps_traceback_info();
+        let mut list = HspList::new(99);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                callback_called = true;
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(!callback_called);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn rps_compute_traceback_skips_invalid_zero_length_profile_context() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let alphabet_size = 26;
+        let num_rows = 2 + 1;
+        let rps_info = RpsTracebackInfo {
+            profile_header: RpsProfileHeader {
+                magic_number: RPS_MAGIC_NUM,
+                num_profiles: 2,
+                start_offsets: vec![0, 0, 2],
+                pssm_values: (0..(num_rows * alphabet_size)).map(|v| v as i32).collect(),
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.1, 0.2],
+        };
+        let mut list = HspList::new(0);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                callback_called = true;
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(!callback_called);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+    }
+
+    #[test]
+    fn rps_compute_traceback_rejects_malformed_frequency_payload_before_stream_drain() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let mut rps_info = make_rps_traceback_info();
+        let frequency_rows = rps_info
+            .freq_ratios_header
+            .as_mut()
+            .expect("frequency ratios");
+        frequency_rows
+            .freq_values
+            .truncate(2 * crate::encoding::BLASTAA_SIZE);
+        let mut list = HspList::new(1);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                callback_called = true;
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, -1);
+        assert!(!callback_called);
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+    }
+
+    #[test]
+    fn rps_compute_traceback_allows_missing_karlin_k_metadata() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
+        let mut rps_info = make_rps_traceback_info();
+        rps_info.karlin_k.clear();
+        let mut list = HspList::new(1);
+        let mut hsp = make_hsp(20, 1.0e-3);
+        hsp.context = 0;
+        list.add_hsp(hsp);
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        let mut results = HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, profile_index, karlin_k| {
+                callback_called = true;
+                assert_eq!(profile_index, 1);
+                assert!(karlin_k.is_none());
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(callback_called);
+        assert!(results.hitlists[0].is_some());
+        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
     }
 }

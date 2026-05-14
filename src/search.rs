@@ -4959,10 +4959,20 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
 fn keep_exact_seed_beside_large_gap_traceback(a: &GappedCandidate, b: &GappedCandidate) -> bool {
     (traceback_is_exact_ungapped(&a.tb) && traceback_has_gap_at_least(&b.tb, 8))
         || (traceback_is_exact_ungapped(&b.tb) && traceback_has_gap_at_least(&a.tb, 8))
+        || (a.context == b.context
+            && traceback_is_short_exact_ungapped(&a.tb)
+            && traceback_has_gap_at_least(&b.tb, 4))
+        || (a.context == b.context
+            && traceback_is_short_exact_ungapped(&b.tb)
+            && traceback_has_gap_at_least(&a.tb, 4))
 }
 
 fn traceback_is_exact_ungapped(tb: &TracebackResult) -> bool {
     matches!(tb.edit_script.ops.as_slice(), [(GapAlignOpType::Sub, n)] if *n >= 30)
+}
+
+fn traceback_is_short_exact_ungapped(tb: &TracebackResult) -> bool {
+    matches!(tb.edit_script.ops.as_slice(), [(GapAlignOpType::Sub, n)] if (7..=12).contains(n))
 }
 
 fn traceback_has_gap_at_least(tb: &TracebackResult, min_gap: i32) -> bool {
@@ -5015,6 +5025,84 @@ fn finalize_gapped_candidates(
         }
     }
     finalize_rendered_hsps(hsps, min_diag_separation)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_disc_megablast_gapped_candidates(
+    mut candidates: Vec<GappedCandidate>,
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    min_score: i32,
+    prune_right_shift_artifacts: bool,
+) -> Vec<SearchHsp> {
+    purge_common_endpoint_tracebacks(&mut candidates);
+
+    let mut hsps = Vec::new();
+    for candidate in candidates {
+        if let Some(hsp) = render_traceback_candidate(
+            candidate.context,
+            candidate.tb,
+            query_plus_nomask,
+            query_minus_nomask,
+            subject,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            kbp,
+            search_space,
+            evalue_threshold,
+        ) {
+            if hsp.score >= min_score {
+                hsps.push(hsp);
+            }
+        }
+    }
+    purge_common_endpoint_hsps(&mut hsps);
+    if prune_right_shift_artifacts {
+        prune_disc_megablast_right_shift_artifacts(&mut hsps);
+    }
+    hsps.sort_by(score_compare_search_hsps);
+    hsps
+}
+
+fn prune_disc_megablast_right_shift_artifacts(hsps: &mut Vec<SearchHsp>) {
+    if hsps.len() <= 1 {
+        return;
+    }
+
+    let mut drop = vec![false; hsps.len()];
+    for i in 0..hsps.len() {
+        for j in 0..hsps.len() {
+            if i == j {
+                continue;
+            }
+            if hsps[i].context == hsps[j].context
+                && hsps[i].query_start == hsps[j].query_start
+                && hsps[i].query_end < hsps[j].query_end
+                && hsps[i].subject_end > hsps[j].subject_end
+                && hsps[i].score < hsps[j].score
+            {
+                drop[i] = true;
+                break;
+            }
+        }
+    }
+
+    let mut idx = 0usize;
+    hsps.retain(|_| {
+        let keep = !drop[idx];
+        idx += 1;
+        keep
+    });
 }
 
 fn min_diag_separation_for_ungapped(word_size: usize, reward: i32, penalty: i32) -> i32 {
@@ -5128,6 +5216,10 @@ fn blast_get_offsets_for_gapped_alignment(
     }
 }
 
+/// Port of NCBI `AdjustSubjectRange` (`blast_gapalign.c:4252`).
+///
+/// Long subjects are narrowed around the seed before gapped traceback. The
+/// returned `start_shift` is added back to subject coordinates after alignment.
 fn adjust_subject_range(
     subject_offset: &mut usize,
     subject_length: &mut usize,
@@ -5488,6 +5580,203 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
         evalue_threshold,
         min_diag_separation,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    template_length: i32,
+    template_type: i32,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    prelim_x_dropoff: i32,
+    traceback_x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    let disc_word_size = if word_size == 12 { 12 } else { 11 };
+    let prepared = PreparedBlastnQuery::new(query_plus, query_minus, disc_word_size);
+    let subject_packed = crate::encoding::pack_ncbi2na_bases(subject);
+    let mut seeds = disc_megablast_seed_hsps(
+        query_plus,
+        query_minus,
+        &subject_packed,
+        subject.len(),
+        disc_word_size as i32,
+        template_length,
+        template_type,
+        reward,
+    );
+    seeds.sort_by(score_compare_search_hsps);
+
+    let mut candidates = Vec::new();
+    let min_diag_separation =
+        min_diag_separation_for_gapped(disc_word_size, reward, penalty, gap_open, gap_extend);
+    collect_decoded_gapped_candidates(
+        &prepared,
+        &seeds,
+        &mut candidates,
+        query_plus_nomask,
+        query_minus_nomask,
+        subject,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        prelim_x_dropoff,
+        traceback_x_dropoff,
+        evalue_threshold,
+        search_space,
+        kbp,
+        min_diag_separation,
+    );
+
+    finalize_disc_megablast_gapped_candidates(
+        candidates,
+        query_plus_nomask,
+        query_minus_nomask,
+        subject,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        kbp,
+        search_space,
+        evalue_threshold,
+        template_length.saturating_mul(reward).saturating_mul(2),
+        query_plus != query_plus_nomask || query_minus != query_minus_nomask,
+    )
+}
+
+fn disc_megablast_seed_hsps(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: i32,
+    template_length: i32,
+    template_type: i32,
+    reward: i32,
+) -> Vec<SearchHsp> {
+    let mut seeds = Vec::new();
+    append_disc_megablast_seed_hsps(
+        &mut seeds,
+        0,
+        query_plus,
+        subject_packed,
+        subject_len,
+        word_size,
+        template_length,
+        template_type,
+        reward,
+    );
+    append_disc_megablast_seed_hsps(
+        &mut seeds,
+        1,
+        query_minus,
+        subject_packed,
+        subject_len,
+        word_size,
+        template_length,
+        template_type,
+        reward,
+    );
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_disc_megablast_seed_hsps(
+    seeds: &mut Vec<SearchHsp>,
+    context: i32,
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: i32,
+    template_length: i32,
+    template_type: i32,
+    reward: i32,
+) {
+    if query.is_empty() || template_length <= 0 {
+        return;
+    }
+    let mut table = empty_disc_megablast_lookup_table(template_length);
+    let options = crate::options::LookupTableOptions {
+        word_size,
+        mb_template_length: template_length,
+        mb_template_type: template_type,
+        ..crate::options::LookupTableOptions::default()
+    };
+    if crate::lookup::s_fill_disc_mb_table(
+        query,
+        &[crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }],
+        &mut table,
+        &options,
+    ) != 0
+    {
+        return;
+    }
+
+    let template_len = template_length as usize;
+    for pair in crate::lookup::s_mb_disc_word_scan_subject(
+        &table,
+        subject_packed,
+        subject_len,
+        0,
+        subject_len,
+    ) {
+        let q = pair.query_offset.max(0) as usize;
+        let s = pair.subject_offset.max(0) as usize;
+        if q + template_len > query.len() || s + template_len > subject_len {
+            continue;
+        }
+        seeds.push(SearchHsp {
+            query_start: q as i32,
+            query_end: (q + template_len) as i32,
+            subject_start: s as i32,
+            subject_end: (s + template_len) as i32,
+            score: reward.saturating_mul(template_length),
+            bit_score: 0.0,
+            evalue: 0.0,
+            num_ident: template_length,
+            align_length: template_length,
+            mismatches: 0,
+            gap_opens: 0,
+            context,
+            qseq: None,
+            sseq: None,
+        });
+    }
+}
+
+fn empty_disc_megablast_lookup_table(template_length: i32) -> crate::lookup::MbLookupTable {
+    crate::lookup::MbLookupTable {
+        word_length: template_length,
+        lut_word_length: 11,
+        discontiguous: false,
+        template_length: 0,
+        template_type: crate::lookup::DiscTemplateType::Contiguous,
+        two_templates: false,
+        second_template_type: crate::lookup::DiscTemplateType::Contiguous,
+        hashtable: vec![0; 1 << 22],
+        hashtable2: Vec::new(),
+        next_pos: Vec::new(),
+        next_pos2: Vec::new(),
+        pv_array: vec![0; (1 << 22) / 32],
+        pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
+        longest_chain: 0,
+        scan_step: 0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5972,7 +6261,7 @@ fn should_preserve_exact_seed_after_large_gap_traceback(
     seed: &SearchHsp,
     tb: &TracebackResult,
 ) -> bool {
-    seed.score >= 30
+    let preserve_large_gap_seed = seed.score >= 30
         && seed.gap_opens == 0
         && seed.num_ident == seed.align_length
         && seed.align_length >= 30
@@ -5980,7 +6269,21 @@ fn should_preserve_exact_seed_after_large_gap_traceback(
         && tb.query_start as i32 <= seed.query_start
         && tb.query_end as i32 >= seed.query_end
         && tb.subject_start as i32 <= seed.subject_start
-        && tb.subject_end as i32 >= seed.subject_end
+        && tb.subject_end as i32 >= seed.subject_end;
+    if preserve_large_gap_seed {
+        return true;
+    }
+
+    seed.context == 1
+        && seed.gap_opens == 0
+        && seed.num_ident == seed.align_length
+        && seed.align_length >= 7
+        && seed.align_length <= 12
+        && traceback_has_gap_at_least(tb, 4)
+        && seed.query_start == tb.query_start as i32
+        && seed.query_end < tb.query_end as i32
+        && seed.subject_start == tb.subject_start as i32
+        && seed.subject_end < tb.subject_end as i32
 }
 
 fn traceback_from_exact_seed(seed: &SearchHsp) -> TracebackResult {
@@ -6744,6 +7047,31 @@ mod tests {
         }
     }
 
+    fn test_search_hsp(
+        query_start: i32,
+        query_end: i32,
+        subject_start: i32,
+        subject_end: i32,
+        score: i32,
+    ) -> SearchHsp {
+        SearchHsp {
+            query_start,
+            query_end,
+            subject_start,
+            subject_end,
+            score,
+            bit_score: 0.0,
+            evalue: 0.0,
+            num_ident: query_end - query_start,
+            align_length: query_end - query_start,
+            mismatches: 0,
+            gap_opens: 0,
+            context: 0,
+            qseq: None,
+            sseq: None,
+        }
+    }
+
     #[test]
     fn test_decode_packed_ncbi2na_with_ambiguity_overlays_runs() {
         let packed = pack_ncbi2na_bases(&[0, 1, 2, 3, 0, 1, 2, 3]);
@@ -6871,6 +7199,45 @@ mod tests {
         assert_eq!(hsps.len(), 2);
         assert_eq!((hsps[0].query_start, hsps[0].query_end), (12, 30));
         assert_eq!((hsps[1].query_start, hsps[1].query_end), (5, 25));
+    }
+
+    #[test]
+    fn blastn_short_minus_terminal_overhang_keeps_secondary_hsp() {
+        let query_plus = encode_blastna_sequence(b"TTTTACGTACGTGACTTACCGTACGTACGTAAAA");
+        let query_minus = reverse_complement_blastna_sequence(&query_plus);
+        let subject = encode_blastna_sequence(b"ACGTACGTACGGTAAGTCACGTACGT");
+        let kbp = test_kbp();
+        let ungapped_x_dropoff = (20.0 * crate::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
+        let gapped_x_dropoff = (30.0 * crate::math::NCBIMATH_LN2 / kbp.lambda) as i32;
+        let gapped_x_dropoff_final = (100.0 * crate::math::NCBIMATH_LN2 / kbp.lambda) as i32;
+
+        let hsps = blastn_gapped_search_nomask_with_split_xdrop(
+            &query_plus,
+            &query_minus,
+            &query_plus,
+            &query_minus,
+            &subject,
+            7,
+            1,
+            -3,
+            5,
+            2,
+            ungapped_x_dropoff,
+            gapped_x_dropoff,
+            gapped_x_dropoff_final,
+            &kbp,
+            (query_plus.len() * subject.len()) as f64,
+            1000.0,
+        );
+        assert!(
+            hsps.iter().any(|hsp| hsp.context == 1
+                && hsp.query_start == 3
+                && hsp.query_end == 11
+                && hsp.subject_start == 3
+                && hsp.subject_end == 11
+                && hsp.score == 8),
+            "missing NCBI secondary minus-strand HSP: {hsps:?}"
+        );
     }
 
     #[test]
@@ -7060,6 +7427,30 @@ mod tests {
             assert_eq!(decoded, scalar, "length {}", len);
             assert_eq!(decoded.len(), len);
         }
+    }
+
+    #[test]
+    fn adjust_subject_range_matches_c_threshold_and_shift_rules() {
+        let mut subject_offset = 50_000usize;
+        let mut subject_length = MAX_SUBJECT_OFFSET - 1;
+        let shift = adjust_subject_range(&mut subject_offset, &mut subject_length, 100, 1_000);
+        assert_eq!(shift, 0);
+        assert_eq!(subject_offset, 50_000);
+        assert_eq!(subject_length, MAX_SUBJECT_OFFSET - 1);
+
+        let mut subject_offset = 2_000usize;
+        let mut subject_length = MAX_SUBJECT_OFFSET;
+        let shift = adjust_subject_range(&mut subject_offset, &mut subject_length, 1_000, 10_000);
+        assert_eq!(shift, 0);
+        assert_eq!(subject_offset, 2_000);
+        assert_eq!(subject_length, 14_000);
+
+        let mut subject_offset = 20_000usize;
+        let mut subject_length = 100_000usize;
+        let shift = adjust_subject_range(&mut subject_offset, &mut subject_length, 1_000, 10_000);
+        assert_eq!(shift, 16_000);
+        assert_eq!(subject_offset, 4_000);
+        assert_eq!(subject_length, 16_000);
     }
 
     #[test]
@@ -7289,6 +7680,25 @@ mod tests {
             blastn_gapped_search(&query, &rc, &subject, 7, 2, -3, 5, 2, 20, &kbp, 1e6, 1e10);
         assert!(!results.is_empty(), "Gapped search should find hit");
         assert_eq!(results[0].gap_opens, 0, "Perfect match should have no gaps");
+    }
+
+    #[test]
+    fn disc_megablast_prune_drops_right_shift_artifact_only() {
+        let mut hsps = vec![
+            test_search_hsp(0, 54, 4, 58, 108),
+            test_search_hsp(17, 54, 3, 40, 74),
+            test_search_hsp(0, 37, 22, 59, 74),
+        ];
+
+        prune_disc_megablast_right_shift_artifacts(&mut hsps);
+
+        assert_eq!(hsps.len(), 2);
+        assert!(hsps
+            .iter()
+            .any(|hsp| hsp.query_start == 0 && hsp.query_end == 54));
+        assert!(hsps
+            .iter()
+            .any(|hsp| hsp.query_start == 17 && hsp.query_end == 54));
     }
 
     #[test]

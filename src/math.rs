@@ -209,8 +209,7 @@ pub fn s_log_derivative(order: i32, u: &[f64]) -> f64 {
         3 => y[3] - 3.0 * y[2] * y[1] + 2.0 * y[1] * y[1] * y[1],
         4 => {
             let tmp = y[1] * y[1];
-            y[4] - 4.0 * y[3] * y[1] - 3.0 * y[2] * y[2] + 12.0 * y[2] * tmp
-                - 6.0 * tmp * tmp
+            y[4] - 4.0 * y[3] * y[1] - 3.0 * y[2] * y[2] + 12.0 * y[2] * tmp - 6.0 * tmp * tmp
         }
         _ => f64::INFINITY,
     }
@@ -784,11 +783,8 @@ pub fn erf_impl(z: f64, invert: bool) -> f64 {
             ];
             let x = z - 0.5;
             let p = ((((P[5] * x + P[4]) * x + P[3]) * x + P[2]) * x + P[1]) * x + P[0];
-            let q = (((((Q[6] * x + Q[5]) * x + Q[4]) * x + Q[3]) * x + Q[2])
-                * x
-                + Q[1])
-                * x
-                + Q[0];
+            let q =
+                (((((Q[6] * x + Q[5]) * x + Q[4]) * x + Q[3]) * x + Q[2]) * x + Q[1]) * x + Q[0];
             result = (Y + p / q) * (-z * z).exp() / z;
         } else if z < 2.5 {
             const Y: f64 = 0.506_728_172_302_246_093_75;
@@ -855,16 +851,10 @@ pub fn erf_impl(z: f64, invert: bool) -> f64 {
                 5.484_091_822_386_417_415_84,
             ];
             let x = 1.0 / z;
-            let p = (((((P[6] * x + P[5]) * x + P[4]) * x + P[3]) * x + P[2])
-                * x
-                + P[1])
-                * x
-                + P[0];
-            let q = (((((Q[6] * x + Q[5]) * x + Q[4]) * x + Q[3]) * x + Q[2])
-                * x
-                + Q[1])
-                * x
-                + Q[0];
+            let p =
+                (((((P[6] * x + P[5]) * x + P[4]) * x + P[3]) * x + P[2]) * x + P[1]) * x + P[0];
+            let q =
+                (((((Q[6] * x + Q[5]) * x + Q[4]) * x + Q[3]) * x + Q[2]) * x + Q[1]) * x + Q[0];
             result = (Y + p / q) * (-z * z).exp() / z;
         }
     } else {
@@ -872,7 +862,11 @@ pub fn erf_impl(z: f64, invert: bool) -> f64 {
         invert = !invert;
     }
 
-    if invert { 1.0 - result } else { result }
+    if invert {
+        1.0 - result
+    } else {
+        result
+    }
 }
 
 /// Wrapper for NCBI Boost-style `Erf` (`boost_erf.c:247`).

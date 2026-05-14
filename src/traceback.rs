@@ -60,7 +60,12 @@ impl OutOfFrameScoring {
                 .copied()
                 .unwrap_or_else(|| self.matrix_score(*a.get(a_index).unwrap_or(&0), b_letter));
         }
-        self.matrix_score(*a.get(a_index).unwrap_or(&0), b_letter)
+        let row = if reversed {
+            m.saturating_sub(a_index)
+        } else {
+            a_index
+        };
+        self.matrix_score(*a.get(row).unwrap_or(&0), b_letter)
     }
 }
 
@@ -292,7 +297,11 @@ use crate::stat::MININT;
 const SCRIPT_SUB: u8 = 3;
 const SCRIPT_GAP_IN_A: u8 = 0; // gap in query = deletion
 const SCRIPT_GAP_IN_B: u8 = 6; // gap in subject = insertion
+const SCRIPT_AHEAD_ONE_FRAME: u8 = 1;
+const SCRIPT_AHEAD_TWO_FRAMES: u8 = 2;
 const SCRIPT_NEXT_IN_FRAME: u8 = 3;
+const SCRIPT_NEXT_PLUS_ONE_FRAME: u8 = 4;
+const SCRIPT_NEXT_PLUS_TWO_FRAMES: u8 = 5;
 const SCRIPT_OP_MASK: u8 = 0x07;
 const SCRIPT_OOF_OPEN_GAP: u8 = 0x08;
 const SCRIPT_EXTEND_GAP_A: u8 = 0x10;
@@ -2473,11 +2482,11 @@ pub fn blast_gapped_align(
 fn oof_script_to_op(script: u8) -> GapAlignOpType {
     match script & SCRIPT_OP_MASK {
         SCRIPT_GAP_IN_A => GapAlignOpType::Del,
-        1 => GapAlignOpType::Del2,
-        2 => GapAlignOpType::Del1,
+        SCRIPT_AHEAD_ONE_FRAME => GapAlignOpType::Del2,
+        SCRIPT_AHEAD_TWO_FRAMES => GapAlignOpType::Del1,
         SCRIPT_SUB => GapAlignOpType::Sub,
-        4 => GapAlignOpType::Ins1,
-        5 => GapAlignOpType::Ins2,
+        SCRIPT_NEXT_PLUS_ONE_FRAME => GapAlignOpType::Ins1,
+        SCRIPT_NEXT_PLUS_TWO_FRAMES => GapAlignOpType::Ins2,
         SCRIPT_GAP_IN_B => GapAlignOpType::Ins,
         _ => GapAlignOpType::Sub,
     }
@@ -2505,44 +2514,44 @@ fn oof_initial_trace_script(
     match frame {
         0 if shifted + shift_penalty == score_other_frame1 => {
             if score_other_frame1 == score_col2 {
-                2
+                SCRIPT_AHEAD_TWO_FRAMES
             } else {
-                5
+                SCRIPT_NEXT_PLUS_TWO_FRAMES
             }
         }
         0 => {
             if score_other_frame2 == score_col3 {
-                1
+                SCRIPT_AHEAD_ONE_FRAME
             } else {
-                4
+                SCRIPT_NEXT_PLUS_ONE_FRAME
             }
         }
         1 if shifted + shift_penalty == score_other_frame1 => {
             if score_other_frame1 == score_col1 {
-                1
+                SCRIPT_AHEAD_ONE_FRAME
             } else {
-                4
+                SCRIPT_NEXT_PLUS_ONE_FRAME
             }
         }
         1 => {
             if score_other_frame2 == score_col3 {
-                2
+                SCRIPT_AHEAD_TWO_FRAMES
             } else {
-                5
+                SCRIPT_NEXT_PLUS_TWO_FRAMES
             }
         }
         _ if shifted + shift_penalty == score_other_frame1 => {
             if score_other_frame1 == score_col1 {
-                2
+                SCRIPT_AHEAD_TWO_FRAMES
             } else {
-                5
+                SCRIPT_NEXT_PLUS_TWO_FRAMES
             }
         }
         _ => {
             if score_other_frame2 == score_col2 {
-                1
+                SCRIPT_AHEAD_ONE_FRAME
             } else {
-                4
+                SCRIPT_NEXT_PLUS_ONE_FRAME
             }
         }
     }
@@ -4350,6 +4359,380 @@ mod tests {
     }
 
     #[test]
+    fn out_of_frame_wrapper_non_switch_matches_direct_tblastn_branch() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
+        let scoring = OutOfFrameScoring::default();
+        let mut direct_q_start = 0;
+        let mut direct_s_start = 0;
+        let direct = s_out_of_frame_gapped_align(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut direct_q_start,
+            &mut direct_s_start,
+            true,
+            None,
+            &scoring,
+            0,
+            false,
+        );
+        let mut wrapped_q_start = 0;
+        let mut wrapped_s_start = 0;
+        let wrapped = s_out_of_frame_semi_gapped_align_wrap(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut wrapped_q_start,
+            &mut wrapped_s_start,
+            true,
+            None,
+            &scoring,
+            0,
+            false,
+            false,
+        );
+
+        assert_eq!(wrapped, direct);
+        assert_eq!(wrapped_q_start, direct_q_start);
+        assert_eq!(wrapped_s_start, direct_s_start);
+    }
+
+    #[test]
+    fn out_of_frame_wrapper_non_switch_traceback_matches_direct_tblastn_branch() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
+        let scoring = OutOfFrameScoring::default();
+        let mut direct_q_start = 0;
+        let mut direct_s_start = 0;
+        let mut direct_block = crate::gapinfo::gap_prelim_edit_block_new();
+        let direct = s_out_of_frame_gapped_align(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut direct_q_start,
+            &mut direct_s_start,
+            false,
+            Some(&mut direct_block),
+            &scoring,
+            0,
+            false,
+        );
+
+        let mut wrapped_q_start = 0;
+        let mut wrapped_s_start = 0;
+        let mut wrapped_block = crate::gapinfo::gap_prelim_edit_block_new();
+        let wrapped = s_out_of_frame_semi_gapped_align_wrap(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut wrapped_q_start,
+            &mut wrapped_s_start,
+            false,
+            Some(&mut wrapped_block),
+            &scoring,
+            0,
+            false,
+            false,
+        );
+
+        assert_eq!(wrapped, direct);
+        assert_eq!(wrapped_q_start, direct_q_start);
+        assert_eq!(wrapped_s_start, direct_s_start);
+        assert_eq!(wrapped_block.edit_ops, direct_block.edit_ops);
+        assert!(!wrapped_block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_wrapper_switch_score_only_matches_swapped_direct_branch() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
+        let scoring = OutOfFrameScoring::default();
+        let mut direct_subject_start = 0;
+        let mut direct_query_start = 0;
+        let direct = s_out_of_frame_gapped_align(
+            &subject,
+            &query,
+            subject.len() as i32,
+            query.len() as i32,
+            &mut direct_subject_start,
+            &mut direct_query_start,
+            true,
+            None,
+            &scoring,
+            0,
+            false,
+        );
+        let mut wrapped_query_start = 0;
+        let mut wrapped_subject_start = 0;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+        let wrapped = s_out_of_frame_semi_gapped_align_wrap(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut wrapped_query_start,
+            &mut wrapped_subject_start,
+            true,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+            true,
+        );
+
+        assert_eq!(wrapped, direct);
+        assert_eq!(wrapped_query_start, direct_query_start);
+        assert_eq!(wrapped_subject_start, direct_subject_start);
+        assert!(block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_wrapper_switch_traceback_matches_swapped_direct_branch() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
+        let scoring = OutOfFrameScoring::default();
+        let mut direct_subject_start = 0;
+        let mut direct_query_start = 0;
+        let mut direct_block = crate::gapinfo::gap_prelim_edit_block_new();
+        let direct = s_out_of_frame_gapped_align(
+            &subject,
+            &query,
+            subject.len() as i32,
+            query.len() as i32,
+            &mut direct_subject_start,
+            &mut direct_query_start,
+            false,
+            Some(&mut direct_block),
+            &scoring,
+            0,
+            false,
+        );
+
+        let mut wrapped_query_start = 0;
+        let mut wrapped_subject_start = 0;
+        let mut wrapped_block = crate::gapinfo::gap_prelim_edit_block_new();
+        let wrapped = s_out_of_frame_semi_gapped_align_wrap(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut wrapped_query_start,
+            &mut wrapped_subject_start,
+            false,
+            Some(&mut wrapped_block),
+            &scoring,
+            0,
+            false,
+            true,
+        );
+
+        assert_eq!(wrapped, direct);
+        assert_eq!(wrapped_query_start, direct_query_start);
+        assert_eq!(wrapped_subject_start, direct_subject_start);
+        assert_eq!(wrapped_block.edit_ops, direct_block.edit_ops);
+        assert!(!wrapped_block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_wrapper_switch_empty_input_maps_c_sentinel_offsets() {
+        let scoring = OutOfFrameScoring::default();
+        let mut q_start = 99;
+        let mut s_start = 99;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+
+        let score = s_out_of_frame_semi_gapped_align_wrap(
+            &[],
+            &[],
+            0,
+            0,
+            &mut q_start,
+            &mut s_start,
+            false,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+            true,
+        );
+
+        assert_eq!(score, 0);
+        assert_eq!(q_start, -2);
+        assert_eq!(s_start, 0);
+        assert!(block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_wrapper_non_switch_empty_input_keeps_c_sentinel_offsets() {
+        let scoring = OutOfFrameScoring::default();
+        let mut q_start = 99;
+        let mut s_start = 99;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+
+        let score = s_out_of_frame_semi_gapped_align_wrap(
+            &[],
+            &[],
+            0,
+            0,
+            &mut q_start,
+            &mut s_start,
+            false,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+            false,
+        );
+
+        assert_eq!(score, 0);
+        assert_eq!(q_start, 0);
+        assert_eq!(s_start, -2);
+        assert!(block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_wrapper_switch_score_only_empty_input_maps_c_sentinel_offsets() {
+        let scoring = OutOfFrameScoring::default();
+        let mut q_start = 99;
+        let mut s_start = 99;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+
+        let score = s_out_of_frame_semi_gapped_align_wrap(
+            &[],
+            &[],
+            0,
+            0,
+            &mut q_start,
+            &mut s_start,
+            true,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+            true,
+        );
+
+        assert_eq!(score, 0);
+        assert_eq!(q_start, -2);
+        assert_eq!(s_start, 0);
+        assert!(block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_reversed_matrix_branch_reads_query_backwards_like_c() {
+        let a = crate::encoding::AMINOACID_TO_NCBISTDAA[b'A' as usize];
+        let c = crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize];
+        let d = crate::encoding::AMINOACID_TO_NCBISTDAA[b'D' as usize];
+        let query = vec![a, c, d];
+        let scoring = OutOfFrameScoring::default();
+
+        assert_eq!(scoring.oof_row_score(0, &query, query.len(), 1, d, true), 6);
+        assert_eq!(
+            scoring.oof_row_score(0, &query, query.len(), 1, d, false),
+            -3
+        );
+    }
+
+    #[test]
+    fn out_of_frame_subject_letter_selection_matches_c_pointer_offset() {
+        let subject = [10u8, 11, 12, 13, 14];
+
+        assert_eq!(oof_subject_letter(&subject, 0, false), 0);
+        assert_eq!(oof_subject_letter(&subject, 1, false), 0);
+        assert_eq!(oof_subject_letter(&subject, 2, false), 10);
+        assert_eq!(oof_subject_letter(&subject, 4, false), 12);
+
+        assert_eq!(oof_subject_letter(&subject, 0, true), 14);
+        assert_eq!(oof_subject_letter(&subject, 2, true), 12);
+    }
+
+    #[test]
+    fn out_of_frame_initial_trace_scripts_follow_c_frame_ties() {
+        assert_eq!(
+            oof_initial_trace_script(0, 10, 5, 0, 10, 0, 1),
+            SCRIPT_AHEAD_TWO_FRAMES
+        );
+        assert_eq!(
+            oof_initial_trace_script(0, 10, 5, 0, 3, 0, 1),
+            SCRIPT_NEXT_PLUS_TWO_FRAMES
+        );
+        assert_eq!(
+            oof_initial_trace_script(0, 5, 10, 0, 0, 10, 1),
+            SCRIPT_AHEAD_ONE_FRAME
+        );
+        assert_eq!(
+            oof_initial_trace_script(0, 5, 10, 0, 0, 3, 1),
+            SCRIPT_NEXT_PLUS_ONE_FRAME
+        );
+
+        assert_eq!(
+            oof_initial_trace_script(1, 10, 5, 10, 0, 0, 1),
+            SCRIPT_AHEAD_ONE_FRAME
+        );
+        assert_eq!(
+            oof_initial_trace_script(1, 10, 5, 3, 0, 0, 1),
+            SCRIPT_NEXT_PLUS_ONE_FRAME
+        );
+        assert_eq!(
+            oof_initial_trace_script(1, 5, 10, 0, 0, 10, 1),
+            SCRIPT_AHEAD_TWO_FRAMES
+        );
+        assert_eq!(
+            oof_initial_trace_script(1, 5, 10, 0, 0, 3, 1),
+            SCRIPT_NEXT_PLUS_TWO_FRAMES
+        );
+
+        assert_eq!(
+            oof_initial_trace_script(2, 10, 5, 10, 0, 0, 1),
+            SCRIPT_AHEAD_TWO_FRAMES
+        );
+        assert_eq!(
+            oof_initial_trace_script(2, 10, 5, 3, 0, 0, 1),
+            SCRIPT_NEXT_PLUS_TWO_FRAMES
+        );
+        assert_eq!(
+            oof_initial_trace_script(2, 5, 10, 0, 10, 0, 1),
+            SCRIPT_AHEAD_ONE_FRAME
+        );
+        assert_eq!(
+            oof_initial_trace_script(2, 5, 10, 0, 3, 0, 1),
+            SCRIPT_NEXT_PLUS_ONE_FRAME
+        );
+
+        assert_eq!(
+            oof_initial_trace_script(0, 10, 5, 9, 3, 0, 1),
+            SCRIPT_NEXT_IN_FRAME
+        );
+    }
+
+    #[test]
+    fn out_of_frame_script_op_codes_map_to_gap_ops_like_c() {
+        assert_eq!(oof_script_to_op(SCRIPT_GAP_IN_A), GapAlignOpType::Del);
+        assert_eq!(
+            oof_script_to_op(SCRIPT_AHEAD_ONE_FRAME),
+            GapAlignOpType::Del2
+        );
+        assert_eq!(
+            oof_script_to_op(SCRIPT_AHEAD_TWO_FRAMES),
+            GapAlignOpType::Del1
+        );
+        assert_eq!(oof_script_to_op(SCRIPT_NEXT_IN_FRAME), GapAlignOpType::Sub);
+        assert_eq!(
+            oof_script_to_op(SCRIPT_NEXT_PLUS_ONE_FRAME),
+            GapAlignOpType::Ins1
+        );
+        assert_eq!(
+            oof_script_to_op(SCRIPT_NEXT_PLUS_TWO_FRAMES),
+            GapAlignOpType::Ins2
+        );
+        assert_eq!(oof_script_to_op(SCRIPT_GAP_IN_B), GapAlignOpType::Ins);
+    }
+
+    #[test]
     fn out_of_frame_gapped_align_score_only_uses_specialized_oof_dp() {
         let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
         let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
@@ -4379,6 +4762,60 @@ mod tests {
             block.edit_ops.is_empty(),
             "score-only path must not populate traceback"
         );
+    }
+
+    #[test]
+    fn out_of_frame_gapped_align_score_only_empty_input_keeps_c_sentinel_offsets() {
+        let scoring = OutOfFrameScoring::default();
+        let mut a_offset = 99;
+        let mut b_offset = 99;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+
+        let score = s_out_of_frame_gapped_align(
+            &[],
+            &[],
+            0,
+            0,
+            &mut a_offset,
+            &mut b_offset,
+            true,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+        );
+
+        assert_eq!(score, 0);
+        assert_eq!(a_offset, 0);
+        assert_eq!(b_offset, -2);
+        assert!(block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_gapped_align_traceback_empty_input_keeps_c_sentinel_offsets() {
+        let scoring = OutOfFrameScoring::default();
+        let mut a_offset = 99;
+        let mut b_offset = 99;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+
+        let score = s_out_of_frame_gapped_align(
+            &[],
+            &[],
+            0,
+            0,
+            &mut a_offset,
+            &mut b_offset,
+            false,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+        );
+
+        assert_eq!(score, 0);
+        assert_eq!(a_offset, 0);
+        assert_eq!(b_offset, -2);
+        assert!(block.edit_ops.is_empty());
     }
 
     #[test]
@@ -4422,6 +4859,48 @@ mod tests {
         assert_eq!(trace_score, score_only);
         assert_eq!(trace_a_offset, score_a_offset);
         assert_eq!(trace_b_offset, score_b_offset);
+        assert!(!block.edit_ops.is_empty());
+    }
+
+    #[test]
+    fn out_of_frame_traceback_without_edit_block_keeps_score_and_offsets() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
+        let scoring = OutOfFrameScoring::default();
+        let mut with_block_q_offset = 0;
+        let mut with_block_s_offset = 0;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+        let with_block = s_out_of_frame_align_with_traceback(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut with_block_q_offset,
+            &mut with_block_s_offset,
+            Some(&mut block),
+            &scoring,
+            0,
+            false,
+        );
+
+        let mut no_block_q_offset = 0;
+        let mut no_block_s_offset = 0;
+        let no_block = s_out_of_frame_align_with_traceback(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut no_block_q_offset,
+            &mut no_block_s_offset,
+            None,
+            &scoring,
+            0,
+            false,
+        );
+
+        assert_eq!(no_block, with_block);
+        assert_eq!(no_block_q_offset, with_block_q_offset);
+        assert_eq!(no_block_s_offset, with_block_s_offset);
         assert!(!block.edit_ops.is_empty());
     }
 
@@ -4497,6 +4976,40 @@ mod tests {
             false,
         );
         assert_eq!(extended & SCRIPT_EXTEND_GAP_A, SCRIPT_EXTEND_GAP_A);
+
+        let mut score_array = vec![OofScoreCell {
+            best: 0,
+            best_gap: 0,
+        }];
+        let mut score_row = 9;
+        let mut score_col = 10;
+        let mut other1 = i32::MIN / 4;
+        let mut other2 = i32::MIN / 4;
+        let mut best_score = 0;
+        let mut first_b_index = 0;
+        let mut last_b_index = 0;
+        let extended = oof_step_frame_with_script(
+            &mut score_array,
+            0,
+            &mut score_row,
+            &mut score_col,
+            &mut other1,
+            &mut other2,
+            &mut best_score,
+            &mut a_offset,
+            &mut b_offset,
+            1,
+            0,
+            2,
+            1,
+            1,
+            100,
+            &mut first_b_index,
+            &mut last_b_index,
+            SCRIPT_SUB,
+            false,
+        );
+        assert_eq!(extended & SCRIPT_EXTEND_GAP_B, SCRIPT_EXTEND_GAP_B);
     }
 
     #[test]
