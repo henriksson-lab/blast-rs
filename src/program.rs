@@ -99,6 +99,7 @@ pub fn blast_program_is_valid(p: ProgramType) -> bool {
 }
 
 /// Port of NCBI `BlastProgram2Number` (`blast_util.c:278`).
+/// naming: Rust preserves the C `2` spelling used in the source symbol.
 /// Returns `(status, program)`, where status is `1` only for a NULL input in C.
 /// Unknown non-null names return success with `eBlastTypeUndefined`.
 pub fn blast_program_2_number(program: Option<&str>) -> (i16, ProgramType) {
@@ -138,6 +139,7 @@ pub fn blast_program_2_number(program: Option<&str>) -> (i16, ProgramType) {
 }
 
 /// Port of NCBI `BlastNumber2Program` (`blast_util.c:312`).
+/// naming: Rust preserves the C `2` spelling used in the source symbol.
 /// Rust returns an owned canonical program name instead of allocating through
 /// the caller's `char**`; `None` models the C NULL output pointer error.
 pub fn blast_number_2_program(number: ProgramType, program: Option<()>) -> (i16, Option<String>) {

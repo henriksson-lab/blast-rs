@@ -122,9 +122,13 @@ fn test_re_adjustment_conditional(
     let d_q_mat = relative_entropy(p_query, p_matrix);
     let d_m_q = relative_entropy(p_match, p_query);
 
-    let mut angle = ((d_m_mat * d_m_mat + d_q_mat * d_q_mat - d_m_q * d_m_q)
-        / (2.0 * d_m_mat * d_q_mat))
-        .acos();
+    // NCBI evaluates `numerator / 2.0 / D_m_mat / D_q_mat` as three
+    // successive divisions (left-to-right). Replicating that chain
+    // matters: a single divide by the product `(2.0 * d_m_mat * d_q_mat)`
+    // can differ by ~1 ULP, which is enough to flip the angle-threshold
+    // decision for borderline pairs.
+    let numerator = d_m_mat * d_m_mat + d_q_mat * d_q_mat - d_m_q * d_m_q;
+    let mut angle = (numerator / 2.0 / d_m_mat / d_q_mat).acos();
     // Convert radians to degrees
     angle = angle * HALF_CIRCLE_DEGREES / PI;
 

@@ -126,6 +126,8 @@ pub fn ir_locate(hash: &mut IrDiagHash, diag: u32, key: u32) -> Option<usize> {
 }
 
 /// Port of NCBI `IR_LOCATE` (`index_ungapped.c`).
+/// naming: Rust includes `_macro` to distinguish this C macro-shaped helper
+/// from the out-of-line `ir_locate` routine.
 pub fn ir_locate_macro(hash: &mut IrDiagHash, diag: u32, key: u32) -> Option<usize> {
     let key = key as usize;
     let entry = hash.entries.get(key)?;

@@ -85,7 +85,9 @@ struct BlastnArgs {
     num_threads: Option<String>,
 
     /// Output format: 0=pairwise, 5=XML, 6=tabular, 17=SAM, or '6 col1 col2...'
-    #[arg(long = "outfmt", default_value = "6")]
+    /// Output format. NCBI default is `0` (pairwise). Note: BLAST+ documents
+    /// `-outfmt 0` as the default for all CLI tools.
+    #[arg(long = "outfmt", default_value = "0")]
     outfmt: String,
 
     /// Word size for initial seed
@@ -266,9 +268,11 @@ struct BlastnArgs {
     #[arg(long = "culling_limit")]
     culling_limit: Option<String>,
 
-    /// Window size for multiple hit algorithm
-    #[arg(long = "window_size", default_value = "0")]
-    window_size: String,
+    /// Window size for multiple hit algorithm. `0` disables two-hit method
+    /// (per NCBI's `-window_size 0` semantics). When not supplied the
+    /// program-specific default is used (e.g. 40 for blastp).
+    #[arg(long = "window_size")]
+    window_size: Option<String>,
 
     /// Soft masking (filter query but use for lookup)
     #[arg(long = "soft_masking", default_value = "true")]
@@ -639,8 +643,17 @@ impl BlastnArgs {
             .map(|value| parse_validated_i32("culling_limit", value))
             .unwrap_or(0)
     }
+    #[cfg_attr(not(test), allow(dead_code))]
     fn window_size(&self) -> i32 {
-        parse_validated_i32("window_size", &self.window_size)
+        self.window_size
+            .as_deref()
+            .map(|v| parse_validated_i32("window_size", v))
+            .unwrap_or(-1)
+    }
+    fn window_size_explicit(&self) -> Option<i32> {
+        self.window_size
+            .as_deref()
+            .map(|v| parse_validated_i32("window_size", v))
     }
     fn num_descriptions_value(&self) -> Option<i32> {
         self.num_descriptions
@@ -2437,10 +2450,35 @@ fn validate_choice_options(args: &BlastnArgs) {
     }
 
     if let Some(task) = args.task.as_deref() {
-        if !matches!(
-            task,
-            "blastn" | "blastn-short" | "dc-megablast" | "megablast" | "rmblastn"
-        ) {
+        // Accept all NCBI BLAST+ tasks. Program-specific subsets are enforced
+        // elsewhere when the option matters; here we just reject unknown
+        // task names. NCBI's value sets per program:
+        //   blastn: blastn / blastn-short / dc-megablast / megablast / rmblastn / vecscreen
+        //   blastp: blastp / blastp-short / blastp-fast
+        //   blastx: blastx / blastx-fast
+        //   tblastn: tblastn / tblastn-fast
+        //   psiblast, deltablast, rpsblast, rpstblastn (each its own task name)
+        const VALID_TASKS: &[&str] = &[
+            "blastn",
+            "blastn-short",
+            "dc-megablast",
+            "megablast",
+            "rmblastn",
+            "vecscreen",
+            "blastp",
+            "blastp-short",
+            "blastp-fast",
+            "blastx",
+            "blastx-fast",
+            "tblastn",
+            "tblastn-fast",
+            "tblastx",
+            "psiblast",
+            "deltablast",
+            "rpsblast",
+            "rpstblastn",
+        ];
+        if !VALID_TASKS.contains(&task) {
             let error = format!(
                 "Argument \"task\". Illegal value, expected Permissible values: 'blastn' 'blastn-short' 'dc-megablast' 'megablast' 'rmblastn' :  `{task}'"
             );
@@ -2637,9 +2675,10 @@ fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
     if culling_limit < 0 {
         emit_program_integer_constraint_error(program, "culling_limit", ">=0", culling_limit);
     }
-    let window_size = args.window_size();
-    if window_size < 0 {
-        emit_program_integer_constraint_error(program, "window_size", ">=0", window_size);
+    if let Some(window_size) = args.window_size_explicit() {
+        if window_size < 0 {
+            emit_program_integer_constraint_error(program, "window_size", ">=0", window_size);
+        }
     }
     let off_diagonal_range = args.off_diagonal_range();
     if off_diagonal_range < 0 {
@@ -3814,6 +3853,7 @@ fn run_blastp_with_output_labels(
                         query_acc: query_ids.acc.clone(),
                         query_accver: query_ids.accver.clone(),
                         subject_id: subject_id.clone(),
+                        subject_seqid: None,
                         subject_gi: subject_ids.gi.clone(),
                         subject_acc: subject_ids.acc.clone(),
                         subject_accver: subject_ids.accver.clone(),
@@ -3843,13 +3883,20 @@ fn run_blastp_with_output_labels(
                         subject_kingdom: String::new(),
                         num_ident: hsp.num_identities as i32,
                         num_positives,
+                        num_links: hsp.num_links,
+                        comp_adjust_method: hsp.comp_adjust_method,
                     });
                 }
             }
         }
 
         if !preserve_psiblast_iteration_tabular_order(args, psiblast_pairwise) {
-            all_hits_sort_by_evalue(&mut hits);
+            let query_order: std::collections::HashMap<String, usize> = queries
+                .iter()
+                .enumerate()
+                .map(|(idx, rec)| (fasta_record_ids(rec, args.parse_deflines).id, idx))
+                .collect();
+            all_hits_sort_by_query_then_evalue(&mut hits, &query_order);
         }
         apply_filters(&mut hits, args, 0, None, CliProgram::Blastp, false);
 
@@ -3969,8 +4016,14 @@ fn run_blastp_with_output_labels(
                     .entry(subject_id.clone())
                     .or_insert(defline);
             }
+            // For the `stitle` column, emit the raw title from the ASN.1
+            // header (no accession prefix manipulation). NCBI's stitle
+            // matches what's stored in the DB — `serine protease inhibitor
+            // [...]` for protein DBs whose titles omit the accession,
+            // `NC_003279.8 Caenorhabditis elegans ...` for nucleotide DBs
+            // whose titles include it.
             let subject_title =
-                db_subject_defline(&db, sr.subject_oid, &subject_id).unwrap_or_default();
+                extract_header_title(db.get_header(sr.subject_oid)).unwrap_or_default();
             for hsp in &sr.hsps {
                 let qseq = if hsp.query_aln.is_empty() {
                     None
@@ -3988,14 +4041,18 @@ fn run_blastp_with_output_labels(
                     params.matrix,
                     hsp.num_identities as i32,
                 );
+                let subject_gi = db.get_gi(sr.subject_oid).map(|gi| gi.to_string());
+                let subject_seqid = db.get_blast_seqid_chain(sr.subject_oid);
+                let subject_acc = db.get_bare_accession(sr.subject_oid);
                 all_hits.push(TabularHit {
                     query_id: query_ids.id.clone(),
                     query_gi: query_ids.gi.clone(),
                     query_acc: query_ids.acc.clone(),
                     query_accver: query_ids.accver.clone(),
                     subject_id: subject_id.clone(),
-                    subject_gi: None,
-                    subject_acc: None,
+                    subject_seqid,
+                    subject_gi,
+                    subject_acc,
                     subject_accver: None,
                     subject_title: subject_title.clone(),
                     pct_identity: hsp.percent_identity(),
@@ -4022,13 +4079,20 @@ fn run_blastp_with_output_labels(
                     subject_kingdom: String::new(),
                     num_ident: hsp.num_identities as i32,
                     num_positives,
+                    num_links: hsp.num_links,
+                    comp_adjust_method: hsp.comp_adjust_method,
                 });
             }
         }
     }
 
     if !preserve_psiblast_iteration_tabular_order(args, psiblast_pairwise) {
-        all_hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
+        let query_order: std::collections::HashMap<String, usize> = queries
+            .iter()
+            .enumerate()
+            .map(|(idx, rec)| (fasta_record_ids(rec, args.parse_deflines).id, idx))
+            .collect();
+        all_hits_sort_by_query_then_evalue(&mut all_hits, &query_order);
     }
     apply_filters(
         &mut all_hits,
@@ -4193,6 +4257,7 @@ fn search_result_hsps_to_tabular_hits(
                 query_acc: None,
                 query_accver: None,
                 subject_id: subject_id.clone(),
+                subject_seqid: None,
                 subject_gi: None,
                 subject_acc: None,
                 subject_accver: None,
@@ -4221,6 +4286,8 @@ fn search_result_hsps_to_tabular_hits(
                 subject_kingdom: String::new(),
                 num_ident: hsp.num_identities as i32,
                 num_positives,
+                num_links: hsp.num_links,
+                comp_adjust_method: hsp.comp_adjust_method,
             });
         }
     }
@@ -4238,17 +4305,47 @@ fn search_result_hsps_to_db_tabular_hits(
     for result in &mut results {
         result.subject_accession =
             db_output_subject_id(db, result.subject_oid, &result.subject_accession);
-        if let Some(title) = db_subject_defline(db, result.subject_oid, &result.subject_accession) {
+        // NCBI's `stitle` column emits the raw title from the ASN.1
+        // header, NOT the "accession + title" defline. The latter is for
+        // pairwise display, where NCBI builds it from `Hit_def`. Mixing
+        // up which one feeds the tabular column added/stripped accession
+        // prefixes inconsistently between blastp and blastn.
+        if let Some(title) = extract_header_title(db.get_header(result.subject_oid)) {
             subject_titles
                 .entry(result.subject_accession.clone())
                 .or_insert(title);
         }
+    }
+    // Capture seq-id chain + GI per OID so we can populate the
+    // `sseqid`/`sallseqid`/`sgi` tabular columns. `db_output_subject_id`
+    // re-set `result.subject_accession` to the bare accession before this
+    // map is built, but the OID we keep here is from the (still-live)
+    // results, so we re-iterate and stash by accession.
+    let mut subject_seqids: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+    for result in &results {
+        subject_seqids
+            .entry(result.subject_accession.clone())
+            .or_insert_with(|| {
+                (
+                    db.get_blast_seqid_chain(result.subject_oid),
+                    db.get_gi(result.subject_oid).map(|gi| gi.to_string()),
+                )
+            });
     }
     let mut hits =
         search_result_hsps_to_tabular_hits(query_id, query_len, &[], results, matrix_type);
     for hit in &mut hits {
         if let Some(title) = subject_titles.get(&hit.subject_id) {
             hit.subject_title = title.clone();
+        }
+        if let Some((seqid, gi)) = subject_seqids.get(&hit.subject_id) {
+            if hit.subject_seqid.is_none() {
+                hit.subject_seqid = seqid.clone();
+            }
+            if hit.subject_gi.is_none() {
+                hit.subject_gi = gi.clone();
+            }
         }
     }
     hits
@@ -4321,8 +4418,47 @@ fn translated_display_coords(start: usize, end: usize, frame: i32, seq_len: usiz
     }
 }
 
-fn all_hits_sort_by_evalue(hits: &mut [TabularHit]) {
-    hits.sort_by(|a, b| blast_rs::api::evalue_comp(a.evalue, b.evalue));
+/// Multi-query tabular sort: queries appear in input order, subjects
+/// within each query sort by best (lowest) e-value, and HSPs within a
+/// subject sort by e-value too. Matches NCBI's `align_format` behavior:
+/// without grouping by subject, HSPs from the same hit get interleaved
+/// across other subjects whenever their e-values overlap.
+fn all_hits_sort_by_query_then_evalue(
+    hits: &mut [TabularHit],
+    query_order: &std::collections::HashMap<String, usize>,
+) {
+    // Compute the best e-value per (query, subject) so the secondary sort
+    // key positions subjects by their best HSP.
+    let mut best_evalue: std::collections::HashMap<(String, String), f64> =
+        std::collections::HashMap::new();
+    for hit in hits.iter() {
+        let key = (hit.query_id.clone(), hit.subject_id.clone());
+        // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds the per-list
+        // best-evalue accumulator with `(double)INT4_MAX`; use the same seed
+        // here so the running-min has consistent semantics.
+        let entry = best_evalue.entry(key).or_insert(i32::MAX as f64);
+        if blast_rs::api::evalue_comp(hit.evalue, *entry) == std::cmp::Ordering::Less {
+            *entry = hit.evalue;
+        }
+    }
+    hits.sort_by(|a, b| {
+        let a_rank = query_order.get(&a.query_id).copied().unwrap_or(usize::MAX);
+        let b_rank = query_order.get(&b.query_id).copied().unwrap_or(usize::MAX);
+        let a_best = best_evalue
+            .get(&(a.query_id.clone(), a.subject_id.clone()))
+            .copied()
+            .unwrap_or(a.evalue);
+        let b_best = best_evalue
+            .get(&(b.query_id.clone(), b.subject_id.clone()))
+            .copied()
+            .unwrap_or(b.evalue);
+        a_rank
+            .cmp(&b_rank)
+            .then_with(|| blast_rs::api::evalue_comp(a_best, b_best))
+            .then_with(|| a.subject_id.cmp(&b.subject_id))
+            .then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
+            .then_with(|| b.raw_score.cmp(&a.raw_score))
+    });
 }
 
 fn apply_blastn_linked_sum_stats_to_hsps(
@@ -4386,6 +4522,7 @@ fn apply_blastn_linked_sum_stats_to_hsps(
                 },
                 context: hsp.context,
                 num: 1,
+                xsum: 0.0,
             })
             .collect(),
         best_evalue: f64::INFINITY,
@@ -4523,9 +4660,15 @@ fn psiblast_tabular_iteration_rounds<'a>(
     artifacts: Option<&'a PsiblastArtifacts>,
 ) -> Vec<&'a [blast_rs::api::SearchResult]> {
     let outfmt = outfmt_number(&args.outfmt);
-    let emit_convergence_rounds =
-        psiblast && args.num_iterations_value() == Some(0) && matches!(outfmt, 6 | 7 | 10);
-    if emit_convergence_rounds {
+    // NCBI emits each iteration's tabular rows only for `-num_iterations 0`
+    // (run until convergence) AND for `N>=2`. With explicit `-num_iterations
+    // N` where N>=2 NCBI still emits per-iter rows. With no flag or N==1
+    // NCBI emits the single final round only.
+    let n = args.num_iterations_value();
+    let emit_per_iteration = psiblast
+        && matches!(outfmt, 6 | 7 | 10)
+        && matches!(n, Some(v) if v == 0 || v >= 2);
+    if emit_per_iteration {
         if let Some(artifacts) = artifacts {
             if !artifacts.round_results.is_empty() {
                 return artifacts.round_results.iter().map(Vec::as_slice).collect();
@@ -4537,7 +4680,10 @@ fn psiblast_tabular_iteration_rounds<'a>(
 
 fn preserve_psiblast_iteration_tabular_order(args: &BlastnArgs, psiblast: bool) -> bool {
     let outfmt = outfmt_number(&args.outfmt);
-    psiblast && args.num_iterations_value() == Some(0) && matches!(outfmt, 6 | 7 | 10)
+    let n = args.num_iterations_value();
+    psiblast
+        && matches!(outfmt, 6 | 7 | 10)
+        && matches!(n, Some(v) if v == 0 || v >= 2)
 }
 
 fn write_psiblast_convergence_marker<W: Write>(
@@ -4933,6 +5079,41 @@ fn build_blastp_params_with_seg_default(
     if default_seg_filtering {
         params.max_intron_length = 0;
     }
+    // Task-specific defaults from NCBI's `CBlastOptionsFactory::CreateTask`
+    // (`blast_options_handle.cpp:388`). Applied BEFORE user overrides so any
+    // explicit `-matrix` / `-word_size` / `-evalue` flags still win.
+    match args.task.as_deref() {
+        // blastp-short defaults from NCBI's CBlastOptionsFactory:
+        //   matrix=PAM30, gap_open=9, gap_extend=1, word_size=2,
+        //   evalue=20000, filter off. NOTE: enabling these *exposed* a
+        //   seed/lookup-table sensitivity bug — with word_size=2 our
+        //   neighborhood scan over-generates seeds compared to NCBI's,
+        //   producing ~37k extra lines vs NCBI's "No hits found". The
+        //   task-default emission is only safe once the protein lookup
+        //   table is tightened for word_size=2 (separate bug). Skip
+        //   blastp-short defaults for now to keep the previous behaviour
+        //   (blastp default params + user-supplied -task name) which is
+        //   closer to NCBI's actual blastp-short output for the fixtures
+        //   we test against.
+        Some("blastp-short") => {
+            // intentionally not setting blastp-short defaults until the
+            // upstream lookup-table issue is fixed.
+        }
+        Some("blastp-fast") | Some("blastx-fast") | Some("tblastn-fast") => {
+            // NCBI's *-fast tasks all use word_size=5 with the compressed
+            // AA lookup table and `BLAST_WORD_THRESHOLD_BLASTP_FAST`. The
+            // 2.17 header defines this constant as 20, but the 2.12 binary
+            // we test against reports `Neighboring words threshold: 21` —
+            // so we use 21 to match the binary that defines our parity
+            // target. (If we ever switch parity targets to a newer NCBI,
+            // drop this back to 20.)
+            params.word_size = 5;
+            if args.threshold.is_none() {
+                params.word_threshold = Some(21.0);
+            }
+        }
+        _ => {}
+    }
     // SearchParams::blastp() already sets the protein defaults (11/1).
     // BlastnArgs::gapopen()/gapextend() have nucleotide fallbacks (5/2), so
     // check option presence instead of comparing parsed values.
@@ -4956,6 +5137,15 @@ fn build_blastp_params_with_seg_default(
         .map(|value| parse_validated_i32("word_size", value))
     {
         params.word_size = ws as usize;
+        // NOTE: NCBI 2.17's `CBlastProteinOptionsHandle::SetWordSize`
+        // (`blast_prot_options.cpp:56-77`) auto-maps word_size to the
+        // matching neighborhood threshold (ws=5 → 20, ws=6 → 21, ws=7 →
+        // 20.25). But the NCBI 2.12 binary we use as parity target does
+        // NOT do this auto-mapping for ws=6 or ws=7 — `-word_size 6`
+        // there still reports `Neighboring words threshold: 11`. The
+        // -task *-fast branch above handles ws=5 via the task code path
+        // (which 2.12 *does* honor). Don't add the ws=6/7 auto-mapping
+        // here — it would break parity with our 2.12 target.
     }
     if let Some(comp) = args
         .comp_based_stats
@@ -5015,9 +5205,12 @@ fn build_blastp_params_with_seg_default(
     if args.xdrop_gap_final != "100.0" {
         params.x_drop_final = args.xdrop_gap_final() as i32;
     }
-    let window_size = args.window_size();
-    if window_size > 0 {
-        params.two_hit_window = window_size as usize;
+    // `-window_size N`: N>0 sets the two-hit window. N=0 explicitly DISABLES
+    // the two-hit method (single-hit mode, more sensitive — produces extra
+    // hits that pure two-hit misses). Not-supplied keeps the program's
+    // default (BLAST_WINDOW_SIZE_PROT = 40 for blastp).
+    if let Some(window_size) = args.window_size_explicit() {
+        params.two_hit_window = window_size.max(0) as usize;
     }
     params.filter_low_complexity = match args.seg.as_deref() {
         Some("no") => false,
@@ -5041,6 +5234,7 @@ fn build_blastp_params_with_seg_default(
         }
     };
     params.sum_stats = !args.ungapped && ncbi_bool_enabled(args.sum_stats.as_deref(), true);
+    params.ungapped = args.ungapped;
     params.max_target_seqs = args.effective_max_target_seqs() as usize;
     params.max_hsps = args.max_hsps_value().map(|max| max as usize);
     let culling_limit = args.culling_limit();
@@ -5062,7 +5256,7 @@ fn apply_protein_matrix_gap_defaults(args: &BlastnArgs, params: &mut blast_rs::a
     if args.gapextend.is_none() {
         params.gap_extend = default_extend;
     }
-    if args.window_size() == 0 {
+    if args.window_size_explicit().is_none() {
         params.two_hit_window = default_protein_two_hit_window(params.matrix);
     }
 }
@@ -6589,18 +6783,25 @@ fn run_blastn_rust(
         std::env::split_paths(&paths).find_map(|path| blast_rs::db::TaxNameDb::open(&path).ok())
     });
 
-    // Pure Rust KBP computation — per-context (plus + minus) for exact e-value matching
-    // The C engine computes separate KBP for each context based on strand composition
-    let (kbp_plus, kbp_minus, searchsp_plus, searchsp_minus, len_adj_plus, len_adj_minus) = {
-        let rec = &records[0];
-        let (loc_start, loc_end) = query_loc_bounds(args, rec.sequence.len())?;
-        let query_plus =
-            blast_rs::encoding::encode_blastna_sequence(&rec.sequence[loc_start..loc_end]);
-        let query_minus = blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus);
-
+    // Per-query KBP / search-space computation. NCBI gives each query in a
+    // multi-FASTA its own effective length, length-adjustment and resulting
+    // search space (`BlastQueryInfo::contexts[i].eff_searchsp`), so the
+    // e-value formula uses per-query parameters — not the first query's.
+    // The closure below produces both strands' stats for one query so we
+    // can call it inside the `encoded_queries` map and stash the result on
+    // each `EncodedQuery`.
+    let database_length = effective_db_length(args, db.total_length as i64);
+    let reward = args.reward();
+    let penalty = args.penalty();
+    let compute_query_stats = |query_plus: &[u8], query_minus: &[u8]| -> (
+        blast_rs::stat::KarlinBlk,
+        blast_rs::stat::KarlinBlk,
+        f64,
+        f64,
+        i32,
+        i32,
+    ) {
         const BLASTNA_SIZE: usize = 16;
-        let reward = args.reward();
-        let penalty = args.penalty();
         let matrix_fn = |i: usize, j: usize| -> i32 {
             if i >= BLASTNA_SIZE || j >= BLASTNA_SIZE {
                 return penalty;
@@ -6612,7 +6813,7 @@ fn run_blastn_rust(
         for i in 0..BLASTNA_SIZE {
             for j in 0..BLASTNA_SIZE {
                 let s = matrix_fn(i, j);
-                if s <= -100000000 || s >= 100000000 {
+                if s <= -100_000_000 || s >= 100_000_000 {
                     continue;
                 }
                 if s < lo {
@@ -6627,14 +6828,13 @@ fn run_blastn_rust(
         let ambig: &[u8] = &[14, 15];
         let qlen = query_plus.len() as i32;
 
-        // Compute KBP for both contexts
         let ctxs = [blast_rs::stat::UngappedKbpContext {
             query_offset: 0,
             query_length: qlen,
             is_valid: true,
         }];
         let plus_kbp_results = blast_rs::stat::ungapped_kbp_calc(
-            &query_plus,
+            query_plus,
             &ctxs,
             lo,
             hi,
@@ -6643,7 +6843,7 @@ fn run_blastn_rust(
             &matrix_fn,
         );
         let minus_kbp_results = blast_rs::stat::ungapped_kbp_calc(
-            &query_minus,
+            query_minus,
             &ctxs,
             lo,
             hi,
@@ -6662,7 +6862,6 @@ fn run_blastn_rust(
         let ungapped_plus = plus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
         let ungapped_minus = minus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
 
-        // Gapped KBP (from table — may fall back to ungapped for large gap costs)
         let (gkbp_plus, _) = blast_rs::stat::nucl_gapped_kbp_lookup(
             args.gapopen(),
             args.gapextend(),
@@ -6691,8 +6890,6 @@ fn run_blastn_rust(
             gkbp_minus.clone()
         };
 
-        // Per-context search space
-        let database_length = effective_db_length(args, db.total_length as i64);
         let compute_searchsp = |kbp: &blast_rs::stat::KarlinBlk,
                                 ukbp: &blast_rs::stat::KarlinBlk|
          -> (f64, i32) {
@@ -6746,7 +6943,20 @@ fn run_blastn_rust(
             len_adj_minus,
         )
     };
-    // Use plus-strand KBP as the primary (for seed finding threshold)
+
+    // First-query stats used only for the pre-loop x-drop / cutoff
+    // expressions below; the per-query loop shadows them per `EncodedQuery`.
+    // `kbp_minus`, `searchsp_minus`, and the len-adjustments are no longer
+    // referenced outside per-query scope but are kept here for code that
+    // still expects single-query semantics.
+    let (kbp_plus, _kbp_minus, searchsp_plus, _searchsp_minus, _len_adj_plus, _len_adj_minus) = {
+        let rec = &records[0];
+        let (loc_start, loc_end) = query_loc_bounds(args, rec.sequence.len())?;
+        let query_plus =
+            blast_rs::encoding::encode_blastna_sequence(&rec.sequence[loc_start..loc_end]);
+        let query_minus = blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus);
+        compute_query_stats(&query_plus, &query_minus)
+    };
     let kbp = &kbp_plus;
     let search_space = searchsp_plus;
     let word_size = args.word_size() as usize;
@@ -6757,26 +6967,42 @@ fn run_blastn_rust(
     let gapopen = args.gapopen();
     let gapextend = args.gapextend();
     let evalue = args.evalue();
-    let dc_template_length = args.template_length_value();
-    let dc_template_type = args.template_type_value();
-    let use_dc_megablast_template = args.task.as_deref() == Some("dc-megablast")
+    // NCBI's dc-megablast task (`disc_nucl_options.cpp:60-61`) defaults to
+    // template_length=18 and template_type=0 ("coding") when not specified.
+    // Without these defaults the engine falls back to regular megablast
+    // (single hit, no template scan), which produces hits NCBI's
+    // dc-megablast filters out.
+    let is_dc_megablast = args.task.as_deref() == Some("dc-megablast");
+    let dc_template_length = args
+        .template_length_value()
+        .or_else(|| if is_dc_megablast { Some(18) } else { None });
+    let dc_template_type = args
+        .template_type_value()
+        .or_else(|| if is_dc_megablast { Some(0) } else { None });
+    let use_dc_megablast_template = is_dc_megablast
         && dc_template_length.is_some()
         && dc_template_type.is_some();
 
     let mut all_hits: Vec<(u32, TabularHit)> = Vec::new();
 
-    let apply_dust = args.dust != "no";
+    // NCBI's `-ungapped` mode ignores DUST: empirically `-ungapped` and
+    // `-ungapped -dust no` produce identical output (the full 500-bp
+    // self-hit reports pident=100 with `mismatches=0`, so masked positions
+    // cannot have penalized scoring during extension). Mirror that
+    // behaviour — DUST is only useful when seeds and extension can be
+    // separated, and ungapped scans don't make that distinction.
+    let apply_dust = args.dust != "no" && !args.ungapped;
 
-    // Pre-compute invariant values outside the per-query loop.
-    // Matches NCBI `BLAST_Cutoffs(&, &, kbp, searchsp, FALSE, 0)` at
-    // `blast_parameters.c:943` (no decay adjustment).
-    let cutoff_score = kbp.evalue_to_raw(evalue, search_space);
-    // Ungapped uses `ceil()+Int4` per blast_parameters.c:221; gapped uses
-    // plain `(Int4)` truncation per blast_parameters.c:457-463.
-    let ungapped_x_dropoff =
+    // Pre-compute invariant values outside the per-query loop. The per-query
+    // loop body shadows `cutoff_score` / `ungapped_x_dropoff` /
+    // `gapped_x_dropoff_final` with values computed from each query's own
+    // KBP. `_cutoff_score` and `_ungapped_x_dropoff` are retained for any
+    // first-query diagnostic that hasn't been migrated yet.
+    let _cutoff_score = kbp.evalue_to_raw(evalue, search_space);
+    let _ungapped_x_dropoff =
         (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
     let gapped_x_dropoff = (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32;
-    let gapped_x_dropoff_final = gapped_x_dropoff
+    let _gapped_x_dropoff_final = gapped_x_dropoff
         .max((args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / kbp.lambda) as i32);
     let parsed_num_threads = args.num_threads();
     let num_threads = if parsed_num_threads <= 0 {
@@ -6809,6 +7035,23 @@ fn run_blastn_rust(
         minus_masked: Vec<u8>,
         plus_nomask: Vec<u8>,
         minus_nomask: Vec<u8>,
+        // Per-query statistics — NCBI computes these per `BlastQueryInfo`
+        // context. Using the first query's values for every query gave
+        // mismatched e-values in multi-FASTA blastn.
+        kbp_plus: blast_rs::stat::KarlinBlk,
+        #[allow(dead_code)]
+        kbp_minus: blast_rs::stat::KarlinBlk,
+        search_space: f64,
+        #[allow(dead_code)]
+        search_space_minus: f64,
+        cutoff_score: i32,
+        ungapped_x_dropoff: i32,
+        gapped_x_dropoff: i32,
+        gapped_x_dropoff_final: i32,
+        #[allow(dead_code)]
+        len_adj_plus: i32,
+        #[allow(dead_code)]
+        len_adj_minus: i32,
     }
     let encoded_queries: Vec<EncodedQuery> = records
         .iter()
@@ -6829,6 +7072,18 @@ fn run_blastn_rust(
                 let reversed_raw_query: Vec<u8> = raw_query.iter().rev().copied().collect();
                 apply_lowercase_mask(&reversed_raw_query, &mut minus_masked);
             }
+            let (q_kbp_plus, q_kbp_minus, q_sp_plus, q_sp_minus, q_lap, q_lam) =
+                compute_query_stats(&plus_nomask, &minus_nomask);
+            let q_cutoff = q_kbp_plus.evalue_to_raw(evalue, q_sp_plus);
+            let q_ungapped_xdrop =
+                (args.xdrop_ungap() * blast_rs::math::NCBIMATH_LN2 / q_kbp_plus.lambda).ceil()
+                    as i32;
+            let q_gapped_xdrop =
+                (args.xdrop_gap() * blast_rs::math::NCBIMATH_LN2 / q_kbp_plus.lambda) as i32;
+            let q_gapped_xdrop_final = q_gapped_xdrop.max(
+                (args.xdrop_gap_final() * blast_rs::math::NCBIMATH_LN2 / q_kbp_plus.lambda)
+                    as i32,
+            );
             Ok(EncodedQuery {
                 id: rec.id.clone(),
                 seq_len: plus_nomask.len() as i32,
@@ -6845,6 +7100,16 @@ fn run_blastn_rust(
                 } else {
                     Vec::new()
                 },
+                kbp_plus: q_kbp_plus,
+                kbp_minus: q_kbp_minus,
+                search_space: q_sp_plus,
+                search_space_minus: q_sp_minus,
+                cutoff_score: q_cutoff,
+                ungapped_x_dropoff: q_ungapped_xdrop,
+                gapped_x_dropoff: q_gapped_xdrop,
+                gapped_x_dropoff_final: q_gapped_xdrop_final,
+                len_adj_plus: q_lap,
+                len_adj_minus: q_lam,
             })
         })
         .collect::<Result<_, _>>()?;
@@ -6920,6 +7185,13 @@ fn run_blastn_rust(
                 let ambiguity_data = db.get_volume_ambiguity_data(volume_idx, local_oid);
                 let mut results = Vec::new();
                 for (qi, eq) in encoded_queries.iter().enumerate() {
+                    // Shadow outer-scope stats with this query's own values.
+                    let kbp = &eq.kbp_plus;
+                    let search_space = eq.search_space;
+                    let cutoff_score = eq.cutoff_score;
+                    let ungapped_x_dropoff = eq.ungapped_x_dropoff;
+                    let gapped_x_dropoff = eq.gapped_x_dropoff;
+                    let gapped_x_dropoff_final = eq.gapped_x_dropoff_final;
                     let mut hsps = if args.ungapped {
                         if args.lcase_masking {
                             let subject_decoded = if let Some(amb) = ambiguity_data {
@@ -7040,6 +7312,13 @@ fn run_blastn_rust(
                                 evalue,
                             )
                         } else if let Some(amb) = ambiguity_data {
+                            // When the subject carries ambiguity data, decode
+                            // it with N→byte 14 overlay so the matrix scoring
+                            // in extension penalises N-vs-real positions
+                            // (matrix[14][x] = -1 per `BlastScoreBlkNuclMatrixCreate`).
+                            // Without the overlay we'd score those positions
+                            // as their underlying 2-bit base, over-reporting
+                            // identity and missing NCBI's mismatch annotation.
                             let subject_decoded =
                                 blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
                                     packed, seq_len, amb,
@@ -7157,12 +7436,12 @@ fn run_blastn_rust(
                             &mut hsps,
                             eq.seq_len,
                             seq_len as i32,
-                            &kbp_plus,
-                            &kbp_minus,
-                            searchsp_plus,
-                            searchsp_minus,
-                            len_adj_plus,
-                            len_adj_minus,
+                            &eq.kbp_plus,
+                            &eq.kbp_minus,
+                            eq.search_space,
+                            eq.search_space_minus,
+                            eq.len_adj_plus,
+                            eq.len_adj_minus,
                         );
                     }
                     if !hsps.is_empty() {
@@ -7249,6 +7528,12 @@ fn run_blastn_rust(
                                     db.get_volume_ambiguity_data(volume_idx, local_oid);
                                 let mut results = Vec::new();
                                 for (qi, eq) in encoded_queries.iter().enumerate() {
+                                    let kbp = &eq.kbp_plus;
+                                    let search_space = eq.search_space;
+                                    let cutoff_score = eq.cutoff_score;
+                                    let ungapped_x_dropoff = eq.ungapped_x_dropoff;
+                                    let gapped_x_dropoff = eq.gapped_x_dropoff;
+                                    let gapped_x_dropoff_final = eq.gapped_x_dropoff_final;
                                     let mut hsps = if args.ungapped {
                                         if args.lcase_masking {
                                             let subject_decoded = if let Some(amb) = ambiguity_data {
@@ -7465,12 +7750,12 @@ fn run_blastn_rust(
                                             &mut hsps,
                                             eq.seq_len,
                                             seq_len as i32,
-                                            &kbp_plus,
-                                            &kbp_minus,
-                                            searchsp_plus,
-                                            searchsp_minus,
-                                            len_adj_plus,
-                                            len_adj_minus,
+                                            &eq.kbp_plus,
+                                            &eq.kbp_minus,
+                                            eq.search_space,
+                                            eq.search_space_minus,
+                                            eq.len_adj_plus,
+                                            eq.len_adj_minus,
                                         );
                                     }
                                     if !hsps.is_empty() {
@@ -7552,6 +7837,12 @@ fn run_blastn_rust(
                     });
                     let mut results = Vec::new();
                     for (qi, eq) in encoded_queries.iter().enumerate() {
+                        let kbp = &eq.kbp_plus;
+                        let search_space = eq.search_space;
+                        let cutoff_score = eq.cutoff_score;
+                        let ungapped_x_dropoff = eq.ungapped_x_dropoff;
+                        let gapped_x_dropoff = eq.gapped_x_dropoff;
+                        let gapped_x_dropoff_final = eq.gapped_x_dropoff_final;
                         let mut hsps = if args.ungapped {
                             if let Some(subject_decoded) = subject_decoded_with_ambiguity.as_ref() {
                                 blast_rs::search::blastn_ungapped_search_no_dedup_nomask(
@@ -7765,6 +8056,8 @@ fn run_blastn_rust(
                     hsp.sseq.as_deref(),
                 );
 
+                let subject_gi = db.get_gi(oid).map(|gi| gi.to_string());
+                let subject_seqid = db.get_blast_seqid_chain(oid);
                 all_hits.push((
                     oid,
                     TabularHit {
@@ -7773,7 +8066,8 @@ fn run_blastn_rust(
                         query_acc: None,
                         query_accver: None,
                         subject_id,
-                        subject_gi: None,
+                        subject_seqid,
+                        subject_gi,
                         subject_acc: None,
                         subject_accver: None,
                         subject_title: String::new(),
@@ -7790,14 +8084,14 @@ fn run_blastn_rust(
                         subject_start: s_start,
                         subject_end: s_end,
                         evalue: if hsp.context == 1 {
-                            kbp_minus.raw_to_evalue(hsp.score, searchsp_minus)
+                            eq.kbp_minus.raw_to_evalue(hsp.score, eq.search_space_minus)
                         } else {
-                            kbp_plus.raw_to_evalue(hsp.score, searchsp_plus)
+                            eq.kbp_plus.raw_to_evalue(hsp.score, eq.search_space)
                         },
                         bit_score: if hsp.context == 1 {
-                            kbp_minus.raw_to_bit(hsp.score)
+                            eq.kbp_minus.raw_to_bit(hsp.score)
                         } else {
-                            kbp_plus.raw_to_bit(hsp.score)
+                            eq.kbp_plus.raw_to_bit(hsp.score)
                         },
                         query_len,
                         subject_len: db.get_seq_len(oid) as i32,
@@ -7813,6 +8107,8 @@ fn run_blastn_rust(
                         subject_kingdom: String::new(),
                         num_ident: hsp.num_ident,
                         num_positives: hsp.num_ident,
+                        num_links: 1,
+                        comp_adjust_method: 0,
                     },
                 ));
             }
@@ -7971,13 +8267,22 @@ fn run_blastn_rust(
         })
         .collect();
     for (oid, hit) in &mut all_hits {
-        if let Some(title) = db_subject_title(&db, *oid, &hit.subject_id) {
+        // NCBI's `stitle` column emits the raw title from the ASN.1 header
+        // (no accession prefix manipulation). For DBs where the title
+        // already starts with the accession (celegans chromosome headers
+        // store `NC_003279.8 Caenorhabditis elegans ...`), that prefix
+        // stays. For DBs whose title is just the description (seqp's
+        // protein headers), no accession gets prepended.
+        if let Some(title) = extract_header_title(db.get_header(*oid)) {
             hit.subject_title = title;
         }
     }
+    // NCBI's SAM RNAME column uses the bare accession (e.g. `BP722512.1`).
+    // The `BL_ORD_ID:N` placeholder applies only when the DB has no real
+    // accessions; with real DB entries we should emit the accession itself.
     let db_sam_labels: std::collections::HashMap<_, _> = all_hits
         .iter()
-        .map(|(oid, hit)| (sam_hit_key(hit), format!("BL_ORD_ID:{}", oid)))
+        .map(|(_oid, hit)| (sam_hit_key(hit), hit.subject_id.clone()))
         .collect();
     let db_xml_groups: std::collections::HashMap<_, _> = all_hits
         .iter()
@@ -7988,14 +8293,27 @@ fn run_blastn_rust(
             .iter()
             .filter_map(|(oid, hit)| {
                 let group = format!("BL_ORD_ID:{}", oid);
-                let defline = db_subject_title(&db, *oid, &hit.subject_id)
+                // NCBI's blastn XML emits:
+                //   Hit_id = full Seq-id chain (e.g. `gi|N|dbj|acc.ver|`),
+                //   Hit_def = title only (no accession prefix),
+                //   Hit_accession = bare accession (no `.N` version).
+                // Fall back to the BL_ORD_ID placeholder only when the DB has
+                // no real accession data (matches NCBI's behavior for
+                // accession-less blast DBs).
+                let hit_id = db
+                    .get_blast_seqid_chain(*oid)
+                    .unwrap_or_else(|| format!("gnl|BL_ORD_ID|{}", oid));
+                let hit_def = db_subject_title(&db, *oid, &hit.subject_id)
                     .or_else(|| db_subject_defline(&db, *oid, &hit.subject_id))?;
+                let bare_accession = db
+                    .get_bare_accession(*oid)
+                    .unwrap_or_else(|| oid.to_string());
                 Some((
                     group,
                     (
-                        format!("gnl|BL_ORD_ID|{}", oid),
-                        defline,
-                        oid.to_string(),
+                        hit_id,
+                        hit_def,
+                        bare_accession,
                         hit.subject_len,
                     ),
                 ))
@@ -8071,7 +8389,8 @@ fn run_blastn_rust(
             writer.flush()?;
             return Ok(());
         }
-        write_pairwise_db_report_preamble(&mut writer, &db)?;
+        write_pairwise_db_report_preamble(&mut writer, &db, args)?;
+        let dust_on = args.dust != "no" && !args.ungapped;
         for query in records {
             let query_hits =
                 pairwise_query_hits(&hits, &query.id, args.sorthits(), args.sorthsps());
@@ -8084,6 +8403,14 @@ fn run_blastn_rust(
             )?;
             let query_hits =
                 limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+            // Precompute DUST mask once per query, then map each HSP's
+            // qseq positions back to the original query to lowercase
+            // masked bases (NCBI's `-outfmt 0` convention).
+            let query_dust_mask: Option<Vec<bool>> = if dust_on {
+                Some(blastn_query_dust_mask(&query.sequence))
+            } else {
+                None
+            };
             let mut last_pairwise_subject: Option<&str> = None;
             for hit in query_hits {
                 let query_aln = hit
@@ -8096,6 +8423,17 @@ fn run_blastn_rust(
                     .as_deref()
                     .map(alignment_string_to_blastna)
                     .unwrap_or_default();
+                let lowercase_mask =
+                    query_dust_mask
+                        .as_deref()
+                        .map(|dust| {
+                            qseq_lowercase_mask_from_dust(
+                                hit.qseq.as_deref().unwrap_or(""),
+                                hit.query_start,
+                                hit.query_end,
+                                dust,
+                            )
+                        });
                 let has_previous_subject = last_pairwise_subject.is_some();
                 let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
                 last_pairwise_subject = Some(hit.subject_id.as_str());
@@ -8110,6 +8448,8 @@ fn run_blastn_rust(
                     show_subject_header,
                     subject_deflines.get(&hit.subject_id).map(String::as_str),
                     pairwise_line_length(args),
+                    lowercase_mask.as_deref(),
+                    matches!(args.task.as_deref(), Some("rmblastn")),
                 )?;
             }
             write_pairwise_db_query_stats(&mut writer, args, query, &db)?;
@@ -8344,6 +8684,65 @@ fn write_translated_tabular_output<W: Write>(
     )
 }
 
+/// Compute a per-position DUST mask for the raw ASCII query sequence used
+/// for blastn pairwise output. NCBI lowercases low-complexity bases at
+/// display time (`align_format` calls the DUST filter directly on the
+/// original sequence). Returns a Vec<bool> with `true` at masked positions.
+fn blastn_query_dust_mask(seq: &[u8]) -> Vec<bool> {
+    let window = seq.len().min(64);
+    if window < 3 {
+        return vec![false; seq.len()];
+    }
+    // Run DUST on the BLASTNA-encoded query rather than the raw ASCII. The
+    // `blastna_or_iupac_to_ncbi2na_base` helper treats ASCII `N` as `A`
+    // (collapsing to 0), but treats BLASTNA byte 14 (`N`) as `G` (low 2 bits
+    // = 2). That difference means ASCII-input DUST mis-classifies any AAAN+
+    // run as low-complexity AAAAAAAA, masking regions NCBI keeps unmasked.
+    // Match NCBI by encoding first.
+    let buf = blast_rs::encoding::encode_blastna_sequence(seq);
+    let mask = blast_rs::filter::dust_filter(&buf, 20, window, 1);
+    let _ = buf; // discard encoding scratch, the mask carries the regions
+    let mut out = vec![false; seq.len()];
+    for region in &mask.regions {
+        let start = region.start as usize;
+        // NCBI's pairwise output lowercases through the inclusive end of
+        // each DUST region. Our DUST port stores `end` as the half-open
+        // exclusive bound (`to + 1`), but the lowercase mask reads as one
+        // position short of NCBI's display when applied with `pos < end`.
+        // Extend by one so the masked range matches NCBI's coverage.
+        let end = (region.end as usize).saturating_add(1).min(seq.len());
+        for v in out.iter_mut().take(end).skip(start) {
+            *v = true;
+        }
+    }
+    out
+}
+
+/// Build a lowercase mask aligned with the aligned query string `qseq`
+/// (which may contain `-` gap chars) by mapping each non-gap position back
+/// to the original query coordinate and checking the DUST mask.
+fn qseq_lowercase_mask_from_dust(
+    qseq: &str,
+    query_start: i32,
+    query_end: i32,
+    dust_mask: &[bool],
+) -> Vec<bool> {
+    let mut out = Vec::with_capacity(qseq.len());
+    let direction: i32 = if query_start <= query_end { 1 } else { -1 };
+    let mut q_pos = query_start - 1; // 0-indexed
+    for byte in qseq.bytes() {
+        if byte == b'-' {
+            out.push(false);
+            continue;
+        }
+        let idx = q_pos.max(0) as usize;
+        let masked = dust_mask.get(idx).copied().unwrap_or(false);
+        out.push(masked);
+        q_pos += direction;
+    }
+    out
+}
+
 fn apply_blastn_dust_mask(seq: &mut [u8]) {
     let window = seq.len().min(64);
     if window >= 3 {
@@ -8372,7 +8771,15 @@ fn apply_lowercase_mask(raw_query: &[u8], encoded_query: &mut [u8]) {
 
 #[cfg_attr(test, allow(dead_code))]
 fn blast_db_subject_chunks(seq_len: usize) -> Vec<(usize, usize)> {
+    // 1-1 with NCBI `MAX_DBSEQ_LEN` and `DBSEQ_CHUNK_OVERLAP`
+    // (`blast_gapalign.h:54`, `blast_hits.h:192`). NCBI walks long
+    // subjects in `MAX_DBSEQ_LEN`-sized windows that overlap by
+    // `DBSEQ_CHUNK_OVERLAP = 100` bases so an HSP spanning a chunk
+    // boundary is still detectable from at least one chunk. Without
+    // overlap, our task=blastn parity drops because seeds/HSPs straddling
+    // 5 Mb boundaries silently vanish.
     const MAX_DBSEQ_LEN: usize = 5_000_000;
+    const DBSEQ_CHUNK_OVERLAP: usize = 100;
 
     if seq_len <= MAX_DBSEQ_LEN {
         return vec![(0, seq_len)];
@@ -8383,7 +8790,11 @@ fn blast_db_subject_chunks(seq_len: usize) -> Vec<(usize, usize)> {
     while start < seq_len {
         let end = seq_len.min(start.saturating_add(MAX_DBSEQ_LEN));
         chunks.push((start, end));
-        start = end;
+        if end >= seq_len {
+            break;
+        }
+        // NCBI: `backup->next = backup->offset + MAX_DBSEQ_LEN - dbseq_chunk_overlap`.
+        start = end - DBSEQ_CHUNK_OVERLAP;
     }
     chunks
 }
@@ -8806,6 +9217,7 @@ fn run_blastn_subject(
                     query_acc: query_ids.acc.clone(),
                     query_accver: query_ids.accver.clone(),
                     subject_id: subject_ids.id.clone(),
+                    subject_seqid: None,
                     subject_gi: subject_ids.gi.clone(),
                     subject_acc: subject_ids.acc.clone(),
                     subject_accver: subject_ids.accver.clone(),
@@ -8838,6 +9250,8 @@ fn run_blastn_subject(
                     subject_kingdom: String::new(),
                     num_ident: hsp.num_ident,
                     num_positives: hsp.num_ident,
+                    num_links: 1,
+                    comp_adjust_method: 0,
                 });
             }
         }
@@ -8961,6 +9375,8 @@ fn run_blastn_subject(
                     show_subject_header,
                     subject_display.as_deref(),
                     pairwise_line_length(args),
+                    None,
+                    matches!(args.task.as_deref(), Some("rmblastn")),
                 )?;
             }
             write_pairwise_subject_query_stats(
@@ -9015,8 +9431,32 @@ fn run_blastn_subject(
 }
 
 fn format_sam_float(value: f64) -> String {
+    // NCBI's SAM EV field emits `0` for evalues below ~1e-180, matching the
+    // pairwise / XML threshold (`align_format_util.cpp:GetScoreString`).
+    if value != 0.0 && value.abs() < 1.0e-180 {
+        return "0".to_string();
+    }
     if value != 0.0 && value.abs() < 0.0001 {
-        format!("{:.5e}", value)
+        // NCBI's SAM EV emits the equivalent of `%g` with 6-digit precision
+        // (e.g. `1.2357e-10` — trailing zero stripped — or `8.80849e-49`).
+        // Format with 5 decimals (6 significant digits) then strip trailing
+        // zeros from the mantissa, keeping the exponent intact.
+        let raw = format!("{:.5e}", value);
+        if let Some(e_idx) = raw.find('e') {
+            let (mantissa, exp) = raw.split_at(e_idx);
+            let trimmed = if mantissa.contains('.') {
+                let mut m = mantissa.trim_end_matches('0').to_string();
+                if m.ends_with('.') {
+                    m.pop();
+                }
+                m
+            } else {
+                mantissa.to_string()
+            };
+            format!("{}{}", trimmed, exp)
+        } else {
+            raw
+        }
     } else {
         let abs = value.abs();
         let digits_before_decimal = if abs >= 1.0 {
@@ -9052,28 +9492,76 @@ fn xml_escape(s: &str) -> String {
 }
 
 fn format_xml_evalue(value: f64) -> String {
+    // NCBI's `CAlignFormatUtil::GetScoreString` clamps very small e-values
+    // to "0.0" in pairwise output; the XML formatter renders that as the
+    // literal `0`. Mirror that here so `Hsp_evalue` reads `0` for
+    // sub-1e-180 values instead of `2.46731e-268`.
+    if value == 0.0 || value < 1.0e-180 {
+        return "0".to_string();
+    }
+    // NCBI emits `%g` precision 6: 6 significant digits, trailing zeros
+    // stripped, fixed notation when in [1e-4, 1e6), scientific otherwise.
+    // Delegate to the shared helper so this is identical to Hsp_bit-score
+    // formatting.
+    format_xml_double_g(value)
+}
+
+/// Format a double as NCBI's XML `Hsp_bit-score`-style `%g` with precision 6:
+/// 6 significant digits, trailing zeros stripped from the mantissa, plain
+/// fixed notation when the value doesn't require scientific (NCBI uses fixed
+/// for ~1e-4..1e6 and scientific outside).
+fn format_xml_double_g(value: f64) -> String {
     if value == 0.0 {
-        "0".to_string()
-    } else {
+        return "0".to_string();
+    }
+    let abs = value.abs();
+    let use_scientific = abs < 1e-4 || abs >= 1e6;
+    if use_scientific {
         let s = format!("{value:.5e}");
         if let Some((mantissa, exponent)) = s.split_once('e') {
+            let mantissa_trimmed = if mantissa.contains('.') {
+                let mut m = mantissa.trim_end_matches('0').to_string();
+                if m.ends_with('.') {
+                    m.pop();
+                }
+                m
+            } else {
+                mantissa.to_string()
+            };
             let exponent = exponent
                 .trim_start_matches('+')
                 .trim_start_matches('0')
                 .replace("-0", "-");
-            format!("{mantissa}e{exponent}")
+            format!("{mantissa_trimmed}e{exponent}")
         } else {
             s
         }
+    } else {
+        // Fixed notation: 6 significant digits total, trailing zeros stripped.
+        let digits_before_decimal = if abs >= 1.0 {
+            abs.log10().floor() as i32 + 1
+        } else {
+            0
+        };
+        let decimals = (6 - digits_before_decimal).max(0) as usize;
+        let mut s = format!("{value:.decimals$}");
+        if s.contains('.') {
+            while s.ends_with('0') {
+                s.pop();
+            }
+            if s.ends_with('.') {
+                s.pop();
+            }
+        }
+        s
     }
 }
 
 fn format_xml_stat_float(value: f64) -> String {
-    if value.abs() < 1.0 {
-        format!("{value:.15}")
-    } else {
-        format!("{value:.14}")
-    }
+    // NCBI emits these with `%g`-style trimming — `0.46`, `1.28`, `0.85`,
+    // not `0.460000000000000`. Use Rust's `{}` default which prints the
+    // shortest round-trip representation for the value.
+    format!("{value}")
 }
 
 fn sort_blastn_subject_tabular_output_hits(
@@ -9437,31 +9925,60 @@ fn write_pairwise_hit_summary_header<W: Write>(
     Ok(())
 }
 
+/// Compute the e-value column width for the hit-summary table. NCBI pads
+/// the e-value column to the max-format-width across all hits, with a
+/// minimum of 5 chars so `0.0   ` lines up with `4e-162` in tables that
+/// include both. Returns 5 when no hits are present.
+fn pairwise_hit_summary_evalue_width(hits: &[&TabularHit]) -> usize {
+    let mut width = 5usize;
+    for hit in hits {
+        let w = blast_rs::format::format_pairwise_evalue(hit.evalue).len();
+        if w > width {
+            width = w;
+        }
+    }
+    width
+}
+
 fn write_pairwise_hit_summary_row<W: Write>(
     writer: &mut W,
     desc: &str,
     hits: &[&TabularHit],
     sorthits: i32,
     show_num_hsps: bool,
+    evalue_field_width: usize,
 ) -> io::Result<()> {
     let best = pairwise_best_hit(hits);
     if sorthits == 0 {
+        // NCBI's hit-summary one-liner: description left-padded to 70
+        // chars, bit-score left-aligned in an 8-char field starting at
+        // col 71, then the e-value left-padded to the table's max
+        // e-value width (typically 5 for small tables, 6+ for tables
+        // where the smallest e-value is in scientific notation like
+        // `4e-162`). NCBI computes this width across all hits in the
+        // table; we mirror by passing `evalue_field_width` from the
+        // caller's pre-pass.
         if show_num_hsps {
+            // NCBI hit-summary `N` column is the chain size of the best HSP
+            // (NCBI `BlastHSP::num`). For unlinked / singleton hits this is 1;
+            // for sum-stats chains it's the number of segments in the chain.
             writeln!(
                 writer,
-                "{:<68}  {:>4}    {}  {}",
+                "{:<70}{:<8}{:<width$}  {}",
                 desc,
                 blast_rs::format::format_bitscore(best.bit_score),
                 blast_rs::format::format_pairwise_evalue(best.evalue),
-                1,
+                best.num_links.max(1),
+                width = evalue_field_width,
             )
         } else {
             writeln!(
                 writer,
-                "{:<68}  {:>4}    {}",
+                "{:<70}{:<8}{:<width$}",
                 desc,
                 blast_rs::format::format_bitscore(best.bit_score),
                 blast_rs::format::format_pairwise_evalue(best.evalue),
+                width = evalue_field_width,
             )
         }
     } else {
@@ -9502,12 +10019,13 @@ fn write_blastp_pairwise_subject_output<W: Write>(
     psiblast: bool,
 ) -> io::Result<()> {
     write_blastp_pairwise_subject_preamble(writer, subjects, args, total_subject_len, psiblast)?;
-    if psiblast {
-        writeln!(writer, "Results from round 1")?;
-        writeln!(writer)?;
-        writeln!(writer)?;
-    }
-    for query in queries {
+    let num_queries = queries.len();
+    for (query_idx, query) in queries.iter().enumerate() {
+        if psiblast {
+            writeln!(writer, "Results from round 1")?;
+            writeln!(writer)?;
+            writeln!(writer)?;
+        }
         let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
         let has_query_hits = !query_hits.is_empty();
         write_blastp_pairwise_query_header(writer, query, subjects, &query_hits, args, false)?;
@@ -9517,6 +10035,12 @@ fn write_blastp_pairwise_subject_output<W: Write>(
         let mut last_pairwise_subject: Option<&str> = None;
         for hit in limited_hits {
             let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
+            if show_subject_header && last_pairwise_subject.is_some() {
+                // NCBI inserts an extra blank line before each subsequent
+                // subject's `>` header so consecutive subjects are
+                // separated by two blanks instead of one.
+                writeln!(writer)?;
+            }
             last_pairwise_subject = Some(hit.subject_id.as_str());
             let subject_display = subjects
                 .iter()
@@ -9530,20 +10054,31 @@ fn write_blastp_pairwise_subject_output<W: Write>(
                 &subject_display,
                 pairwise_line_length(args),
                 if args.parse_deflines { ">" } else { "> " },
-                if psiblast {
-                    ", Method: Compositional matrix adjust."
-                } else {
-                    ""
+                match params.comp_adjust {
+                    0 => "",
+                    1 => ", Method: Composition-based stats.",
+                    _ => ", Method: Compositional matrix adjust.",
                 },
+                params.matrix,
             )?;
         }
-        write_blastp_pairwise_query_stats(
+        // For psiblast multi-query, NCBI puts "Results from round 1" right
+        // after "Effective search space used:" with NO trailing blanks from
+        // the stats block. Only the final query gets the usual 2 trailing
+        // blanks before the database footer.
+        let trailing = if psiblast && query_idx + 1 < num_queries {
+            0
+        } else {
+            2
+        };
+        write_blastp_pairwise_query_stats_with_trailing(
             writer,
             query,
             params,
             total_subject_len.max(0),
             subjects.len().min(i32::MAX as usize) as i32,
             blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+            trailing,
         )?;
     }
     write_blastp_pairwise_subject_database_footer(
@@ -9618,12 +10153,13 @@ fn write_blastp_pairwise_db_output<W: Write>(
     psiblast: bool,
 ) -> io::Result<()> {
     write_blastp_pairwise_db_preamble(writer, db, psiblast)?;
-    if psiblast {
-        writeln!(writer, "Results from round 1")?;
-        writeln!(writer)?;
-        writeln!(writer)?;
-    }
-    for query in queries {
+    let num_queries = queries.len();
+    for (query_idx, query) in queries.iter().enumerate() {
+        if psiblast {
+            writeln!(writer, "Results from round 1")?;
+            writeln!(writer)?;
+            writeln!(writer)?;
+        }
         let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
         let has_query_hits = !query_hits.is_empty();
         write_blastp_pairwise_db_query_header(
@@ -9640,6 +10176,9 @@ fn write_blastp_pairwise_db_output<W: Write>(
         let mut last_pairwise_subject: Option<&str> = None;
         for hit in limited_hits {
             let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
+            if show_subject_header && last_pairwise_subject.is_some() {
+                writeln!(writer)?;
+            }
             last_pairwise_subject = Some(hit.subject_id.as_str());
             let subject_display = subject_deflines
                 .get(&hit.subject_id)
@@ -9652,20 +10191,27 @@ fn write_blastp_pairwise_db_output<W: Write>(
                 subject_display,
                 pairwise_line_length(args),
                 ">",
-                if psiblast {
-                    ", Method: Compositional matrix adjust."
-                } else {
-                    ""
+                match params.comp_adjust {
+                    0 => "",
+                    1 => ", Method: Composition-based stats.",
+                    _ => ", Method: Compositional matrix adjust.",
                 },
+                params.matrix,
             )?;
         }
-        write_blastp_pairwise_query_stats(
+        let trailing = if psiblast && query_idx + 1 < num_queries {
+            0
+        } else {
+            2
+        };
+        write_blastp_pairwise_query_stats_with_trailing(
             writer,
             query,
             params,
             db.total_length.min(i64::MAX as u64) as i64,
             db.stats_num_oids.min(i32::MAX as u64) as i32,
             blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+            trailing,
         )?;
     }
     write_blastp_pairwise_db_database_footer(writer, db, args, params)
@@ -9707,8 +10253,15 @@ fn write_translated_pairwise_subject_output<W: Write>(
         let has_alignments = !limited_hits.is_empty();
         let mut last_pairwise_subject: Option<&str> = None;
         for hit in limited_hits {
+            let has_previous_subject = last_pairwise_subject.is_some();
             let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
             last_pairwise_subject = Some(hit.subject_id.as_str());
+            if show_subject_header && has_previous_subject {
+                // NCBI inserts an extra blank line before each subsequent
+                // subject's `>` header so consecutive subjects are
+                // separated by two blanks instead of one.
+                writeln!(writer)?;
+            }
             let subject_display = subjects
                 .iter()
                 .find(|subject| subject.id == hit.subject_id)
@@ -9778,8 +10331,12 @@ fn write_translated_pairwise_db_output<W: Write>(
         let has_alignments = !limited_hits.is_empty();
         let mut last_pairwise_subject: Option<&str> = None;
         for hit in limited_hits {
+            let has_previous_subject = last_pairwise_subject.is_some();
             let show_subject_header = last_pairwise_subject != Some(hit.subject_id.as_str());
             last_pairwise_subject = Some(hit.subject_id.as_str());
+            if show_subject_header && has_previous_subject {
+                writeln!(writer)?;
+            }
             let subject_display = subject_deflines
                 .get(&hit.subject_id)
                 .map(String::as_str)
@@ -9895,8 +10452,11 @@ fn write_blastp_pairwise_db_preamble<W: Write>(
         format_with_commas(db.total_length),
     )?;
     writeln!(writer)?;
-    writeln!(writer)?;
-    writeln!(writer)
+    if !psiblast {
+        writeln!(writer)?;
+        writeln!(writer)?;
+    }
+    Ok(())
 }
 
 fn write_blastp_pairwise_db_database_footer<W: Write>(
@@ -10046,6 +10606,7 @@ fn write_blastp_pairwise_query_header<W: Write>(
 
     let mut seen = std::collections::HashSet::new();
     let mut written = 0usize;
+    let evalue_width = pairwise_hit_summary_evalue_width(hits);
     for hit in hits {
         if !seen.insert(hit.subject_id.as_str()) {
             continue;
@@ -10069,6 +10630,7 @@ fn write_blastp_pairwise_query_header<W: Write>(
             &subject_hits,
             args.sorthits(),
             show_num_hsps,
+            evalue_width,
         )?;
         written += 1;
     }
@@ -10109,6 +10671,7 @@ fn write_blastp_pairwise_db_query_header<W: Write>(
 
     let mut seen = std::collections::HashSet::new();
     let mut written = 0usize;
+    let evalue_width = pairwise_hit_summary_evalue_width(hits);
     for hit in hits {
         if !seen.insert(hit.subject_id.as_str()) {
             continue;
@@ -10131,6 +10694,7 @@ fn write_blastp_pairwise_db_query_header<W: Write>(
             &subject_hits,
             args.sorthits(),
             show_num_hsps,
+            evalue_width,
         )?;
         written += 1;
     }
@@ -10146,21 +10710,41 @@ fn write_blastp_pairwise_alignment<W: Write>(
     line_width: usize,
     subject_header_prefix: &str,
     method_suffix: &str,
+    matrix_type: blast_rs::api::MatrixType,
 ) -> io::Result<()> {
     if show_subject_header {
         write_wrapped_subject_header(writer, subject_display, subject_header_prefix)?;
         writeln!(writer, "Length={}", hit.subject_len)?;
     }
     writeln!(writer)?;
+    // For blastp comp_adjust=2, NCBI's Blast_ChooseMatrixAdjustRule falls
+    // back to "Composition-based stats." for short, low-identity, or
+    // low-complexity alignments. Without per-HSP tracking we emit the
+    // caller's constant; some short blastp HSPs will show "Compositional
+    // matrix adjust." where NCBI shows "Composition-based stats.".
+    let expect_label = if hit.num_links > 1 {
+        format!("Expect({})", hit.num_links)
+    } else {
+        "Expect".to_string()
+    };
+    // Prefer per-HSP method (NCBI `BlastHSP::comp_adjustment_method`,
+    // `blast_kappa.c:332-342`) when recorded; else fall back to the caller's
+    // params-derived constant.
+    let per_hsp_method_suffix = match hit.comp_adjust_method {
+        1 => ", Method: Composition-based stats.",
+        2 => ", Method: Compositional matrix adjust.",
+        _ => method_suffix,
+    };
     writeln!(
         writer,
-        " Score = {} bits ({}),  Expect = {}{}",
+        " Score = {} bits ({}),  {} = {}{}",
         blast_rs::format::format_bitscore(hit.bit_score),
         hit.raw_score,
+        expect_label,
         blast_rs::format::format_pairwise_evalue(hit.evalue),
-        method_suffix
+        per_hsp_method_suffix
     )?;
-    let positives = hit.num_ident;
+    let positives = hit.num_positives;
     let gap_count = pairwise_alignment_gap_count(hit);
     writeln!(
         writer,
@@ -10211,7 +10795,7 @@ fn write_blastp_pairwise_alignment<W: Write>(
         for i in 0..chunk {
             let q = qbytes.get(pos + i).copied().unwrap_or(b' ');
             let s = sbytes.get(pos + i).copied().unwrap_or(b' ');
-            let c = if q == s && q != b'-' { q } else { b' ' };
+            let c = pairwise_protein_midline_char(q, s, matrix_type);
             write!(writer, "{}", c as char)?;
         }
         writeln!(writer)?;
@@ -10244,12 +10828,29 @@ fn write_translated_pairwise_alignment<W: Write>(
         writeln!(writer, "Length={}", hit.subject_len)?;
     }
     writeln!(writer)?;
+    let method_suffix = match params.comp_adjust {
+        0 => "",
+        1 => ", Method: Composition-based stats.",
+        _ => ", Method: Compositional matrix adjust.",
+    };
+    let expect_label = if hit.num_links > 1 {
+        format!("Expect({})", hit.num_links)
+    } else {
+        "Expect".to_string()
+    };
+    let per_hsp_method_suffix = match hit.comp_adjust_method {
+        1 => ", Method: Composition-based stats.",
+        2 => ", Method: Compositional matrix adjust.",
+        _ => method_suffix,
+    };
     writeln!(
         writer,
-        " Score = {} bits ({}),  Expect = {}",
+        " Score = {} bits ({}),  {} = {}{}",
         blast_rs::format::format_bitscore(hit.bit_score),
         hit.raw_score,
-        blast_rs::format::format_pairwise_evalue(hit.evalue)
+        expect_label,
+        blast_rs::format::format_pairwise_evalue(hit.evalue),
+        per_hsp_method_suffix
     )?;
     let positives = pairwise_protein_positive_count(hit, params.matrix);
     let gap_count = pairwise_alignment_gap_count(hit);
@@ -10419,11 +11020,16 @@ fn pairwise_protein_midline_char(q: u8, s: u8, matrix_type: blast_rs::api::Matri
     if q == b'-' || s == b'-' || q == b' ' || s == b' ' {
         return b' ';
     }
-    if q == s {
-        return q;
+    // Translated programs lowercase SEG-soft-masked query residues for display;
+    // case-fold both sides so the midline still reflects the underlying amino
+    // acid identity / substitution score (NCBI's `showalign.cpp` does the same).
+    let qu = q.to_ascii_uppercase();
+    let su = s.to_ascii_uppercase();
+    if qu == su {
+        return qu;
     }
-    let q_encoded = blast_rs::encoding::aminoacid_to_ncbistdaa_base(q);
-    let s_encoded = blast_rs::encoding::aminoacid_to_ncbistdaa_base(s);
+    let q_encoded = blast_rs::encoding::aminoacid_to_ncbistdaa_base(qu);
+    let s_encoded = blast_rs::encoding::aminoacid_to_ncbistdaa_base(su);
     let matrix = blast_rs::api::get_matrix(matrix_type);
     if matrix[q_encoded as usize][s_encoded as usize] > 0 {
         b'+'
@@ -10556,29 +11162,76 @@ fn write_wrapped_subject_header<W: Write>(
     subject_id: &str,
     prefix: &str,
 ) -> io::Result<()> {
-    const WIDTH: usize = 78;
-    if prefix.len() + subject_id.len() <= WIDTH {
-        writeln!(writer, "{prefix}{subject_id}")?;
+    // Port of NCBI `align_format/showalign.cpp::s_WrapOutputLine` (line_len=60).
+    // The seqid (first whitespace-delimited token after the leading `>`) is
+    // emitted unwrapped; `s_WrapOutputLine` then operates only on the title
+    // portion with title-relative position counters. At each title position
+    // `i > 0 && i % line_len == 0`, the next whitespace character triggers
+    // a newline emission. Multi-defline subjects are stored with `>gi|...|`
+    // chains embedded inside the title text, so this single-pass title wrap
+    // produces the correct line breaks across all chained ids.
+    const LINE_LEN: usize = 60;
+    let full = format!("{prefix}{subject_id}");
+    let bytes = full.as_bytes();
+    // Split into header-prefix (`>seqid `) and title.
+    // Skip past the leading `>` (and any other prefix bytes) plus the first
+    // seqid token to find where the title starts.
+    let title_start = {
+        let mut i = 0usize;
+        // Move past leading `>` / prefix bytes.
+        while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'>' {
+            i += 1;
+        }
+        // First whitespace after this point ends the seqid token.
+        let mut j = i;
+        while j < bytes.len() && bytes[j] != b' ' && bytes[j] != b'\t' {
+            j += 1;
+        }
+        // Include the trailing space so the prefix is `>seqid `.
+        if j < bytes.len() {
+            j + 1
+        } else {
+            j
+        }
+    };
+    if title_start >= bytes.len() {
+        writeln!(writer, "{full}")?;
         return Ok(());
     }
-    let first_width = WIDTH.saturating_sub(prefix.len()).max(1);
-    writeln!(writer, "{}{}", prefix, &subject_id[..first_width])?;
-    let mut remaining = &subject_id[first_width..];
-    while !remaining.is_empty() {
-        let take = remaining.len().min(WIDTH);
-        writeln!(writer, "{}", &remaining[..take])?;
-        remaining = &remaining[take..];
+    // Emit `>seqid ` verbatim.
+    writer.write_all(&bytes[..title_start])?;
+    let title = &bytes[title_start..];
+    if title.len() <= LINE_LEN {
+        writer.write_all(title)?;
+        writeln!(writer)?;
+        return Ok(());
     }
+    let mut do_wrap = false;
+    for (i, &c) in title.iter().enumerate() {
+        if i > 0 && i % LINE_LEN == 0 {
+            do_wrap = true;
+        }
+        writer.write_all(&[c])?;
+        if do_wrap && (c == b' ' || c == b'\t') {
+            writeln!(writer)?;
+            do_wrap = false;
+        }
+    }
+    writeln!(writer)?;
     Ok(())
 }
 
-fn write_blastp_pairwise_query_stats<W: Write>(
+fn write_blastp_pairwise_query_stats_with_trailing<W: Write>(
     writer: &mut W,
     query: &blast_rs::input::FastaRecord,
     params: &blast_rs::api::SearchParams,
     total_subject_len: i64,
     num_subjects: i32,
     leading_blank_lines: usize,
+    trailing_blank_lines: usize,
 ) -> io::Result<()> {
     let query_aa = blast_rs::encoding::encode_ncbistdaa_sequence(&query.sequence);
     let matrix = *blast_rs::api::get_matrix(params.matrix);
@@ -10631,8 +11284,10 @@ fn write_blastp_pairwise_query_stats<W: Write>(
         "Effective search space used: {}",
         effective_search_space.round().max(0.0) as u64
     )?;
-    writeln!(writer)?;
-    writeln!(writer)
+    for _ in 0..trailing_blank_lines {
+        writeln!(writer)?;
+    }
+    Ok(())
 }
 
 fn write_translated_pairwise_query_stats<W: Write>(
@@ -10653,22 +11308,35 @@ fn write_translated_pairwise_query_stats<W: Write>(
     };
     let matrix = *blast_rs::api::get_matrix(params.matrix);
     let matrix_name = blastp_matrix_name(params.matrix);
-    let ungapped_kbp =
-        if program_label == "BLASTX" && params.matrix != blast_rs::api::MatrixType::Blosum62 {
-            blast_rs::stat::query_specific_protein_ungapped_kbp_for_matrix(
-                &query_for_stats,
-                matrix_name,
-                &matrix,
-            )
-        } else if program_label == "BLASTX" || program_label == "TBLASTX" {
-            blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name)
+    // NCBI's pairwise-stats Lambda/K/H column policy varies by program:
+    //   blastp / tblastn: query-specific (computed via `BlastKarlinBlkUngappedCalc`).
+    //   blastx: query-specific BUT capped at the matrix "ideal" Lambda
+    //     (`blast_stat.c:2796`). For most protein-quality queries the
+    //     query-specific Lambda is >= ideal, so the cap gives the table
+    //     value; for queries with ambiguous residues (X/N→X) the
+    //     query-specific Lambda drops below ideal and NCBI prints the
+    //     real query-specific value (e.g. 0.295 for our `with_ns` fixture).
+    //   tblastx: TABLE values (no cap, no query-specific — table KBP used
+    //     throughout the engine).
+    let ungapped_kbp = if program_label == "TBLASTX" {
+        blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name)
+    } else {
+        let kbp = blast_rs::stat::query_specific_protein_ungapped_kbp_for_matrix(
+            &query_for_stats,
+            matrix_name,
+            &matrix,
+        );
+        if program_label == "BLASTX" {
+            let ideal = blast_rs::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name);
+            if kbp.lambda >= ideal.lambda {
+                ideal
+            } else {
+                kbp
+            }
         } else {
-            blast_rs::stat::query_specific_protein_ungapped_kbp_for_matrix(
-                &query_for_stats,
-                matrix_name,
-                &matrix,
-            )
-        };
+            kbp
+        }
+    };
     let ungapped_display = protein_ungapped_display_stats(params.matrix);
     let gapped_display = protein_gapped_display_stats(params);
     let effective_query_len = if query_is_translated {
@@ -10929,7 +11597,19 @@ fn write_blastp_pairwise_options_footer<W: Write>(
     writeln!(
         writer,
         "Neighboring words threshold: {}",
-        blastp_args_word_threshold(args, "BLASTP")
+        // Prefer the actual params.word_threshold (which task-specific
+        // defaults like blastp-fast set to 21). Fall back to the
+        // args/default helper for the legacy case where word_threshold
+        // wasn't set on params.
+        args.threshold
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                params
+                    .word_threshold
+                    .map(format_sam_float)
+                    .unwrap_or_else(|| blastp_args_word_threshold(args, "BLASTP"))
+            })
     )?;
     writeln!(
         writer,
@@ -10988,32 +11668,78 @@ fn blastp_subject_xml_hit_metadata(
 }
 
 fn blastp_db_xml_hit_metadata(db: &BlastDb, oid: u32, raw_accession: &str) -> BlastpXmlHitMetadata {
-    let hit_def = extract_header_title(db.get_header(oid)).unwrap_or_else(|| raw_accession.into());
-    let accession = raw_accession
+    let title =
+        extract_header_title(db.get_header(oid)).unwrap_or_else(|| raw_accession.into());
+    let versioned_accession = raw_accession
         .rsplit('|')
         .next()
         .filter(|part| !part.is_empty())
         .unwrap_or(raw_accession)
         .to_string();
+    // NCBI's XML `Hit_id` carries the full BLAST Seq-id chain
+    // (`gi|N|ref|acc.ver|` or `pir||name`), `Hit_def` is just the raw title
+    // (no accession prefix), and `Hit_accession` is the BARE accession
+    // without the version suffix. See `align_format/showalign.cpp` /
+    // `BlastSeqalign_GetIDStr` for the chain format.
+    let hit_id = db
+        .get_blast_seqid_chain(oid)
+        .unwrap_or_else(|| raw_accession.to_string());
+    let bare_accession =
+        blast_rs::format::strip_accession_version(&versioned_accession).to_string();
     BlastpXmlHitMetadata {
-        hit_id: raw_accession.to_string(),
-        hit_def,
-        accession,
+        hit_id,
+        hit_def: title,
+        accession: bare_accession,
         length: db.get_seq_len(oid).min(i32::MAX as u32) as i32,
     }
 }
 
 fn translated_db_xml_hit_metadata(db: &BlastDb, oid: u32) -> BlastpXmlHitMetadata {
+    // For protein subject DBs (blastx target / blastp), emit the full
+    // BLAST Seq-id chain (`gi|N|ref|acc.ver|`) and the bare accession
+    // matching NCBI's XML format. Fall back to the synthetic
+    // `gnl|BL_ORD_ID|N` placeholder only for nucleotide DBs without
+    // proper Seq-id ASN.1 (tblastn/tblastx celegans-style).
+    let title = extract_header_title(db.get_header(oid));
+    if let (Some(seqid_chain), Some(bare_acc)) =
+        (db.get_blast_seqid_chain(oid), db.get_bare_accession(oid))
+    {
+        return BlastpXmlHitMetadata {
+            hit_def: title.clone().unwrap_or_else(|| bare_acc.clone()),
+            hit_id: seqid_chain,
+            accession: bare_acc,
+            length: db.get_seq_len(oid).min(i32::MAX as u32) as i32,
+        };
+    }
     let accession = oid.to_string();
     let hit_id = format!("gnl|BL_ORD_ID|{oid}");
     BlastpXmlHitMetadata {
         hit_def: db_pairwise_subject_defline(db, oid, &hit_id)
             .or_else(|| db.get_defline(oid))
-            .or_else(|| extract_header_title(db.get_header(oid)))
+            .or_else(|| title)
             .unwrap_or_else(|| accession.clone()),
         hit_id,
         accession,
         length: db.get_seq_len(oid).min(i32::MAX as u32) as i32,
+    }
+}
+
+fn xml_seg_filter_for_blastp(args: &BlastnArgs) -> &'static str {
+    // NCBI `align_format/blastfmtutil.cpp` emits `L;` for SEG-active queries
+    // and `F` otherwise. blastp / psiblast default to `-seg no`, so the
+    // common case is `F`.
+    match args.seg.as_deref() {
+        None | Some("no") => "F",
+        _ => "L;",
+    }
+}
+
+fn xml_seg_filter_for_translated(args: &BlastnArgs) -> &'static str {
+    // tblastn / blastx / tblastx default to `-seg yes`, so the common case
+    // is `L;`. Honor an explicit override.
+    match args.seg.as_deref() {
+        Some("no") => "F",
+        _ => "L;",
     }
 }
 
@@ -11098,7 +11824,11 @@ fn write_blastp_xml_output<W: Write>(
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
         blastp_args_gap_costs(args).1
     )?;
-    writeln!(writer, "      <Parameters_filter>F</Parameters_filter>")?;
+    writeln!(
+        writer,
+        "      <Parameters_filter>{}</Parameters_filter>",
+        xml_seg_filter_for_blastp(args)
+    )?;
     writeln!(writer, "    </Parameters>")?;
     writeln!(writer, "  </BlastOutput_param>")?;
     writeln!(writer, "<BlastOutput_iterations>")?;
@@ -11379,7 +12109,11 @@ fn write_translated_xml_output<W: Write>(
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
         blastp_args_gap_costs(args).1
     )?;
-    writeln!(writer, "      <Parameters_filter>F</Parameters_filter>")?;
+    writeln!(
+        writer,
+        "      <Parameters_filter>{}</Parameters_filter>",
+        xml_seg_filter_for_translated(args)
+    )?;
     writeln!(writer, "    </Parameters>")?;
     writeln!(writer, "  </BlastOutput_param>")?;
     writeln!(writer, "<BlastOutput_iterations>")?;
@@ -11607,10 +12341,20 @@ fn write_translated_xml_hsp<W: Write>(
         "      <Hsp_align-len>{}</Hsp_align-len>",
         hit.align_len
     )?;
+    // NCBI's translated-program XML emits the MASKED query as `Hsp_qseq` —
+    // SEG-masked residues appear as uppercase `X` rather than the original
+    // (lowercase soft-mask is a pairwise-only convention). Our `query_aln`
+    // carries the unmasked residues with SEG positions lowercased; substitute
+    // those to `X` here so XML matches NCBI.
+    let qseq = hit.qseq.as_deref().unwrap_or("");
+    let qseq_xml: String = qseq
+        .chars()
+        .map(|c| if c.is_ascii_lowercase() { 'X' } else { c })
+        .collect();
     writeln!(
         writer,
         "      <Hsp_qseq>{}</Hsp_qseq>",
-        xml_escape(hit.qseq.as_deref().unwrap_or(""))
+        xml_escape(&qseq_xml)
     )?;
     writeln!(
         writer,
@@ -11626,19 +12370,17 @@ fn write_translated_xml_hsp<W: Write>(
 }
 
 fn format_translated_xml_evalue(value: f64) -> String {
+    // NCBI uses `NStr::DoubleToString(val, 6, fDoubleGeneral)` — 6 SIG
+    // digits. Switch to fixed notation in [1e-4, 1e6), scientific
+    // otherwise. See [`format_blastp_xml_evalue`] for the rationale.
     if value == 0.0 {
         return "0".to_string();
     }
-    if value.abs() < 1e-4 {
-        let s = format!("{value:.5e}");
-        if let Some((mantissa, exponent)) = s.split_once('e') {
-            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
-            return format!("{mantissa}e{}", pad_xml_exponent(exponent));
-        }
-        return s;
-    }
-    if value.abs() < 1e-3 {
-        let mut s = format!("{value:.9}");
+    let abs = value.abs();
+    if (1e-4..1e6).contains(&abs) {
+        let exp = abs.log10().floor() as i32;
+        let decimals = (5 - exp).max(0) as usize;
+        let mut s = format!("{value:.*}", decimals);
         while s.contains('.') && s.ends_with('0') {
             s.pop();
         }
@@ -11647,12 +12389,10 @@ fn format_translated_xml_evalue(value: f64) -> String {
         }
         return s;
     }
-    let mut s = format!("{value:.8}");
-    while s.contains('.') && s.ends_with('0') {
-        s.pop();
-    }
-    if s.ends_with('.') {
-        s.pop();
+    let s = format!("{value:.5e}");
+    if let Some((mantissa, exponent)) = s.split_once('e') {
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        return format!("{mantissa}e{}", pad_xml_exponent(exponent));
     }
     s
 }
@@ -11691,19 +12431,33 @@ fn blastp_xml_midline(hit: &TabularHit, matrix_type: blast_rs::api::MatrixType) 
 }
 
 fn format_blastp_xml_score(value: f64) -> String {
-    let mut s = format!("{value:.4}");
-    while s.contains('.') && s.ends_with('0') {
-        s.pop();
-    }
-    if s.ends_with('.') {
-        s.pop();
-    }
-    s
+    // NCBI emits Hsp_bit-score using `%g` precision 6 (6 significant digits,
+    // trailing zeros stripped from the mantissa). Use the shared helper.
+    format_xml_double_g(value)
 }
 
 fn format_blastp_xml_evalue(value: f64) -> String {
+    // NCBI's `align_format` emits Hsp_evalue with 6 SIGNIFICANT digits using
+    // `NStr::DoubleToString(val, 6, fDoubleGeneral)` — fixed notation in
+    // roughly [1e-4, 1e6), scientific otherwise. The crucial detail is
+    // "significant digits", not "decimal places": 1.636695 prints as
+    // `1.6367` (5 decimals), 0.518654 prints as `0.518654` (6 decimals),
+    // 100.5 prints as `100.5` (1 decimal).
     if value == 0.0 {
         return "0".to_string();
+    }
+    let abs = value.abs();
+    if (1e-4..1e6).contains(&abs) {
+        let exp = abs.log10().floor() as i32;
+        let decimals = (5 - exp).max(0) as usize;
+        let mut s = format!("{value:.*}", decimals);
+        while s.contains('.') && s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+        return s;
     }
     let s = format!("{value:.5e}");
     if let Some((mantissa, exponent)) = s.split_once('e') {
@@ -11711,11 +12465,14 @@ fn format_blastp_xml_evalue(value: f64) -> String {
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string();
-        let exponent = exponent
-            .trim_start_matches('+')
-            .trim_start_matches('0')
-            .replace("-0", "-");
-        format!("{mantissa}e{exponent}")
+        let (sign, digits) = exponent
+            .strip_prefix('-')
+            .map(|rest| ("-", rest))
+            .or_else(|| exponent.strip_prefix('+').map(|rest| ("", rest)))
+            .unwrap_or(("", exponent));
+        let digits = digits.trim_start_matches('0');
+        let digits = if digits.is_empty() { "0" } else { digits };
+        format!("{mantissa}e{sign}{digits}")
     } else {
         s
     }
@@ -11928,7 +12685,15 @@ fn write_blastn_subject_xml_output<W: Write>(
         writer,
         "  <BlastOutput_version>BLASTN 2.12.0+</BlastOutput_version>"
     )?;
-    writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
+    // NCBI's blastn XML reference is the greedy-DNA paper (Zhang 2000), not
+    // the Gapped-BLAST/PSI-BLAST paper that's emitted for blastp.
+    // blastn task=blastn-short / rmblastn uses the Gapped BLAST paper instead
+    // of the greedy-DNA paper.
+    if matches!(args.task.as_deref(), Some("blastn") | Some("blastn-short") | Some("rmblastn") | Some("dc-megablast")) {
+        writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
+    } else {
+        writeln!(writer, "  <BlastOutput_reference>Zheng Zhang, Scott Schwartz, Lukas Wagner, and Webb Miller (2000), &quot;A greedy algorithm for aligning DNA sequences&quot;, J Comput Biol 2000; 7(1-2):203-14.</BlastOutput_reference>")?;
+    }
     writeln!(writer, "  <BlastOutput_db></BlastOutput_db>")?;
     if let Some(query) = queries.first() {
         let query_id = if args.parse_deflines {
@@ -11984,7 +12749,15 @@ fn write_blastn_subject_xml_output<W: Write>(
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
         args.gapextend()
     )?;
-    writeln!(writer, "      <Parameters_filter>m;</Parameters_filter>")?;
+    // NCBI emits `L;m;` when DUST is active (L = DUST low-complexity filter,
+    // m = lowercase soft masking pass-through). Without DUST it would just
+    // be `m;` (or `F` when no filtering at all).
+    let filter_str = if args.dust != "no" { "L;m;" } else { "m;" };
+    writeln!(
+        writer,
+        "      <Parameters_filter>{}</Parameters_filter>",
+        filter_str
+    )?;
     writeln!(writer, "    </Parameters>")?;
     writeln!(writer, "  </BlastOutput_param>")?;
     writeln!(writer, "<BlastOutput_iterations>")?;
@@ -12042,6 +12815,7 @@ fn write_blastn_subject_xml_output<W: Write>(
                 .or_default()
                 .push(hit);
         }
+        let iteration_has_hits = !subject_ord.is_empty();
         for (hit_num, (subject_id, hsps)) in subject_ord.iter().enumerate() {
             let Some(first) = hsps.first() else {
                 continue;
@@ -12074,8 +12848,8 @@ fn write_blastn_subject_xml_output<W: Write>(
                 writeln!(writer, "      <Hsp_num>{}</Hsp_num>", hsp_num + 1)?;
                 writeln!(
                     writer,
-                    "      <Hsp_bit-score>{:.2}</Hsp_bit-score>",
-                    hit.bit_score
+                    "      <Hsp_bit-score>{}</Hsp_bit-score>",
+                    format_xml_double_g(hit.bit_score)
                 )?;
                 writeln!(writer, "      <Hsp_score>{}</Hsp_score>", hit.raw_score)?;
                 writeln!(
@@ -12178,6 +12952,12 @@ fn write_blastn_subject_xml_output<W: Write>(
         )?;
         writeln!(writer, "    </Statistics>")?;
         writeln!(writer, "  </Iteration_stat>")?;
+        if !iteration_has_hits {
+            writeln!(
+                writer,
+                "  <Iteration_message>No hits found</Iteration_message>"
+            )?;
+        }
         writeln!(writer, "</Iteration>")?;
     }
     writeln!(writer, "</BlastOutput_iterations>")?;
@@ -12207,7 +12987,14 @@ fn write_blastn_db_xml_output<W: Write>(
         writer,
         "  <BlastOutput_version>BLASTN 2.12.0+</BlastOutput_version>"
     )?;
-    writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
+    // NCBI's blastn XML reference is the greedy-DNA paper (Zhang 2000).
+    // blastn task=blastn-short / rmblastn uses the Gapped BLAST paper instead
+    // of the greedy-DNA paper.
+    if matches!(args.task.as_deref(), Some("blastn") | Some("blastn-short") | Some("rmblastn") | Some("dc-megablast")) {
+        writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
+    } else {
+        writeln!(writer, "  <BlastOutput_reference>Zheng Zhang, Scott Schwartz, Lukas Wagner, and Webb Miller (2000), &quot;A greedy algorithm for aligning DNA sequences&quot;, J Comput Biol 2000; 7(1-2):203-14.</BlastOutput_reference>")?;
+    }
     writeln!(
         writer,
         "  <BlastOutput_db>{}</BlastOutput_db>",
@@ -12256,7 +13043,12 @@ fn write_blastn_db_xml_output<W: Write>(
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
         args.gapextend()
     )?;
-    writeln!(writer, "      <Parameters_filter>m;</Parameters_filter>")?;
+    let filter_str = if args.dust != "no" { "L;m;" } else { "m;" };
+    writeln!(
+        writer,
+        "      <Parameters_filter>{}</Parameters_filter>",
+        filter_str
+    )?;
     writeln!(writer, "    </Parameters>")?;
     writeln!(writer, "  </BlastOutput_param>")?;
     writeln!(writer, "<BlastOutput_iterations>")?;
@@ -12309,6 +13101,7 @@ fn write_blastn_db_xml_output<W: Write>(
             }
             grouped.entry(group).or_default().push(hit);
         }
+        let iteration_has_hits = !group_order.is_empty();
 
         for (hit_num, group) in group_order.iter().enumerate() {
             let Some(hsps) = grouped.get(group) else {
@@ -12341,8 +13134,8 @@ fn write_blastn_db_xml_output<W: Write>(
                 writeln!(writer, "      <Hsp_num>{}</Hsp_num>", hsp_num + 1)?;
                 writeln!(
                     writer,
-                    "      <Hsp_bit-score>{:.2}</Hsp_bit-score>",
-                    hit.bit_score
+                    "      <Hsp_bit-score>{}</Hsp_bit-score>",
+                    format_xml_double_g(hit.bit_score)
                 )?;
                 writeln!(writer, "      <Hsp_score>{}</Hsp_score>", hit.raw_score)?;
                 writeln!(
@@ -12453,6 +13246,12 @@ fn write_blastn_db_xml_output<W: Write>(
         )?;
         writeln!(writer, "    </Statistics>")?;
         writeln!(writer, "  </Iteration_stat>")?;
+        if !iteration_has_hits {
+            writeln!(
+                writer,
+                "  <Iteration_message>No hits found</Iteration_message>"
+            )?;
+        }
         writeln!(writer, "</Iteration>")?;
     }
     writeln!(writer, "</BlastOutput_iterations>")?;
@@ -12462,41 +13261,61 @@ fn write_blastn_db_xml_output<W: Write>(
 }
 
 fn sam_cigar_subject_as_read(hit: &TabularHit) -> String {
-    let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) else {
-        return format!("{}M", hit.align_len);
-    };
+    // NCBI's blastn SAM treats the subject as the "read" and includes hard
+    // clips for the subject flanks that are NOT part of the alignment:
+    // e.g. `79280H500M14992654H` for a 500-bp alignment at subject pos
+    // 79281 inside a 15 072 434-bp chromosome. The H counts cover the
+    // unaligned subject ends so the CIGAR-length sum equals subject_len.
+    let s_lo = hit.subject_start.min(hit.subject_end);
+    let s_hi = hit.subject_start.max(hit.subject_end);
+    let pre_clip = (s_lo - 1).max(0);
+    let post_clip = (hit.subject_len - s_hi).max(0);
 
-    let mut cigar = String::new();
-    let mut current_op = '\0';
-    let mut current_len = 0usize;
-    for (q, s) in qseq.bytes().zip(sseq.bytes()) {
-        let op = if q == b'-' {
-            'I'
-        } else if s == b'-' {
-            'D'
-        } else {
-            'M'
-        };
-        if op == current_op {
-            current_len += 1;
-        } else {
+    let body = {
+        let mut cigar = String::new();
+        if let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) {
+            let mut current_op = '\0';
+            let mut current_len = 0usize;
+            for (q, s) in qseq.bytes().zip(sseq.bytes()) {
+                let op = if q == b'-' {
+                    'I'
+                } else if s == b'-' {
+                    'D'
+                } else {
+                    'M'
+                };
+                if op == current_op {
+                    current_len += 1;
+                } else {
+                    if current_len > 0 {
+                        cigar.push_str(&current_len.to_string());
+                        cigar.push(current_op);
+                    }
+                    current_op = op;
+                    current_len = 1;
+                }
+            }
             if current_len > 0 {
                 cigar.push_str(&current_len.to_string());
                 cigar.push(current_op);
             }
-            current_op = op;
-            current_len = 1;
         }
+        if cigar.is_empty() {
+            format!("{}M", hit.align_len)
+        } else {
+            cigar
+        }
+    };
+
+    let mut result = String::new();
+    if pre_clip > 0 {
+        result.push_str(&format!("{}H", pre_clip));
     }
-    if current_len > 0 {
-        cigar.push_str(&current_len.to_string());
-        cigar.push(current_op);
+    result.push_str(&body);
+    if post_clip > 0 {
+        result.push_str(&format!("{}H", post_clip));
     }
-    if cigar.is_empty() {
-        format!("{}M", hit.align_len)
-    } else {
-        cigar
-    }
+    result
 }
 
 fn sam_gap_count(hit: &TabularHit) -> i32 {
@@ -12509,6 +13328,7 @@ fn sam_gap_count(hit: &TabularHit) -> i32 {
         .count() as i32
 }
 
+#[allow(dead_code)]
 fn sam_mismatch_count(hit: &TabularHit) -> i32 {
     let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) else {
         return hit.mismatches;
@@ -12662,6 +13482,11 @@ fn write_blastn_sam_output_with_query_labels<W: Write>(
     }
 
     writeln!(writer, "@HD\tVN:1.2\tSO:coordinate\tGO:reference")?;
+    // NCBI emits @SQ headers only for queries that produced at least one hit
+    // (see `align_format/sam.cpp::PrintHeader`). Build the set of query ids
+    // present in `hits` so we don't emit @SQ for queries with no alignments.
+    let queries_with_hits: std::collections::HashSet<&str> =
+        hits.iter().map(|h| h.query_id.as_str()).collect();
     for (i, query) in queries.iter().enumerate() {
         let query_label = query_sq_labels
             .and_then(|labels| labels.get(i))
@@ -12672,6 +13497,11 @@ fn write_blastn_sam_output_with_query_labels<W: Write>(
                     .map(String::as_str)
                     .unwrap_or(query.id.as_str())
             });
+        if !queries_with_hits.contains(query.id.as_str())
+            && !queries_with_hits.contains(query_label)
+        {
+            continue;
+        }
         writeln!(
             writer,
             "@SQ\tSN:{}\tLN:{}",
@@ -12679,9 +13509,16 @@ fn write_blastn_sam_output_with_query_labels<W: Write>(
             query.sequence.len()
         )?;
     }
+    // NCBI's @PG CL field carries argv as the user invoked it (e.g.
+    // `/usr/bin/blastn -query ...`). Our binary is `blast-cli <subcommand>`
+    // so the leading two tokens always differ from NCBI's. Reproduce ours
+    // verbatim — the rest of the SAM body is byte-identical, and any tool
+    // consuming SAM treats @PG CL as informational.
+    let cl = std::env::args().collect::<Vec<_>>().join(" ");
     writeln!(
         writer,
-        "@PG\tID:0\tVN:2.12.0+\tCL:blast-cli blastn -outfmt 17 \tPN:blastn"
+        "@PG\tID:0\tVN:2.12.0+\tCL:{} \tPN:blastn",
+        cl
     )?;
 
     for hit in hits {
@@ -12700,7 +13537,11 @@ fn write_blastn_sam_output_with_query_labels<W: Write>(
         };
         let pos = hit.query_start.min(hit.query_end);
         let cigar = sam_cigar_subject_as_read(hit);
-        let edit_distance = sam_gap_count(hit) + sam_mismatch_count(hit);
+        // NCBI's SAM `NM` tag reports gap count only (not mismatches), matching
+        // `align_format/sam.cpp::PrintAlignment` which writes the number of
+        // alignment insertions+deletions rather than the SAM-spec edit distance
+        // including substitutions.
+        let edit_distance = sam_gap_count(hit);
         writeln!(
             writer,
             "{}\t{}\t{}\t{}\t255\t{}\t*\t0\t0\t*\t*\tAS:i:{}\tEV:f:{}\tNM:i:{}\tPI:f:{:.2}\tBS:f:{}",
@@ -12725,8 +13566,8 @@ fn compare_oid_hsps_for_hitlist(
     b_oid: u32,
     b_hsps: &[blast_rs::search::SearchHsp],
 ) -> std::cmp::Ordering {
-    let a_best = a_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
-    let b_best = b_hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
+    let a_best = a_hsps.iter().map(|h| h.evalue).fold(i32::MAX as f64, f64::min);
+    let b_best = b_hsps.iter().map(|h| h.evalue).fold(i32::MAX as f64, f64::min);
     let a_score = first_search_hsp_score_by_evalue(a_hsps);
     let b_score = first_search_hsp_score_by_evalue(b_hsps);
 
@@ -12813,6 +13654,8 @@ impl NcbiBlastHitList {
     /// (`blast_hits.c:3243`): append until `hsplist_max`, then heapify once
     /// with `s_EvalueCompareHSPLists`, and replace the current heap root
     /// unless the new HSP list is strictly worse than the saved worst list.
+    /// naming: Rust exposes this as the associated `NcbiBlastHitList` update
+    /// method.
     fn update(&mut self, mut hsp_list: NcbiBlastHspList) {
         hsp_list.refresh_best_evalue();
         if self.hsplist_max == 0 {
@@ -12863,14 +13706,20 @@ impl NcbiBlastHspList {
         let mut hsp_list = Self {
             oid,
             hsps,
-            best_evalue: f64::MAX,
+            // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`.
+            best_evalue: i32::MAX as f64,
         };
         hsp_list.refresh_best_evalue();
         hsp_list
     }
 
     fn refresh_best_evalue(&mut self) {
-        self.best_evalue = self.hsps.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
+        // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds with `(double)INT4_MAX`.
+        self.best_evalue = self
+            .hsps
+            .iter()
+            .map(|h| h.evalue)
+            .fold(i32::MAX as f64, f64::min);
     }
 
     fn sort_by_evalue(&mut self) {
@@ -13129,10 +13978,17 @@ fn effective_db_length(args: &BlastnArgs, actual_db_length: i64) -> i64 {
 
 fn db_subject_defline(db: &BlastDb, oid: u32, subject_id: &str) -> Option<String> {
     let title = extract_header_title(db.get_header(oid))?;
-    if title == subject_id || title.starts_with(&format!("{} ", subject_id)) {
+    // For PIR/PRF/etc. Seq-ids whose Textseq-id has only a `name` field,
+    // NCBI's pairwise display prepends the dbtag prefix (`pir||T09571`)
+    // because the bare name is ambiguous across databases. `get_display_id`
+    // returns the prefixed form when applicable; fall back to subject_id
+    // for the common case (Refseq, GenBank, etc. with accession+version
+    // — those don't need the prefix).
+    let display_id = db.get_display_id(oid).unwrap_or_else(|| subject_id.to_string());
+    if title == display_id || title.starts_with(&format!("{} ", display_id)) {
         Some(title)
     } else {
-        Some(format!("{} {}", subject_id, title))
+        Some(format!("{} {}", display_id, title))
     }
 }
 
@@ -13229,25 +14085,64 @@ fn write_pairwise_subject_report_preamble<W: Write>(
     args: &BlastnArgs,
     total_subject_len: i64,
 ) -> io::Result<()> {
+    let task = args.task.as_deref();
+    // rmblastn emits "RMBLASTN" header + RepeatMasker reference; other blastn
+    // tasks use "BLASTN" + Gapped-BLAST / greedy-DNA.
+    if matches!(task, Some("rmblastn")) {
+        writeln!(writer, "RMBLASTN 2.12.0+")?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer, "Reference: Robert M. Hubley, Arian Smit")?;
+        writeln!(writer, "RMBlast - RepeatMasker Search Engine")?;
+        writeln!(writer, "2010 <http://www.repeatmasker.org>")?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        write_pairwise_subject_database_line(writer, "", args.subject.as_ref())?;
+        writeln!(
+            writer,
+            "           {} sequences; {} total letters",
+            format_with_commas(subjects.len() as u64),
+            format_with_commas(total_subject_len as u64),
+        )?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        return Ok(());
+    }
     writeln!(writer, "BLASTN 2.12.0+")?;
     writeln!(writer)?;
     writeln!(writer)?;
-    writeln!(
-        writer,
-        "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A."
-    )?;
-    writeln!(
-        writer,
-        "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J."
-    )?;
-    writeln!(
-        writer,
-        "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of"
-    )?;
-    writeln!(
-        writer,
-        "protein database search programs\", Nucleic Acids Res. 25:3389-3402."
-    )?;
+    // blastn-short / rmblastn use the Gapped BLAST paper as the pairwise
+    // reference; other blastn tasks use the greedy-DNA paper (Zhang 2000).
+    if matches!(task, Some("blastn") | Some("blastn-short") | Some("rmblastn") | Some("dc-megablast")) {
+        writeln!(
+            writer,
+            "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A."
+        )?;
+        writeln!(
+            writer,
+            "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J."
+        )?;
+        writeln!(
+            writer,
+            "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of"
+        )?;
+        writeln!(
+            writer,
+            "protein database search programs\", Nucleic Acids Res. 25:3389-3402."
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "Reference: Zheng Zhang, Scott Schwartz, Lukas Wagner, and Webb"
+        )?;
+        writeln!(
+            writer,
+            "Miller (2000), \"A greedy algorithm for aligning DNA sequences\", J"
+        )?;
+        writeln!(writer, "Comput Biol 2000; 7(1-2):203-14.")?;
+    }
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
@@ -13309,6 +14204,7 @@ fn write_pairwise_subject_query_header<W: Write>(
 
     let mut seen = std::collections::HashSet::new();
     let mut written = 0usize;
+    let evalue_width = pairwise_hit_summary_evalue_width(hits);
     for hit in hits {
         if !seen.insert(hit.subject_id.as_str()) {
             continue;
@@ -13329,7 +14225,14 @@ fn write_pairwise_subject_query_header<W: Write>(
             .copied()
             .filter(|h| h.subject_id == hit.subject_id)
             .collect();
-        write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits(), false)?;
+        write_pairwise_hit_summary_row(
+            writer,
+            &desc,
+            &subject_hits,
+            args.sorthits(),
+            false,
+            evalue_width,
+        )?;
         written += 1;
     }
     writeln!(writer)?;
@@ -13399,12 +14302,14 @@ fn write_pairwise_subject_database_footer<W: Write>(
         args.reward(),
         args.penalty()
     )?;
-    writeln!(
-        writer,
-        "Gap Penalties: Existence: {}, Extension: {}",
-        args.gapopen(),
-        args.gapextend()
-    )
+    write_blastn_gap_penalties(writer, args)?;
+    // dc-megablast prints the two-hit window in the footer (40 by default).
+    // megablast/blastn/blastn-short don't (megablast=greedy single-hit,
+    // blastn-short/blastn uses single-hit too).
+    if matches!(args.task.as_deref(), Some("dc-megablast")) {
+        writeln!(writer, "Window for multiple hits: 40")?;
+    }
+    Ok(())
 }
 
 fn write_pairwise_subject_database_line<W: Write>(
@@ -13479,9 +14384,15 @@ fn write_pairwise_blastn_kbp_row<W: Write>(
     writer: &mut W,
     kbp: &blast_rs::stat::KarlinBlk,
 ) -> io::Result<()> {
+    // NCBI's pairwise KBP row: lambda right-aligned in width 8, K and H
+    // each right-aligned in width 9, plus a single trailing space. This
+    // works for both megablast (lambda=1.33 ⇒ 4 leading spaces) and
+    // dc-megablast (lambda=0.634 ⇒ 3 leading spaces) where the
+    // pairwise_blastn_lambda_or_h helper picks `.2f` vs `.3f` based on
+    // magnitude.
     writeln!(
         writer,
-        "    {}    {}     {} ",
+        "{:>8}{:>9}{:>9} ",
         pairwise_blastn_lambda_or_h(kbp.lambda),
         pairwise_blastn_k(kbp.k),
         pairwise_blastn_lambda_or_h(kbp.h)
@@ -13500,26 +14411,90 @@ fn pairwise_blastn_k(value: f64) -> String {
     format!("{value:.3}")
 }
 
-fn write_pairwise_db_report_preamble<W: Write>(writer: &mut W, db: &BlastDb) -> io::Result<()> {
+fn write_pairwise_db_report_preamble<W: Write>(
+    writer: &mut W,
+    db: &BlastDb,
+    args: &BlastnArgs,
+) -> io::Result<()> {
+    let task = args.task.as_deref();
+    // rmblastn: program header is "RMBLASTN" and emits the RepeatMasker /
+    // RMBlast citation (Hubley & Smit 2010) BEFORE the standard Gapped-BLAST
+    // 1997 reference. Both references are present; the RepeatMasker one is
+    // an extra header.
+    if matches!(task, Some("rmblastn")) {
+        writeln!(writer, "RMBLASTN 2.12.0+")?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer, "Reference: Robert M. Hubley, Arian Smit")?;
+        writeln!(writer, "RMBlast - RepeatMasker Search Engine")?;
+        writeln!(writer, "2010 <http://www.repeatmasker.org>")?;
+        writeln!(writer)?;
+        writeln!(
+            writer,
+            "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A."
+        )?;
+        writeln!(
+            writer,
+            "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J."
+        )?;
+        writeln!(
+            writer,
+            "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of"
+        )?;
+        writeln!(
+            writer,
+            "protein database search programs\", Nucleic Acids Res. 25:3389-3402."
+        )?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer, "Database: {}", db.title)?;
+        writeln!(
+            writer,
+            "           {} sequences; {} total letters",
+            format_with_commas(db.stats_num_oids),
+            format_with_commas(db.total_length),
+        )?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        writeln!(writer)?;
+        return Ok(());
+    }
     writeln!(writer, "BLASTN 2.12.0+")?;
     writeln!(writer)?;
     writeln!(writer)?;
-    writeln!(
-        writer,
-        "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A."
-    )?;
-    writeln!(
-        writer,
-        "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J."
-    )?;
-    writeln!(
-        writer,
-        "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of"
-    )?;
-    writeln!(
-        writer,
-        "protein database search programs\", Nucleic Acids Res. 25:3389-3402."
-    )?;
+    // NCBI's pairwise reference depends on the blastn task:
+    //   `blastn-short` (and `rmblastn`) use the Gapped BLAST paper because
+    //   the engine path runs the protein-style two-hit gapped extension.
+    //   All other blastn tasks reference the greedy-DNA paper (Zhang 2000).
+    if matches!(task, Some("blastn") | Some("blastn-short") | Some("rmblastn") | Some("dc-megablast")) {
+        writeln!(
+            writer,
+            "Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A."
+        )?;
+        writeln!(
+            writer,
+            "Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J."
+        )?;
+        writeln!(
+            writer,
+            "Lipman (1997), \"Gapped BLAST and PSI-BLAST: a new generation of"
+        )?;
+        writeln!(
+            writer,
+            "protein database search programs\", Nucleic Acids Res. 25:3389-3402."
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "Reference: Zheng Zhang, Scott Schwartz, Lukas Wagner, and Webb"
+        )?;
+        writeln!(
+            writer,
+            "Miller (2000), \"A greedy algorithm for aligning DNA sequences\", J"
+        )?;
+        writeln!(writer, "Comput Biol 2000; 7(1-2):203-14.")?;
+    }
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(writer)?;
@@ -13559,11 +14534,17 @@ fn write_pairwise_db_query_header<W: Write>(
         writeln!(writer)?;
         return Ok(());
     }
-    write_pairwise_hit_summary_header(writer, args.sorthits(), false)?;
-    writeln!(writer)?;
+    // rmblastn omits the "Sequences producing significant alignments:" hit
+    // summary block — its alignments go directly under the query header.
+    let is_rmblastn = matches!(args.task.as_deref(), Some("rmblastn"));
+    if !is_rmblastn {
+        write_pairwise_hit_summary_header(writer, args.sorthits(), false)?;
+        writeln!(writer)?;
+    }
 
     let mut seen = std::collections::HashSet::new();
     let mut written = 0usize;
+    let evalue_width = pairwise_hit_summary_evalue_width(hits);
     for hit in hits {
         if !seen.insert(hit.subject_id.as_str()) {
             continue;
@@ -13581,7 +14562,18 @@ fn write_pairwise_db_query_header<W: Write>(
             .copied()
             .filter(|h| h.subject_id == hit.subject_id)
             .collect();
-        write_pairwise_hit_summary_row(writer, &desc, &subject_hits, args.sorthits(), false)?;
+        if is_rmblastn {
+            written += 1;
+            continue;
+        }
+        write_pairwise_hit_summary_row(
+            writer,
+            &desc,
+            &subject_hits,
+            args.sorthits(),
+            false,
+            evalue_width,
+        )?;
         written += 1;
     }
     writeln!(writer)?;
@@ -13595,6 +14587,11 @@ fn write_pairwise_db_query_stats<W: Write>(
     query: &blast_rs::input::FastaRecord,
     db: &BlastDb,
 ) -> io::Result<()> {
+    // rmblastn doesn't print per-query Lambda/K/H or search-space stats —
+    // RepeatMasker computes its own composite statistics downstream.
+    if matches!(args.task.as_deref(), Some("rmblastn")) {
+        return Ok(());
+    }
     let Ok((loc_start, loc_end)) = query_loc_bounds(args, query.sequence.len()) else {
         return Ok(());
     };
@@ -13653,12 +14650,49 @@ fn write_pairwise_db_database_footer<W: Write>(
         args.reward(),
         args.penalty()
     )?;
-    writeln!(
-        writer,
-        "Gap Penalties: Existence: {}, Extension: {}",
-        args.gapopen(),
-        args.gapextend()
-    )
+    write_blastn_gap_penalties(writer, args)?;
+    // dc-megablast prints the two-hit window in the footer (40 by default).
+    // megablast/blastn/blastn-short don't (megablast=greedy single-hit,
+    // blastn-short/blastn uses single-hit too).
+    if matches!(args.task.as_deref(), Some("dc-megablast")) {
+        writeln!(writer, "Window for multiple hits: 40")?;
+    }
+    Ok(())
+}
+
+fn write_blastn_gap_penalties<W: Write>(writer: &mut W, args: &BlastnArgs) -> io::Result<()> {
+    // NCBI's `align_format/blast_format.cpp::BLAST_PrintGapInfo` displays
+    // the greedy (megablast) linear gap penalty as `reward/2 - penalty`
+    // when both `-gapopen` and `-gapextend` are zero, since the engine
+    // collapses the affine cost into a single linear coefficient. For
+    // task=blastn (affine, non-zero open/extend) the values are shown as
+    // configured.
+    let gap_open = args.gapopen();
+    let gap_extend = args.gapextend();
+    if gap_open == 0 && gap_extend == 0 {
+        let reward = args.reward();
+        let penalty = args.penalty();
+        let linear = (reward as f64) / 2.0 - (penalty as f64);
+        writeln!(
+            writer,
+            "Gap Penalties: Existence: 0, Extension: {}",
+            format_blastn_gap_extension(linear)
+        )
+    } else {
+        writeln!(
+            writer,
+            "Gap Penalties: Existence: {}, Extension: {}",
+            gap_open, gap_extend
+        )
+    }
+}
+
+fn format_blastn_gap_extension(value: f64) -> String {
+    if (value - value.trunc()).abs() < 1e-9 {
+        format!("{}", value as i64)
+    } else {
+        format!("{:.1}", value)
+    }
 }
 
 fn truncate_description(s: &str, width: usize) -> String {
@@ -13723,10 +14757,12 @@ fn write_pairwise_alignment<W: Write>(
     show_subject_header: bool,
     subject_display: Option<&str>,
     line_width: usize,
+    query_lowercase_mask: Option<&[bool]>,
+    rmblastn_style: bool,
 ) -> io::Result<()> {
     let subject_display = subject_display.unwrap_or(hit.subject_id.as_str());
     let mut buf = Vec::new();
-    blast_rs::format::format_pairwise_alignment_with_line_width(
+    blast_rs::format::format_pairwise_alignment_full(
         &mut buf,
         &hit.query_id,
         subject_display,
@@ -13744,6 +14780,8 @@ fn write_pairwise_alignment<W: Write>(
         hit.gap_opens,
         true,
         line_width,
+        query_lowercase_mask,
+        rmblastn_style,
     )?;
     let start = buf.windows(2).position(|w| w == b"\n\n").map_or_else(
         || {
@@ -13975,8 +15013,8 @@ fn compare_tabular_subjects_for_hitlist(
     b_subject: &str,
     b_hits: &[&TabularHit],
 ) -> std::cmp::Ordering {
-    let a_best = a_hits.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
-    let b_best = b_hits.iter().map(|h| h.evalue).fold(f64::MAX, f64::min);
+    let a_best = a_hits.iter().map(|h| h.evalue).fold(i32::MAX as f64, f64::min);
+    let b_best = b_hits.iter().map(|h| h.evalue).fold(i32::MAX as f64, f64::min);
     let a_score = first_tabular_hsp_score_by_evalue(a_hits);
     let b_score = first_tabular_hsp_score_by_evalue(b_hits);
 
@@ -16603,6 +17641,7 @@ mod tests {
             query_acc: None,
             query_accver: None,
             subject_id: subject_id.to_string(),
+            subject_seqid: None,
             subject_gi: None,
             subject_acc: None,
             subject_accver: None,
@@ -16631,6 +17670,8 @@ mod tests {
             subject_kingdom: String::new(),
             num_ident: align_len,
             num_positives: align_len,
+            num_links: 1,
+            comp_adjust_method: 0,
         }
     }
 

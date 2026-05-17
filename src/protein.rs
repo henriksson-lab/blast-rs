@@ -6,6 +6,23 @@ use crate::encoding::ncbistdaa_to_aminoacid_char;
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
 use crate::matrix::AA_SIZE;
 use crate::stat::MININT;
+use std::cell::RefCell;
+
+/// Per-thread DP scratch reused across [`protein_align_ex_scored`] calls.
+///
+/// `sa` holds the band's per-cell state and `script_pool` holds the
+/// per-DP-row traceback buffers, recycled between calls so they keep
+/// their `Vec` capacity. Mirrors NCBI's `BlastGapDP` pattern of
+/// allocating once per worker and resetting between alignments.
+#[derive(Default)]
+struct ProteinDpScratch {
+    sa: Vec<GapDP>,
+    script_pool: Vec<Vec<u8>>,
+}
+
+thread_local! {
+    static DP_SCRATCH: RefCell<ProteinDpScratch> = RefCell::new(ProteinDpScratch::default());
+}
 
 /// Score two amino acids using a scoring matrix.
 #[inline]
@@ -272,13 +289,63 @@ fn protein_align_ex_scored(
         n + 3
     };
     let alloc = (extra * 2 + 20).min(n + extra + 10);
-    let mut sa = vec![
+
+    // Swap out the thread-local scratch so we own it for the duration of
+    // this call (the cell holds a `Default` placeholder until we swap
+    // back at the end). `sa` reuses its `Vec<GapDP>` capacity and
+    // per-row traceback `Vec<u8>`s are pulled from / returned to
+    // `script_pool` so they keep their capacity across calls. This
+    // mirrors NCBI's `BlastGapDP` allocation pattern of one scratch per
+    // worker, reset between alignments.
+    let mut scratch_cell = DP_SCRATCH.with(|s| s.replace(ProteinDpScratch::default()));
+    let result = protein_align_ex_scored_inner(
+        a,
+        b,
+        m,
+        n,
+        scores,
+        query_offset,
+        gap_extend,
+        x_dropoff,
+        reverse,
+        gap_oe,
+        extra,
+        alloc,
+        &mut scratch_cell,
+    );
+    DP_SCRATCH.with(|s| {
+        s.replace(scratch_cell);
+    });
+    result
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn protein_align_ex_scored_inner(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    scores: ProteinScoreSource<'_>,
+    query_offset: usize,
+    gap_extend: i32,
+    x_dropoff: i32,
+    reverse: bool,
+    gap_oe: i32,
+    extra: usize,
+    alloc: usize,
+    scratch: &mut ProteinDpScratch,
+) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
+    let sa = &mut scratch.sa;
+    sa.clear();
+    sa.reserve(alloc);
+    sa.resize(
+        alloc,
         GapDP {
             best: MININT,
             best_gap: MININT,
-        };
-        alloc
-    ];
+        },
+    );
 
     sa[0] = GapDP {
         best: 0,
@@ -295,8 +362,12 @@ fn protein_align_ex_scored(
         b_size += 1;
     }
 
+    let pool = &mut scratch.script_pool;
     let mut scripts: Vec<Vec<u8>> = Vec::with_capacity(m + 1);
-    scripts.push(vec![SCRIPT_GAP_IN_A; b_size]);
+    let mut first_row = pool.pop().unwrap_or_default();
+    first_row.clear();
+    first_row.resize(b_size, SCRIPT_GAP_IN_A);
+    scripts.push(first_row);
 
     let mut best_score = 0i32;
     let mut first_b = 0usize;
@@ -311,7 +382,9 @@ fn protein_align_ex_scored(
         let a_letter = a[a_idx];
         let query_pos = query_offset + a_idx;
 
-        let mut row_script = vec![0u8; b_size + extra + 10];
+        let mut row_script = pool.pop().unwrap_or_default();
+        row_script.clear();
+        row_script.resize(b_size + extra + 10, 0);
         let mut sc = MININT;
         let mut sgr = MININT;
         let mut last_b = first_b;
@@ -491,6 +564,17 @@ fn protein_align_ex_scored(
             }
         } else {
             ops.push((op, 1));
+        }
+    }
+
+    // Return each row's Vec<u8> capacity to the pool for the next call.
+    // Cap pool retention to avoid unbounded RSS growth on workloads
+    // where alignment sizes vary widely — once the pool has enough
+    // rows for a "typical" alignment, further rows are dropped.
+    const MAX_POOL_ROWS: usize = 512;
+    for row in scripts.drain(..) {
+        if pool.len() < MAX_POOL_ROWS {
+            pool.push(row);
         }
     }
 

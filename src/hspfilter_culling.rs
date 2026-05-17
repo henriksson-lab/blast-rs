@@ -196,11 +196,16 @@ impl<'a> BlastHSPCullingData<'a> {
             // Sort each HspList and compute worst_evalue / low_score
             // for the hitlist (matching NCBI's tail of finalize).
             for list in hitlist.hsp_lists.iter_mut() {
+                // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:~1300`) seeds
+                // with `(double)INT4_MAX` and takes MIN over all evalues.
+                // For an empty list NCBI returns INT4_MAX; we previously
+                // returned INFINITY. The downstream comparator pushes
+                // empty lists to the end anyway, but match NCBI exactly.
                 let best = list
                     .hsps
                     .iter()
                     .map(|h| h.evalue)
-                    .fold(f64::INFINITY, f64::min);
+                    .fold(i32::MAX as f64, f64::min);
                 list.best_evalue = best;
                 list.sort_by_score();
             }
@@ -237,21 +242,21 @@ pub fn blast_hsp_culling_pipe_run(
             for list in hitlist.hsp_lists.iter_mut() {
                 // C: `Blast_HSPListSortByEvalue(hsp_list);` then
                 // `hsp_list->best_evalue = hsp_list->hsp_array[0]->evalue;`.
-                list.hsps.sort_by(|a, b| {
-                    a.evalue
-                        .partial_cmp(&b.evalue)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                // NCBI's `s_EvalueCompareHSPs` (`blast_hits.c:1415`) uses
+                // an epsilon=1e-180 evalue threshold (`s_EvalueComp`) and
+                // falls back to `ScoreCompareHSPs` for ties — a raw
+                // `partial_cmp` would diverge for near-zero evalues and
+                // for any equal-evalue pair (no tie-break).
+                list.hsps
+                    .sort_by(crate::hspstream::evalue_compare_hsps);
                 if let Some(head) = list.hsps.first() {
                     list.best_evalue = head.evalue;
                 }
             }
             // C: `Blast_HitListSortByEvalue(...)`.
-            hitlist.hsp_lists.sort_by(|a, b| {
-                a.best_evalue
-                    .partial_cmp(&b.best_evalue)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            hitlist
+                .hsp_lists
+                .sort_by(crate::hspstream::evalue_compare_hsp_lists);
         }
     }
 
@@ -320,10 +325,16 @@ pub struct BlastHSPBestHitOptions {
     pub score_edge: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlastHSPSubjectBestHitOptions {
+    pub max_range_diff: i32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlastHSPFilteringOptions {
     pub best_hit: Option<BlastHSPBestHitOptions>,
     pub best_hit_stage: crate::util::EBlastStage,
+    pub subject_besthit_opts: Option<BlastHSPSubjectBestHitOptions>,
     pub culling_opts: Option<BlastHSPCullingOptions>,
     pub culling_stage: crate::util::EBlastStage,
 }
@@ -372,6 +383,7 @@ pub fn blast_hspfiltering_options_new() -> BlastHSPFilteringOptions {
     BlastHSPFilteringOptions {
         best_hit: None,
         best_hit_stage: crate::util::EBlastStage::None,
+        subject_besthit_opts: None,
         culling_opts: None,
         culling_stage: crate::util::EBlastStage::None,
     }
@@ -414,6 +426,41 @@ pub fn blast_hspfiltering_options_add_culling(
 
     filt_opts.culling_opts = Some(culling);
     filt_opts.culling_stage = stage;
+    0
+}
+
+/// Rust ownership equivalent of `BlastHSPSubjectBestHitOptionsNew`
+/// (`blast_options.c:1963`).
+pub fn blast_hsp_subject_best_hit_options_new(_is_protein: bool) -> BlastHSPSubjectBestHitOptions {
+    // NCBI defaults: 3 for both protein and nucleotide programs.
+    BlastHSPSubjectBestHitOptions {
+        max_range_diff: 3,
+    }
+}
+
+/// Rust ownership equivalent of `BlastHSPSubjectBestHitOptionsFree`
+/// (`blast_options.c:1987`).
+pub fn blast_hsp_subject_best_hit_options_free(
+    subject_besthit_opts: &mut Option<BlastHSPSubjectBestHitOptions>,
+) -> Option<BlastHSPSubjectBestHitOptions> {
+    *subject_besthit_opts = None;
+    None
+}
+
+/// Rust ownership equivalent of `BlastHSPFilteringOptions_AddSubjectBestHit`
+/// (`blast_options.c:1998`).
+pub fn blast_hspfiltering_options_add_subject_best_hit(
+    filt_opts: Option<&mut BlastHSPFilteringOptions>,
+    subject_besthit: &mut Option<BlastHSPSubjectBestHitOptions>,
+) -> i16 {
+    let Some(filt_opts) = filt_opts else {
+        return 1;
+    };
+    let Some(subject_besthit) = subject_besthit.take() else {
+        return 1;
+    };
+
+    filt_opts.subject_besthit_opts = Some(subject_besthit);
     0
 }
 
@@ -473,6 +520,7 @@ pub fn blast_hspfiltering_options_free(
 ) -> Option<BlastHSPFilteringOptions> {
     if let Some(opts) = opts {
         blast_hspbest_hit_options_free(&mut opts.best_hit);
+        blast_hsp_subject_best_hit_options_free(&mut opts.subject_besthit_opts);
         blast_hspculling_options_free(&mut opts.culling_opts);
     }
     *opts = None;
@@ -1845,6 +1893,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 1000,
+            min_length: 0,
         };
         let hit = crate::options::HitSavingOptions::default();
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
@@ -1917,6 +1966,7 @@ mod tests {
             num_queries: 1,
             contexts: vec![],
             max_length: 0,
+            min_length: 0,
         };
         let hit = crate::options::HitSavingOptions::default();
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
@@ -1942,6 +1992,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 10,
+            min_length: 0,
         };
         let hit = crate::options::HitSavingOptions::default();
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
@@ -1972,6 +2023,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 1000,
+            min_length: 0,
         };
         let hit = crate::options::HitSavingOptions::default();
         let cull_opts = BlastHSPCullingOptions { max_hits: 5 };
@@ -2082,7 +2134,7 @@ mod tests {
         let info = blast_hsp_culling_info_new(params.clone());
         assert_eq!(info.params.culling_max, 3);
         let pipe = blast_hsp_culling_pipe_info_new(params);
-        assert_eq!(pipe.params.hsp_num_max, i32::MAX);
+        assert_eq!(pipe.params.hsp_num_max, 50);
         assert!(pipe.next.is_none());
     }
 
@@ -2114,9 +2166,9 @@ mod tests {
         let first = head.as_ref().expect("head");
         let second = first.next.as_ref().expect("second");
         let third = second.next.as_ref().expect("third");
-        assert_eq!(first.params.hsp_num_max, i32::MAX);
-        assert_eq!(second.params.hsp_num_max, i32::MAX);
-        assert_eq!(third.params.hsp_num_max, i32::MAX);
+        assert_eq!(first.params.hsp_num_max, 10);
+        assert_eq!(second.params.hsp_num_max, 20);
+        assert_eq!(third.params.hsp_num_max, 30);
         assert!(third.next.is_none());
         assert_eq!(first_ptr, first.as_ref() as *const _ as *mut _);
         assert_eq!(second_ptr, second.as_ref() as *const _ as *mut _);
@@ -2184,6 +2236,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 200,
+            min_length: 0,
         };
         let hit = crate::options::HitSavingOptions {
             hitlist_size: 20,
@@ -2267,6 +2320,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let hit = crate::options::HitSavingOptions {
             hitlist_size: 20,
@@ -2299,6 +2353,7 @@ mod tests {
     fn translated_hsp_filtering_options_lifecycle_and_transfers() {
         let mut filter = blast_hspfiltering_options_new();
         assert!(filter.best_hit.is_none());
+        assert!(filter.subject_besthit_opts.is_none());
         assert!(filter.culling_opts.is_none());
 
         let mut best_hit = Some(blast_hspbest_hit_options_new(0.1, 0.2));
@@ -2321,6 +2376,24 @@ mod tests {
         assert_eq!(
             filter.best_hit_stage,
             crate::util::EBlastStage::PrelimSearch
+        );
+
+        assert_eq!(
+            blast_hsp_subject_best_hit_options_new(true),
+            BlastHSPSubjectBestHitOptions { max_range_diff: 3 }
+        );
+        let mut subject_besthit = Some(blast_hsp_subject_best_hit_options_new(false));
+        assert_eq!(
+            blast_hspfiltering_options_add_subject_best_hit(
+                Some(&mut filter),
+                &mut subject_besthit,
+            ),
+            0
+        );
+        assert!(subject_besthit.is_none());
+        assert_eq!(
+            filter.subject_besthit_opts,
+            Some(BlastHSPSubjectBestHitOptions { max_range_diff: 3 })
         );
 
         let mut culling = Some(blast_hspculling_options_new(7));
@@ -2382,6 +2455,14 @@ mod tests {
                 None,
                 &mut missing_culling,
                 crate::util::EBlastStage::PrelimSearch,
+            ),
+            1
+        );
+        let mut missing_subject_besthit = None;
+        assert_eq!(
+            blast_hspfiltering_options_add_subject_best_hit(
+                Some(&mut conflict),
+                &mut missing_subject_besthit,
             ),
             1
         );

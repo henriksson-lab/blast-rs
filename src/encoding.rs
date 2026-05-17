@@ -114,9 +114,25 @@ pub const NCBISTDAA_STANDARD_RESIDUES: [u8; 20] = [
     1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22,
 ];
 
+/// Bit i is set iff i is one of the 20 standard NCBIstdaa residue codes.
+/// Used for the hot-path `is_ncbistdaa_standard_residue` check — replaces
+/// `.contains(&b)` on `NCBISTDAA_STANDARD_RESIDUES`, which was emitting
+/// memchr calls for every byte in `read_composition` (~50% of tblastx
+/// per-subject runtime).
+const STANDARD_RESIDUE_MASK: u32 = {
+    let mut mask: u32 = 0;
+    let mut i = 0;
+    while i < NCBISTDAA_STANDARD_RESIDUES.len() {
+        mask |= 1 << NCBISTDAA_STANDARD_RESIDUES[i];
+        i += 1;
+    }
+    mask
+};
+
 /// Return whether a code is one of the 20 standard NCBIstdaa residues.
+#[inline]
 pub fn is_ncbistdaa_standard_residue(b: u8) -> bool {
-    NCBISTDAA_STANDARD_RESIDUES.contains(&b)
+    b < 32 && (STANDARD_RESIDUE_MASK & (1u32 << b)) != 0
 }
 
 /// Return whether a code contributes to amino-acid composition.

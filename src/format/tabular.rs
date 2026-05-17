@@ -8,7 +8,7 @@ use std::io::Write;
 /// Strip a trailing `.N` version suffix from an accession-like string.
 /// `AAC44598.1` → `AAC44598`; `gi|123|ref|NP_839091.2|` is left untouched
 /// because the trailing `|` after the digits prevents the strip.
-fn strip_accession_version(s: &str) -> &str {
+pub fn strip_accession_version(s: &str) -> &str {
     if let Some(dot) = s.rfind('.') {
         let suffix = &s[dot + 1..];
         if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
@@ -57,6 +57,10 @@ pub struct TabularHit {
     pub query_acc: Option<String>,
     pub query_accver: Option<String>,
     pub subject_id: String,
+    /// Full BLAST Seq-id chain (e.g. `gi|N|ref|acc.ver|`, `pir||name`) for
+    /// `sseqid` / `sallseqid` tabular columns. When `None`, the formatter
+    /// falls back to `subject_id`.
+    pub subject_seqid: Option<String>,
     pub subject_gi: Option<String>,
     pub subject_acc: Option<String>,
     pub subject_accver: Option<String>,
@@ -85,15 +89,32 @@ pub struct TabularHit {
     pub subject_kingdom: String,
     pub num_ident: i32,
     pub num_positives: i32,
+    /// Number of HSPs in this HSP's linked-set chain (NCBI `BlastHSP::num`).
+    /// 1 for singletons (pairwise prints `Expect = X`); >=2 for sum-stats
+    /// chains (pairwise prints `Expect(N) = X`).
+    pub num_links: i32,
+    /// Composition adjustment method actually applied per HSP, mirroring
+    /// `BlastHSP::comp_adjustment_method`. Drives the `, Method: ...` suffix
+    /// on the pairwise Score line.
+    /// 0 = none, 1 = Composition-based stats., 2 = Compositional matrix adjust.
+    pub comp_adjust_method: u8,
 }
 
 /// Format an e-value matching BLAST tabular output (-outfmt 6).
 /// Uses NStr::DoubleToString(evalue, 2, fDoubleScientific) which is
 /// essentially %.2e for small values, transitioning to fixed for larger ones.
+/// The fixed-notation threshold uses `< 0.0005` so values like `9.98e-04`
+/// (which round to `0.001` at 3 decimal places) render as `0.001` —
+/// matching NCBI's tabular output behavior (`%.3f` rounding).
 pub fn format_evalue(val: f64) -> String {
+    // NCBI's tabular formatter (`align_format/tabular.cpp:1335`) overrides
+    // `GetScoreString`'s small-evalue branch with `DoubleToString(evalue, 2,
+    // fDoubleScientific)` for `1.0e-180 <= evalue < 0.0009`. We must match
+    // that 0.0009 boundary, not 0.0005, so 5.23e-04 renders as "5.23e-04"
+    // rather than rounding into the "0.001" fixed-point branch.
     if val < 1.0e-180 {
         "0.0".to_string()
-    } else if val < 0.001 {
+    } else if val < 0.0009 {
         // Scientific notation with 2 decimal places, C-style zero-padded exponent
         let s = format!("{:.2e}", val);
         // Rust: "2.01e-4" → need "2.01e-04"
@@ -137,10 +158,35 @@ pub fn format_evalue(val: f64) -> String {
 }
 
 /// Format a bit score matching BLAST reference style.
-/// >= 99.9: integer (e.g. "198"), < 99.9: one decimal (e.g. "56.0").
+/// `> 99999`: scientific 3 decimal places (NCBI `%5.3le` → `"1.000e+05"`);
+/// `> 99.9`: integer (e.g. `"198"`); else: one decimal (e.g. `"56.0"`).
+///
+/// NCBI `align_format_util.cpp::GetScoreString` (~line 987):
+/// ```c
+/// if (bit_score > 99999)      snprintf(..., "%5.3le", bit_score);
+/// else if (bit_score > 99.9)  snprintf(..., "%3.0ld", (long)bit_score);
+/// else                         snprintf(..., "%4.1lf", bit_score);
+/// ```
+/// Rust's `{:.3e}` produces `"1.000e5"` (no sign, no zero-padded exponent),
+/// so we have to manually shape the exponent to match `%5.3le`.
 pub fn format_bitscore(val: f64) -> String {
     if val > 99999.0 {
-        format!("{:.3e}", val)
+        // NCBI `%5.3le` format: 3 decimal places, explicit `e` with sign and
+        // zero-padded 2-digit exponent (e.g. `1.234e+05`).
+        let raw = format!("{val:.3e}");
+        if let Some(e_idx) = raw.find('e') {
+            let (mantissa, exp) = raw.split_at(e_idx);
+            let exp_digits = &exp[1..];
+            let (sign, digits) = if let Some(rest) = exp_digits.strip_prefix('-') {
+                ('-', rest)
+            } else {
+                ('+', exp_digits.strip_prefix('+').unwrap_or(exp_digits))
+            };
+            let n: u32 = digits.parse().unwrap_or(0);
+            format!("{mantissa}e{sign}{n:02}")
+        } else {
+            raw
+        }
     } else if val > 99.9 {
         format!("{:.0}", val as i64)
     } else {
@@ -216,20 +262,31 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             .unwrap_or(&hit.query_id)
             .clone(),
         "qgi" => hit.query_gi.as_deref().unwrap_or("0").to_string(),
-        "sseqid" | "sallseqid" => hit.subject_id.clone(),
+        "sseqid" | "sallseqid" => hit
+            .subject_seqid
+            .as_deref()
+            .unwrap_or(hit.subject_id.as_str())
+            .to_string(),
         "sacc" | "sallacc" => {
-            // NCBI's `-outfmt 6 sacc` returns the accession without version
-            // suffix; `saccver` returns it WITH version (`blast_format.cpp` —
-            // `eDefline_AccessionWithoutVersion` vs `eDefline_AccessionWithVersion`).
-            // Our extracted `subject_id` typically carries `.N`; strip when
-            // emitting `sacc` so column values match.
-            let raw = hit.subject_acc.as_ref().unwrap_or(&hit.subject_id);
-            strip_accession_version(raw).to_string()
+            // NCBI's `-outfmt 6 sacc` returns the bare accession when one
+            // is available from the ASN.1 Seq-id with a separate `version`
+            // field (Refseq, GenBank, etc.). For DBs whose IDs are parsed
+            // from titles (e.g. celegans's `NC_003279.8` — the `.8` is part
+            // of the accession itself, not a separable version), NCBI keeps
+            // the `.8`. Mirror by stripping only when we have an explicit
+            // versioned accession source (`subject_accver`); otherwise pass
+            // subject_id through verbatim.
+            if let Some(acc) = hit.subject_acc.as_ref() {
+                acc.clone()
+            } else if let Some(accver) = hit.subject_accver.as_ref() {
+                strip_accession_version(accver).to_string()
+            } else {
+                hit.subject_id.clone()
+            }
         }
         "saccver" => hit
             .subject_accver
             .as_ref()
-            .or(hit.subject_acc.as_ref())
             .unwrap_or(&hit.subject_id)
             .clone(),
         "sgi" | "sallgi" => hit.subject_gi.as_deref().unwrap_or("0").to_string(),
@@ -244,9 +301,17 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
         "length" => hit.align_len.to_string(),
         "mismatch" => {
             if let (Some(qseq), Some(sseq)) = (hit.qseq.as_deref(), hit.sseq.as_deref()) {
+                // NCBI counts mismatches against the unmasked alignment; for
+                // translated programs we may carry SEG soft-mask info as
+                // lowercase ASCII in qseq. Case-fold so a lowercase-vs-uppercase
+                // pair is recognized as an identity, not a mismatch.
                 qseq.bytes()
                     .zip(sseq.bytes())
-                    .filter(|&(q, s)| q != b'-' && s != b'-' && q != s)
+                    .filter(|&(q, s)| {
+                        q != b'-'
+                            && s != b'-'
+                            && q.to_ascii_uppercase() != s.to_ascii_uppercase()
+                    })
                     .count()
                     .to_string()
             } else {
@@ -288,7 +353,7 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
         }
         "qlen" => hit.query_len.to_string(),
         "slen" => hit.subject_len.to_string(),
-        "qcovs" | "qcovus" => {
+        "qcovs" => {
             if let Some(qcovs) = qcovs {
                 qcovs.to_string()
             } else if hit.query_len > 0 {
@@ -299,10 +364,44 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
                 "0".to_string()
             }
         }
+        "qcovus" => {
+            // NCBI emits `qcovus` only for blastn (subject = non-translated
+            // nucleotide). For blastp / blastx / tblastn / tblastx the column
+            // reads `N/A` because per-unique-subject coverage isn't computed
+            // for translated or protein subjects. Same alphabet heuristic as
+            // sstrand.
+            let is_blastn_like = match hit.sseq.as_deref() {
+                Some(s) if !s.is_empty() => s.bytes().all(|b| {
+                    matches!(
+                        b.to_ascii_uppercase(),
+                        b'A' | b'C' | b'G' | b'T' | b'N' | b'-' | b'U'
+                    )
+                }),
+                _ => false,
+            };
+            if !is_blastn_like {
+                "N/A".to_string()
+            } else if let Some(qcovs) = qcovs {
+                qcovs.to_string()
+            } else if hit.query_len > 0 {
+                let cov = 100.0 * (hit.query_end - hit.query_start + 1).abs() as f64
+                    / hit.query_len as f64;
+                format_query_coverage(cov)
+            } else {
+                "0".to_string()
+            }
+        }
         "qcovhsp" => {
+            // NCBI's `qcovhsp` is `align_len * 100 / qlen`, NOT
+            // `(qend - qstart + 1) * 100 / qlen`. The two only agree when
+            // the alignment has no gaps in the query. For programs where
+            // qlen and align_len use different units (blastx: qlen is nt,
+            // align_len is aa), NCBI still uses align_len/qlen directly —
+            // which produces the smaller numbers we observed
+            // (6/11/8/11 vs our 18/33/25/33 for blastx). See
+            // `align_format/blast_align_format.cpp::CBlastFormatUtil`.
             if hit.query_len > 0 {
-                let query_span = (hit.query_end - hit.query_start).abs() + 1;
-                let cov = 100.0 * query_span as f64 / hit.query_len as f64;
+                let cov = 100.0 * hit.align_len as f64 / hit.query_len as f64;
                 format_query_coverage(cov)
             } else {
                 "0".to_string()
@@ -355,21 +454,71 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             }
         }
         // Sequence hash
-        "qseq" => hit.qseq.as_deref().unwrap_or("N/A").to_string(),
-        "sseq" => hit.sseq.as_deref().unwrap_or("N/A").to_string(),
+        // NCBI's tabular qseq/sseq is always uppercase (the soft-mask
+        // lowercase-display is a pairwise-only convention from `showalign.cpp`).
+        // Our translated engines may leave soft-mask info in the alignment as
+        // lowercase ASCII; force-uppercase here so tabular matches NCBI.
+        "qseq" => hit
+            .qseq
+            .as_deref()
+            .unwrap_or("N/A")
+            .to_ascii_uppercase(),
+        "sseq" => hit
+            .sseq
+            .as_deref()
+            .unwrap_or("N/A")
+            .to_ascii_uppercase(),
         "btop" => format_btop(hit),
         "sstrand" => {
-            if hit.subject_start <= hit.subject_end {
+            // NCBI emits `N/A` for sstrand whenever the subject is NOT a
+            // plain (non-translated) nucleotide sequence — i.e., blastp,
+            // blastx, psiblast (subject = protein) AND tblastn / tblastx
+            // (subject is nt but reported in translated-protein frame, not
+            // strand). Only blastn / megablast / blastn-short / rmblastn /
+            // dc-megablast emit plus/minus. Detect blastn by qframe and
+            // sframe both being 1 (we normalize non-translated to 1/1) AND
+            // qseq being absent or short-alphabet (we don't have program
+            // info here, but `subject_taxids` doesn't help — use the
+            // sseq alphabet as a proxy).
+            let is_blastn_like = match hit.sseq.as_deref() {
+                Some(s) if !s.is_empty() => s.bytes().all(|b| {
+                    matches!(
+                        b.to_ascii_uppercase(),
+                        b'A' | b'C' | b'G' | b'T' | b'N' | b'-' | b'U'
+                    )
+                }),
+                _ => false,
+            };
+            if !is_blastn_like {
+                "N/A".to_string()
+            } else if hit.subject_start <= hit.subject_end {
                 "plus".to_string()
             } else {
                 "minus".to_string()
             }
         }
-        // Frame fields
-        "qframe" => hit.qframe.to_string(),
-        "sframe" => hit.sframe.to_string(),
-        "frames" => format!("{}/{}", hit.qframe, hit.sframe),
+        // Frame fields. NCBI emits `1` for both query and subject in
+        // blastp / blastn / psiblast (non-translated). Translated programs
+        // (blastx / tblastn / tblastx) emit the actual frame for the
+        // translated side and `0` for the un-translated side. We detect
+        // "both zero" — only true for non-translated programs — and emit
+        // 1/1 in that case; otherwise pass the recorded frame through.
+        "qframe" => default_frame_for_nontranslated(hit.qframe, hit.sframe),
+        "sframe" => default_frame_for_nontranslated(hit.sframe, hit.qframe),
+        "frames" => format!(
+            "{}/{}",
+            default_frame_for_nontranslated(hit.qframe, hit.sframe),
+            default_frame_for_nontranslated(hit.sframe, hit.qframe)
+        ),
         _ => "N/A".to_string(),
+    }
+}
+
+fn default_frame_for_nontranslated(this: i32, other: i32) -> String {
+    if this == 0 && other == 0 {
+        "1".to_string()
+    } else {
+        this.to_string()
     }
 }
 
@@ -512,6 +661,7 @@ mod tests {
             query_acc: None,
             query_accver: None,
             subject_id: "s1".to_string(),
+            subject_seqid: None,
             subject_gi: None,
             subject_acc: None,
             subject_accver: None,
@@ -540,6 +690,8 @@ mod tests {
             subject_kingdom: "E".to_string(),
             num_ident: 47,
             num_positives: 47,
+            num_links: 1,
+            comp_adjust_method: 0,
         }
     }
 
@@ -772,9 +924,13 @@ mod tests {
     #[test]
     fn test_query_coverage_rounds_half_up() {
         let mut hit = make_hit(None, None);
+        // align_len = 20 over qlen = 32 gives 62.5%, the round-half-up
+        // boundary we want to exercise. Tests the formula
+        // `align_len * 100 / qlen` matches NCBI's behavior.
         hit.query_len = 32;
         hit.query_start = 1;
         hit.query_end = 20;
+        hit.align_len = 20;
         assert_eq!(get_field(&hit, "qcovhsp"), "63");
     }
 

@@ -4,9 +4,14 @@
 use std::io::Write;
 
 pub fn format_pairwise_evalue(val: f64) -> String {
+    // NCBI's pairwise e-value format (`align_format_util.cpp:967-981`,
+    // `GetScoreString`) uses `< 0.0009` (not `< 0.001`) as the threshold
+    // for switching from `%4.3lf` fixed to `%3.0le` scientific. Without
+    // this, evalues in [0.0009, 0.001) render as e.g. "1e-03" instead of
+    // NCBI's "0.001".
     if val < 1.0e-180 {
         "0.0".to_string()
-    } else if val < 0.001 {
+    } else if val < 0.0009 {
         let s = format!("{:.0e}", val);
         if let Some(e_pos) = s.find('e') {
             let (mantissa, exp_part) = s.split_at(e_pos);
@@ -125,7 +130,7 @@ pub fn format_pairwise_alignment_with_header<W: Write>(
 /// line width. NCBI BLAST exposes this as `-line_length` for pairwise output.
 pub fn format_pairwise_alignment_with_line_width<W: Write>(
     writer: &mut W,
-    _query_id: &str,
+    query_id: &str,
     subject_id: &str,
     query_seq: &[u8],   // BLASTNA encoded
     subject_seq: &[u8], // BLASTNA encoded
@@ -142,6 +147,104 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
     show_subject_header: bool,
     line_width: usize,
 ) -> std::io::Result<()> {
+    format_pairwise_alignment_with_line_width_and_mask(
+        writer,
+        query_id,
+        subject_id,
+        query_seq,
+        subject_seq,
+        q_start,
+        q_end,
+        s_start,
+        s_end,
+        score,
+        bit_score,
+        evalue,
+        num_ident,
+        align_len,
+        gap_opens,
+        show_subject_header,
+        line_width,
+        None,
+    )
+}
+
+/// Same as [`format_pairwise_alignment_with_line_width`] but with an optional
+/// `query_lowercase_mask` aligned with `query_seq` (one entry per byte). When
+/// the mask bit is set, the corresponding query character renders as
+/// lowercase — used to surface DUST-masked low-complexity regions in NCBI's
+/// `-outfmt 0` style (`CttttttC...`).
+#[allow(clippy::too_many_arguments)]
+pub fn format_pairwise_alignment_with_line_width_and_mask<W: Write>(
+    writer: &mut W,
+    query_id: &str,
+    subject_id: &str,
+    query_seq: &[u8],
+    subject_seq: &[u8],
+    q_start: i32,
+    q_end: i32,
+    s_start: i32,
+    s_end: i32,
+    score: i32,
+    bit_score: f64,
+    evalue: f64,
+    num_ident: i32,
+    align_len: i32,
+    gap_opens: i32,
+    show_subject_header: bool,
+    line_width: usize,
+    query_lowercase_mask: Option<&[bool]>,
+) -> std::io::Result<()> {
+    format_pairwise_alignment_full(
+        writer,
+        query_id,
+        subject_id,
+        query_seq,
+        subject_seq,
+        q_start,
+        q_end,
+        s_start,
+        s_end,
+        score,
+        bit_score,
+        evalue,
+        num_ident,
+        align_len,
+        gap_opens,
+        show_subject_header,
+        line_width,
+        query_lowercase_mask,
+        false,
+    )
+}
+
+/// Same as [`format_pairwise_alignment_with_line_width_and_mask`] but allows
+/// the caller to request the `rmblastn`-style alignment header: `Score = N`
+/// (raw score only) followed by a blank line, no Expect annotation. NCBI's
+/// rmblastn (RepeatMasker engine) suppresses bit-score / evalue display
+/// because RepeatMasker computes its own composite statistics downstream.
+#[allow(clippy::too_many_arguments)]
+pub fn format_pairwise_alignment_full<W: Write>(
+    writer: &mut W,
+    _query_id: &str,
+    subject_id: &str,
+    query_seq: &[u8],   // BLASTNA encoded
+    subject_seq: &[u8], // BLASTNA encoded
+    q_start: i32,
+    q_end: i32,
+    s_start: i32,
+    s_end: i32,
+    score: i32,
+    bit_score: f64,
+    evalue: f64,
+    num_ident: i32,
+    align_len: i32,
+    gap_opens: i32,
+    show_subject_header: bool,
+    line_width: usize,
+    query_lowercase_mask: Option<&[bool]>,
+    rmblastn_style: bool,
+) -> std::io::Result<()> {
     let pident = if align_len > 0 {
         100.0 * num_ident as f64 / align_len as f64
     } else {
@@ -152,23 +255,47 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
         write_wrapped_subject_header(writer, subject_id)?;
     }
     writeln!(writer)?;
-    writeln!(
-        writer,
-        " Score = {:.1} bits ({}),  Expect = {}",
-        bit_score,
-        score,
-        format_pairwise_evalue(evalue)
-    )?;
+    // Pairwise bit score uses NCBI's `CAlignFormatUtil::GetScoreString`
+    // bracketing (`align_format_util.cpp:986`) — the same rule already
+    // applied at the tabular call sites via `format_bitscore`.
+    if rmblastn_style {
+        writeln!(writer, " Score = {}", score)?;
+        writeln!(writer)?;
+    } else {
+        writeln!(
+            writer,
+            " Score = {} bits ({}),  Expect = {}",
+            crate::format::tabular::format_bitscore(bit_score),
+            score,
+            format_pairwise_evalue(evalue)
+        )?;
+    }
+    // NCBI's "Gaps = N/M" in pairwise output is the total number of gap
+    // CHARACTERS (sum of `-` in both query and subject aligned strings),
+    // NOT the number of gap-open events. The caller passes us `gap_opens`
+    // (segment count) for the tabular column, but for pairwise we recompute
+    // by scanning the BLASTNA-encoded aligned sequences: byte value 15
+    // (BLASTNA_GAP) marks each gap character.
+    let gap_chars = query_seq
+        .iter()
+        .chain(subject_seq.iter())
+        .filter(|&&b| b == 15)
+        .count() as i32;
+    let gap_display = if gap_chars > 0 {
+        gap_chars
+    } else {
+        gap_opens
+    };
     writeln!(
         writer,
         " Identities = {}/{} ({}%), Gaps = {}/{} ({}%)",
         num_ident,
         align_len,
         (pident + 0.5) as i32,
-        gap_opens,
+        gap_display,
         align_len,
         if align_len > 0 {
-            (100.0 * gap_opens as f64 / align_len as f64 + 0.5) as i32
+            (100.0 * gap_display as f64 / align_len as f64 + 0.5) as i32
         } else {
             0
         }
@@ -202,18 +329,40 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
     while pos < q_len {
         let chunk = line_width.min(q_len - pos);
 
+        // Count non-gap chars in this chunk for query and subject. NCBI's
+        // coordinates in pairwise output advance only on real bases — gap
+        // characters (`-`, BLASTNA byte 15) don't move the cursor. Without
+        // this, the end coordinate is inflated by the number of gaps.
+        let mut q_letters: i32 = 0;
+        let mut s_letters: i32 = 0;
+        for i in 0..chunk {
+            if pos + i < query_seq.len() && query_seq[pos + i] != 15 {
+                q_letters += 1;
+            }
+            if pos + i < subject_seq.len() && subject_seq[pos + i] != 15 {
+                s_letters += 1;
+            }
+        }
+
         // Query line
         write!(writer, "Query  {:<width$}  ", qi, width = coord_width)?;
         for i in 0..chunk {
             if pos + i < query_seq.len() {
-                write!(
-                    writer,
-                    "{}",
-                    crate::encoding::blastna_to_iupacna_char(query_seq[pos + i])
-                )?;
+                let mut ch = crate::encoding::blastna_to_iupacna_char(query_seq[pos + i]);
+                if let Some(mask) = query_lowercase_mask {
+                    if mask.get(pos + i).copied().unwrap_or(false) {
+                        ch = ch.to_ascii_lowercase();
+                    }
+                }
+                write!(writer, "{}", ch)?;
             }
         }
-        writeln!(writer, "  {}", qi + chunk as i32 - 1)?;
+        let q_end_pos = if q_letters == 0 {
+            qi
+        } else {
+            qi + q_letters - 1
+        };
+        writeln!(writer, "  {}", q_end_pos)?;
 
         // Match line
         for _ in 0..sequence_column {
@@ -242,13 +391,17 @@ pub fn format_pairwise_alignment_with_line_width<W: Write>(
                 )?;
             }
         }
-        let s_end_pos = si + s_dir * (chunk as i32 - 1);
+        let s_end_pos = if s_letters == 0 {
+            si
+        } else {
+            si + s_dir * (s_letters - 1)
+        };
         writeln!(writer, "  {}", s_end_pos)?;
         writeln!(writer)?;
 
         pos += chunk;
-        qi += chunk as i32;
-        si += s_dir * chunk as i32;
+        qi += q_letters;
+        si += s_dir * s_letters;
     }
 
     Ok(())

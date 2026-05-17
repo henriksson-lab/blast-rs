@@ -456,7 +456,9 @@ pub(crate) fn align_ex(
                 }
             } else {
                 last_b = bi;
-                if sc > best_score || (!reverse && sc == best_score && sc > 0 && sc <= 30) {
+                // NCBI `ALIGN_EX` (`blast_gapalign.c:611`) uses strict `>`:
+                // ties on `best_score` keep the FIRST cell encountered.
+                if sc > best_score {
                     best_score = sc;
                     a_off = ai;
                     b_off = bi;
@@ -2173,7 +2175,11 @@ pub fn reevaluate_with_ambiguities_gapped(
     let mut best_start_esp_index: usize = 0;
     let mut best_end_esp_index: usize = 0;
     let mut current_start_esp_index: usize = 0;
-    let mut best_end_esp_num: i32 = 0;
+    // NCBI seeds with -1 (`blast_hits.c:538`); only set to a non-negative value
+    // inside the `sum > score` branch. The post-loop right-extension does
+    // `best_end_esp_num += ext`, so an initial -1 yields `ext - 1` in the
+    // edge case where the loop never enters the better-score branch.
+    let mut best_end_esp_num: i32 = -1;
 
     // Clone the ops into a mutable buffer so we can split a run if needed.
     let mut ops = tb.edit_script.ops.clone();

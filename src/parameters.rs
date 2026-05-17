@@ -759,19 +759,59 @@ pub fn blast_hit_saving_parameters_update_c(
             params.prelim_evalue = evalue;
             cutoff
         };
+        let _ = evalue; // suppress unused-modify; sum-stats path below uses its own.
 
-        let mut new_cutoff = scaled_i32(new_cutoff, scale_factor);
-        if params.link_hsp_params.is_some() && gapped_calculation {
-            let decay = params
-                .link_hsp_params
-                .as_ref()
-                .map_or(0.0, |link| link.gap_decay_rate);
-            let (sum_cutoff, _) = stat::blast_cutoffs(1, evalue, kbp, searchsp as f64, true, decay);
-            new_cutoff = new_cutoff.min(scaled_i32(sum_cutoff, scale_factor));
-        }
+        let new_cutoff = scaled_i32(new_cutoff, scale_factor);
         params.cutoffs[context].cutoff_score = new_cutoff;
         params.cutoffs[context].cutoff_score_max = new_cutoff;
         cutoff_min = cutoff_min.min(new_cutoff);
+    }
+
+    // NCBI `blast_parameters.c:950-976`: sum-statistics cutoff is computed
+    // AFTER the per-context loop, using an average query length, the
+    // sum-stats-specific `searchsp = MIN(avg_qlen, avg_subj) * avg_subj`,
+    // and evalue = 1.0 (constant, NOT options->expect_value). Then
+    // `cutoff[context] = MIN(new_cutoff, cutoff[context])`. Previously
+    // our port inlined a buggy version inside the per-context loop with
+    // wrong evalue and wrong searchsp.
+    if params.link_hsp_params.is_some() && gapped_calculation && !query_info.contexts.is_empty() {
+        let decay = params
+            .link_hsp_params
+            .as_ref()
+            .map_or(0.0, |link| link.gap_decay_rate);
+        let evalue_hsp = 1.0;
+        // NCBI uses `query_info->last_context` — the index of the last
+        // valid context; we approximate via `contexts.len() - 1`. For
+        // contexts with all valid this is equivalent.
+        let last_idx = query_info.contexts.len() - 1;
+        let last_ctx = &query_info.contexts[last_idx];
+        let concat_qlen = last_ctx.query_offset + last_ctx.query_length;
+        let avg_qlen = concat_qlen / (last_idx as i32 + 1);
+        // NCBI's `MIN(avg_qlen, avg_subj) * avg_subj` — intentional
+        // clamp for sum-stats search space (different from the simple
+        // `avg_qlen * avg_subj` product used in `BLAST_Cutoffs`).
+        let sum_searchsp = (avg_qlen.min(avg_subject_length).max(1) as i64)
+            .saturating_mul(avg_subject_length.max(1) as i64);
+
+        for (context, context_info) in query_info.contexts.iter().enumerate() {
+            if !context_info.is_valid {
+                continue;
+            }
+            let Some(kbp) = kbp_array
+                .get(context)
+                .filter(|kbp| stat::s_blast_karlin_blk_is_valid(Some(kbp)))
+            else {
+                return -1;
+            };
+            let (sum_cutoff, _) =
+                stat::blast_cutoffs(1, evalue_hsp, kbp, sum_searchsp as f64, true, decay);
+            let sum_cutoff = scaled_i32(sum_cutoff, scale_factor);
+            let current = params.cutoffs[context].cutoff_score;
+            let merged = sum_cutoff.min(current);
+            params.cutoffs[context].cutoff_score = merged;
+            params.cutoffs[context].cutoff_score_max = merged;
+            cutoff_min = cutoff_min.min(merged);
+        }
     }
     params.cutoff_score_min = cutoff_min;
     0
@@ -928,9 +968,15 @@ pub fn blast_initial_word_parameters_update(
             else {
                 return -1;
             };
+            // NCBI `blast_parameters.c:359` passes `(Int8)subj_length *
+            // query_length` to `BLAST_Cutoffs`. The previous Rust port
+            // had `.saturating_mul((subject_length as u64).min(query_length))`
+            // which collapsed to `subj * MIN(subj, query)` — wrong when
+            // subject is smaller than query. `saturating_mul` already
+            // handles u64 overflow; the `.min()` was an unintentional
+            // clamp.
             let searchsp = (subject_length as u64)
-                .saturating_mul((subject_length as u64).min(query_length.max(1) as u64))
-                as f64;
+                .saturating_mul(query_length.max(1) as u64) as f64;
             let (cutoff, _) = stat::blast_cutoffs(
                 1,
                 s_get_cutoff_evalue(program_number),

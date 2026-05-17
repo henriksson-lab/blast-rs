@@ -22632,6 +22632,61 @@ fn tblastx_subject_ncbi_parity_complex_frameshift_top_hsps() {
 }
 
 #[test]
+fn tblastx_subject_ncbi_parity_complex_frameshift_rendered_fields() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+#[ignore = "documents remaining complex TBLASTX identity-field short-HSP gap"]
+fn tblastx_subject_ncbi_parity_complex_frameshift_identity_fields() {
+    assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
+        "6 qseqid sseqid pident nident positive length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+#[ignore = "documents remaining complex TBLASTX XML frame-shift rendering gap"]
+fn tblastx_subject_ncbi_parity_complex_frameshift_xml() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
+        "5",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+#[ignore = "documents remaining complex TBLASTX pairwise frame-shift rendering gap"]
+fn tblastx_subject_ncbi_parity_complex_frameshift_pairwise() {
+    assert_translated_subject_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
+        "0",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
 fn blastx_subject_ncbi_parity_indel_remains_ungapped() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "blastx",
@@ -25264,6 +25319,65 @@ fn tblastx_db_ncbi_parity_complex_frameshift_top_hsps() {
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+fn tblastx_db_ncbi_parity_complex_frameshift_rendered_fields() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
+        "6 qseqid sseqid qstart qend sstart send length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+#[ignore = "documents remaining complex TBLASTX identity-field short-HSP gap"]
+fn tblastx_db_ncbi_parity_complex_frameshift_identity_fields() {
+    assert_translated_db_outfmt_matches_ncbi_sorted_lines(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
+        "6 qseqid sseqid pident nident positive length gaps gapopen qframe sframe frames qseq sseq btop",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+#[ignore = "documents remaining complex TBLASTX XML frame-shift rendering gap"]
+fn tblastx_db_ncbi_parity_complex_frameshift_xml() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
+        "5",
+        &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
+        &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
+    );
+}
+
+#[test]
+#[ignore = "documents remaining complex TBLASTX pairwise frame-shift rendering gap"]
+fn tblastx_db_ncbi_parity_complex_frameshift_pairwise() {
+    assert_translated_db_outfmt_matches_ncbi(
+        "tblastx",
+        "/usr/bin/tblastx",
+        "nucl",
+        ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
+        ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
+        "0",
         &["--seg", "no", "--evalue", "1000", "--max_hsps", "30"],
         &["-seg", "no", "-evalue", "1000", "-max_hsps", "30"],
     );

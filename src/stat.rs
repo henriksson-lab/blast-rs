@@ -619,6 +619,11 @@ pub fn blast_karlin_blk_copy(kbp_to: Option<&mut KarlinBlk>, kbp_from: Option<&K
 }
 
 /// Port of NCBI `BlastScoreBlkMaxScoreSet` (`blast_stat.c:1500`).
+///
+/// NCBI explicitly skips `BLAST_SCORE_MIN`/`BLAST_SCORE_MAX` sentinels
+/// (used for gap rows/columns and other "impossible" entries) when
+/// computing the loscore/hiscore range. The clamp at the end also
+/// restores those sentinels if the loop produced no real scores.
 pub fn blast_score_blk_max_score_set(sbp: &mut BlastScoreBlk) -> i16 {
     if sbp.matrix.data.is_empty() {
         return 1;
@@ -627,9 +632,25 @@ pub fn blast_score_blk_max_score_set(sbp: &mut BlastScoreBlk) -> i16 {
     let mut hiscore = BLAST_SCORE_MIN;
     for row in &sbp.matrix.data {
         for &score in row {
-            loscore = loscore.min(score);
-            hiscore = hiscore.max(score);
+            // NCBI `blast_stat.c:1513`: skip sentinel entries (gap rows,
+            // etc.) so they don't pollute the real-score range.
+            if score <= BLAST_SCORE_MIN || score >= BLAST_SCORE_MAX {
+                continue;
+            }
+            if loscore > score {
+                loscore = score;
+            }
+            if hiscore < score {
+                hiscore = score;
+            }
         }
+    }
+    // NCBI `blast_stat.c:1525`: clamp if no real scores were observed.
+    if loscore < BLAST_SCORE_MIN {
+        loscore = BLAST_SCORE_MIN;
+    }
+    if hiscore > BLAST_SCORE_MAX {
+        hiscore = BLAST_SCORE_MAX;
     }
     sbp.loscore = loscore;
     sbp.hiscore = hiscore;
@@ -782,7 +803,8 @@ impl KarlinBlk {
     }
 
     /// Convert a raw score to a bit score.
-    /// Port of NCBI `Blast_HSPListGetBitScores` (`blast_hits.c:1927`):
+    /// blast-rs: Formula helper extracted from bit-score calculation; not a
+    /// direct NCBI C port:
     /// `(score * Lambda - logK) / NCBIMATH_LN2`. Note that unlike the
     /// E-value path, the bit-score formula does NOT apply `round_down`
     /// even-masking — `Blast_HSPListGetEvalues` (`blast_hits.c:1864-1869`)
@@ -793,7 +815,7 @@ impl KarlinBlk {
     }
 
     /// Convert a raw score and search space to an E-value.
-    /// Port of NCBI `BLAST_KarlinStoE_simple` (`blast_stat.c:4157`):
+    /// blast-rs: Karlin score-to-E-value method; not a direct NCBI C port:
     /// returns `-1.0` when the Karlin block is degenerate, otherwise
     /// `searchsp * exp(-lambda * S + logK)` (NCBI `:4170` uses `logK`
     /// inside the exponent for numerical stability at large magnitudes).
@@ -807,7 +829,7 @@ impl KarlinBlk {
     }
 
     /// Convert an E-value to the minimum raw score needed.
-    /// Port of NCBI `BlastKarlinEtoS_simple` (`blast_stat.c:4040`): the
+    /// blast-rs: Karlin E-value-to-score method; not a direct NCBI C port. The
     /// e-value is clamped to `K_SMALL_FLOAT` before conversion to avoid
     /// floating-point exceptions on extremely tight cutoffs. Returns
     /// `BLAST_SCORE_MIN` when lambda/K/H are invalid (NCBI `:4054-4057`).
@@ -1109,8 +1131,8 @@ pub fn blast_cutoffs(
     (s, e_out)
 }
 
-/// Port of NCBI `BLAST_Cutoffs` (`blast_stat.c:4089`) with pointer-style
-/// mutable outputs.
+/// blast-rs: Pointer-style mutable-output adapter for cutoff computation; not
+/// a direct NCBI C port.
 pub fn blast_cutoffs_in_place(
     score: Option<&mut i32>,
     evalue: Option<&mut f64>,
@@ -1389,15 +1411,16 @@ pub fn sum_p_calc(r: u32, s: f64) -> f64 {
     d.min(1.0)
 }
 
-/// Port of NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`).
-/// Convert a P-value to an E-value. For `p = 1` returns `f64::INFINITY`
-/// (NCBI returns `INT4_MAX`, which the sum-E callers cap below).
+/// blast-rs: Ergonomic Karlin P-to-E helper; not a direct NCBI C port. Returns
+/// `INT4_MIN` cast to `f64` for invalid `p`, `INT4_MAX` cast to `f64` for
+/// `p == 1`, otherwise `-BLAST_Log1p(-p)`. Sum-E callers downstream cap
+/// at `INT4_MAX`, so this end-cap matters for byte-identical e-values.
 pub fn karlin_p_to_e(p: f64) -> f64 {
     if !(0.0..=1.0).contains(&p) {
         return i32::MIN as f64;
     }
     if p == 1.0 {
-        return f64::INFINITY;
+        return i32::MAX as f64;
     }
     // NCBI: `return -BLAST_Log1p(-p)`.
     -crate::math::log1p(-p)
@@ -1421,7 +1444,7 @@ pub fn karlin_e_to_p(evalue: f64) -> f64 {
 
 const SUM_E_CAP: f64 = i32::MAX as f64;
 
-/// Port of NCBI `BLAST_SmallGapSumE` (`blast_stat.c:4418`).
+/// blast-rs: Ergonomic small-gap sum-E helper; not a direct NCBI C port.
 /// Computes the e-value of a collection of distinct alignments
 /// separated by small gaps. Matches NCBI's formula and cap at
 /// `INT4_MAX`. Delegates the P-value step to `sum_p`, which handles
@@ -1443,7 +1466,11 @@ pub fn small_gap_sum_e(
     } else {
         let pair_search_space = subject_length as f64 * query_length as f64;
         xsum -= pair_search_space.ln() + 2.0 * (num - 1) as f64 * (starting_points as f64).ln();
-        xsum -= crate::math::ln_factorial(num as i32);
+        // NCBI `blast_stat.c:4452` calls `BLAST_LnFactorial((double)num)`,
+        // which goes straight to `s_LnGamma(num+1.0)` (no precomputed-table
+        // fast path). Use our matching helper instead of the table-backed
+        // `ln_factorial`, since the two paths differ by ~1 ULP for small n.
+        xsum -= crate::math::blast_ln_factorial(num as f64);
         let p = sum_p(num, xsum)?;
         karlin_p_to_e(p) * (searchsp_eff / pair_search_space)
     };
@@ -1482,7 +1509,7 @@ pub fn blast_small_gap_sum_e(
     .unwrap_or(SUM_E_CAP)
 }
 
-/// Port of NCBI `BLAST_UnevenGapSumE` (`blast_stat.c:4491`).
+/// blast-rs: Ergonomic uneven-gap sum-E helper; not a direct NCBI C port.
 /// Used for HSP collections with asymmetric gap widths — e.g. exons
 /// separated by introns in translated searches.
 #[allow(clippy::too_many_arguments)]
@@ -1503,7 +1530,9 @@ pub fn uneven_gap_sum_e(
         xsum -= pair_search_space.ln()
             + (num - 1) as f64
                 * ((query_start_points as f64).ln() + (subject_start_points as f64).ln());
-        xsum -= crate::math::ln_factorial(num as i32);
+        // NCBI `blast_stat.c:4511` calls `BLAST_LnFactorial`; see comment
+        // in `small_gap_sum_e` — use the helper that matches NCBI exactly.
+        xsum -= crate::math::blast_ln_factorial(num as f64);
         let p = sum_p(num, xsum)?;
         karlin_p_to_e(p) * (searchsp_eff / pair_search_space)
     };
@@ -1544,7 +1573,7 @@ pub fn blast_uneven_gap_sum_e(
     .unwrap_or(SUM_E_CAP)
 }
 
-/// Port of NCBI `BLAST_LargeGapSumE` (`blast_stat.c:4532`).
+/// blast-rs: Ergonomic large-gap sum-E helper; not a direct NCBI C port.
 /// Computes the e-value of a collection of distinct alignments
 /// separated by arbitrarily large gaps.
 pub fn large_gap_sum_e(
@@ -1560,7 +1589,9 @@ pub fn large_gap_sum_e(
     } else {
         let q = query_length as f64;
         let s = subject_length as f64;
-        xsum -= num as f64 * (s * q).ln() - crate::math::ln_factorial(num as i32);
+        // NCBI `blast_stat.c:4555` calls `BLAST_LnFactorial`; see
+        // `small_gap_sum_e` for the rationale on bypassing the table.
+        xsum -= num as f64 * (s * q).ln() - crate::math::blast_ln_factorial(num as f64);
         let p = sum_p(num, xsum)?;
         karlin_p_to_e(p) * (searchsp_eff / (q * s))
     };
@@ -2047,7 +2078,8 @@ pub fn spouge_evalue_with_gap_decay(
     raw / gap_decay_divisor(BLAST_GAP_DECAY_RATE_GAPPED, 1)
 }
 
-/// 1-1 port of `BLAST_SpougeStoE` (`blast_stat.c:5176`). Returns the raw
+/// blast-rs: Ergonomic Spouge score-to-E-value helper; not a direct NCBI C
+/// port. Returns the raw
 /// per-pair Spouge finite-size-corrected e-value. Some NCBI call sites
 /// (e.g. translated searches with HSP linking via `link_hsps.c:1791`)
 /// further divide by `BLAST_GapDecayDivisor(gap_decay_rate, 1)` —
@@ -2104,7 +2136,15 @@ pub fn spouge_evalue(
     let c_y = (2.0 * sigma_hat / kbp.lambda).max(sigma_hat * y + tau_hat);
     let area = p1 * p2 + c_y * p_m_f * p_n_f;
 
-    (area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor).max(0.0)
+    // NCBI `blast_stat.c:5232` returns the raw computed value:
+    //   `e_value = area * k_ * exp(-lambda_ * y_) * db_scale_factor;
+    //    ASSERT(e_value >= 0.0); return e_value;`
+    // The ASSERT is a no-op in NCBI's release builds, so we mirror that
+    // by returning the raw value rather than clamping at zero. In
+    // practice `area` is always non-negative for valid alignments, but
+    // ULP-level FP errors in `erfc` could conceivably produce tiny
+    // negative results — preserving NCBI's behavior keeps byte-identity.
+    area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor
 }
 
 /// Port of NCBI `BLAST_SpougeStoE` (`blast_stat.c:5176`) with
@@ -2122,7 +2162,8 @@ pub fn blast_spouge_sto_e(
     spouge_evalue(y_, kbp, gbp, m_, n_)
 }
 
-/// Port of NCBI `BLAST_SpougeEtoS` (`blast_stat.c:5236`). Binary-search the
+/// blast-rs: Ergonomic Spouge E-value-to-score helper; not a direct NCBI C
+/// port. Binary-search the
 /// raw score `S` such that `BLAST_SpougeStoE(S, kbp, gbp, m, n) <= e0`.
 ///
 /// Used for the per-context cutoff in `BlastHitSavingParametersUpdate`
@@ -2193,8 +2234,7 @@ pub fn protein_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Opt
 }
 
 /// Build Gumbel block for the named protein scoring matrix.
-/// Port of `Blast_GumbelBlkLoadFromTables` using NCBI `blast_stat.c`
-/// matrix value rows.
+/// blast-rs: Matrix-specific Gumbel table helper; not a direct NCBI C port.
 pub fn matrix_gumbel_blk(
     matrix_name: &str,
     gap_open: i32,
@@ -2219,7 +2259,7 @@ pub fn matrix_gumbel_blk(
 }
 
 /// Build Gumbel block for NCBI's IDENTITY matrix.
-/// Port of `Blast_GumbelBlkLoadFromTables` using `prot_idenity_values[]`.
+/// blast-rs: IDENTITY-matrix Gumbel table helper; not a direct NCBI C port.
 pub fn identity_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Option<GumbelBlk> {
     matrix_gumbel_blk("IDENTITY", gap_open, gap_extend, db_length)
 }
@@ -2425,8 +2465,8 @@ pub fn compute_ungapped_kbp(reward: i32, penalty: i32) -> KarlinBlk {
 /// Compute length adjustment using the Altschul-Gish formula.
 /// This adjusts query and database lengths to account for edge effects.
 /// length_adj satisfies: K * (q - length_adj) * (d - N * length_adj) * exp(-lambda * S) = threshold
-/// Compute the length adjustment using NCBI `BLAST_ComputeLengthAdjustment`
-/// (`blast_stat.c:5041`). For callers that have no explicit alpha/beta
+/// blast-rs: Defaulted length-adjustment helper; not a direct NCBI C port.
+/// For callers that have no explicit alpha/beta
 /// (typically ungapped or missing-gapped-params paths), NCBI uses
 /// `alpha/lambda = 1/H` and `beta = 0`; that convention is applied
 /// here so the verbatim bracketing algorithm is exercised.
@@ -4900,8 +4940,8 @@ const BLAST_KARLIN_LAMBDA_ITER_DEFAULT: i32 = 17;
 /// iterations for the K solver.
 const BLAST_KARLIN_K_ITER_MAX: usize = 100;
 
-/// Port of NCBI `Blast_KarlinLambdaNR` (`blast_stat.c:2567`): combined
-/// Newton/bisection solver for the Karlin-Altschul lambda parameter
+/// blast-rs: Internal Karlin lambda Newton/bisection solver; not a direct NCBI
+/// C port. Solves the Karlin-Altschul lambda parameter
 /// over `x = exp(-lambda)`.
 fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 {
     let x0 = (-lambda0).exp();
@@ -4987,6 +5027,13 @@ fn compute_lambda(sfp: &SfDist) -> f64 {
     }
     let low = sfp.obs_min;
     let high = sfp.obs_max;
+    // NCBI `Blast_KarlinLambdaNR` (`blast_stat.c:2581`) gates on
+    // `BlastScoreChk(low, high)` before the GCD loop and returns -1 if
+    // the score range is invalid (lo>=0, hi<=0, out-of-range, or span
+    // exceeding `BLAST_SCORE_RANGE_MAX`).
+    if blast_score_chk(low, high) != 0 {
+        return -1.0;
+    }
     let mut d = -low;
     for i in 1..=(high - low) {
         if d <= 1 {
@@ -5000,8 +5047,14 @@ fn compute_lambda(sfp: &SfDist) -> f64 {
 }
 
 /// Compute H (relative entropy) from score frequencies and Lambda.
+/// Port of NCBI `BlastKarlinLtoH` (`blast_stat.c:2607`). NCBI gates on
+/// `BlastScoreChk(low, high)` before the formula and returns -1 if the
+/// score range is invalid.
 fn compute_h(sfp: &SfDist, lambda: f64) -> f64 {
     if lambda < 0.0 {
+        return -1.0;
+    }
+    if blast_score_chk(sfp.obs_min, sfp.obs_max) != 0 {
         return -1.0;
     }
     let etonlam = (-lambda).exp();
@@ -5328,7 +5381,11 @@ mod tests {
             BLAST_SCORE_MIN
         );
         assert_eq!(sbp.hiscore, 1);
-        assert_eq!(sbp.loscore, BLAST_SCORE_MIN);
+        // NCBI `BlastScoreBlkMaxScoreSet` (`blast_stat.c:1513`) skips
+        // `BLAST_SCORE_MIN` sentinels (gap rows) when computing loscore,
+        // so the result is the lowest REAL score (-3 = penalty), not the
+        // sentinel.
+        assert_eq!(sbp.loscore, -3);
 
         let mut owned = Some(sbp);
         assert!(blast_score_blk_free(&mut owned).is_none());
@@ -5798,8 +5855,8 @@ mod tests {
     fn test_karlin_p_to_e_basic() {
         // P = 0 → E = 0.
         assert_eq!(karlin_p_to_e(0.0), 0.0);
-        // P = 1 → E = +infinity (NCBI caps at INT4_MAX downstream).
-        assert_eq!(karlin_p_to_e(1.0), f64::INFINITY);
+        // P = 1 → E = INT4_MAX (matches NCBI `BLAST_KarlinPtoE` exactly).
+        assert_eq!(karlin_p_to_e(1.0), i32::MAX as f64);
         // P = 0.5 → E = -ln(0.5) = ln(2) ≈ 0.6931.
         assert!((karlin_p_to_e(0.5) - std::f64::consts::LN_2).abs() < 1e-12);
         // Bad input returns sentinel.

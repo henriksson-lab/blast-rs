@@ -290,9 +290,16 @@ fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> 
     //   `NlmKarlinLambdaNR(sprob, d, low, high, lambda0,
     //                      BLAST_KARLIN_LAMBDA_ACCURACY_DEFAULT,
     //                      20, 20 + BLAST_KARLIN_LAMBDA_ITER_DEFAULT, ...)`.
+    // Per NCBI's `NlmKarlinLambdaNR` signature
+    // (`blast_stat.c:2491`: `..., Int4 itmax, Int4 maxNewton, ...`),
+    // argument 7 is `itmax = 20` (total loop iterations) and argument 8
+    // is `maxNewton = 20 + BLAST_KARLIN_LAMBDA_ITER_DEFAULT = 37` (Newton
+    // budget). With `maxNewton > itmax`, the `k >= maxNewton` test never
+    // fires; bisection only happens when Newton convergence stalls or
+    // `g >= 0`. We had these swapped previously — a real bug.
     let tolx = 1.0e-5;
-    let max_newton = 20;
-    let itmax = max_newton + 17; // BLAST_KARLIN_LAMBDA_ITER_DEFAULT = 17
+    let itmax = 20;
+    let max_newton = itmax + 17; // BLAST_KARLIN_LAMBDA_ITER_DEFAULT = 17
 
     // sprob is indexed relative to sprob[0] = P(obs_min)
     // sprob[-obs_min] = P(0)
@@ -650,11 +657,18 @@ pub fn karlin_e_to_p(x: f64) -> f64 {
 }
 
 /// NCBI BLAST_KarlinPtoE: P-value to E-value conversion.
+///
+/// Mirrors NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`) exactly:
+/// - `p < 0` or `p > 1` → returns `INT4_MIN` (cast to f64).
+/// - `p == 1` → returns `INT4_MAX` (cast to f64).
+/// - otherwise → `-log1p(-p)`.
 pub fn karlin_p_to_e_compo(p: f64) -> f64 {
-    if p <= 0.0 || p >= 1.0 {
-        return p;
+    if !(0.0..=1.0).contains(&p) {
+        return i32::MIN as f64;
     }
-    // NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`): `return -BLAST_Log1p(-p)`.
+    if p == 1.0 {
+        return i32::MAX as f64;
+    }
     -crate::math::log1p(-p)
 }
 

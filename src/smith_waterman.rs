@@ -1864,6 +1864,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 4,
+            min_length: 0,
         };
         let nuc_matrix = crate::traceback::build_blastna_matrix(1, -3);
         let params = BlastSmithWatermanGappedScoreParams {

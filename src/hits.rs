@@ -59,11 +59,13 @@ pub fn compute_identities(
 /// Filter an HSP list by e-value threshold.
 pub fn filter_by_evalue(list: &mut HspList, max_evalue: f64) {
     list.hsps.retain(|hsp| hsp.evalue <= max_evalue);
+    // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`
+    // (2147483647.0), not `f64::MAX`. Empty-list value should match.
     list.best_evalue = list
         .hsps
         .iter()
         .map(|hsp| hsp.evalue)
-        .fold(f64::MAX, f64::min);
+        .fold(i32::MAX as f64, f64::min);
 }
 
 /// Sort HSP list by score (descending), using NCBI's full tie-breaker.
@@ -198,7 +200,9 @@ mod tests {
         filter_by_evalue(&mut list, 0.001);
 
         assert!(list.hsps.is_empty());
-        assert_eq!(list.best_evalue, f64::MAX);
+        // NCBI's `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`
+        // for an empty list, not `f64::MAX`.
+        assert_eq!(list.best_evalue, i32::MAX as f64);
     }
 
     /// Helper to create an HSP with specified fields, defaulting others.

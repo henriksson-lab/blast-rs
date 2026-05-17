@@ -31,7 +31,8 @@ pub struct SearchHsp {
     pub sseq: Option<String>,
 }
 
-/// Port of NCBI `ScoreCompareHSPs` (`blast_hits.c:1330`) for `SearchHsp`.
+/// blast-rs: SearchHsp comparator modeled on score-ordered HSP sorting; not a
+/// direct NCBI C port.
 /// Same tie-breaker structure as `hspstream::score_compare_hsps` but over
 /// `SearchHsp`'s `*_start`/`*_end` fields instead of `*_offset`/`*_end`.
 fn score_compare_search_hsps(a: &SearchHsp, b: &SearchHsp) -> std::cmp::Ordering {
@@ -59,7 +60,6 @@ struct GappedCandidate {
 struct NaLookup<'a> {
     context: i32,
     query: &'a [u8],
-    query_nomask: &'a [u8],
     lut_word: usize,
     lut_mask: u32,
     scan_start: usize,
@@ -360,15 +360,13 @@ impl<'a> PreparedBlastnQuery<'a> {
         word_size: usize,
     ) -> Self {
         let mut lookups = Vec::with_capacity(2);
-        if let Some(lookup) = NaLookup::new_contiguous(0, query_plus, query_plus_nomask, word_size)
-        {
+        if let Some(lookup) = NaLookup::new_contiguous(0, query_plus, word_size) {
             lookups.push(lookup);
         }
-        if let Some(lookup) =
-            NaLookup::new_contiguous(1, query_minus, query_minus_nomask, word_size)
-        {
+        if let Some(lookup) = NaLookup::new_contiguous(1, query_minus, word_size) {
             lookups.push(lookup);
         }
+        let _ = (query_plus_nomask, query_minus_nomask); // kept for ABI
         let paired_pv = if lookups.len() == 2
             && lookups[0].lut_word == lookups[1].lut_word
             && lookups[0].lut_mask == lookups[1].lut_mask
@@ -426,7 +424,6 @@ impl<'a> PreparedBlastnQuery<'a> {
         if let Some(lookup) = NaLookup::new(
             0,
             query_plus,
-            query_plus_nomask,
             word_size,
             approx_entries,
             choose_lut_word_for_table(choose_lut_word, use_small_table),
@@ -436,13 +433,13 @@ impl<'a> PreparedBlastnQuery<'a> {
         if let Some(lookup) = NaLookup::new(
             1,
             query_minus,
-            query_minus_nomask,
             word_size,
             approx_entries,
             choose_lut_word_for_table(choose_lut_word, use_small_table),
         ) {
             lookups.push(lookup);
         }
+        let _ = (query_plus_nomask, query_minus_nomask); // kept for ABI
         let paired_pv = if lookups.len() == 2
             && lookups[0].lut_word == lookups[1].lut_word
             && lookups[0].lut_mask == lookups[1].lut_mask
@@ -486,12 +483,7 @@ impl<'a> PreparedBlastnQuery<'a> {
 }
 
 impl<'a> NaLookup<'a> {
-    fn new_contiguous(
-        context: i32,
-        query: &'a [u8],
-        query_nomask: &'a [u8],
-        word_size: usize,
-    ) -> Option<Self> {
+    fn new_contiguous(context: i32, query: &'a [u8], word_size: usize) -> Option<Self> {
         let stats = lookup_segment_stats(query, word_size);
         let approx_entries = stats.approx_table_entries;
         let max_q_off = stats.max_q_off;
@@ -500,20 +492,12 @@ impl<'a> NaLookup<'a> {
         } else {
             choose_contiguous_mb_lut_word
         };
-        Self::new(
-            context,
-            query,
-            query_nomask,
-            word_size,
-            approx_entries,
-            choose_lut_word,
-        )
+        Self::new(context, query, word_size, approx_entries, choose_lut_word)
     }
 
     fn new(
         context: i32,
         query: &'a [u8],
-        query_nomask: &'a [u8],
         word_size: usize,
         approx_entries: usize,
         choose_lut_word: fn(usize, usize) -> usize,
@@ -555,7 +539,6 @@ impl<'a> NaLookup<'a> {
         Some(NaLookup {
             context,
             query,
-            query_nomask,
             lut_word,
             lut_mask,
             scan_start,
@@ -873,6 +856,15 @@ fn blastn_ungapped_search_inner(
     let lut_word = word_size.min(8);
     let lut_size = 1usize << (2 * lut_word);
 
+    // Hoist the scratch allocations out of the strand loop. last_hit is the
+    // largest (subject.len() + query.len() + 1 i32s — 60 MB for a 15 Mbp
+    // celegans chromosome), and we previously reallocated it per strand.
+    // Reusing across the two strands halves the per-call memory traffic.
+    let max_query_len = query_plus.len().max(query_minus.len());
+    let mut last_hit: Vec<i32> = vec![-1; subject.len() + max_query_len + 1];
+    let mut lut: Vec<i32> = vec![-1; lut_size];
+    let mut next: Vec<i32> = vec![-1; max_query_len];
+
     for (context, query, query_nomask) in [
         (0i32, query_plus, query_plus_nomask),
         (1i32, query_minus, query_minus_nomask),
@@ -880,11 +872,11 @@ fn blastn_ungapped_search_inner(
         if query.len() < word_size || subject.len() < word_size {
             continue;
         }
-        let mut last_hit = vec![-1i32; subject.len() + query.len() + 1];
+        last_hit[..subject.len() + query.len() + 1].fill(-1);
 
-        // Build lookup table from query
-        let mut lut: Vec<i32> = vec![-1; lut_size];
-        let mut next: Vec<i32> = vec![-1; query.len()];
+        // Build lookup table from query.
+        lut.fill(-1);
+        next[..query.len()].fill(-1);
 
         for i in (0..=(query.len() - word_size)).rev() {
             if has_ambiguous_base(&query[i..i + word_size]) {
@@ -2444,7 +2436,7 @@ fn s_scan_na_lookup_shape_packed(
             subject_packed,
             subject_len,
             word_size,
-            lookup.query_nomask,
+            lookup.query,
             &lookup.lut,
             &lookup.next,
             &lookup.pv,
@@ -2461,7 +2453,14 @@ fn s_scan_na_lookup_shape_packed(
             reduced_nucl_cutoff_score,
             hsps,
         );
-    } else if lut_word == 8 {
+    } else if lut_word == 8 && scan_step == 1 {
+        // `scan_byte_oriented_lut8_mod1` advances `byte_idx` only on the
+        // state-3 branch, which is correct iff `scan_step == 1` (state
+        // cycles 0→1→2→3→0 and we cross a byte every 4 positions). For
+        // any other `scan_step` (e.g. word_size 9/10/12 with lut_word 8)
+        // the function never advances past the first packed byte and
+        // returns nearly zero hits. Route those to the generic `scan_step1`
+        // which uses position-based `packed_hash_at` instead.
         scan_byte_oriented_lut8_mod1(
             subject_packed,
             subject_len,
@@ -2469,7 +2468,34 @@ fn s_scan_na_lookup_shape_packed(
             lookup.lut_mask,
             scan_start,
             scan_step,
-            lookup.query_nomask,
+            lookup.query,
+            word_size,
+            &lookup.lut,
+            &lookup.next,
+            &lookup.pv,
+            &mut scratch.last_hit,
+            lookup.diag_mask,
+            reward,
+            penalty,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+            lookup.context,
+            nucl_score_table,
+            reduced_nucl_cutoff_score,
+            hsps,
+        );
+    } else if lut_word >= 8 {
+        scan_step1(
+            subject_packed,
+            subject_len,
+            end,
+            lut_word,
+            lookup.lut_mask,
+            scan_start,
+            scan_step,
+            lookup.query,
             word_size,
             &lookup.lut,
             &lookup.next,
@@ -2496,7 +2522,7 @@ fn s_scan_na_lookup_shape_packed(
             lookup.lut_mask,
             scan_start,
             scan_step,
-            lookup.query_nomask,
+            lookup.query,
             word_size,
             &lookup.lut,
             &lookup.next,
@@ -2523,7 +2549,7 @@ fn s_scan_na_lookup_shape_packed(
             lookup.lut_mask,
             scan_start,
             scan_step,
-            lookup.query_nomask,
+            lookup.query,
             word_size,
             &lookup.lut,
             &lookup.next,
@@ -7264,7 +7290,7 @@ mod tests {
     #[test]
     fn translated_na_scan_choosers_match_c_dispatch_shapes() {
         let query = vec![0u8; 400_000];
-        let small_6_2 = NaLookup::new(0, &query[..8], &query[..8], 7, 8, choose_small_na_lut_word)
+        let small_6_2 = NaLookup::new(0, &query[..8], 7, 8, choose_small_na_lut_word)
             .expect("small lut6 step2");
         assert_eq!(
             s_small_na_choose_scan_subject(&small_6_2),
@@ -7273,7 +7299,6 @@ mod tests {
 
         let small_8_3 = NaLookup::new(
             0,
-            &query[..20_000],
             &query[..20_000],
             10,
             20_000,
@@ -7288,7 +7313,6 @@ mod tests {
         let mb_10_2 = NaLookup::new(
             0,
             &query[..20_000],
-            &query[..20_000],
             11,
             20_000,
             choose_contiguous_mb_lut_word,
@@ -7301,7 +7325,6 @@ mod tests {
 
         let mb_11_3 = NaLookup::new(
             0,
-            &query[..200_000],
             &query[..200_000],
             13,
             200_000,

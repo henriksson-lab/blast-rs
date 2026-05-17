@@ -199,7 +199,8 @@ pub fn blast_get_ungapped_hsp_list(
     let Some(init_hitlist) = init_hitlist else {
         if let Some(hsp_list) = hsp_list.as_mut() {
             hsp_list.hsps.clear();
-            hsp_list.best_evalue = f64::MAX;
+            // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`.
+            hsp_list.best_evalue = i32::MAX as f64;
         }
         return 0;
     };
@@ -943,6 +944,7 @@ mod tests {
         let query_info = crate::queryinfo::QueryInfo {
             num_queries: 1,
             max_length: 10,
+            min_length: 0,
             contexts: (0..6)
                 .map(|idx| crate::queryinfo::ContextInfo {
                     query_offset: 100 + idx * 100,
@@ -1203,7 +1205,8 @@ mod tests {
             0
         );
         assert!(hsp_list.as_ref().unwrap().hsps.is_empty());
-        assert_eq!(hsp_list.as_ref().unwrap().best_evalue, f64::MAX);
+        // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`.
+        assert_eq!(hsp_list.as_ref().unwrap().best_evalue, i32::MAX as f64);
     }
 
     #[test]
@@ -1268,6 +1271,7 @@ mod tests {
                 },
             ],
             max_length: 2,
+            min_length: 0,
         };
         let concatenated_query = crate::util::BlastSequenceBlk {
             oof_sequence: Some(vec![1, 2, 15, 3, 4, 15, 5, 6]),

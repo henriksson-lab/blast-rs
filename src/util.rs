@@ -28,19 +28,36 @@ pub fn translate_codon(b1: u8, b2: u8, b3: u8, genetic_code: &[u8; 64]) -> u8 {
 pub fn codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
     const MAPPING: [u8; 4] = [1, 2, 4, 8];
 
-    if (codon[0] | codon[1] | codon[2]) > 15 {
+    let c0 = codon[0];
+    let c1 = codon[1];
+    let c2 = codon[2];
+    if (c0 | c1 | c2) > 15 {
         return crate::encoding::NCBISTDAA_X;
+    }
+
+    // Fast path for unambiguous codons (each base is a single bit, i.e. one of
+    // 1/2/4/8). This covers the vast majority of bytes in `blast_get_translation`
+    // hot loops, eliminating the 4×4×4 ambiguity enumeration.
+    let all_single =
+        c0 != 0 && (c0 & (c0 - 1)) == 0 &&
+        c1 != 0 && (c1 & (c1 - 1)) == 0 &&
+        c2 != 0 && (c2 & (c2 - 1)) == 0;
+    if all_single {
+        let i = c0.trailing_zeros() as usize;
+        let j = c1.trailing_zeros() as usize;
+        let k = c2.trailing_zeros() as usize;
+        return genetic_code[i * 16 + j * 4 + k];
     }
 
     let mut aa: u8 = 0;
     for i in 0..4 {
-        if codon[0] & MAPPING[i] != 0 {
+        if c0 & MAPPING[i] != 0 {
             let index0 = i * 16;
             for j in 0..4 {
-                if codon[1] & MAPPING[j] != 0 {
+                if c1 & MAPPING[j] != 0 {
                     let index1 = index0 + j * 4;
                     for k in 0..4 {
-                        if codon[2] & MAPPING[k] != 0 {
+                        if c2 & MAPPING[k] != 0 {
                             let taa = genetic_code[index1 + k];
                             if aa == 0 {
                                 aa = taa;
@@ -1344,14 +1361,28 @@ pub fn blast_get_translation(
 
     // C: for (index = ABS(frame) - 1; index < nt_length - 2; index += CODON_LENGTH)
     let start = (frame.unsigned_abs() as usize) - 1;
-    if nt_length >= 2 {
+    if nt_length >= 2 && nucl_seq.len() >= nt_length {
+        let nucl_ptr = nucl_seq.as_ptr();
+        let prot_ptr = prot_seq.as_mut_ptr();
+        let end = nt_length - 2;
         let mut index = start;
-        while index < nt_length - 2 {
-            let codon = [nucl_seq[index], nucl_seq[index + 1], nucl_seq[index + 2]];
+        while index < end {
+            // SAFETY: `index < end = nt_length - 2`, plus nt_length <= nucl_seq.len()
+            // and prot_seq must have at least `(end - start) / 3 + 2` slots which
+            // callers guarantee. Avoids bounds checks in the hot translation loop.
+            let codon = unsafe {
+                [
+                    *nucl_ptr.add(index),
+                    *nucl_ptr.add(index + 1),
+                    *nucl_ptr.add(index + 2),
+                ]
+            };
             let residue = codon_to_aa(codon, genetic_code);
             // C: if (IS_residue(residue) || residue == FENCE_SENTRY)
             if is_residue(residue) || residue == FENCE_SENTRY {
-                prot_seq[index_prot] = residue;
+                unsafe {
+                    *prot_ptr.add(index_prot) = residue;
+                }
                 index_prot += 1;
             }
             index += CODON_LENGTH;

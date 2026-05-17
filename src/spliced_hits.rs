@@ -3758,6 +3758,7 @@ mod tests {
                 },
             ],
             max_length: 50,
+            min_length: 0,
         };
         let data = BlastHSPMapperData {
             query_info: Some(query_info),
@@ -3792,6 +3793,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 30,
+            min_length: 0,
         };
         let data = BlastHSPMapperData {
             query_info: Some(query_info),

@@ -93,6 +93,10 @@ pub struct LinkBlastHsp {
     /// Number of HSPs linked together for sum statistics. `0` or `1`
     /// means "not part of a linked set".
     pub num: i32,
+    /// Sum-score in bit space for the linked set, mirroring `BlastHSP::xsum`
+    /// (`blast_hits.h`). Used downstream to keep the linked sum separate from
+    /// the per-HSP `bit_score` column.
+    pub xsum: f64,
 }
 
 /// A list of HSPs for one subject (port of `BlastHSPList`, `blast_hits.h:151`).
@@ -988,12 +992,19 @@ pub fn s_BlastEvenGapLinkHSPs(
                 };
                 hsp_list.hsp_array[nodes[h].hsp_idx as usize].num = num_links;
                 if nodes[h].linked_set {
+                    // NCBI stores `xsum` in `H->xsum` (LinkHSPStruct field),
+                    // not in `hsp->bit_score` (`link_hsps.c:1050,1062`). The
+                    // per-HSP `bit_score` in the BlastHSP array stays the
+                    // individual lambda*score-based bit score so the tabular
+                    // and XML formatters can report each HSP's own bit score
+                    // while the evalue is shared across the linked set.
                     let xsum = nodes[h].hsp_link.xsum[om];
-                    hsp_list.hsp_array[nodes[h].hsp_idx as usize].bit_score = xsum;
+                    hsp_list.hsp_array[nodes[h].hsp_idx as usize].xsum = xsum;
                     // Walk the link chain, propagating num to each member.
                     let mut cur_link = nodes[h].hsp_link.link[om];
                     while let Some(link_h) = cur_link {
                         hsp_list.hsp_array[nodes[link_h].hsp_idx as usize].num = num_links;
+                        hsp_list.hsp_array[nodes[link_h].hsp_idx as usize].xsum = xsum;
                         cur_link = nodes[link_h].hsp_link.link[om];
                     }
                 }
@@ -1771,6 +1782,7 @@ mod tests {
             },
             context,
             num: 1,
+            xsum: 0.0,
         }
     }
 
@@ -1795,6 +1807,7 @@ mod tests {
             num_queries,
             contexts,
             max_length: query_length as u32,
+            min_length: 0,
         }
     }
 

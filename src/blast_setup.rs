@@ -812,8 +812,8 @@ pub fn blast_calc_eff_lengths(
     0
 }
 
-/// Port of NCBI `BLAST_CalcEffLengths` (`blast_setup.c:699`) with nullable
-/// pointer-shaped inputs.
+/// blast-rs: Nullable pointer-shaped adapter for effective-length calculation;
+/// not a direct NCBI C port.
 pub fn blast_calc_eff_lengths_c(
     program_number: ProgramType,
     scoring_options: Option<&ScoringOptions>,
@@ -1069,6 +1069,7 @@ mod tests {
                 },
             ],
             max_length: 12,
+            min_length: 0,
         };
         let mut sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 2).expect("sbp");
@@ -1171,6 +1172,7 @@ mod tests {
                 },
             ],
             max_length: 10,
+            min_length: 0,
         };
         let scoring = ScoringOptions {
             reward: 0,
@@ -1247,6 +1249,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 20,
+            min_length: 0,
         };
         let scoring = ScoringOptions {
             reward: 0,
@@ -1350,6 +1353,7 @@ mod tests {
                 },
             ],
             max_length: 20,
+            min_length: 0,
         };
         let mut sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 2).expect("sbp");
@@ -1531,6 +1535,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let scoring = ScoringOptions {
             reward: 0,
@@ -1577,6 +1582,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let scoring = ScoringOptions {
             reward: 0,
@@ -1643,6 +1649,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let scoring = ScoringOptions {
             reward: 0,
@@ -1735,6 +1742,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let scoring = ScoringOptions {
             reward: 0,
@@ -1806,6 +1814,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let scoring = ScoringOptions {
             reward: 0,

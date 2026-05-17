@@ -2221,8 +2221,30 @@ fn s_seg_parameters_check(params: &mut SegParameters) {
 #[allow(dead_code)]
 fn seg_parameters_free(_params: Option<SegParameters>) {}
 
+/// Reverse map of `SEG_VALID_AA_CODES`: index `i` (a NCBIstdaa code byte)
+/// stores the position of that byte in `SEG_VALID_AA_CODES`, or `u8::MAX`
+/// if the byte isn't one of the 20 valid SEG amino-acid codes. Precomputed
+/// at compile time so `seg_alpha_index` is O(1) — replaces a linear
+/// `iter().position()` scan that was hot in `read_composition`-style loops
+/// during SEG filtering (`composition_matrix_adj` workload).
+const SEG_ALPHA_INDEX_LUT: [u8; 256] = {
+    let mut lut = [u8::MAX; 256];
+    let mut i = 0;
+    while i < SEG_VALID_AA_CODES.len() {
+        lut[SEG_VALID_AA_CODES[i] as usize] = i as u8;
+        i += 1;
+    }
+    lut
+};
+
+#[inline]
 fn seg_alpha_index(code: u8) -> Option<usize> {
-    SEG_VALID_AA_CODES.iter().position(|&valid| valid == code)
+    let idx = SEG_ALPHA_INDEX_LUT[code as usize];
+    if idx == u8::MAX {
+        None
+    } else {
+        Some(idx as usize)
+    }
 }
 
 #[allow(dead_code)]
@@ -3525,6 +3547,7 @@ mod tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 6,
+            min_length: 0,
         };
         let mut query_blk = BlastSequenceBlk {
             sequence: Some(vec![99, 99, 0, 0, 0, 0, 0, 0, 88]),
@@ -3621,6 +3644,7 @@ mod tests {
                 },
             ],
             max_length: 6,
+            min_length: 0,
         };
         let mut query_blk = BlastSequenceBlk {
             sequence: Some(vec![
@@ -3686,6 +3710,7 @@ mod tests {
             num_queries: 1,
             contexts,
             max_length: 10,
+            min_length: 0,
         };
 
         let mut dna_masks = blast_mask_loc_new(crate::util::NUM_FRAMES).expect("mask loc");
@@ -3770,6 +3795,7 @@ mod tests {
                 },
             ],
             max_length: 10,
+            min_length: 0,
         };
 
         let mut mask_loc = blast_mask_loc_new(3).expect("mask loc");
@@ -3893,6 +3919,7 @@ mod tests {
                 },
             ],
             max_length: 6,
+            min_length: 0,
         };
         let original: Vec<u8> = (0..16).collect();
         let mut query_blk = BlastSequenceBlk {

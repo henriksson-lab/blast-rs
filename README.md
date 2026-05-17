@@ -460,6 +460,14 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
 - **NCBI application framework** -- `corelib/` (logging, config, threading, diagnostics)
 - **blast_formatter** -- standalone tool for reformatting archived BLAST results
 
+### Struct-field gaps relative to NCBI
+
+These C struct fields exist in NCBI but are not yet mirrored in our Rust equivalents. They should be added when the first caller that needs them lands; track new gaps here as they're noticed.
+
+- `QueryInfo` (`blast_query_info.h`): still missing `first_context` / `last_context` (we use the implicit `0` and `contexts.len() - 1`) and `pattern_info` (PHI-blast pattern occurrences — only needed if/when PHI-blast pattern stats are wired through).
+- `Hsp` (NCBI `BlastHSP` in `blast_hits.h`): omits `num` (count of linked HSPs — stored on the separate `LinkBlastHsp` shape used by the linker) and `num_positives` (computed on demand by `blast_hsp_get_num_identities` / midline-scan helpers). The C `BlastSeg` is flattened into `Hsp` directly; the redundant `length` field is computed as `end - offset` at the call sites.
+- `BlastScoreBlk` (`blast_stat.h`): omits `alphabet_start` (always 0 for NCBIstdaa/blastna in practice), `comments` (unused), `psi_matrix` (PSI-BLAST PSSM not yet stored in the score blk directly), `complexity_adjusted_scoring` (rmblastn-specific), and `ambig_size`/`ambig_occupy` (encoded by `ambiguous_res.len()` in Rust).
+
 ## License
 
 MIT OR Unlicense

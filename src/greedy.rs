@@ -60,6 +60,7 @@ impl SMBSpace {
 }
 
 /// Port of NCBI `MBSpaceNew` (`greedy_align.c:44`).
+/// naming: Rust keeps MBSpace as the established `mbspace` token.
 pub fn mbspace_new(num_space_arrays: i32) -> SMBSpace {
     let requested = num_space_arrays.max(0) as usize;
     let space_allocated = MBSPACE_MIN_SPACE.max(requested);
@@ -85,6 +86,7 @@ pub fn s_refresh_mbspace(space: Option<&mut SMBSpace>) {
 }
 
 /// Rust ownership equivalent of NCBI `MBSpaceFree`.
+/// naming: Rust keeps MBSpace as the established `mbspace` token.
 pub fn mbspace_free(space: &mut Option<SMBSpace>) {
     *space = None;
 }
@@ -1098,7 +1100,8 @@ fn greedy_align_one_side_with_growth_packed_subject(
     }
 }
 
-/// Port of the non-affine branch of NCBI `BLAST_GreedyGappedAlignment`.
+/// blast-rs: Seeded non-affine greedy alignment helper; not a direct NCBI C
+/// port.
 ///
 /// This is the exact megablast path for `gap_open == 0 && gap_extend == 0`.
 pub fn greedy_align_with_seed(

@@ -1273,6 +1273,42 @@ impl BlastDb {
         extract_accession_from_header(hdr)
     }
 
+    /// Return the bare accession (without version suffix) when the ASN.1
+    /// header has a structured Textseq-id with `accession`+`version` fields.
+    /// Used by tabular `sacc` to distinguish "real" versioned accessions
+    /// (Refseq, GenBank, etc.) from title-parsed accessions where `.N` is
+    /// part of the identifier itself (e.g. celegans `NC_003279.8`). Returns
+    /// `None` when no structured Textseq-id is present, signaling that
+    /// callers should NOT strip the `.N` suffix from the accession.
+    pub fn get_bare_accession(&self, oid: u32) -> Option<String> {
+        extract_textseq_bare_accession_from_asn(self.get_header(oid))
+    }
+
+    /// Return the GI number from the ASN.1 Seq-id list, if a `gi` Seq-id
+    /// is present. Used to populate NCBI's `sgi` / `sallgi` tabular columns.
+    pub fn get_gi(&self, oid: u32) -> Option<u32> {
+        extract_gi_from_header(self.get_header(oid))
+    }
+
+    /// Return the "BLAST display" form of the first Textseq-id Seq-id:
+    /// `<dbtag>||name` for records that only have a `name` field (PIR, PRF,
+    /// etc.), `accession.version` for records with an `accession`.
+    /// NCBI's `align_format` pairwise output uses this form for its hit
+    /// summary line — the bare name alone (`T09571`) wouldn't disambiguate
+    /// which database the record came from.
+    pub fn get_display_id(&self, oid: u32) -> Option<String> {
+        extract_textseq_display_id_from_asn(self.get_header(oid))
+    }
+
+    /// Return the full BLAST Seq-id chain (e.g. `gi|20092202|ref|NP_618277.1|`
+    /// or `pir||T09571`), matching NCBI's `Hit_id` XML element. Pieces are
+    /// the GI (if present) followed by the first Textseq-id Seq-id rendered
+    /// as `<dbtag>|<accession.version>|` or `<dbtag>||<name>` when there is
+    /// no accession.
+    pub fn get_blast_seqid_chain(&self, oid: u32) -> Option<String> {
+        extract_blast_seqid_chain_from_asn(self.get_header(oid))
+    }
+
     /// Extract a BLAST-style subject defline from the ASN.1 header.
     /// This keeps the accession used by tabular output as the leading token,
     /// followed by the human-readable title when one is present.
@@ -1510,6 +1546,48 @@ fn extract_integer_value_bytes(buf: &[u8], start: usize, end: usize) -> Option<u
         value = (value << 8) | u32::from(b);
     }
     Some(value)
+}
+
+/// Extract the GI number from the first `gi` Seq-id (tag [11]) in the header,
+/// if present. NCBI's BLAST databases store the GI either as a constructed
+/// `0xab 0x80 0x02 0xLL ... 0x00 0x00` (definite-or-indefinite Tagged INTEGER
+/// inside a SET OF Seq-id) or as a primitive `0x8b 0xLL ...` form. Both
+/// encodings carry a single big-endian unsigned INTEGER value.
+pub fn extract_gi_from_header(hdr: &[u8]) -> Option<u32> {
+    let mut i = 0;
+    while i < hdr.len() {
+        // Constructed [11] gi: `0xab 0x80 ... 0x02 0xLL bytes ... 0x00 0x00`
+        // or `0xab LL ... 0x02 0xLL bytes` (definite length).
+        if hdr[i] == 0xab {
+            if let Some((mut j, end, _)) = asn1_value_bounds(hdr, i, 0xab, 32) {
+                while j + 1 < end {
+                    if hdr[j] == 0x02 {
+                        if let Some((len, len_len)) = read_ber_len(hdr, j + 1) {
+                            let s = j + 1 + len_len;
+                            let e = s.saturating_add(len);
+                            if e <= end {
+                                if let Some(v) = extract_integer_value_bytes(hdr, s, e) {
+                                    return Some(v);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+            }
+        }
+        // Primitive [11] gi: `0x8b 0xLL bytes`
+        if hdr[i] == 0x8b {
+            if let Some((start, end, _after)) = asn1_value_bounds(hdr, i, 0x8b, 16) {
+                if let Some(value) = extract_integer_value_bytes(hdr, start, end) {
+                    return Some(value);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn extract_primitive_integer_seqid_accession(hdr: &[u8]) -> Option<String> {
@@ -1807,9 +1885,183 @@ fn extract_local_accession_from_asn(hdr: &[u8]) -> Option<String> {
 }
 
 /// Walk the binary header, find the first Seq-id whose CHOICE arm wraps a
-/// Textseq-id, and extract the `accession` (field [1]) plus optional `version`
-/// (field [3]). Returns `accession.version` if both present.
+/// Textseq-id, and return the "BLAST display" form: when the Textseq-id has
+/// only a `name` field (and no `accession`), NCBI's seq-id printer renders
+/// `<dbtag>||name` (e.g. `pir||T09571`, `prf||1234ABC`) because the bare name
+/// alone wouldn't disambiguate which database it came from. Records with an
+/// `accession` field render as `accession.version` regardless of dbtag,
+/// because the accession itself is unique. Returns `None` when no Textseq-id
+/// Seq-id is found.
+pub fn extract_textseq_display_id_from_asn(hdr: &[u8]) -> Option<String> {
+    extract_textseq_acc_inner(hdr, true)
+}
+
+/// Same as [`extract_textseq_display_id_from_asn`] but returns the BARE
+/// accession (or name) without any `<dbtag>||` prefix — matches the value
+/// NCBI puts in tabular `sseqid` / `sacc` columns.
 fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    extract_textseq_acc_inner(hdr, false)
+}
+
+/// Walk the binary header for a Textseq-id `accession` field (tag [1]) and
+/// return JUST that bare accession — without the trailing `.version`. Returns
+/// `None` when no structured Textseq-id `accession` is present (i.e., the
+/// record's identifier was derived from a `name` field or title-parse).
+/// Used to populate tabular `sacc` correctly: NCBI strips the version
+/// suffix only when it came from a separate `version` field, never when
+/// the `.N` is part of a free-form accession string.
+pub fn extract_textseq_bare_accession_from_asn(hdr: &[u8]) -> Option<String> {
+    let n = hdr.len();
+    let mut i = 0;
+    while i < n {
+        if !TEXTSEQ_ID_TAGS.contains(&hdr[i]) {
+            i += 1;
+            continue;
+        }
+        let Some((mut j, _seq_id_end, _after)) = asn1_value_bounds(hdr, i, hdr[i], 512) else {
+            i += 1;
+            continue;
+        };
+        let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) else {
+            i += 1;
+            continue;
+        };
+        j = seq_start;
+        while j < seq_end {
+            if let Some((fs, fe, _after)) = asn1_value_bounds(hdr, j, 0xa1, 128) {
+                return extract_visible_string(hdr, fs, fe);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn textseq_dbtag(tag: u8) -> Option<&'static str> {
+    // Seq-id CHOICE indexes (objseq.asn): 4=genbank, 5=embl, 6=pir,
+    // 7=swissprot, 9=other (refseq), 12=ddbj, 13=prf, 15=tpg, 16=tpe,
+    // 17=tpd. Encoded as constructed context-specific tags `0xa0+N`.
+    match tag {
+        0xa4 => Some("gb"),
+        0xa5 => Some("emb"),
+        0xa6 => Some("pir"),
+        0xa7 => Some("sp"),
+        0xa9 => Some("ref"),
+        0xac => Some("dbj"),
+        0xad => Some("prf"),
+        0xaf => Some("tpg"),
+        0xb0 => Some("tpe"),
+        0xb1 => Some("tpd"),
+        _ => None,
+    }
+}
+
+/// Build the full BLAST Seq-id chain string (NCBI's `BlastSeqalign_GetIDStr`
+/// output): `gi|N|<dbtag>|<accession.version>|` when both GI and a
+/// Textseq-id are present, `<dbtag>|<accession.version>|` or
+/// `<dbtag>||<name>` otherwise. The chain is what NCBI puts in the XML
+/// `Hit_id` element.
+pub fn extract_blast_seqid_chain_from_asn(hdr: &[u8]) -> Option<String> {
+    let gi = extract_gi_from_header(hdr);
+    let textseq = extract_textseq_chain_segment(hdr);
+    match (gi, textseq) {
+        (Some(g), Some(seg)) => Some(format!("gi|{}|{}", g, seg)),
+        (Some(g), None) => Some(format!("gi|{}", g)),
+        (None, Some(seg)) => Some(seg),
+        (None, None) => None,
+    }
+}
+
+/// Return the `<dbtag>|<accession.version>|` or `<dbtag>||<name>` segment of
+/// the BLAST Seq-id chain (without the leading `gi|...|`).
+fn extract_textseq_chain_segment(hdr: &[u8]) -> Option<String> {
+    let n = hdr.len();
+    let mut i = 0;
+    while i < n {
+        if !TEXTSEQ_ID_TAGS.contains(&hdr[i]) {
+            i += 1;
+            continue;
+        }
+        let Some((mut j, _seq_id_end, _after)) = asn1_value_bounds(hdr, i, hdr[i], 512) else {
+            i += 1;
+            continue;
+        };
+        let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) else {
+            i += 1;
+            continue;
+        };
+        j = seq_start;
+        let scan_end = seq_end;
+        let parent_tag = hdr[i];
+        let dbtag = match textseq_dbtag(parent_tag) {
+            Some(d) => d,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+        let mut acc: Option<String> = None;
+        let mut name: Option<String> = None;
+        let mut version: Option<u32> = None;
+        while j < scan_end {
+            if let Some((fs, fe, after)) = asn1_value_bounds(hdr, j, 0xa1, 128) {
+                acc = extract_visible_string(hdr, fs, fe);
+                j = after;
+                continue;
+            }
+            if name.is_none() {
+                if let Some((fs, fe, after)) = asn1_value_bounds(hdr, j, 0xa0, 128) {
+                    name = extract_visible_string(hdr, fs, fe);
+                    j = after;
+                    continue;
+                }
+            }
+            if let Some((fs, fe, after)) = asn1_value_bounds(hdr, j, 0xa3, 32) {
+                if version.is_none() {
+                    version = extract_small_integer(hdr, fs, fe);
+                }
+                if version.is_some() && (acc.is_some() || name.is_some()) {
+                    break;
+                }
+                j = after;
+                continue;
+            }
+            j += 1;
+        }
+        let acc_or_name = match (acc, name) {
+            (Some(a), n) => Some((a, true, n)),
+            (None, Some(n)) => Some((n, false, None)),
+            (None, None) => None,
+        };
+        if let Some((primary, from_acc, secondary_name)) = acc_or_name {
+            let with_version = if let Some(v) = version {
+                if v > 0 {
+                    format!("{}.{}", primary, v)
+                } else {
+                    primary
+                }
+            } else {
+                primary
+            };
+            if from_acc {
+                // `<dbtag>|accession.version|` plus optional secondary name
+                // for sp/pir/prf records (e.g., `sp|P12345|HUMAN`).
+                let mut s = format!("{}|{}|", dbtag, with_version);
+                if let Some(n) = secondary_name {
+                    s.push_str(&n);
+                }
+                return Some(s);
+            } else {
+                return Some(format!("{}||{}", dbtag, with_version));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_textseq_acc_inner(hdr: &[u8], include_dbtag_for_name_only: bool) -> Option<String> {
     let n = hdr.len();
     let mut i = 0;
     while i < n {
@@ -1821,13 +2073,19 @@ fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
             i += 1;
             continue;
         };
-        // Inside the seq-id wrapper: the inner Textseq-id is commonly encoded
-        // as a SEQUENCE. Honor its BER length when present.
-        let mut scan_end = seq_id_end;
-        if let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) {
-            j = seq_start;
-            scan_end = seq_end;
-        }
+        // A real Textseq-id Seq-id wraps a `Textseq-id` SEQUENCE (tag 0x30).
+        // Without that inner SEQUENCE the candidate is almost always a
+        // coincidental match against payload bytes of a sibling field — e.g.
+        // `gi` is an INTEGER whose value happens to contain `0xa5`, which the
+        // naive byte scan misreads as an EMBL Seq-id tag. Skip by a single
+        // byte so the scan still reaches the real Seq-id later in the header.
+        let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) else {
+            i += 1;
+            continue;
+        };
+        j = seq_start;
+        let scan_end = seq_end;
+        let _ = (seq_id_end, after_seq_id);
         // Hunt for the accession field ([1]) or fall back to the
         // `name` field (0xa0 0x80 …). PIR records often have `name` set but
         // no `accession` (e.g. T30219 stores its identifier as `name`); NCBI
@@ -1866,17 +2124,30 @@ fn extract_textseq_accession_from_asn(hdr: &[u8]) -> Option<String> {
             }
             j += 1;
         }
-        let acc = acc.or(name);
-        if let Some(acc_str) = acc {
-            if let Some(version) = version {
-                if version > 0 {
-                    return Some(format!("{}.{}", acc_str, version));
-                }
+        let parent_tag = hdr[i];
+        let (acc_str, came_from_accession_field) = match (acc, name) {
+            (Some(a), _) => (a, true),
+            (None, Some(n)) => (n, false),
+            (None, None) => {
+                i = after_seq_id.max(i + 1);
+                continue;
             }
-            return Some(acc_str);
+        };
+        let with_version = if let Some(version) = version {
+            if version > 0 {
+                format!("{}.{}", acc_str, version)
+            } else {
+                acc_str
+            }
+        } else {
+            acc_str
+        };
+        if include_dbtag_for_name_only && !came_from_accession_field {
+            if let Some(dbtag) = textseq_dbtag(parent_tag) {
+                return Some(format!("{}||{}", dbtag, with_version));
+            }
         }
-        // No accession — advance past the tag and try the next seq-id.
-        i = after_seq_id.max(i + 1);
+        return Some(with_version);
     }
     None
 }

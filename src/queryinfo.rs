@@ -19,11 +19,41 @@ pub struct ContextInfo {
 }
 
 /// Information about all queries in a search.
+///
+/// Mirrors NCBI `BlastQueryInfo` (`blast_query_info.h:80`). `max_length` and
+/// `min_length` are the longest / shortest concatenated-context lengths and
+/// are consumed by `BSearchContextInfo` (`blast_query_info.c:225`) to bound
+/// the binary search range.
 #[derive(Debug, Clone)]
 pub struct QueryInfo {
     pub num_queries: i32,
     pub contexts: Vec<ContextInfo>,
     pub max_length: u32,
+    /// NCBI `BlastQueryInfo.min_length` — length of the shortest concatenated
+    /// query context. Used by `BSearchContextInfo`'s search-range bound.
+    pub min_length: u32,
+}
+
+impl QueryInfo {
+    /// Compute `(max_length, min_length)` from a freshly built context list.
+    /// Returns `(0, 0)` when no contexts are present.
+    fn compute_length_bounds(contexts: &[ContextInfo]) -> (u32, u32) {
+        let mut max_length = 0u32;
+        let mut min_length = u32::MAX;
+        for ctx in contexts {
+            let len = ctx.query_length.max(0) as u32;
+            if len > max_length {
+                max_length = len;
+            }
+            if len < min_length {
+                min_length = len;
+            }
+        }
+        if min_length == u32::MAX {
+            min_length = 0;
+        }
+        (max_length, min_length)
+    }
 }
 
 impl QueryInfo {
@@ -47,11 +77,12 @@ impl QueryInfo {
             offset += qlen as i32 + 1;
         }
 
-        let max_length = query_lengths.iter().copied().max().unwrap_or(0) as u32;
+        let (max_length, min_length) = Self::compute_length_bounds(&contexts);
         QueryInfo {
             num_queries,
             contexts,
             max_length,
+            min_length,
         }
     }
 
@@ -89,17 +120,20 @@ impl QueryInfo {
             offset += qlen as i32 + 1;
         }
 
-        let max_length = query_lengths.iter().copied().max().unwrap_or(0) as u32;
+        let (max_length, min_length) = Self::compute_length_bounds(&contexts);
 
         QueryInfo {
             num_queries,
             contexts,
             max_length,
+            min_length,
         }
     }
 
     /// Create QueryInfo for a single translated nucleotide query from the
     /// offsets returned by `BLAST_GetAllTranslations`.
+    /// blast-rs: QueryInfo constructor over translation offsets; not a direct
+    /// NCBI C port.
     ///
     /// The six contexts follow NCBI `BLAST_ContextToFrame` order:
     /// `+1,+2,+3,-1,-2,-3`. Context offsets point into the flat translation
@@ -124,15 +158,12 @@ impl QueryInfo {
                 }
             })
             .collect();
-        let max_length = contexts
-            .iter()
-            .map(|ctx| ctx.query_length.max(0) as u32)
-            .max()
-            .unwrap_or(0);
+        let (max_length, min_length) = Self::compute_length_bounds(&contexts);
         QueryInfo {
             num_queries: 1,
             contexts,
             max_length,
+            min_length,
         }
     }
 
@@ -201,16 +232,36 @@ pub fn blast_get_query_index_from_query_offset(
 }
 
 /// 1-1 port of `BSearchContextInfo` (`blast_query_info.c:219`).
+/// naming: Rust keeps the conventional `bsearch` token for binary search.
 /// Returns the index of the context with the greatest query offset not
 /// exceeding `n`.
+///
+/// NCBI bounds the binary search with `min_length` / `max_length` when both
+/// are populated and `first_context == 0` — this prunes the search range
+/// for multi-query searches. We mirror that optimization here.
 pub fn bsearch_context_info(n: i32, query_info: &QueryInfo) -> i32 {
     let size = query_info.contexts.len();
     if size == 0 {
         return -1;
     }
 
-    let mut b = 0usize;
-    let mut e = size;
+    // NCBI `blast_query_info.c:225`:
+    //   if (min_length > 0 && max_length > 0 && first_context == 0) {
+    //     b = MIN(n / (max_length + 1), size - 1);
+    //     e = MIN(n / (min_length + 1) + 1, size);
+    //   }
+    // Our Rust port doesn't track `first_context` explicitly, but for all
+    // current callers it is implicitly 0 (the contexts vector starts at
+    // index 0). When the length bounds are populated, apply the same
+    // pruning that NCBI uses.
+    let (mut b, mut e) = if query_info.min_length > 0 && query_info.max_length > 0 && n >= 0 {
+        let n_u = n as u32;
+        let lo = (n_u / (query_info.max_length + 1)) as usize;
+        let hi = (n_u / (query_info.min_length + 1)) as usize + 1;
+        (lo.min(size - 1), hi.min(size))
+    } else {
+        (0usize, size)
+    };
 
     while b < e - 1 {
         let m = (b + e) / 2;
@@ -414,6 +465,7 @@ mod tests {
             num_queries: 0,
             contexts: Vec::new(),
             max_length: 0,
+            min_length: 0,
         };
 
         assert_eq!(bsearch_context_info(0, &qi), -1);

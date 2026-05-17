@@ -277,6 +277,8 @@ pub struct BlastRpsLookupTable {
 
 /// Generic wrapper around different lookup table types.
 pub enum LookupTableWrap {
+    Na(BlastNaLookupTable),
+    NaHash(BlastNaHashLookupTable),
     SmallNa(SmallNaLookupTable),
     Megablast(MbLookupTable),
     Aa(AaLookupTable),
@@ -286,6 +288,8 @@ pub enum LookupTableWrap {
 impl LookupTableWrap {
     pub fn table_type(&self) -> LookupTableType {
         match self {
+            LookupTableWrap::Na(_) => LookupTableType::NaLookup,
+            LookupTableWrap::NaHash(_) => LookupTableType::NaHashLookup,
             LookupTableWrap::SmallNa(_) => LookupTableType::SmallNaLookup,
             LookupTableWrap::Megablast(_) => LookupTableType::MegablastLookup,
             LookupTableWrap::Aa(_) => LookupTableType::AaLookup,
@@ -295,6 +299,8 @@ impl LookupTableWrap {
 
     pub fn word_length(&self) -> i32 {
         match self {
+            LookupTableWrap::Na(t) => t.word_length,
+            LookupTableWrap::NaHash(t) => t.word_length,
             LookupTableWrap::SmallNa(t) => t.word_length,
             LookupTableWrap::Megablast(t) => t.word_length,
             LookupTableWrap::Aa(t) => t.word_length,
@@ -309,6 +315,8 @@ pub fn s_get_minimum_subj_seq_len(lookup_wrap: Option<&LookupTableWrap>) -> i32 
         return 0;
     };
     match lookup_wrap {
+        LookupTableWrap::Na(table) => table.word_length,
+        LookupTableWrap::NaHash(table) => table.word_length,
         LookupTableWrap::SmallNa(table) => table.word_length,
         LookupTableWrap::Megablast(table) => table.word_length,
         LookupTableWrap::Aa(table) => table.word_length,
@@ -502,6 +510,62 @@ pub fn s_small_na_lookup(lookup_wrap: Option<&LookupTableWrap>, index: i32, q_po
     }
 }
 
+/// Retrieve all query offsets for a SmallNa lookup word, preserving C's compact
+/// backbone/overflow layout used by `BlastSmallNaLookupTable`.
+pub fn s_blast_small_na_lookup_retrieve(
+    lookup: &SmallNaLookupTable,
+    index: i32,
+    offset_pairs: &mut Vec<OffsetPair>,
+    s_off: i32,
+) -> i32 {
+    if lookup.backbone.is_empty() {
+        return 0;
+    }
+
+    let index = lookup.backbone[(index as usize) & (lookup.backbone.len() - 1)];
+    let before = offset_pairs.len();
+    if index >= 0 {
+        offset_pairs.push(OffsetPair {
+            query_offset: index,
+            subject_offset: s_off,
+        });
+    } else if index != -1 {
+        let mut src_off = (-index) as usize;
+        loop {
+            let Some(&lookup_pos) = lookup.overflow.get(src_off) else {
+                break;
+            };
+            src_off += 1;
+            if lookup_pos < 0 {
+                break;
+            }
+            offset_pairs.push(OffsetPair {
+                query_offset: lookup_pos,
+                subject_offset: s_off,
+            });
+        }
+    }
+
+    (offset_pairs.len() - before) as i32
+}
+
+/// Infer `BlastSmallNaLookupTable::lut_word_length` from the finalized
+/// backbone size. Rust's compact SmallNa owner stores the same information as
+/// C's `backbone_size = 1 << (BITS_PER_NUC * lut_word_length)`.
+pub fn small_na_lut_word_length(lookup: &SmallNaLookupTable) -> i32 {
+    let len = lookup.backbone.len();
+    if len > 0 && len.is_power_of_two() {
+        let bits = len.trailing_zeros();
+        if bits % BITS_PER_NUC == 0 {
+            let width = (bits / BITS_PER_NUC) as i32;
+            if width > 0 {
+                return width;
+            }
+        }
+    }
+    lookup.word_length
+}
+
 /// Port of NCBI static `s_NaLookup` (`na_ungapped.c:111`) over Rust's
 /// `BlastNaLookupTable` owner.
 pub fn s_na_lookup(lookup: Option<&BlastNaLookupTable>, index: i32, q_pos: i32) -> bool {
@@ -552,7 +616,7 @@ pub fn blast_choose_na_extend(lookup_wrap: Option<&LookupTableWrap>) -> Option<N
             })
         }
         LookupTableWrap::SmallNa(lut) => {
-            let lut_word_length = lut.word_length;
+            let lut_word_length = small_na_lut_word_length(lut);
             let extend_callback = if lut_word_length == lut.word_length {
                 NaExtendCallback::Direct
             } else if lut_word_length % crate::stat::COMPRESSION_RATIO as i32 == 0
@@ -568,6 +632,25 @@ pub fn blast_choose_na_extend(lookup_wrap: Option<&LookupTableWrap>) -> Option<N
                 extend_callback: Some(extend_callback),
             })
         }
+        LookupTableWrap::Na(lut) => {
+            let extend_callback = if lut.lut_word_length == lut.word_length {
+                NaExtendCallback::Direct
+            } else if lut.lut_word_length % crate::stat::COMPRESSION_RATIO as i32 == 0
+                && lut.scan_step % crate::stat::COMPRESSION_RATIO as i32 == 0
+            {
+                NaExtendCallback::Aligned
+            } else {
+                NaExtendCallback::Generic
+            };
+            Some(NaExtendChoice {
+                lookup_callback: Some(NaLookupCallback::Na),
+                extend_callback: Some(extend_callback),
+            })
+        }
+        LookupTableWrap::NaHash(_) => Some(NaExtendChoice {
+            lookup_callback: None,
+            extend_callback: None,
+        }),
         LookupTableWrap::Aa(_) | LookupTableWrap::Rps(_) => None,
     }
 }
@@ -604,7 +687,12 @@ pub fn s_is_seed_masked(
     let present = match blast_choose_na_extend(Some(lookup_wrap))?.lookup_callback? {
         NaLookupCallback::Megablast => s_mb_lookup(Some(lookup_wrap), index, q_pos),
         NaLookupCallback::SmallNa => s_small_na_lookup(Some(lookup_wrap), index, q_pos),
-        NaLookupCallback::Na => return None,
+        NaLookupCallback::Na => {
+            let LookupTableWrap::Na(lookup) = lookup_wrap else {
+                return None;
+            };
+            s_na_lookup(Some(lookup), index, q_pos)
+        }
     };
     Some(!present)
 }
@@ -841,6 +929,18 @@ pub fn blast_choose_na_lookup_table(
     Some(lut_type)
 }
 
+/// Port of NCBI `EstimateNumTableEntries` (`lookup_util.c:190`).
+pub fn estimate_num_table_entries(locations: &[crate::util::SSeqRange], max_off: &mut i32) -> i32 {
+    let mut num_entries = 0i32;
+    let mut curr_max = 0i32;
+    for loc in locations {
+        num_entries = num_entries.saturating_add(loc.right.saturating_sub(loc.left));
+        curr_max = curr_max.max(loc.right);
+    }
+    *max_off = curr_max;
+    num_entries
+}
+
 /// Rust ownership equivalent of NCBI `MapperWordHitsNew`.
 pub fn mapper_word_hits_new(
     query: &crate::util::BlastSequenceBlk,
@@ -1053,6 +1153,67 @@ pub fn blast_small_na_lookup_table_destruct(
     None
 }
 
+fn nucleotide_backbone_size(lut_width: i32) -> Option<usize> {
+    if lut_width <= 0 {
+        return None;
+    }
+    let bits = BITS_PER_NUC.checked_mul(lut_width as u32)?;
+    let size = 1usize.checked_shl(bits)?;
+    i32::try_from(size).ok()?;
+    Some(size)
+}
+
+/// Rust ownership translation of NCBI `BlastSmallNaLookupTableNew`
+/// (`blast_nalookup.c:378`).
+pub fn blast_small_na_lookup_table_new(
+    query_sequence: &[u8],
+    locations: &[crate::util::SSeqRange],
+    lut: &mut Option<SmallNaLookupTable>,
+    lookup_options: &crate::options::LookupTableOptions,
+    lut_width: i32,
+) -> i16 {
+    let Some(backbone_size) = nucleotide_backbone_size(lut_width) else {
+        *lut = None;
+        return -1;
+    };
+    if lookup_options.word_size < lut_width {
+        *lut = None;
+        return -1;
+    }
+
+    let mut lookup = SmallNaLookupTable {
+        word_length: lookup_options.word_size,
+        backbone: Vec::new(),
+        overflow: Vec::new(),
+        pv_array: Vec::new(),
+        longest_chain: 0,
+        scan_step: lookup_options.word_size - lut_width + 1,
+    };
+    if lookup.scan_step <= 0 {
+        *lut = None;
+        return -1;
+    }
+
+    let mut thin_backbone = vec![None; backbone_size];
+    blast_lookup_index_query_exact_matches(
+        &mut thin_backbone,
+        lookup.word_length,
+        BITS_PER_NUC as i32,
+        lut_width,
+        query_sequence,
+        locations,
+    );
+
+    let status = s_blast_small_na_lookup_finalize(&mut thin_backbone, &mut lookup);
+    if status != 0 {
+        *lut = None;
+        return status as i16;
+    }
+
+    *lut = Some(lookup);
+    0
+}
+
 /// Port of NCBI `s_BlastSmallNaLookupFinalize` (`blast_nalookup.c:197`).
 /// `thin_backbone` rows follow the C layout: slot 1 stores hit count and slots
 /// 2.. hold query offsets.
@@ -1206,9 +1367,8 @@ pub fn blast_hash_lookup_index_query_exact_matches(
             continue;
         }
 
-        let first_indexed_start = from + word_length_usize - lut_word_length_usize;
         let last_start = to + 1 - lut_word_length_usize;
-        for start in first_indexed_start..=last_start {
+        for start in from..=last_start {
             let Some(word) = query_sequence.get(start..start + lut_word_length_usize) else {
                 break;
             };
@@ -1295,6 +1455,52 @@ pub fn blast_na_lookup_table_destruct(
 ) -> Option<BlastNaLookupTable> {
     *lookup = None;
     None
+}
+
+/// Rust ownership translation of NCBI `BlastNaLookupTableNew`
+/// (`blast_nalookup.c:548`).
+pub fn blast_na_lookup_table_new(
+    query_sequence: &[u8],
+    locations: &[crate::util::SSeqRange],
+    lut: &mut Option<BlastNaLookupTable>,
+    lookup_options: &crate::options::LookupTableOptions,
+    lut_width: i32,
+) -> i16 {
+    let Some(backbone_size) = nucleotide_backbone_size(lut_width) else {
+        *lut = None;
+        return -1;
+    };
+    if lookup_options.word_size < lut_width {
+        *lut = None;
+        return -1;
+    }
+
+    let mut lookup = BlastNaLookupTable {
+        mask: backbone_size as i32 - 1,
+        word_length: lookup_options.word_size,
+        lut_word_length: lut_width,
+        scan_step: lookup_options.word_size - lut_width + 1,
+        backbone_size: backbone_size as i32,
+        ..Default::default()
+    };
+    if lookup.scan_step <= 0 {
+        *lut = None;
+        return -1;
+    }
+
+    let mut thin_backbone = vec![None; backbone_size];
+    blast_lookup_index_query_exact_matches(
+        &mut thin_backbone,
+        lookup.word_length,
+        BITS_PER_NUC as i32,
+        lookup.lut_word_length,
+        query_sequence,
+        locations,
+    );
+
+    s_blast_na_lookup_finalize(&mut thin_backbone, &mut lookup);
+    *lut = Some(lookup);
+    0
 }
 
 /// Port of NCBI `s_BlastNaHashLookupFinalize` (`blast_nalookup.c:2019`).
@@ -1434,6 +1640,22 @@ fn test_pv_bit(pv: &[u32], index: u64, pv_array_bts: usize) -> bool {
         .is_some_and(|slot| (*slot & (1u32 << ((index as u32) & crate::stat::PV_ARRAY_MASK))) != 0)
 }
 
+/// Port of NCBI static `FNV_hash` (`blast_nalookup.c:1390`).
+pub fn fnv_hash(seq: &[u8], mask: u32) -> u32 {
+    const FNV_PRIME: u32 = 16_777_619;
+    const FNV_OFFSET_BASIS: u32 = 2_166_136_261;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in seq.iter().take(4) {
+        hash = hash.wrapping_mul(FNV_PRIME);
+        hash ^= u32::from(byte);
+    }
+    for _ in seq.len().min(4)..4 {
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash & mask
+}
+
 /// Port of NCBI `s_NaHashLookupFillPV` (`blast_nalookup.c:1408`).
 pub fn s_na_hash_lookup_fill_pv(
     query_sequence: &[u8],
@@ -1533,6 +1755,82 @@ pub fn s_na_hash_lookup_count_words_in_subject_16_1(
         }
     }
 
+    0
+}
+
+/// Port-shaped equivalent of NCBI static
+/// `s_NaHashLookupScanSubjectForWordCounts` (`blast_nalookup.c:1839`).
+///
+/// C allocates a sparse counter over the full 2^32 word space. Rust keeps the
+/// same sparse bitfield/value logic but limits the backing bitfield to the PV
+/// words actually present in the grow-on-set Rust PV representation.
+pub fn s_na_hash_lookup_scan_subject_for_word_counts(
+    seq_src: Option<&mut dyn crate::seqsrc::BlastSeqSource>,
+    lookup: Option<&mut BlastNaHashLookupTable>,
+    in_num_threads: u32,
+    max_word_count: u8,
+) -> i16 {
+    let (Some(seq_src), Some(lookup)) = (seq_src, lookup) else {
+        return -1;
+    };
+    if lookup.pv.is_empty() || lookup.lut_word_length != 16 {
+        return -1;
+    }
+
+    let num_db_seqs = seq_src.num_seqs();
+    if num_db_seqs <= 0 || in_num_threads == 0 {
+        return -1;
+    }
+    let _num_threads = in_num_threads.min(num_db_seqs as u32);
+    let sparse_len = (lookup.pv.len() as i64) << crate::stat::PV_ARRAY_BTS;
+    let Some(mut word_counts) =
+        crate::util::blast_sparse_uint1_array_new(Some(&lookup.pv), sparse_len)
+    else {
+        return -1;
+    };
+
+    crate::seqsrc::blast_seq_src_reset_chunk_iterator(seq_src);
+    let oids: Vec<i32> = seq_src.iter_oids().collect();
+    for oid in oids {
+        let Some(seq_data) = seq_src.get_sequence(&crate::seqsrc::GetSeqArg {
+            oid,
+            encoding: crate::seqsrc::SeqEncoding::Protein,
+        }) else {
+            continue;
+        };
+        let status = s_na_hash_lookup_count_words_in_subject_16_1(
+            Some(&seq_data.sequence),
+            seq_data.length,
+            Some(&*lookup),
+            Some(&mut word_counts),
+            max_word_count,
+        );
+        if status != 0 {
+            return status;
+        }
+    }
+
+    let mut value_index = 0usize;
+    for word_index in 0..word_counts.length as usize {
+        let mut bit = 1u32;
+        while bit != 0 {
+            if (word_counts.bitfield[word_index] & bit) != 0 {
+                let Some(&count) = word_counts.values.get(value_index) else {
+                    return -1;
+                };
+                if count == 0 || count >= max_word_count {
+                    word_counts.bitfield[word_index] &= !bit;
+                }
+                value_index += 1;
+                if value_index >= word_counts.num_elements as usize {
+                    break;
+                }
+            }
+            bit = bit.wrapping_shl(1);
+        }
+    }
+
+    lookup.pv = word_counts.bitfield;
     0
 }
 
@@ -1646,6 +1944,235 @@ pub fn blast_na_hash_lookup_table_destruct(
 ) -> Option<BlastNaHashLookupTable> {
     *lookup = None;
     None
+}
+
+/// Rust ownership translation of NCBI `BlastNaHashLookupTableNew`
+/// (`blast_nalookup.c:2222`).
+pub fn blast_na_hash_lookup_table_new(
+    query_sequence: &[u8],
+    locations: &[crate::util::SSeqRange],
+    lut: &mut Option<BlastNaHashLookupTable>,
+    lookup_options: &crate::options::LookupTableOptions,
+    seq_src: Option<&mut dyn crate::seqsrc::BlastSeqSource>,
+    num_threads: u32,
+) -> i16 {
+    if lookup_options.db_filter && seq_src.is_none() {
+        return -1;
+    }
+
+    let mut lookup = BlastNaHashLookupTable {
+        word_length: lookup_options.word_size,
+        lut_word_length: 16,
+        scan_step: if lookup_options.db_filter {
+            1
+        } else {
+            lookup_options.word_size - 16 + 1
+        },
+        pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
+        ..Default::default()
+    };
+    if lookup.word_length < lookup.lut_word_length || lookup.scan_step <= 0 {
+        *lut = None;
+        return -1;
+    }
+
+    if s_na_hash_lookup_fill_pv(query_sequence, locations, &mut lookup) != 0 {
+        *lut = None;
+        return -1;
+    }
+    if s_na_hash_lookup_remove_poly_a_words(Some(&mut lookup)) != 0 {
+        *lut = None;
+        return -1;
+    }
+
+    if lookup_options.db_filter {
+        let status = s_na_hash_lookup_scan_subject_for_word_counts(
+            seq_src,
+            Some(&mut lookup),
+            num_threads,
+            lookup_options.max_db_word_count,
+        );
+        if status != 0 {
+            *lut = None;
+            return status;
+        }
+    }
+
+    let num_unique_words: i32 = lookup
+        .pv
+        .iter()
+        .map(|&word| crate::util::s_popcount(word) as i32)
+        .sum();
+    let mut num_hash_bits = 8u32;
+    while num_hash_bits < 32 && (1i64 << num_hash_bits) < i64::from(num_unique_words) {
+        num_hash_bits += 1;
+    }
+
+    lookup.backbone_size = 1i32.checked_shl(num_hash_bits).unwrap_or(i32::MAX);
+    lookup.mask = lookup.backbone_size.saturating_sub(1);
+    let backbone_size = lookup.backbone_size.max(0) as usize;
+    let mut thin_backbone = vec![BackboneCell::default(); backbone_size];
+    let mut offsets = vec![0; query_sequence.len() + 1];
+
+    let status = blast_hash_lookup_index_query_exact_matches(
+        &mut thin_backbone,
+        &mut offsets,
+        lookup.word_length,
+        BITS_PER_NUC as i32,
+        lookup.lut_word_length,
+        query_sequence,
+        locations,
+        fnv_hash,
+        lookup.mask as u32,
+        Some(&lookup.pv),
+    );
+    if status != 0 {
+        *lut = None;
+        return status;
+    }
+
+    s_blast_na_hash_lookup_finalize(&mut thin_backbone, &offsets, &mut lookup);
+    *lut = Some(lookup);
+    0
+}
+
+/// Port of NCBI static `s_BlastNaHashLookupRetieveHits`
+/// (`blast_nascan.c:2701`) over the finalized Rust-owned hash table.
+pub fn s_blast_na_hash_lookup_retrieve_hits(
+    lookup: &BlastNaHashLookupTable,
+    index: u32,
+    s_off: i32,
+    offset_pairs: &mut Vec<OffsetPair>,
+) -> i32 {
+    let pv_array_bts = lookup.pv_array_bts.max(0) as usize;
+    if !test_pv_bit(&lookup.pv, u64::from(index), pv_array_bts) {
+        return 0;
+    }
+
+    let hashed_index = fnv_hash(&index.to_ne_bytes(), lookup.mask as u32) as usize;
+    let Some(cell) = lookup.thick_backbone.get(hashed_index) else {
+        return 0;
+    };
+    if cell.num_words <= 0 {
+        return 0;
+    }
+
+    let before = offset_pairs.len();
+    if cell.num_words as usize <= NA_WORDS_PER_HASH {
+        let mut start = 0usize;
+        for word_index in 0..cell.num_words.max(0) as usize {
+            let num_offsets = cell.num_offsets[word_index].max(0) as usize;
+            if cell.words[word_index] == index {
+                if num_offsets > 0 {
+                    for offset in cell.offsets.iter().skip(start).take(num_offsets) {
+                        offset_pairs.push(OffsetPair {
+                            query_offset: *offset,
+                            subject_offset: s_off,
+                        });
+                    }
+                } else {
+                    let cursor = cell.offsets[0].max(0) as usize;
+                    na_hash_lookup_retrieve_overflow_word(
+                        lookup,
+                        cursor,
+                        cell.num_words,
+                        index,
+                        s_off,
+                        offset_pairs,
+                    );
+                }
+                break;
+            }
+            start = start.saturating_add(num_offsets);
+        }
+    } else {
+        let cursor = cell.offsets[0].max(0) as usize;
+        na_hash_lookup_retrieve_overflow_word(
+            lookup,
+            cursor,
+            cell.num_words,
+            index,
+            s_off,
+            offset_pairs,
+        );
+    }
+
+    offset_pairs.len().saturating_sub(before) as i32
+}
+
+fn na_hash_lookup_retrieve_overflow_word(
+    lookup: &BlastNaHashLookupTable,
+    mut cursor: usize,
+    num_words: i8,
+    index: u32,
+    s_off: i32,
+    offset_pairs: &mut Vec<OffsetPair>,
+) {
+    for _ in 0..num_words.max(0) {
+        let Some(&word) = lookup.overflow.get(cursor) else {
+            return;
+        };
+        let Some(&num_offsets) = lookup.overflow.get(cursor + 1) else {
+            return;
+        };
+        let num_offsets = num_offsets.max(0) as usize;
+        cursor = cursor.saturating_add(2);
+        if word as u32 == index {
+            for offset in lookup.overflow.iter().skip(cursor).take(num_offsets) {
+                offset_pairs.push(OffsetPair {
+                    query_offset: *offset,
+                    subject_offset: s_off,
+                });
+            }
+            return;
+        }
+        cursor = cursor.saturating_add(num_offsets);
+    }
+}
+
+/// Port of NCBI static `s_BlastNaHashScanSubject_Any`
+/// (`blast_nascan.c:2860`) for the represented 16-base NaHash scan.
+pub fn s_blast_na_hash_scan_subject_any(
+    lookup: &BlastNaHashLookupTable,
+    subject_packed: &[u8],
+    subject_length: i32,
+    scan_start: i32,
+    scan_end: i32,
+) -> Option<Vec<OffsetPair>> {
+    if lookup.lut_word_length != 16 || lookup.scan_step <= 0 || subject_length < 16 {
+        return None;
+    }
+    if scan_start < 0 || scan_end < scan_start || scan_end + lookup.lut_word_length > subject_length
+    {
+        return None;
+    }
+    if subject_length as usize > subject_packed.len().saturating_mul(4) {
+        return None;
+    }
+
+    let mut offset_pairs = Vec::new();
+    let mut s_off = scan_start;
+    while s_off <= scan_end {
+        let byte = (s_off / crate::stat::COMPRESSION_RATIO as i32) as usize;
+        let phase = s_off % crate::stat::COMPRESSION_RATIO as i32;
+        let index = if phase == 0 {
+            let chunk = subject_packed.get(byte..byte + 4)?;
+            u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        } else {
+            let chunk = subject_packed.get(byte..byte + 5)?;
+            let w = (u64::from(chunk[0]) << 32)
+                | (u64::from(chunk[1]) << 24)
+                | (u64::from(chunk[2]) << 16)
+                | (u64::from(chunk[3]) << 8)
+                | u64::from(chunk[4]);
+            let shift = 2 * (crate::stat::COMPRESSION_RATIO as i32 - phase);
+            ((w >> shift) & u64::from(u32::MAX)) as u32
+        };
+        let _ = s_blast_na_hash_lookup_retrieve_hits(lookup, index, s_off, &mut offset_pairs);
+        s_off = s_off.saturating_add(lookup.scan_step);
+    }
+
+    Some(offset_pairs)
 }
 
 /// Port of NCBI `s_RemovePolyAWords` (`blast_nalookup.c:903`).
@@ -1927,6 +2454,11 @@ pub fn s_fill_disc_mb_table(
     mb_lt.pv_array.fill(0);
 
     let mut helper_array = vec![0u32; (mb_lt.hashtable.len() / 2048).max(1)];
+    let mut helper_array2 = if word_type == DiscWordType::TwoTemplates {
+        vec![0u32; (mb_lt.hashtable.len() / 2048).max(1)]
+    } else {
+        Vec::new()
+    };
     let template_length_usize = template_length as usize;
     let template_mask = if template_length >= 32 {
         u64::MAX
@@ -1966,14 +2498,19 @@ pub fn s_fill_disc_mb_table(
             }
             if word_type == DiscWordType::TwoTemplates {
                 let ecode2 = compute_discontiguous_index(accum, second_template_type) as usize;
-                if s_insert_mb_word(mb_lt, &mut helper_array, ecode2, query_index, true) != 0 {
+                if s_insert_mb_word(mb_lt, &mut helper_array2, ecode2, query_index, true) != 0 {
                     return -1;
                 }
             }
         }
     }
 
-    mb_lt.longest_chain = helper_array.into_iter().max().unwrap_or(2).max(2) as i32;
+    let longest_chain = helper_array.into_iter().max().unwrap_or(2).max(2) + 1;
+    mb_lt.longest_chain = longest_chain as i32;
+    if word_type == DiscWordType::TwoTemplates {
+        let second_longest_chain = helper_array2.into_iter().max().unwrap_or(2).max(2) + 1;
+        mb_lt.longest_chain += second_longest_chain as i32;
+    }
     0
 }
 
@@ -2239,6 +2776,122 @@ pub fn s_scan_subject_for_word_counts(
     0
 }
 
+fn mb_pv_array_bts(hashsize: usize, pv_size: usize) -> i32 {
+    let entries_per_bit = (hashsize / pv_size.max(1)).max(1);
+    entries_per_bit.trailing_zeros() as i32
+}
+
+/// Rust ownership translation of NCBI `BlastMBLookupTableNew`
+/// (`blast_nalookup.c:1227`).
+pub fn blast_mb_lookup_table_new(
+    query_sequence: &[u8],
+    locations: &[crate::util::SSeqRange],
+    mb_lt_ptr: &mut Option<MbLookupTable>,
+    lookup_options: &crate::options::LookupTableOptions,
+    approx_table_entries: i32,
+    lut_width: i32,
+    seq_src: Option<&mut dyn crate::seqsrc::BlastSeqSource>,
+) -> i16 {
+    *mb_lt_ptr = None;
+    let Some(hashsize) = nucleotide_backbone_size(lut_width) else {
+        return -1;
+    };
+    if lut_width < 9 || lookup_options.word_size < lut_width {
+        return -1;
+    }
+
+    let target_pv_size = 131_072usize;
+    let small_query_cutoff = 15_000;
+    let large_query_cutoff = 800_000;
+    let mut pv_size = if lut_width <= 12 {
+        if hashsize <= 8 * target_pv_size {
+            hashsize >> crate::stat::PV_ARRAY_BTS
+        } else {
+            target_pv_size / crate::stat::PV_ARRAY_BYTES
+        }
+    } else {
+        target_pv_size * 64 / crate::stat::PV_ARRAY_BYTES
+    }
+    .max(1);
+
+    if !lookup_options.db_filter
+        && (approx_table_entries <= small_query_cutoff
+            || approx_table_entries >= large_query_cutoff)
+    {
+        pv_size = (pv_size / 2).max(1);
+    }
+
+    let mut mb_lt = MbLookupTable {
+        word_length: lookup_options.word_size,
+        lut_word_length: lut_width,
+        discontiguous: false,
+        template_length: 0,
+        template_type: DiscTemplateType::Contiguous,
+        two_templates: false,
+        second_template_type: DiscTemplateType::Contiguous,
+        hashtable: vec![0; hashsize],
+        hashtable2: Vec::new(),
+        next_pos: Vec::new(),
+        next_pos2: Vec::new(),
+        pv_array: vec![0; pv_size],
+        pv_array_bts: mb_pv_array_bts(hashsize, pv_size),
+        longest_chain: 0,
+        scan_step: 0,
+    };
+
+    let mut counts = if lookup_options.db_filter {
+        Some(vec![0u8; hashsize / 2])
+    } else {
+        None
+    };
+
+    if lookup_options.db_filter {
+        let Some(seq_src) = seq_src else {
+            return -1;
+        };
+        if s_fill_pv(query_sequence, locations, &mut mb_lt, Some(lookup_options)) != 0 {
+            return -1;
+        }
+        let Some(counts_ref) = counts.as_mut() else {
+            return -1;
+        };
+        if s_scan_subject_for_word_counts(
+            Some(seq_src),
+            Some(&mb_lt),
+            Some(counts_ref.as_mut_slice()),
+            lookup_options.max_db_word_count,
+        ) != 0
+        {
+            return -1;
+        }
+    }
+
+    let status = if lookup_options.mb_template_length > 0 {
+        mb_lt.scan_step = 1;
+        s_fill_disc_mb_table(query_sequence, locations, &mut mb_lt, lookup_options)
+    } else {
+        mb_lt.scan_step = lookup_options.word_size - lut_width + 1;
+        if mb_lt.scan_step <= 0 {
+            -1
+        } else {
+            s_fill_contig_mb_table(
+                query_sequence,
+                locations,
+                &mut mb_lt,
+                lookup_options,
+                counts.as_deref(),
+            )
+        }
+    };
+
+    if status != 0 {
+        return status;
+    }
+
+    *mb_lt_ptr = Some(mb_lt);
+    0
+}
+
 /// 1-1 ownership translation of `BlastMBLookupTableDestruct`.
 pub fn blast_mb_lookup_table_destruct(lookup: &mut Option<MbLookupTable>) -> Option<MbLookupTable> {
     *lookup = None;
@@ -2448,6 +3101,14 @@ pub fn lookup_table_wrap_free(lookup: &mut Option<LookupTableWrap>) -> Option<Lo
     };
 
     match table {
+        LookupTableWrap::Na(table) => {
+            let mut inner = Some(table);
+            let _ = blast_na_lookup_table_destruct(&mut inner);
+        }
+        LookupTableWrap::NaHash(table) => {
+            let mut inner = Some(table);
+            let _ = blast_na_hash_lookup_table_destruct(&mut inner);
+        }
         LookupTableWrap::SmallNa(table) => {
             let mut inner = Some(table);
             let _ = blast_small_na_lookup_table_destruct(&mut inner);
@@ -2478,16 +3139,145 @@ pub fn lookup_table_wrap_init(
     0
 }
 
+/// blast-rs: Nucleotide construction arm for represented Rust lookup variants;
+/// not a direct NCBI C port.
+pub fn lookup_table_wrap_init_nucleotide(
+    query_sequence: &[u8],
+    locations: &[crate::util::SSeqRange],
+    lookup_options: &crate::options::LookupTableOptions,
+    lookup_wrap_ptr: &mut Option<LookupTableWrap>,
+    seq_src: Option<&mut dyn crate::seqsrc::BlastSeqSource>,
+    num_threads: u32,
+) -> i16 {
+    match lookup_options.lut_type {
+        LookupTableType::SmallNaLookup
+        | LookupTableType::NaLookup
+        | LookupTableType::MegablastLookup
+        | LookupTableType::NaHashLookup => {}
+        _ => {
+            let _ = lookup_table_wrap_free(lookup_wrap_ptr);
+            return -1;
+        }
+    }
+
+    let _ = lookup_table_wrap_free(lookup_wrap_ptr);
+
+    let mut max_q_off = 0;
+    let num_table_entries = estimate_num_table_entries(locations, &mut max_q_off);
+    let mut lut_width = 0;
+    let Some(chosen_type) = blast_choose_na_lookup_table(
+        Some(lookup_options),
+        num_table_entries,
+        max_q_off,
+        &mut lut_width,
+    ) else {
+        return -1;
+    };
+
+    match chosen_type {
+        LookupTableType::MegablastLookup => {
+            let mut lookup = None;
+            let status = blast_mb_lookup_table_new(
+                query_sequence,
+                locations,
+                &mut lookup,
+                lookup_options,
+                num_table_entries,
+                lut_width,
+                seq_src,
+            );
+            if status != 0 {
+                return status;
+            }
+            let Some(lookup) = lookup else {
+                return -1;
+            };
+            *lookup_wrap_ptr = Some(LookupTableWrap::Megablast(lookup));
+            0
+        }
+        LookupTableType::SmallNaLookup => {
+            let mut small = None;
+            let status = blast_small_na_lookup_table_new(
+                query_sequence,
+                locations,
+                &mut small,
+                lookup_options,
+                lut_width,
+            );
+            if status == 0 {
+                let Some(lookup) = small else {
+                    return -1;
+                };
+                *lookup_wrap_ptr = Some(LookupTableWrap::SmallNa(lookup));
+                return 0;
+            }
+
+            let mut standard = None;
+            let fallback_status = blast_na_lookup_table_new(
+                query_sequence,
+                locations,
+                &mut standard,
+                lookup_options,
+                lut_width,
+            );
+            if fallback_status != 0 {
+                return fallback_status;
+            }
+            let Some(lookup) = standard else {
+                return -1;
+            };
+            *lookup_wrap_ptr = Some(LookupTableWrap::Na(lookup));
+            0
+        }
+        LookupTableType::NaHashLookup => {
+            let mut lookup = None;
+            let status = blast_na_hash_lookup_table_new(
+                query_sequence,
+                locations,
+                &mut lookup,
+                lookup_options,
+                seq_src,
+                num_threads,
+            );
+            if status != 0 {
+                return status;
+            }
+            let Some(lookup) = lookup else {
+                return -1;
+            };
+            *lookup_wrap_ptr = Some(LookupTableWrap::NaHash(lookup));
+            0
+        }
+        LookupTableType::NaLookup => {
+            let mut lookup = None;
+            let status = blast_na_lookup_table_new(
+                query_sequence,
+                locations,
+                &mut lookup,
+                lookup_options,
+                lut_width,
+            );
+            if status != 0 {
+                return status;
+            }
+            let Some(lookup) = lookup else {
+                return -1;
+            };
+            *lookup_wrap_ptr = Some(LookupTableWrap::Na(lookup));
+            0
+        }
+        _ => -1,
+    }
+}
+
 /// Rust ownership-shaped equivalent of NCBI `LookupTableWrapInit_MT`
 /// (`lookup_wrap.c:61`) once the concrete lookup table has been built.
 ///
 /// C constructs the table inside this function after switching on
-/// `lookup_options->lut_type`. In Rust, callers already construct the typed
-/// table because the construction inputs live in program-specific modules. Keep
-/// the represented switch here so the audited name still exposes the same
-/// ownership and variant boundary as C. `num_threads` only affects C's
-/// `eNaHashLookupTable` construction path, which is not represented by
-/// `LookupTableWrap` today.
+/// `lookup_options->lut_type`. Rust also exposes
+/// `lookup_table_wrap_init_nucleotide` for the represented nucleotide
+/// construction branch; this lower-level helper preserves the ownership handoff
+/// when callers already hold a constructed typed lookup table.
 pub fn lookup_table_wrap_init_mt(
     lookup_wrap_ptr: &mut Option<LookupTableWrap>,
     lookup: LookupTableWrap,
@@ -2507,6 +3297,16 @@ pub fn lookup_table_wrap_init_mt(
             // allocation is completed by the nucleotide lookup builder before
             // ownership reaches this wrapper.
             LookupTableWrap::Megablast(table)
+        }
+        LookupTableWrap::Na(table) => {
+            // C eNaLookupTable: standard nucleotide lookup ownership.
+            LookupTableWrap::Na(table)
+        }
+        LookupTableWrap::NaHash(table) => {
+            // C eNaHashLookupTable: construction receives num_threads before
+            // ownership reaches the wrapper; scan callbacks are represented by
+            // the typed NaHash scanner helpers.
+            LookupTableWrap::NaHash(table)
         }
         LookupTableWrap::SmallNa(table) => {
             // C eSmallNaLookupTable can fall back to eNaLookupTable on
@@ -2533,6 +3333,8 @@ pub fn lookup_table_wrap_init_mt(
 /// 1-1 translation of `GetOffsetArraySize` for represented lookup variants.
 pub fn get_offset_array_size(lookup: &LookupTableWrap) -> i32 {
     let longest_chain = match lookup {
+        LookupTableWrap::Na(table) => table.longest_chain,
+        LookupTableWrap::NaHash(table) => table.longest_chain,
         LookupTableWrap::SmallNa(table) => table.longest_chain,
         LookupTableWrap::Megablast(table) => table.longest_chain,
         LookupTableWrap::Aa(table) => table
@@ -2724,6 +3526,27 @@ mod tests {
         assert!(s_small_na_lookup(Some(&small), 0, 5));
         assert!(s_small_na_lookup(Some(&small), 1, 7));
         assert!(!s_small_na_lookup(Some(&small), 0, 9));
+        let LookupTableWrap::SmallNa(small_table) = &small else {
+            unreachable!();
+        };
+        let mut pairs = Vec::new();
+        assert_eq!(
+            s_blast_small_na_lookup_retrieve(small_table, 0, &mut pairs, 11),
+            2
+        );
+        assert_eq!(
+            pairs,
+            vec![
+                OffsetPair {
+                    query_offset: 3,
+                    subject_offset: 11,
+                },
+                OffsetPair {
+                    query_offset: 5,
+                    subject_offset: 11,
+                }
+            ]
+        );
         assert_eq!(
             blast_choose_na_extend(Some(&small)),
             Some(NaExtendChoice {
@@ -2745,6 +3568,28 @@ mod tests {
         na.pv[0] = 1 << 2;
         assert!(s_na_lookup(Some(&na), 2, 8));
         assert!(!s_na_lookup(Some(&na), 2, 9));
+
+        let na_wrap = LookupTableWrap::Na(na);
+        assert_eq!(
+            blast_choose_na_extend(Some(&na_wrap)),
+            Some(NaExtendChoice {
+                lookup_callback: Some(NaLookupCallback::Na),
+                extend_callback: Some(NaExtendCallback::Direct),
+            })
+        );
+        assert_eq!(
+            s_is_seed_masked(Some(&na_wrap), &[2, 0, 0, 0], 0, 4, 8),
+            Some(false)
+        );
+
+        let na_hash = LookupTableWrap::NaHash(BlastNaHashLookupTable::default());
+        assert_eq!(
+            blast_choose_na_extend(Some(&na_hash)),
+            Some(NaExtendChoice {
+                lookup_callback: None,
+                extend_callback: None,
+            })
+        );
     }
 
     #[test]
@@ -2795,6 +3640,28 @@ mod tests {
                 .unwrap()
                 .extend_callback,
             Some(NaExtendCallback::Generic)
+        );
+
+        let small_generic = LookupTableWrap::SmallNa(SmallNaLookupTable {
+            word_length: 9,
+            backbone: vec![0; 1usize << (BITS_PER_NUC * 7)],
+            overflow: Vec::new(),
+            pv_array: Vec::new(),
+            longest_chain: 0,
+            scan_step: 3,
+        });
+        assert_eq!(
+            small_na_lut_word_length(match &small_generic {
+                LookupTableWrap::SmallNa(table) => table,
+                _ => unreachable!(),
+            }),
+            7
+        );
+        assert_eq!(
+            blast_choose_na_extend(Some(&small_generic))
+                .unwrap()
+                .extend_callback,
+            Some(NaExtendCallback::SmallGeneric)
         );
     }
 
@@ -2943,6 +3810,21 @@ mod tests {
         );
         assert_eq!(width, 16);
         assert!(blast_choose_na_lookup_table(None, 0, 0, &mut width).is_none());
+    }
+
+    #[test]
+    fn estimate_num_table_entries_matches_c_right_minus_left_rule() {
+        let ranges = [
+            crate::util::SSeqRange { left: 0, right: 4 },
+            crate::util::SSeqRange {
+                left: 10,
+                right: 15,
+            },
+        ];
+        let mut max_off = 0;
+
+        assert_eq!(estimate_num_table_entries(&ranges, &mut max_off), 9);
+        assert_eq!(max_off, 15);
     }
 
     #[test]
@@ -3229,6 +4111,135 @@ mod tests {
     }
 
     #[test]
+    fn small_na_lookup_table_new_builds_backbone_and_scan_metadata() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGT");
+        let range = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 4,
+            ..Default::default()
+        };
+        let mut lookup = None;
+
+        assert_eq!(
+            blast_small_na_lookup_table_new(&query, &range, &mut lookup, &options, 4),
+            0
+        );
+        let lookup = lookup.expect("SmallNa lookup");
+        assert_eq!(lookup.word_length, 4);
+        assert_eq!(lookup.scan_step, 1);
+        assert_eq!(lookup.backbone.len(), 1usize << (BITS_PER_NUC * 4));
+        assert!(lookup.longest_chain > 0);
+
+        let index = compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
+        let wrap = LookupTableWrap::SmallNa(lookup);
+        assert!(s_small_na_lookup(Some(&wrap), index, 0));
+        assert!(s_small_na_lookup(Some(&wrap), index, 4));
+        assert!(!s_small_na_lookup(Some(&wrap), index, 1));
+    }
+
+    #[test]
+    fn standard_na_lookup_table_new_builds_thick_backbone_and_pv() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGTAC");
+        let range = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 5,
+            ..Default::default()
+        };
+        let mut lookup = None;
+
+        assert_eq!(
+            blast_na_lookup_table_new(&query, &range, &mut lookup, &options, 4),
+            0
+        );
+        let lookup = lookup.expect("standard Na lookup");
+        assert_eq!(lookup.word_length, 5);
+        assert_eq!(lookup.lut_word_length, 4);
+        assert_eq!(lookup.scan_step, 2);
+        assert_eq!(lookup.backbone_size, 1i32 << (BITS_PER_NUC * 4));
+        assert_eq!(lookup.mask, lookup.backbone_size - 1);
+        assert!(lookup.longest_chain > 0);
+
+        let index = compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
+        assert!(s_na_lookup(Some(&lookup), index, 0));
+        assert!(s_na_lookup(Some(&lookup), index, 4));
+        assert!(!s_na_lookup(Some(&lookup), index, 1));
+        assert!(s_blast_lookup_get_num_hits(&lookup, index) >= 2);
+        assert!(lookup.pv[(index as usize) >> crate::stat::PV_ARRAY_BTS] != 0);
+    }
+
+    #[test]
+    fn megablast_lookup_table_new_builds_contiguous_lookup_like_c() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGTACGT");
+        let range = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 9,
+            program_number: crate::program::BLASTN,
+            ..Default::default()
+        };
+        let mut lookup = None;
+
+        assert_eq!(
+            blast_mb_lookup_table_new(&query, &range, &mut lookup, &options, 21_000, 9, None),
+            0
+        );
+        let lookup = lookup.expect("megablast lookup");
+        assert_eq!(lookup.word_length, 9);
+        assert_eq!(lookup.lut_word_length, 9);
+        assert_eq!(lookup.scan_step, 1);
+        assert_eq!(lookup.hashtable.len(), 1usize << (BITS_PER_NUC * 9));
+        assert_eq!(lookup.next_pos.len(), query.len() + 1);
+        assert!(!lookup.pv_array.is_empty());
+        assert!(lookup.pv_array_bts >= crate::stat::PV_ARRAY_BTS as i32);
+
+        let index = compute_table_index(9, BITS_PER_NUC as i32, &query[0..9]) as i32;
+        let wrap = LookupTableWrap::Megablast(lookup);
+        assert!(s_mb_lookup(Some(&wrap), index, 0));
+        assert!(!s_mb_lookup(Some(&wrap), index, 1));
+    }
+
+    #[test]
+    fn nucleotide_lookup_table_new_rejects_invalid_lut_width() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGT");
+        let range = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 3,
+            ..Default::default()
+        };
+        let mut small = Some(SmallNaLookupTable {
+            word_length: 1,
+            backbone: vec![0],
+            overflow: Vec::new(),
+            pv_array: Vec::new(),
+            longest_chain: 0,
+            scan_step: 1,
+        });
+        let mut standard = Some(BlastNaLookupTable::default());
+
+        assert_eq!(
+            blast_small_na_lookup_table_new(&query, &range, &mut small, &options, 4),
+            -1
+        );
+        assert!(small.is_none());
+        assert_eq!(
+            blast_na_lookup_table_new(&query, &range, &mut standard, &options, 4),
+            -1
+        );
+        assert!(standard.is_none());
+    }
+
+    #[test]
     fn translated_standard_na_lookup_destructor_drops_owned_table() {
         let mut lookup = Some(BlastNaLookupTable {
             thick_backbone: vec![NaLookupBackboneCell {
@@ -3246,15 +4257,22 @@ mod tests {
 
     #[test]
     fn nucleotide_hash_lookup_finalize_packs_inline_and_overflow_like_c() {
-        let mut thin = vec![BackboneCell::default(); 3];
-        thin[1] = BackboneCell {
+        let mask = 3;
+        let bucket5 = fnv_hash(&5u32.to_ne_bytes(), mask) as usize;
+        let bucket9 = fnv_hash(&6u32.to_ne_bytes(), mask) as usize;
+        let bucket10 = fnv_hash(&10u32.to_ne_bytes(), mask) as usize;
+        assert_ne!(bucket5, bucket9);
+        assert_eq!(bucket9, bucket10);
+
+        let mut thin = vec![BackboneCell::default(); 4];
+        thin[bucket5] = BackboneCell {
             word: 5,
             offset: 1,
             num_offsets: 2,
             next: None,
         };
-        thin[2] = BackboneCell {
-            word: 9,
+        thin[bucket9] = BackboneCell {
+            word: 6,
             offset: 3,
             num_offsets: 4,
             next: Some(Box::new(BackboneCell {
@@ -3272,24 +4290,265 @@ mod tests {
 
         s_blast_na_hash_lookup_finalize(&mut thin, &offsets, &mut lookup);
 
-        assert_eq!(lookup.backbone_size, 3);
+        assert_eq!(lookup.backbone_size, 4);
         assert_eq!(lookup.longest_chain, 10);
-        assert_eq!(lookup.thick_backbone[1].num_words, 1);
-        assert_eq!(lookup.thick_backbone[1].num_offsets, [2, 0, 0]);
-        assert_eq!(lookup.thick_backbone[1].words, [5, 0, 0]);
-        assert_eq!(lookup.thick_backbone[1].offsets[..2], [0, 1]);
-        assert_eq!(lookup.thick_backbone[2].num_words, 2);
-        assert_eq!(lookup.thick_backbone[2].words, [9, 10, 0]);
-        assert_eq!(lookup.thick_backbone[2].offsets[0], 0);
+        assert_eq!(lookup.thick_backbone[bucket5].num_words, 1);
+        assert_eq!(lookup.thick_backbone[bucket5].num_offsets, [2, 0, 0]);
+        assert_eq!(lookup.thick_backbone[bucket5].words, [5, 0, 0]);
+        assert_eq!(lookup.thick_backbone[bucket5].offsets[..2], [0, 1]);
+        assert_eq!(lookup.thick_backbone[bucket9].num_words, 2);
+        assert_eq!(lookup.thick_backbone[bucket9].words, [6, 10, 0]);
+        assert_eq!(lookup.thick_backbone[bucket9].offsets[0], 0);
         assert_eq!(
             lookup.overflow,
-            vec![9, 4, 2, 3, 4, 5, 10, 6, 6, 7, 8, 9, 10, 11]
+            vec![6, 4, 2, 3, 4, 5, 10, 6, 6, 7, 8, 9, 10, 11]
         );
         assert_eq!(lookup.offsets_size, lookup.overflow.len() as i32);
         assert!(lookup.pv[0] & (1 << 5) != 0);
-        assert!(lookup.pv[0] & (1 << 9) != 0);
+        assert!(lookup.pv[0] & (1 << 6) != 0);
         assert!(lookup.pv[0] & (1 << 10) != 0);
-        assert!(thin[2].next.is_none());
+        assert!(thin[bucket9].next.is_none());
+
+        lookup.mask = mask as i32;
+        let mut pairs = Vec::new();
+        assert_eq!(
+            s_blast_na_hash_lookup_retrieve_hits(&lookup, 5, 21, &mut pairs),
+            2
+        );
+        assert_eq!(
+            pairs,
+            vec![
+                OffsetPair {
+                    query_offset: 0,
+                    subject_offset: 21,
+                },
+                OffsetPair {
+                    query_offset: 1,
+                    subject_offset: 21,
+                },
+            ]
+        );
+
+        pairs.clear();
+        assert_eq!(
+            s_blast_na_hash_lookup_retrieve_hits(&lookup, 10, 27, &mut pairs),
+            6
+        );
+        assert_eq!(pairs[0].query_offset, 6);
+        assert_eq!(pairs[5].query_offset, 11);
+        assert_eq!(
+            s_blast_na_hash_lookup_retrieve_hits(&lookup, 11, 27, &mut pairs),
+            0
+        );
+    }
+
+    #[test]
+    fn na_hash_scan_subject_any_retrieves_16_base_hits() {
+        let subject = crate::encoding::encode_blastna_sequence(b"ACGTACGTACGTACGTAC");
+        let packed = crate::encoding::pack_ncbi2na_bases(&subject);
+        let word = u32::from_be_bytes([packed[0], packed[1], packed[2], packed[3]]);
+        let mut lookup = BlastNaHashLookupTable {
+            mask: 15,
+            word_length: 16,
+            lut_word_length: 16,
+            scan_step: 1,
+            thick_backbone: vec![NaHashLookupBackboneCell::default(); 16],
+            pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
+            ..Default::default()
+        };
+        let hash_index = fnv_hash(&word.to_ne_bytes(), lookup.mask as u32) as usize;
+        lookup.thick_backbone[hash_index] = NaHashLookupBackboneCell {
+            num_words: 1,
+            num_offsets: [1, 0, 0],
+            words: [word, 0, 0],
+            offsets: [4, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        set_pv_bit(&mut lookup.pv, word as usize, crate::stat::PV_ARRAY_BTS);
+
+        let hits = s_blast_na_hash_scan_subject_any(&lookup, &packed, subject.len() as i32, 0, 2)
+            .expect("represented NaHash scan");
+        assert_eq!(
+            hits,
+            vec![OffsetPair {
+                query_offset: 4,
+                subject_offset: 0,
+            }]
+        );
+        assert!(
+            s_blast_na_hash_scan_subject_any(&lookup, &packed, subject.len() as i32, 0, 4)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn na_hash_lookup_table_new_builds_fnv_backbone_and_scan_metadata() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGTACGTACGTACGT");
+        let range = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 16,
+            db_filter: false,
+            ..Default::default()
+        };
+        let mut lookup = None;
+
+        assert_eq!(
+            blast_na_hash_lookup_table_new(&query, &range, &mut lookup, &options, None, 1),
+            0
+        );
+        let lookup = lookup.expect("NaHash lookup");
+        assert_eq!(lookup.word_length, 16);
+        assert_eq!(lookup.lut_word_length, 16);
+        assert_eq!(lookup.scan_step, 1);
+        assert_eq!(lookup.backbone_size, 256);
+        assert_eq!(lookup.mask, 255);
+        assert!(lookup.longest_chain > 0);
+
+        let packed = crate::encoding::pack_ncbi2na_bases(&query);
+        let hits = s_blast_na_hash_scan_subject_any(&lookup, &packed, query.len() as i32, 0, 4)
+            .expect("NaHash scan");
+        assert!(
+            hits.iter()
+                .any(|hit| hit.query_offset == 0 && hit.subject_offset == 0),
+            "expected self hit from constructed NaHash lookup: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn na_hash_lookup_table_new_indexes_leading_windows_for_long_words() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGTACGTACGTACGT");
+        let range = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 20,
+            db_filter: false,
+            ..Default::default()
+        };
+        let mut lookup = None;
+
+        assert_eq!(
+            blast_na_hash_lookup_table_new(&query, &range, &mut lookup, &options, None, 1),
+            0
+        );
+        let lookup = lookup.expect("long-word NaHash lookup");
+        assert_eq!(lookup.word_length, 20);
+        assert_eq!(lookup.lut_word_length, 16);
+        assert_eq!(lookup.scan_step, 5);
+
+        let packed = crate::encoding::pack_ncbi2na_bases(&query);
+        let hits = s_blast_na_hash_scan_subject_any(&lookup, &packed, query.len() as i32, 0, 0)
+            .expect("NaHash scan at leading word");
+        assert!(
+            hits.iter()
+                .any(|hit| hit.query_offset == 0 && hit.subject_offset == 0),
+            "C indexes the leading 16-base window for word_size > 16: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn na_hash_lookup_table_new_applies_database_word_filter() {
+        struct TestSeqSrc {
+            seqs: Vec<Vec<u8>>,
+            reset: bool,
+        }
+
+        impl crate::seqsrc::BlastSeqSource for TestSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                self.seqs.len() as i32
+            }
+
+            fn total_length(&self) -> i64 {
+                self.seqs.iter().map(|seq| seq.len() as i64).sum()
+            }
+
+            fn max_seq_len(&self) -> i32 {
+                self.seqs.iter().map(Vec::len).max().unwrap_or(0) as i32
+            }
+
+            fn avg_seq_len(&self) -> i32 {
+                if self.seqs.is_empty() {
+                    0
+                } else {
+                    (self.total_length() / self.seqs.len() as i64) as i32
+                }
+            }
+
+            fn name(&self) -> &str {
+                "test"
+            }
+
+            fn is_protein(&self) -> bool {
+                false
+            }
+
+            fn seq_len(&self, oid: i32) -> i32 {
+                self.seqs[oid as usize].len() as i32
+            }
+
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                self.seqs
+                    .get(arg.oid as usize)
+                    .map(|seq| crate::seqsrc::SeqData {
+                        sequence: seq.clone(),
+                        length: seq.len() as i32 * 4,
+                    })
+            }
+
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(0..self.seqs.len() as i32)
+            }
+
+            fn reset_chunk_iterator(&mut self) {
+                self.reset = true;
+            }
+        }
+
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGTACGTACGT");
+        let packed_query = crate::encoding::pack_ncbi2na_bases(&query);
+        let range = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 16,
+            db_filter: true,
+            max_db_word_count: 2,
+            ..Default::default()
+        };
+        let mut missing_seqsrc = None;
+        assert_eq!(
+            blast_na_hash_lookup_table_new(&query, &range, &mut missing_seqsrc, &options, None, 1),
+            -1
+        );
+
+        let mut seqsrc = TestSeqSrc {
+            seqs: vec![packed_query.clone(), packed_query],
+            reset: false,
+        };
+        let mut lookup = None;
+        assert_eq!(
+            blast_na_hash_lookup_table_new(
+                &query,
+                &range,
+                &mut lookup,
+                &options,
+                Some(&mut seqsrc),
+                4,
+            ),
+            0
+        );
+        assert!(seqsrc.reset);
+        let lookup = lookup.expect("filtered NaHash lookup");
+        assert_eq!(lookup.scan_step, 1);
+        assert_eq!(lookup.longest_chain, 0);
+        assert!(lookup.thick_backbone.iter().all(|cell| cell.num_words == 0));
     }
 
     #[test]
@@ -3948,7 +5207,23 @@ mod tests {
         assert_eq!(rps.table_type(), LookupTableType::RpsLookup);
         assert_eq!(rps.word_length(), 4);
 
+        let na = LookupTableWrap::Na(BlastNaLookupTable {
+            word_length: 9,
+            ..Default::default()
+        });
+        assert_eq!(na.table_type(), LookupTableType::NaLookup);
+        assert_eq!(na.word_length(), 9);
+
+        let na_hash = LookupTableWrap::NaHash(BlastNaHashLookupTable {
+            word_length: 16,
+            ..Default::default()
+        });
+        assert_eq!(na_hash.table_type(), LookupTableType::NaHashLookup);
+        assert_eq!(na_hash.word_length(), 16);
+
         assert_eq!(s_get_minimum_subj_seq_len(Some(&small)), 11);
+        assert_eq!(s_get_minimum_subj_seq_len(Some(&na)), 9);
+        assert_eq!(s_get_minimum_subj_seq_len(Some(&na_hash)), 16);
         assert_eq!(s_get_minimum_subj_seq_len(Some(&aa)), 3);
         assert_eq!(s_get_minimum_subj_seq_len(Some(&rps)), 4);
         assert_eq!(s_get_minimum_subj_seq_len(None), 0);
@@ -4041,7 +5316,45 @@ mod tests {
             ecode as u64,
             crate::stat::PV_ARRAY_BTS
         ));
-        assert_eq!(table.longest_chain, 2);
+        assert_eq!(table.longest_chain, 3);
+    }
+
+    #[test]
+    fn translated_disc_mb_two_template_longest_chain_uses_separate_c_helpers() {
+        let query = vec![0; 18];
+        let ranges = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            word_size: 11,
+            mb_template_length: 16,
+            mb_template_type: DiscWordType::TwoTemplates as i32,
+            ..Default::default()
+        };
+        let mut table = MbLookupTable {
+            word_length: 16,
+            lut_word_length: 11,
+            discontiguous: false,
+            template_length: 0,
+            template_type: DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: DiscTemplateType::Contiguous,
+            hashtable: vec![0; 1 << 22],
+            hashtable2: Vec::new(),
+            next_pos: Vec::new(),
+            next_pos2: Vec::new(),
+            pv_array: vec![0; (1 << 22) / 32],
+            pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
+            longest_chain: 0,
+            scan_step: 0,
+        };
+
+        assert_eq!(
+            s_fill_disc_mb_table(&query, &ranges, &mut table, &options),
+            0
+        );
+        assert_eq!(table.longest_chain, 6);
     }
 
     #[test]
@@ -4213,6 +5526,18 @@ mod tests {
         });
         assert_eq!(get_offset_array_size(&small), OFFSET_ARRAY_SIZE + 17);
 
+        let na = LookupTableWrap::Na(BlastNaLookupTable {
+            longest_chain: 5,
+            ..Default::default()
+        });
+        assert_eq!(get_offset_array_size(&na), OFFSET_ARRAY_SIZE + 5);
+
+        let na_hash = LookupTableWrap::NaHash(BlastNaHashLookupTable {
+            longest_chain: 9,
+            ..Default::default()
+        });
+        assert_eq!(get_offset_array_size(&na_hash), OFFSET_ARRAY_SIZE + 9);
+
         let aa = LookupTableWrap::Aa(AaLookupTable {
             word_length: 3,
             threshold: 11.0,
@@ -4271,6 +5596,55 @@ mod tests {
             wrapped.as_ref().expect("mt initialized table").table_type(),
             LookupTableType::AaLookup
         );
+    }
+
+    #[test]
+    fn lookup_table_wrap_init_nucleotide_builds_chosen_variant() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGT");
+        let ranges = [crate::util::SSeqRange {
+            left: 0,
+            right: query.len() as i32 - 1,
+        }];
+        let options = crate::options::LookupTableOptions {
+            lut_type: LookupTableType::NaLookup,
+            word_size: 4,
+            program_number: crate::program::BLASTN,
+            ..Default::default()
+        };
+        let mut wrapped = None;
+
+        assert_eq!(
+            lookup_table_wrap_init_nucleotide(&query, &ranges, &options, &mut wrapped, None, 1),
+            0
+        );
+        let wrapped_ref = wrapped.as_ref().expect("nucleotide lookup");
+        assert_eq!(wrapped_ref.table_type(), LookupTableType::SmallNaLookup);
+        let index = compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
+        assert!(s_small_na_lookup(wrapped.as_ref(), index, 0));
+    }
+
+    #[test]
+    fn lookup_table_wrap_init_nucleotide_falls_back_to_standard_na() {
+        let query = crate::encoding::encode_blastna_sequence(b"ACGTACGT");
+        let ranges = [crate::util::SSeqRange {
+            left: 0,
+            right: 32_768,
+        }];
+        let options = crate::options::LookupTableOptions {
+            lut_type: LookupTableType::NaLookup,
+            word_size: 8,
+            program_number: crate::program::BLASTN,
+            ..Default::default()
+        };
+        let mut wrapped = None;
+
+        assert_eq!(
+            lookup_table_wrap_init_nucleotide(&query, &ranges, &options, &mut wrapped, None, 1),
+            0
+        );
+        let wrapped_ref = wrapped.as_ref().expect("standard nucleotide lookup");
+        assert_eq!(wrapped_ref.table_type(), LookupTableType::NaLookup);
+        assert_eq!(wrapped_ref.word_length(), 8);
     }
 
     fn identity_hash(bytes: &[u8], mask: u32) -> u32 {
@@ -4382,6 +5756,16 @@ mod tests {
         assert_eq!(duplicate_cell.offset, 6);
         assert_eq!(duplicate_cell.num_offsets, 2);
         assert_eq!(offsets[6], 2);
+
+        let leading_word = 0b0001_10u32;
+        let leading_index = identity_hash(&leading_word.to_ne_bytes(), 63);
+        assert_eq!(backbone[leading_index as usize].word, leading_word);
+        assert_eq!(
+            backbone[leading_index as usize].num_offsets, 2,
+            "C indexes leading lookup-width windows even when word_length > lut_word_length"
+        );
+        assert_eq!(backbone[leading_index as usize].offset, 5);
+        assert_eq!(offsets[5], 1);
     }
 
     #[test]

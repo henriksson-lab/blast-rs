@@ -104,8 +104,8 @@ impl IntervalTree {
         self.is_contained_with_metadata(query, subject, score, 0, 0)
     }
 
-    /// Check containment with NCBI `s_HSPIsContained` metadata gates
-    /// (`blast_itree.c:810`): the containing HSP must have the same query
+    /// blast-rs: Interval-tree containment adapter with C metadata gates; not
+    /// a direct NCBI C port. The containing HSP must have the same query
     /// index, the same subject-frame sign, and score >= the candidate.
     pub fn is_contained_with_metadata(
         &self,
@@ -219,6 +219,30 @@ impl IntervalTree {
 
     pub fn reset(&mut self) {
         blast_interval_tree_reset(self);
+    }
+
+    /// Reuse this tree for a new (query, subject) pair without
+    /// reallocating the node pool. Mirrors NCBI's pattern of allocating
+    /// a single `BlastIntervalTree` and calling `Blast_IntervalTreeReset`
+    /// between subjects, but also refreshes the recorded bounds since
+    /// our callers pass the actual subject length rather than INT4_MAX.
+    pub fn reset_for_query(&mut self, q_max: i32, s_max: i32) {
+        self.s_min = 0;
+        self.s_max = s_max;
+        self.num_used = 1;
+        self.hsp_count = 0;
+        self.nodes.truncate(1);
+        if let Some(root) = self.nodes.get_mut(0) {
+            root.leftptr = 0;
+            root.midptr = 0;
+            root.rightptr = 0;
+            root.hsp = None;
+            root.leftend = 0;
+            root.rightend = q_max;
+        } else {
+            let mut retval = 0;
+            let _ = s_interval_root_node_init(self, 0, q_max, &mut retval);
+        }
     }
 }
 
@@ -1376,6 +1400,37 @@ mod tests {
         assert!(tree.is_contained(Interval::new(10, 40), Interval::new(10, 40), 90));
         assert!(!tree.is_contained(Interval::new(10, 40), Interval::new(10, 40), 110));
         assert!(!tree.is_contained(Interval::new(0, 60), Interval::new(0, 50), 90));
+    }
+
+    #[test]
+    fn test_reset_for_query_matches_fresh_new() {
+        // A tree exercised with several inserts, then reset_for_query'd to
+        // new bounds, must behave identically to a freshly-allocated tree
+        // of the same bounds — no stale state from prior use.
+        let mut reused = IntervalTree::new(50, 50);
+        reused.insert(Interval::new(0, 30), Interval::new(0, 30), 100);
+        reused.insert(Interval::new(40, 50), Interval::new(40, 50), 80);
+        reused.insert(Interval::new(10, 20), Interval::new(10, 20), 60);
+        assert!(reused.len() > 0);
+
+        reused.reset_for_query(101, 201);
+        assert_eq!(reused.len(), 0);
+        assert_eq!(reused.s_min, 0);
+        assert_eq!(reused.s_max, 201);
+        assert_eq!(reused.num_used, 1);
+
+        // Same containment queries on a fresh and reused tree should agree.
+        let fresh = IntervalTree::new(101, 201);
+        let q = Interval::new(10, 40);
+        let s = Interval::new(10, 40);
+        assert_eq!(
+            reused.is_contained(q, s, 50),
+            fresh.is_contained(q, s, 50)
+        );
+
+        // Inserts after reset should land in the empty tree.
+        reused.insert(Interval::new(5, 95), Interval::new(5, 195), 200);
+        assert!(reused.is_contained(Interval::new(10, 90), Interval::new(10, 190), 150));
     }
 
     #[test]

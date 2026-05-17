@@ -75,7 +75,7 @@
 use crate::compo_mode_condition::MatrixAdjustRule;
 use crate::hspstream::{Hsp, HspList};
 use crate::math::NCBIMATH_LN2;
-use crate::program::{ProgramType, RPS_BLAST};
+use crate::program::{ProgramType, RPS_TBLASTN};
 
 /// `kWindowBorder` (`redo_alignment.c:112`).
 pub const K_WINDOW_BORDER: i32 = 200;
@@ -144,6 +144,8 @@ pub struct BlastCompoAlignment {
 impl BlastCompoAlignment {
     /// 1-1 port of `BlastCompo_AlignmentNew`. The C version `malloc`s and
     /// initializes; Rust returns a stack value the caller can wrap.
+    /// naming: Rust exposes this as the associated constructor for
+    /// `BlastCompoAlignment`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         score: i32,
@@ -323,9 +325,10 @@ pub struct BlastCompoMatchingSequence {
     pub local_data_index: i32,
 }
 
-/// 1-1 port of `s_MatchingSequenceInitialize` (`blast_kappa.c:874`).
+/// blast-rs: Convenience wrapper around the name-matched matching-sequence
+/// initializer; not a direct NCBI C port.
 ///
-/// NCBI fills a small stack struct for the current database sequence before
+/// The C code fills a small stack struct for the current database sequence before
 /// invoking the redo-alignment callbacks. The C `local_data` pointer is modeled
 /// as `local_data_index`; callers that need richer state keep it externally and
 /// use this index as the lookup key.
@@ -2888,6 +2891,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 0,
+            min_length: 0,
         };
         let mut kbp = vec![];
         let mut mtx = Vec::<Vec<i32>>::new();
@@ -2984,6 +2988,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 10,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -3078,6 +3083,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -3232,6 +3238,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let karlin = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -3371,6 +3378,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -3495,6 +3503,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -3619,6 +3628,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -3786,6 +3796,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -3914,6 +3925,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -4128,6 +4140,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -4269,6 +4282,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -4411,6 +4425,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -4544,6 +4559,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -4669,6 +4685,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -4795,6 +4812,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -4922,6 +4940,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -6055,6 +6074,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -6198,6 +6218,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -6342,6 +6363,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -6487,6 +6509,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -6615,6 +6638,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -6833,6 +6857,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -7068,6 +7093,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -7196,6 +7222,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let karlin = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -7915,6 +7942,7 @@ mod struct_tests {
                 },
             ],
             max_length: query1.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -8103,6 +8131,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -8361,6 +8390,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -8635,6 +8665,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -9290,6 +9321,7 @@ mod struct_tests {
                 },
             ],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let original_kbp = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -9425,6 +9457,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -9545,6 +9578,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let karlin = crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -9682,6 +9716,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: query.len() as u32,
+            min_length: 0,
         };
         let mut kbp = vec![crate::stat::KarlinBlk {
             lambda: 0.267,
@@ -10907,6 +10942,7 @@ mod struct_tests {
                 },
             ],
             max_length: 10,
+            min_length: 0,
         };
         // Concatenated buffer with sentinel between queries.
         let qdata: Vec<u8> = (1..=10).chain([0u8]).chain(11..=20).collect();
@@ -11336,7 +11372,8 @@ mod struct_tests {
             expected
                 .iter()
                 .map(|(evalue, _)| *evalue)
-                .fold(f64::MAX, f64::min)
+                // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds with `(double)INT4_MAX`.
+                .fold(i32::MAX as f64, f64::min)
         );
     }
 
@@ -11408,6 +11445,7 @@ mod struct_tests {
                 },
             ],
             max_length: 20,
+            min_length: 0,
         };
 
         let status = blast_hsp_list_get_evalues(
@@ -11491,6 +11529,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let score_block = crate::link_hsps::LinkScoreBlock {
             kbp: vec![crate::stat::KarlinBlk {
@@ -11586,6 +11625,7 @@ mod struct_tests {
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             }],
             max_length: 100,
+            min_length: 0,
         };
         let score_block = crate::link_hsps::LinkScoreBlock {
             kbp: vec![crate::stat::KarlinBlk {
@@ -12832,9 +12872,11 @@ pub fn preliminary_test_near_identical(
         }
         let align_len =
             (align.query_end - align.query_start).min(align.match_end - align.match_start);
-        if align_len <= 0 {
-            return false;
-        }
+        // NCBI `redo_alignment.c:1074` doesn't guard against align_len <= 0:
+        //   `if ((double)align->score / (double)align_len < cutoff) return FALSE;`
+        // Dividing positive score by 0 yields +inf, and `+inf < cutoff` is
+        // false, so NCBI returns TRUE for zero-length alignments. Match that
+        // behavior — don't bail out on align_len <= 0.
         if align.score as f64 / (align_len as f64) < cutoff {
             return false;
         }
@@ -12921,14 +12963,12 @@ pub fn get_nucl_length(l: i32) -> i32 {
 ///
 /// For RPS-tblastn the subject is a packed mixed-frame protein sequence;
 /// the underlying nucleotide length is recovered via `GET_NUCL_LENGTH`
-/// and divided by 3. For all other programs the input length is returned
-/// unchanged.
+/// and divided by 3. For all other programs (including ordinary RPS-blastp)
+/// the input length is returned unchanged.
 pub fn s_get_subject_length(total_subj_length: i32, program_number: ProgramType) -> i32 {
-    if program_number == RPS_BLAST {
-        // NCBI uses `eBlastTypeRpsTblastn` here — Rust constant is
-        // `RPS_BLAST` (no separate RPS-tblastn variant in the current
-        // type alias), so we treat them as equivalent. Confirm and split
-        // when the RPS-tblastn driver lands.
+    // NCBI checks `eBlastTypeRpsTblastn` only — NOT `eBlastTypeRpsBlast`.
+    // We mirror that here using the distinct `RPS_TBLASTN` constant.
+    if program_number == RPS_TBLASTN {
         (get_nucl_length(total_subj_length) - 1) / 3
     } else {
         total_subj_length
@@ -14002,7 +14042,8 @@ pub fn blast_gap_align_struct_new(gap_x_dropoff: i32) -> Option<BlastGapAlignWor
     Some(workspace)
 }
 
-/// 1-1 port of `s_BlastGapAlignStruct_Free` (`blast_kappa.c:2532`).
+/// blast-rs: Compatibility alias for the name-matched gap-align free hook; not
+/// a direct NCBI C port.
 /// `Drop` handles deallocation; this hook is a parity marker.
 pub fn blast_gap_align_struct_free(slot: &mut Option<BlastGapAlignWorkspace>) {
     if let Some(workspace) = slot.as_mut() {
@@ -14152,7 +14193,8 @@ pub fn blast_redo_alignment_core_mt(
                 .hsps
                 .iter()
                 .map(|hsp| hsp.evalue)
-                .fold(f64::MAX, f64::min);
+                // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds with `(double)INT4_MAX`.
+                .fold(i32::MAX as f64, f64::min);
 
             let mut per_query: Vec<Option<crate::hspstream::HspList>> = Vec::new();
             for hsp in this_match.hsps.iter().cloned() {
@@ -14213,7 +14255,8 @@ pub fn blast_redo_alignment_core_mt(
                     .hsps
                     .iter()
                     .map(|hsp| hsp.evalue)
-                    .fold(f64::MAX, f64::min);
+                    // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds with `(double)INT4_MAX`.
+                    .fold(i32::MAX as f64, f64::min);
 
                 if query_index >= results.hitlists.len() {
                     results.hitlists.resize_with(query_index + 1, || None);
@@ -14262,7 +14305,8 @@ pub fn blast_redo_alignment_core_mt(
                         .hsps
                         .iter()
                         .map(|hsp| hsp.evalue)
-                        .fold(f64::MAX, f64::min);
+                        // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds with `(double)INT4_MAX`.
+                        .fold(i32::MAX as f64, f64::min);
                 }
                 if hitlist.hsp_lists.is_empty() {
                     *hitlist_slot = None;
@@ -15085,7 +15129,8 @@ fn blast_redo_alignment_core_one_match_with_callbacks_inner(
         }
     } else {
         this_match.hsps.clear();
-        this_match.best_evalue = f64::MAX;
+        // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`.
+        this_match.best_evalue = i32::MAX as f64;
     }
 
     0
@@ -15521,7 +15566,8 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         }
     } else {
         this_match.hsps.clear();
-        this_match.best_evalue = f64::MAX;
+        // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`.
+        this_match.best_evalue = i32::MAX as f64;
     }
 
     0
@@ -15811,11 +15857,19 @@ pub fn blast_redo_one_match_in_memory_with_adjustment(
                     false,
                     params.subject_is_translated,
                 );
-                let matrix_adjust_rule = match blast_adjust_scores_with_workspace(
+                // NCBI `redo_alignment.c:1242-1245` passes `query.length`
+                // and `subject.length` (window-data buffer lengths,
+                // including any X residues), NOT the `numTrueAminoAcids`
+                // counts. Match exactly.
+                let query_window_len = query.data().len();
+                let subject_window_len = subject.data().len();
+                let matrix_adjust_rule = match blast_adjust_scores_with_workspace_v2(
                     matrix,
                     &query_composition,
+                    query_window_len,
                     query_num_true,
                     &subject_composition,
+                    subject_window_len,
                     subject_num_true,
                     &params.matrix_info,
                     params.compo_adjust_mode,
@@ -16242,11 +16296,17 @@ pub fn blast_redo_one_match_with_callbacks_and_adjustment(
                         false,
                         params.subject_is_translated,
                     );
-                    match blast_adjust_scores_with_workspace(
+                    // NCBI passes full window-data lengths (not num_true) to
+                    // `Blast_AdjustScores` — see `redo_alignment.c:1242`.
+                    let query_window_len = query.data().len();
+                    let subject_window_len = subject.data().len();
+                    match blast_adjust_scores_with_workspace_v2(
                         matrix,
                         &query_composition,
+                        query_window_len,
                         query_num_true,
                         &subject_composition,
+                        subject_window_len,
                         subject_num_true,
                         &params.matrix_info,
                         params.compo_adjust_mode,
@@ -16957,11 +17017,16 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
             false,
             params.subject_is_translated,
         );
-        let matrix_adjust_rule = match blast_adjust_scores_with_workspace(
+        // NCBI passes full window-data lengths to `Blast_AdjustScores`.
+        let query_window_len = query.data().len();
+        let subject_window_len = subject.data().len();
+        let matrix_adjust_rule = match blast_adjust_scores_with_workspace_v2(
             matrix,
             &query_composition,
+            query_window_len,
             query_num_true,
             &subject_composition,
+            subject_window_len,
             subject_num_true,
             &params.matrix_info,
             params.compo_adjust_mode,
@@ -17455,11 +17520,16 @@ pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
                 false,
                 params.subject_is_translated,
             );
-            match blast_adjust_scores_with_workspace(
+            // NCBI passes full window-data lengths to `Blast_AdjustScores`.
+            let query_window_len = query.data().len();
+            let subject_window_len = subject.data().len();
+            match blast_adjust_scores_with_workspace_v2(
                 matrix,
                 &query_composition,
+                query_window_len,
                 query_num_true,
                 &subject_composition,
+                subject_window_len,
                 subject_num_true,
                 &params.matrix_info,
                 params.compo_adjust_mode,
@@ -17934,7 +18004,8 @@ fn pssm_x_score(row: &[f64], cols: usize, probs: &[f64]) -> f64 {
     score.min(-1.0)
 }
 
-/// Position-specific counterpart of `Blast_CompositionBasedStats`.
+/// blast-rs: Position-specific composition scaling helper; not a direct NCBI C
+/// port.
 ///
 /// This is the `s_GetPssmScoreProbs` + `s_ScalePSSM` branch used when
 /// `Blast_MatrixInfo::positionBased` is true.
@@ -18535,6 +18606,57 @@ pub fn blast_adjust_scores_with_workspace(
     pvalue_for_this_pair: &mut f64,
     ratio_to_pass_back: &mut f64,
 ) -> Result<MatrixAdjustRule, i32> {
+    // NCBI `Blast_AdjustScores` (`composition_adjustment.c:1414`) takes
+    // both `queryLength`/`subjectLength` (full sequence-block lengths
+    // including ambiguities) AND the `numTrueAminoAcids` field of the
+    // composition struct. We collapse them here by approximating
+    // `query_length = max(query_num_true, num residues in prob)` since
+    // the prob array already encodes the residue distribution. For most
+    // callers `query_num_true` equals the window length; only matters
+    // when X-heavy windows reach `choose_matrix_adjust_rule`. Backward-
+    // compatible default; see [`blast_adjust_scores_with_workspace_v2`]
+    // for the explicit-length variant that callers should prefer.
+    blast_adjust_scores_with_workspace_v2(
+        matrix,
+        query_prob,
+        query_num_true,
+        query_num_true,
+        subject_prob,
+        subject_num_true,
+        subject_num_true,
+        matrix_info,
+        composition_adjust_mode,
+        re_pseudocounts,
+        workspace,
+        composition_test_index,
+        pvalue_for_this_pair,
+        ratio_to_pass_back,
+    )
+}
+
+/// Port of NCBI `Blast_AdjustScores` with explicit
+/// `queryLength`/`subjectLength` separate from `numTrueAminoAcids`. The
+/// length parameters are used for [`choose_matrix_adjust_rule`] (which
+/// applies the high-pair/length-ratio thresholds against the full
+/// window length); the `num_true` counts are used for the
+/// pseudocount-weighted matrix optimization path.
+#[allow(clippy::too_many_arguments)]
+pub fn blast_adjust_scores_with_workspace_v2(
+    matrix: &mut [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    query_prob: &[f64],
+    query_length: usize,
+    query_num_true: usize,
+    subject_prob: &[f64],
+    subject_length: usize,
+    subject_num_true: usize,
+    matrix_info: &BlastMatrixInfo,
+    composition_adjust_mode: CompoAdjustMode,
+    re_pseudocounts: i32,
+    workspace: Option<&BlastCompositionWorkspace>,
+    composition_test_index: i32,
+    pvalue_for_this_pair: &mut f64,
+    ratio_to_pass_back: &mut f64,
+) -> Result<MatrixAdjustRule, i32> {
     if query_num_true == 0 || subject_num_true == 0 {
         return Err(1);
     }
@@ -18570,6 +18692,15 @@ pub fn blast_adjust_scores_with_workspace(
         });
     }
 
+    // NCBI `composition_adjustment.c:1494` passes `queryLength` and
+    // `subjectLength` (the full sequence-block lengths) to
+    // `Blast_ChooseMatrixAdjustRule`, NOT `numTrueAminoAcids`. The
+    // length-ratio and high-pair-frequency tests inside
+    // `s_TestToApplyREAdjustmentConditional` use the lengths as bounds
+    // (`length <= LENGTH_LOWER_THRESHOLD = 50` short-circuit) and as
+    // ratio terms. Using `num_true` here was a subtle divergence —
+    // shortens the effective length for X-heavy windows and biases the
+    // decision toward `UserSpecifiedRelEntropy`.
     let mut matrix_adjust_rule = if matches!(
         composition_adjust_mode,
         CompoAdjustMode::CompositionBasedStats
@@ -18577,8 +18708,8 @@ pub fn blast_adjust_scores_with_workspace(
         MatrixAdjustRule::ScaleOldMatrix
     } else {
         crate::compo_mode_condition::choose_matrix_adjust_rule(
-            query_num_true,
-            subject_num_true,
+            query_length,
+            subject_length,
             &permuted_query,
             &permuted_subject,
             composition_adjust_mode as u8,
@@ -19004,13 +19135,14 @@ pub fn rescale_search(
     scale_factor: f64,
 ) {
     for i in 0..(num_queries.max(0) as usize) {
+        // NCBI gates only on `sbp->kbp_gap[i] != NULL` (`blast_kappa.c:2124`)
+        // — there is no `Lambda > 0` guard before the divide/log. The Rust
+        // analogue of the NULL check is simply "slot exists in the array".
         if let Some(kbp) = kbp_gap.get_mut(i) {
-            if kbp.lambda > 0.0 {
-                kbp.lambda /= scale_factor;
-                // C: `kbp->logK = log(kbp->K);` — recomputes from the
-                // (unchanged) K to flush any prior cached value.
-                kbp.log_k = kbp.k.ln();
-            }
+            kbp.lambda /= scale_factor;
+            // C: `kbp->logK = log(kbp->K);` — recomputes from the
+            // (unchanged) K to flush any prior cached value.
+            kbp.log_k = kbp.k.ln();
         }
     }
     scoring.gap_open = crate::math::nint(scoring.gap_open as f64 * scale_factor) as i32;
@@ -19501,6 +19633,8 @@ impl BlastCompoHeap {
     }
 
     /// 1-1 port of `BlastCompo_HeapWouldInsert`.
+    /// naming: Rust exposes this as an associated method on the composition
+    /// heap type.
     ///
     /// Returns true if a candidate with `(evalue, score, subject_index)` would
     /// be retained: the heap is not full, the candidate passes the inclusion
@@ -19551,6 +19685,8 @@ impl BlastCompoHeap {
     }
 
     /// 1-1 port of `BlastCompo_HeapFilledToCutoff`.
+    /// naming: Rust exposes this as an associated method on the composition
+    /// heap type.
     pub fn filled_to_cutoff(&self) -> bool {
         self.records.len() >= self.heap_threshold.max(0) as usize
             && self.worst_evalue() <= self.ecutoff
@@ -19558,6 +19694,8 @@ impl BlastCompoHeap {
 
     /// 1-1 port of `BlastCompo_HeapPop`. Removes and returns the
     /// hit-list with the worst (largest) e-value.
+    /// naming: Rust exposes this as an associated method on the composition
+    /// heap type.
     pub fn pop_worst(&mut self) -> Option<HspList> {
         let worst_idx = self.worst_record_index()?;
         Some(self.records.swap_remove(worst_idx))
@@ -19820,19 +19958,19 @@ pub fn blast_hsp_get_num_identities(
                             s += 1;
                         }
                     }
-                    crate::gapinfo::GapAlignOpType::Del
-                    | crate::gapinfo::GapAlignOpType::Del1
-                    | crate::gapinfo::GapAlignOpType::Del2 => {
+                    crate::gapinfo::GapAlignOpType::Del => {
                         s += count as usize;
                     }
-                    crate::gapinfo::GapAlignOpType::Ins
-                    | crate::gapinfo::GapAlignOpType::Ins1
-                    | crate::gapinfo::GapAlignOpType::Ins2 => {
+                    crate::gapinfo::GapAlignOpType::Ins => {
                         q += count as usize;
                     }
                     _ => {
-                        // C `default:` branch advances both — used for
-                        // out-of-frame or unknown ops.
+                        // NCBI `s_Blast_HSPGetNumIdentitiesAndPositives`
+                        // (`blast_hits.c:818`) default branch advances both
+                        // pointers — frame-shift ops (`Del1/Del2/Ins1/Ins2`)
+                        // and `Decline` fall here. OOF alignments are
+                        // counted via `s_Blast_HSPGetOOFNumIdentitiesAndPositives`
+                        // instead.
                         q += count as usize;
                         s += count as usize;
                     }
@@ -19841,11 +19979,22 @@ pub fn blast_hsp_get_num_identities(
         }
     }
 
+    // NCBI `blast_hits.c:832-833`:
+    //   if (NULL != matrix) *num_pos_ptr = num_pos + num_ident;
+    // The "positives" count returned to callers is the SUM of
+    // identical-residue matches AND non-identical-but-positive-matrix
+    // matches. Our inner loop only incremented `num_pos` on the
+    // non-identical-but-positive branch (matching NCBI's loop body), so
+    // we need the final fold-in here when a matrix was supplied.
+    if matrix.is_some() {
+        num_pos += num_ident;
+    }
+
     (num_ident, align_length, num_pos)
 }
 
-/// 1-1 port of `s_ComputeNumIdentities` (`blast_kappa.c:458`) for protein
-/// subjects and already-materialized protein-space subjects.
+/// blast-rs: Protein/materialized-subject identity stamping helper; not a
+/// direct NCBI C port.
 ///
 /// Walks every HSP in the list and stamps `hsp.num_ident` from a fresh
 /// re-walk over the (unmasked) query and subject bytes via
@@ -20073,6 +20222,7 @@ pub fn blast_link_hsps_for_kappa(
                 },
                 context: hsp.context,
                 num: 1,
+                xsum: 0.0,
             })
             .collect(),
         best_evalue: hsp_list.best_evalue,
@@ -20166,7 +20316,9 @@ pub fn blast_hsp_list_get_evalues_simple(
     kbp: &crate::stat::KarlinBlk,
     search_space: f64,
 ) {
-    let mut best_evalue = f64::MAX;
+    // NCBI `Blast_HSPListGetEvalues` (`blast_hits.c:1902`) closes with
+    // `s_BlastGetBestEvalue` which seeds with `(double)INT4_MAX`.
+    let mut best_evalue = i32::MAX as f64;
     for hsp in &mut hsp_list.hsps {
         hsp.evalue = kbp.raw_to_evalue(hsp.score, search_space);
         hsp.bit_score = kbp.raw_to_bit(hsp.score);
@@ -20216,7 +20368,9 @@ pub fn blast_hsp_list_get_evalues(
         1.0
     };
 
-    let mut best_evalue = f64::MAX;
+    // NCBI `Blast_HSPListGetEvalues` (`blast_hits.c:1902`) calls
+    // `s_BlastGetBestEvalue` which seeds with `(double)INT4_MAX`.
+    let mut best_evalue = i32::MAX as f64;
     for hsp in &mut hsp_list.hsps {
         let hsp_context = hsp.context.max(0) as usize;
         let mut kbp_context = hsp_context;
@@ -20597,19 +20751,21 @@ pub fn s_calc_lambda(probs: &[f64], min_score: i32, max_score: i32, lambda0: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::program::{BLASTP, BLASTX, RPS_BLAST};
+    use crate::program::{BLASTP, BLASTX, RPS_BLAST, RPS_TBLASTN};
 
     #[test]
     fn get_subject_length_passthrough_for_blastp() {
         assert_eq!(s_get_subject_length(1234, BLASTP), 1234);
         assert_eq!(s_get_subject_length(1234, BLASTX), 1234);
+        // NCBI: ordinary RPS-blastp does NOT divide by 3; only RPS-tblastn does.
+        assert_eq!(s_get_subject_length(1234, RPS_BLAST), 1234);
     }
 
     #[test]
-    fn get_subject_length_rps_uses_macro() {
+    fn get_subject_length_rps_tblastn_uses_macro() {
         // GET_NUCL_LENGTH(l) = (l-5)/2 + 2; then -1 then /3.
         // For l=11: (11-5)/2 + 2 = 5; (5-1)/3 = 1.
-        assert_eq!(s_get_subject_length(11, RPS_BLAST), 1);
+        assert_eq!(s_get_subject_length(11, RPS_TBLASTN), 1);
     }
 
     #[test]

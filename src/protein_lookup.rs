@@ -44,7 +44,8 @@ pub struct ProteinHit {
     pub gapped_start_s: usize,
 }
 
-/// Port of NCBI `ScoreCompareHSPs` (`blast_hits.c:1330`) for `ProteinHit`.
+/// blast-rs: ProteinHit comparator modeled on score-ordered HSP sorting; not a
+/// direct NCBI C port.
 /// Same tie-breaker as `hspstream::score_compare_hsps` / `search::score_compare_search_hsps`
 /// but over `ProteinHit`'s `usize` offset fields.
 fn score_compare_protein_hits(a: &ProteinHit, b: &ProteinHit) -> std::cmp::Ordering {
@@ -1555,10 +1556,28 @@ fn s_blast_aa_extend_right(
     (best, best_d, best_ident, last_off_delta)
 }
 
+/// Result of `s_blast_aa_extend_two_hit`. NCBI distinguishes:
+///   - left extension did NOT reach the first hit (`right_extend == FALSE`),
+///   - left reached first AND right extended (`right_extend == TRUE`), with the
+///     HSP only saved if `score >= cutoff`.
+/// We mirror that here: `s_last_off` is `Some` exactly when right_extend was
+/// true; `hit` is `Some` only when `score > 0` (caller-side cutoff).
+pub enum TwoHitOutcome {
+    /// Left extension did not reach first hit. NCBI's caller updates
+    /// `diag.last_hit` from the current subject offset, not `s_last_off`.
+    NoReach,
+    /// Left reached first hit (right extension ran). NCBI's caller updates
+    /// `diag.last_hit` from `s_last_off - (wordsize - 1)`. HSP is only saved
+    /// when present (`score > 0`).
+    Reached {
+        hit: Option<ProteinHit>,
+        s_last_off: i32,
+    },
+}
+
 /// Port of NCBI `s_BlastAaExtendTwoHit` (`aa_ungapped.c:1089`), reduced to
-/// the local slice-based scanner state. Returns the HSP plus NCBI's
-/// `s_last_off` value used by `s_BlastAaWordFinder_TwoHit` diagonal
-/// bookkeeping.
+/// the local slice-based scanner state. Returns NCBI's `right_extend` /
+/// `s_last_off` plus the optional ungapped HSP.
 fn s_blast_aa_extend_two_hit(
     query: &[u8],
     subject: &[u8],
@@ -1568,7 +1587,7 @@ fn s_blast_aa_extend_two_hit(
     q_right_off: usize,
     s_right_off: usize,
     s_left_off: usize,
-) -> Option<(ProteinHit, i32)> {
+) -> TwoHitOutcome {
     let qlen = query.len();
 
     // Find best start within the word.
@@ -1593,14 +1612,23 @@ fn s_blast_aa_extend_two_hit(
         s_blast_aa_extend_left(query, subject, matrix, ext_q, ext_s, x_dropoff);
     let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
     if !reached_first {
-        return None;
+        // NCBI `s_BlastAaExtendTwoHit` sets `*right_extend = FALSE` here and
+        // returns; the caller falls back to `subject_offset + diag_offset`.
+        return TwoHitOutcome::NoReach;
     }
 
     let (right_score, right_d_r, right_ident, s_last_off_delta) =
         s_blast_aa_extend_right(query, subject, matrix, ext_q, ext_s, x_dropoff, left_score);
     let total_score = left_score.max(right_score);
+    let s_last_off = ext_s as i32 + s_last_off_delta;
     if total_score <= 0 {
-        return None;
+        // NCBI still sets `*right_extend = TRUE` here — only HSP saving is
+        // gated on `score >= cutoff`. Surface `s_last_off` so the caller can
+        // update `diag.last_hit` via `s_last_off - (ws - 1)` exactly like NCBI.
+        return TwoHitOutcome::Reached {
+            hit: None,
+            s_last_off,
+        };
     }
 
     let qs = ext_q - left_d as usize;
@@ -1609,10 +1637,9 @@ fn s_blast_aa_extend_two_hit(
     let se = ext_s + right_d_r as usize;
     let alen = (qe - qs) as i32;
     let ident = left_ident + right_ident;
-    let s_last_off = ext_s as i32 + s_last_off_delta;
 
-    Some((
-        ProteinHit {
+    TwoHitOutcome::Reached {
+        hit: Some(ProteinHit {
             query_start: qs,
             query_end: qe,
             subject_start: ss,
@@ -1627,9 +1654,9 @@ fn s_blast_aa_extend_two_hit(
             scaled_score: None,
             gapped_start_q: 0,
             gapped_start_s: 0,
-        },
+        }),
         s_last_off,
-    ))
+    }
 }
 
 /// Name-matched port of NCBI `s_BlastAaWordFinder_TwoHit`
@@ -1733,7 +1760,7 @@ pub fn s_blast_aa_word_finder_two_hit(
                 let s_right_off = s_pos;
                 let q_right_off = q_pos;
 
-                if let Some((hit, s_last_off)) = s_blast_aa_extend_two_hit(
+                match s_blast_aa_extend_two_hit(
                     query,
                     subject,
                     matrix,
@@ -1743,11 +1770,20 @@ pub fn s_blast_aa_word_finder_two_hit(
                     s_right_off,
                     s_left_off,
                 ) {
-                    *diag_ptr.add(diag) = (s_last_off - (ws - 1) + diag_offset, true);
-                    hits.push(hit);
-                    continue;
+                    TwoHitOutcome::Reached { hit, s_last_off } => {
+                        // NCBI `s_BlastAaWordFinder_TwoHit` (`aa_ungapped.c:412`)
+                        // sets diag.last_hit from `s_last_off` whenever
+                        // `right_extend == TRUE`, even if the HSP score was
+                        // below the save cutoff.
+                        *diag_ptr.add(diag) = (s_last_off - (ws - 1) + diag_offset, true);
+                        if let Some(hit) = hit {
+                            hits.push(hit);
+                        }
+                    }
+                    TwoHitOutcome::NoReach => {
+                        *diag_ptr.add(diag) = (s_off + diag_offset, false);
+                    }
                 }
-                *diag_ptr.add(diag) = (s_off + diag_offset, false);
             }
         }
     }
