@@ -738,27 +738,28 @@ pub fn blast_hit_saving_parameters_update_c(
             searchsp /= crate::util::NUM_FRAMES as i64;
         }
 
-        let new_cutoff = if let Some(gbp) = sbp_view.gbp {
-            let cbs_stretch = if composition_based_stats > 1 {
-                5.0
+        let new_cutoff =
+            if let Some(gbp) = sbp_view.gbp.filter(|gbp| stat::gumbel_blk_is_filled(gbp)) {
+                let cbs_stretch = if composition_based_stats > 1 {
+                    5.0
+                } else {
+                    1.0
+                };
+                params.prelim_evalue = cbs_stretch * evalue;
+                stat::spouge_etos(
+                    cbs_stretch * evalue,
+                    kbp,
+                    gbp,
+                    context_info.query_length,
+                    avg_subject_length,
+                )
             } else {
-                1.0
+                let (cutoff, adjusted_evalue) =
+                    stat::blast_cutoffs(1, evalue, kbp, searchsp as f64, false, 0.0);
+                evalue = adjusted_evalue;
+                params.prelim_evalue = evalue;
+                cutoff
             };
-            params.prelim_evalue = cbs_stretch * evalue;
-            stat::spouge_etos(
-                cbs_stretch * evalue,
-                kbp,
-                gbp,
-                context_info.query_length,
-                avg_subject_length,
-            )
-        } else {
-            let (cutoff, adjusted_evalue) =
-                stat::blast_cutoffs(1, evalue, kbp, searchsp as f64, false, 0.0);
-            evalue = adjusted_evalue;
-            params.prelim_evalue = evalue;
-            cutoff
-        };
         let _ = evalue; // suppress unused-modify; sum-stats path below uses its own.
 
         let new_cutoff = scaled_i32(new_cutoff, scale_factor);
@@ -975,8 +976,8 @@ pub fn blast_initial_word_parameters_update(
             // subject is smaller than query. `saturating_mul` already
             // handles u64 overflow; the `.min()` was an unintentional
             // clamp.
-            let searchsp = (subject_length as u64)
-                .saturating_mul(query_length.max(1) as u64) as f64;
+            let searchsp =
+                (subject_length as u64).saturating_mul(query_length.max(1) as u64) as f64;
             let (cutoff, _) = stat::blast_cutoffs(
                 1,
                 s_get_cutoff_evalue(program_number),

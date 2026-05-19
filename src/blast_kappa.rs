@@ -104,6 +104,7 @@ pub enum CompoAdjustMode {
 }
 
 impl CompoAdjustMode {
+    /// blast-rs: Numeric enum conversion helper; not a direct NCBI C port.
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => CompoAdjustMode::NoCompositionBasedStats,
@@ -142,7 +143,9 @@ pub struct BlastCompoAlignment {
 }
 
 impl BlastCompoAlignment {
-    /// 1-1 port of `BlastCompo_AlignmentNew`. The C version `malloc`s and
+    /// NCBI: BlastCompo_AlignmentNew (redo_alignment.c:140).
+    ///
+    /// The C version `malloc`s and
     /// initializes; Rust returns a stack value the caller can wrap.
     /// naming: Rust exposes this as the associated constructor for
     /// `BlastCompoAlignment`.
@@ -209,6 +212,8 @@ pub struct BlastCompoWindowInfo {
 }
 
 impl BlastCompoWindowInfo {
+    /// NCBI: s_WindowInfoNew (redo_alignment.c:527).
+    /// naming: Associated constructor on `BlastCompoWindowInfo`.
     pub fn new(
         begin: i32,
         end: i32,
@@ -235,12 +240,14 @@ impl BlastCompoWindowInfo {
         }
     }
 
-    /// 1-1 port of `s_WindowSwapRange`.
+    /// NCBI: s_WindowSwapRange (redo_alignment.c:566).
+    /// naming: Associated method on `BlastCompoWindowInfo`; type supplies `window_info`.
     pub fn swap_range(&mut self) {
         std::mem::swap(&mut self.query_range, &mut self.subject_range);
     }
 
-    /// 1-1 ownership-safe port of `s_WindowInfoJoin`.
+    /// NCBI: s_WindowInfoJoin (redo_alignment.c:591).
+    /// naming: Associated method on `BlastCompoWindowInfo`; type supplies `window_info`.
     ///
     /// Appends `other.align` to the tail of `self.align`, expands the subject
     /// range, and adds HSP counts. The caller is responsible for ensuring the
@@ -265,7 +272,8 @@ impl BlastCompoWindowInfo {
     }
 }
 
-/// 1-1 port of `s_WindowInfoFree` (`redo_alignment.c:552`).
+/// NCBI: s_WindowInfoFree (redo_alignment.c:552).
+/// naming: Rust drops owned values, so the public parity hook omits the `s_` prefix.
 ///
 /// Rust frees the window and its alignment list automatically. This parity
 /// hook clears the caller's slot to mirror C's `*window = NULL`.
@@ -293,6 +301,8 @@ pub struct BlastCompoSequenceData {
 }
 
 impl BlastCompoSequenceData {
+    /// blast-rs: Slice accessor for Rust's sentinel-backed sequence storage; not a direct NCBI C port.
+    ///
     /// Returns the residue slice (`&data[0..length]` in C terms,
     /// equivalent to `&buffer[data_offset .. data_offset + length]`).
     pub fn data(&self) -> &[u8] {
@@ -302,7 +312,8 @@ impl BlastCompoSequenceData {
     }
 }
 
-/// 1-1 port of `s_SequenceDataRelease` (`redo_alignment.c:486`).
+/// NCBI: s_SequenceDataRelease (redo_alignment.c:486).
+/// naming: Public Rust parity hook omits the private `s_` prefix.
 ///
 /// In C this frees `buffer`, then nulls both `data` and `buffer`. In Rust the
 /// buffer owns the data; clearing it and resetting the offset/length gives the
@@ -340,8 +351,8 @@ pub fn matching_sequence_initialize(
     s_matching_sequence_initialize(length, index, local_data_index)
 }
 
-/// Name-matched wrapper for NCBI static `s_MatchingSequenceInitialize`
-/// (`blast_kappa.c:1357`) over Rust's in-memory matching-sequence view.
+/// blast-rs: Name-matched wrapper for NCBI static `s_MatchingSequenceInitialize`
+/// (`blast_kappa.c:1357`) over Rust's in-memory matching-sequence view; not a direct NCBI C port.
 pub fn s_matching_sequence_initialize(
     length: i32,
     index: i32,
@@ -372,7 +383,9 @@ pub struct BlastCompoQueryInfo {
     pub words: Vec<u64>,
 }
 
-/// Port of `Blast_MatrixInfo` (`composition_adjustment.h`). Holds the
+/// NCBI: Blast_MatrixInfo (composition_adjustment.h).
+///
+/// Holds the
 /// scoring matrix used for the redo-alignment pass, plus its
 /// dimensions, name, and the rounding/scale parameters used by
 /// composition adjustment.
@@ -440,7 +453,7 @@ pub struct BlastCompositionWorkspace {
 }
 
 impl BlastCompositionWorkspace {
-    /// Port boundary for `Blast_CompositionWorkspaceInit` with BLOSUM62.
+    /// blast-rs: Constructs the local BLOSUM62 composition workspace; not a direct NCBI C port.
     pub fn blosum62() -> Self {
         let (joint_probs, first_standard_freq, second_standard_freq) =
             crate::composition::blosum62_workspace();
@@ -472,7 +485,8 @@ pub struct BlastScoreBlkSnapshot {
     pub round_down: bool,
 }
 
-/// 1-1 port boundary for `s_BlastScoreBlk_Copy` (`blast_kappa.c:2609`).
+/// NCBI: s_BlastScoreBlk_Copy (blast_kappa.c:2609).
+/// naming: Rust snapshot helper omits the private `s_` prefix and models only local fields.
 ///
 /// Rust's `Clone` performs the deep copies that NCBI does field-by-field with
 /// `Blast_KarlinBlkCopy`, matrix allocation/copy, and PSI-matrix row copies.
@@ -9864,8 +9878,8 @@ mod struct_tests {
         // do_link_hsps = false → cutoff_s = 1 per NCBI's branch.
         assert_eq!(p.cutoff_s, 1);
         assert_eq!(p.cutoff_e, 1e-3);
-        // BLOSUM62 11/1 alpha=1.9 → x_dropoff ≈ 25 * ln(2) / 0.267 ≈ 65.
-        let expected_xdrop = (25.0 * crate::math::NCBIMATH_LN2 / 0.267).round() as i32;
+        // C casts the final MAX expression to Int4, truncating toward zero.
+        let expected_xdrop = (25.0 * crate::math::NCBIMATH_LN2 / 0.267) as i32;
         assert_eq!(p.gapping_params.x_dropoff, expected_xdrop);
         // near_identical_cutoff = 1.74 * ln(2) / 0.267
         let expected_nic = (NEAR_IDENTICAL_BITS_PER_POSITION * crate::math::NCBIMATH_LN2) / 0.267;
@@ -12364,7 +12378,8 @@ mod struct_tests {
 // Macros (`blast_hits_priv.h`, `redo_alignment.h`).
 // ───────────────────────────────────────────────────────────────────────────
 
-/// `CONTAINED_IN_HSP(a, b, c, d, e, f)` — `blast_hits_priv.h:68`.
+/// NCBI: CONTAINED_IN_HSP (blast_hits_priv.h:68).
+/// naming: Rust helper uses snake_case for the C macro.
 /// True iff `c` is in `[a, b]` and `f` is in `[d, e]`.
 #[inline]
 pub fn contained_in_hsp(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> bool {
@@ -12379,7 +12394,8 @@ pub const COMPOSITION_MARGIN: i32 = 20;
 pub const NCBISTDAA_STOP_CHAR: u8 = crate::encoding::NCBISTDAA_STOP;
 pub const MINIMUM_LENGTH_NEAR_IDENTICAL: i32 = 50;
 
-/// 1-1 port of `s_IsContained` (`redo_alignment.c:965`).
+/// NCBI: s_IsContained (redo_alignment.c:965).
+/// naming: Rust helper omits the private `s_` prefix.
 ///
 /// Returns true if the alignment defined by `(query_start, query_end,
 /// subject_start, subject_end, score, frame)` is contained in any
@@ -12424,12 +12440,14 @@ pub fn is_contained(
 }
 
 #[inline]
+/// blast-rs: Local endpoint predicate factored from `s_WithDistinctEnds`; not a direct NCBI C port.
 fn is_same_endpoint(new_align: &BlastCompoAlignment, align: &BlastCompoAlignment) -> bool {
     (align.query_start == new_align.query_start && align.match_start == new_align.match_start)
         || (align.query_end == new_align.query_end && align.match_end == new_align.match_end)
 }
 
 #[inline]
+/// blast-rs: Local endpoint predicate factored from `s_WithDistinctEnds`; not a direct NCBI C port.
 fn is_similar_endpoint(new_align: &BlastCompoAlignment, align: &BlastCompoAlignment) -> bool {
     let start_contained = contained_in_hsp(
         align.query_start,
@@ -12454,6 +12472,7 @@ fn is_similar_endpoint(new_align: &BlastCompoAlignment, align: &BlastCompoAlignm
             && new_align.query_end - new_align.match_end == align.query_end - align.match_end)
 }
 
+/// blast-rs: Linked-list length helper for Rust-owned alignment lists; not a direct NCBI C port.
 fn alignment_list_len(mut head: Option<&BlastCompoAlignment>) -> usize {
     let mut len = 0;
     while let Some(node) = head {
@@ -12463,12 +12482,14 @@ fn alignment_list_len(mut head: Option<&BlastCompoAlignment>) -> usize {
     len
 }
 
+/// blast-rs: Clone helper that drops the Rust linked-list tail; not a direct NCBI C port.
 fn alignment_copy_without_next(align: &BlastCompoAlignment) -> BlastCompoAlignment {
     let mut copied = align.clone();
     copied.next = None;
     copied
 }
 
+/// blast-rs: In-place reversal helper for Rust-owned alignment lists; not a direct NCBI C port.
 fn alignments_rev(head: &mut Option<Box<BlastCompoAlignment>>) {
     let mut prev = None;
     let mut cur = head.take();
@@ -12481,7 +12502,8 @@ fn alignments_rev(head: &mut Option<Box<BlastCompoAlignment>>) {
     *head = prev;
 }
 
-/// 1-1 port of `BlastCompo_AlignmentsFree` (`redo_alignment.c:160`).
+/// NCBI: BlastCompo_AlignmentsFree (redo_alignment.c:160).
+/// naming: Public Rust parity hook omits the `blast_compo_` prefix.
 ///
 /// Rust drops each node and its owned traceback context automatically. The C
 /// callback parameter is unnecessary because `GapEditScript` is owned, so this
@@ -12490,16 +12512,15 @@ pub fn alignments_free(alignments: &mut Option<Box<BlastCompoAlignment>>) {
     *alignments = None;
 }
 
-/// Name-matched Rust ownership equivalent of NCBI static `s_FreeEditScript`
-/// (`blast_kappa.c:283`).
+/// NCBI: s_FreeEditScript (blast_kappa.c:283).
 pub fn s_free_edit_script(
     edit_script: Option<crate::gapinfo::GapEditScript>,
 ) -> Option<crate::gapinfo::GapEditScript> {
     crate::gapinfo::gap_edit_script_delete(edit_script)
 }
 
-/// 1-1 port of the repeated `BlastCompo_AlignmentsFree` cleanup loops in
-/// `Blast_RedoOneMatch*`.
+/// blast-rs: Array cleanup helper for repeated `BlastCompo_AlignmentsFree`
+/// loops in `Blast_RedoOneMatch*`; not a direct NCBI C port.
 pub fn alignments_free_array(
     alignments: &mut [Option<Box<BlastCompoAlignment>>],
     num_queries: usize,
@@ -12509,6 +12530,8 @@ pub fn alignments_free_array(
     }
 }
 
+/// NCBI: s_AlignmentCmp (redo_alignment.c:763).
+/// naming: Rust comparator returns `Ordering` and omits the private `s_` prefix.
 fn alignment_cmp(a: &BlastCompoAlignment, b: &BlastCompoAlignment) -> std::cmp::Ordering {
     b.score
         .cmp(&a.score)
@@ -12518,6 +12541,8 @@ fn alignment_cmp(a: &BlastCompoAlignment, b: &BlastCompoAlignment) -> std::cmp::
         .then(b.query_end.cmp(&a.query_end))
 }
 
+/// NCBI: s_DistinctAlignmentsSort (redo_alignment.c:774).
+/// naming: Rust helper omits the private `s_` prefix.
 fn distinct_alignments_sort(head: &mut Option<Box<BlastCompoAlignment>>) {
     let mut nodes = Vec::new();
     let mut cur = head.take();
@@ -12535,7 +12560,8 @@ fn distinct_alignments_sort(head: &mut Option<Box<BlastCompoAlignment>>) {
     *head = out;
 }
 
-/// 1-1 ownership-safe port of `s_WithDistinctEnds` (`redo_alignment.c:395`).
+/// NCBI: s_WithDistinctEnds (redo_alignment.c:395).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// The C routine conditionally inserts `new_align` at the head of a linked
 /// list. If an old same-frame alignment has a matching endpoint and an equal
@@ -12590,6 +12616,8 @@ pub fn with_distinct_ends(
     true
 }
 
+/// NCBI: s_SubjectCompareWindows (redo_alignment.c:620).
+/// naming: Rust comparator returns `Ordering` and omits the private `s_` prefix.
 fn subject_compare_windows(
     a: &BlastCompoWindowInfo,
     b: &BlastCompoWindowInfo,
@@ -12604,6 +12632,8 @@ fn subject_compare_windows(
         .then(a.query_range.context.cmp(&b.query_range.context))
 }
 
+/// NCBI: s_LocationCompareWindows (redo_alignment.c:643).
+/// naming: Rust comparator returns `Ordering` and omits the private `s_` prefix.
 fn location_compare_windows(
     a: &BlastCompoWindowInfo,
     b: &BlastCompoWindowInfo,
@@ -12618,7 +12648,8 @@ fn location_compare_windows(
         .then(a.query_range.end.cmp(&b.query_range.end))
 }
 
-/// `s_GetTranslatedLength` (`redo_alignment.c:657`).
+/// NCBI: s_GetTranslatedLength (redo_alignment.c:657).
+/// naming: Public Rust helper omits the private `s_` prefix.
 pub fn get_translated_length(length: i32, frame: i32, is_pos_based: bool) -> i32 {
     let nucl_length = if is_pos_based {
         get_nucl_length(length)
@@ -12629,7 +12660,8 @@ pub fn get_translated_length(length: i32, frame: i32, is_pos_based: bool) -> i32
     ((nucl_length - frame + 1) / 3).max(0)
 }
 
-/// 1-1 port of `s_WindowsFromTranslatedAligns` (`redo_alignment.c:676`).
+/// NCBI: s_WindowsFromTranslatedAligns (redo_alignment.c:676).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Creates one bordered window per translated HSP, sorts by
 /// `s_LocationCompareWindows`, joins overlapping windows with identical query
@@ -12717,7 +12749,8 @@ pub fn windows_from_translated_aligns(
     Ok(joined)
 }
 
-/// 1-1 dispatch port of `s_WindowsFromAligns` (`redo_alignment.c:884`).
+/// NCBI: s_WindowsFromAligns (redo_alignment.c:884).
+/// naming: Public Rust helper omits the private `s_` prefix.
 pub fn windows_from_aligns(
     alignments: &Option<Box<BlastCompoAlignment>>,
     query_info: &[BlastCompoQueryInfo],
@@ -12746,8 +12779,8 @@ pub fn windows_from_aligns(
     }
 }
 
-/// 1-1 port of `Blast_GetCompositionRange`
-/// (`composition_adjustment.c:1236`).
+/// NCBI: Blast_GetCompositionRange (composition_adjustment.c:1236).
+/// naming: Public Rust helper omits the `blast_` prefix.
 pub fn get_composition_range(subject_data: &[u8], start: i32, finish: i32) -> (i32, i32) {
     let length = subject_data.len() as i32;
     let mut left = start.clamp(0, length);
@@ -12784,7 +12817,8 @@ pub fn get_composition_range(subject_data: &[u8], start: i32, finish: i32) -> (i
     (left, right)
 }
 
-/// 1-1 port of `s_GetComposition` (`redo_alignment.c:930`).
+/// NCBI: s_GetComposition (redo_alignment.c:930).
+/// naming: Public Rust helper omits the private `s_` prefix.
 pub fn get_composition(
     seq: &BlastCompoSequenceData,
     range: &BlastCompoSequenceRange,
@@ -12816,13 +12850,14 @@ pub fn get_composition(
     crate::composition::read_composition(&data[left..right.min(data.len())], alphsize)
 }
 
-/// 1-1 port of `s_EvalueFromScore` (`redo_alignment.c:976`).
+/// NCBI: s_EvalueFromScore (redo_alignment.c:976).
+/// naming: Public Rust helper omits the private `s_` prefix.
 pub fn evalue_from_score(score: i32, lambda: f64, log_k: f64, searchsp: f64) -> f64 {
     searchsp * (-(lambda * score as f64) + log_k).exp()
 }
 
-/// Significance decision inside `Blast_RedoOneMatchSmithWaterman`
-/// (`redo_alignment.c:1488`).
+/// blast-rs: Significance decision factored from `Blast_RedoOneMatchSmithWaterman`
+/// (`redo_alignment.c:1488`); not a direct NCBI C port.
 ///
 /// Mirrors the C branch after `Blast_SmithWatermanScoreOnly`: link-HSP mode
 /// saves by raw score cutoff; non-link mode saves by e-value cutoff, and for
@@ -12851,8 +12886,8 @@ pub fn smith_waterman_alignment_is_significant(
     significant
 }
 
-/// 1-1 port of `s_preliminaryTestNearIdentical`
-/// (`redo_alignment.c:1087`).
+/// NCBI: s_preliminaryTestNearIdentical (redo_alignment.c:1087).
+/// naming: Public Rust helper normalizes the mixed-case C static name to snake_case.
 pub fn preliminary_test_near_identical(
     query_info: &[BlastCompoQueryInfo],
     window: &BlastCompoWindowInfo,
@@ -12895,7 +12930,8 @@ pub fn preliminary_test_near_identical(
     true
 }
 
-/// 1-1 port of `s_WindowsFromProteinAligns` (`redo_alignment.c:807`).
+/// NCBI: s_WindowsFromProteinAligns (redo_alignment.c:807).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Protein searches create one full-subject window per query that has at
 /// least one alignment. Each alignment is copied into the window for its
@@ -12947,7 +12983,10 @@ pub fn windows_from_protein_aligns(
     Ok(compacted)
 }
 
-/// `GET_NUCL_LENGTH(l)` macro — `redo_alignment.h:495`. Used by RPS-tblastn
+/// NCBI: GET_NUCL_LENGTH (redo_alignment.h:495).
+/// naming: Rust helper uses snake_case for the C macro.
+///
+/// Used by RPS-tblastn
 /// to convert a packed mixed-frame protein length back to nucleotide
 /// length.
 #[inline]
@@ -12959,7 +12998,7 @@ pub fn get_nucl_length(l: i32) -> i32 {
 // Leaf utilities — no `BlastCompo_*` plumbing required.
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Port of `s_GetSubjectLength` (`blast_kappa.c:364`).
+/// NCBI: s_GetSubjectLength (blast_kappa.c:364).
 ///
 /// For RPS-tblastn the subject is a packed mixed-frame protein sequence;
 /// the underlying nucleotide length is recovered via `GET_NUCL_LENGTH`
@@ -12975,7 +13014,7 @@ pub fn s_get_subject_length(total_subj_length: i32, program_number: ProgramType)
     }
 }
 
-/// Port of `s_HSPListNormalizeScores` (`blast_kappa.c:101`).
+/// NCBI: s_HSPListNormalizeScores (blast_kappa.c:101).
 ///
 /// Rescales each HSP score from a high-precision representation back to
 /// integer scores by dividing by `score_divisor`, then sets the
@@ -12995,7 +13034,9 @@ pub fn s_hsp_list_normalize_scores(
     }
 }
 
-/// Port of `s_GetHash` (`blast_kappa.c:1117`). Hash for a 28-letter-alphabet
+/// NCBI: s_GetHash (blast_kappa.c:1117).
+///
+/// Hash for a 28-letter-alphabet
 /// word: `hash = sum_k (data[k] << (5 * (word_size - 1 - k)))`.
 #[inline]
 pub fn s_get_hash(data: &[u8], word_size: usize) -> u64 {
@@ -13007,7 +13048,7 @@ pub fn s_get_hash(data: &[u8], word_size: usize) -> u64 {
     hash
 }
 
-/// Port of `s_ExtendRight` (`blast_kappa.c:944`).
+/// NCBI: s_ExtendRight (blast_kappa.c:944).
 ///
 /// Extends rightward from the start of `query` and `subject`, counting
 /// identical residues and tolerating up to `max_shift` mismatches/gaps
@@ -13090,7 +13131,7 @@ pub fn s_extend_right(query: &[u8], subject: &[u8], max_shift: i32) -> (i32, i32
     (num_identical, q_pos, s_pos, align_len)
 }
 
-/// Port of `s_ExtendLeft` (`blast_kappa.c:1039`).
+/// NCBI: s_ExtendLeft (blast_kappa.c:1039).
 ///
 /// Extends leftward from the END of `query` and `subject`. Returns
 /// `(num_identical, query_ext_len, subject_ext_len, align_len_delta)`
@@ -13166,7 +13207,9 @@ pub fn s_extend_left(query: &[u8], subject: &[u8], max_shift: i32) -> (i32, i32,
     (num_identical, q_ext_len, s_ext_len, align_delta)
 }
 
-/// Port of `s_FindNumIdentical` (`blast_kappa.c:1143`). Walks the subject
+/// NCBI: s_FindNumIdentical (blast_kappa.c:1143).
+///
+/// Walks the subject
 /// in a sliding-window k-mer hash, looking up each window in the query's
 /// pre-hashed array; on every hit, extends bidirectionally via
 /// `s_ExtendLeft` / `s_ExtendRight` to count identities.
@@ -13249,7 +13292,7 @@ pub fn s_find_num_identical(
     num_identical
 }
 
-/// 1-1 port of `BlastKappa_SavedParameters` (`blast_kappa.c:1958`).
+/// NCBI: BlastKappa_SavedParameters (blast_kappa.c:1958).
 ///
 /// Snapshot of the search parameters captured on entry to
 /// `Blast_RedoAlignmentCore`. The kappa driver may scale the score
@@ -13269,7 +13312,7 @@ pub struct BlastKappaSavedParameters {
 }
 
 impl BlastKappaSavedParameters {
-    /// 1-1 port of `s_SavedParametersNew` (`blast_kappa.c:2008`).
+    /// NCBI: s_SavedParametersNew (blast_kappa.c:2008).
     ///
     /// `rows` is the row count of the scoring matrix (PSSM length for
     /// position-based searches; `BLASTAA_SIZE` otherwise). When
@@ -13312,7 +13355,8 @@ impl BlastKappaSavedParameters {
     }
 }
 
-/// 1-1 port of `s_NewAlignmentUsingXdrop` (`blast_kappa.c:1812`).
+/// NCBI: s_NewAlignmentUsingXdrop (blast_kappa.c:1812).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// X-drop traceback callback used by Smith-Waterman post-processing:
 /// given the SW-derived `(query_start, query_end, match_start,
@@ -13387,7 +13431,8 @@ pub fn new_alignment_using_xdrop(
     Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
 }
 
-/// Protein-space counterpart of [`new_alignment_using_xdrop`].
+/// blast-rs: Protein-space counterpart of [`new_alignment_using_xdrop`];
+/// not a direct NCBI C port.
 ///
 /// NCBI's Smith-Waterman redo path calls the caller-supplied X-drop callback
 /// after the SW score/start/end pass. For materialized protein and translated
@@ -13445,7 +13490,8 @@ pub fn new_alignment_using_xdrop_protein(
     Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
 }
 
-/// Position-specific/PSSM counterpart of [`new_alignment_using_xdrop_protein`].
+/// blast-rs: Position-specific/PSSM counterpart of [`new_alignment_using_xdrop_protein`];
+/// not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn new_alignment_using_xdrop_protein_pssm(
     query: &BlastCompoSequenceData,
@@ -13499,7 +13545,8 @@ pub fn new_alignment_using_xdrop_protein_pssm(
     Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
 }
 
-/// 1-1 port of `s_RedoOneAlignment` (`blast_kappa.c:1898`).
+/// NCBI: s_RedoOneAlignment (blast_kappa.c:1898).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// X-drop alignment in BOTH directions from the seed `(gapped_start_q,
 /// gapped_start_s)`, producing a fresh `BlastCompoAlignment` that
@@ -13551,6 +13598,7 @@ pub fn redo_one_alignment(
     )
 }
 
+/// blast-rs: Converts local `BlastMatrixInfo` rows to amino-acid arrays; not a direct NCBI C port.
 fn matrix_info_to_aa_array(
     matrix_info: &BlastMatrixInfo,
 ) -> Option<[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
@@ -13568,6 +13616,9 @@ fn matrix_info_to_aa_array(
     Some(matrix)
 }
 
+/// blast-rs: Matrix-scored counterpart of [`redo_one_alignment`] for protein-space
+/// searches; not a direct NCBI C port.
+///
 /// Matrix-scored counterpart of [`redo_one_alignment`] for protein-space
 /// searches. This is the materialized-subject analog of NCBI's
 /// `BLAST_GappedAlignmentWithTraceback` callback when the query and subject
@@ -13617,6 +13668,8 @@ pub fn redo_one_alignment_protein(
     )
 }
 
+/// blast-rs: Matrix-scored protein redo with caller-owned adjusted matrix; not a direct NCBI C port.
+///
 /// Matrix-scored protein redo when the caller already owns the adjusted
 /// square amino-acid matrix for this query/subject pair.
 #[allow(clippy::too_many_arguments)]
@@ -13663,6 +13716,8 @@ pub fn redo_one_alignment_protein_with_matrix(
     )
 }
 
+/// blast-rs: Position-specific protein redo helper; not a direct NCBI C port.
+///
 /// Position-specific counterpart of [`redo_one_alignment_protein_with_matrix`]
 /// for PSI/PSSM searches. Scores are taken from
 /// `pssm[absolute_query_position][subject_residue]`.
@@ -13711,7 +13766,8 @@ pub fn redo_one_alignment_protein_with_pssm(
     )
 }
 
-/// 1-1 port of `s_GetStartFreqRatios` (`blast_kappa.c:648`).
+/// NCBI: s_GetStartFreqRatios (blast_kappa.c:648).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Returns the BLASTAA_SIZE × BLASTAA_SIZE frequency-ratio matrix for
 /// the named scoring matrix. NCBI's C version dispatches via
@@ -13726,7 +13782,8 @@ pub fn get_start_freq_ratios(
     crate::matrix::get_matrix_freq_ratios(matrix_name).ok_or(())
 }
 
-/// 1-1 port of `s_GetPosBasedStartFreqRatios` (`blast_kappa.c:591`).
+/// NCBI: s_GetPosBasedStartFreqRatios (blast_kappa.c:591).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Builds the position-specific frequency-ratio rows underlying a PSSM. NCBI
 /// first copies the standard matrix row selected by each query residue, then
@@ -13776,6 +13833,8 @@ pub fn get_pos_based_start_freq_ratios(
     Ok(return_ratios)
 }
 
+/// blast-rs: Position-frequency-ratio to PSSM converter; not a direct NCBI C port.
+///
 /// Convert position-specific frequency-ratio rows to integer PSSM rows.
 ///
 /// This is the unscaled log-odds conversion stage used before PSI's
@@ -13811,6 +13870,8 @@ pub fn pos_freq_ratios_to_pssm(freq_ratios: &[Vec<f64>], lambda: f64) -> Result<
 /// `_PSIConvertFreqRatiosToPSSM`.
 pub const PSI_PSSM_SCALE_FACTOR: f64 = 200.0;
 
+/// blast-rs: Build PSI-private scaled PSSM rows; not a direct NCBI C port.
+///
 /// Build the private scaled PSSM rows from position-specific frequency ratios.
 ///
 /// NCBI keeps both an integer score matrix and `scaled_pssm` in
@@ -13837,7 +13898,8 @@ pub fn pos_freq_ratios_to_scaled_pssm(freq_ratios: &[Vec<f64>]) -> Result<Vec<Ve
     Ok(scaled)
 }
 
-/// 1-1 port boundary for `s_ScalePosMatrix` (`blast_kappa.c:676`).
+/// NCBI: s_ScalePosMatrix (blast_kappa.c:676).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// NCBI allocates a temporary `SFreqRatios`, runs
 /// `_PSIConvertFreqRatiosToPSSM`, then copies the resulting public PSSM into
@@ -13859,6 +13921,8 @@ pub fn scale_pos_matrix(self_: &mut BlastMatrixInfo, freq_ratios: &[Vec<f64>]) -
     0
 }
 
+/// blast-rs: PSI-private statistic update after PSSM scaling; not a direct NCBI C port.
+///
 /// PSI-private statistic update after PSSM scaling.
 ///
 /// NCBI's PSI scaling/statistics path applies the Lambda ratio returned by the
@@ -13887,7 +13951,8 @@ pub fn psi_private_update_lambda_statistics(
 /// precision without overflowing `BLAST_SCORE_MIN`.
 pub const SCALING_FACTOR: f64 = 32.0;
 
-/// 1-1 port of `s_SWFindFinalEndsUsingXdrop` (`blast_kappa.c:843`).
+/// NCBI: s_SWFindFinalEndsUsingXdrop (blast_kappa.c:843).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Smith-Waterman has located `(query_start..query_end,
 /// match_start..match_end)` and a target `score`; this routine
@@ -13969,7 +14034,9 @@ pub fn sw_find_final_ends_using_xdrop(
     (x_score, q_extent, s_extent, last_ops)
 }
 
-/// 1-1 port of `BlastGapAlignStruct` (`blast_gapalign.h`) — the
+/// NCBI: BlastGapAlignStruct (blast_gapalign.h).
+///
+/// The
 /// gapped-alignment workspace owned by the kappa driver.
 ///
 /// NCBI's struct holds many heap-allocated workspace buffers
@@ -13998,7 +14065,7 @@ pub struct BlastGapAlignWorkspace {
 }
 
 impl BlastGapAlignWorkspace {
-    /// 1-1 port of `s_BlastGapAlignStruct_Copy` (`blast_kappa.c:2604`).
+    /// NCBI: s_BlastGapAlignStruct_Copy (blast_kappa.c:2604).
     pub fn s_blast_gap_align_struct_copy(&self) -> Self {
         let copied_script = if let Some(src_script) = self.edit_script.as_ref() {
             let mut dst_script = crate::gapinfo::GapEditScript::default();
@@ -14028,8 +14095,8 @@ impl BlastGapAlignWorkspace {
     }
 }
 
-/// Ownership-shaped port of `BLAST_GapAlignStructNew`
-/// (`blast_gapalign.c:292`) for the modeled Rust workspace fields.
+/// blast-rs: Ownership-shaped port boundary for `BLAST_GapAlignStructNew`
+/// (`blast_gapalign.c:292`) over modeled Rust workspace fields; not a direct NCBI C port.
 pub fn blast_gap_align_struct_new(gap_x_dropoff: i32) -> Option<BlastGapAlignWorkspace> {
     let mut workspace = BlastGapAlignWorkspace::default();
     workspace.gap_x_dropoff = gap_x_dropoff.max(0);
@@ -14059,7 +14126,8 @@ pub fn blast_gap_align_struct_free(slot: &mut Option<BlastGapAlignWorkspace>) {
     *slot = None;
 }
 
-/// 1-1 port of `s_BlastGapAlignStruct_Free` (`blast_kappa.c:2532`)
+/// NCBI: s_BlastGapAlignStruct_Free (blast_kappa.c:2532).
+///
 /// over the modeled Rust workspace fields.
 pub fn s_blast_gap_align_struct_free(slot: &mut Option<BlastGapAlignWorkspace>) {
     if let Some(workspace) = slot.as_mut() {
@@ -14087,7 +14155,7 @@ pub struct BlastKappaGappingParamsContext {
     pub program: ProgramType,
 }
 
-/// 1-1 port of `Blast_RedoAlignmentCore` (`blast_kappa.c:2942`).
+/// NCBI: Blast_RedoAlignmentCore (blast_kappa.c:2942).
 ///
 /// Single-thread adapter that delegates to the multi-thread driver
 /// `Blast_RedoAlignmentCore_MT(num_threads = 1, ...)`. The MT driver
@@ -14124,6 +14192,9 @@ pub fn blast_redo_alignment_core(
     )
 }
 
+/// blast-rs: Port boundary for `Blast_RedoAlignmentCore_MT` (`blast_kappa.c:2980`,
+/// 669 LOC, cyclomatic 120); not a complete direct NCBI C port.
+///
 /// Port boundary for `Blast_RedoAlignmentCore_MT` (`blast_kappa.c:2980`,
 /// 669 LOC, cyclomatic 120). The full driver orchestrates:
 /// 1. Save initial search state via [`record_initial_search`].
@@ -14388,6 +14459,7 @@ pub struct BlastRedoCallbackSubjectConfig<'a> {
     pub link_context: Option<&'a HitlistLinkContext<'a>>,
 }
 
+/// blast-rs: Program-mode gate for materialized redo helpers; not a direct NCBI C port.
 fn materialized_redo_program_is_supported(program: ProgramType) -> bool {
     matches!(
         program,
@@ -14400,6 +14472,7 @@ fn materialized_redo_program_is_supported(program: ProgramType) -> bool {
     )
 }
 
+/// blast-rs: Context grouping helper for materialized redo dispatch; not a direct NCBI C port.
 fn materialized_num_contexts_per_query(
     program: ProgramType,
     query_info: &crate::queryinfo::QueryInfo,
@@ -14413,6 +14486,7 @@ fn materialized_num_contexts_per_query(
     }
 }
 
+/// blast-rs: Maps redo program type to the Rust `BlastSeqSource` encoding; not a direct NCBI C port.
 fn seqsrc_encoding_for_redo_program(program: ProgramType) -> crate::seqsrc::SeqEncoding {
     if crate::program::blast_subject_is_translated(program) {
         crate::seqsrc::SeqEncoding::Ncbi4na
@@ -14423,6 +14497,8 @@ fn seqsrc_encoding_for_redo_program(program: ProgramType) -> crate::seqsrc::SeqE
     }
 }
 
+/// blast-rs: Callback-backed branch of `Blast_RedoAlignmentCore_MT`; not a complete direct NCBI C port.
+///
 /// Callback-backed branch of `Blast_RedoAlignmentCore_MT`.
 ///
 /// The compatibility translation [`blast_redo_alignment_core_mt`] preserves the
@@ -14493,6 +14569,8 @@ pub fn blast_redo_alignment_core_mt_with_callbacks(
     status
 }
 
+/// blast-rs: Materialized-subject branch of `Blast_RedoAlignmentCore_MT`; not a complete direct NCBI C port.
+///
 /// Materialized-subject branch of `Blast_RedoAlignmentCore_MT`.
 ///
 /// This covers the single-match materialized-subject path for nucleotide,
@@ -14579,6 +14657,8 @@ pub fn blast_redo_alignment_core_mt_in_memory_subject(
     status
 }
 
+/// blast-rs: Materialized-subject list branch of `Blast_RedoAlignmentCore_MT`; not a complete direct NCBI C port.
+///
 /// Materialized-subject list branch of `Blast_RedoAlignmentCore_MT`.
 ///
 /// This models the `hsp_stream != NULL` control shape once the caller has
@@ -14704,6 +14784,8 @@ pub fn blast_redo_alignment_core_mt_in_memory_subjects(
     status
 }
 
+/// blast-rs: `BlastSeqSrc` fetching branch of `Blast_RedoAlignmentCore_MT`; not a complete direct NCBI C port.
+///
 /// `BlastSeqSrc` fetching branch of `Blast_RedoAlignmentCore_MT`.
 ///
 /// This mirrors the C `hsp_stream != NULL && subjectBlk == NULL` shape for
@@ -14852,6 +14934,7 @@ pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
     status
 }
 
+/// blast-rs: Shared callback-backed one-match redo/evaluate path; not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 fn blast_redo_alignment_core_one_match_with_callbacks_inner(
     program: ProgramType,
@@ -15136,6 +15219,7 @@ fn blast_redo_alignment_core_one_match_with_callbacks_inner(
     0
 }
 
+/// blast-rs: Callback-backed identity recomputation helper; not a direct NCBI C port.
 fn compute_num_identities_with_callbacks(
     hsp_list: &mut HspList,
     params: &BlastRedoAlignParams,
@@ -15217,6 +15301,7 @@ fn compute_num_identities_with_callbacks(
     0
 }
 
+/// blast-rs: Shared materialized one-match redo/evaluate path; not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 fn blast_redo_alignment_core_one_match_in_memory_inner(
     program: ProgramType,
@@ -15573,6 +15658,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
     0
 }
 
+/// blast-rs: Converts Rust alignment lists to `s_IsContained` tuple inputs; not a direct NCBI C port.
 fn alignment_list_to_containment_tuples(
     head: Option<&BlastCompoAlignment>,
 ) -> Vec<(i32, i32, i32, i32, i32, i32)> {
@@ -15592,8 +15678,8 @@ fn alignment_list_to_containment_tuples(
     out
 }
 
-/// In-memory no-composition port boundary for `Blast_RedoOneMatch`
-/// (`redo_alignment.c:1133`).
+/// blast-rs: In-memory no-composition port boundary for `Blast_RedoOneMatch`
+/// (`redo_alignment.c:1133`); not a complete direct NCBI C port.
 ///
 /// This covers the branch where no composition adjustment is requested, so the
 /// C callback calls reduce to already-ported Rust helpers:
@@ -15730,8 +15816,8 @@ pub fn blast_redo_one_match_in_memory(
     0
 }
 
-/// In-memory protein-space composition-adjusted counterpart of
-/// [`blast_redo_one_match_in_memory`].
+/// blast-rs: In-memory protein-space composition-adjusted counterpart of
+/// [`blast_redo_one_match_in_memory`]; not a direct NCBI C port.
 ///
 /// This covers the materialized-subject ordinary redo branch once query and
 /// subject ranges can be copied locally: compute query/subject composition,
@@ -15915,8 +16001,8 @@ pub fn blast_redo_one_match_in_memory_with_adjustment(
     0
 }
 
-/// Position-specific/PSSM composition-adjusted counterpart of
-/// [`blast_redo_one_match_in_memory_with_adjustment`].
+/// blast-rs: Position-specific/PSSM composition-adjusted counterpart of
+/// [`blast_redo_one_match_in_memory_with_adjustment`]; not a direct NCBI C port.
 ///
 /// This covers the ordinary PSI-style materialized redo branch: copy local
 /// query/subject windows, compute composition, run the position-based
@@ -16087,8 +16173,8 @@ pub fn blast_redo_one_match_in_memory_with_position_adjustment(
     0
 }
 
-/// Callback-driven no-composition port boundary for `Blast_RedoOneMatch`
-/// (`redo_alignment.c:1133`).
+/// blast-rs: Callback-driven no-composition port boundary for `Blast_RedoOneMatch`
+/// (`redo_alignment.c:1133`); not a complete direct NCBI C port.
 ///
 /// This follows the generic C driver shape: clear output lists, build windows,
 /// rerun `get_range` when the near-identical state changes, skip HSPs already
@@ -16124,8 +16210,8 @@ pub fn blast_redo_one_match_with_callbacks(
     )
 }
 
-/// Callback-driven port boundary for `Blast_RedoOneMatch`
-/// (`redo_alignment.c:1133`) with the composition-adjusted score path wired.
+/// blast-rs: Callback-driven port boundary for `Blast_RedoOneMatch`
+/// (`redo_alignment.c:1133`) with the composition-adjusted score path wired; not a complete direct NCBI C port.
 ///
 /// The existing callback table supplies `get_range` and `redo_one_alignment`,
 /// while this function owns the translated `Blast_AdjustScores` call between
@@ -16365,8 +16451,8 @@ pub fn blast_redo_one_match_with_callbacks_and_adjustment(
     0
 }
 
-/// Callback-driven position-specific/PSSM counterpart of
-/// [`blast_redo_one_match_with_callbacks_and_adjustment`].
+/// blast-rs: Callback-driven position-specific/PSSM counterpart of
+/// [`blast_redo_one_match_with_callbacks_and_adjustment`]; not a direct NCBI C port.
 ///
 /// The callback table supplies the C-style range fetcher; after
 /// position-based score adjustment this helper runs the local PSSM traceback
@@ -16583,6 +16669,7 @@ pub fn blast_redo_one_match_with_callbacks_and_position_adjustment(
     0
 }
 
+/// blast-rs: Converts the local nucleotide X-drop matrix into SW matrix shape; not a direct NCBI C port.
 fn nucleotide_sw_matrix_from_xdrop_matrix(
     matrix: &[[i32; 16]; 16],
 ) -> [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE] {
@@ -16595,8 +16682,8 @@ fn nucleotide_sw_matrix_from_xdrop_matrix(
     out
 }
 
-/// In-memory no-composition nucleotide port boundary for
-/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`).
+/// blast-rs: In-memory no-composition nucleotide port boundary for
+/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`); not a complete direct NCBI C port.
 ///
 /// This mirrors the executable SW loop once sequence ranges are already
 /// materialized locally: build windows, retrieve query/subject ranges, clear
@@ -16748,8 +16835,8 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_nucl(
     0
 }
 
-/// In-memory no-composition protein-space port boundary for
-/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`).
+/// blast-rs: In-memory no-composition protein-space port boundary for
+/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`); not a complete direct NCBI C port.
 ///
 /// This mirrors [`blast_redo_one_match_smith_waterman_in_memory_nucl`] after
 /// sequence ranges have been materialized as protein residues. It covers
@@ -16904,8 +16991,8 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_protein(
     0
 }
 
-/// In-memory non-position composition-adjusted protein-space port boundary for
-/// `Blast_RedoOneMatchSmithWaterman`.
+/// blast-rs: In-memory non-position composition-adjusted protein-space port boundary for
+/// `Blast_RedoOneMatchSmithWaterman`; not a complete direct NCBI C port.
 ///
 /// This is the materialized-subject counterpart of the callback adjusted SW
 /// path: copy protein-space query/subject ranges, compute compositions, run
@@ -17123,8 +17210,8 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
     0
 }
 
-/// In-memory position-specific/PSSM protein-space port boundary for
-/// `Blast_RedoOneMatchSmithWaterman`.
+/// blast-rs: In-memory position-specific/PSSM protein-space port boundary for
+/// `Blast_RedoOneMatchSmithWaterman`; not a complete direct NCBI C port.
 ///
 /// This mirrors the protein Smith-Waterman materialized loop, but adjusts the
 /// position-specific rows for the current query/subject window before running
@@ -17339,8 +17426,8 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_protein_position_adjustment
     0
 }
 
-/// Callback-driven no-composition port boundary for
-/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`).
+/// blast-rs: Callback-driven no-composition port boundary for
+/// `Blast_RedoOneMatchSmithWaterman` (`redo_alignment.c:1342`); not a complete direct NCBI C port.
 ///
 /// The C routine obtains sequence ranges through `callbacks->get_range`, runs
 /// Smith-Waterman, applies the significance gate, finds the start, finalizes
@@ -17381,9 +17468,9 @@ pub fn blast_redo_one_match_smith_waterman_with_callbacks(
     )
 }
 
-/// Callback-driven port boundary for `Blast_RedoOneMatchSmithWaterman`
+/// blast-rs: Callback-driven port boundary for `Blast_RedoOneMatchSmithWaterman`
 /// (`redo_alignment.c:1342`) with the non-position composition-adjusted
-/// score path wired before the SW loop.
+/// score path wired before the SW loop; not a complete direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
     alignments: &mut [Option<Box<BlastCompoAlignment>>],
@@ -17646,8 +17733,8 @@ pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
     0
 }
 
-/// Callback-driven position-specific/PSSM counterpart of
-/// [`blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment`].
+/// blast-rs: Callback-driven position-specific/PSSM counterpart of
+/// [`blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment`]; not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustment(
     alignments: &mut [Option<Box<BlastCompoAlignment>>],
@@ -17876,6 +17963,7 @@ pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustmen
     0
 }
 
+/// blast-rs: Converts modeled square matrix vectors into fixed amino-acid arrays; not a direct NCBI C port.
 fn square_matrix_from_vec(
     matrix: &[Vec<i32>],
 ) -> Option<[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
@@ -17892,6 +17980,7 @@ fn square_matrix_from_vec(
     Some(out)
 }
 
+/// blast-rs: Converts modeled frequency-ratio rows into fixed amino-acid arrays; not a direct NCBI C port.
 fn freq_ratios_from_vec(
     matrix: &[Vec<f64>],
 ) -> Option<[[f64; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
@@ -17908,6 +17997,7 @@ fn freq_ratios_from_vec(
     Some(out)
 }
 
+/// blast-rs: Composition p-value helper for local `Blast_AdjustScores` adapters; not a direct NCBI C port.
 fn composition_test_pvalue(query_prob: &[f64], subject_prob: &[f64]) -> f64 {
     let mut permuted_query = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
     let mut permuted_subject = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
@@ -17926,6 +18016,7 @@ fn composition_test_pvalue(query_prob: &[f64], subject_prob: &[f64]) -> f64 {
     crate::composition::composition_pvalue(lambda_for_pair)
 }
 
+/// blast-rs: PSSM score-probability helper for local position-based scaling; not a direct NCBI C port.
 fn pssm_score_probs(
     matrix: &[Vec<i32>],
     rows: usize,
@@ -17968,6 +18059,7 @@ fn pssm_score_probs(
     Some((score_probs, obs_min, obs_max))
 }
 
+/// blast-rs: PSSM lambda-ratio helper for local position-based scaling; not a direct NCBI C port.
 fn pssm_lambda_ratio(
     matrix: &[Vec<i32>],
     rows: usize,
@@ -17994,6 +18086,7 @@ fn pssm_lambda_ratio(
     Some(ratio.max(0.5))
 }
 
+/// blast-rs: PSSM X-residue score helper for local position-based scaling; not a direct NCBI C port.
 fn pssm_x_score(row: &[f64], cols: usize, probs: &[f64]) -> f64 {
     let mut score = 0.0f64;
     for j in 0..cols.min(crate::composition::ALPHA_CONVERT.len()) {
@@ -18076,8 +18169,8 @@ pub fn composition_scale_pssm_with_ratio(
     Some((matrix, ratio))
 }
 
-/// Old-style scaling branch of `Blast_AdjustScores`
-/// (`composition_adjustment.c:1446`).
+/// blast-rs: Old-style scaling branch of `Blast_AdjustScores`
+/// (`composition_adjustment.c:1446`); not a direct NCBI C port.
 ///
 /// This covers the non-position-based `eCompositionBasedStats` path that
 /// chooses `eCompoScaleOldMatrix` and calls `Blast_CompositionBasedStats`.
@@ -18110,7 +18203,8 @@ pub fn blast_adjust_scores_scale_old_matrix(
     )
 }
 
-/// Position-based/PSSM old-style scaling branch of `Blast_AdjustScores`.
+/// blast-rs: Position-based/PSSM old-style scaling branch of `Blast_AdjustScores`;
+/// not a direct NCBI C port.
 ///
 /// NCBI routes every `matrixInfo->positionBased` call to
 /// `eCompoScaleOldMatrix`, then `Blast_CompositionBasedStats`, whose PSSM
@@ -18156,7 +18250,7 @@ pub fn blast_adjust_position_based_scores(
     Ok(MatrixAdjustRule::ScaleOldMatrix)
 }
 
-/// Port of `Kappa_posSearchItemsNew` (`blast_posit.c:43`).
+/// NCBI: Kappa_posSearchItemsNew (blast_posit.c:43).
 pub fn kappa_pos_search_items_new(
     query_length: usize,
     matrix_name: &str,
@@ -18173,7 +18267,7 @@ pub fn kappa_pos_search_items_new(
     })
 }
 
-/// Rust ownership equivalent of `Kappa_posSearchItemsFree`.
+/// NCBI: Kappa_posSearchItemsFree (blast_posit.c:86).
 pub fn kappa_pos_search_items_free(
     pos_search: &mut Option<KappaPosSearchItems>,
 ) -> Option<KappaPosSearchItems> {
@@ -18188,7 +18282,7 @@ pub fn kappa_pos_search_items_free(
     None
 }
 
-/// Port of `Kappa_compactSearchItemsNew` (`blast_posit.c:101`).
+/// NCBI: Kappa_compactSearchItemsNew (blast_posit.c:101).
 pub fn kappa_compact_search_items_new(
     query: &[u8],
     query_length: usize,
@@ -18217,7 +18311,7 @@ pub fn kappa_compact_search_items_new(
     })
 }
 
-/// Rust ownership equivalent of `Kappa_compactSearchItemsFree`.
+/// NCBI: Kappa_compactSearchItemsFree (blast_posit.c:141).
 pub fn kappa_compact_search_items_free(
     compact_search: &mut Option<KappaCompactSearchItems>,
 ) -> Option<KappaCompactSearchItems> {
@@ -18238,7 +18332,7 @@ pub fn kappa_compact_search_items_free(
     None
 }
 
-/// Port of `fillSfp` (`blast_posit.c:170`).
+/// NCBI: fillSfp (blast_posit.c:170).
 pub fn fill_sfp(
     matrix: &[Vec<i32>],
     matrix_length: usize,
@@ -18292,7 +18386,7 @@ pub fn fill_sfp(
     Some(sfp)
 }
 
-/// Port of `_PSIComputeScoreProbabilities` (`blast_psi_priv.c:2647`).
+/// NCBI: _PSIComputeScoreProbabilities (blast_psi_priv.c:2647).
 pub fn psi_compute_score_probabilities(
     pssm: &[Vec<i32>],
     query: &[u8],
@@ -18361,7 +18455,7 @@ pub fn psi_compute_score_probabilities(
     Some(sfp)
 }
 
-/// Port of `_PSIUpdateLambdaK` (`blast_psi_priv.c:2732`).
+/// NCBI: _PSIUpdateLambdaK (blast_psi_priv.c:2732).
 pub fn psi_update_lambda_k(
     pssm: &[Vec<i32>],
     query: &[u8],
@@ -18397,6 +18491,7 @@ pub fn psi_update_lambda_k(
     0
 }
 
+/// blast-rs: Local row-scaling helper factored from `impalaScaleMatrix`; not a direct NCBI C port.
 fn impala_apply_factor(
     matrix: &mut [Vec<i32>],
     private_matrix: &[Vec<i32>],
@@ -18419,7 +18514,7 @@ fn impala_apply_factor(
     Some(())
 }
 
-/// Port of `impalaScaleMatrix` (`blast_posit.c:230`).
+/// NCBI: impalaScaleMatrix (blast_posit.c:230).
 pub fn impala_scale_matrix(
     compact_search: &KappaCompactSearchItems,
     pos_matrix: &mut [Vec<i32>],
@@ -18559,7 +18654,7 @@ pub fn impala_scale_matrix(
     true
 }
 
-/// Port of `Kappa_impalaScaling` (`blast_posit.c:393`).
+/// NCBI: Kappa_impalaScaling (blast_posit.c:393).
 pub fn kappa_impala_scaling(
     pos_search: &mut KappaPosSearchItems,
     compact_search: &KappaCompactSearchItems,
@@ -18581,7 +18676,8 @@ pub fn kappa_impala_scaling(
     }
 }
 
-/// Port boundary for `Blast_AdjustScores` (`composition_adjustment.c:1446`).
+/// blast-rs: Port boundary for `Blast_AdjustScores` (`composition_adjustment.c:1446`);
+/// not a complete direct NCBI C port.
 ///
 /// Implements the non-position-based paths whose required state is available:
 /// composition-based scale-old-matrix adjustment and relative-entropy matrix
@@ -18634,8 +18730,9 @@ pub fn blast_adjust_scores_with_workspace(
     )
 }
 
-/// Port of NCBI `Blast_AdjustScores` with explicit
+/// blast-rs: `Blast_AdjustScores` adapter with explicit
 /// `queryLength`/`subjectLength` separate from `numTrueAminoAcids`. The
+/// naming: Version suffix distinguishes this Rust adapter from the compatibility entry point.
 /// length parameters are used for [`choose_matrix_adjust_rule`] (which
 /// applies the high-pair/length-ratio thresholds against the full
 /// window length); the `num_true` counts are used for the
@@ -18777,7 +18874,7 @@ pub fn blast_adjust_scores_with_workspace_v2(
 /// expensive composition-adjustment pass.
 pub const NEAR_IDENTICAL_BITS_PER_POSITION: f64 = 1.74;
 
-/// 1-1 port of `s_GetAlignParams` (`blast_kappa.c:2406`).
+/// NCBI: s_GetAlignParams (blast_kappa.c:2406).
 ///
 /// Assembly point for the redo-alignment driver: builds a
 /// [`BlastRedoAlignParams`] from the search context. Composes the
@@ -18899,7 +18996,7 @@ pub const K_RE_MATRIX_ADJUSTMENT_PSEUDOCOUNTS: i32 = 20;
 /// `kFixedReBlosum62` (`composition_adjustment.c:77`).
 pub const K_FIXED_RE_BLOSUM62: f64 = 0.44;
 
-/// 1-1 port of `Blast_RedoAlignParamsNew` (`redo_alignment.c:1013`).
+/// NCBI: Blast_RedoAlignParamsNew (redo_alignment.c:1013).
 ///
 /// Bundles the matrix info + gapping params + composition-adjust mode
 /// flags into `BlastRedoAlignParams` driver state. NCBI's C
@@ -18941,8 +19038,8 @@ pub fn blast_redo_align_params_new(
     )
 }
 
-/// Variant of [`blast_redo_align_params_new`] that carries the
-/// `Blast_RedoAlignCallbacks *callbacks` argument from NCBI's constructor.
+/// blast-rs: Variant of [`blast_redo_align_params_new`] that carries the
+/// `Blast_RedoAlignCallbacks *callbacks` argument from NCBI's constructor; not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn blast_redo_align_params_new_with_callbacks(
     matrix_info: BlastMatrixInfo,
@@ -18977,7 +19074,7 @@ pub fn blast_redo_align_params_new_with_callbacks(
     }
 }
 
-/// 1-1 port of `Blast_RedoAlignParamsFree` (`redo_alignment.c:1001`).
+/// NCBI: Blast_RedoAlignParamsFree (redo_alignment.c:1001).
 ///
 /// In Rust, `Drop` handles the deallocation that NCBI does manually.
 /// Provided for parity so callers porting NCBI flow can keep matching
@@ -18987,7 +19084,8 @@ pub fn blast_redo_align_params_free(slot: &mut Option<BlastRedoAlignParams>) {
     *slot = None;
 }
 
-/// 1-1 port of `s_ResultHspToDistinctAlign` (`blast_kappa.c:769`).
+/// NCBI: s_ResultHspToDistinctAlign (blast_kappa.c:769).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Converts an array of HSPs into per-frame singly-linked
 /// `BlastCompoAlignment` lists. NCBI uses a 6-element `tail[]` array
@@ -19067,7 +19165,8 @@ pub fn result_hsp_to_distinct_align(
     0
 }
 
-/// 1-1 port of `s_DoSegSequenceData` (`blast_kappa.c:1427`).
+/// NCBI: s_DoSegSequenceData (blast_kappa.c:1427).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Filters low-complexity regions out of `seq_data` using the SEG
 /// algorithm (NCBIstdaa input). NCBI's C uses
@@ -19104,7 +19203,8 @@ pub fn do_seg_sequence_data(seq_data: &mut BlastCompoSequenceData) -> (i32, bool
     (0, was_biased)
 }
 
-/// 1-1 port of `s_MatchingSequenceRelease` (`blast_kappa.c:907`).
+/// NCBI: s_MatchingSequenceRelease (blast_kappa.c:907).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// In the C source this releases the BlastSeqSrc-managed subject
 /// sequence and frees the per-match `BlastKappa_SequenceInfo`
@@ -19120,7 +19220,8 @@ pub fn matching_sequence_release(self_: &mut BlastCompoMatchingSequence) {
     self_.length = 0;
 }
 
-/// 1-1 port of `s_RescaleSearch` (`blast_kappa.c:2117`).
+/// NCBI: s_RescaleSearch (blast_kappa.c:2117).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Rescales every per-context gapped Karlin block so that
 /// `lambda /= scale_factor` (and `log_k = ln(K)` is reset for
@@ -19150,8 +19251,8 @@ pub fn rescale_search(
     scoring.scale_factor = scale_factor;
 }
 
-/// 1-1 port of the **query-preparation preamble** of `s_SequenceGetRange`
-/// (`blast_kappa.c:1670`).
+/// blast-rs: Query-preparation preamble of `s_SequenceGetRange`
+/// (`blast_kappa.c:1670`); not a complete direct NCBI C port.
 ///
 /// Copies `query[q_range.begin .. q_range.end]` into a freshly-allocated
 /// buffer with NCBI's sentinel-byte layout (`buffer[0] = 0`, real data
@@ -19188,8 +19289,8 @@ pub fn sequence_prep_query_range(
     }
 }
 
-/// 1-1 port of the in-memory protein branch of
-/// `s_SequenceGetProteinRange` (`blast_kappa.c:1586`).
+/// blast-rs: In-memory protein branch of `s_SequenceGetProteinRange`
+/// (`blast_kappa.c:1586`); not a complete direct NCBI C port.
 ///
 /// NCBI obtains the source residues from `BlastSeqSrcGetSequence`, then
 /// creates the same sentinel-byte layout used by the query path:
@@ -19216,7 +19317,8 @@ pub fn sequence_get_protein_range(
     }
 }
 
-/// In-memory port of `s_SequenceGetTranslatedRange` (`blast_kappa.c:1637`).
+/// blast-rs: In-memory port of `s_SequenceGetTranslatedRange`
+/// (`blast_kappa.c:1637`); not a complete direct NCBI C port.
 ///
 /// The C path obtains a `BlastTargetTranslation` for the subject/frame and
 /// copies the requested protein-space interval into sentinel-backed
@@ -19235,8 +19337,8 @@ pub fn sequence_get_translated_range(
     s_sequence_get_translated_range(source_ncbi4na, range, genetic_code)
 }
 
-/// Name-matched wrapper for NCBI static `s_SequenceGetTranslatedRange`
-/// (`blast_kappa.c:1475`) over a materialized NCBI4na subject.
+/// blast-rs: Name-matched wrapper for NCBI static `s_SequenceGetTranslatedRange`
+/// (`blast_kappa.c:1475`) over a materialized NCBI4na subject; not a direct NCBI C port.
 pub fn s_sequence_get_translated_range(
     source_ncbi4na: &[u8],
     range: &BlastCompoSequenceRange,
@@ -19265,7 +19367,8 @@ pub fn s_sequence_get_translated_range(
     ))
 }
 
-/// In-memory port boundary for `s_SequenceGetRange` (`blast_kappa.c:1670`).
+/// blast-rs: In-memory port boundary for `s_SequenceGetRange` (`blast_kappa.c:1670`);
+/// not a complete direct NCBI C port.
 ///
 /// The C helper prepares the query range, then dispatches subject extraction to
 /// either `s_SequenceGetProteinRange` or `s_SequenceGetTranslatedRange`
@@ -19289,8 +19392,8 @@ pub fn sequence_get_range_in_memory(
     )
 }
 
-/// Same as [`sequence_get_range_in_memory`], with an explicit genetic code for
-/// translated-subject programs.
+/// blast-rs: Same as [`sequence_get_range_in_memory`], with an explicit genetic code for
+/// translated-subject programs; not a direct NCBI C port.
 pub fn sequence_get_range_in_memory_with_code(
     program: ProgramType,
     query: &BlastCompoSequenceData,
@@ -19308,7 +19411,7 @@ pub fn sequence_get_range_in_memory_with_code(
     Ok((query_seq, subject_seq))
 }
 
-/// 1-1 port of `s_GappingParamsNew` (`blast_kappa.c:2354`).
+/// NCBI: s_GappingParamsNew (blast_kappa.c:2354).
 ///
 /// Builds a `BlastCompoGappingParams` from `(scoring, extension)` and a
 /// per-context array of gapped Karlin blocks. The X-dropoff is set to
@@ -19340,9 +19443,8 @@ pub fn s_gapping_params_new(
         }
     }
     let x_dropoff = if min_lambda < f64::MAX {
-        let bits_dropoff =
-            (gap_x_dropoff_final_bits * crate::math::NCBIMATH_LN2 / min_lambda).round() as i32;
-        bits_dropoff.max(raw_gap_x_dropoff_final)
+        (gap_x_dropoff_final_bits * crate::math::NCBIMATH_LN2 / min_lambda)
+            .max(raw_gap_x_dropoff_final as f64) as i32
     } else {
         raw_gap_x_dropoff_final
     };
@@ -19355,8 +19457,7 @@ pub fn s_gapping_params_new(
     }
 }
 
-/// 1-1 port of the **non-position-based** branch of `s_MatrixInfoInit`
-/// (`blast_kappa.c:2199`).
+/// NCBI: s_MatrixInfoInit (blast_kappa.c:2199).
 ///
 /// Initializes a `BlastMatrixInfo` from the matrix name and the
 /// "ideal" gapped Karlin block, populating `ungappedLambda`,
@@ -19393,8 +19494,8 @@ pub fn s_matrix_info_init(
     0
 }
 
-/// Position-based counterpart to the frequency-ratio setup in
-/// `s_MatrixInfoInit`.
+/// blast-rs: Position-based counterpart to the frequency-ratio setup in
+/// `s_MatrixInfoInit`; not a direct NCBI C port.
 ///
 /// NCBI's full PSI branch calls `s_GetPosBasedStartFreqRatios`, then
 /// `s_ScalePosMatrix`, which internally runs `_PSIConvertFreqRatiosToPSSM`.
@@ -19430,7 +19531,8 @@ pub fn matrix_info_init_psiblast_from_start_numerator(
     scale_pos_matrix(self_, &freq_ratios)
 }
 
-/// 1-1 port of `s_RecordInitialSearch` (`blast_kappa.c:2059`).
+/// NCBI: s_RecordInitialSearch (blast_kappa.c:2059).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Snapshots `scoring->gap_open / gap_extend / scale_factor`,
 /// per-context gapped Karlin blocks (one entry per query context), and
@@ -19488,7 +19590,8 @@ pub fn record_initial_search(
     0
 }
 
-/// 1-1 port of `s_RestoreSearch` (`blast_kappa.c:2147`).
+/// NCBI: s_RestoreSearch (blast_kappa.c:2147).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Inverse of [`record_initial_search`]: copies the snapshot back into
 /// the caller's mutable scoring parameters, Karlin blocks, and
@@ -19529,7 +19632,8 @@ pub fn restore_search(
     }
 }
 
-/// 1-1 port of `s_SavedParametersFree` (`blast_kappa.c:1977`).
+/// NCBI: s_SavedParametersFree (blast_kappa.c:1977).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// In Rust the struct's `Drop` impl handles deallocation, so this
 /// function is a no-op marker — provided so that callers porting the
@@ -19548,7 +19652,9 @@ pub fn saved_parameters_free(saved: &mut Option<BlastKappaSavedParameters>) {
     params.original_expect_value = 0.0;
 }
 
-/// 1-1 port of `BlastCompo_Heap` (`compo_heap.h:82`). The C struct keeps
+/// NCBI: BlastCompo_Heap (compo_heap.h:82).
+///
+/// The C struct keeps
 /// hits as either an unsorted array (until `n == heapThreshold`) or as
 /// a max-heap keyed on e-value (after the threshold). Once it's a heap,
 /// new candidates with e-value >= `worstEvalue` are rejected unless
@@ -19569,6 +19675,8 @@ pub struct BlastCompoHeap {
 pub const EVALUE_STRETCH: f64 = 5.0;
 
 impl BlastCompoHeap {
+    /// NCBI: BlastCompo_HeapNew (compo_heap.c:50).
+    /// naming: Associated constructor on `BlastCompoHeap`.
     pub fn new(heap_threshold: i32, ecutoff: f64) -> Self {
         Self {
             records: Vec::new(),
@@ -19577,6 +19685,8 @@ impl BlastCompoHeap {
         }
     }
 
+    /// blast-rs: Worst-evalue accessor for Rust heap state; not a direct NCBI C port.
+    ///
     /// Worst (largest) e-value currently in the heap, or `+∞` if empty.
     pub fn worst_evalue(&self) -> f64 {
         self.records
@@ -19591,10 +19701,12 @@ impl BlastCompoHeap {
             })
     }
 
+    /// blast-rs: Local heap tie-break helper; not a direct NCBI C port.
     fn best_score(record: &HspList) -> i32 {
         record.hsps.iter().map(|hsp| hsp.score).max().unwrap_or(0)
     }
 
+    /// blast-rs: Local heap tie-break helper; not a direct NCBI C port.
     fn record_worse_than(record: &HspList, evalue: f64, score: i32, subject_index: i32) -> bool {
         if record.best_evalue > evalue {
             return true;
@@ -19612,6 +19724,7 @@ impl BlastCompoHeap {
         record.oid < subject_index
     }
 
+    /// blast-rs: Local heap scan helper replacing C heap internals; not a direct NCBI C port.
     fn worst_record_index(&self) -> Option<usize> {
         if self.records.is_empty() {
             return None;
@@ -19632,7 +19745,7 @@ impl BlastCompoHeap {
         Some(worst_idx)
     }
 
-    /// 1-1 port of `BlastCompo_HeapWouldInsert`.
+    /// NCBI: BlastCompo_HeapWouldInsert (compo_heap.c:190).
     /// naming: Rust exposes this as an associated method on the composition
     /// heap type.
     ///
@@ -19654,7 +19767,8 @@ impl BlastCompoHeap {
         }
     }
 
-    /// 1-1 semantic port of `BlastCompo_HeapInsert`.
+    /// NCBI: BlastCompo_HeapInsert (compo_heap.c:210).
+    /// naming: Associated method on `BlastCompoHeap`; type supplies `blast_compo_heap`.
     ///
     /// Inserts `record` if it would be retained. When the heap is full and the
     /// candidate does not pass `ecutoff`, the worse of the candidate and the
@@ -19684,7 +19798,7 @@ impl BlastCompoHeap {
         Some(record)
     }
 
-    /// 1-1 port of `BlastCompo_HeapFilledToCutoff`.
+    /// NCBI: BlastCompo_HeapFilledToCutoff (compo_heap.c:270).
     /// naming: Rust exposes this as an associated method on the composition
     /// heap type.
     pub fn filled_to_cutoff(&self) -> bool {
@@ -19692,7 +19806,9 @@ impl BlastCompoHeap {
             && self.worst_evalue() <= self.ecutoff
     }
 
-    /// 1-1 port of `BlastCompo_HeapPop`. Removes and returns the
+    /// NCBI: BlastCompo_HeapPop (compo_heap.c:251).
+    ///
+    /// Removes and returns the
     /// hit-list with the worst (largest) e-value.
     /// naming: Rust exposes this as an associated method on the composition
     /// heap type.
@@ -19702,7 +19818,7 @@ impl BlastCompoHeap {
     }
 }
 
-/// 1-1 port of `BlastCompo_EarlyTermination` (`redo_alignment.c:1592`).
+/// NCBI: BlastCompo_EarlyTermination (redo_alignment.c:1592).
 pub fn blast_compo_early_termination(
     evalue: f64,
     significant_matches: &[BlastCompoHeap],
@@ -19724,7 +19840,8 @@ pub fn blast_compo_early_termination(
     true
 }
 
-/// 1-1 port of `s_FreeBlastCompo_QueryInfoArray` (`blast_kappa.c:2279`).
+/// NCBI: s_FreeBlastCompo_QueryInfoArray (blast_kappa.c:2279).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// In the C source this `free`s every `query_info[i].words` array and
 /// then `free`s the outer container. In Rust the `BlastCompoQueryInfo`
@@ -19735,12 +19852,14 @@ pub fn free_blast_compo_query_info_array(query_info: &mut Vec<BlastCompoQueryInf
     query_info.clear();
 }
 
-/// 1-1 port of `s_ClearHeap` (`blast_kappa.c:2518`).
+/// NCBI: s_ClearHeap (blast_kappa.c:2518).
+/// naming: Public Rust helper omits the private `s_` prefix.
 pub fn clear_heap(heap: &mut BlastCompoHeap) {
     while heap.pop_worst().is_some() {}
 }
 
-/// Merge worker-local composition heaps into the global per-query heaps.
+/// blast-rs: Merge worker-local composition heaps into the global per-query heaps;
+/// not a direct NCBI C port.
 ///
 /// NCBI's threaded redo core lets worker threads retain candidate HSP lists in
 /// local `BlastCompo_Heap` arrays, then merges them by reinserting each worker
@@ -19765,7 +19884,8 @@ pub fn merge_compo_thread_heaps(
     }
 }
 
-/// 1-1 port of `s_FillResultsFromCompoHeaps` (`blast_kappa.c:2493`).
+/// NCBI: s_FillResultsFromCompoHeaps (blast_kappa.c:2493).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Drains each heap into a fresh `HitList`, then reverses the
 /// query order at the end (mirroring NCBI's
@@ -19791,7 +19911,8 @@ pub fn fill_results_from_compo_heaps(heaps: &mut [BlastCompoHeap]) -> crate::hsp
     results
 }
 
-/// 1-1 port of `s_GetQueryInfo` (`blast_kappa.c:2308`).
+/// NCBI: s_GetQueryInfo (blast_kappa.c:2308).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Builds a `Vec<BlastCompoQueryInfo>` from the per-context fields of a
 /// Rust `QueryInfo` plus the concatenated query buffer. For each context
@@ -19845,7 +19966,8 @@ pub fn get_query_info(
         .collect()
 }
 
-/// 1-1 port of `s_CreateWordArray` (`blast_kappa.c:2244`).
+/// NCBI: s_CreateWordArray (blast_kappa.c:2244).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Returns an array of 8-mer hashes such that `result[i]` is the hash
 /// of `seq[i .. i + 8]`. Used by `s_TestNearIdentical` /
@@ -19878,8 +20000,8 @@ pub fn create_word_array(seq: &[u8]) -> Option<Vec<u64>> {
     Some(hashes)
 }
 
-/// 1-1 port of `s_Blast_HSPGetNumIdentitiesAndPositives`
-/// (`blast_hits.c:746`).
+/// NCBI: s_Blast_HSPGetNumIdentitiesAndPositives (blast_hits.c:746).
+/// naming: Public Rust helper shortens the C suffix to the local identity-only API.
 ///
 /// Walks the HSP's gap edit script (or its ungapped extent if no
 /// edit script is present) and counts identical residue pairs and
@@ -20024,7 +20146,7 @@ pub fn compute_num_identities_blastp(
     }
 }
 
-/// Translated-subject branch of `s_ComputeNumIdentities`.
+/// blast-rs: Translated-subject branch of `s_ComputeNumIdentities`; not a direct NCBI C port.
 ///
 /// NCBI builds a `BlastTargetTranslation` for each tblastn/tblastx subject
 /// frame before calling `Blast_HSPGetNumIdentitiesAndPositives`. This helper
@@ -20079,7 +20201,7 @@ pub struct HitlistLinkContext<'a> {
     pub gapped_calculation: bool,
 }
 
-/// 1-1 port of `s_HitlistEvaluateAndPurge` (`blast_kappa.c:394`).
+/// NCBI: s_HitlistEvaluateAndPurge (blast_kappa.c:394).
 ///
 /// Assigns final e-values and prunes the hit list. The full C function
 /// dispatches between `BLAST_LinkHsps` (sum-statistics branch) and
@@ -20161,8 +20283,8 @@ pub fn s_hitlist_evaluate_and_purge(
     (best_score, best_evalue)
 }
 
-/// Bridge from the kappa `HspList` representation to the already-ported
-/// `BLAST_LinkHsps` dispatcher and back.
+/// blast-rs: Bridge from the kappa `HspList` representation to the already-ported
+/// `BLAST_LinkHsps` dispatcher and back; not a direct NCBI C port.
 pub fn blast_link_hsps_for_kappa(
     hsp_list: &mut HspList,
     program_number: ProgramType,
@@ -20282,7 +20404,7 @@ pub fn blast_link_hsps_for_kappa(
     status
 }
 
-/// Count gap-opening operations in a `GapEditScript`.
+/// blast-rs: Count gap-opening operations in a `GapEditScript`; not a direct NCBI C port.
 ///
 /// NCBI's HSP initialization stores the number of gap runs, not the total
 /// number of gapped residues. Consecutive same-type gap ops are already merged
@@ -20305,7 +20427,7 @@ pub fn gap_edit_script_num_gap_opens(script: &crate::gapinfo::GapEditScript) -> 
         .count() as i32
 }
 
-/// Compact compatibility helper for call sites that already collapsed
+/// blast-rs: Compact compatibility helper for call sites that already collapsed
 /// `BlastScoreBlk`/`BlastQueryInfo` to a single Karlin block and search space.
 ///
 /// Unlike upstream `Blast_HSPListGetEvalues`, this also stamps bit scores
@@ -20329,7 +20451,7 @@ pub fn blast_hsp_list_get_evalues_simple(
     hsp_list.best_evalue = best_evalue;
 }
 
-/// Port of `Blast_HSPListGetEvalues` (`blast_hits.c:1811`).
+/// NCBI: Blast_HSPListGetEvalues (blast_hits.c:1811).
 ///
 /// This keeps the upstream-shaped inputs: program kind, query contexts,
 /// subject length, gapped-vs-ungapped Karlin arrays, RPS preliminary context
@@ -20402,7 +20524,11 @@ pub fn blast_hsp_list_get_evalues(
             hsp.score
         };
 
-        hsp.evalue = if let Some(gbp) = sbp.gbp.as_ref() {
+        hsp.evalue = if let Some(gbp) = sbp
+            .gbp
+            .as_ref()
+            .filter(|gbp| crate::stat::gumbel_blk_is_filled(gbp))
+        {
             let query_length = context_info.query_length;
             if is_rps {
                 crate::stat::spouge_evalue(score, &scaled_kbp, gbp, subject_length, query_length)
@@ -20423,7 +20549,8 @@ pub fn blast_hsp_list_get_evalues(
     0
 }
 
-/// 1-1 port of `s_AdjustEvaluesForComposition` (`blast_kappa.c:134`).
+/// NCBI: s_AdjustEvaluesForComposition (blast_kappa.c:134).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Combines a sequence-composition p-value with each HSP's
 /// alignment p-value via Fisher's method, then converts back to an
@@ -20471,7 +20598,8 @@ pub fn adjust_evalues_for_composition(
     hsp_list.best_evalue = best_evalue;
 }
 
-/// 1-1 port of `s_TestNearIdentical` (`blast_kappa.c:1258`).
+/// NCBI: s_TestNearIdentical (blast_kappa.c:1258).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Returns true iff the aligned query/subject ranges have ≥ 95 % identity
 /// after a fast bidirectional extension (right then left from the
@@ -20557,7 +20685,8 @@ pub fn test_near_identical(
     fraction_identical > K_MIN_FRACTION_NEAR_IDENTICAL
 }
 
-/// 1-1 port of `s_HSPListFromDistinctAlignments` (`blast_kappa.c:304`).
+/// NCBI: s_HSPListFromDistinctAlignments (blast_kappa.c:304).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Walks a singly-linked list of `BlastCompoAlignment` values
 /// (the output of the kappa redo-alignment driver), converts each to
@@ -20632,7 +20761,8 @@ pub fn hsp_list_from_distinct_alignments(
     (0, comp_tags)
 }
 
-/// 1-1 port of `s_NewAlignmentFromGapAlign` (`blast_kappa.c:1747`).
+/// NCBI: s_NewAlignmentFromGapAlign (blast_kappa.c:1747).
+/// naming: Public Rust helper omits the private `s_` prefix.
 ///
 /// Reads a finished gapped alignment (Rust's `TracebackResult` plays the
 /// role of NCBI's `BlastGapAlignStruct`), shifts its local coordinates
@@ -20676,7 +20806,7 @@ pub fn new_alignment_from_gap_align(
     ))
 }
 
-/// Port of `s_HitlistReapContained` (`blast_kappa.c:223`).
+/// NCBI: s_HitlistReapContained (blast_kappa.c:223).
 ///
 /// Removes any HSP that is fully contained within an earlier (higher-
 /// scoring) HSP on both query and subject coordinates and shares the
@@ -20732,7 +20862,9 @@ pub fn s_hitlist_reap_contained(hsps: &mut Vec<Hsp>) {
     });
 }
 
-/// Port of `s_CalcLambda` (`blast_kappa.c:551`). Newton-Raphson refinement
+/// NCBI: s_CalcLambda (blast_kappa.c:551).
+///
+/// Newton-Raphson refinement
 /// of `lambda` from a score-probability distribution. Takes the
 /// probabilities as a slice indexed `[0..score_max - score_min + 1]`.
 pub fn s_calc_lambda(probs: &[f64], min_score: i32, max_score: i32, lambda0: f64) -> f64 {

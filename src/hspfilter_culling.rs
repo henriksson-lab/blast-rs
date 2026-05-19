@@ -55,6 +55,7 @@ pub struct BlastHSPCullingData<'a> {
 
 impl<'a> BlastHSPCullingData<'a> {
     /// 1-1 port of `s_BlastHSPCullingNew` (`hspfilter_culling.c:666`).
+    /// naming: Rust keeps HSPCulling as the established `hspculling` token.
     /// Allocates the writer-data struct and snapshots the
     /// `num_contexts = query_info.last_context + 1` derived value.
     pub fn s_blast_hspculling_new(
@@ -71,6 +72,7 @@ impl<'a> BlastHSPCullingData<'a> {
     }
 
     /// 1-1 port of `s_BlastHSPCullingInit` (`hspfilter_culling.c:487`).
+    /// naming: Rust keeps HSPCulling as the established `hspculling` token.
     /// Allocates the per-context tree forest. Called before
     /// `cull_run` when the pipeline starts.
     pub fn s_blast_hspculling_init(&mut self) {
@@ -78,6 +80,7 @@ impl<'a> BlastHSPCullingData<'a> {
     }
 
     /// 1-1 port of `s_BlastHSPCullingRun` (`hspfilter_culling.c:602`).
+    /// naming: Rust keeps HSPCulling as the established `hspculling` token.
     ///
     /// Walks an `HspList` and inserts each HSP into the appropriate
     /// per-context culling tree via `s_save_hsp`. Handles blastn's
@@ -143,6 +146,7 @@ impl<'a> BlastHSPCullingData<'a> {
     }
 
     /// 1-1 port of `s_BlastHSPCullingFinal` (`hspfilter_culling.c:500`).
+    /// naming: Rust keeps HSPCulling as the established `hspculling` token.
     ///
     /// Rips every per-context tree into a flat list of HSPs, groups
     /// them by subject OID, and packages them into an `HspResults`
@@ -181,20 +185,22 @@ impl<'a> BlastHSPCullingData<'a> {
                 let mut found = false;
                 for list in hitlist.hsp_lists.iter_mut() {
                     if list.oid == sid {
-                        list.hsps.push(hsp.clone());
+                        let _ = crate::hspstream::blast_hsp_list_save_hsp(list, hsp.clone());
                         found = true;
                         break;
                     }
                 }
                 if !found {
                     let mut list = crate::hspstream::HspList::new(sid);
-                    list.hsps.push(hsp);
+                    let _ = crate::hspstream::blast_hsp_list_save_hsp(&mut list, hsp);
                     hitlist.hsp_lists.push(list);
                 }
             }
 
             // Sort each HspList and compute worst_evalue / low_score
             // for the hitlist (matching NCBI's tail of finalize).
+            hitlist.low_score = i32::MAX;
+            hitlist.worst_evalue = 0.0;
             for list in hitlist.hsp_lists.iter_mut() {
                 // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:~1300`) seeds
                 // with `(double)INT4_MAX` and takes MIN over all evalues.
@@ -208,6 +214,10 @@ impl<'a> BlastHSPCullingData<'a> {
                     .fold(i32::MAX as f64, f64::min);
                 list.best_evalue = best;
                 list.sort_by_score();
+                if let Some(head) = list.hsps.first() {
+                    hitlist.low_score = hitlist.low_score.min(head.score);
+                    hitlist.worst_evalue = hitlist.worst_evalue.max(list.best_evalue);
+                }
             }
         }
         results
@@ -215,6 +225,7 @@ impl<'a> BlastHSPCullingData<'a> {
 }
 
 /// 1-1 port of `s_BlastHSPCullingPipeRun` (`hspfilter_culling.c:699`).
+/// naming: Rust keeps the public pipe wrapper name already used by callers.
 ///
 /// Pipe-stage variant of the writer: re-runs the culling filter
 /// against an existing `HspResults`, updating it in place. NCBI:
@@ -247,8 +258,7 @@ pub fn blast_hsp_culling_pipe_run(
                 // falls back to `ScoreCompareHSPs` for ties — a raw
                 // `partial_cmp` would diverge for near-zero evalues and
                 // for any equal-evalue pair (no tie-break).
-                list.hsps
-                    .sort_by(crate::hspstream::evalue_compare_hsps);
+                list.hsps.sort_by(crate::hspstream::evalue_compare_hsps);
                 if let Some(head) = list.hsps.first() {
                     list.best_evalue = head.evalue;
                 }
@@ -282,6 +292,7 @@ pub fn blast_hsp_culling_pipe_run(
 }
 
 /// 1-1 port of `s_BlastHSPCullingPipeNew` (`hspfilter_culling.c:752`).
+/// naming: Rust keeps the public pipe constructor name already used by callers.
 ///
 /// In NCBI's C this returns a `BlastHSPPipe*` populated with vtable
 /// pointers (`RunFnPtr` = `s_BlastHSPCullingPipeRun`, `FreeFnPtr` =
@@ -297,6 +308,7 @@ pub fn blast_hsp_culling_pipe_new<'a>(
 }
 
 /// 1-1 port of `s_BlastHSPCullingFree` (`hspfilter_culling.c:683`).
+/// naming: Rust keeps HSPCulling as the established `hspculling` token.
 /// `Drop` handles recursive cleanup of the owned culling trees; this
 /// direct wrapper preserves the C boundary where the data pointer is
 /// nulled after release.
@@ -305,6 +317,7 @@ pub fn s_blast_hspculling_free(slot: &mut Option<BlastHSPCullingData<'_>>) {
 }
 
 /// 1-1 port of `s_BlastHSPCullingPipeFree` (`hspfilter_culling.c:736`).
+/// naming: Rust keeps the public pipe free-hook name already used by callers.
 /// `Drop` handles the actual deallocation; this hook is a parity
 /// marker for callers wanting to match NCBI's flow.
 pub fn blast_hsp_culling_pipe_free(slot: &mut Option<BlastHSPCullingData<'_>>) {
@@ -346,6 +359,7 @@ const K_BEST_HIT_SCORE_EDGE_MAX: f64 = 0.5;
 
 /// Rust ownership equivalent of `BlastHSPBestHitOptionsNew`
 /// (`blast_options.c:1816`).
+/// naming: Rust keeps HSPBestHit as the established `hspbest_hit` token.
 pub fn blast_hspbest_hit_options_new(overhang: f64, score_edge: f64) -> BlastHSPBestHitOptions {
     BlastHSPBestHitOptions {
         overhang,
@@ -355,6 +369,7 @@ pub fn blast_hspbest_hit_options_new(overhang: f64, score_edge: f64) -> BlastHSP
 
 /// Rust ownership equivalent of `BlastHSPBestHitOptionsFree`
 /// (`blast_options.c:1848`).
+/// naming: Rust keeps HSPBestHit as the established `hspbest_hit` token.
 pub fn blast_hspbest_hit_options_free(
     opt: &mut Option<BlastHSPBestHitOptions>,
 ) -> Option<BlastHSPBestHitOptions> {
@@ -364,12 +379,14 @@ pub fn blast_hspbest_hit_options_free(
 
 /// Rust ownership equivalent of `BlastHSPCullingOptionsNew`
 /// (`blast_options.c:1857`).
+/// naming: Rust keeps HSPCulling as the established `hspculling` token.
 pub fn blast_hspculling_options_new(max: i32) -> BlastHSPCullingOptions {
     BlastHSPCullingOptions { max_hits: max }
 }
 
 /// Rust ownership equivalent of `BlastHSPCullingOptionsFree`
 /// (`blast_options.c:1880`).
+/// naming: Rust keeps HSPCulling as the established `hspculling` token.
 pub fn blast_hspculling_options_free(
     culling_opts: &mut Option<BlastHSPCullingOptions>,
 ) -> Option<BlastHSPCullingOptions> {
@@ -379,6 +396,7 @@ pub fn blast_hspculling_options_free(
 
 /// Rust ownership equivalent of `BlastHSPFilteringOptionsNew`
 /// (`blast_options.c:1890`).
+/// naming: Rust keeps HSPFiltering as the established `hspfiltering` token.
 pub fn blast_hspfiltering_options_new() -> BlastHSPFilteringOptions {
     BlastHSPFilteringOptions {
         best_hit: None,
@@ -392,6 +410,7 @@ pub fn blast_hspfiltering_options_new() -> BlastHSPFilteringOptions {
 /// Rust ownership equivalent of `BlastHSPFilteringOptions_AddBestHit`
 /// (`blast_options.c:1897`). On success, ownership moves from `best_hit`
 /// into `filt_opts`, matching the C pointer-to-pointer transfer.
+/// naming: Rust keeps HSPFiltering as the established `hspfiltering` token.
 pub fn blast_hspfiltering_options_add_best_hit(
     filt_opts: Option<&mut BlastHSPFilteringOptions>,
     best_hit: &mut Option<BlastHSPBestHitOptions>,
@@ -412,6 +431,7 @@ pub fn blast_hspfiltering_options_add_best_hit(
 /// Rust ownership equivalent of `BlastHSPFilteringOptions_AddCulling`
 /// (`blast_options.c:1913`). On success, ownership moves from `culling`
 /// into `filt_opts`, matching the C pointer-to-pointer transfer.
+/// naming: Rust keeps HSPFiltering as the established `hspfiltering` token.
 pub fn blast_hspfiltering_options_add_culling(
     filt_opts: Option<&mut BlastHSPFilteringOptions>,
     culling: &mut Option<BlastHSPCullingOptions>,
@@ -433,9 +453,7 @@ pub fn blast_hspfiltering_options_add_culling(
 /// (`blast_options.c:1963`).
 pub fn blast_hsp_subject_best_hit_options_new(_is_protein: bool) -> BlastHSPSubjectBestHitOptions {
     // NCBI defaults: 3 for both protein and nucleotide programs.
-    BlastHSPSubjectBestHitOptions {
-        max_range_diff: 3,
-    }
+    BlastHSPSubjectBestHitOptions { max_range_diff: 3 }
 }
 
 /// Rust ownership equivalent of `BlastHSPSubjectBestHitOptionsFree`
@@ -449,6 +467,7 @@ pub fn blast_hsp_subject_best_hit_options_free(
 
 /// Rust ownership equivalent of `BlastHSPFilteringOptions_AddSubjectBestHit`
 /// (`blast_options.c:1998`).
+/// naming: Rust keeps HSPFiltering as the established `hspfiltering` token.
 pub fn blast_hspfiltering_options_add_subject_best_hit(
     filt_opts: Option<&mut BlastHSPFilteringOptions>,
     subject_besthit: &mut Option<BlastHSPSubjectBestHitOptions>,
@@ -464,10 +483,14 @@ pub fn blast_hspfiltering_options_add_subject_best_hit(
     0
 }
 
+/// blast-rs: Stage-bit helper for filtering option validation; not a direct
+/// NCBI C port.
 fn blast_stage_has_prelim(stage: crate::util::EBlastStage) -> bool {
     (stage as i32 & crate::util::EBlastStage::PrelimSearch as i32) != 0
 }
 
+/// NCBI: BlastHSPBestHitOptionsValidate (blast_options.c).
+/// naming: Rust keeps HSPBestHit as the established `hspbest_hit` token.
 pub fn blast_hspbest_hit_options_validate(opts: &BlastHSPFilteringOptions) -> i16 {
     let Some(best_hit) = opts.best_hit else {
         return 0;
@@ -485,6 +508,8 @@ pub fn blast_hspbest_hit_options_validate(opts: &BlastHSPFilteringOptions) -> i1
     0
 }
 
+/// NCBI: BlastHSPCullingOptionsValidate (blast_options.c).
+/// naming: Rust keeps HSPCulling as the established `hspculling` token.
 pub fn blast_hspculling_options_validate(opts: &BlastHSPFilteringOptions) -> i16 {
     let Some(culling_opts) = opts.culling_opts else {
         return 0;
@@ -496,6 +521,8 @@ pub fn blast_hspculling_options_validate(opts: &BlastHSPFilteringOptions) -> i16
     0
 }
 
+/// NCBI: BlastHSPFilteringOptionsValidate (blast_options.c).
+/// naming: Rust keeps HSPFiltering as the established `hspfiltering` token.
 pub fn blast_hspfiltering_options_validate(opts: &BlastHSPFilteringOptions) -> i16 {
     let status = blast_hspbest_hit_options_validate(opts);
     if status != 0 {
@@ -515,6 +542,7 @@ pub fn blast_hspfiltering_options_validate(opts: &BlastHSPFilteringOptions) -> i
 
 /// Rust ownership equivalent of `BlastHSPFilteringOptionsFree`
 /// (`blast_options.c:1952`).
+/// naming: Rust keeps HSPFiltering as the established `hspfiltering` token.
 pub fn blast_hspfiltering_options_free(
     opts: &mut Option<BlastHSPFilteringOptions>,
 ) -> Option<BlastHSPFilteringOptions> {
@@ -592,6 +620,7 @@ pub struct BlastHSPWriterInfo {
     pub params: BlastHSPCullingParams,
 }
 
+/// NCBI: BlastHSPCullingInfoNew (hspfilter_culling.c).
 pub fn blast_hsp_culling_info_new(params: BlastHSPCullingParams) -> BlastHSPWriterInfo {
     BlastHSPWriterInfo { params }
 }
@@ -677,6 +706,7 @@ pub fn blast_hsp_best_hit_pipe_info_new(params: BlastHSPBestHitParams) -> BlastH
     BlastHSPBestHitPipeInfo { params, next: None }
 }
 
+/// blast-rs: Best-hit query-span adapter; not a direct NCBI C port.
 fn best_hit_query_begin_len(
     hsp: &Hsp,
     query_info: &crate::queryinfo::QueryInfo,
@@ -711,6 +741,7 @@ fn best_hit_query_begin_len(
     Some((qid, begin, len))
 }
 
+/// NCBI: s_BlastHSPBestHitInit (hspfilter_besthit.c).
 fn s_blast_hsp_best_hit_init(
     data: &mut BlastHSPBestHitData<'_>,
     results: &crate::hspstream::HspResults,
@@ -722,6 +753,7 @@ fn s_blast_hsp_best_hit_init(
     0
 }
 
+/// NCBI: s_ExportToHitlist (hspfilter_besthit.c).
 fn s_export_to_hitlist(
     qid: usize,
     data: &mut BlastHSPBestHitData<'_>,
@@ -739,11 +771,11 @@ fn s_export_to_hitlist(
             .iter_mut()
             .find(|list| list.oid == node.sid)
         {
-            list.hsps.push(node.hsp);
+            let _ = crate::hspstream::blast_hsp_list_save_hsp(list, node.hsp);
         } else {
             let mut list = crate::hspstream::blast_hsp_list_new(data.params.hsp_num_max);
             list.oid = node.sid;
-            list.hsps.push(node.hsp);
+            let _ = crate::hspstream::blast_hsp_list_save_hsp(&mut list, node.hsp);
             tmp_hit_list.hsp_lists.push(list);
         }
     }
@@ -754,6 +786,7 @@ fn s_export_to_hitlist(
     0
 }
 
+/// NCBI: s_ImportFromHitlist (hspfilter_besthit.c).
 fn s_import_from_hitlist(
     qid: usize,
     data: &mut BlastHSPBestHitData<'_>,
@@ -790,6 +823,8 @@ fn s_import_from_hitlist(
     0
 }
 
+/// blast-rs: Best-hit insertion helper over owned Rust HSP nodes; not a direct
+/// NCBI C port.
 fn best_hit_insert(
     data: &mut BlastHSPBestHitData<'_>,
     sid: i32,
@@ -814,10 +849,14 @@ fn best_hit_insert(
     let den_a = score_a as f64 / len_a as f64 / param_s;
 
     let list = &mut data.best_list[qid];
-    for node in list
-        .iter()
-        .filter(|node| node.end >= end && node.begin <= begin)
-    {
+    for node in list.iter().filter(|node| {
+        node.end >= end
+            && if rps {
+                node.begin < begin
+            } else {
+                node.begin <= begin
+            }
+    }) {
         let score_b = node.hsp.score;
         if node.end >= end
             && node.hsp.evalue <= evalue_a
@@ -1066,6 +1105,7 @@ pub struct BlastHSPCollectorInfo {
 }
 
 /// Port of NCBI `s_BlastHSPCollectorFinal` (`hspfilter_collector.c:68`).
+/// naming: Rust keeps HSPCollector as the established `hspcollector` token.
 pub fn s_blast_hspcollector_final(
     _data: &mut BlastHSPCollectorData,
     results: &mut crate::hspstream::HspResults,
@@ -1074,6 +1114,7 @@ pub fn s_blast_hspcollector_final(
 }
 
 /// Port of NCBI `s_BlastHSPCollectorRun` (`hspfilter_collector.c:82`).
+/// naming: Rust keeps HSPCollector as the established `hspcollector` token.
 pub fn s_blast_hspcollector_run(
     data: &mut BlastHSPCollectorData,
     results: &mut crate::hspstream::HspResults,
@@ -1103,13 +1144,14 @@ pub fn s_blast_hspcollector_run(
                 list.oid = hsp_list.oid;
                 list
             });
-            split_list.hsps.push(hsp);
+            let _ = crate::hspstream::blast_hsp_list_save_hsp(split_list, hsp);
         }
 
         for (query_index, split_list) in split_lists.into_iter().enumerate() {
-            let Some(split_list) = split_list else {
+            let Some(mut split_list) = split_list else {
                 continue;
             };
+            let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(&mut split_list));
             let hitlist = results.hitlists[query_index].get_or_insert_with(|| {
                 crate::hspstream::blast_hit_list_new(data.params.prelim_hitlist_size)
             });
@@ -1127,6 +1169,7 @@ pub fn s_blast_hspcollector_run(
 }
 
 /// Port of NCBI `s_BlastHSPCollectorRun_RPS` (`hspfilter_collector.c:204`).
+/// naming: Rust keeps HSPCollector/RPS as established snake_case tokens.
 pub fn s_blast_hspcollector_run_rps(
     data: &mut BlastHSPCollectorData,
     results: &mut crate::hspstream::HspResults,
@@ -1158,7 +1201,7 @@ pub fn s_blast_hspcollector_run_rps(
         while index < hsp_list.hsps.len() && hsp_list.hsps[index].context == oid {
             let mut hsp = hsp_list.hsps[index].clone();
             hsp.context = 0;
-            split_list.hsps.push(hsp);
+            let _ = crate::hspstream::blast_hsp_list_save_hsp(&mut split_list, hsp);
             index += 1;
         }
         split_list
@@ -1171,6 +1214,7 @@ pub fn s_blast_hspcollector_run_rps(
 }
 
 /// Rust ownership equivalent of `s_BlastHSPCollectorFree`.
+/// naming: Rust keeps HSPCollector as the established `hspcollector` token.
 pub fn s_blast_hspcollector_free(
     _: Option<BlastHSPCollectorWriter>,
 ) -> Option<BlastHSPCollectorWriter> {
@@ -1178,6 +1222,7 @@ pub fn s_blast_hspcollector_free(
 }
 
 /// Port of NCBI `s_BlastHSPCollectorNew` (`hspfilter_collector.c:295`).
+/// naming: Rust keeps HSPCollector as the established `hspcollector` token.
 pub fn s_blast_hspcollector_new(params: BlastHSPCollectorParams) -> BlastHSPCollectorWriter {
     let rps_run = crate::program::blast_program_is_rps_blast(params.program);
     BlastHSPCollectorWriter {
@@ -1203,6 +1248,7 @@ pub struct BlastHSPPipeInfo {
     pub next: Option<Box<BlastHSPPipeInfo>>,
 }
 
+/// NCBI: BlastHSPCullingPipeInfoNew (hspfilter_culling.c).
 pub fn blast_hsp_culling_pipe_info_new(params: BlastHSPCullingParams) -> BlastHSPPipeInfo {
     BlastHSPPipeInfo { params, next: None }
 }
@@ -1249,6 +1295,7 @@ pub struct LinkedHsp {
 impl LinkedHsp {
     /// 1-1 port of `s_HSPCopy` (`hspfilter_culling.c:65`). Produces a
     /// detached copy (next pointer cleared in callers' usage).
+    /// naming: Rust exposes this as an associated copy method on `LinkedHsp`.
     pub fn s_hsp_copy(&self) -> LinkedHsp {
         LinkedHsp {
             hsp: self.hsp.clone(),
@@ -1263,6 +1310,8 @@ impl LinkedHsp {
 }
 
 /// 1-1 port boundary for `s_HSPCopy` (`hspfilter_culling.c:65`).
+/// NCBI: s_HSPCopy (hspfilter_culling.c:65).
+/// naming: Rust keeps HSP as a separate snake_case token.
 pub fn s_hsp_copy(hsp: &LinkedHsp) -> LinkedHsp {
     hsp.s_hsp_copy()
 }
@@ -1340,6 +1389,7 @@ pub fn s_full_pass(list: &Option<Box<LinkedHsp>>, y: &mut LinkedHsp) -> bool {
 
 /// 1-1 port of `s_AddHSPtoList` (`hspfilter_culling.c:193`). Pushes
 /// `y` onto the head of `list`.
+/// naming: Rust keeps HSP as a separate snake_case token.
 pub fn s_add_hsp_to_list(list: &mut Option<Box<LinkedHsp>>, mut y: Box<LinkedHsp>) {
     y.next = list.take();
     *list = Some(y);
@@ -1355,6 +1405,8 @@ pub fn s_add_hsp_to_list(list: &mut Option<Box<LinkedHsp>>, mut y: Box<LinkedHsp
 /// compare by `(begin, end, score, subject_id)` since two adjacent
 /// references can't safely share an identity in safe code.
 pub fn s_process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32 {
+    /// blast-rs: Local identity predicate replacing C pointer equality; not a
+    /// direct NCBI C port.
     fn matches_y(node: &LinkedHsp, y: &LinkedHsp) -> bool {
         node.begin == y.begin
             && node.end == y.end
@@ -1442,6 +1494,8 @@ pub struct CTreeNode {
 }
 
 /// Rust allocation equivalent of `s_GetNode` (`hspfilter_culling.c:210`).
+/// blast-rs: Rust allocation helper mirroring the C node pool boundary; not a
+/// direct NCBI C port.
 pub fn s_get_node() -> Box<CTreeNode> {
     Box::new(CTreeNode::default())
 }
@@ -1453,6 +1507,7 @@ pub fn s_ret_node(_: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>> {
 
 impl CTreeNode {
     /// 1-1 port of `s_ForkChildren` (`hspfilter_culling.c:258`).
+    /// naming: Rust exposes this as an associated method on `CTreeNode`.
     ///
     /// Walks the node's HSP list. Each element whose query span lies
     /// strictly to the left of the midpoint is moved into a freshly
@@ -1465,6 +1520,7 @@ impl CTreeNode {
     }
 
     /// 1-1 port of `s_CTreeNodeNew` (`hspfilter_culling.c:228`).
+    /// naming: Rust exposes this as an associated constructor on `CTreeNode`.
     /// Allocates a new node; if `parent` is `None`, the interval stays
     /// uninitialized (caller fills `begin`/`end` for the root). When a
     /// parent is supplied, the child's interval is `[parent.begin,
@@ -1490,11 +1546,15 @@ impl CTreeNode {
 }
 
 /// 1-1 port boundary for `s_CTreeNodeNew` (`hspfilter_culling.c:228`).
+/// NCBI: s_CTreeNodeNew (hspfilter_culling.c:228).
+/// naming: Rust keeps CTree as the established `ctree` token.
 pub fn s_ctree_node_new(parent: Option<&CTreeNode>, dir: CTreeChild) -> Box<CTreeNode> {
     CTreeNode::s_ctree_node_new(parent, dir)
 }
 
 /// 1-1 port boundary for `s_ForkChildren` (`hspfilter_culling.c:258`).
+/// NCBI: s_ForkChildren (hspfilter_culling.c:258).
+/// naming: Rust keeps the free helper name used by existing callers.
 pub fn s_fork_children(node: &mut CTreeNode) {
     debug_assert!(node.left.is_none());
     debug_assert!(node.right.is_none());
@@ -1509,6 +1569,7 @@ pub fn s_fork_children(node: &mut CTreeNode) {
     let mut left_list: Option<Box<LinkedHsp>> = None;
     let mut right_list: Option<Box<LinkedHsp>> = None;
 
+    /// blast-rs: Local linked-list append helper; not a direct NCBI C port.
     fn append_tail(list: &mut Option<Box<LinkedHsp>>, mut node: Box<LinkedHsp>) {
         node.next = None;
         match list.as_mut() {
@@ -1558,6 +1619,7 @@ pub fn s_fork_children(node: &mut CTreeNode) {
 }
 
 /// Rust ownership equivalent of `s_CTreeNodeFree` (`hspfilter_culling.c:250`).
+/// naming: Rust keeps CTree as the established `ctree` token.
 pub fn s_ctree_node_free(node: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>> {
     if let Some(node) = node.as_ref() {
         debug_assert!(node.left.is_none());
@@ -1568,6 +1630,7 @@ pub fn s_ctree_node_free(node: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>>
 }
 
 /// Disabled NCBI debug hook (`s_Debug`, `hspfilter_culling.c:302`).
+/// blast-rs: Disabled debug traversal hook; not a direct NCBI C port.
 pub fn s_debug(node: Option<&CTreeNode>) {
     let Some(node) = node else {
         return;
@@ -1584,6 +1647,7 @@ pub fn s_debug(node: Option<&CTreeNode>) {
 }
 
 /// 1-1 port of `s_MarkDownCTree` (`hspfilter_culling.c:319`).
+/// naming: Rust keeps CTree as the established `ctree` token.
 ///
 /// Recursively walks the tree, decrementing every HSP's `merit` and
 /// removing nodes whose lists are emptied AND that have no children.
@@ -1599,6 +1663,7 @@ pub fn s_mark_down_ctree(slot: &mut Option<Box<CTreeNode>>) {
 }
 
 /// 1-1 port of `s_ProcessCTree` (`hspfilter_culling.c:334`).
+/// naming: Rust keeps CTree as the established `ctree` token.
 ///
 /// Walks the tree to update merit in response to a newly-added
 /// dominator `x`. If `x` covers the full range of a subtree, every
@@ -1641,6 +1706,7 @@ pub fn s_process_ctree(slot: &mut Option<Box<CTreeNode>>, x: &LinkedHsp) {
 
 /// 1-1 port of `s_CTreeNew` (`hspfilter_culling.c:376`). Root over
 /// `[0, qlen)`.
+/// naming: Rust keeps CTree as the established `ctree` token.
 pub fn s_ctree_new(qlen: i32) -> Box<CTreeNode> {
     let mut tree = s_ctree_node_new(None, CTreeChild::Left);
     tree.begin = 0;
@@ -1649,6 +1715,7 @@ pub fn s_ctree_new(qlen: i32) -> Box<CTreeNode> {
 }
 
 /// Rust ownership equivalent of `s_CTreeFree` (`hspfilter_culling.c:384`).
+/// naming: Rust keeps CTree as the established `ctree` token.
 pub fn s_ctree_free(tree: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>> {
     let Some(mut tree) = tree else { return None };
     debug_assert!(tree.hsp_list.is_none());
@@ -1658,6 +1725,7 @@ pub fn s_ctree_free(tree: Option<Box<CTreeNode>>) -> Option<Box<CTreeNode>> {
 }
 
 /// 1-1 port of `s_RipHSPOffCTree` (`hspfilter_culling.c:396`).
+/// naming: Rust keeps HSP and CTree as readable snake_case tokens.
 ///
 /// Recursively rips every HSP off the tree (rooted at `slot`) into a
 /// single linked list. NCBI assumes the caller owns the tree; the
@@ -1669,6 +1737,7 @@ pub fn s_rip_hsp_off_ctree(slot: Option<Box<CTreeNode>>) -> Option<Box<LinkedHsp
     let left_list = s_rip_hsp_off_ctree(node.left.take());
     let right_list = s_rip_hsp_off_ctree(node.right.take());
 
+    /// blast-rs: Local linked-list append helper; not a direct NCBI C port.
     fn append_tail(list: &mut Option<Box<LinkedHsp>>, tail: Option<Box<LinkedHsp>>) {
         if list.is_none() {
             *list = tail;
@@ -1700,6 +1769,8 @@ pub fn s_save_hsp(tree: &mut CTreeNode, a: &mut LinkedHsp) -> bool {
     // we recreate that with raw pointer-chasing inside a loop. Rust
     // doesn't make this clean across owned children, so we recurse
     // using a path-collecting helper.
+    /// blast-rs: Recursive descent helper for Rust-owned culling trees; not a
+    /// direct NCBI C port.
     fn descend<'a>(node: &'a mut CTreeNode, a: &mut LinkedHsp) -> Option<&'a mut CTreeNode> {
         debug_assert!(node.begin <= a.begin);
         debug_assert!(node.end >= a.end);
@@ -2081,6 +2152,8 @@ mod tests {
         assert_eq!(hl.hsp_lists[0].oid, 42);
         // Both HSPs should have survived (no domination).
         assert_eq!(hl.hsp_lists[0].hsps.len(), 2);
+        assert_eq!(hl.low_score, 100);
+        assert_eq!(hl.worst_evalue, 1e-10);
     }
 
     #[test]
@@ -2350,6 +2423,58 @@ mod tests {
     }
 
     #[test]
+    fn blast_hsp_best_hit_rps_keeps_equal_begin_candidate() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 0,
+        };
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 20,
+            hsp_num_max: 10,
+            program_number: crate::program::RPS_BLAST,
+            ..crate::options::HitSavingOptions::default()
+        };
+        let opts = BlastHSPBestHitOptions {
+            overhang: 0.1,
+            score_edge: 0.1,
+        };
+        let params = blast_hsp_best_hit_params_new(&hit, &opts, 0, true);
+        let mut data = s_blast_hsp_best_hit_pipe_new(params, &qi);
+        let mut results = crate::hspstream::HspResults::new(1);
+        let _ = s_blast_hsp_best_hit_init(&mut data, &results);
+
+        let mut hsp_list = crate::hspstream::HspList::new(0);
+        hsp_list.add_hsp(hsp(100, 7, 10, 2));
+        hsp_list.add_hsp(hsp(80, 7, 9, 2));
+        assert_eq!(
+            s_blast_hsp_best_hit_run_rps(&mut data, 0, Some(hsp_list)),
+            0
+        );
+        assert_eq!(s_blast_hsp_best_hit_final(&mut data, &mut results), 0);
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists[0].hsps.len(), 2);
+        assert_eq!(
+            hitlist.hsp_lists[0]
+                .hsps
+                .iter()
+                .map(|hsp| hsp.score)
+                .collect::<Vec<_>>(),
+            vec![100, 80]
+        );
+    }
+
+    #[test]
     fn translated_hsp_filtering_options_lifecycle_and_transfers() {
         let mut filter = blast_hspfiltering_options_new();
         assert!(filter.best_hit.is_none());
@@ -2525,6 +2650,33 @@ mod tests {
     }
 
     #[test]
+    fn blast_hsp_collector_split_path_respects_hsp_cap() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 10,
+            ..Default::default()
+        };
+        let params = blast_hsp_collector_params_new(&hit, crate::program::BLASTP, 0, true, 1);
+        let mut data = BlastHSPCollectorData { params };
+        let mut results = crate::hspstream::HspResults::new(2);
+        let mut input = crate::hspstream::blast_hsp_list_new(10);
+        input.oid = 42;
+        input.hsps.push(hsp(20, 0, 0, 0));
+        input.hsps.push(hsp(90, 0, 20, 20));
+        input.hsps.push(hsp(70, 1, 0, 0));
+
+        assert_eq!(
+            s_blast_hspcollector_run(&mut data, &mut results, Some(input)),
+            0
+        );
+        let q0 = &results.hitlists[0].as_ref().unwrap().hsp_lists[0];
+        assert_eq!(q0.hsps.len(), 1);
+        assert_eq!(q0.hsps[0].score, 90);
+        let q1 = &results.hitlists[1].as_ref().unwrap().hsp_lists[0];
+        assert_eq!(q1.hsps.len(), 1);
+        assert_eq!(q1.hsps[0].score, 70);
+    }
+
+    #[test]
     fn blast_hsp_collector_run_respects_prelim_hitlist_cap() {
         let hit = crate::options::HitSavingOptions {
             hitlist_size: 1,
@@ -2612,6 +2764,29 @@ mod tests {
         assert_eq!(hitlist.hsp_lists[0].hsps[0].context, 0);
         assert_eq!(hitlist.hsp_lists[1].oid, 9);
         assert_eq!(hitlist.hsp_lists[1].hsps[0].score, 70);
+    }
+
+    #[test]
+    fn blast_hsp_collector_rps_path_respects_hsp_cap() {
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 10,
+            ..Default::default()
+        };
+        let params = blast_hsp_collector_params_new(&hit, crate::program::RPS_BLAST, 0, true, 1);
+        let mut writer = s_blast_hspcollector_new(params);
+        let mut results = crate::hspstream::HspResults::new(1);
+        let mut input = crate::hspstream::blast_hsp_list_new(10);
+        input.hsps.push(hsp(50, 9, 0, 30));
+        input.hsps.push(hsp(80, 9, 0, 10));
+
+        assert_eq!(
+            s_blast_hspcollector_run_rps(&mut writer.data, &mut results, 0, input),
+            0
+        );
+        let hitlist = results.hitlists[0].as_ref().unwrap();
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 80);
     }
 
     #[test]

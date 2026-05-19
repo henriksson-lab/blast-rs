@@ -24,6 +24,7 @@ pub struct BlastScoreMatrix {
 }
 
 impl BlastScoreMatrix {
+    /// blast-rs: Owned score-matrix constructor; not a direct NCBI C port.
     pub fn new(nrows: usize, ncols: usize) -> Self {
         Self {
             nrows,
@@ -109,7 +110,9 @@ pub fn blast_score_blk_new(alphabet: i32, number_of_contexts: i32) -> Option<Bla
         kbp_gap_std: vec![KarlinBlk::default(); context_count],
         kbp_gap_psi: vec![KarlinBlk::default(); context_count],
         kbp_ideal: None,
-        gbp: None,
+        gbp: std::env::var_os("OLD_FSC")
+            .is_none()
+            .then(s_blast_gumbel_blk_new),
         ambiguous_res: Vec::new(),
         matrix_only_scoring: false,
         round_down: false,
@@ -245,7 +248,7 @@ pub fn blast_res_freq_std_comp(sbp: Option<&BlastScoreBlk>, rfp: Option<&mut Bla
     blast_res_freq_normalize(Some(sbp), Some(rfp), 1.0)
 }
 
-/// Port of NCBI `BlastResCompNew` (`blast_stat.c:1952`).
+/// NCBI: BlastResCompNew (blast_stat.c:1952).
 pub fn blast_res_comp_new(sbp: Option<&BlastScoreBlk>) -> Option<BlastResComp> {
     let sbp = sbp?;
     Some(BlastResComp {
@@ -254,6 +257,7 @@ pub fn blast_res_comp_new(sbp: Option<&BlastScoreBlk>) -> Option<BlastResComp> {
     })
 }
 
+/// NCBI: BlastResCompDestruct (blast_stat.c:1967).
 pub fn blast_res_comp_destruct(rcp: &mut Option<BlastResComp>) -> Option<BlastResComp> {
     if let Some(rcp) = rcp.as_mut() {
         rcp.comp.clear();
@@ -262,7 +266,7 @@ pub fn blast_res_comp_destruct(rcp: &mut Option<BlastResComp>) -> Option<BlastRe
     None
 }
 
-/// Port of NCBI `BlastResCompStr` (`blast_stat.c:1984`).
+/// NCBI: BlastResCompStr (blast_stat.c:1984).
 pub fn blast_res_comp_str(
     sbp: Option<&BlastScoreBlk>,
     rcp: Option<&mut BlastResComp>,
@@ -344,7 +348,8 @@ pub fn blast_res_freq_string(
     blast_res_freq_res_comp(Some(sbp_ref), rfp, Some(&rcp))
 }
 
-/// Port-shaped deep copy for NCBI static `s_BlastScoreBlk_Copy`.
+/// blast-rs: Owned deep-copy helper corresponding to `s_BlastScoreBlk_Copy`;
+/// not a direct NCBI C port in this source snapshot.
 pub fn s_blast_score_blk_copy(src: &BlastScoreBlk) -> BlastScoreBlk {
     let mut matrix = BlastScoreMatrix::new(src.matrix.nrows, src.matrix.ncols);
     for (dst, src_row) in matrix.data.iter_mut().zip(src.matrix.data.iter()) {
@@ -431,9 +436,10 @@ pub fn blast_score_blk_nucl_matrix_create(sbp: &mut BlastScoreBlk) -> i16 {
             sbp.matrix.data[index2][index1] = score;
         }
     }
-    sbp.matrix.data[crate::encoding::BLASTNA_SIZE - 1].fill(BLAST_SCORE_MIN);
+    let strand_sentinel_score = i32::MIN / 2;
+    sbp.matrix.data[crate::encoding::BLASTNA_SIZE - 1].fill(strand_sentinel_score);
     for index in 0..crate::encoding::BLASTNA_SIZE {
-        sbp.matrix.data[index][crate::encoding::BLASTNA_SIZE - 1] = BLAST_SCORE_MIN;
+        sbp.matrix.data[index][crate::encoding::BLASTNA_SIZE - 1] = strand_sentinel_score;
     }
     blast_score_blk_max_score_set(sbp)
 }
@@ -515,7 +521,7 @@ pub fn blast_score_blk_protein_matrix_read(sbp: &mut BlastScoreBlk, matrix_name:
     blast_score_blk_max_score_set(sbp)
 }
 
-/// Port of NCBI static `BlastScoreBlkProteinMatrixLoad` (`blast_stat.c:1539`).
+/// NCBI: BlastScoreBlkProteinMatrixLoad (blast_stat.c:1539).
 pub fn blast_score_blk_protein_matrix_load(sbp: &mut BlastScoreBlk) -> i16 {
     let matrix_name = sbp.name.as_deref().unwrap_or("BLOSUM62");
     let source = if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
@@ -583,15 +589,14 @@ pub fn blast_score_blk_protein_matrix_load(sbp: &mut BlastScoreBlk) -> i16 {
     blast_score_blk_max_score_set(sbp)
 }
 
-/// Port of NCBI `Blast_ScoreBlkMatrixFill` (`blast_stat.c:1599`).
+/// NCBI: Blast_ScoreBlkMatrixFill (blast_stat.c:1599).
 pub fn blast_score_blk_matrix_fill(sbp: &mut BlastScoreBlk) -> i16 {
     let status = if sbp.alphabet_code == crate::encoding::BLASTNA_SEQ_CODE
         || sbp.alphabet_code == crate::encoding::NCBI4NA_SEQ_CODE
     {
         blast_score_blk_nucl_matrix_create(sbp)
     } else {
-        let matrix_name = sbp.name.as_deref().unwrap_or("BLOSUM62").to_string();
-        blast_score_blk_protein_matrix_read(sbp, &matrix_name)
+        blast_score_blk_protein_matrix_load(sbp)
     };
     if status != 0 {
         return status;
@@ -599,13 +604,34 @@ pub fn blast_score_blk_matrix_fill(sbp: &mut BlastScoreBlk) -> i16 {
     blast_score_blk_max_score_set(sbp)
 }
 
-/// Port of NCBI `Blast_ScoreBlkKbpIdealCalc` (`blast_stat.c:2832`).
+/// NCBI: Blast_ScoreBlkKbpIdealCalc (blast_stat.c:2832).
 pub fn blast_score_blk_kbp_ideal_calc(sbp: Option<&mut BlastScoreBlk>) -> i16 {
     let Some(sbp) = sbp else {
         return 1;
     };
-    let matrix_name = sbp.name.as_deref().unwrap_or("BLOSUM62");
-    sbp.kbp_ideal = Some(protein_ideal_ungapped_kbp_for_matrix(matrix_name));
+    if !sbp.protein_alphabet && sbp.loscore >= sbp.hiscore {
+        let status = blast_score_blk_nucl_matrix_create(sbp);
+        if status != 0 {
+            return status;
+        }
+    }
+    let Some(mut stdrfp) = blast_res_freq_new(Some(sbp)) else {
+        return 1;
+    };
+    if blast_res_freq_std_comp(Some(sbp), Some(&mut stdrfp)) != 0 {
+        return 1;
+    }
+    let Some(mut sfp) = blast_score_freq_new(sbp.loscore, sbp.hiscore) else {
+        return 1;
+    };
+    if blast_score_freq_calc(Some(sbp), Some(&mut sfp), Some(&stdrfp), Some(&stdrfp)) != 0 {
+        return 1;
+    }
+    let mut ideal = blast_karlin_blk_new();
+    if blast_karlin_blk_ungapped_calc(Some(&mut ideal), Some(&sfp)) != 0 {
+        return 1;
+    }
+    sbp.kbp_ideal = Some(ideal);
     0
 }
 
@@ -657,12 +683,14 @@ pub fn blast_score_blk_max_score_set(sbp: &mut BlastScoreBlk) -> i16 {
     0
 }
 
-/// Port of NCBI static `s_BlastKarlinBlkIsValid`.
+/// blast-rs: Karlin-block validity helper matching the C predicate shape; not
+/// a direct NCBI C port in this source snapshot.
 pub fn s_blast_karlin_blk_is_valid(kbp: Option<&KarlinBlk>) -> bool {
     kbp.is_some_and(KarlinBlk::is_valid)
 }
 
-/// Port-shaped lookup for NCBI static `s_BlastFindValidKarlinBlk`.
+/// blast-rs: Shared lookup implementation for valid Karlin blocks; not a
+/// direct NCBI C port.
 pub fn s_blast_find_valid_karlin_blk<'a>(
     kbp_in: &'a [KarlinBlk],
     query_info: &crate::queryinfo::QueryInfo,
@@ -680,8 +708,8 @@ pub fn s_blast_find_valid_karlin_blk<'a>(
     Err(crate::diagnostics::BLASTERR_NOVALIDKARLINALTSCHUL)
 }
 
-/// Port of NCBI static `s_BlastFindValidKarlinBlk`
-/// (`blast_parameters.c:62`) with pointer-shaped output.
+/// NCBI: s_BlastFindValidKarlinBlk (blast_parameters.c:62).
+/// naming: `_c` suffix marks the pointer-shaped compatibility wrapper.
 pub fn s_blast_find_valid_karlin_blk_c<'a>(
     kbp_in: &'a [KarlinBlk],
     query_info: Option<&crate::queryinfo::QueryInfo>,
@@ -702,7 +730,8 @@ pub fn s_blast_find_valid_karlin_blk_c<'a>(
     }
 }
 
-/// Port-shaped lookup for NCBI static `s_BlastFindSmallestLambda`.
+/// blast-rs: Shared lookup implementation for smallest valid lambda; not a
+/// direct NCBI C port.
 pub fn s_blast_find_smallest_lambda<'a>(
     kbp_in: &'a [KarlinBlk],
     query_info: &crate::queryinfo::QueryInfo,
@@ -718,8 +747,8 @@ pub fn s_blast_find_smallest_lambda<'a>(
         .map(|kbp| (kbp.lambda, kbp))
 }
 
-/// Port of NCBI static `s_BlastFindSmallestLambda`
-/// (`blast_parameters.c:92`) with optional pointer-shaped output.
+/// NCBI: s_BlastFindSmallestLambda (blast_parameters.c:92).
+/// naming: `_c` suffix marks the pointer-shaped compatibility wrapper.
 pub fn s_blast_find_smallest_lambda_c<'a>(
     kbp_in: &'a [KarlinBlk],
     query_info: Option<&crate::queryinfo::QueryInfo>,
@@ -738,13 +767,13 @@ pub fn s_blast_find_smallest_lambda_c<'a>(
     result.map(|(lambda, _)| lambda).unwrap_or(i32::MAX as f64)
 }
 
-/// Port of NCBI static `s_BlastGumbelBlkFree`.
+/// NCBI: s_BlastGumbelBlkFree (blast_stat.c:846).
 pub fn s_blast_gumbel_blk_free(gbp: &mut Option<GumbelBlk>) -> Option<GumbelBlk> {
     *gbp = None;
     None
 }
 
-/// Port of NCBI static `s_BlastGumbelBlkNew`.
+/// NCBI: s_BlastGumbelBlkNew (blast_stat.c:838).
 pub fn s_blast_gumbel_blk_new() -> GumbelBlk {
     GumbelBlk {
         lambda: 0.0,
@@ -758,13 +787,18 @@ pub fn s_blast_gumbel_blk_new() -> GumbelBlk {
     }
 }
 
-/// Port of NCBI `Blast_KarlinBlkFree`.
+/// blast-rs: Local equivalent of NCBI's `gbp->filled` flag; not a direct NCBI C port.
+pub fn gumbel_blk_is_filled(gbp: &GumbelBlk) -> bool {
+    gbp.lambda.is_finite() && gbp.lambda > 0.0
+}
+
+/// NCBI: Blast_KarlinBlkFree (blast_stat.c:956).
 pub fn blast_karlin_blk_free(kbp: &mut Option<KarlinBlk>) -> Option<KarlinBlk> {
     *kbp = None;
     None
 }
 
-/// Port of NCBI `BLAST_ScoreSetAmbigRes`.
+/// NCBI: BLAST_ScoreSetAmbigRes (blast_stat.c:1012).
 pub fn blast_score_set_ambig_res(sbp: Option<&mut BlastScoreBlk>, ambiguous_res: u8) -> i16 {
     let Some(sbp) = sbp else {
         return crate::util::BLASTERR_INVALIDPARAM;
@@ -787,7 +821,8 @@ pub fn blast_score_set_ambig_res(sbp: Option<&mut BlastScoreBlk>, ambiguous_res:
     0
 }
 
-/// Apply NCBI's `score &= ~1` even-rounding when `round_down` is set.
+/// blast-rs: Shared round-down helper for Karlin score conversion; not a
+/// direct NCBI C port.
 #[inline]
 fn round_down_score(score: i32, round_down: bool) -> i32 {
     if round_down {
@@ -798,6 +833,7 @@ fn round_down_score(score: i32, round_down: bool) -> i32 {
 }
 
 impl KarlinBlk {
+    /// blast-rs: Karlin-block validity method; not a direct NCBI C port.
     pub fn is_valid(&self) -> bool {
         self.lambda > 0.0 && self.k > 0.0 && self.h > 0.0
     }
@@ -850,7 +886,7 @@ impl KarlinBlk {
     }
 }
 
-/// Port of NCBI `BLAST_KarlinStoE_simple` (`blast_stat.c:4157`).
+/// NCBI: BLAST_KarlinStoE_simple (blast_stat.c:4157).
 pub fn blast_karlin_sto_e_simple(score: i32, kbp: Option<&KarlinBlk>, searchsp: i64) -> f64 {
     let Some(kbp) = kbp else {
         return -1.0;
@@ -861,7 +897,7 @@ pub fn blast_karlin_sto_e_simple(score: i32, kbp: Option<&KarlinBlk>, searchsp: 
     searchsp as f64 * (-kbp.lambda * score as f64 + kbp.log_k).exp()
 }
 
-/// Port of NCBI static `BlastKarlinEtoS_simple` (`blast_stat.c:4040`).
+/// NCBI: BlastKarlinEtoS_simple (blast_stat.c:4040).
 pub fn blast_karlin_eto_s_simple(evalue: f64, kbp: Option<&KarlinBlk>, searchsp: i64) -> i32 {
     let Some(kbp) = kbp else {
         return BLAST_SCORE_MIN;
@@ -1060,7 +1096,8 @@ pub const BLAST_WINDOW_SIZE_MEGABLAST: i32 = 0;
 /// `BLAST_WINDOW_SIZE_DISC` — discontiguous-megablast window (40).
 pub const BLAST_WINDOW_SIZE_DISC: i32 = 40;
 
-/// Port of NCBI `BLAST_GapDecayDivisor` (`blast_stat.c:4079`).
+/// NCBI: BLAST_GapDecayDivisor (blast_stat.c:4079).
+/// naming: Short Rust helper name intentionally omits the `blast_` prefix.
 /// Computes the divisor used by sum-statistics to compensate for the
 /// effect of choosing the best among multiple alignments:
 /// `(1 - decayrate) * decayrate^(nsegs - 1)`. Typical `decayrate` values
@@ -1070,7 +1107,8 @@ pub fn gap_decay_divisor(decayrate: f64, nsegs: u32) -> f64 {
     (1.0 - decayrate) * crate::math::powi(decayrate, (nsegs as i32) - 1)
 }
 
-/// Port of NCBI `BLAST_Cutoffs` (`blast_stat.c:4089`). Given a desired
+/// NCBI: BLAST_Cutoffs (blast_stat.c:4089).
+/// Given a desired
 /// e-value `e_in`, a Karlin-Altschul block, a search space size, and an
 /// optional decay-rate adjustment, returns a tuple
 /// `(cutoff_score, effective_evalue)`.
@@ -1120,7 +1158,7 @@ pub fn blast_cutoffs(
     // non-positive or the cutoff didn't change. Mirrors NCBI's
     // `blast_stat.c:4134-4146`.
     let e_out = if esave <= 0.0 || !s_changed {
-        let mut recomputed = kbp.raw_to_evalue(s, searchsp);
+        let mut recomputed = blast_karlin_sto_e_simple(s, Some(kbp), searchsp as i64);
         if dodecay && gap_decay_rate > 0.0 && gap_decay_rate < 1.0 {
             recomputed /= gap_decay_divisor(gap_decay_rate, 1);
         }
@@ -1208,7 +1246,7 @@ const SUM_P_TAB4: [f64; 55] = [
     0.8699,   0.9127,   0.9451,   0.9679,   0.9827,   0.9915,   0.9963,
 ];
 
-/// Port of NCBI `s_BlastSumP` (`blast_stat.c:4357`).
+/// NCBI: s_BlastSumP (blast_stat.c:4357).
 /// Estimates the Sum P-value by calculation or interpolation. Accuracy:
 /// ~2.5 digits throughout the range of `r` (number of segments) and `s`
 /// (total score in nats, adjusted by `-r*log(K*N)`).
@@ -1259,7 +1297,7 @@ pub fn sum_p(r: u32, s: f64) -> Option<f64> {
     Some(sum_p_calc(r, s))
 }
 
-/// Port of NCBI `SRombergCbackArgs` (`blast_stat.c:4205`).
+/// NCBI: SRombergCbackArgs (blast_stat.c:4205).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SRombergCbackArgs {
     pub num_hsps: i32,
@@ -1270,7 +1308,7 @@ pub struct SRombergCbackArgs {
     pub epsilon: f64,
 }
 
-/// Port of NCBI static `s_OuterIntegralCback` (`blast_stat.c:4219`).
+/// NCBI: s_OuterIntegralCback (blast_stat.c:4219).
 pub fn s_outer_integral_cback(x: f64, callback_args: &SRombergCbackArgs) -> f64 {
     let y = (x - callback_args.sdvir).exp();
     if y == f64::INFINITY {
@@ -1285,7 +1323,7 @@ pub fn s_outer_integral_cback(x: f64, callback_args: &SRombergCbackArgs) -> f64 
     (callback_args.num_hsps_minus_2 as f64 * x.ln() + callback_args.adj2 - y).exp()
 }
 
-/// Port of NCBI static `s_InnerIntegralCback` (`blast_stat.c:4240`).
+/// NCBI: s_InnerIntegralCback (blast_stat.c:4240).
 pub fn s_inner_integral_cback(s: f64, callback_args: &SRombergCbackArgs) -> f64 {
     let mut outer_args = *callback_args;
     outer_args.adj2 = callback_args.adj1 - s;
@@ -1301,7 +1339,8 @@ pub fn s_inner_integral_cback(s: f64, callback_args: &SRombergCbackArgs) -> f64 
     )
 }
 
-/// Port of NCBI `s_BlastSumPCalc` (`blast_stat.c:4269`).
+/// NCBI: s_BlastSumPCalc (blast_stat.c:4269).
+/// naming: Short Rust helper name intentionally omits the `s_blast_` prefix.
 /// Computes the Sum P-value via double Romberg integration for
 /// `r ≥ 5` (callers with smaller `r` should go through `sum_p` instead).
 /// Matches the Karlin-Altschul PNAS 1993 formula with the iteratively
@@ -1426,7 +1465,8 @@ pub fn karlin_p_to_e(p: f64) -> f64 {
     -crate::math::log1p(-p)
 }
 
-/// Port of NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`).
+/// NCBI: BLAST_KarlinPtoE (blast_stat.c:4175).
+/// naming: Rust separates the `PtoE` acronym group as `p_to_e`.
 pub fn blast_karlin_p_to_e(p: f64) -> f64 {
     if !(0.0..=1.0).contains(&p) {
         return i32::MIN as f64;
@@ -1437,7 +1477,9 @@ pub fn blast_karlin_p_to_e(p: f64) -> f64 {
     -crate::math::log1p(-p)
 }
 
-/// Port of NCBI `BLAST_KarlinEtoP` (`blast_stat.c:4189`).
+/// NCBI: BLAST_KarlinEtoP (blast_stat.c:4189).
+/// naming: Ergonomic Rust entry point omits the `blast_` prefix and separates
+/// the `EtoP` acronym group as `e_to_p`.
 pub fn karlin_e_to_p(evalue: f64) -> f64 {
     -crate::math::expm1(-evalue)
 }
@@ -1485,7 +1527,8 @@ pub fn small_gap_sum_e(
     Some(sum_e)
 }
 
-/// Port of NCBI `BLAST_SmallGapSumE` (`blast_stat.c:4418`) with the C
+/// NCBI: BLAST_SmallGapSumE (blast_stat.c:4418).
+/// Port with the C
 /// return type and argument shape.
 #[allow(clippy::too_many_arguments)]
 pub fn blast_small_gap_sum_e(
@@ -1547,7 +1590,8 @@ pub fn uneven_gap_sum_e(
     Some(sum_e)
 }
 
-/// Port of NCBI `BLAST_UnevenGapSumE` (`blast_stat.c:4491`) with the C
+/// NCBI: BLAST_UnevenGapSumE (blast_stat.c:4491).
+/// Port with the C
 /// return type and argument shape.
 #[allow(clippy::too_many_arguments)]
 pub fn blast_uneven_gap_sum_e(
@@ -1606,7 +1650,8 @@ pub fn large_gap_sum_e(
     Some(sum_e)
 }
 
-/// Port of NCBI `BLAST_LargeGapSumE` (`blast_stat.c:4532`) with the C
+/// NCBI: BLAST_LargeGapSumE (blast_stat.c:4532).
+/// Port with the C
 /// return type and argument shape.
 pub fn blast_large_gap_sum_e(
     num: i16,
@@ -1638,7 +1683,7 @@ pub struct ScoreFreq {
     pub sprob: Vec<f64>, // probability for each score value
 }
 
-/// Port of NCBI static `BlastScoreChk` (`blast_stat.c:2095`).
+/// NCBI: BlastScoreChk (blast_stat.c:2095).
 pub fn blast_score_chk(lo: i32, hi: i32) -> i16 {
     if lo >= 0
         || hi <= 0
@@ -1653,7 +1698,7 @@ pub fn blast_score_chk(lo: i32, hi: i32) -> i16 {
     0
 }
 
-/// Port of NCBI `Blast_ScoreFreqNew` (`blast_stat.c:2113`).
+/// NCBI: Blast_ScoreFreqNew (blast_stat.c:2113).
 pub fn blast_score_freq_new(score_min: i32, score_max: i32) -> Option<ScoreFreq> {
     if blast_score_chk(score_min, score_max) != 0 {
         return None;
@@ -1669,6 +1714,7 @@ pub fn blast_score_freq_new(score_min: i32, score_max: i32) -> Option<ScoreFreq>
     })
 }
 
+/// NCBI: Blast_ScoreFreqFree (blast_stat.c:941).
 pub fn blast_score_freq_free(sfp: &mut Option<ScoreFreq>) -> Option<ScoreFreq> {
     if let Some(sfp) = sfp.as_mut() {
         sfp.sprob.clear();
@@ -1679,6 +1725,8 @@ pub fn blast_score_freq_free(sfp: &mut Option<ScoreFreq>) -> Option<ScoreFreq> {
 
 impl ScoreFreq {
     #[inline]
+    /// blast-rs: Score-index accessor for owned probability storage; not a
+    /// direct NCBI C port.
     fn p(&self, score: i32) -> f64 {
         if score < self.score_min || score > self.score_max {
             0.0
@@ -1688,6 +1736,8 @@ impl ScoreFreq {
     }
 
     #[inline]
+    /// blast-rs: Mutable score-index accessor for owned probability storage;
+    /// not a direct NCBI C port.
     fn p_mut(&mut self, score: i32) -> Option<&mut f64> {
         if score < self.score_min || score > self.score_max {
             None
@@ -1697,7 +1747,7 @@ impl ScoreFreq {
     }
 }
 
-/// Port of NCBI static `BlastScoreFreqCalc` (`blast_stat.c:2151`).
+/// NCBI: BlastScoreFreqCalc (blast_stat.c:2151).
 pub fn blast_score_freq_calc(
     sbp: Option<&BlastScoreBlk>,
     sfp: Option<&mut ScoreFreq>,
@@ -1768,6 +1818,8 @@ pub fn blast_karlin_blk_new() -> KarlinBlk {
     KarlinBlk::default()
 }
 
+/// blast-rs: Adapter from public `ScoreFreq` to the internal Karlin solver
+/// distribution; not a direct NCBI C port.
 fn score_freq_to_sf_dist(sfp: &ScoreFreq) -> SfDist {
     SfDist {
         score_min: sfp.score_min,
@@ -2032,6 +2084,8 @@ impl MatrixStatRow {
         }
     }
 
+    /// blast-rs: Convert a matrix table row into public gapped parameters; not
+    /// a direct NCBI C port.
     fn gapped_params(self) -> GappedParams {
         GappedParams {
             gap_open: self.gap_open,
@@ -2044,6 +2098,8 @@ impl MatrixStatRow {
         }
     }
 
+    /// blast-rs: Convert a matrix table row into display statistics; not a
+    /// direct NCBI C port.
     fn display_params(self) -> ProteinMatrixStats {
         ProteinMatrixStats {
             lambda: self.lambda,
@@ -2056,8 +2112,8 @@ impl MatrixStatRow {
     }
 }
 
-/// Compute Spouge finite-size correction e-value.
-/// Port of BLAST_SpougeStoE from blast_stat.c:5176.
+/// blast-rs: Spouge score-to-E-value helper with gap-decay adjustment; not a
+/// direct NCBI C port.
 /// Uses per-subject lengths for more accurate e-values than simple Karlin formula.
 /// Spouge e-value with NCBI's HSP-linking gap-decay correction
 /// applied. Used by translated searches (blastx/tblastn/tblastx) and
@@ -2147,8 +2203,8 @@ pub fn spouge_evalue(
     area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor
 }
 
-/// Port of NCBI `BLAST_SpougeStoE` (`blast_stat.c:5176`) with
-/// pointer-shaped arguments.
+/// NCBI: BLAST_SpougeStoE (blast_stat.c:5176).
+/// Port with pointer-shaped arguments.
 pub fn blast_spouge_sto_e(
     y_: i32,
     kbp: Option<&KarlinBlk>,
@@ -2212,8 +2268,8 @@ pub fn spouge_etos(e0: f64, kbp: &KarlinBlk, gbp: &GumbelBlk, m: i32, n: i32) ->
     a
 }
 
-/// Port of NCBI `BLAST_SpougeEtoS` (`blast_stat.c:5236`) with
-/// pointer-shaped arguments.
+/// NCBI: BLAST_SpougeEtoS (blast_stat.c:5236).
+/// Port with pointer-shaped arguments.
 pub fn blast_spouge_eto_s(
     e0: f64,
     kbp: Option<&KarlinBlk>,
@@ -2227,8 +2283,7 @@ pub fn blast_spouge_eto_s(
     spouge_etos(e0, kbp, gbp, m, n)
 }
 
-/// Build Gumbel block for protein BLOSUM62 with given gap costs.
-/// Port of Blast_GumbelBlkLoadFromTables from blast_stat.c:3696.
+/// blast-rs: BLOSUM62-specific Gumbel table helper; not a direct NCBI C port.
 pub fn protein_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Option<GumbelBlk> {
     matrix_gumbel_blk("BLOSUM62", gap_open, gap_extend, db_length)
 }
@@ -2264,8 +2319,7 @@ pub fn identity_gumbel_blk(gap_open: i32, gap_extend: i32, db_length: i64) -> Op
     matrix_gumbel_blk("IDENTITY", gap_open, gap_extend, db_length)
 }
 
-/// Port of NCBI `Blast_KarlinBlkGappedLoadFromTables`
-/// (`blast_stat.c:3577`).
+/// NCBI: Blast_KarlinBlkGappedLoadFromTables (blast_stat.c:3577).
 pub fn blast_karlin_blk_gapped_load_from_tables(
     kbp: Option<&mut KarlinBlk>,
     gap_open: i32,
@@ -2296,7 +2350,7 @@ pub fn blast_karlin_blk_gapped_load_from_tables(
     0
 }
 
-/// Port of NCBI `Blast_KarlinBlkGappedCalc` (`blast_stat.c:3527`).
+/// NCBI: Blast_KarlinBlkGappedCalc (blast_stat.c:3527).
 pub fn blast_karlin_blk_gapped_calc(
     kbp: Option<&mut KarlinBlk>,
     gap_open: i32,
@@ -2312,7 +2366,7 @@ pub fn blast_karlin_blk_gapped_calc(
     status
 }
 
-/// Port of NCBI `Blast_GumbelBlkLoadFromTables` (`blast_stat.c:3696`).
+/// NCBI: Blast_GumbelBlkLoadFromTables (blast_stat.c:3696).
 pub fn blast_gumbel_blk_load_from_tables(
     gbp: Option<&mut GumbelBlk>,
     gap_open: i32,
@@ -2334,7 +2388,7 @@ pub fn blast_gumbel_blk_load_from_tables(
     0
 }
 
-/// Port of NCBI `Blast_GumbelBlkCalc` (`blast_stat.c:3652`).
+/// NCBI: Blast_GumbelBlkCalc (blast_stat.c:3652).
 pub fn blast_gumbel_blk_calc(
     gbp: Option<&mut GumbelBlk>,
     gap_open: i32,
@@ -2349,6 +2403,8 @@ pub fn blast_gumbel_blk_calc(
     status
 }
 
+/// blast-rs: Shared diagnostic formatter for matrix-table lookup errors; not
+/// a direct NCBI C port.
 fn report_matrix_table_error(
     error_return: Option<&mut Option<Box<crate::diagnostics::BlastMessage>>>,
     status: i16,
@@ -2401,7 +2457,7 @@ fn report_matrix_table_error(
     }
 }
 
-/// Compute ungapped Karlin-Altschul lambda parameter for nucleotide scoring.
+/// blast-rs: Uniform nucleotide ungapped-lambda helper; not a direct NCBI C port.
 /// Solves: 0.25 * exp(lambda * reward) + 0.75 * exp(lambda * penalty) = 1
 /// using Newton's method.
 pub fn compute_ungapped_lambda(reward: i32, penalty: i32) -> f64 {
@@ -2426,7 +2482,7 @@ pub fn compute_ungapped_lambda(reward: i32, penalty: i32) -> f64 {
     lambda
 }
 
-/// Compute ungapped Karlin-Altschul K parameter for nucleotide scoring.
+/// blast-rs: Uniform nucleotide ungapped-K helper; not a direct NCBI C port.
 /// K = (1 - exp(-lambda)) * (1 - exp(-lambda)) / (sum of prob * exp(lambda*score) * score^2 / 2)
 /// Simplified for uniform base frequencies.
 pub fn compute_ungapped_k(lambda: f64, reward: i32, penalty: i32) -> f64 {
@@ -2446,7 +2502,8 @@ pub fn compute_ungapped_k(lambda: f64, reward: i32, penalty: i32) -> f64 {
     h / (lambda * variance)
 }
 
-/// Compute ungapped KarlinBlk for nucleotide scoring with given reward/penalty.
+/// blast-rs: Uniform nucleotide ungapped Karlin-block helper; not a direct
+/// NCBI C port.
 pub fn compute_ungapped_kbp(reward: i32, penalty: i32) -> KarlinBlk {
     let lambda = compute_ungapped_lambda(reward, penalty);
     let k = compute_ungapped_k(lambda, reward, penalty);
@@ -2819,6 +2876,8 @@ const IDENTITY_ROWS: &[MatrixStatRow] = &[
     ),
 ];
 
+/// blast-rs: Resolve matrix-statistics rows by matrix name; not a direct NCBI
+/// C port.
 fn matrix_stat_rows(matrix_name: &str) -> Option<&'static [MatrixStatRow]> {
     if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
         Some(BLOSUM45_ROWS)
@@ -2843,6 +2902,8 @@ fn matrix_stat_rows(matrix_name: &str) -> Option<&'static [MatrixStatRow]> {
     }
 }
 
+/// blast-rs: Matrix-statistics row lookup with standard-matrix filtering; not
+/// a direct NCBI C port.
 fn matrix_stat_rows_with_standard_only(
     matrix_name: &str,
     standard_only: bool,
@@ -2854,6 +2915,7 @@ fn matrix_stat_rows_with_standard_only(
     }
 }
 
+/// blast-rs: Matrix-statistics row lookup by gap costs; not a direct NCBI C port.
 fn lookup_matrix_stat_row(
     matrix_name: &str,
     gap_open: i32,
@@ -2897,12 +2959,12 @@ pub const IDENTITY_PARAMS: &[(i32, i32, f64, f64, f64, f64, f64)] = &[
     (15, 2, 0.2835, 0.255, 1.49, 0.19, -1.0),
 ];
 
-/// Look up gapped KBP for protein scoring (BLOSUM62).
+/// blast-rs: BLOSUM62 gapped-parameter lookup helper; not a direct NCBI C port.
 pub fn lookup_protein_params(gap_open: i32, gap_extend: i32) -> Option<GappedParams> {
     lookup_matrix_params("BLOSUM62", gap_open, gap_extend)
 }
 
-/// Look up gapped KBP for a named protein scoring matrix.
+/// blast-rs: Named-matrix gapped-parameter lookup helper; not a direct NCBI C port.
 pub fn lookup_matrix_params(
     matrix_name: &str,
     gap_open: i32,
@@ -2911,14 +2973,16 @@ pub fn lookup_matrix_params(
     lookup_matrix_stat_row(matrix_name, gap_open, gap_extend).map(MatrixStatRow::gapped_params)
 }
 
-/// Look up the ungapped alpha/beta row for a named protein scoring matrix.
+/// blast-rs: Named-matrix ungapped alpha/beta lookup helper; not a direct NCBI
+/// C port.
 pub fn lookup_matrix_ungapped_alpha_beta(matrix_name: &str) -> Option<(f64, f64)> {
     matrix_stat_rows(matrix_name)?
         .first()
         .map(|row| (row.alpha, row.beta))
 }
 
-/// Look up the ungapped reporting row for a named protein scoring matrix.
+/// blast-rs: Named-matrix ungapped display-stat lookup helper; not a direct
+/// NCBI C port.
 pub fn lookup_matrix_ungapped_display_params(matrix_name: &str) -> Option<ProteinMatrixStats> {
     matrix_stat_rows(matrix_name)?
         .first()
@@ -2926,7 +2990,8 @@ pub fn lookup_matrix_ungapped_display_params(matrix_name: &str) -> Option<Protei
         .map(MatrixStatRow::display_params)
 }
 
-/// Look up the gapped reporting row for a named protein scoring matrix.
+/// blast-rs: Named-matrix gapped display-stat lookup helper; not a direct NCBI
+/// C port.
 pub fn lookup_matrix_display_params(
     matrix_name: &str,
     gap_open: i32,
@@ -2935,19 +3000,23 @@ pub fn lookup_matrix_display_params(
     lookup_matrix_stat_row(matrix_name, gap_open, gap_extend).map(MatrixStatRow::display_params)
 }
 
-/// Look up gapped KBP for NCBI's IDENTITY matrix.
+/// blast-rs: IDENTITY-matrix gapped-parameter lookup helper; not a direct NCBI
+/// C port.
 pub fn lookup_identity_params(gap_open: i32, gap_extend: i32) -> Option<GappedParams> {
     lookup_matrix_params("IDENTITY", gap_open, gap_extend)
 }
 
-/// Compute ungapped KBP for protein BLOSUM62. Values match NCBI
+/// blast-rs: BLOSUM62 ungapped Karlin-block table helper; not a direct NCBI C port.
+/// Values match NCBI
 /// `blosum62_values[0]` (ungapped entry) from `blast_stat.c:259`:
 /// Lambda = 0.3176, K = 0.134, H = 0.4012.
 pub fn protein_ungapped_kbp() -> KarlinBlk {
     protein_ungapped_kbp_for_matrix("BLOSUM62")
 }
 
-/// Compute ungapped KBP for the named protein matrix from NCBI's standard
+/// blast-rs: Named-matrix ungapped Karlin-block table helper; not a direct
+/// NCBI C port.
+/// Reads from NCBI's standard
 /// `blast_stat.c` row 0 table values.
 pub fn protein_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
     let row = matrix_stat_rows(matrix_name)
@@ -2962,7 +3031,8 @@ pub fn protein_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
     }
 }
 
-/// Compute NCBI's `sbp->kbp_ideal` for a protein matrix.
+/// blast-rs: Protein ideal-Karlin computation helper; not a direct NCBI C port.
+/// Computes NCBI's `sbp->kbp_ideal` for a protein matrix.
 ///
 /// `Blast_ScoreBlkKbpIdealCalc` builds a score-frequency distribution from
 /// standard residue composition on both axes and runs
@@ -2976,6 +3046,8 @@ pub fn protein_ideal_ungapped_kbp_for_matrix(matrix_name: &str) -> KarlinBlk {
     protein_ideal_ungapped_kbp_from_matrix(matrix, protein_ungapped_kbp_for_matrix(matrix_name))
 }
 
+/// blast-rs: Matrix-backed implementation for ideal protein Karlin blocks; not
+/// a direct NCBI C port.
 fn protein_ideal_ungapped_kbp_from_matrix(
     matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
     fallback: KarlinBlk,
@@ -3031,6 +3103,7 @@ fn protein_ideal_ungapped_kbp_from_matrix(
     }
 }
 
+/// blast-rs: Resolve built-in protein matrix data by name; not a direct NCBI C port.
 fn protein_matrix_by_name(
     matrix_name: &str,
 ) -> Option<&'static [[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
@@ -3057,6 +3130,8 @@ fn protein_matrix_by_name(
     }
 }
 
+/// blast-rs: Compute observed score bounds for a protein matrix and
+/// composition; not a direct NCBI C port.
 fn protein_matrix_score_bounds(
     matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
     std_freq: &[f64; crate::matrix::AA_SIZE],
@@ -3083,7 +3158,8 @@ fn protein_matrix_score_bounds(
     }
 }
 
-/// Compute the query-specific ungapped Karlin block for a protein query.
+/// blast-rs: Query-specific ungapped protein Karlin helper; not a direct NCBI C port.
+/// Computes the query-specific ungapped Karlin block for a protein query.
 /// Mirrors NCBI's `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`):
 /// `Blast_ResFreqString` over the query → `BlastScoreFreqCalc` →
 /// `Blast_KarlinBlkUngappedCalc`. The result drifts slightly from the ideal
@@ -3100,7 +3176,9 @@ pub fn query_specific_protein_ungapped_kbp(
     )
 }
 
-/// Compute query-specific ungapped protein KBP with the selected matrix's
+/// blast-rs: Query-specific ungapped protein Karlin helper with matrix fallback;
+/// not a direct NCBI C port.
+/// Computes query-specific ungapped protein KBP with the selected matrix's
 /// standard row as the fallback for unsupported query compositions.
 pub fn query_specific_protein_ungapped_kbp_for_matrix(
     query_aa_ncbistdaa: &[u8],
@@ -3114,6 +3192,8 @@ pub fn query_specific_protein_ungapped_kbp_for_matrix(
     )
 }
 
+/// blast-rs: Shared query-specific ungapped protein Karlin implementation; not
+/// a direct NCBI C port.
 fn query_specific_protein_ungapped_kbp_with_fallback(
     query_aa_ncbistdaa: &[u8],
     matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
@@ -3147,6 +3227,8 @@ fn query_specific_protein_ungapped_kbp_with_fallback(
     r.into_iter().next().flatten().unwrap_or(fallback)
 }
 
+/// blast-rs: NCBIstdaa-indexed standard amino-acid background-frequency table;
+/// not a direct NCBI C port.
 /// NCBIstdaa-indexed standard amino-acid background frequencies.
 /// Robinson & Robinson 1991 (matches NCBI's `Blast_ResFreqStdComp` table for
 /// `BLASTAA_SEQ_CODE`). Entries for `*`, `-`, ambiguity letters (B/Z/X/U/O/J)
@@ -3166,6 +3248,8 @@ pub fn protein_std_freq_ncbistdaa() -> [f64; 28] {
     out
 }
 
+/// blast-rs: Letter-indexed standard amino-acid background-frequency table;
+/// not a direct NCBI C port.
 fn protein_std_freq_letters() -> [(u8, f64); 20] {
     [
         (b'A', 78.05),
@@ -3191,7 +3275,7 @@ fn protein_std_freq_letters() -> [(u8, f64); 20] {
     ]
 }
 
-/// Compute effective search space.
+/// blast-rs: Effective-search-space arithmetic helper; not a direct NCBI C port.
 /// eff_length = db_length - num_seqs * length_adjustment
 /// eff_query_length = query_length - length_adjustment
 /// search_space = eff_length * eff_query_length
@@ -3219,7 +3303,7 @@ pub struct MatrixData {
     pub prod_matrix: Vec<f64>,
 }
 
-/// Port of NCBI internal `s_MatrixDataReset` (`blast_tune.c:125`).
+/// NCBI: s_MatrixDataReset (blast_tune.c:125).
 pub fn s_matrix_data_reset(
     m: Option<&mut MatrixData>,
     new_word_size: i32,
@@ -3246,6 +3330,7 @@ pub fn s_matrix_data_reset(
     0
 }
 
+/// NCBI: s_SetInitialMatrix (blast_tune.c:178).
 fn s_set_initial_matrix(matrix: &mut [f64], matrix_dim: i32, identity: f64) {
     let dim = matrix_dim.max(0) as usize;
     matrix[..dim * dim].fill(0.0);
@@ -3259,6 +3344,7 @@ fn s_set_initial_matrix(matrix: &mut [f64], matrix_dim: i32, identity: f64) {
     }
 }
 
+/// NCBI: s_MatrixMultiply (blast_tune.c:210).
 fn s_matrix_multiply(a: &[f64], identity: f64, prod: &mut [f64], dim: i32) {
     let dim = dim.max(0) as usize;
     let comp_identity = 1.0 - identity;
@@ -3284,7 +3370,7 @@ fn s_matrix_multiply(a: &[f64], identity: f64, prod: &mut [f64], dim: i32) {
     }
 }
 
-/// Port of NCBI internal `s_MatrixSquare` (`blast_tune.c:243`).
+/// NCBI: s_MatrixSquare (blast_tune.c:243).
 pub fn s_matrix_square(a: &[f64], prod: &mut [f64], dim: i32) {
     let dim = dim.max(0) as usize;
     let full_entries = dim & !3;
@@ -3310,6 +3396,7 @@ pub fn s_matrix_square(a: &[f64], prod: &mut [f64], dim: i32) {
     }
 }
 
+/// NCBI: s_FindHitProbability (blast_tune.c:293).
 fn s_find_hit_probability(
     m: &mut MatrixData,
     word_size: i32,
@@ -3368,7 +3455,7 @@ fn s_find_hit_probability(
     0
 }
 
-/// Port of NCBI internal `s_FindWordSize` (`blast_tune.c:362`).
+/// NCBI: s_FindWordSize (blast_tune.c:362).
 pub fn s_find_word_size(
     m: Option<&mut MatrixData>,
     min_percent_identity: f64,
@@ -3575,7 +3662,7 @@ pub struct MatrixInfo {
     pub max_number_values: i32,
 }
 
-/// Port-shaped Rust equivalent of NCBI static `MatrixInfoNew`.
+/// NCBI: MatrixInfoNew (blast_stat.c:2878).
 pub fn matrix_info_new(name: &str) -> Option<MatrixInfo> {
     let values = matrix_stat_rows(name)?;
     Some(MatrixInfo {
@@ -3586,8 +3673,7 @@ pub fn matrix_info_new(name: &str) -> Option<MatrixInfo> {
     })
 }
 
-/// Rust ownership equivalent of NCBI static `MatrixInfoDestruct`
-/// (`blast_stat.c:2890`).
+/// NCBI: MatrixInfoDestruct (blast_stat.c:2890).
 pub fn matrix_info_destruct(matrix_info: &mut Option<MatrixInfo>) -> Option<MatrixInfo> {
     if let Some(info) = matrix_info.as_mut() {
         info.name.clear();
@@ -3607,8 +3693,8 @@ const ALL_MATRIX_NAMES: &[&str] = &[
     "IDENTITY",
 ];
 
-/// Rust-owned equivalent of NCBI `BlastLoadMatrixValues`
-/// (`blast_stat.c:2952`).
+/// NCBI: BlastLoadMatrixValues (blast_stat.c:2952).
+/// naming: Returns an owned `Vec<MatrixInfo>` instead of a C linked list.
 pub fn blast_load_matrix_values(standard_only: bool) -> Vec<MatrixInfo> {
     let names = if standard_only {
         STANDARD_MATRIX_NAMES
@@ -3621,15 +3707,15 @@ pub fn blast_load_matrix_values(standard_only: bool) -> Vec<MatrixInfo> {
         .collect()
 }
 
-/// Port-shaped no-op for NCBI `BlastMatrixValuesDestruct`
-/// (`blast_stat.c:2929`), which releases the C linked list.
+/// NCBI: BlastMatrixValuesDestruct (blast_stat.c:2929).
+/// naming: Clears the owned `Vec<MatrixInfo>` instead of freeing a C linked list.
 pub fn blast_matrix_values_destruct(values: &mut Vec<MatrixInfo>) -> Vec<MatrixInfo> {
     values.clear();
     Vec::new()
 }
 
-/// Rust string-returning equivalent of NCBI `BLAST_PrintMatrixMessage`
-/// (`blast_stat.c:3760`).
+/// NCBI: BLAST_PrintMatrixMessage (blast_stat.c:3760).
+/// naming: Returns a Rust `String` instead of writing to a C message buffer.
 pub fn blast_print_matrix_message(matrix_name: &str, standard_only: bool) -> String {
     let mut out = format!("{matrix_name} is not a supported matrix, supported matrices are:\n");
     for info in blast_load_matrix_values(standard_only) {
@@ -3650,6 +3736,7 @@ pub struct MatrixValues {
     pub pref_flags: Vec<i32>,
 }
 
+/// blast-rs: Matrix-name to preferred-row index lookup; not a direct NCBI C port.
 fn matrix_best_index(matrix_name: &str, rows_len: usize) -> Option<usize> {
     let index = if matrix_name.eq_ignore_ascii_case("BLOSUM45") {
         7
@@ -3675,8 +3762,8 @@ fn matrix_best_index(matrix_name: &str, rows_len: usize) -> Option<usize> {
     (index < rows_len).then_some(index)
 }
 
-/// Port-shaped equivalent of NCBI `Blast_GetMatrixValues`
-/// (`blast_stat.c:3013`).
+/// NCBI: Blast_GetMatrixValues (blast_stat.c:3013).
+/// naming: Returns owned parallel vectors instead of C output arrays.
 pub fn blast_get_matrix_values(matrix_name: Option<&str>) -> MatrixValues {
     let Some(matrix_name) = matrix_name else {
         return MatrixValues {
@@ -3725,7 +3812,8 @@ pub fn blast_get_matrix_values(matrix_name: Option<&str>) -> MatrixValues {
     }
 }
 
-/// Port of NCBI `BLAST_GetAlphaBeta` (`blast_stat.c:3094`) for protein
+/// NCBI: BLAST_GetAlphaBeta (blast_stat.c:3094).
+/// Port for protein
 /// matrix rows. Nucleotide callers use [`blast_get_nucl_alpha_beta`].
 pub fn blast_get_alpha_beta(
     matrix_name: Option<&str>,
@@ -3800,13 +3888,15 @@ pub const NUM_STRANDS: usize = 2;
 /// genetic-code table (all unique `NNN` triplets in NCBIstdaa).
 pub const GENCODE_STRLEN: usize = 64;
 
-/// Port of NCBI `BLAST_SCORE_MIN` (`blast_stat.h:121`): minimum allowed
+/// NCBI: BLAST_SCORE_MIN (blast_stat.h:121).
+/// Minimum allowed
 /// score (one-letter comparison). NCBI defines it as `INT2_MIN`
 /// (-32768); we keep the value literally so downstream "impossible
 /// score" sentinels compare identically.
 pub const BLAST_SCORE_MIN: i32 = i16::MIN as i32;
 
-/// Port of NCBI `BLAST_SCORE_MAX` (`blast_stat.h:122`): maximum allowed
+/// NCBI: BLAST_SCORE_MAX (blast_stat.h:122).
+/// Maximum allowed
 /// score (one-letter comparison) = `INT2_MAX` (32767).
 pub const BLAST_SCORE_MAX: i32 = i16::MAX as i32;
 
@@ -3871,6 +3961,7 @@ pub const PSSM_SUBJECT_MASK: u32 = 1 << 7;
 /// `PATTERN_QUERY_MASK`.
 pub const PATTERN_QUERY_MASK: u32 = 1 << 8;
 
+/// blast-rs: Nucleotide Karlin table selector; not a direct NCBI C port.
 fn get_kbp_table(reward: i32, penalty: i32) -> Option<KbpTableMeta> {
     match (reward, penalty) {
         (1, -5) => Some(KbpTableMeta {
@@ -3949,7 +4040,7 @@ fn get_kbp_table(reward: i32, penalty: i32) -> Option<KbpTableMeta> {
     }
 }
 
-/// Port of NCBI static `s_SplitArrayOf8` (`blast_stat.c:3152`).
+/// NCBI: s_SplitArrayOf8 (blast_stat.c:3152).
 pub fn s_split_array_of8(input: &[KbpTableRow]) -> (i16, Vec<KbpTableRow>, Vec<KbpTableRow>, bool) {
     if input.is_empty() {
         return (1, Vec::new(), Vec::new(), false);
@@ -3961,7 +4052,7 @@ pub fn s_split_array_of8(input: &[KbpTableRow]) -> (i16, Vec<KbpTableRow>, Vec<K
     }
 }
 
-/// Port of NCBI static `s_AdjustGapParametersByGcd` (`blast_stat.c:3186`).
+/// NCBI: s_AdjustGapParametersByGcd (blast_stat.c:3186).
 pub fn s_adjust_gap_parameters_by_gcd(
     normal: &mut [KbpTableRow],
     non_affine: &mut [KbpTableRow],
@@ -3986,8 +4077,8 @@ pub fn s_adjust_gap_parameters_by_gcd(
     0
 }
 
-/// Port-shaped Rust equivalent of NCBI static `s_GetNuclValuesArray`
-/// (`blast_stat.c:3238`).
+/// NCBI: s_GetNuclValuesArray (blast_stat.c:3238).
+/// naming: Returns owned vectors in `NuclValuesArray` instead of C output arrays.
 pub fn s_get_nucl_values_array(reward: i32, penalty: i32) -> Result<NuclValuesArray, i16> {
     let divisor = crate::math::gcd(reward, penalty.abs());
     if divisor <= 0 {
@@ -4023,8 +4114,7 @@ pub fn s_get_nucl_values_array(reward: i32, penalty: i32) -> Result<NuclValuesAr
     })
 }
 
-/// Port of NCBI `BLAST_GetNucleotideGapExistenceExtendParams`
-/// (`blast_stat.c:3402`).
+/// NCBI: BLAST_GetNucleotideGapExistenceExtendParams (blast_stat.c:3402).
 pub fn blast_get_nucleotide_gap_existence_extend_params(
     reward: i32,
     penalty: i32,
@@ -4049,7 +4139,7 @@ pub fn blast_get_nucleotide_gap_existence_extend_params(
     0
 }
 
-/// Port of NCBI `Blast_KarlinBlkNuclGappedCalc` (`blast_stat.c:3846`).
+/// NCBI: Blast_KarlinBlkNuclGappedCalc (blast_stat.c:3846).
 pub fn blast_karlin_blk_nucl_gapped_calc(
     kbp: Option<&mut KarlinBlk>,
     gap_open: i32,
@@ -4132,13 +4222,13 @@ pub fn blast_karlin_blk_nucl_gapped_calc(
     0
 }
 
-/// Port of NCBI `BLAST_CheckRewardPenaltyScores` (`blast_stat.c:3454`).
+/// NCBI: BLAST_CheckRewardPenaltyScores (blast_stat.c:3454).
 pub fn blast_check_reward_penalty_scores(reward: i32, penalty: i32) -> bool {
     s_get_nucl_values_array(reward, penalty).is_ok()
 }
 
-/// Rust string-returning equivalent of NCBI `BLAST_PrintAllowedValues`
-/// (`blast_stat.c:3792`).
+/// NCBI: BLAST_PrintAllowedValues (blast_stat.c:3792).
+/// naming: Returns a Rust `String` instead of writing to a C message buffer.
 pub fn blast_print_allowed_values(matrix_name: &str, gap_open: i32, gap_extend: i32) -> String {
     let mut out = format!(
         "Gap existence and extension values of {} and {} not supported for {}\nsupported values are:\n",
@@ -4152,7 +4242,8 @@ pub fn blast_print_allowed_values(matrix_name: &str, gap_open: i32, gap_extend: 
     out
 }
 
-/// Rust message-list equivalent of NCBI static `BlastKarlinReportAllowedValues`.
+/// NCBI: BlastKarlinReportAllowedValues (blast_stat.c:3478).
+/// naming: Returns Rust message strings instead of appending to a C message list.
 pub fn blast_karlin_report_allowed_values(matrix_name: &str) -> Vec<String> {
     matrix_stat_rows(matrix_name)
         .map(|rows| {
@@ -4168,7 +4259,10 @@ pub fn blast_karlin_report_allowed_values(matrix_name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Look up gapped KBP params for nucleotide, matching C's Blast_KarlinBlkNuclGappedCalc exactly.
+/// blast-rs: Nucleotide gapped-Karlin lookup helper with scaled-score support;
+/// not a direct NCBI C port.
+/// Looks up gapped KBP params for nucleotide, matching C's
+/// Blast_KarlinBlkNuclGappedCalc table semantics.
 /// Returns Ok((lambda, k, log_k, h, round_down)) or Err message.
 pub fn nucl_gapped_kbp_lookup(
     gap_open: i32,
@@ -4258,8 +4352,8 @@ pub fn nucl_gapped_kbp_lookup(
     ))
 }
 
-/// Compute the length adjustment for effective search space (exact C-compatible).
-/// Port of BLAST_ComputeLengthAdjustment from blast_stat.c.
+/// blast-rs: Tuple-returning length-adjustment helper; not a direct NCBI C port.
+/// Computes the length adjustment for effective search space.
 /// Returns (length_adjustment, converged).
 pub fn compute_length_adjustment_exact(
     k: f64,
@@ -4330,8 +4424,8 @@ pub fn compute_length_adjustment_exact(
     (adj, converged)
 }
 
-/// Port of NCBI `BLAST_ComputeLengthAdjustment` (`blast_stat.c:5041`) with
-/// pointer-style output and integer convergence status.
+/// NCBI: BLAST_ComputeLengthAdjustment (blast_stat.c:5041).
+/// Port with pointer-style output and integer convergence status.
 pub fn blast_compute_length_adjustment(
     k: f64,
     log_k: f64,
@@ -4362,8 +4456,8 @@ pub fn blast_compute_length_adjustment(
     }
 }
 
-/// Look up alpha and beta for nucleotide gapped alignment.
-/// Port of Blast_GetNuclAlphaBeta from blast_stat.c.
+/// blast-rs: Tuple-returning nucleotide alpha/beta lookup helper with
+/// scaled-score support; not a direct NCBI C port.
 pub fn nucl_alpha_beta(
     reward: i32,
     penalty: i32,
@@ -4424,8 +4518,7 @@ pub fn nucl_alpha_beta(
     )
 }
 
-/// Port-shaped wrapper for NCBI `Blast_GetNuclAlphaBeta`
-/// (`blast_stat.c:3965`).
+/// NCBI: Blast_GetNuclAlphaBeta (blast_stat.c:3965).
 pub fn blast_get_nucl_alpha_beta(
     reward: i32,
     penalty: i32,
@@ -4468,7 +4561,7 @@ pub fn blast_get_nucl_alpha_beta(
     0
 }
 
-/// Port of NCBI `Blast_FillResidueProbability` (`blast_stat.c:4577`).
+/// NCBI: Blast_FillResidueProbability (blast_stat.c:4577).
 pub fn blast_fill_residue_probability(sequence: &[u8], res_prob: &mut [f64]) {
     let mut frequency = vec![0i32; crate::encoding::BLASTAA_SIZE];
     let mut denominator = sequence.len() as i32;
@@ -4488,13 +4581,14 @@ pub fn blast_fill_residue_probability(sequence: &[u8], res_prob: &mut [f64]) {
     }
 }
 
-/// Port of NCBI static `RPSfindUngappedLambda` (`blast_stat.c:4610`).
+/// NCBI: RPSfindUngappedLambda (blast_stat.c:4610).
+/// naming: Rust splits NCBI's `RPSfind` mixed-case prefix as `rps_find`.
 pub fn rps_find_ungapped_lambda(matrix_name: Option<&str>) -> f64 {
     let values = blast_get_matrix_values(matrix_name);
     values.lambda.first().copied().unwrap_or(0.0)
 }
 
-/// Port of NCBI static `RPSFillScores` (`blast_stat.c:4649`).
+/// NCBI: RPSFillScores (blast_stat.c:4649).
 pub fn rps_fill_scores(
     matrix: &[Vec<i32>],
     query_prob_array: &[f64],
@@ -4549,6 +4643,8 @@ pub fn rps_fill_scores(
         .sum();
 }
 
+/// blast-rs: Internal `ScoreFreq` adapter for the public lambda-NR wrapper;
+/// not a direct NCBI C port.
 fn blast_karlin_lambda_nr_from_score_freq(sfp: &ScoreFreq, initial_lambda: f64) -> f64 {
     let dist = score_freq_to_sf_dist(sfp);
     if dist.score_avg >= 0.0 {
@@ -4556,6 +4652,9 @@ fn blast_karlin_lambda_nr_from_score_freq(sfp: &ScoreFreq, initial_lambda: f64) 
     }
     let low = dist.obs_min;
     let high = dist.obs_max;
+    if blast_score_chk(low, high) != 0 {
+        return -1.0;
+    }
     let mut d = -low;
     for i in 1..=(high - low) {
         if d <= 1 {
@@ -4568,8 +4667,8 @@ fn blast_karlin_lambda_nr_from_score_freq(sfp: &ScoreFreq, initial_lambda: f64) 
     solve_lambda(&dist, d, low, high, initial_lambda)
 }
 
-/// Port of NCBI `Blast_KarlinLambdaNR` (`blast_stat.c:2567`) with an
-/// explicit initial lambda.
+/// NCBI: Blast_KarlinLambdaNR (blast_stat.c:2567).
+/// Port with an explicit initial lambda.
 pub fn blast_karlin_lambda_nr(sfp: Option<&ScoreFreq>, initial_lambda: f64) -> f64 {
     let Some(sfp) = sfp else {
         return -1.0;
@@ -4577,8 +4676,8 @@ pub fn blast_karlin_lambda_nr(sfp: Option<&ScoreFreq>, initial_lambda: f64) -> f
     blast_karlin_lambda_nr_from_score_freq(sfp, initial_lambda)
 }
 
-/// Port of NCBI `RPSRescalePssm` (`blast_stat.c:4693`) using owned Rust
-/// matrix rows instead of `_PSIAllocateMatrix`.
+/// NCBI: RPSRescalePssm (blast_stat.c:4693).
+/// naming: Uses owned Rust matrix rows instead of `_PSIAllocateMatrix`.
 pub fn rps_rescale_pssm(
     scaling_factor: f64,
     rps_query_length: i32,
@@ -4670,8 +4769,7 @@ pub struct SCompressedAlphabet {
     pub matrix: Option<BlastScoreMatrix>,
 }
 
-/// Port of NCBI static `s_BuildCompressedTranslation`
-/// (`blast_stat.c:4736`).
+/// NCBI: s_BuildCompressedTranslation (blast_stat.c:4736).
 pub fn s_build_compressed_translation(
     trans_string: &str,
     table: &mut [u8],
@@ -4705,7 +4803,7 @@ pub fn s_build_compressed_translation(
     }
 }
 
-/// Port of NCBI static `s_GetCompressedProbs` (`blast_stat.c:4772`).
+/// NCBI: s_GetCompressedProbs (blast_stat.c:4772).
 pub fn s_get_compressed_probs(
     sbp: Option<&BlastScoreBlk>,
     compressed_prob: &mut [f64],
@@ -4754,8 +4852,7 @@ pub fn s_get_compressed_probs(
     0
 }
 
-/// Port of NCBI static `s_BuildCompressedScoreMatrix`
-/// (`blast_stat.c:4818`).
+/// NCBI: s_BuildCompressedScoreMatrix (blast_stat.c:4818).
 pub fn s_build_compressed_score_matrix(
     sbp: Option<&BlastScoreBlk>,
     new_alphabet: Option<&mut SCompressedAlphabet>,
@@ -4867,7 +4964,8 @@ pub fn s_compressed_alphabet_free(
     None
 }
 
-/// Port of NCBI `s_GetUngappedBeta` (`blast_stat.c:3935`): `(1,-1)` and
+/// NCBI: s_GetUngappedBeta (blast_stat.c:3935).
+/// `(1,-1)` and
 /// `(2,-3)` scoring systems use `beta = -2`; every other combination uses
 /// `beta = 0`.
 pub fn s_get_ungapped_beta(reward: i32, penalty: i32) -> f64 {
@@ -4878,6 +4976,7 @@ pub fn s_get_ungapped_beta(reward: i32, penalty: i32) -> f64 {
     }
 }
 
+/// blast-rs: Private alias for ungapped beta lookup; not a direct NCBI C port.
 fn get_ungapped_beta(reward: i32, penalty: i32) -> f64 {
     s_get_ungapped_beta(reward, penalty)
 }
@@ -4900,6 +4999,8 @@ struct SfDist {
 }
 
 impl SfDist {
+    /// blast-rs: Owned score-frequency distribution constructor; not a direct
+    /// NCBI C port.
     fn new(lo: i32, hi: i32) -> Self {
         let n = (hi - lo + 1) as usize;
         SfDist {
@@ -4912,6 +5013,8 @@ impl SfDist {
         }
     }
     #[inline]
+    /// blast-rs: Score-index accessor for internal Karlin probabilities; not a
+    /// direct NCBI C port.
     fn p(&self, s: i32) -> f64 {
         if s < self.score_min || s > self.score_max {
             0.0
@@ -4920,6 +5023,8 @@ impl SfDist {
         }
     }
     #[inline]
+    /// blast-rs: Mutable score-index accessor for internal Karlin probabilities;
+    /// not a direct NCBI C port.
     fn p_mut(&mut self, s: i32) -> &mut f64 {
         &mut self.probs[(s - self.score_min) as usize]
     }
@@ -5018,8 +5123,10 @@ fn solve_lambda(sfp: &SfDist, d: i32, low: i32, high: i32, lambda0: f64) -> f64 
 /// guess for the Newton-Raphson lambda solver.
 const BLAST_KARLIN_LAMBDA0_DEFAULT: f64 = 0.5;
 
-/// Compute Lambda from score frequency distribution. Port of NCBI
-/// `Blast_KarlinLambdaNR` (`blast_stat.c:2567`) — score-GCD reduction
+/// blast-rs: Internal lambda computation over `SfDist`; not a direct NCBI C port.
+/// naming: Short Rust helper name is scoped to the internal Karlin solver; the
+/// public compatibility wrapper is `blast_karlin_lambda_nr`.
+/// Uses NCBI `Blast_KarlinLambdaNR` (`blast_stat.c:2567`) score-GCD reduction
 /// followed by Newton-Raphson solve on `x = exp(-lambda)`.
 fn compute_lambda(sfp: &SfDist) -> f64 {
     if sfp.score_avg >= 0.0 {
@@ -5046,8 +5153,9 @@ fn compute_lambda(sfp: &SfDist) -> f64 {
     solve_lambda(sfp, d, low, high, BLAST_KARLIN_LAMBDA0_DEFAULT)
 }
 
-/// Compute H (relative entropy) from score frequencies and Lambda.
-/// Port of NCBI `BlastKarlinLtoH` (`blast_stat.c:2607`). NCBI gates on
+/// NCBI: BlastKarlinLtoH (blast_stat.c:2607).
+/// naming: Short Rust helper name is scoped to the internal Karlin solver.
+/// Computes H (relative entropy) from score frequencies and Lambda. NCBI gates on
 /// `BlastScoreChk(low, high)` before the formula and returns -1 if the
 /// score range is invalid.
 fn compute_h(sfp: &SfDist, lambda: f64) -> f64 {
@@ -5070,7 +5178,8 @@ fn compute_h(sfp: &SfDist, lambda: f64) -> f64 {
     }
 }
 
-/// Compute K from Lambda and H using DP algorithm.
+/// blast-rs: Internal Karlin K computation over `SfDist`; not a direct NCBI C port.
+/// Computes K from Lambda and H using the C-compatible DP algorithm.
 fn compute_k(sfp: &SfDist, lambda: f64, h: f64) -> f64 {
     if lambda <= 0.0 || h <= 0.0 || sfp.score_avg >= 0.0 {
         return -1.0;
@@ -5203,8 +5312,10 @@ pub struct UngappedKbpContext {
     pub is_valid: bool,
 }
 
-/// Compute ungapped KBP for all contexts. Returns per-context `Option<KarlinBlk>`.
-/// Port of Blast_ScoreBlkKbpUngappedCalc from blast_stat.c (nucleotide path —
+/// blast-rs: Shared owned-data implementation for ungapped KBP contexts; not a
+/// direct NCBI C port.
+/// Computes ungapped KBP for all contexts. Returns per-context `Option<KarlinBlk>`.
+/// Implements the Blast_ScoreBlkKbpUngappedCalc nucleotide path —
 /// std composition is fixed at 0.25 for A/C/G/T).
 pub fn ungapped_kbp_calc(
     query: &[u8],
@@ -5239,6 +5350,8 @@ pub fn ungapped_kbp_calc(
 ///
 /// Mirrors `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`): per-context
 /// `Blast_ResFreqString` → `BlastScoreFreqCalc` → `Blast_KarlinBlkUngappedCalc`.
+/// blast-rs: Shared ungapped KBP implementation with explicit standard
+/// composition; not a direct NCBI C port.
 pub fn ungapped_kbp_calc_with_std(
     query: &[u8],
     contexts: &[UngappedKbpContext],
@@ -5378,7 +5491,7 @@ mod tests {
         assert_eq!(sbp.matrix.data[0][1], -3);
         assert_eq!(
             sbp.matrix.data[crate::encoding::BLASTNA_SIZE - 1][0],
-            BLAST_SCORE_MIN
+            i32::MIN / 2
         );
         assert_eq!(sbp.hiscore, 1);
         // NCBI `BlastScoreBlkMaxScoreSet` (`blast_stat.c:1513`) skips

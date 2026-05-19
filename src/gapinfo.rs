@@ -52,7 +52,7 @@ pub const MAPPER_SPLICE_SIGNAL: u8 = 0x80;
 pub const MAPPER_POLY_A: u8 = 0x20;
 pub const MAPPER_ADAPTER: u8 = 0x10;
 
-/// Port of NCBI static `s_GapCost` (`phi_gapalign.c:281`).
+/// NCBI: s_GapCost (phi_gapalign.c:281).
 pub fn s_gap_cost(gap_open: i32, gap_extend: i32, length: i32) -> i32 {
     if length <= 0 {
         0
@@ -72,6 +72,7 @@ const PHI_DIAGONAL_DELETE: i32 = 2;
 const PHI_INSERT_CODE: i32 = 10;
 const PHI_DELETE_CODE: i32 = 20;
 
+/// blast-rs: Safe matrix lookup helper for PHI DP; not a direct NCBI C port.
 fn phi_matrix_score(matrix: &[Vec<i32>], a: u8, b: u8) -> i32 {
     matrix
         .get(a as usize)
@@ -80,8 +81,7 @@ fn phi_matrix_score(matrix: &[Vec<i32>], a: u8, b: u8) -> i32 {
         .unwrap_or(0)
 }
 
-/// Port of NCBI `s_Align` (`phi_gapalign.c:93`), the banded PHI pattern
-/// alignment DP used by `s_BandedAlign`.
+/// NCBI: s_Align (phi_gapalign.c:93).
 fn s_align(
     seq1: &[u8],
     seq2: &[u8],
@@ -247,7 +247,7 @@ fn s_align(
     score
 }
 
-/// Port of NCBI `s_BandedAlign` (`phi_gapalign.c:280`).
+/// NCBI: s_BandedAlign (phi_gapalign.c:280).
 pub fn s_banded_align(
     seq1: &[u8],
     seq2: &[u8],
@@ -451,7 +451,7 @@ pub struct JumperAlignParams {
     pub gap_x_dropoff: i32,
 }
 
-/// Rust ownership equivalent of NCBI `GapStateFree` (`gapinfo.c:38`).
+/// blast-rs: Rust ownership equivalent of NCBI `GapStateFree` (gapinfo.c:38); not a direct NCBI C port.
 pub fn gap_state_free(
     state_struct: Option<Box<GapStateArrayStruct>>,
 ) -> Option<Box<GapStateArrayStruct>> {
@@ -463,7 +463,7 @@ pub fn gap_state_free(
     None
 }
 
-/// Port of NCBI `s_GapGetState` (`blast_gapalign.c:71`).
+/// NCBI: s_GapGetState (blast_gapalign.c:71).
 ///
 /// The C helper reuses the first unused state-array node whose allocation is
 /// long enough; otherwise it appends a new node whose backing storage is at
@@ -490,7 +490,7 @@ pub fn s_gap_get_state(
     None
 }
 
-/// Port of NCBI `s_GapPurgeState` (`blast_gapalign.c:128`).
+/// NCBI: s_GapPurgeState (blast_gapalign.c:128).
 ///
 /// The C routine clears `used` on the supplied state node and following nodes,
 /// making the arrays available to later `s_GapGetState` calls.
@@ -503,6 +503,7 @@ pub fn s_gap_purge_state(state_struct: &mut GapStateArrayStruct) -> bool {
     true
 }
 
+/// blast-rs: Allocates one Rust state-array pool node; not a direct NCBI C port.
 fn gap_state_array_new(requested_len: usize) -> GapStateArrayStruct {
     let alloc_len = requested_len.max(GAP_STATE_MIN_CELLS);
     GapStateArrayStruct {
@@ -513,7 +514,7 @@ fn gap_state_array_new(requested_len: usize) -> GapStateArrayStruct {
     }
 }
 
-/// Port of NCBI `GapEditScriptNew` (`gapinfo.c:55`).
+/// NCBI: GapEditScriptNew (gapinfo.c:55).
 pub fn gap_edit_script_new(size: i32) -> Option<GapEditScript> {
     if size <= 0 {
         return None;
@@ -521,17 +522,17 @@ pub fn gap_edit_script_new(size: i32) -> Option<GapEditScript> {
     Some(GapEditScript::with_capacity(size as usize))
 }
 
-/// Rust ownership equivalent of NCBI `GapEditScriptDelete` (`gapinfo.c:74`).
+/// blast-rs: Rust ownership equivalent of NCBI `GapEditScriptDelete` (gapinfo.c:74); not a direct NCBI C port.
 pub fn gap_edit_script_delete(_: Option<GapEditScript>) -> Option<GapEditScript> {
     None
 }
 
-/// Port of NCBI `GapEditScriptDup` (`gapinfo.c:88`).
+/// NCBI: GapEditScriptDup (gapinfo.c:88).
 pub fn gap_edit_script_dup(old: Option<&GapEditScript>) -> Option<GapEditScript> {
     old.cloned()
 }
 
-/// Port of NCBI `GapEditScriptPartialCopy` (`gapinfo.c:104`).
+/// NCBI: GapEditScriptPartialCopy (gapinfo.c:104).
 pub fn gap_edit_script_partial_copy(
     new_script: &mut GapEditScript,
     offset: i32,
@@ -566,7 +567,7 @@ pub fn gap_edit_script_partial_copy(
     0
 }
 
-/// Port of NCBI `s_GapPrelimEditBlockRealloc` (`gapinfo.c:132`).
+/// NCBI: s_GapPrelimEditBlockRealloc (gapinfo.c:132).
 pub fn s_gap_prelim_edit_block_realloc(edit_block: &mut GapPrelimEditBlock, total_ops: i32) -> i16 {
     if total_ops < 0 {
         return -1;
@@ -582,7 +583,7 @@ pub fn s_gap_prelim_edit_block_realloc(edit_block: &mut GapPrelimEditBlock, tota
     0
 }
 
-/// Port of NCBI internal `s_GapPrelimEditBlockAddNew` (`gapinfo.c:157`).
+/// NCBI: s_GapPrelimEditBlockAddNew (gapinfo.c:157).
 pub fn s_gap_prelim_edit_block_add_new(
     edit_block: &mut GapPrelimEditBlock,
     op_type: GapAlignOpType,
@@ -602,7 +603,7 @@ pub fn s_gap_prelim_edit_block_add_new(
     0
 }
 
-/// Port of NCBI `GapPrelimEditBlockAdd` (`gapinfo.c:174`).
+/// NCBI: GapPrelimEditBlockAdd (gapinfo.c:174).
 pub fn gap_prelim_edit_block_add(
     edit_block: &mut GapPrelimEditBlock,
     op_type: GapAlignOpType,
@@ -620,7 +621,7 @@ pub fn gap_prelim_edit_block_add(
     let _ = s_gap_prelim_edit_block_add_new(edit_block, op_type, num_ops);
 }
 
-/// Port of NCBI `GapPrelimEditBlockNew` (`gapinfo.c:187`).
+/// NCBI: GapPrelimEditBlockNew (gapinfo.c:187).
 pub fn gap_prelim_edit_block_new() -> GapPrelimEditBlock {
     let mut edit_block = GapPrelimEditBlock {
         edit_ops: Vec::new(),
@@ -630,12 +631,12 @@ pub fn gap_prelim_edit_block_new() -> GapPrelimEditBlock {
     edit_block
 }
 
-/// Rust ownership equivalent of NCBI `GapPrelimEditBlockFree`.
+/// blast-rs: Rust ownership equivalent of NCBI `GapPrelimEditBlockFree`; not a direct NCBI C port.
 pub fn gap_prelim_edit_block_free(_: Option<GapPrelimEditBlock>) -> Option<GapPrelimEditBlock> {
     None
 }
 
-/// Port of NCBI `GapPrelimEditBlockReset` (`gapinfo.c:212`).
+/// NCBI: GapPrelimEditBlockReset (gapinfo.c:212).
 pub fn gap_prelim_edit_block_reset(edit_block: Option<&mut GapPrelimEditBlock>) {
     if let Some(edit_block) = edit_block {
         edit_block.edit_ops.clear();
@@ -643,7 +644,7 @@ pub fn gap_prelim_edit_block_reset(edit_block: Option<&mut GapPrelimEditBlock>) 
     }
 }
 
-/// Port of NCBI `GapPrelimEditBlockAppend` (`gapinfo.c:221`).
+/// NCBI: GapPrelimEditBlockAppend (gapinfo.c:221).
 pub fn gap_prelim_edit_block_append(
     edit_block1: &mut GapPrelimEditBlock,
     edit_block2: &GapPrelimEditBlock,
@@ -653,8 +654,7 @@ pub fn gap_prelim_edit_block_append(
     }
 }
 
-/// Port of NCBI `Blast_PrelimEditBlockToGapEditScript`
-/// (`blast_gapalign.c:2481`).
+/// NCBI: Blast_PrelimEditBlockToGapEditScript (blast_gapalign.c:2481).
 pub fn blast_prelim_edit_block_to_gap_edit_script(
     rev_prelim_tback: Option<&GapPrelimEditBlock>,
     fwd_prelim_tback: Option<&GapPrelimEditBlock>,
@@ -699,6 +699,7 @@ pub fn blast_prelim_edit_block_to_gap_edit_script(
     Some(script)
 }
 
+/// blast-rs: OOF nucleotide-span helper extracted from traceback conversion; not a direct NCBI C port.
 fn oof_op_nucleotide_span(op: GapAlignOpType) -> i32 {
     match op {
         GapAlignOpType::Ins => GapAlignOpType::Sub as i32,
@@ -706,8 +707,7 @@ fn oof_op_nucleotide_span(op: GapAlignOpType) -> i32 {
     }
 }
 
-/// Port-shaped translation of NCBI static `s_BlastOOFTracebackToGapEditScript`
-/// (`blast_gapalign.c:4451`).
+/// NCBI: s_BlastOOFTracebackToGapEditScript (blast_gapalign.c:4451).
 ///
 /// OOF traceback stores frame-shift operations in the same numeric space as
 /// `EGapAlignOpType` (`Del2`/`Del1`/`Ins1`/`Ins2`). This helper performs the C
@@ -842,7 +842,7 @@ pub fn s_blast_oof_traceback_to_gap_edit_script(
     0
 }
 
-/// Port of NCBI `JumperPrelimEditBlockNew` (`jumper.c:108`).
+/// NCBI: JumperPrelimEditBlockNew (jumper.c:108).
 pub fn jumper_prelim_edit_block_new(size: i32) -> Option<JumperPrelimEditBlock> {
     if size <= 0 {
         return None;
@@ -852,29 +852,34 @@ pub fn jumper_prelim_edit_block_new(size: i32) -> Option<JumperPrelimEditBlock> 
     })
 }
 
-/// Rust ownership equivalent of NCBI `JumperPrelimEditBlockFree`.
+/// blast-rs: Rust ownership equivalent of NCBI `JumperPrelimEditBlockFree`; not a direct NCBI C port.
 pub fn jumper_prelim_edit_block_free(
     _: Option<JumperPrelimEditBlock>,
 ) -> Option<JumperPrelimEditBlock> {
     None
 }
 
-/// Port of NCBI `JumperPrelimEditBlockAdd` (`jumper.c:139`).
+/// NCBI: JumperPrelimEditBlockAdd (jumper.c:139).
 pub fn jumper_prelim_edit_block_add(block: &mut JumperPrelimEditBlock, op: JumperOpType) -> i32 {
-    if !matches!(op, JUMPER_MISMATCH | JUMPER_INSERTION | JUMPER_DELETION) {
-        return -1;
-    }
     if block.edit_ops.len() >= block.edit_ops.capacity() {
         let grow_by = block.edit_ops.capacity().max(1);
         if block.edit_ops.try_reserve_exact(grow_by).is_err() {
             return -1;
         }
     }
+    if op > 0 {
+        if let Some(last) = block.edit_ops.last_mut() {
+            if *last > 0 {
+                *last += op;
+                return 0;
+            }
+        }
+    }
     block.edit_ops.push(op);
     0
 }
 
-/// Port of NCBI `s_CreateTable` (`jumper.c:164`).
+/// NCBI: s_CreateTable (jumper.c:164).
 pub fn s_create_table(table: &mut [u32]) {
     for (byte, entry) in table.iter_mut().enumerate() {
         let mut packed = 0u32;
@@ -886,12 +891,12 @@ pub fn s_create_table(table: &mut [u32]) {
     }
 }
 
-/// Rust ownership equivalent of NCBI `JumperGapAlignFree`.
+/// blast-rs: Rust ownership equivalent of NCBI `JumperGapAlignFree`; not a direct NCBI C port.
 pub fn jumper_gap_align_free(_: Option<JumperGapAlign>) -> Option<JumperGapAlign> {
     None
 }
 
-/// Port of NCBI `JumperGapAlignNew` (`jumper.c:199`).
+/// NCBI: JumperGapAlignNew (jumper.c:199).
 pub fn jumper_gap_align_new(size: i32) -> Option<JumperGapAlign> {
     if size <= 0 {
         return None;
@@ -907,7 +912,7 @@ pub fn jumper_gap_align_new(size: i32) -> Option<JumperGapAlign> {
     })
 }
 
-/// Port of NCBI internal `s_ResetJumperPrelimEditBlocks` (`jumper.c:229`).
+/// NCBI: s_ResetJumperPrelimEditBlocks (jumper.c:229).
 pub fn s_reset_jumper_prelim_edit_blocks(
     left: Option<&mut JumperPrelimEditBlock>,
     right: Option<&mut JumperPrelimEditBlock>,
@@ -919,7 +924,7 @@ pub fn s_reset_jumper_prelim_edit_blocks(
     right.edit_ops.clear();
 }
 
-/// Port of NCBI internal `s_GetSeqPositions` (`jumper.c:277`).
+/// NCBI: s_GetSeqPositions (jumper.c:277).
 pub fn s_get_seq_positions(
     edit_script: Option<&JumperPrelimEditBlock>,
     edit_index: i32,
@@ -950,6 +955,7 @@ pub fn s_get_seq_positions(
     0
 }
 
+/// blast-rs: Bounds-checked packed-subject base accessor; not a direct NCBI C port.
 fn jumper_packed_subject_base(subject: &[u8], subject_pos: i32, subject_length: i32) -> Option<u8> {
     if subject_pos < 0 || subject_pos >= subject_length {
         return None;
@@ -963,6 +969,7 @@ fn jumper_packed_subject_base(subject: &[u8], subject_pos: i32, subject_length: 
     ))
 }
 
+/// blast-rs: Jumper base comparison wrapper over packed subject storage; not a direct NCBI C port.
 fn jumper_bases_match(
     query: &[u8],
     subject: &[u8],
@@ -984,7 +991,7 @@ fn jumper_bases_match(
     query_base == subject_base
 }
 
-/// Port of NCBI internal `s_ShiftGapsRight` (`jumper.c:286`).
+/// NCBI: s_ShiftGapsRight (jumper.c:286).
 pub fn s_shift_gaps_right(
     edit_script: &mut JumperPrelimEditBlock,
     query: &[u8],
@@ -1122,7 +1129,7 @@ pub fn s_shift_gaps_right(
     0
 }
 
-/// Port of NCBI internal `s_ShiftGaps` (`jumper.c:457`).
+/// NCBI: s_ShiftGaps (jumper.c:457).
 pub fn s_shift_gaps(
     jumper: &mut JumperGapAlign,
     query: &[u8],
@@ -1192,7 +1199,7 @@ pub fn s_shift_gaps(
     0
 }
 
-/// Port of NCBI internal `s_TrimExtension` (`jumper.c:519`).
+/// NCBI: s_TrimExtension (jumper.c:519).
 pub fn s_trim_extension(
     jops: &mut JumperPrelimEditBlock,
     margin: i32,
@@ -1257,12 +1264,12 @@ pub fn s_trim_extension(
     }
 }
 
-/// Rust ownership equivalent of NCBI `JumperEditsBlockFree`.
+/// blast-rs: Rust ownership equivalent of NCBI `JumperEditsBlockFree`; not a direct NCBI C port.
 pub fn jumper_edits_block_free(_: Option<JumperEditsBlock>) -> Option<JumperEditsBlock> {
     None
 }
 
-/// Port of NCBI `JumperEditsBlockNew` (`jumper.c:2718`).
+/// NCBI: JumperEditsBlockNew (jumper.c:2718).
 pub fn jumper_edits_block_new(num: i32) -> Option<JumperEditsBlock> {
     if num < 0 {
         return None;
@@ -1272,12 +1279,12 @@ pub fn jumper_edits_block_new(num: i32) -> Option<JumperEditsBlock> {
     })
 }
 
-/// Port of NCBI `JumperEditsBlockDup` (`jumper.c:2737`).
+/// NCBI: JumperEditsBlockDup (jumper.c:2737).
 pub fn jumper_edits_block_dup(block: Option<&JumperEditsBlock>) -> Option<JumperEditsBlock> {
     block.cloned()
 }
 
-/// Convert one Jumper preliminary operation to the corresponding BLAST gap op.
+/// blast-rs: Convert one Jumper preliminary operation to the corresponding BLAST gap op; not a direct NCBI C port.
 fn jumper_op_to_gap_op(op: JumperOpType) -> GapAlignOpType {
     if op >= 0 {
         GapAlignOpType::Sub
@@ -1288,7 +1295,7 @@ fn jumper_op_to_gap_op(op: JumperOpType) -> GapAlignOpType {
     }
 }
 
-/// Convert one Jumper preliminary operation to its run length.
+/// blast-rs: Convert one Jumper preliminary operation to its run length; not a direct NCBI C port.
 fn jumper_op_to_num(op: JumperOpType) -> i32 {
     if op > 0 {
         op
@@ -1297,7 +1304,7 @@ fn jumper_op_to_num(op: JumperOpType) -> i32 {
     }
 }
 
-/// Port of NCBI `JumperPrelimEditBlockToGapEditScript` (`jumper.c:610`).
+/// NCBI: JumperPrelimEditBlockToGapEditScript (jumper.c:610).
 pub fn jumper_prelim_edit_block_to_gap_edit_script(
     rev_prelim_block: &JumperPrelimEditBlock,
     fwd_prelim_block: &JumperPrelimEditBlock,
@@ -1320,7 +1327,7 @@ pub fn jumper_prelim_edit_block_to_gap_edit_script(
     Some(script)
 }
 
-/// Port of NCBI `JumperEditsBlockCombine` (`jumper.c:2860`).
+/// NCBI: JumperEditsBlockCombine (jumper.c:2860).
 pub fn jumper_edits_block_combine(
     block: &mut Option<JumperEditsBlock>,
     append: &mut Option<JumperEditsBlock>,
@@ -1344,7 +1351,7 @@ pub fn jumper_edits_block_combine(
     Some(base.clone())
 }
 
-/// Port of NCBI internal `s_ComputeExtensionScore` (`jumper.c:722`).
+/// NCBI: s_ComputeExtensionScore (jumper.c:722).
 pub fn s_compute_extension_score(
     edit_script: &JumperPrelimEditBlock,
     match_score: i32,
@@ -1373,12 +1380,12 @@ pub fn s_compute_extension_score(
     score
 }
 
-/// Rust ownership equivalent of NCBI `SequenceOverhangsFree`.
+/// blast-rs: Rust ownership equivalent of NCBI `SequenceOverhangsFree`; not a direct NCBI C port.
 pub fn sequence_overhangs_free(_: Option<SequenceOverhangs>) -> Option<SequenceOverhangs> {
     None
 }
 
-/// Port of NCBI `JumperGoodAlign` (`jumper.c:2650`).
+/// NCBI: JumperGoodAlign (jumper.c:2650).
 pub fn jumper_good_align(
     score: i32,
     query_start: i32,
@@ -1417,7 +1424,7 @@ pub fn jumper_good_align(
     edit_dist <= hit_options.max_edit_distance
 }
 
-/// Port of NCBI `JumperFindEdits` (`jumper.c:2755`).
+/// NCBI: JumperFindEdits (jumper.c:2755).
 pub fn jumper_find_edits(
     query: &[u8],
     subject: &[u8],
@@ -1520,7 +1527,7 @@ pub fn jumper_find_edits(
     Some(edits)
 }
 
-/// Port of NCBI `JumperFindSpliceSignals` (`jumper.c:2945`).
+/// NCBI: JumperFindSpliceSignals (jumper.c:2945).
 pub fn jumper_find_splice_signals(
     hsp: &crate::hspstream::Hsp,
     map_info: &mut crate::hspstream::BlastHSPMappingInfo,
@@ -1559,7 +1566,7 @@ pub fn jumper_find_splice_signals(
     0
 }
 
-/// Port of NCBI internal `s_SaveSubjectOverhangs` (`jumper.c:2995`).
+/// NCBI: s_SaveSubjectOverhangs (jumper.c:2995).
 pub fn s_save_subject_overhangs(
     hsp: &crate::hspstream::Hsp,
     map_info: &mut crate::hspstream::BlastHSPMappingInfo,
@@ -1623,7 +1630,7 @@ pub fn s_save_subject_overhangs(
     0
 }
 
-/// Port-shaped Rust equivalent of NCBI `s_CreateHSPForWordHit` (`jumper.c:3098`).
+/// blast-rs: Port-shaped equivalent of NCBI `s_CreateHSPForWordHit` (jumper.c:3098); not a direct NCBI C port.
 ///
 /// C stores mapper data inside `BlastHSP::map_info`; Rust keeps it as a
 /// separate [`crate::hspstream::BlastHSPMappingInfo`], so this returns both.
@@ -1693,7 +1700,7 @@ pub fn s_create_hsp_for_word_hit(
     Some((hsp, map_info))
 }
 
-/// Port-shaped Rust equivalent of NCBI internal `s_CreateHSP` (`jumper.c:3188`).
+/// blast-rs: Port-shaped equivalent of NCBI `s_CreateHSP` (jumper.c:3188); not a direct NCBI C port.
 ///
 /// Rust keeps C `BlastHSP::map_info` as a separate value, so this returns the
 /// created HSP with its mapping info side by side.
@@ -1795,6 +1802,7 @@ pub fn s_create_hsp(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// blast-rs: Indexed short-read HSP constructor for Rust mapper state; not a direct NCBI C port.
 fn s_create_short_read_indexed_hsp(
     query_seq: &[u8],
     query_len: i32,
@@ -1873,6 +1881,7 @@ fn s_create_short_read_indexed_hsp(
     Some(hsp)
 }
 
+/// blast-rs: Mapper rescue base matcher with ambiguous-query handling; not a direct NCBI C port.
 fn jumper_base_matches_or_ambiguous(query_base: u8, subject: &[u8], subject_pos: i32) -> bool {
     query_base & 0xfc != 0
         || (subject_pos >= 0
@@ -1881,6 +1890,7 @@ fn jumper_base_matches_or_ambiguous(query_base: u8, subject: &[u8], subject_pos:
 }
 
 #[allow(clippy::too_many_arguments)]
+/// blast-rs: Optional small-word rescue around saved Jumper HSPs; not a direct NCBI C port.
 fn blast_na_extend_jumper_small_word_rescue(
     saved_hsp: &crate::hspstream::Hsp,
     s_index: &SubjectIndex,
@@ -2202,13 +2212,14 @@ fn blast_na_extend_jumper_small_word_rescue(
     saved
 }
 
-/// Rust ownership equivalent of NCBI `SubjectIndexIteratorFree`.
+/// blast-rs: Rust ownership equivalent of NCBI `SubjectIndexIteratorFree`; not a direct NCBI C port.
 pub fn subject_index_iterator_free(
     _: Option<SubjectIndexIterator>,
 ) -> Option<SubjectIndexIterator> {
     None
 }
 
+/// blast-rs: Packed-subject word extraction for Rust `SubjectIndex`; not a direct NCBI C port.
 fn subject_word_at(subject: &[u8], subject_len: i32, pos: i32, word_size: i32) -> Option<u32> {
     if pos < 0 || word_size <= 0 {
         return None;
@@ -2228,7 +2239,7 @@ fn subject_word_at(subject: &[u8], subject_len: i32, pos: i32, word_size: i32) -
     Some(word)
 }
 
-/// Port-shaped Rust equivalent of NCBI `SubjectIndexNew` (`jumper.c:3874`).
+/// blast-rs: Port-shaped equivalent of NCBI `SubjectIndexNew` (jumper.c:3874); not a direct NCBI C port.
 pub fn subject_index_new(
     subject: &[u8],
     subject_len: i32,
@@ -2253,7 +2264,7 @@ pub fn subject_index_new(
     })
 }
 
-/// Port of NCBI `SubjectIndexIteratorNew` (`jumper.c:3982`).
+/// NCBI: SubjectIndexIteratorNew (jumper.c:3982).
 pub fn subject_index_iterator_new(
     s_index: &SubjectIndex,
     word: u32,
@@ -2279,7 +2290,7 @@ pub fn subject_index_iterator_new(
     })
 }
 
-/// Port of NCBI `SubjectIndexIteratorNext` (`jumper.c:4035`).
+/// NCBI: SubjectIndexIteratorNext (jumper.c:4035).
 pub fn subject_index_iterator_next(it: &mut SubjectIndexIterator) -> i32 {
     if it.word_index < 0 || it.word_index as usize >= it.positions.len() {
         return -1;
@@ -2292,7 +2303,7 @@ pub fn subject_index_iterator_next(it: &mut SubjectIndexIterator) -> i32 {
     pos
 }
 
-/// Port of NCBI `SubjectIndexIteratorPrev` (`jumper.c:4087`).
+/// NCBI: SubjectIndexIteratorPrev (jumper.c:4087).
 pub fn subject_index_iterator_prev(it: &mut SubjectIndexIterator) -> i32 {
     if it.positions.is_empty() {
         return -1;
@@ -2311,7 +2322,7 @@ pub fn subject_index_iterator_prev(it: &mut SubjectIndexIterator) -> i32 {
     pos
 }
 
-/// Port of NCBI `GapEditScriptCombine` (`jumper.c:2895`).
+/// NCBI: GapEditScriptCombine (jumper.c:2895).
 pub fn gap_edit_script_combine(
     edit_script: &mut Option<GapEditScript>,
     append: &mut Option<GapEditScript>,
@@ -2333,6 +2344,7 @@ pub fn gap_edit_script_combine(
     edit_script.clone()
 }
 
+/// blast-rs: Bit-mask helper for Jumper mismatch tracing; not a direct NCBI C port.
 fn jumper_trace_mask(max_mismatches: i32) -> u32 {
     if max_mismatches <= 0 {
         0
@@ -2343,6 +2355,7 @@ fn jumper_trace_mask(max_mismatches: i32) -> u32 {
     }
 }
 
+/// blast-rs: Bit-window update helper for Jumper mismatch tracing; not a direct NCBI C port.
 fn jumper_shift_trace(trace: &mut u32, shift: i32, window: i32) {
     if *trace == 0 {
         return;
@@ -2354,6 +2367,7 @@ fn jumper_shift_trace(trace: &mut u32, shift: i32, window: i32) {
     }
 }
 
+/// blast-rs: Unpacked-subject rightward jump validation helper; not a direct NCBI C port.
 fn jumper_match_run_right(
     query: &[u8],
     subject: &[u8],
@@ -2383,6 +2397,7 @@ fn jumper_match_run_right(
     true
 }
 
+/// blast-rs: Unpacked-subject leftward jump validation helper; not a direct NCBI C port.
 fn jumper_match_run_left(
     query: &[u8],
     subject: &[u8],
@@ -2412,6 +2427,7 @@ fn jumper_match_run_left(
     true
 }
 
+/// blast-rs: Finds the next rightward Jumper table entry for unpacked subject data; not a direct NCBI C port.
 fn jumper_find_right(query: &[u8], subject: &[u8], cp: i32, cq: i32, jumps: &[Jump]) -> Jump {
     let cpmax = query.len() as i32;
     let cqmax = subject.len() as i32;
@@ -2444,6 +2460,7 @@ fn jumper_find_right(query: &[u8], subject: &[u8], cp: i32, cq: i32, jumps: &[Ju
     })
 }
 
+/// blast-rs: Finds the next leftward Jumper table entry for unpacked subject data; not a direct NCBI C port.
 fn jumper_find_left(query: &[u8], subject: &[u8], cp: i32, cq: i32, jumps: &[Jump]) -> Jump {
     for &jump in jumps {
         if jump.lng == 0 {
@@ -2474,6 +2491,7 @@ fn jumper_find_left(query: &[u8], subject: &[u8], cp: i32, cq: i32, jumps: &[Jum
     })
 }
 
+/// blast-rs: Packed-subject rightward jump validation helper; not a direct NCBI C port.
 fn jumper_packed_match_run_right(
     query: &[u8],
     subject: &[u8],
@@ -2504,6 +2522,7 @@ fn jumper_packed_match_run_right(
     true
 }
 
+/// blast-rs: Packed-subject leftward jump validation helper; not a direct NCBI C port.
 fn jumper_packed_match_run_left(
     query: &[u8],
     subject: &[u8],
@@ -2532,6 +2551,7 @@ fn jumper_packed_match_run_left(
     true
 }
 
+/// blast-rs: Finds the next rightward Jumper table entry for packed subject data; not a direct NCBI C port.
 fn jumper_find_right_compressed(
     query: &[u8],
     subject: &[u8],
@@ -2578,6 +2598,7 @@ fn jumper_find_right_compressed(
     })
 }
 
+/// blast-rs: Finds the next leftward Jumper table entry for packed subject data; not a direct NCBI C port.
 fn jumper_find_left_compressed(
     query: &[u8],
     subject: &[u8],
@@ -2614,7 +2635,7 @@ fn jumper_find_left_compressed(
     })
 }
 
-/// Port of NCBI `JumperExtendRight` (`jumper.c:1384`).
+/// NCBI: JumperExtendRight (jumper.c:1384).
 pub fn jumper_extend_right(
     query: &[u8],
     subject: &[u8],
@@ -2695,7 +2716,7 @@ pub fn jumper_extend_right(
     (score, cp, cq)
 }
 
-/// Port of NCBI `JumperExtendRightWithTraceback` (`jumper.c:1552`).
+/// NCBI: JumperExtendRightWithTraceback (jumper.c:1552).
 pub fn jumper_extend_right_with_traceback(
     query: &[u8],
     subject: &[u8],
@@ -2814,7 +2835,7 @@ pub fn jumper_extend_right_with_traceback(
     )
 }
 
-/// Port of NCBI `JumperExtendLeft` (`jumper.c:2354`).
+/// NCBI: JumperExtendLeft (jumper.c:2354).
 pub fn jumper_extend_left(
     query: &[u8],
     subject: &[u8],
@@ -2906,7 +2927,7 @@ pub fn jumper_extend_left(
     )
 }
 
-/// Port of NCBI `JumperExtendRightCompressed` (`jumper.c:734`).
+/// NCBI: JumperExtendRightCompressed (jumper.c:734).
 pub fn jumper_extend_right_compressed(
     query: &[u8],
     subject: &[u8],
@@ -3003,7 +3024,7 @@ pub fn jumper_extend_right_compressed(
     (best_score, cpstop, cqstop)
 }
 
-/// Port of NCBI `JumperExtendLeftCompressed` (`jumper.c:1749`).
+/// NCBI: JumperExtendLeftCompressed (jumper.c:1749).
 pub fn jumper_extend_left_compressed(
     query: &[u8],
     subject: &[u8],
@@ -3098,7 +3119,7 @@ pub fn jumper_extend_left_compressed(
     )
 }
 
-/// Port of NCBI `JumperExtendRightCompressedWithTraceback` (`jumper.c:915`).
+/// NCBI: JumperExtendRightCompressedWithTraceback (jumper.c:915).
 pub fn jumper_extend_right_compressed_with_traceback(
     query: &[u8],
     subject: &[u8],
@@ -3214,7 +3235,7 @@ pub fn jumper_extend_right_compressed_with_traceback(
     )
 }
 
-/// Port of NCBI `JumperExtendLeftCompressedWithTraceback` (`jumper.c:1917`).
+/// NCBI: JumperExtendLeftCompressedWithTraceback (jumper.c:1917).
 pub fn jumper_extend_left_compressed_with_traceback(
     query: &[u8],
     subject: &[u8],
@@ -3323,7 +3344,7 @@ pub fn jumper_extend_left_compressed_with_traceback(
     )
 }
 
-/// Port of NCBI `JumperExtendRightCompressedWithTracebackOptimal` (`jumper.c:1124`).
+/// NCBI: JumperExtendRightCompressedWithTracebackOptimal (jumper.c:1124).
 pub fn jumper_extend_right_compressed_with_traceback_optimal(
     query: &[u8],
     subject: &[u8],
@@ -3471,7 +3492,7 @@ pub fn jumper_extend_right_compressed_with_traceback_optimal(
     (best_score, cpstop, cqstop)
 }
 
-/// Port of NCBI `JumperExtendLeftCompressedWithTracebackOptimal` (`jumper.c:2110`).
+/// NCBI: JumperExtendLeftCompressedWithTracebackOptimal (jumper.c:2110).
 pub fn jumper_extend_left_compressed_with_traceback_optimal(
     query: &[u8],
     subject: &[u8],
@@ -3616,8 +3637,8 @@ pub fn jumper_extend_left_compressed_with_traceback_optimal(
     )
 }
 
-/// Port-shaped Rust equivalent of NCBI `JumperGappedAlignmentCompressedWithTraceback`
-/// (`jumper.c:2512`).
+/// blast-rs: Port-shaped equivalent of NCBI `JumperGappedAlignmentCompressedWithTraceback`
+/// (jumper.c:2512); not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn jumper_gapped_alignment_compressed_with_traceback(
     query: &[u8],
@@ -3757,10 +3778,12 @@ pub fn jumper_gapped_alignment_compressed_with_traceback(
     0
 }
 
+/// blast-rs: Selects lookup word lengths for Jumper scanning; not a direct NCBI C port.
 fn jumper_lookup_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
     jumper_scan_lengths(lookup_wrap)
 }
 
+/// blast-rs: Lookup word-length adapter for represented scan paths; not a direct NCBI C port.
 fn jumper_scan_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
     match lookup_wrap {
         crate::lookup::LookupTableWrap::Na(table) => {
@@ -3785,6 +3808,7 @@ fn jumper_scan_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(
     }
 }
 
+/// blast-rs: Lookup word-length adapter for Jumper extension paths; not a direct NCBI C port.
 fn jumper_extend_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
     match lookup_wrap {
         crate::lookup::LookupTableWrap::Na(table) => {
@@ -3804,6 +3828,7 @@ fn jumper_extend_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option
     }
 }
 
+/// blast-rs: Decodes Rust scratch-table alignment outputs; not a direct NCBI C port.
 fn jumper_alignment_outputs(jumper: &JumperGapAlign) -> Option<(i32, i32, i32, i32, i32)> {
     let data = &jumper.table;
     if data.len() < 5 {
@@ -3818,6 +3843,7 @@ fn jumper_alignment_outputs(jumper: &JumperGapAlign) -> Option<(i32, i32, i32, i
     ))
 }
 
+/// blast-rs: Packed-subject word extraction for lookup scanning; not a direct NCBI C port.
 fn packed_subject_word(
     subject: &[u8],
     subject_length: i32,
@@ -3841,7 +3867,7 @@ fn packed_subject_word(
     Some(word)
 }
 
-/// Port of NCBI `s_DetermineScanningOffsets` (`masksubj.inl:43`).
+/// NCBI: s_DetermineScanningOffsets (masksubj.inl:43).
 ///
 /// `range` stores the current subject range index, scan start, and inclusive
 /// scan end. The function advances past masked/unusable ranges until scanning
@@ -3875,6 +3901,7 @@ struct JumperWordHitBatch {
     s_range: u32,
 }
 
+/// blast-rs: Collects represented lookup hits for one subject scan range; not a direct NCBI C port.
 fn jumper_collect_word_hits_for_range(
     lookup_wrap: &crate::lookup::LookupTableWrap,
     subject: &[u8],
@@ -3970,6 +3997,7 @@ fn jumper_collect_word_hits_for_range(
     offset_pairs
 }
 
+/// blast-rs: Batches represented lookup hits by subject scan range; not a direct NCBI C port.
 fn jumper_collect_word_hit_batches_in_ranges(
     lookup_wrap: &crate::lookup::LookupTableWrap,
     subject: &[u8],
@@ -4030,6 +4058,7 @@ fn jumper_collect_word_hit_batches_in_ranges(
 }
 
 #[cfg(test)]
+/// blast-rs: Test-only flattened view of Jumper word-hit batches; not a direct NCBI C port.
 fn jumper_collect_word_hits_in_ranges(
     lookup_wrap: &crate::lookup::LookupTableWrap,
     subject: &[u8],
@@ -4053,7 +4082,7 @@ fn jumper_collect_word_hits_in_ranges(
     .collect()
 }
 
-/// Port-shaped Rust equivalent of NCBI `BlastNaExtendJumper` (`jumper.c:3253`).
+/// blast-rs: Port-shaped equivalent of NCBI `BlastNaExtendJumper` (jumper.c:3253); not a direct NCBI C port.
 ///
 /// This is the mapper/short-read driver around the already translated Jumper
 /// extension primitives: it sorts word hits by diagonal/query/subject, performs
@@ -4271,8 +4300,8 @@ pub fn blast_na_extend_jumper(
     hits_extended
 }
 
-/// Port-shaped Rust equivalent of NCBI `JumperNaWordFinder`
-/// (`na_ungapped.c:1995`) for the represented contiguous lookup-table path.
+/// blast-rs: Port-shaped equivalent of NCBI `JumperNaWordFinder`
+/// (na_ungapped.c:1995) for the represented contiguous lookup-table path; not a direct NCBI C port.
 ///
 /// C obtains hits by dispatching through the selected `scansub_callback`; Rust
 /// performs the same represented work directly for the current typed
@@ -4355,6 +4384,7 @@ pub fn jumper_na_word_finder_with_subject_ranges(
     )
 }
 
+/// blast-rs: Flushes one MapperWordHits bucket into Jumper extension; not a direct NCBI C port.
 fn mapper_word_hits_flush(
     word_hits: &mut crate::lookup::MapperWordHits,
     index: usize,
@@ -4448,6 +4478,7 @@ pub fn jumper_na_word_finder_with_word_hits(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// blast-rs: Shared implementation for Jumper word-finder adapters; not a direct NCBI C port.
 fn jumper_na_word_finder_impl(
     subject: &[u8],
     subject_length: i32,
@@ -4662,6 +4693,7 @@ fn jumper_na_word_finder_impl(
     0
 }
 
+/// blast-rs: Extracts an unambiguous word from unpacked query bases; not a direct NCBI C port.
 fn unpacked_query_word(query: &[u8], start: i32, word_size: i32) -> Option<u32> {
     if start < 0 || word_size <= 0 {
         return None;
@@ -4681,8 +4713,8 @@ fn unpacked_query_word(query: &[u8], start: i32, word_size: i32) -> Option<u32> 
     Some(word)
 }
 
-/// Port-shaped Rust equivalent of NCBI static `DoAnchoredScan`
-/// (`jumper.c:4139`).
+/// blast-rs: Port-shaped equivalent of NCBI `DoAnchoredScan`
+/// (jumper.c:4139); not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn do_anchored_scan(
     query_seq: &[u8],
@@ -4908,8 +4940,8 @@ pub fn do_anchored_scan(
     }
 }
 
-/// Port-shaped Rust equivalent of NCBI static `DoAnchoredSearch`
-/// (`jumper.c:4394`).
+/// blast-rs: Port-shaped equivalent of NCBI `DoAnchoredSearch`
+/// (jumper.c:4394); not a direct NCBI C port.
 ///
 /// C pulls partially covered mapper chains from the stream writer state, runs
 /// `DoAnchoredScan` on uncovered query flanks, and writes a subject HSP list
@@ -5008,6 +5040,7 @@ pub fn do_anchored_search_to_stream(
     stream.blast_hspstream_write(query_index, hsp_list) as i16
 }
 
+/// blast-rs: Maps a recovered HSP list back to a query index; not a direct NCBI C port.
 fn query_index_for_hsp_list(
     hsp_list: &crate::hspstream::HspList,
     query_info: &crate::queryinfo::QueryInfo,
@@ -5020,6 +5053,7 @@ fn query_index_for_hsp_list(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// blast-rs: Builds anchored-search HSP lists from Rust mapper data; not a direct NCBI C port.
 fn do_anchored_search_build_list(
     query: &[u8],
     subject: &[u8],
@@ -5144,8 +5178,8 @@ fn do_anchored_search_build_list(
     Some(hsp_list)
 }
 
-/// Port-shaped Rust equivalent of NCBI `MB_IndexedWordFinder`
-/// (`na_ungapped.c:1762`) for subjects already known to be indexed.
+/// blast-rs: Port-shaped equivalent of NCBI `MB_IndexedWordFinder`
+/// (na_ungapped.c:1762) for subjects already known to be indexed; not a direct NCBI C port.
 ///
 /// The C function obtains initial hits from indexed database callbacks, then
 /// runs the same diagonal hash suppression and ungapped extension filter as the
@@ -5335,8 +5369,8 @@ where
     0
 }
 
-/// Port-shaped Rust equivalent of NCBI `ShortRead_IndexedWordFinder`
-/// (`na_ungapped.c:2227`) for subjects already known to be indexed.
+/// blast-rs: Port-shaped equivalent of NCBI `ShortRead_IndexedWordFinder`
+/// (na_ungapped.c:2227) for subjects already known to be indexed; not a direct NCBI C port.
 ///
 /// For indexed subjects, C consumes indexed initial hits and immediately runs
 /// Jumper gapped traceback per non-redundant diagonal.
@@ -5541,16 +5575,20 @@ where
 }
 
 impl GapEditScript {
+    /// blast-rs: Rust constructor wrapper; not a direct NCBI C port.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// blast-rs: Rust constructor wrapper with reserved storage; not a direct NCBI C port.
     pub fn with_capacity(size: usize) -> Self {
         GapEditScript {
             ops: Vec::with_capacity(size),
         }
     }
 
+    /// blast-rs: Append helper that preserves C edit-script merge semantics; not a direct NCBI C port.
+    ///
     /// Append an edit op, merging with the previous op if the type matches.
     /// Mirrors NCBI's `Blast_PrelimEditBlockToGapEditScript`
     /// (`blast_gapalign.c:2482`) which collapses consecutive same-type ops
@@ -5569,11 +5607,15 @@ impl GapEditScript {
         self.ops.push((op, count));
     }
 
+    /// blast-rs: Native edit-script summary helper; not a direct NCBI C port.
+    ///
     /// Total alignment length (sum of all op counts).
     pub fn alignment_length(&self) -> i32 {
         self.ops.iter().map(|(_, n)| *n).sum()
     }
 
+    /// blast-rs: Native alignment rendering helper; not a direct NCBI C port.
+    ///
     /// Render aligned query and subject strings from edit script.
     /// `query` and `subject` are the byte slices covering the aligned region.
     /// `to_char` converts a single encoded byte to a display character.
@@ -5654,6 +5696,8 @@ impl GapEditScript {
         (q_str, s_str)
     }
 
+    /// blast-rs: Native edit-script identity counter; not a direct NCBI C port.
+    ///
     /// Count identities given query and subject byte slices.
     pub fn count_identities(&self, query: &[u8], subject: &[u8]) -> (i32, i32, i32) {
         let mut q_pos = 0usize;
@@ -6383,8 +6427,9 @@ mod tests {
             jumper_prelim_edit_block_add(&mut prelim, JUMPER_INSERTION),
             0
         );
-        assert_eq!(jumper_prelim_edit_block_add(&mut prelim, 9), -1);
-        assert_eq!(prelim.edit_ops, vec![JUMPER_MISMATCH, JUMPER_INSERTION]);
+        assert_eq!(jumper_prelim_edit_block_add(&mut prelim, 9), 0);
+        assert_eq!(jumper_prelim_edit_block_add(&mut prelim, 4), 0);
+        assert_eq!(prelim.edit_ops, vec![JUMPER_MISMATCH, JUMPER_INSERTION, 13]);
         assert!(jumper_prelim_edit_block_free(Some(prelim)).is_none());
 
         let mut table = vec![0u32; 256];

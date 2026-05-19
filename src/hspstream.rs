@@ -75,6 +75,7 @@ pub struct BlastTargetTranslationView<'a> {
 }
 
 impl<'a> BlastTargetTranslationView<'a> {
+    /// blast-rs: Bounds-checked view accessor for translated target slices; not a direct NCBI C port.
     pub fn get(&self, protein_offset: i32) -> Option<u8> {
         let index = protein_offset as isize + self.pointer_offset;
         if index < 0 {
@@ -94,6 +95,7 @@ pub struct HspList {
 }
 
 impl HspList {
+    /// blast-rs: Rust convenience constructor for owned HSP lists; not a direct NCBI C port.
     pub fn new(oid: i32) -> Self {
         HspList {
             oid,
@@ -106,16 +108,18 @@ impl HspList {
         }
     }
 
+    /// blast-rs: Rust convenience wrapper around `blast_hsp_list_save_hsp`; not a direct NCBI C port.
     pub fn add_hsp(&mut self, hsp: Hsp) {
         let _ = blast_hsp_list_save_hsp(self, hsp);
     }
 
+    /// blast-rs: Rust convenience wrapper around score sorting; not a direct NCBI C port.
     pub fn sort_by_score(&mut self) {
         self.hsps.sort_by(score_compare_hsps);
     }
 }
 
-/// Rust ownership equivalent of NCBI `Blast_HSPFree` (`blast_hits.c:130`).
+/// blast-rs: Rust ownership equivalent of the C HSP free routine; not a direct NCBI C port.
 pub fn blast_hsp_free(hsp: &mut Option<Hsp>) -> Option<Hsp> {
     if let Some(hsp) = hsp.as_mut() {
         hsp.edit_script = crate::gapinfo::gap_edit_script_delete(hsp.edit_script.take());
@@ -124,17 +128,17 @@ pub fn blast_hsp_free(hsp: &mut Option<Hsp>) -> Option<Hsp> {
     None
 }
 
-/// Port of NCBI `BlastHSPMappingInfoNew` (`blast_hits.c:207`).
+/// NCBI: BlastHSPMappingInfoNew (blast_hits.c:207).
 pub fn blast_hsp_mapping_info_new() -> BlastHSPMappingInfo {
     BlastHSPMappingInfo::default()
 }
 
-/// Rust ownership equivalent of NCBI `BlastHSPMappingInfoFree`.
+/// blast-rs: Rust ownership equivalent of the C mapping-info free routine; not a direct NCBI C port.
 pub fn blast_hsp_mapping_info_free(_: Option<BlastHSPMappingInfo>) -> Option<BlastHSPMappingInfo> {
     None
 }
 
-/// Port-shaped equivalent of NCBI `BlastHspNumMax` (`blast_hits.c:213`).
+/// NCBI: BlastHspNumMax (blast_hits.c:213).
 pub fn blast_hsp_num_max(_gapped_calculation: bool, hsp_num_max: i32) -> i32 {
     if hsp_num_max > 0 {
         hsp_num_max
@@ -157,8 +161,7 @@ pub fn blast_hsp_get_num_identities_plain(
     (0, align_length)
 }
 
-/// Port of NCBI internal `s_Blast_HSPGetOOFNumIdentitiesAndPositives`
-/// (`blast_hits.c:850`).
+/// NCBI: s_Blast_HSPGetOOFNumIdentitiesAndPositives (blast_hits.c:850).
 pub fn s_blast_hsp_get_oof_num_identities_and_positives(
     query: &[u8],
     subject: &[u8],
@@ -245,7 +248,7 @@ pub fn s_blast_hsp_get_oof_num_identities_and_positives(
     (0, num_ident, align_length, positives)
 }
 
-/// Port of NCBI `Blast_HSPGetTargetTranslation` (`blast_hits.c:1147`).
+/// NCBI: Blast_HSPGetTargetTranslation (blast_hits.c:1147).
 ///
 /// C returns `translations[context] - range_start + 1`, which can point before
 /// the allocation. Rust returns the allocation plus `pointer_offset` so callers
@@ -345,18 +348,18 @@ pub fn blast_hsp_get_target_translation<'a>(
     })
 }
 
-/// Port of NCBI internal `s_HSPTest` (`blast_hits.c:993`).
+/// NCBI: s_HSPTest (blast_hits.c:993).
 pub fn s_hsp_test(hsp: &Hsp, hit_options: &HitSavingOptions, align_length: i32) -> bool {
     (hsp.num_ident as f64 * 100.0 < align_length as f64 * hit_options.percent_identity)
         || align_length < hit_options.min_hit_length
 }
 
-/// Port of NCBI `Blast_HSPTest` (`blast_hits.c:1027`).
+/// NCBI: Blast_HSPTest (blast_hits.c:1027).
 pub fn blast_hsp_test(hsp: &Hsp, hit_options: &HitSavingOptions, align_length: i32) -> bool {
     s_hsp_test(hsp, hit_options, align_length)
 }
 
-/// Port of NCBI `Blast_HSPGetQueryCoverage` (`blast_hits.c:1066`).
+/// NCBI: Blast_HSPGetQueryCoverage (blast_hits.c:1066).
 pub fn blast_hsp_get_query_coverage(hsp: &Hsp, query_length: i32) -> f64 {
     let mut pct = 0.0;
     if query_length > 0 {
@@ -368,7 +371,7 @@ pub fn blast_hsp_get_query_coverage(hsp: &Hsp, query_length: i32) -> f64 {
     pct
 }
 
-/// Port of NCBI `Blast_HSPQueryCoverageTest` (`blast_hits.c:1077`).
+/// NCBI: Blast_HSPQueryCoverageTest (blast_hits.c:1077).
 pub fn blast_hsp_query_coverage_test(
     hsp: &Hsp,
     min_query_coverage_pct: f64,
@@ -378,17 +381,17 @@ pub fn blast_hsp_query_coverage_test(
     hsp_coverage < min_query_coverage_pct
 }
 
-/// Port of NCBI internal `s_HSPStartDiag` (`blast_hits.c:1464`).
+/// NCBI: s_HSPStartDiag (blast_hits.c:1464).
 pub fn s_hsp_start_diag(hsp: &Hsp) -> i32 {
     hsp.query_offset - hsp.subject_offset
 }
 
-/// Port of NCBI internal `s_HSPEndDiag` (`blast_hits.c:1474`).
+/// NCBI: s_HSPEndDiag (blast_hits.c:1474).
 pub fn s_hsp_end_diag(hsp: &Hsp) -> i32 {
     hsp.query_end - hsp.subject_end
 }
 
-/// Port of NCBI `GetPrelimHitlistSize` (`blast_hits.c:43`).
+/// NCBI: GetPrelimHitlistSize (blast_hits.c:43).
 pub fn get_prelim_hitlist_size(
     hitlist_size: i32,
     composition_based_stats: i32,
@@ -416,7 +419,8 @@ pub fn get_prelim_hitlist_size(
     prelim_hitlist_size
 }
 
-/// Port of NCBI `SBlastHitsParametersNew` (`blast_hits.c:74`).
+/// NCBI: SBlastHitsParametersNew (blast_hits.c:74).
+/// naming: Historical Rust spelling keeps `sblast` as one token.
 pub fn sblast_hits_parameters_new(
     hit_options: Option<&HitSavingOptions>,
     composition_based_stats: i32,
@@ -440,14 +444,15 @@ pub fn sblast_hits_parameters_new(
     0
 }
 
-/// Rust ownership equivalent of NCBI `SBlastHitsParametersFree`.
+/// blast-rs: Rust ownership equivalent of the C hits-parameters free routine; not a direct NCBI C port.
 pub fn sblast_hits_parameters_free(
     _: Option<SBlastHitsParameters>,
 ) -> Option<SBlastHitsParameters> {
     None
 }
 
-/// 1-1 translation of `Blast_HSPListNew` (`blast_hits.c:1558`) for the Rust
+/// NCBI: Blast_HSPListNew (blast_hits.c:1558).
+/// 1-1 translation for the Rust
 /// `HspList` shape. `oid` is not initialized by the C allocator; callers
 /// fill it later, so this translation uses the neutral sentinel `-1`.
 pub fn blast_hsp_list_new(hsp_max: i32) -> HspList {
@@ -466,14 +471,16 @@ pub fn blast_hsp_list_new(hsp_max: i32) -> HspList {
     }
 }
 
-/// 1-1 translation of `Blast_HSPListFree` (`blast_hits.c:1542`). Rust drops
+/// NCBI: Blast_HSPListFree (blast_hits.c:1542).
+/// 1-1 translation. Rust drops
 /// the list contents; clearing the option preserves the C return value shape.
 pub fn blast_hsp_list_free(hsp_list: &mut Option<HspList>) -> Option<HspList> {
     *hsp_list = None;
     None
 }
 
-/// 1-1 translation of `BlastHSPListDup` (`blast_hits.c:1583`). `Clone`
+/// NCBI: BlastHSPListDup (blast_hits.c:1583).
+/// 1-1 translation. `Clone`
 /// performs the same detached copy for the Rust-owned HSP vector and edit
 /// scripts.
 pub fn blast_hsp_list_dup(hsp_list: Option<&HspList>) -> Option<HspList> {
@@ -490,12 +497,12 @@ pub fn blast_hsp_list_dup(hsp_list: Option<&HspList>) -> Option<HspList> {
     Some(dst)
 }
 
-/// 1-1 translation of `Blast_HSPListSwap` (`blast_hits.c:1614`).
+/// NCBI: Blast_HSPListSwap (blast_hits.c:1614).
 pub fn blast_hsp_list_swap(list1: &mut HspList, list2: &mut HspList) {
     std::mem::swap(list1, list2);
 }
 
-/// 1-1 translation of `Blast_HSPListSortByScore` (`blast_hits.c:1374`).
+/// NCBI: Blast_HSPListSortByScore (blast_hits.c:1374).
 ///
 /// NCBI checks `Blast_HSPListIsSortedByScore` first and skips the sort when
 /// the list is already sorted; we mirror that here so already-sorted lists
@@ -514,7 +521,7 @@ pub fn blast_hsp_list_sort_by_score(hsp_list: Option<&mut HspList>) -> i32 {
     0
 }
 
-/// Port of NCBI `Blast_HSPUpdateWithTraceback` (`blast_traceback.c:78`).
+/// NCBI: Blast_HSPUpdateWithTraceback (blast_traceback.c:78).
 pub fn blast_hsp_update_with_traceback(
     gap_align: Option<&mut crate::blast_kappa::BlastGapAlignWorkspace>,
     hsp: Option<&mut Hsp>,
@@ -535,7 +542,7 @@ pub fn blast_hsp_update_with_traceback(
     0
 }
 
-/// 1-1 translation of `Blast_HSPListSortByEvalue` (`blast_hits.c:1437`).
+/// NCBI: Blast_HSPListSortByEvalue (blast_hits.c:1437).
 ///
 /// NCBI checks `s_EvalueCompareHSPs` for an existing sort first and only
 /// calls `qsort` if the list is not yet ordered. We mirror that.
@@ -557,7 +564,8 @@ pub fn blast_hsp_list_sort_by_evalue(hsp_list: Option<&mut HspList>) -> i32 {
     0
 }
 
-/// Typed Rust port of NCBI internal `s_Heapify` (`blast_hits.c:1627`).
+/// NCBI: s_Heapify (blast_hits.c:1627).
+/// naming: Typed Rust helper keeps the C helper name while generalizing over element type.
 ///
 /// C receives raw byte pointers plus element width; Rust receives the same
 /// logical heap slice and element indices. The comparison polarity is the
@@ -593,7 +601,8 @@ pub fn s_heapify<T>(
     }
 }
 
-/// Typed Rust port of NCBI internal `s_CreateHeap` (`blast_hits.c:1660`).
+/// NCBI: s_CreateHeap (blast_hits.c:1660).
+/// naming: Typed Rust helper keeps the C helper name while generalizing over element type.
 pub fn s_create_heap<T>(heap: &mut [T], compar: impl Fn(&T, &T) -> std::cmp::Ordering + Copy) {
     let nel = heap.len();
     if nel <= 1 {
@@ -609,8 +618,9 @@ pub fn s_create_heap<T>(heap: &mut [T], compar: impl Fn(&T, &T) -> std::cmp::Ord
     }
 }
 
-/// Port of NCBI internal `s_BlastHSPListInsertHSPInHeap`
-/// (`blast_hits.c:1687`) for the Rust vector-backed HSP list. NCBI does
+/// NCBI: s_BlastHSPListInsertHSPInHeap (blast_hits.c:1687).
+/// naming: Rust spells HSP as a separate snake_case token.
+/// Port for the Rust vector-backed HSP list. NCBI does
 /// NOT touch `best_evalue` here — callers are responsible for setting it
 /// when needed (typically via `Blast_HSPListGetEvalues` later).
 pub fn s_blast_hsp_list_insert_hsp_in_heap(hsp_list: &mut HspList, hsp: Hsp) {
@@ -640,7 +650,9 @@ pub fn s_blast_hsp_list_insert_hsp_in_heap(hsp_list: &mut HspList, hsp: Hsp) {
     // we maintain the same level of staleness for parity).
 }
 
-/// 1-1 translation of `Blast_HSPListSaveHSP` (`blast_hits.c:1754`) for the
+/// NCBI: Blast_HSPListSaveHSP (blast_hits.c:1754).
+/// naming: Rust spells HSP as a separate snake_case token.
+/// 1-1 translation for the
 /// vector-backed Rust list. When the list has reached `hsp_max`, the new HSP
 /// replaces the current worst HSP only if it sorts better by
 /// [`score_compare_hsps`].
@@ -660,10 +672,13 @@ pub fn blast_hsp_list_save_hsp(hsp_list: &mut HspList, hsp: Hsp) -> i32 {
     0
 }
 
+/// blast-rs: Local interval containment helper extracted from HSP merge logic; not a direct NCBI C port.
 fn contained_in_hsp(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> bool {
     a <= c && b >= c && d <= f && e >= f
 }
 
+/// NCBI: s_BlastMergeTwoHSPs (blast_hits.c:2672).
+/// naming: Rust spells HSPs as a readable snake_case plural token.
 fn s_blast_merge_two_hsps(hsp1: &mut Hsp, hsp2: &Hsp, allow_gap: bool) -> bool {
     debug_assert!(hsp1.edit_script.is_none() || hsp2.edit_script.is_none());
 
@@ -721,6 +736,7 @@ fn s_blast_merge_two_hsps(hsp1: &mut Hsp, hsp2: &Hsp, allow_gap: bool) -> bool {
 
 const OVERLAP_DIAG_CLOSE: i32 = 10;
 
+/// blast-rs: Split-query context index helper for HSP-list merge; not a direct NCBI C port.
 fn hsp_context_offset_index(context: i32, contexts_per_query: i32) -> Option<usize> {
     if contexts_per_query <= 0 {
         return None;
@@ -728,7 +744,9 @@ fn hsp_context_offset_index(context: i32, contexts_per_query: i32) -> Option<usi
     Some(context.rem_euclid(contexts_per_query) as usize)
 }
 
-/// 1-1 translation of NCBI `Blast_HSPListsMerge` (`blast_hits.c:2857`) for
+/// NCBI: Blast_HSPListsMerge (blast_hits.c:2857).
+/// naming: Rust spells HSP lists as separate snake_case tokens.
+/// 1-1 translation for
 /// Rust-owned HSP vectors. The split-offset arguments preserve C's overlap
 /// strip merge for subject chunks (`contexts_per_query < 0`) and query chunks.
 pub fn blast_hsp_lists_merge(
@@ -871,6 +889,7 @@ pub fn blast_hsp_lists_merge(
     0
 }
 
+/// blast-rs: Convenience wrapper around `blast_hsp_lists_merge`; not a direct NCBI C port.
 pub fn blast_hsp_lists_merge_simple(
     hsp_list: &mut Option<HspList>,
     combined_hsp_list: &mut Option<HspList>,
@@ -888,8 +907,9 @@ pub fn blast_hsp_lists_merge_simple(
     )
 }
 
-/// 1-1 translation of `Blast_HSPListPHIGetBitScores`
-/// (`blast_hits.c:1934`). NCBI reads `lambda` and `paramC` from
+/// NCBI: Blast_HSPListPHIGetBitScores (blast_hits.c:1934).
+/// naming: Rust spells HSP/PHI as separate snake_case tokens.
+/// NCBI reads `lambda` and `paramC` from
 /// `sbp->kbp_gap[0]`; the Rust translation takes those score-block values
 /// explicitly and updates every HSP in place.
 pub fn blast_hsp_list_phi_get_bit_scores(hsp_list: &mut HspList, lambda: f64, param_c: f64) {
@@ -901,7 +921,7 @@ pub fn blast_hsp_list_phi_get_bit_scores(hsp_list: &mut HspList, lambda: f64, pa
     }
 }
 
-/// Port of NCBI `PhiBlastGetEffectiveNumberOfPatterns` (`blast_hits.c:360`).
+/// NCBI: PhiBlastGetEffectiveNumberOfPatterns (blast_hits.c:360).
 ///
 /// C reads `occurrences` from `query_info->pattern_info` and reads the
 /// minimum pattern length from `query_info->contexts[0].length_adjustment`.
@@ -926,7 +946,7 @@ pub fn phi_blast_get_effective_number_of_patterns(
     count
 }
 
-/// Port of NCBI `s_HSPPHIGetEvalue` (`blast_hits.c:399`).
+/// NCBI: s_HSPPHIGetEvalue (blast_hits.c:399).
 /// naming: Rust spells HSP/PHI as separate snake_case tokens.
 ///
 /// The C helper reads `paramC`/`Lambda` from `sbp->kbp[0]`, the effective
@@ -947,7 +967,9 @@ pub fn s_hsp_phi_get_evalue(
         * (-lambda * hsp.score as f64).exp();
 }
 
-/// Port of NCBI `Blast_HSPListPHIGetEvalues` (`blast_hits.c:1955`) with the
+/// NCBI: Blast_HSPListPHIGetEvalues (blast_hits.c:1955).
+/// naming: Rust spells HSP/PHI as separate snake_case tokens.
+/// Port with the
 /// C score-block and pattern-block fields passed explicitly.
 pub fn blast_hsp_list_phi_get_evalues(
     hsp_list: &mut HspList,
@@ -974,8 +996,7 @@ pub fn blast_hsp_list_phi_get_evalues(
     hsp_list.best_evalue = s_blast_get_best_evalue(hsp_list);
 }
 
-/// 1-1 translation of `Blast_HSPListIsSortedByScore`
-/// (`blast_hits.c:1358`).
+/// NCBI: Blast_HSPListIsSortedByScore (blast_hits.c:1358).
 pub fn blast_hsp_list_is_sorted_by_score(hsp_list: Option<&HspList>) -> bool {
     let Some(hsp_list) = hsp_list else {
         return true;
@@ -986,7 +1007,7 @@ pub fn blast_hsp_list_is_sorted_by_score(hsp_list: Option<&HspList>) -> bool {
         .all(|pair| !score_compare_hsps(&pair[0], &pair[1]).is_gt())
 }
 
-/// Port of NCBI `s_HSPListRescaleScores` (`blast_traceback.c:106`).
+/// NCBI: s_HSPListRescaleScores (blast_traceback.c:106).
 ///
 /// Traceback scores may be held in a scaled integer space. C removes that
 /// scaling with truncating integer division after adding half the divisor,
@@ -998,7 +1019,7 @@ pub fn s_hsp_list_rescale_scores(hsp_list: &mut HspList, scale_factor: f64) {
     hsp_list.hsps.sort_by(score_compare_hsps);
 }
 
-/// Port of NCBI `s_BlastHSPRPSUpdate` (`blast_traceback.c:131`).
+/// NCBI: s_BlastHSPRPSUpdate (blast_traceback.c:131).
 /// naming: Rust spells HSP/RPS as separate snake_case tokens.
 ///
 /// RPS traceback temporarily swaps query and subject; this helper flips
@@ -1017,6 +1038,7 @@ pub fn s_blast_hsp_rps_update(hsp: &mut Hsp) {
     }
 }
 
+/// blast-rs: Local BLASTX frame-to-context mapping helper; not a direct NCBI C port.
 fn blast_frame_to_context_blastx(frame: i32) -> i32 {
     match frame {
         1 => 0,
@@ -1029,7 +1051,7 @@ fn blast_frame_to_context_blastx(frame: i32) -> i32 {
     }
 }
 
-/// Port of NCBI `s_BlastHSPListRPSUpdate` (`blast_traceback.c:155`).
+/// NCBI: s_BlastHSPListRPSUpdate (blast_traceback.c:155).
 ///
 /// For RPS programs, the traceback code has query/subject roles reversed.
 /// This restores the HSP coordinates and frames, fixes the edit script, and
@@ -1093,6 +1115,7 @@ pub struct RpsGapAlignData {
     pub position_based: bool,
 }
 
+/// blast-rs: RPS profile magic-number decoder for owned traceback metadata; not a direct NCBI C port.
 fn rps_alphabet_size(magic_number: i32) -> Option<usize> {
     match magic_number {
         RPS_MAGIC_NUM => Some(26),
@@ -1101,6 +1124,7 @@ fn rps_alphabet_size(magic_number: i32) -> Option<usize> {
     }
 }
 
+/// blast-rs: RPS profile row decoder for owned integer tables; not a direct NCBI C port.
 fn rps_rows_from_values(
     values: &[i32],
     num_rows: usize,
@@ -1115,8 +1139,8 @@ fn rps_rows_from_values(
     )
 }
 
-/// Owned Rust equivalent of NCBI static `s_RPSFillFreqRatiosInPsiMatrix`
-/// (`blast_traceback.c:1001`).
+/// NCBI: s_RPSFillFreqRatiosInPsiMatrix (blast_traceback.c:1001).
+/// naming: Rust exposes the RPS acronym as a separate snake_case token.
 ///
 /// C allocates `ncol x BLASTAA_SIZE` doubles, copies the on-disk integer
 /// ratios divided by `FREQ_RATIO_SCALE` through the profile alphabet size, and
@@ -1141,8 +1165,9 @@ pub fn s_rps_fill_freq_ratios_in_psi_matrix(
     Some(ratios)
 }
 
-/// Port-shaped fetch for the `BlastSeqSrcGetSequence` call inside
+/// blast-rs: Port-shaped fetch adapter for the `BlastSeqSrcGetSequence` call inside
 /// `s_RPSComputeTraceback` (`blast_traceback.c:1182`).
+/// not a direct NCBI C port.
 ///
 /// The C loop chooses the traceback encoding from the program, fetches the RPS
 /// consensus sequence for the current HSP-list OID, and skips that list if the
@@ -1159,8 +1184,9 @@ pub fn s_rps_fetch_consensus_sequence(
     crate::seqsrc::blast_seq_src_get_sequence(seq_src, Some(&arg))
 }
 
-/// Port-shaped profile PSSM setup for `s_RPSComputeTraceback`
+/// blast-rs: Port-shaped profile PSSM setup adapter for `s_RPSComputeTraceback`
 /// (`blast_traceback.c:1196-1248`).
+/// not a direct NCBI C port.
 ///
 /// For CBS, C allocates a fresh `seq_length x BLASTAA_SIZE` PSSM scratch matrix
 /// before redo alignment fills it. Without CBS, RPS-tblastn uses the selected
@@ -1210,8 +1236,9 @@ pub fn s_rps_profile_pssm_for_traceback(
     )
 }
 
-/// Port-shaped Rust equivalent of NCBI `s_RPSGapAlignDataPrepare`
+/// blast-rs: Port-shaped Rust equivalent of NCBI `s_RPSGapAlignDataPrepare`
 /// (`blast_traceback.c:944`).
+/// not a direct NCBI C port.
 ///
 /// C builds a `BlastQueryInfo` over the concatenated profile database and
 /// attaches row pointers into the mmapped RPS PSSM/frequency-ratio blocks. Rust
@@ -1319,8 +1346,9 @@ pub fn s_rps_gap_align_data_prepare(
     })
 }
 
-/// Port-shaped Rust equivalent of NCBI `s_RPSComputeTraceback`
+/// blast-rs: Port-shaped Rust equivalent of NCBI `s_RPSComputeTraceback`
 /// (`blast_traceback.c:1058`) for the represented Rust stream/traceback layer.
+/// not a direct NCBI C port.
 ///
 /// The caller supplies the concrete traceback operation because Rust does not
 /// yet expose the C `SeqSrc`/`BlastGapAlignStruct` pointer graph. This function
@@ -1357,6 +1385,7 @@ where
 }
 
 /// CBS-aware variant of [`s_rps_compute_traceback`].
+/// blast-rs: Composition-aware Rust wrapper around RPS traceback orchestration; not a direct NCBI C port.
 ///
 /// NCBI only installs `RPS_K_MULT * karlin_k[oid]` for RPS-tblastn inside the
 /// composition-based branch; ordinary RPS-BLAST installs it for both CBS and
@@ -1465,6 +1494,7 @@ where
     0
 }
 
+/// blast-rs: Effective-search-space helper for Rust HSP post-traceback update; not a direct NCBI C port.
 fn hsp_effective_search_space(
     hsp: &Hsp,
     query_info: &crate::queryinfo::QueryInfo,
@@ -1481,6 +1511,7 @@ fn hsp_effective_search_space(
     }
 }
 
+/// blast-rs: Karlin block lookup helper for Rust HSP post-traceback update; not a direct NCBI C port.
 fn hsp_kbp_for_context<'a>(
     kbp_array: &'a [crate::stat::KarlinBlk],
     context: usize,
@@ -1491,8 +1522,9 @@ fn hsp_kbp_for_context<'a>(
         .or_else(|| kbp_array.iter().find(|kbp| kbp.is_valid()))
 }
 
-/// Port-shaped coordinator for NCBI `s_HSPListPostTracebackUpdate`
+/// blast-rs: Port-shaped coordinator for NCBI `s_HSPListPostTracebackUpdate`
 /// (`blast_traceback.c:199`).
+/// not a direct NCBI C port.
 ///
 /// The C function is mostly orchestration: restore RPS HSP orientation, either
 /// link HSPs or recompute ordinary e-values, reap by e-value, rescale raw
@@ -1575,8 +1607,7 @@ pub fn s_hsp_list_post_traceback_update(
     0
 }
 
-/// 1-1 translation of `Blast_HSPCalcLengthAndGaps`
-/// (`blast_hits.c:1055`).
+/// NCBI: Blast_HSPCalcLengthAndGaps (blast_hits.c:1055).
 pub fn blast_hsp_calc_length_and_gaps(hsp: &Hsp) -> (i32, i32, i32) {
     let mut length = hsp.query_end - hsp.query_offset;
     let subject_length = hsp.subject_end - hsp.subject_offset;
@@ -1609,8 +1640,7 @@ pub fn blast_hsp_calc_length_and_gaps(hsp: &Hsp) -> (i32, i32, i32) {
     (length, gaps, gap_opens)
 }
 
-/// 1-1 translation of `Blast_HSPListAdjustOffsets`
-/// (`blast_hits.c:3037`).
+/// NCBI: Blast_HSPListAdjustOffsets (blast_hits.c:3037).
 pub fn blast_hsp_list_adjust_offsets(hsp_list: &mut HspList, offset: i32) {
     if offset == 0 {
         return;
@@ -1622,8 +1652,7 @@ pub fn blast_hsp_list_adjust_offsets(hsp_list: &mut HspList, offset: i32) {
     }
 }
 
-/// Port of NCBI internal `s_AdjustSubjectForTranslatedSraSearch`
-/// (`blast_engine.c:1207`).
+/// NCBI: s_AdjustSubjectForTranslatedSraSearch (blast_engine.c:1207).
 pub fn s_adjust_subject_for_translated_sra_search(hsp_list: &mut HspList, offset: u8, length: i32) {
     for hsp in &mut hsp_list.hsps {
         if hsp.subject_frame > 0 {
@@ -1676,8 +1705,9 @@ pub fn s_adjust_subject_for_translated_sra_search(hsp_list: &mut HspList, offset
     }
 }
 
-/// Port of NCBI internal `s_BlastHSPListsCombineByScore`
-/// (`blast_hits.c:2749`) for Rust-owned HSP vectors.
+/// NCBI: s_BlastHSPListsCombineByScore (blast_hits.c:2749).
+/// naming: Rust spells HSP lists as separate snake_case tokens.
+/// Port for Rust-owned HSP vectors.
 pub fn s_blast_hsp_lists_combine_by_score(
     hsp_list: &mut HspList,
     combined_hsp_list: &mut HspList,
@@ -1723,7 +1753,7 @@ pub fn s_blast_hsp_lists_combine_by_score(
     combined_hsp_list.best_evalue = s_blast_get_best_evalue(combined_hsp_list);
 }
 
-/// 1-1 translation of `Blast_HSPListAppend` (`blast_hits.c:2809`).
+/// NCBI: Blast_HSPListAppend (blast_hits.c:2809).
 pub fn blast_hsp_list_append(
     old_hsp_list: &mut Option<HspList>,
     combined_hsp_list: &mut Option<HspList>,
@@ -1747,7 +1777,8 @@ pub fn blast_hsp_list_append(
     0
 }
 
-/// Port of NCBI `ScoreCompareHSPs` (`blast_hits.c:1330`). Total ordering
+/// NCBI: ScoreCompareHSPs (blast_hits.c:1330).
+/// Total ordering
 /// used by `Blast_HSPListSortByScore`: primary key is score descending,
 /// with tie-breakers on `(subject_offset asc, subject_end desc,
 /// query_offset asc, query_end desc)`.
@@ -1761,7 +1792,8 @@ pub fn score_compare_hsps(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
         .then_with(|| b.query_end.cmp(&a.query_end))
 }
 
-/// Port of NCBI internal `s_QueryEndCompareHSPs` (`blast_hits.c:2332`).
+/// NCBI: s_QueryEndCompareHSPs (blast_hits.c:2332).
+/// naming: Rust keeps HSPs as a readable snake_case plural token.
 pub fn s_query_end_compare_hsps(a: Option<&Hsp>, b: Option<&Hsp>) -> std::cmp::Ordering {
     let (Some(a), Some(b)) = (a, b) else {
         return match (a.is_some(), b.is_some()) {
@@ -1781,7 +1813,7 @@ pub fn s_query_end_compare_hsps(a: Option<&Hsp>, b: Option<&Hsp>) -> std::cmp::O
         .then_with(|| b.subject_offset.cmp(&a.subject_offset))
 }
 
-/// Port of NCBI internal `s_CutOffGapEditScript` (`blast_hits.c:2392`).
+/// NCBI: s_CutOffGapEditScript (blast_hits.c:2392).
 pub fn s_cut_off_gap_edit_script(hsp: &mut Hsp, q_cut: i32, s_cut: i32, cut_begin: bool) {
     let Some(edit_script) = hsp.edit_script.as_mut() else {
         return;
@@ -1864,11 +1896,13 @@ pub struct HitList {
 }
 
 impl HitList {
+    /// blast-rs: Rust convenience constructor for owned hit lists; not a direct NCBI C port.
     pub fn new() -> Self {
         blast_hit_list_new(0)
     }
 
-    /// Port of NCBI `Blast_HitListUpdate` (`blast_hits.c:3243`) for the
+    /// NCBI: Blast_HitListUpdate (blast_hits.c:3243).
+    /// Port for the
     /// Rust `HitList` shape.
     pub fn blast_hit_list_update(&mut self, mut hsp_list: HspList) -> i32 {
         hsp_list.best_evalue = s_blast_get_best_evalue(&hsp_list);
@@ -1902,12 +1936,13 @@ impl HitList {
         0
     }
 
+    /// blast-rs: Rust convenience wrapper around hit-list e-value sorting; not a direct NCBI C port.
     pub fn sort_by_evalue(&mut self) {
         let _ = blast_hit_list_sort_by_evalue(self);
     }
 }
 
-/// 1-1 translation of `Blast_HitListNew` (`blast_hits.c:3125`).
+/// NCBI: Blast_HitListNew (blast_hits.c:3125).
 pub fn blast_hit_list_new(hitlist_size: i32) -> HitList {
     HitList {
         hsp_lists: Vec::new(),
@@ -1917,7 +1952,8 @@ pub fn blast_hit_list_new(hitlist_size: i32) -> HitList {
     }
 }
 
-/// 1-1 shaped equivalent of NCBI `Blast_HitListMerge` (`blast_hits.c:2119`).
+/// NCBI: Blast_HitListMerge (blast_hits.c:2119).
+/// naming: Rust uses owned `Option<HitList>` parameters instead of C pointers.
 pub fn blast_hit_list_merge(
     old_hit_list: &mut Option<HitList>,
     combined_hit_list: &mut Option<HitList>,
@@ -2001,6 +2037,7 @@ pub fn blast_hit_list_merge(
     0
 }
 
+/// blast-rs: Convenience wrapper around `blast_hit_list_merge`; not a direct NCBI C port.
 pub fn blast_hit_list_merge_simple(
     old_hit_list: &mut Option<HitList>,
     combined_hit_list: &mut Option<HitList>,
@@ -2008,7 +2045,8 @@ pub fn blast_hit_list_merge_simple(
     blast_hit_list_merge(old_hit_list, combined_hit_list, 0, None, 0, true)
 }
 
-/// 1-1 translation of `Blast_HitListHSPListsFree` (`blast_hits.c:3155`) for
+/// NCBI: Blast_HitListHSPListsFree (blast_hits.c:3155).
+/// 1-1 translation for
 /// the Rust vector-backed representation.
 pub fn blast_hit_list_hsp_lists_free(hitlist: Option<&mut HitList>) -> i32 {
     let Some(hitlist) = hitlist else { return 0 };
@@ -2016,7 +2054,7 @@ pub fn blast_hit_list_hsp_lists_free(hitlist: Option<&mut HitList>) -> i32 {
     0
 }
 
-/// 1-1 translation of `Blast_HitListFree` (`blast_hits.c:3139`).
+/// NCBI: Blast_HitListFree (blast_hits.c:3139).
 pub fn blast_hit_list_free(hitlist: &mut Option<HitList>) -> Option<HitList> {
     if let Some(hitlist) = hitlist {
         let _ = blast_hit_list_hsp_lists_free(Some(hitlist));
@@ -2025,7 +2063,8 @@ pub fn blast_hit_list_free(hitlist: &mut Option<HitList>) -> Option<HitList> {
     None
 }
 
-/// 1-1 translation of `s_BlastHitListPurge` (`blast_hits.c:3170`) for the
+/// NCBI: s_BlastHitListPurge (blast_hits.c:3170).
+/// 1-1 translation for the
 /// Rust vector-backed hit list. C frees the first empty HSP list and every
 /// list after it, even if a later list is non-empty.
 pub fn s_blast_hit_list_purge(hitlist: Option<&mut HitList>) {
@@ -2039,7 +2078,7 @@ pub fn s_blast_hit_list_purge(hitlist: Option<&mut HitList>) {
     }
 }
 
-/// 1-1 translation of `Blast_HitListSortByEvalue` (`blast_hits.c:3330`).
+/// NCBI: Blast_HitListSortByEvalue (blast_hits.c:3330).
 pub fn blast_hit_list_sort_by_evalue(hitlist: &mut HitList) -> i32 {
     if hitlist.hsp_lists.len() > 1 {
         hitlist.hsp_lists.sort_by(evalue_compare_hsp_lists);
@@ -2048,8 +2087,8 @@ pub fn blast_hit_list_sort_by_evalue(hitlist: &mut HitList) -> i32 {
     0
 }
 
-/// Port of NCBI internal `s_BlastHitListInsertHSPListInHeap`
-/// (`blast_hits.c:3196`) for the Rust vector-backed hit list.
+/// NCBI: s_BlastHitListInsertHSPListInHeap (blast_hits.c:3196).
+/// Port for the Rust vector-backed hit list.
 pub fn s_blast_hit_list_insert_hsp_list_in_heap(hit_list: &mut HitList, hsp_list: HspList) {
     if hit_list.hsp_lists.is_empty() {
         hit_list.hsp_lists.push(hsp_list);
@@ -2074,7 +2113,7 @@ pub fn s_blast_hit_list_insert_hsp_list_in_heap(hit_list: &mut HitList, hsp_list
     }
 }
 
-/// 1-1 translation of `Blast_HSPListPurgeNullHSPs` (`blast_hits.c:2225`).
+/// NCBI: Blast_HSPListPurgeNullHSPs (blast_hits.c:2225).
 /// naming: Rust keeps HSPs as a readable snake_case plural token.
 /// `Vec<Hsp>` cannot contain null HSP pointers, so the Rust representation is
 /// already compact and this is a no-op. NCBI does NOT recompute
@@ -2083,7 +2122,7 @@ pub fn blast_hsp_list_purge_null_hsps(_hsp_list: Option<&mut HspList>) -> i32 {
     0
 }
 
-/// 1-1 translation of `Blast_HitListPurgeNullHSPLists` (`blast_hits.c:3302`).
+/// NCBI: Blast_HitListPurgeNullHSPLists (blast_hits.c:3302).
 /// `Vec<HspList>` cannot contain null HSP-list pointers, so the Rust
 /// representation is already compact and this is a no-op. NCBI also does
 /// no other work here (the C version just walks the array dropping nulls).
@@ -2091,6 +2130,7 @@ pub fn blast_hit_list_purge_null_hsp_lists(_hitlist: Option<&mut HitList>) -> i3
     0
 }
 
+/// NCBI: s_BlastGetBestEvalue (blast_hits.c:1742).
 fn s_blast_get_best_evalue(hsp_list: &HspList) -> f64 {
     // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds with `(double)INT4_MAX`.
     hsp_list
@@ -2100,7 +2140,9 @@ fn s_blast_get_best_evalue(hsp_list: &HspList) -> f64 {
         .fold(i32::MAX as f64, f64::min)
 }
 
-/// Port of NCBI `s_EvalueComp` (`blast_hits.c:1390`). Two e-values that
+/// NCBI: s_EvalueComp (blast_hits.c:1390).
+/// naming: Rust drops the private `s_` prefix for this comparator.
+/// Two e-values that
 /// are both below `1.0e-180` compare equal; otherwise ordinary ordering.
 pub fn evalue_comp(evalue1: f64, evalue2: f64) -> std::cmp::Ordering {
     const EPSILON: f64 = 1.0e-180;
@@ -2112,7 +2154,9 @@ pub fn evalue_comp(evalue1: f64, evalue2: f64) -> std::cmp::Ordering {
         .unwrap_or(std::cmp::Ordering::Equal)
 }
 
-/// Port of NCBI `s_EvalueCompareHSPLists` (`blast_hits.c:3078`). Sort
+/// NCBI: s_EvalueCompareHSPLists (blast_hits.c:3078).
+/// naming: Rust drops the private `s_` prefix and keeps HSP lists readable.
+/// Sort
 /// order for HSP lists: primary key is best_evalue (via `evalue_comp`),
 /// then top-HSP score descending, then `oid` descending. Empty lists
 /// sort to the end.
@@ -2178,23 +2222,25 @@ pub struct BlastHspStreamResultsBatchArray {
 }
 
 impl HspResults {
+    /// blast-rs: Rust convenience constructor for owned HSP results; not a direct NCBI C port.
     pub fn new(num_queries: i32) -> Self {
         blast_hsp_results_new(num_queries)
     }
 
+    /// blast-rs: Rust convenience wrapper around result e-value sorting; not a direct NCBI C port.
     pub fn sort_by_evalue(&mut self) {
         let _ = blast_hsp_results_sort_by_evalue(self);
     }
 }
 
-/// 1-1 translation of `Blast_HSPResultsNew` (`blast_hits.c:3346`).
+/// NCBI: Blast_HSPResultsNew (blast_hits.c:3346).
 pub fn blast_hsp_results_new(num_queries: i32) -> HspResults {
     HspResults {
         hitlists: (0..num_queries.max(0)).map(|_| None).collect(),
     }
 }
 
-/// 1-1 translation of `Blast_HSPResultsFree` (`blast_hits.c:3366`).
+/// NCBI: Blast_HSPResultsFree (blast_hits.c:3366).
 pub fn blast_hsp_results_free(results: &mut Option<HspResults>) -> Option<HspResults> {
     if let Some(results) = results {
         for hitlist in &mut results.hitlists {
@@ -2205,12 +2251,13 @@ pub fn blast_hsp_results_free(results: &mut Option<HspResults>) -> Option<HspRes
     None
 }
 
-/// Port of NCBI `SThreadLocalDataNew` (`blast_traceback_mt_priv.c:37`).
+/// NCBI: SThreadLocalDataNew (blast_traceback_mt_priv.c:37).
+/// naming: Historical Rust spelling keeps `sthread` as one token.
 pub fn sthread_local_data_new() -> SThreadLocalData {
     SThreadLocalData::default()
 }
 
-/// Rust ownership equivalent of NCBI `SThreadLocalDataFree`.
+/// blast-rs: Rust ownership equivalent of the C thread-local-data free routine; not a direct NCBI C port.
 pub fn sthread_local_data_free(tld: &mut Option<SThreadLocalData>) -> Option<SThreadLocalData> {
     if let Some(tld) = tld {
         let _ = blast_hsp_results_free(&mut tld.results);
@@ -2221,7 +2268,8 @@ pub fn sthread_local_data_free(tld: &mut Option<SThreadLocalData>) -> Option<STh
     None
 }
 
-/// Port of NCBI `SThreadLocalDataArrayNew`.
+/// NCBI: SThreadLocalDataArrayNew (blast_traceback_mt_priv.c).
+/// naming: Historical Rust spelling keeps `sthread` as one token.
 pub fn sthread_local_data_array_new(num_threads: u32) -> SThreadLocalDataArray {
     SThreadLocalDataArray {
         tld: (0..num_threads)
@@ -2231,7 +2279,7 @@ pub fn sthread_local_data_array_new(num_threads: u32) -> SThreadLocalDataArray {
     }
 }
 
-/// Rust ownership equivalent of NCBI `SThreadLocalDataArrayFree`.
+/// blast-rs: Rust ownership equivalent of the C thread-local-data-array free routine; not a direct NCBI C port.
 pub fn sthread_local_data_array_free(
     array: &mut Option<SThreadLocalDataArray>,
 ) -> Option<SThreadLocalDataArray> {
@@ -2246,7 +2294,8 @@ pub fn sthread_local_data_array_free(
     None
 }
 
-/// Port of NCBI `SThreadLocalDataArrayTrim`.
+/// NCBI: SThreadLocalDataArrayTrim (blast_traceback_mt_priv.c).
+/// naming: Historical Rust spelling keeps `sthread` as one token.
 pub fn sthread_local_data_array_trim(
     array: Option<&mut SThreadLocalDataArray>,
     actual_num_threads: u32,
@@ -2267,7 +2316,8 @@ pub fn sthread_local_data_array_trim(
     array.num_elems = actual_num_threads;
 }
 
-/// Port-shaped setup for NCBI `SThreadLocalDataArraySetup`.
+/// blast-rs: Port-shaped setup for NCBI `SThreadLocalDataArraySetup`; not a direct NCBI C port.
+/// naming: Historical Rust spelling keeps `sthread` as one token.
 ///
 /// C also calls `BLAST_GapAlignSetUp` and copies a `BlastSeqSrc`; those raw
 /// handles are represented elsewhere in Rust. This function mirrors the
@@ -2294,6 +2344,7 @@ pub fn sthread_local_data_array_setup(
     0
 }
 
+/// blast-rs: Thread-local consolidation sizing helper; not a direct NCBI C port.
 fn s_count_hsp_lists_per_query(data: Option<&SThreadLocalDataArray>) -> Option<Vec<usize>> {
     let data = data?;
     let first_results = data.tld.first()?.as_ref()?.results.as_ref()?;
@@ -2312,7 +2363,8 @@ fn s_count_hsp_lists_per_query(data: Option<&SThreadLocalDataArray>) -> Option<V
     Some(counts)
 }
 
-/// Port of NCBI `SThreadLocalDataArrayConsolidateResults`.
+/// NCBI: SThreadLocalDataArrayConsolidateResults (blast_traceback_mt_priv.c).
+/// naming: Historical Rust spelling keeps `sthread` as one token.
 ///
 /// HSP lists are moved from each thread-local result into the returned
 /// per-query hit lists. Empty lists are skipped, matching
@@ -2512,7 +2564,8 @@ pub fn blast_hsp_results_sort_by_evalue(results: &mut HspResults) -> i32 {
     0
 }
 
-/// Rust port of NCBI `PHIBlast_HSPResultsSplit` (`blast_hits.c:3572`).
+/// NCBI: PHIBlast_HSPResultsSplit (blast_hits.c:3572).
+/// naming: Historical Rust spelling keeps `phiblast` as one token.
 ///
 /// C reads the pattern occurrence index from `hsp->pat_info->index`; Rust
 /// stores the same PHI metadata in [`Hsp::pat_info`]. The split/clone/insert
@@ -2704,7 +2757,8 @@ pub fn s_trim_results_by_total_hsp_limit(results: &mut HspResults, total_hsp_lim
     hsp_limit_exceeded
 }
 
-/// Port of NCBI internal `s_EvalueCompareHSPs` (`blast_hits.c:1415`).
+/// NCBI: s_EvalueCompareHSPs (blast_hits.c:1415).
+/// naming: Rust keeps HSPs as a readable snake_case plural token.
 pub fn evalue_compare_hsps(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
     let by_evalue = evalue_comp(a.evalue, b.evalue);
     if by_evalue != std::cmp::Ordering::Equal {
@@ -2830,11 +2884,55 @@ pub fn blast_hsp_list_reap_by_evalue(
 /// (`blast_hits.c:2455`).
 /// naming: Rust keeps HSPs as a readable snake_case plural token.
 pub fn blast_hsp_list_purge_hsps_with_common_endpoints(hsp_list: Option<&mut HspList>) -> i16 {
+    blast_hsp_list_purge_hsps_with_common_endpoints_ex(crate::program::BLASTP, hsp_list, true)
+}
+
+/// NCBI: Blast_HSPListPurgeHSPsWithCommonEndpoints (blast_hits.c:2455).
+/// Extended Rust entry point carrying the C program/purge switches.
+pub fn blast_hsp_list_purge_hsps_with_common_endpoints_ex(
+    program_number: crate::program::ProgramType,
+    hsp_list: Option<&mut HspList>,
+    purge: bool,
+) -> i16 {
     let Some(hsp_list) = hsp_list else {
         return 0;
     };
     if hsp_list.hsps.len() <= 1 {
         return 0;
+    }
+    if crate::program::blast_program_is_phi_blast(program_number) {
+        return 0;
+    }
+    let trim_blastn = program_number == crate::program::BLASTN && !purge;
+
+    fn trim_or_drop_common_endpoint(
+        leader: &Hsp,
+        hsp: &mut Hsp,
+        cut_begin: bool,
+        trim_blastn: bool,
+    ) -> bool {
+        if !trim_blastn || hsp.edit_script.is_none() {
+            return false;
+        }
+        let before = (
+            hsp.query_offset,
+            hsp.query_end,
+            hsp.subject_offset,
+            hsp.subject_end,
+        );
+        let (q_cut, s_cut) = if cut_begin {
+            (leader.query_end, leader.subject_end)
+        } else {
+            (leader.query_offset, leader.subject_offset)
+        };
+        s_cut_off_gap_edit_script(hsp, q_cut, s_cut, cut_begin);
+        let after = (
+            hsp.query_offset,
+            hsp.query_end,
+            hsp.subject_offset,
+            hsp.subject_end,
+        );
+        before != after && hsp.query_offset < hsp.query_end && hsp.subject_offset < hsp.subject_end
     }
 
     // NCBI `s_QueryOffsetCompareHSPs` (`blast_hits.c:2268`) sorts by:
@@ -2866,7 +2964,10 @@ pub fn blast_hsp_list_purge_hsps_with_common_endpoints(hsp_list: Option<&mut Hsp
             && hsp_list.hsps[index].subject_offset == hsp_list.hsps[next].subject_offset
             && hsp_list.hsps[index].subject_frame == hsp_list.hsps[next].subject_frame
         {
-            keep[next] = false;
+            let leader = hsp_list.hsps[index].clone();
+            if !trim_or_drop_common_endpoint(&leader, &mut hsp_list.hsps[next], true, trim_blastn) {
+                keep[next] = false;
+            }
             next += 1;
         }
         index = next;
@@ -2904,7 +3005,15 @@ pub fn blast_hsp_list_purge_hsps_with_common_endpoints(hsp_list: Option<&mut Hsp
                 && hsp_list.hsps[index].subject_end == hsp_list.hsps[next].subject_end
                 && hsp_list.hsps[index].subject_frame == hsp_list.hsps[next].subject_frame
             {
-                keep[next] = false;
+                let leader = hsp_list.hsps[index].clone();
+                if !trim_or_drop_common_endpoint(
+                    &leader,
+                    &mut hsp_list.hsps[next],
+                    false,
+                    trim_blastn,
+                ) {
+                    keep[next] = false;
+                }
                 next += 1;
             }
             index = next;
@@ -3047,7 +3156,7 @@ pub fn blast_hsp_list_subject_best_hit(
     hsp_list.hsps.len() as i32
 }
 
-/// Port-shaped `s_FilterBlastResults` (`blast_traceback.c:837`).
+/// blast-rs: Port-shaped filter coordinator corresponding to `s_FilterBlastResults`; not a direct NCBI C port.
 ///
 /// This applies the C max-HSP, query-coverage, and subject-best-hit branches
 /// and purges empty subject lists after query-coverage filtering.
@@ -3096,6 +3205,7 @@ pub struct HspStream {
 }
 
 impl HspStream {
+    /// blast-rs: Rust convenience constructor for mutex-backed HSP streams; not a direct NCBI C port.
     pub fn new(num_queries: i32) -> Self {
         HspStream {
             results: Mutex::new(HspResults::new(num_queries)),
@@ -3105,7 +3215,7 @@ impl HspStream {
         }
     }
 
-    /// Write an HspList to the stream (thread-safe).
+    /// blast-rs: Thread-safe Rust writer method for owned HSP lists; not a direct NCBI C port.
     pub fn blast_hspstream_write(&self, query_index: i32, hsp_list: HspList) -> i32 {
         if *self.closed.lock().unwrap() {
             return -1;
@@ -3119,13 +3229,13 @@ impl HspStream {
         insertion_status
     }
 
-    /// Consume the stream and return the collected results.
+    /// blast-rs: Rust ownership extractor for collected stream results; not a direct NCBI C port.
     pub fn into_results(self) -> HspResults {
         self.results.into_inner().unwrap()
     }
 }
 
-/// Port-shaped constructor for NCBI `BlastHSPStreamNew`
+/// blast-rs: Port-shaped constructor corresponding to `BlastHSPStreamNew`; not a direct NCBI C port.
 /// (`blast_hspstream.c:653`).
 pub fn blast_hsp_stream_new(num_queries: i32) -> HspStream {
     let results = HspResults::new(num_queries);
@@ -3141,7 +3251,7 @@ pub fn blast_hsp_stream_new(num_queries: i32) -> HspStream {
     }
 }
 
-/// Rust ownership equivalent of NCBI `BlastHSPStreamFree`
+/// blast-rs: Rust ownership equivalent of the C HSP-stream free routine; not a direct NCBI C port.
 /// (`blast_hspstream.c:46`).
 pub fn blast_hsp_stream_free(stream: &mut Option<HspStream>) -> Option<HspStream> {
     if let Some(stream) = stream.as_mut() {
@@ -3155,12 +3265,13 @@ pub fn blast_hsp_stream_free(stream: &mut Option<HspStream>) -> Option<HspStream
     None
 }
 
-/// Port of NCBI static `s_SortHSPListByOid` (`blast_hspstream.c:91`).
+/// NCBI: s_SortHSPListByOid (blast_hspstream.c:91).
+/// naming: Rust spells HSP list as separate snake_case tokens.
 pub fn s_sort_hsp_list_by_oid(left: &HspList, right: &HspList) -> i32 {
     right.oid - left.oid
 }
 
-/// Rust no-op equivalent of NCBI static `s_FinalizeWriter`.
+/// blast-rs: Rust no-op equivalent of static `s_FinalizeWriter`; not a direct NCBI C port.
 pub fn s_finalize_writer(stream: Option<&HspStream>) {
     let Some(stream) = stream else {
         return;
@@ -3174,7 +3285,7 @@ pub fn s_finalize_writer(stream: Option<&HspStream>) {
     }
 }
 
-/// Port-shaped close for NCBI `BlastHSPStreamClose`.
+/// blast-rs: Port-shaped close corresponding to `BlastHSPStreamClose`; not a direct NCBI C port.
 pub fn blast_hsp_stream_close(stream: Option<&HspStream>) {
     let Some(stream) = stream else {
         return;
@@ -3192,7 +3303,7 @@ pub fn blast_hsp_stream_close(stream: Option<&HspStream>) {
     *stream.closed.lock().unwrap() = true;
 }
 
-/// Port-shaped read for NCBI `BlastHSPStreamRead` (`blast_hspstream.c:271`).
+/// blast-rs: Port-shaped read corresponding to `BlastHSPStreamRead`; not a direct NCBI C port.
 ///
 /// The C stream materializes a separate `sorted_hsplists` array during close
 /// and then pops from its end. The Rust stream keeps ownership in
@@ -3233,7 +3344,7 @@ pub fn blast_hsp_stream_read(stream: Option<&HspStream>) -> (i32, Option<HspList
     (K_BLAST_HSP_STREAM_SUCCESS, hsp_list)
 }
 
-/// Port-shaped read for NCBI `BlastHSPStreamBatchRead`
+/// blast-rs: Port-shaped read corresponding to `BlastHSPStreamBatchRead`; not a direct NCBI C port.
 /// (`blast_hspstream.c:568`).
 ///
 /// Returns all HSP lists with the same target OID as the next stream read,
@@ -3301,7 +3412,7 @@ pub fn blast_hsp_stream_batch_read(
     K_BLAST_HSP_STREAM_SUCCESS
 }
 
-/// Port of NCBI static `s_BlastHSPStreamCountNumOids`.
+/// blast-rs: Rust set-based OID counter corresponding to `s_BlastHSPStreamCountNumOids`; not a direct NCBI C port.
 pub fn s_blast_hsp_stream_count_num_oids(stream: Option<&HspStream>) -> u32 {
     let Some(stream) = stream else {
         return 0;
@@ -3319,7 +3430,7 @@ pub fn s_blast_hsp_stream_count_num_oids(stream: Option<&HspStream>) -> u32 {
     oids.len() as u32
 }
 
-/// Port of NCBI `BlastHSPStreamToHSPStreamResultsBatch`
+/// blast-rs: Port-shaped batch conversion corresponding to `BlastHSPStreamToHSPStreamResultsBatch`; not a direct NCBI C port.
 /// (`blast_hspstream_mt_utils.c:145`).
 pub fn blast_hsp_stream_to_hsp_stream_results_batch(
     stream: Option<&HspStream>,
@@ -3355,12 +3466,12 @@ pub fn blast_hsp_stream_to_hsp_stream_results_batch(
     (K_BLAST_HSP_STREAM_SUCCESS, Some(batches))
 }
 
-/// Port-shaped close for NCBI `BlastHSPStreamSimpleClose`.
+/// blast-rs: Port-shaped close corresponding to `BlastHSPStreamSimpleClose`; not a direct NCBI C port.
 pub fn blast_hsp_stream_simple_close(stream: Option<&HspStream>) {
     blast_hsp_stream_close(stream);
 }
 
-/// Port-shaped close for NCBI `BlastHSPStreamMappingClose`.
+/// blast-rs: Port-shaped close corresponding to `BlastHSPStreamMappingClose`; not a direct NCBI C port.
 ///
 /// Audit note: Rust's stream does not carry C's mapper writer/vtable payload,
 /// so this only coordinates the existing Rust stream close path.
@@ -3374,7 +3485,7 @@ pub fn blast_hsp_stream_mapping_close(stream: Option<&HspStream>) {
     blast_hsp_stream_close(Some(stream));
 }
 
-/// Port-shaped close for NCBI `BlastHSPStreamTBackClose`.
+/// blast-rs: Port-shaped close corresponding to `BlastHSPStreamTBackClose`; not a direct NCBI C port.
 /// naming: Rust keeps TBack as the established `tback` token.
 ///
 /// Audit note: traceback result transfer is handled by the Rust caller; this
@@ -3387,6 +3498,7 @@ pub fn blast_hsp_stream_tback_close(stream: Option<&HspStream>) {
     blast_hsp_stream_close(Some(stream));
 }
 
+/// blast-rs: HSP-list to query-index mapping helper for Rust results insertion; not a direct NCBI C port.
 fn query_index_for_hsp_list(hsp_list: &HspList, query_info: &crate::queryinfo::QueryInfo) -> i32 {
     hsp_list
         .hsps
@@ -3425,8 +3537,9 @@ pub fn blast_traceback_dispatch_kind(
     }
 }
 
-/// Port-shaped Rust equivalent of NCBI `BLAST_ComputeTraceback`
+/// blast-rs: Port-shaped Rust equivalent of `BLAST_ComputeTraceback`
 /// (`blast_traceback.c:1390`) for the represented stream/list layer.
+/// not a direct NCBI C port.
 ///
 /// The C function owns SeqSrc fetching and program-specific traceback routing.
 /// Rust keeps those lower-level translations as typed call sites, so this
@@ -3547,8 +3660,8 @@ where
     (0, Some(results))
 }
 
-/// Port-shaped Rust equivalent of NCBI
-/// `Blast_RunTracebackSearchWithInterrupt` (`blast_traceback.c:1821`).
+/// blast-rs: Port-shaped Rust equivalent of `Blast_RunTracebackSearchWithInterrupt`; not a direct NCBI C port.
+/// Source boundary: blast_traceback.c:1821.
 ///
 /// This wrapper closes the preliminary stream before delegating to
 /// [`blast_compute_traceback`], matching the C entry point's ownership
@@ -3596,6 +3709,7 @@ where
     )
 }
 
+/// blast-rs: Context-to-frame helper for split-query HSP stream merge; not a direct NCBI C port.
 fn blast_context_to_frame_for_context(context: i32, contexts_per_query: i32) -> i32 {
     match contexts_per_query {
         2 => {
@@ -3610,7 +3724,7 @@ fn blast_context_to_frame_for_context(context: i32, contexts_per_query: i32) -> 
     }
 }
 
-/// 1-1 shaped translation of NCBI `BlastHSPStreamMerge`
+/// blast-rs: Port-shaped stream merge corresponding to `BlastHSPStreamMerge`; not a direct NCBI C port.
 /// (`blast_hspstream.c:399`) for Rust-owned streams. `stream1` is the
 /// local split-query chunk and `stream2` is the accumulated global stream.
 pub fn blast_hsp_stream_merge(
@@ -3753,6 +3867,7 @@ pub fn blast_hsp_stream_merge(
     0
 }
 
+/// blast-rs: Convenience wrapper around `blast_hsp_stream_merge`; not a direct NCBI C port.
 pub fn blast_hsp_stream_merge_simple(
     stream1: Option<&HspStream>,
     stream2: Option<&HspStream>,
@@ -3760,7 +3875,7 @@ pub fn blast_hsp_stream_merge_simple(
     blast_hsp_stream_merge(None, 0, stream2, stream1, 0)
 }
 
-/// Port-shaped status helper for NCBI `BlastHSPStreamRegisterMTLock`.
+/// blast-rs: Port-shaped status helper corresponding to `BlastHSPStreamRegisterMTLock`; not a direct NCBI C port.
 pub fn blast_hsp_stream_register_mt_lock(stream: Option<&HspStream>, has_lock: bool) -> i32 {
     if stream.is_none() || !has_lock {
         -1
@@ -3780,7 +3895,7 @@ pub struct BlastHSPWriter {
     pub finalized: bool,
 }
 
-/// Port-shaped status helper for NCBI `BlastHSPStreamRegisterPipe`.
+/// blast-rs: Port-shaped status helper corresponding to `BlastHSPStreamRegisterPipe`; not a direct NCBI C port.
 pub fn blast_hsp_stream_register_pipe(
     stream: Option<&HspStream>,
     pipe: Option<BlastHSPPipe>,
@@ -3804,7 +3919,7 @@ pub fn blast_hsp_stream_register_pipe(
     }
 }
 
-/// Port-shaped constructor for NCBI `BlastHSPWriterNew`.
+/// blast-rs: Port-shaped constructor corresponding to `BlastHSPWriterNew`; not a direct NCBI C port.
 pub fn blast_hsp_writer_new() -> BlastHSPWriter {
     let mut writer = BlastHSPWriter::default();
     writer.initialized = false;
@@ -3812,14 +3927,14 @@ pub fn blast_hsp_writer_new() -> BlastHSPWriter {
     writer
 }
 
-/// Port-shaped constructor for NCBI `BlastHSPPipeNew`.
+/// blast-rs: Port-shaped constructor corresponding to `BlastHSPPipeNew`; not a direct NCBI C port.
 pub fn blast_hsp_pipe_new(stage: i32) -> BlastHSPPipe {
     let mut pipe = BlastHSPPipe::default();
     pipe.stage = stage;
     pipe
 }
 
-/// Test/introspection helper for the Rust stream's pipe-chain equivalent.
+/// blast-rs: Test/introspection helper for the Rust stream's pipe-chain equivalent; not a direct NCBI C port.
 pub fn blast_hsp_stream_pipe_counts(stream: Option<&HspStream>) -> Option<(usize, usize)> {
     let stream = stream?;
     Some((
@@ -3828,7 +3943,7 @@ pub fn blast_hsp_stream_pipe_counts(stream: Option<&HspStream>) -> Option<(usize
     ))
 }
 
-/// Port of NCBI static `s_TrimHitList` (`blast_hspstream.c:806`).
+/// NCBI: s_TrimHitList (blast_hspstream.c:806).
 pub fn s_trim_hit_list(hitlist: Option<&mut HitList>, count: i32) {
     let Some(hitlist) = hitlist else {
         return;
@@ -6658,6 +6773,83 @@ mod tests {
         assert_eq!(remaining, vec![(100, 0, 0, 10, 10), (80, 4, 4, 20, 20)]);
         assert_eq!(list.best_evalue, 1.0e-10);
         assert_eq!(blast_hsp_list_purge_hsps_with_common_endpoints(None), 0);
+    }
+
+    #[test]
+    fn test_purge_common_endpoints_phi_blast_is_noop() {
+        let mut first = make_hsp(100, 1.0e-5);
+        first.query_offset = 0;
+        first.subject_offset = 0;
+        first.query_end = 10;
+        first.subject_end = 10;
+
+        let mut duplicate = make_hsp(90, 1.0e-20);
+        duplicate.query_offset = 0;
+        duplicate.subject_offset = 0;
+        duplicate.query_end = 12;
+        duplicate.subject_end = 12;
+
+        let mut list = blast_hsp_list_new(0);
+        list.hsps = vec![duplicate, first];
+        list.best_evalue = s_blast_get_best_evalue(&list);
+
+        assert_eq!(
+            blast_hsp_list_purge_hsps_with_common_endpoints_ex(
+                crate::program::PHI_BLASTN,
+                Some(&mut list),
+                true,
+            ),
+            0
+        );
+        assert_eq!(list.hsps.len(), 2);
+        assert_eq!(list.best_evalue, 1.0e-20);
+    }
+
+    #[test]
+    fn test_purge_common_endpoints_blastn_can_trim_duplicate_start() {
+        let mut leader = make_hsp(100, 1.0e-5);
+        leader.query_offset = 0;
+        leader.subject_offset = 0;
+        leader.query_end = 4;
+        leader.subject_end = 4;
+        leader.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 4)],
+        });
+
+        let mut duplicate = make_hsp(90, 1.0e-20);
+        duplicate.query_offset = 0;
+        duplicate.subject_offset = 0;
+        duplicate.query_end = 8;
+        duplicate.subject_end = 8;
+        duplicate.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 8)],
+        });
+
+        let mut list = blast_hsp_list_new(0);
+        list.hsps = vec![duplicate, leader];
+        list.best_evalue = s_blast_get_best_evalue(&list);
+
+        assert_eq!(
+            blast_hsp_list_purge_hsps_with_common_endpoints_ex(
+                crate::program::BLASTN,
+                Some(&mut list),
+                false,
+            ),
+            0
+        );
+        assert_eq!(list.hsps.len(), 2);
+        let trimmed = list
+            .hsps
+            .iter()
+            .find(|hsp| hsp.score == 90)
+            .expect("trimmed hsp");
+        assert_eq!((trimmed.query_offset, trimmed.subject_offset), (4, 4));
+        assert_eq!((trimmed.query_end, trimmed.subject_end), (8, 8));
+        assert_eq!(
+            trimmed.edit_script.as_ref().unwrap().ops,
+            vec![(GapAlignOpType::Sub, 4)]
+        );
+        assert_eq!(list.best_evalue, 1.0e-20);
     }
 
     #[test]

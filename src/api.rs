@@ -343,6 +343,7 @@ fn api_hsp_as_culling_node(hsp: &Hsp, subject_oid: u32) -> crate::hspfilter_cull
 /// and the OID. Mirrors NCBI's per-thread `BlastGapAlignStruct` allocation
 /// pattern: one scratch buffer per worker, reset between subjects instead
 /// of reallocated per OID.
+/// blast-rs: Rayon database-OID dispatch adapter; not a direct NCBI C port.
 fn map_database_oids_init<T, S, FInit, F>(
     db: &BlastDb,
     params: &SearchParams,
@@ -378,15 +379,11 @@ where
             .stack_size(64 * 1024 * 1024)
             .build()
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-        pool.install(|| {
-            (0..db.num_oids)
-                .into_par_iter()
-                .map_init(init, f)
-                .collect()
-        })
+        pool.install(|| (0..db.num_oids).into_par_iter().map_init(init, f).collect())
     }
 }
 
+/// blast-rs: tblastx public-HSP ordering adapter; not a direct NCBI C port.
 fn compare_tblastx_hsps(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
     compare_hsps_by_evalue_then_score(a, b)
 }
@@ -402,6 +399,8 @@ struct TranslatedContextStats {
     kbp: KarlinBlk,
 }
 
+/// blast-rs: tblastx adapter into the direct `BLAST_LinkHsps` port; not a
+/// direct NCBI C port.
 fn apply_tblastx_linked_sum_stats(
     results: &mut [Option<SearchResult>],
     query_contexts: &[TranslatedContextStats],
@@ -421,6 +420,7 @@ fn apply_tblastx_linked_sum_stats(
         return;
     }
 
+    /// blast-rs: tblastx coordinate-conversion helper; not a direct NCBI C port.
     fn translated_coord_to_protein(coord: usize, frame: i32) -> i32 {
         let offset = frame.unsigned_abs() as usize - 1;
         ((coord.saturating_sub(offset)) / 3) as i32
@@ -503,9 +503,9 @@ fn apply_tblastx_linked_sum_stats(
             let avg_q_len_aa = (total_q / query_contexts.len() as i64).max(1) as i32;
             let subj_len_aa = (avg_subject_length_nt / crate::util::CODON_LENGTH as i32).max(1);
             let db_len_aa = (db_length_nt / crate::util::CODON_LENGTH as i64).max(1);
-            let expected_length = crate::math::nint(
-                (kbp.k * avg_q_len_aa as f64 * subj_len_aa as f64).ln() / kbp.h,
-            ) as i32;
+            let expected_length =
+                crate::math::nint((kbp.k * avg_q_len_aa as f64 * subj_len_aa as f64).ln() / kbp.h)
+                    as i32;
             let q_eff = (avg_q_len_aa - expected_length).max(1);
             let s_eff = (subj_len_aa - expected_length).max(1);
             let y_variable = if db_len_aa > s_eff as i64 {
@@ -518,15 +518,13 @@ fn apply_tblastx_linked_sum_stats(
             const EPSILON: f64 = 1.0e-9;
             if search_sp > 8 * window_size as i64 * window_size as i64 {
                 x_variable /= 1.0 - gap_prob + EPSILON;
-                link_params.cutoff_big_gap =
-                    (x_variable.ln() / kbp.lambda).floor() as i32 + 1;
+                link_params.cutoff_big_gap = (x_variable.ln() / kbp.lambda).floor() as i32 + 1;
                 x_variable = y_variable * (window_size * window_size) as f64;
                 x_variable /= gap_prob + EPSILON;
-                link_params.cutoff_small_gap = cutoff_score_min
-                    .max((x_variable.ln() / kbp.lambda).floor() as i32 + 1);
+                link_params.cutoff_small_gap =
+                    cutoff_score_min.max((x_variable.ln() / kbp.lambda).floor() as i32 + 1);
             } else {
-                link_params.cutoff_big_gap =
-                    (x_variable.ln() / kbp.lambda).floor() as i32 + 1;
+                link_params.cutoff_big_gap = (x_variable.ln() / kbp.lambda).floor() as i32 + 1;
                 link_params.gap_prob = 0.0;
                 link_params.cutoff_small_gap = 0;
             }
@@ -579,7 +577,8 @@ fn apply_tblastx_linked_sum_stats(
                             ),
                         },
                         context,
-                        num: 1, xsum: 0.0,
+                        num: 1,
+                        xsum: 0.0,
                     }
                 })
                 .collect(),
@@ -613,8 +612,7 @@ fn apply_tblastx_linked_sum_stats(
         // early-returns at hspcnt<=1, so pre-divide singletons by the same
         // divisor to mirror NCBI's even-gap singleton e-value.
         if hsp_list.hsp_array.len() == 1 {
-            let divisor =
-                crate::stat::gap_decay_divisor(link_params.gap_decay_rate, 1);
+            let divisor = crate::stat::gap_decay_divisor(link_params.gap_decay_rate, 1);
             if divisor > 0.0 {
                 hsp_list.hsp_array[0].evalue /= divisor;
             }
@@ -662,6 +660,8 @@ fn apply_tblastx_linked_sum_stats(
     }
 }
 
+/// blast-rs: blastx adapter into the direct `BLAST_LinkHsps` port; not a
+/// direct NCBI C port.
 fn apply_blastx_linked_sum_stats(
     results: &mut [SearchResult],
     query_info: &crate::queryinfo::QueryInfo,
@@ -674,6 +674,7 @@ fn apply_blastx_linked_sum_stats(
     };
     use crate::program::BLASTX;
 
+    /// blast-rs: blastx coordinate-conversion helper; not a direct NCBI C port.
     fn translated_coord_to_protein(coord: usize, frame: i32) -> i32 {
         let offset = frame.unsigned_abs().saturating_sub(1) as usize;
         ((coord.saturating_sub(offset)) / 3) as i32
@@ -728,7 +729,8 @@ fn apply_blastx_linked_sum_stats(
                             gapped_start: hsp.subject_start as i32,
                         },
                         context,
-                        num: 1, xsum: 0.0,
+                        num: 1,
+                        xsum: 0.0,
                     }
                 })
                 .collect(),
@@ -788,6 +790,8 @@ fn apply_blastx_linked_sum_stats(
     }
 }
 
+/// blast-rs: tblastn adapter into the direct `BLAST_LinkHsps` port; not a
+/// direct NCBI C port.
 fn apply_tblastn_linked_sum_stats(
     results: &mut [SearchResult],
     query_info: &crate::queryinfo::QueryInfo,
@@ -805,6 +809,7 @@ fn apply_tblastn_linked_sum_stats(
     };
     use crate::program::TBLASTN;
 
+    /// blast-rs: tblastn coordinate-conversion helper; not a direct NCBI C port.
     fn nuc_coord_to_protein(coord: usize, frame: i32) -> i32 {
         let offset = frame.unsigned_abs() as usize - 1;
         ((coord.saturating_sub(offset)) / 3) as i32
@@ -864,7 +869,8 @@ fn apply_tblastn_linked_sum_stats(
                         gapped_start: nuc_coord_to_protein(hsp.subject_start, hsp.subject_frame),
                     },
                     context: 0,
-                    num: 1, xsum: 0.0,
+                    num: 1,
+                    xsum: 0.0,
                 })
                 .collect(),
             best_evalue: result.best_evalue(),
@@ -923,6 +929,8 @@ fn apply_tblastn_linked_sum_stats(
     }
 }
 
+/// blast-rs: Public-parameter conversion for translated link-HSP setup; not a
+/// direct NCBI C port.
 fn translated_link_longest_intron(max_intron_length: i32) -> i32 {
     if max_intron_length <= 0 {
         0
@@ -931,6 +939,8 @@ fn translated_link_longest_intron(max_intron_length: i32) -> i32 {
     }
 }
 
+/// blast-rs: Gapped translated link-HSP intron default adapter; not a direct
+/// NCBI C port.
 fn translated_gapped_link_longest_intron(max_intron_length: i32) -> i32 {
     if max_intron_length == 0 {
         // NCBI treats translated gapped blastx/tblastn zero as "use the
@@ -941,12 +951,16 @@ fn translated_gapped_link_longest_intron(max_intron_length: i32) -> i32 {
     }
 }
 
+/// blast-rs: SearchParams predicate for translated sum-statistics; not a
+/// direct NCBI C port.
 fn translated_sum_stats_enabled(params: &SearchParams) -> bool {
     params.sum_stats
         && (params.max_intron_length <= 0
             || translated_gapped_link_longest_intron(params.max_intron_length) > 0)
 }
 
+/// blast-rs: SearchParams adapter for preliminary composition e-value stretch;
+/// not a direct NCBI C port.
 fn composition_prelim_evalue(params: &SearchParams) -> f64 {
     if params.comp_adjust > 1 {
         params.evalue_threshold * 5.0
@@ -955,6 +969,7 @@ fn composition_prelim_evalue(params: &SearchParams) -> f64 {
     }
 }
 
+/// blast-rs: SearchParams database-length override helper; not a direct NCBI C port.
 fn statistical_db_length(params: &SearchParams, actual_db_length: i64) -> i64 {
     if params.db_length > 0 {
         params.db_length
@@ -963,6 +978,8 @@ fn statistical_db_length(params: &SearchParams, actual_db_length: i64) -> i64 {
     }
 }
 
+/// blast-rs: Converts public SearchParams into setup options; not a direct
+/// NCBI C port.
 fn effective_lengths_options(params: &SearchParams) -> crate::options::EffectiveLengthsOptions {
     let mut options = crate::options::EffectiveLengthsOptions::default();
     if params.db_length > 0 {
@@ -975,6 +992,8 @@ fn effective_lengths_options(params: &SearchParams) -> crate::options::Effective
     options
 }
 
+/// blast-rs: blastn SearchHsp adapter into the direct `BLAST_LinkHsps` port;
+/// not a direct NCBI C port.
 fn apply_blastn_linked_sum_stats_to_search_hsps(
     hsps: &mut Vec<SearchHsp>,
     query_len: i32,
@@ -1036,7 +1055,8 @@ fn apply_blastn_linked_sum_stats_to_search_hsps(
                     gapped_start: hsp.subject_start,
                 },
                 context: hsp.context,
-                num: 1, xsum: 0.0,
+                num: 1,
+                xsum: 0.0,
             })
             .collect(),
         best_evalue: f64::INFINITY,
@@ -1089,6 +1109,7 @@ fn apply_blastn_linked_sum_stats_to_search_hsps(
     }
 }
 
+/// blast-rs: Aggregates API HSPs by subject OID; not a direct NCBI C port.
 fn push_hsp_for_subject(
     results: &mut [Option<SearchResult>],
     oid: u32,
@@ -1114,6 +1135,7 @@ fn push_hsp_for_subject(
     }
 }
 
+/// blast-rs: Deduplicates translated API HSP variants; not a direct NCBI C port.
 fn prune_translated_hsp_variants(hsps: &mut Vec<Hsp>) {
     let mut best_by_start: HashMap<(usize, usize, i32, i32), Hsp> = HashMap::new();
     for hsp in hsps.drain(..) {
@@ -1153,10 +1175,12 @@ fn prune_translated_hsp_variants(hsps: &mut Vec<Hsp>) {
     hsps.extend(best_by_start.into_values());
 }
 
+/// blast-rs: Public-HSP e-value/score ordering adapter; not a direct NCBI C port.
 fn compare_hsps_by_evalue_then_score(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
     crate::hspstream::evalue_comp(a.evalue, b.evalue).then_with(|| compare_hsps_by_score(a, b))
 }
 
+/// blast-rs: Public-HSP score ordering adapter; not a direct NCBI C port.
 fn compare_hsps_by_score(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
     let a_subject_offset = a.subject_start.min(a.subject_end).saturating_sub(1);
     let b_subject_offset = b.subject_start.min(b.subject_end).saturating_sub(1);
@@ -1175,6 +1199,8 @@ fn compare_hsps_by_score(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
         .then_with(|| b_query_end.cmp(&a_query_end))
 }
 
+/// blast-rs: Protein cutoff adapter over Karlin/Spouge helpers; not a direct
+/// NCBI C port.
 fn protein_eval_cutoff(
     evalue_threshold: f64,
     prot_kbp: &crate::stat::KarlinBlk,
@@ -1199,6 +1225,7 @@ fn protein_eval_cutoff(
     }
 }
 
+/// blast-rs: Preliminary protein seed cutoff adapter; not a direct NCBI C port.
 fn protein_prelim_seed_cutoff(
     gap_trigger_raw: i32,
     evalue_threshold: f64,
@@ -1219,11 +1246,13 @@ fn protein_prelim_seed_cutoff(
     gap_trigger_raw.min(eval_cutoff).max(1)
 }
 
+/// blast-rs: Converts public bit gap-trigger to raw score; not a direct NCBI C port.
 fn protein_gap_trigger_raw(gap_trigger_bits: f64, ungapped_kbp: &crate::stat::KarlinBlk) -> i32 {
     ((gap_trigger_bits * crate::math::NCBIMATH_LN2 + ungapped_kbp.log_k) / ungapped_kbp.lambda)
         as i32
 }
 
+/// blast-rs: Translated-search Spouge e-value adapter; not a direct NCBI C port.
 fn translated_spouge_evalue(
     score: i32,
     kbp: &crate::stat::KarlinBlk,
@@ -1240,6 +1269,7 @@ fn translated_spouge_evalue(
     }
 }
 
+/// blast-rs: Kappa redo near-identical predicate adapter; not a direct NCBI C port.
 fn kappa_redo_near_identical(
     ph: &crate::protein_lookup::ProteinHit,
     query_len: usize,
@@ -1265,6 +1295,7 @@ fn kappa_redo_near_identical(
     (ph.score as f64 / align_len as f64) >= cutoff
 }
 
+/// blast-rs: Kappa redo subject SEG-mask helper; not a direct NCBI C port.
 fn kappa_seg_mask_subject_for_redo_into(subject: &[u8], buf: &mut Vec<u8>) {
     buf.clear();
     buf.extend_from_slice(subject);
@@ -1278,6 +1309,8 @@ fn kappa_seg_mask_subject_for_redo_into(subject: &[u8], buf: &mut Vec<u8>) {
     }
 }
 
+/// blast-rs: Selects subject sequence for kappa redo alignment; not a direct
+/// NCBI C port.
 fn kappa_redo_subject_sequence<'a>(
     query_len: usize,
     subject: &'a [u8],
@@ -1297,6 +1330,7 @@ fn kappa_redo_subject_sequence<'a>(
     }
 }
 
+/// blast-rs: ProteinHit score ordering adapter; not a direct NCBI C port.
 fn compare_protein_hits_by_score(
     a: &crate::protein_lookup::ProteinHit,
     b: &crate::protein_lookup::ProteinHit,
@@ -1309,8 +1343,8 @@ fn compare_protein_hits_by_score(
         .then_with(|| b.query_end.cmp(&a.query_end))
 }
 
-/// Port of NCBI static `s_ChainingAlignment` (`blast_gapalign.c:3592`) for
-/// the Rust protein-hit representation.
+/// NCBI: s_ChainingAlignment (blast_gapalign.c:3592).
+/// naming: Public Rust wrapper keeps the C static symbol name in snake_case.
 pub fn s_chaining_alignment(
     ungapped_hits: &[crate::protein_lookup::ProteinHit],
     gap_open: i32,
@@ -1361,8 +1395,8 @@ pub fn s_chaining_alignment(
         .collect()
 }
 
-/// Port of the ordinary protein score-only path in NCBI `BLAST_GetGappedScore`
-/// (`blast_gapalign.c:3739`), over already-collected Rust ungapped seeds.
+/// NCBI: BLAST_GetGappedScore (blast_gapalign.c:3739).
+/// naming: Public Rust wrapper is the snake_case form over Rust ProteinHit data.
 pub fn blast_get_gapped_score(
     query_aa: &[u8],
     subj_aa: &[u8],
@@ -1481,9 +1515,8 @@ pub fn blast_get_gapped_score(
     hits
 }
 
-/// Port of the ordinary protein traceback branch in NCBI
-/// `Blast_TracebackFromHSPList` (`blast_traceback.c:345`), over Rust
-/// preliminary protein HSPs produced by [`blast_get_gapped_score`].
+/// NCBI: Blast_TracebackFromHSPList (blast_traceback.c:345).
+/// naming: Public Rust wrapper is the snake_case form over Rust ProteinHit data.
 pub fn blast_traceback_from_hsp_list(
     query_aa: &[u8],
     subj_aa: &[u8],
@@ -1567,6 +1600,8 @@ pub fn blast_traceback_from_hsp_list(
     hits.sort_by(compare_protein_hits_by_score);
 }
 
+/// blast-rs: Protein search adapter combining lookup scan and gapped scoring;
+/// not a direct NCBI C port.
 fn protein_alignment_hits(
     query_aa: &[u8],
     subj_aa: &[u8],
@@ -1610,6 +1645,7 @@ fn protein_alignment_hits(
 /// surviving ungapped HSP for callers that implement NCBI's `-ungapped`
 /// mode (blastx/tblastn). Mirrors `protein_alignment_hits` minus the
 /// gapped phase.
+/// blast-rs: Protein search adapter for public ungapped mode; not a direct NCBI C port.
 fn protein_alignment_hits_ungapped_only(
     query_aa: &[u8],
     subj_aa: &[u8],
@@ -1659,6 +1695,7 @@ pub struct ScoringMatrix {
 }
 
 impl ScoringMatrix {
+    /// blast-rs: Public scoring-matrix constructor; not a direct NCBI C port.
     pub fn from_type(mt: MatrixType) -> Self {
         let scores = *get_matrix(mt);
         let min_score = scores
@@ -1675,33 +1712,43 @@ impl ScoringMatrix {
             name,
         }
     }
+    /// blast-rs: Public BLOSUM62 constructor; not a direct NCBI C port.
     pub fn blosum62() -> Self {
         Self::from_type(MatrixType::Blosum62)
     }
+    /// blast-rs: Public BLOSUM45 constructor; not a direct NCBI C port.
     pub fn blosum45() -> Self {
         Self::from_type(MatrixType::Blosum45)
     }
+    /// blast-rs: Public BLOSUM50 constructor; not a direct NCBI C port.
     pub fn blosum50() -> Self {
         Self::from_type(MatrixType::Blosum50)
     }
+    /// blast-rs: Public BLOSUM80 constructor; not a direct NCBI C port.
     pub fn blosum80() -> Self {
         Self::from_type(MatrixType::Blosum80)
     }
+    /// blast-rs: Public BLOSUM90 constructor; not a direct NCBI C port.
     pub fn blosum90() -> Self {
         Self::from_type(MatrixType::Blosum90)
     }
+    /// blast-rs: Public PAM30 constructor; not a direct NCBI C port.
     pub fn pam30() -> Self {
         Self::from_type(MatrixType::Pam30)
     }
+    /// blast-rs: Public PAM70 constructor; not a direct NCBI C port.
     pub fn pam70() -> Self {
         Self::from_type(MatrixType::Pam70)
     }
+    /// blast-rs: Public PAM250 constructor; not a direct NCBI C port.
     pub fn pam250() -> Self {
         Self::from_type(MatrixType::Pam250)
     }
+    /// blast-rs: Public identity-matrix constructor; not a direct NCBI C port.
     pub fn identity() -> Self {
         Self::from_type(MatrixType::Identity)
     }
+    /// blast-rs: Public scoring-matrix accessor; not a direct NCBI C port.
     pub fn score(&self, a: u8, b: u8) -> i32 {
         self.scores[a as usize & 0x1F][b as usize & 0x1F]
     }
@@ -1756,23 +1803,28 @@ pub struct SearchParams {
 }
 
 impl SearchParams {
+    /// blast-rs: Public blastp SearchParams constructor; not a direct NCBI C port.
     pub fn blastp() -> Self {
         Self::blastp_defaults()
     }
+    /// blast-rs: Public blastn SearchParams constructor; not a direct NCBI C port.
     pub fn blastn() -> Self {
         Self::blastn_defaults()
     }
 
+    /// blast-rs: Public blastx SearchParams constructor; not a direct NCBI C port.
     pub fn blastx() -> Self {
         let mut params = Self::blastp_defaults();
         params.max_intron_length = 0;
         params
     }
+    /// blast-rs: Public tblastn SearchParams constructor; not a direct NCBI C port.
     pub fn tblastn() -> Self {
         let mut params = Self::blastp_defaults();
         params.max_intron_length = 0;
         params
     }
+    /// blast-rs: Public tblastx SearchParams constructor; not a direct NCBI C port.
     pub fn tblastx() -> Self {
         let mut params = Self::blastp_defaults();
         params.comp_adjust = 0;
@@ -1782,6 +1834,7 @@ impl SearchParams {
         params
     }
 
+    /// blast-rs: Public blastp default-parameter bundle; not a direct NCBI C port.
     pub fn blastp_defaults() -> Self {
         SearchParams {
             word_size: crate::stat::BLAST_WORDSIZE_PROT as usize,
@@ -1822,6 +1875,7 @@ impl SearchParams {
         }
     }
 
+    /// blast-rs: Public blastn default-parameter bundle; not a direct NCBI C port.
     pub fn blastn_defaults() -> Self {
         SearchParams {
             word_size: crate::stat::BLAST_WORDSIZE_NUCL as usize,
@@ -1858,7 +1912,7 @@ impl SearchParams {
             // window (40). `two_hit=false` by default, so unused.
             two_hit_window: crate::stat::BLAST_WINDOW_SIZE_PROT as usize,
             x_drop_final: crate::stat::BLAST_GAP_X_DROPOFF_FINAL_NUCL,
-            soft_masking: false,
+            soft_masking: true,
             lcase_masking: false,
             sum_stats: true,
             ungapped: false,
@@ -1867,14 +1921,17 @@ impl SearchParams {
     }
 
     // Builder methods
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn evalue(mut self, v: f64) -> Self {
         self.evalue_threshold = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn max_target_seqs(mut self, v: usize) -> Self {
         self.max_target_seqs = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn num_threads(mut self, v: usize) -> Self {
         self.num_threads = v;
         self
@@ -1883,116 +1940,144 @@ impl SearchParams {
     ///
     /// Supplying a pool enables the parallel path even when `num_threads` is
     /// left at its default value; the pool's own size controls concurrency.
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn thread_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
         self.thread_pool = Some(pool);
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn filter_low_complexity(mut self, v: bool) -> Self {
         self.filter_low_complexity = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn seg_options(mut self, window: usize, locut: f64, hicut: f64) -> Self {
         self.seg_window = window;
         self.seg_locut = locut;
         self.seg_hicut = hicut;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn word_threshold(mut self, v: f64) -> Self {
         self.word_threshold = Some(v);
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn comp_adjust(mut self, v: u8) -> Self {
         self.comp_adjust = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn strand(mut self, v: &str) -> Self {
         self.strand = v.to_string();
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn word_size(mut self, v: usize) -> Self {
         self.word_size = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn matrix(mut self, v: MatrixType) -> Self {
         self.matrix = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn gap_open(mut self, v: i32) -> Self {
         self.gap_open = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn gap_extend(mut self, v: i32) -> Self {
         self.gap_extend = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn match_score(mut self, v: i32) -> Self {
         self.match_score = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn mismatch(mut self, v: i32) -> Self {
         self.mismatch = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn min_score(mut self, v: i32) -> Self {
         self.min_score = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn query_gencode(mut self, v: u8) -> Self {
         self.query_gencode = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn db_gencode(mut self, v: u8) -> Self {
         self.db_gencode = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn db_length(mut self, v: i64) -> Self {
         self.db_length = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn effective_search_space(mut self, v: i64) -> Self {
         self.effective_search_space = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn max_intron_length(mut self, v: i32) -> Self {
         self.max_intron_length = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn max_hsps(mut self, v: Option<usize>) -> Self {
         self.max_hsps = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn culling_limit(mut self, v: Option<usize>) -> Self {
         self.culling_limit = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn two_hit(mut self, v: bool) -> Self {
         self.two_hit = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn two_hit_window(mut self, v: usize) -> Self {
         self.two_hit_window = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn x_drop_ungapped(mut self, v: i32) -> Self {
         self.x_drop_ungapped = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn x_drop_gapped(mut self, v: i32) -> Self {
         self.x_drop_gapped = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn x_drop_final(mut self, v: i32) -> Self {
         self.x_drop_final = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn soft_masking(mut self, v: bool) -> Self {
         self.soft_masking = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn lcase_masking(mut self, v: bool) -> Self {
         self.lcase_masking = v;
         self
     }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn sum_stats(mut self, v: bool) -> Self {
         self.sum_stats = v;
         self
@@ -2018,6 +2103,7 @@ pub struct BlastDbBuilder {
 }
 
 impl BlastDbBuilder {
+    /// blast-rs: Public BLAST database builder constructor; not a direct NCBI C port.
     pub fn new(seq_type: DbType, db_title: impl Into<String>) -> Self {
         BlastDbBuilder {
             seq_type,
@@ -2026,10 +2112,12 @@ impl BlastDbBuilder {
         }
     }
 
+    /// blast-rs: Public BLAST database builder mutator; not a direct NCBI C port.
     pub fn add(&mut self, entry: SequenceEntry) {
         self.entries.push(entry);
     }
 
+    /// blast-rs: Public BLAST database writer dispatcher; not a direct NCBI C port.
     pub fn write(&self, base_path: &Path) -> io::Result<()> {
         match self.seq_type {
             DbType::Nucleotide => self.write_nucleotide(base_path),
@@ -2037,6 +2125,8 @@ impl BlastDbBuilder {
         }
     }
 
+    /// blast-rs: Writes the Rust v4 nucleotide BLAST database files; not a
+    /// direct NCBI C port.
     fn write_nucleotide(&self, base_path: &Path) -> io::Result<()> {
         // Write .nsq
         let mut nsq = BufWriter::new(File::create(base_path.with_extension("nsq"))?);
@@ -2090,6 +2180,8 @@ impl BlastDbBuilder {
         )
     }
 
+    /// blast-rs: Writes the Rust v4 protein BLAST database files; not a direct
+    /// NCBI C port.
     fn write_protein(&self, base_path: &Path) -> io::Result<()> {
         // Write .psq (protein sequences in NCBIstdaa)
         let mut psq = BufWriter::new(File::create(base_path.with_extension("psq"))?);
@@ -2139,6 +2231,8 @@ impl BlastDbBuilder {
 // ── Search functions ────────────────────────────────────────────────────────
 
 /// Run a blastp search (protein query vs protein database).
+/// blast-rs: Public blastp API pipeline assembled from ported lower-level pieces;
+/// not a direct NCBI C port.
 pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     if query.is_empty() {
         return Vec::new();
@@ -2348,10 +2442,14 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 }
                 let q_slice = &query_aa[uh.query_start..uh.query_end];
                 let s_slice = &subj_aa[uh.subject_start..uh.subject_end];
-                let q_aln: Vec<u8> =
-                    q_slice.iter().map(|&b| ncbistdaa_to_aminoacid_base(b)).collect();
-                let s_aln: Vec<u8> =
-                    s_slice.iter().map(|&b| ncbistdaa_to_aminoacid_base(b)).collect();
+                let q_aln: Vec<u8> = q_slice
+                    .iter()
+                    .map(|&b| ncbistdaa_to_aminoacid_base(b))
+                    .collect();
+                let s_aln: Vec<u8> = s_slice
+                    .iter()
+                    .map(|&b| ncbistdaa_to_aminoacid_base(b))
+                    .collect();
                 let mut midline: Vec<u8> = Vec::with_capacity(q_aln.len());
                 for (qb, sb) in q_slice.iter().zip(s_slice.iter()) {
                     let qc = ncbistdaa_to_aminoacid_base(*qb);
@@ -2862,15 +2960,13 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     // Run sequentially or in parallel depending on num_threads/pool. Each
     // worker thread gets one [`ProteinScratch`] reused across all subjects
     // it processes (NCBI's per-thread `BlastGapAlignStruct` pattern).
-    let mut results: Vec<SearchResult> = map_database_oids_init(
-        db,
-        params,
-        ProteinScratch::new,
-        |scratch, oid| search_oid(scratch, oid),
-    )
-    .into_iter()
-    .flatten()
-    .collect();
+    let mut results: Vec<SearchResult> =
+        map_database_oids_init(db, params, ProteinScratch::new, |scratch, oid| {
+            search_oid(scratch, oid)
+        })
+        .into_iter()
+        .flatten()
+        .collect();
 
     apply_api_min_score_filter(&mut results, params.min_score);
     if let Some(culling_limit) = params.culling_limit {
@@ -2891,6 +2987,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 /// Each subject is loaded into cache once, then all queries are checked.
 ///
 /// Returns one `Vec<SearchResult>` per query, in the same order as `queries`.
+/// blast-rs: Batched public blastp API pipeline; not a direct NCBI C port.
 pub fn blastp_batch(
     db: &BlastDb,
     queries: &[&[u8]],
@@ -3241,13 +3338,23 @@ pub fn blastp_batch(
 }
 
 /// Run a blastn search (nucleotide query vs nucleotide database).
+/// blast-rs: Public blastn API pipeline assembled from ported lower-level pieces;
+/// not a direct NCBI C port.
 pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     if query.is_empty() {
         return Vec::new();
     }
 
-    let query_plus = encode_blastna_sequence(query);
-    let query_minus = reverse_complement_blastna_sequence(&query_plus);
+    let query_plus_nomask = encode_blastna_sequence(query);
+    let mut query_plus_lookup = query_plus_nomask.clone();
+    apply_blastn_query_lookup_masks(
+        &mut query_plus_lookup,
+        query,
+        params.filter_low_complexity,
+        params.lcase_masking,
+    );
+    let query_minus_lookup = reverse_complement_blastna_sequence(&query_plus_lookup);
+    let query_minus_nomask = reverse_complement_blastna_sequence(&query_plus_nomask);
 
     let reward = params.match_score;
     let penalty = params.mismatch;
@@ -3255,20 +3362,35 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
     let total_subj_len = db.total_length;
     let (kbp, search_space, len_adj) = blastn_api_stats(
         params,
-        &query_plus,
+        &query_plus_nomask,
         total_subj_len as i64,
         db.num_oids as i32,
     );
 
     let x_dropoff = params.x_drop_ungapped;
 
-    let (q_plus, q_minus) = match params.strand.as_str() {
-        "plus" => (query_plus.as_slice(), &[] as &[u8]),
-        "minus" => (&[] as &[u8], query_minus.as_slice()),
-        _ => (query_plus.as_slice(), query_minus.as_slice()),
+    let (q_plus_lookup, q_minus_lookup) = match params.strand.as_str() {
+        "plus" => (query_plus_lookup.as_slice(), &[] as &[u8]),
+        "minus" => (&[] as &[u8], query_minus_lookup.as_slice()),
+        _ => (query_plus_lookup.as_slice(), query_minus_lookup.as_slice()),
     };
-    let prepared_query =
-        crate::search::PreparedBlastnQuery::new_megablast(q_plus, q_minus, params.word_size);
+    let (q_plus_nomask, q_minus_nomask) = match params.strand.as_str() {
+        "plus" => (query_plus_nomask.as_slice(), &[] as &[u8]),
+        "minus" => (&[] as &[u8], query_minus_nomask.as_slice()),
+        _ => (query_plus_nomask.as_slice(), query_minus_nomask.as_slice()),
+    };
+    let (q_plus_extend, q_minus_extend) = if params.soft_masking {
+        (q_plus_nomask, q_minus_nomask)
+    } else {
+        (q_plus_lookup, q_minus_lookup)
+    };
+    let prepared_query = crate::search::PreparedBlastnQuery::new_megablast_with_nomask(
+        q_plus_lookup,
+        q_minus_lookup,
+        q_plus_nomask,
+        q_minus_nomask,
+        params.word_size,
+    );
 
     let search_oid = |oid: u32| -> Option<SearchResult> {
         let subject_packed = db.get_sequence(oid);
@@ -3280,8 +3402,8 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         let mut last_hit_scratch = prepared_query.last_hit_scratch();
         let mut hsps = crate::search::blastn_gapped_search_packed_prepared_with_xdrops(
             &prepared_query,
-            q_plus,
-            q_minus,
+            q_plus_extend,
+            q_minus_extend,
             subject_packed,
             subject_len,
             reward,
@@ -3406,6 +3528,28 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
     results
 }
 
+/// blast-rs: Public API blastn lookup masking helper; not a direct NCBI C port.
+fn apply_blastn_query_lookup_masks(
+    encoded_query: &mut [u8],
+    raw_query: &[u8],
+    filter_low_complexity: bool,
+    lcase_masking: bool,
+) {
+    if filter_low_complexity {
+        let mask = crate::filter::dust_filter(encoded_query, 20, 64, 1);
+        mask.apply(encoded_query, crate::filter::K_NUCL_MASK);
+    }
+    if lcase_masking {
+        for (encoded, raw) in encoded_query.iter_mut().zip(raw_query.iter()) {
+            if raw.is_ascii_lowercase() {
+                *encoded = crate::filter::K_NUCL_MASK;
+            }
+        }
+    }
+}
+
+/// blast-rs: Computes blastn API Karlin blocks from public parameters; not a
+/// direct NCBI C port.
 fn blastn_api_kbps(
     query_plus: &[u8],
     reward: i32,
@@ -3458,6 +3602,8 @@ fn blastn_api_kbps(
     (ungapped, gapped)
 }
 
+/// blast-rs: Computes blastn API effective search statistics; not a direct
+/// NCBI C port.
 fn blastn_api_stats(
     params: &SearchParams,
     query_plus: &[u8],
@@ -3506,6 +3652,8 @@ fn blastn_api_stats(
 }
 
 /// Run a blastx search (translated nucleotide query vs protein database).
+/// blast-rs: Public blastx API pipeline assembled from ported lower-level pieces;
+/// not a direct NCBI C port.
 pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     if query.len() < 3 {
         return Vec::new();
@@ -3866,6 +4014,8 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
 }
 
 /// Run a tblastn search (protein query vs translated nucleotide database).
+/// blast-rs: Public tblastn API pipeline assembled from ported lower-level pieces;
+/// not a direct NCBI C port.
 pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     if query.is_empty() {
         return Vec::new();
@@ -4284,6 +4434,8 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
 }
 
 /// Run a tblastx search (translated nt query vs translated nt database).
+/// blast-rs: Public tblastx API pipeline assembled from ported lower-level pieces;
+/// not a direct NCBI C port.
 pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     if query.len() < 3 {
         return Vec::new();
@@ -4607,8 +4759,7 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     // leaves untouched). Our SEG hard-masks the working
                     // buffer for extension, but the report should treat masked
                     // residues that happen to match the subject as identities.
-                    let recount_ident: i32 = q_plan.prot_unmasked
-                        [ph.query_start..ph.query_end]
+                    let recount_ident: i32 = q_plan.prot_unmasked[ph.query_start..ph.query_end]
                         .iter()
                         .zip(s_prot[ph.subject_start..ph.subject_end].iter())
                         .filter(|(q, s)| q == s)
@@ -4733,6 +4884,8 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
 
 type ProteinCompositionAdjustment = Option<(Option<[[i32; AA_SIZE]; AA_SIZE]>, Option<f64>)>;
 
+/// blast-rs: Protein composition-adjustment adapter over kappa/composition ports;
+/// not a direct NCBI C port.
 fn protein_composition_adjustment(
     query_aa: &[u8],
     subj_aa: &[u8],
@@ -4843,6 +4996,8 @@ fn protein_composition_adjustment(
 /// `lambda_ratio_opt` is `Some(lr)` only when the matrix-optimization
 /// path fell back to lambda-only adjustment (status != 0 in NCBI's
 /// `Blast_CompositionMatrixAdj`); callers use it to scale the e-value.
+/// blast-rs: Shared translated-search composition redo adapter; not a direct
+/// NCBI C port.
 fn apply_compositional_adjustment_per_subject(
     query_aa: &[u8],
     subj_aa: &[u8],
@@ -4855,7 +5010,12 @@ fn apply_compositional_adjustment_per_subject(
     cutoff_s: i32,
     gapped_lambda: f64,
     scratch: &mut ProteinScratch,
-) -> (Vec<crate::protein_lookup::ProteinHit>, bool, Option<f64>, u8) {
+) -> (
+    Vec<crate::protein_lookup::ProteinHit>,
+    bool,
+    Option<f64>,
+    u8,
+) {
     if comp_mode == 0 {
         return (phits, false, None, 0);
     }
@@ -5023,7 +5183,12 @@ fn apply_compositional_adjustment_per_subject(
         (phits, false)
     };
 
-    (final_phits, use_adj_matrix, lambda_ratio_opt, comp_adjust_method_id)
+    (
+        final_phits,
+        use_adj_matrix,
+        lambda_ratio_opt,
+        comp_adjust_method_id,
+    )
 }
 
 /// blast-rs: ProteinHit endpoint dedup helper modeled on the C common-endpoint
@@ -5108,6 +5273,8 @@ fn purge_hsps_with_common_endpoints(phits: &mut Vec<crate::protein_lookup::Prote
     });
 }
 
+/// blast-rs: Recomputes ProteinHit score from rendered alignment; not a direct
+/// NCBI C port.
 fn rescore_protein_hit(
     ph: &crate::protein_lookup::ProteinHit,
     query_aa: &[u8],
@@ -5168,6 +5335,7 @@ fn rescore_protein_hit(
 }
 
 /// Parse a multi-FASTA byte slice into (title, sequence) pairs.
+/// blast-rs: Public FASTA parser helper; not a direct NCBI C port.
 pub fn parse_fasta(input: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut sequences = Vec::new();
     let mut current_title = String::new();
@@ -5195,6 +5363,7 @@ pub fn parse_fasta(input: &[u8]) -> Vec<(String, Vec<u8>)> {
 }
 
 /// Reverse complement an ASCII nucleotide sequence.
+/// blast-rs: Public reverse-complement wrapper; not a direct NCBI C port.
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     reverse_complement_iupacna_sequence(seq)
 }
@@ -5207,6 +5376,8 @@ pub fn six_frame_translate(nt_seq: &[u8]) -> [TranslatedFrame; 6] {
     six_frame_translate_with_table(nt_seq, &crate::util::STANDARD_GENETIC_CODE)
 }
 
+/// blast-rs: Six-frame translation adapter over `BLAST_GetAllTranslations`;
+/// not a direct NCBI C port.
 fn six_frame_translate_with_table(
     nt_seq: &[u8],
     genetic_code: &'static [u8; 64],
@@ -5256,10 +5427,14 @@ pub struct BlastDefLine {
 }
 
 /// Apply SEG masking on NCBIstdaa-encoded sequence in place.
+/// blast-rs: Public SEG masking wrapper using default options; not a direct
+/// NCBI C port.
 pub fn apply_seg_ncbistdaa(seq: &mut [u8]) {
     apply_seg_ncbistdaa_with_options(seq, 12, 2.2, 2.5)
 }
 
+/// blast-rs: Public SEG masking wrapper with explicit options; not a direct
+/// NCBI C port.
 pub fn apply_seg_ncbistdaa_with_options(seq: &mut [u8], window: usize, locut: f64, hicut: f64) {
     if is_single_residue_low_complexity(seq) {
         for aa in seq {
@@ -5281,6 +5456,8 @@ pub fn apply_seg_ncbistdaa_with_options(seq: &mut [u8], window: usize, locut: f6
     }
 }
 
+/// blast-rs: SEG edge-case helper for homopolymer protein queries; not a direct
+/// NCBI C port.
 fn is_single_residue_low_complexity(seq: &[u8]) -> bool {
     if seq.len() < 12 {
         return false;
@@ -5302,11 +5479,13 @@ fn is_single_residue_low_complexity(seq: &[u8]) -> bool {
 }
 
 /// Compute a boolean mask indicating which positions are lowercase.
+/// blast-rs: Public lowercase-mask helper; not a direct NCBI C port.
 pub fn lowercase_mask(seq: &[u8]) -> Vec<bool> {
     seq.iter().map(|b| b.is_ascii_lowercase()).collect()
 }
 
 /// Apply repeat masking based on n-mer frequency.
+/// blast-rs: Public repeat-mask mutator; not a direct NCBI C port.
 pub fn apply_repeat_mask(seq: &mut [u8]) {
     let mask = repeat_mask(seq, 11, 2.0);
     for (i, masked) in mask.iter().enumerate() {
@@ -5317,6 +5496,7 @@ pub fn apply_repeat_mask(seq: &mut [u8]) {
 }
 
 /// Compute repeat mask: positions where n-mer frequency exceeds threshold.
+/// blast-rs: Public repeat-mask helper; not a direct NCBI C port.
 pub fn repeat_mask(seq: &[u8], nmer_size: usize, threshold: f64) -> Vec<bool> {
     let mut mask = vec![false; seq.len()];
     if seq.len() < nmer_size {
@@ -5383,12 +5563,14 @@ pub struct BlastnSearch {
 }
 
 impl Default for BlastnSearch {
+    /// blast-rs: Native BlastnSearch default implementation; not a direct NCBI C port.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl BlastnSearch {
+    /// blast-rs: Public BlastnSearch builder constructor; not a direct NCBI C port.
     pub fn new() -> Self {
         BlastnSearch {
             word_size: crate::stat::BLAST_WORDSIZE_NUCL as usize,
@@ -5405,47 +5587,58 @@ impl BlastnSearch {
         }
     }
 
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn query(mut self, seq: &[u8]) -> Self {
         self.query_raw = seq.to_vec();
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn subject(mut self, seq: &[u8]) -> Self {
         self.subject_raw = seq.to_vec();
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn word_size(mut self, ws: usize) -> Self {
         self.word_size = ws;
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn reward(mut self, r: i32) -> Self {
         self.reward = r;
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn penalty(mut self, p: i32) -> Self {
         self.penalty = p;
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn gap_open(mut self, g: i32) -> Self {
         self.gap_open = g;
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn gap_extend(mut self, g: i32) -> Self {
         self.gap_extend = g;
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn evalue(mut self, e: f64) -> Self {
         self.evalue = e;
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn dust(mut self, d: bool) -> Self {
         self.dust = d;
         self
     }
+    /// blast-rs: BlastnSearch builder setter; not a direct NCBI C port.
     pub fn strand(mut self, s: Strand) -> Self {
         self.strand = s;
         self
     }
 
+    /// blast-rs: Public BlastnSearch execution wrapper; not a direct NCBI C port.
     pub fn run(&self) -> Vec<SearchHsp> {
         if self.query_raw.is_empty() || self.subject_raw.is_empty() {
             return Vec::new();
@@ -5538,6 +5731,8 @@ impl BlastnSearch {
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
+/// blast-rs: Public API protein-query encoding/masking helper; not a direct
+/// NCBI C port.
 fn encode_protein_query(
     sequence: &[u8],
     filter_low_complexity: bool,
@@ -5684,6 +5879,7 @@ mod low_complexity_tests {
     }
 }
 
+/// blast-rs: Pairwise-display midline helper; not a direct NCBI C port.
 fn build_midline(qseq: &str, sseq: &str) -> Vec<u8> {
     qseq.bytes()
         .zip(sseq.bytes())
@@ -5694,6 +5890,7 @@ fn build_midline(qseq: &str, sseq: &str) -> Vec<u8> {
 // ── Aliases for API compatibility ───────────────────────────────────────────
 
 /// Get the scoring matrix for a given MatrixType.
+/// blast-rs: Public matrix lookup wrapper; not a direct NCBI C port.
 pub fn get_matrix(mt: MatrixType) -> &'static [[i32; AA_SIZE]; AA_SIZE] {
     match mt {
         MatrixType::Blosum45 => &crate::matrix::BLOSUM45,
@@ -5708,6 +5905,8 @@ pub fn get_matrix(mt: MatrixType) -> &'static [[i32; AA_SIZE]; AA_SIZE] {
     }
 }
 
+/// blast-rs: Matrix/gap lookup helper for public API parameters; not a direct
+/// NCBI C port.
 fn protein_gapped_params_for_matrix(
     matrix: MatrixType,
     gap_open: i32,
@@ -5716,6 +5915,7 @@ fn protein_gapped_params_for_matrix(
     crate::stat::lookup_matrix_params(protein_matrix_name(matrix), gap_open, gap_extend)
 }
 
+/// blast-rs: Matrix/gap Karlin-block lookup helper; not a direct NCBI C port.
 fn protein_kbp_for_matrix(matrix: MatrixType, gap_open: i32, gap_extend: i32) -> KarlinBlk {
     protein_gapped_params_for_matrix(matrix, gap_open, gap_extend)
         .map(|p| KarlinBlk {
@@ -5730,6 +5930,7 @@ fn protein_kbp_for_matrix(matrix: MatrixType, gap_open: i32, gap_extend: i32) ->
         })
 }
 
+/// blast-rs: Protein API effective search-space adapter; not a direct NCBI C port.
 fn protein_api_search_space(
     params: &SearchParams,
     query_len: usize,
@@ -5747,13 +5948,11 @@ fn protein_api_search_space(
     // ungapped branch, `blast_stat.c:3128`). For BLOSUM62 row 0 has
     // alpha=0.7916 and beta=-3.2.
     if params.ungapped {
-        let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(
-            protein_matrix_name(params.matrix),
-        );
-        let (alpha, beta) = crate::stat::lookup_matrix_ungapped_alpha_beta(
-            protein_matrix_name(params.matrix),
-        )
-        .unwrap_or((ungapped_kbp.lambda / ungapped_kbp.h.max(1e-9), 0.0));
+        let ungapped_kbp =
+            crate::stat::protein_ungapped_kbp_for_matrix(protein_matrix_name(params.matrix));
+        let (alpha, beta) =
+            crate::stat::lookup_matrix_ungapped_alpha_beta(protein_matrix_name(params.matrix))
+                .unwrap_or((ungapped_kbp.lambda / ungapped_kbp.h.max(1e-9), 0.0));
         let (len_adj, _) = compute_length_adjustment_exact(
             ungapped_kbp.k,
             ungapped_kbp.log_k,
@@ -5800,6 +5999,7 @@ fn protein_api_search_space(
     }
 }
 
+/// blast-rs: Matrix/gap Gumbel-block lookup helper; not a direct NCBI C port.
 fn protein_gumbel_for_matrix(
     matrix: MatrixType,
     gap_open: i32,
@@ -5809,6 +6009,7 @@ fn protein_gumbel_for_matrix(
     crate::stat::matrix_gumbel_blk(protein_matrix_name(matrix), gap_open, gap_extend, db_length)
 }
 
+/// blast-rs: Public enum to BLAST matrix-name adapter; not a direct NCBI C port.
 fn protein_matrix_name(matrix: MatrixType) -> &'static str {
     match matrix {
         MatrixType::Blosum45 => "BLOSUM45",
@@ -5823,6 +6024,7 @@ fn protein_matrix_name(matrix: MatrixType) -> &'static str {
     }
 }
 
+/// blast-rs: Public API default word-threshold selector; not a direct NCBI C port.
 fn suggested_word_threshold(matrix: MatrixType, program: crate::program::ProgramType) -> f64 {
     let mut threshold = match matrix {
         MatrixType::Blosum45 => 14.0,
@@ -5845,6 +6047,7 @@ fn suggested_word_threshold(matrix: MatrixType, program: crate::program::Program
 /// Returns a 64-byte table mapping codons to NCBIstdaa amino acid codes.
 /// Supports the NCBI genetic codes accepted by BLAST 2.12
 /// (1-6, 9-16, 21-31, 33). Unknown codes fall back to the standard code.
+/// blast-rs: Public genetic-code lookup wrapper; not a direct NCBI C port.
 pub fn get_codon_table(code: u8) -> &'static [u8; 64] {
     crate::util::lookup_genetic_code(code)
 }
@@ -5852,6 +6055,7 @@ pub fn get_codon_table(code: u8) -> &'static [u8; 64] {
 // ── Masking wrappers ────────────────────────────────────────────────────────
 
 /// Apply DUST low-complexity masking in place (replaces masked positions with N).
+/// blast-rs: Public DUST masking wrapper; not a direct NCBI C port.
 pub fn apply_dust(seq: &mut [u8]) {
     let mask = crate::filter::dust_filter(seq, 20, 64, 1);
     for r in &mask.regions {
@@ -5864,6 +6068,7 @@ pub fn apply_dust(seq: &mut [u8]) {
 }
 
 /// Apply SEG low-complexity masking in place (replaces masked positions with X).
+/// blast-rs: Public SEG masking wrapper; not a direct NCBI C port.
 pub fn apply_seg(seq: &mut [u8]) {
     let mask = crate::filter::seg_filter(seq, 12, 2.2);
     for r in &mask.regions {
@@ -5876,6 +6081,7 @@ pub fn apply_seg(seq: &mut [u8]) {
 }
 
 /// Replace lowercase characters with N (nucleotide masking).
+/// blast-rs: Public lowercase nucleotide masking helper; not a direct NCBI C port.
 pub fn apply_lowercase_mask_nucleotide(seq: &mut [u8]) {
     for b in seq.iter_mut() {
         if b.is_ascii_lowercase() {
@@ -5885,6 +6091,7 @@ pub fn apply_lowercase_mask_nucleotide(seq: &mut [u8]) {
 }
 
 /// Replace lowercase characters with X (protein masking).
+/// blast-rs: Public lowercase protein masking helper; not a direct NCBI C port.
 pub fn apply_lowercase_mask_protein(seq: &mut [u8]) {
     for b in seq.iter_mut() {
         if b.is_ascii_lowercase() {
@@ -5896,6 +6103,7 @@ pub fn apply_lowercase_mask_protein(seq: &mut [u8]) {
 // ── Composition statistics ──────────────────────────────────────────────────
 
 /// Compute amino acid composition (frequencies) from NCBIstdaa-encoded sequence.
+/// blast-rs: Public composition convenience helper; not a direct NCBI C port.
 pub fn composition_ncbistdaa(seq: &[u8]) -> [f64; 28] {
     let mut counts = [0u64; 28];
     for &b in seq {
@@ -5915,6 +6123,7 @@ pub fn composition_ncbistdaa(seq: &[u8]) -> [f64; 28] {
 ///
 /// q and r are amino acid frequency vectors (28 elements, NCBIstdaa indexed).
 /// Returns the adjusted E-value, or the original if correction is inapplicable.
+/// blast-rs: Public composition-adjusted e-value helper; not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn adjust_evalue(
     raw_evalue: f64,
@@ -5943,6 +6152,8 @@ pub fn adjust_evalue(
 ///   1 = unconditional composition-based lambda adjustment
 ///   2 = conditional: only apply if composition diverges significantly
 ///   3 = unconditional (always applied, even if expected_score >= 0)
+/// blast-rs: Public composition-adjusted e-value helper with mode selector;
+/// not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 pub fn adjust_evalue_with_mode(
     raw_evalue: f64,
@@ -6029,6 +6240,8 @@ pub fn adjust_evalue_with_mode(
 }
 
 /// Find adjusted lambda via bisection for composition-based statistics.
+/// blast-rs: Lambda root-finding helper for API composition adjustment; not a
+/// direct NCBI C port.
 fn find_adjusted_lambda(
     q: &[f64; 28],
     r: &[f64; 28],
@@ -6071,6 +6284,8 @@ fn find_adjusted_lambda(
     Some((lo + hi) / 2.0)
 }
 
+/// blast-rs: Expected-score helper for API composition adjustment; not a direct
+/// NCBI C port.
 fn compo_expected_score(q: &[f64; 28], r: &[f64; 28], matrix: &ScoringMatrix) -> f64 {
     let mut mu = 0.0f64;
     for &i in crate::encoding::NCBISTDAA_STANDARD_RESIDUES.iter() {
@@ -6083,6 +6298,7 @@ fn compo_expected_score(q: &[f64; 28], r: &[f64; 28], matrix: &ScoringMatrix) ->
     mu
 }
 
+/// blast-rs: Background expected-score helper; not a direct NCBI C port.
 fn expected_score_with_bg(matrix: &ScoringMatrix) -> f64 {
     let bg = &crate::matrix::AA_FREQUENCIES;
     // AA_FREQUENCIES is [f64; 20] in ACDEFGHIKLMNPQRSTVWY order, need to map to NCBIstdaa
@@ -6101,6 +6317,7 @@ fn expected_score_with_bg(matrix: &ScoringMatrix) -> f64 {
 // ── Low-level PSSM functions ────────────────────────────────────────────────
 
 /// Build a PSSM from search results (for PSI-BLAST iteration).
+/// blast-rs: Public PSSM-construction helper; not a direct NCBI C port.
 pub fn build_pssm(
     query: &[u8],
     results: &[SearchResult],
@@ -6126,6 +6343,8 @@ pub fn build_pssm(
     pssm
 }
 
+/// blast-rs: Projects public HSP alignment into PSSM query coordinates; not a
+/// direct NCBI C port.
 fn project_subject_alignment_to_query(hsp: &Hsp, query_len: usize) -> Option<Vec<u8>> {
     if hsp.subject_aln.is_empty() {
         return None;
@@ -6168,6 +6387,7 @@ fn project_subject_alignment_to_query(hsp: &Hsp, query_len: usize) -> Option<Vec
 }
 
 /// Search a database using a PSSM instead of a substitution matrix.
+/// blast-rs: Public PSSM search wrapper; not a direct NCBI C port.
 pub fn search_with_pssm(
     db: &BlastDb,
     query: &[u8],
@@ -6209,6 +6429,8 @@ pub fn search_with_pssm(
     pssm_hits_to_search_results(db, &hits, &query_aa, pssm, &prot_kbp, params)
 }
 
+/// blast-rs: Converts BlastDb subjects into PSSM iteration pairs; not a direct
+/// NCBI C port.
 fn pssm_subject_pairs(db: &BlastDb) -> Vec<(String, Vec<u8>)> {
     (0..db.num_oids)
         .map(|oid| {
@@ -6222,6 +6444,8 @@ fn pssm_subject_pairs(db: &BlastDb) -> Vec<(String, Vec<u8>)> {
 /// Convert blastp `SearchResult` HSPs into `PsiBlastHit` records so the
 /// PSSM update step can build alignments uniformly regardless of whether
 /// iter 1 came from blastp (no PSSM yet) or `psi_blast_iteration`.
+/// blast-rs: Adapter from public blastp results into PSI-BLAST hits; not a
+/// direct NCBI C port.
 fn blastp_results_to_psi_hits(
     results: &[SearchResult],
     subj_pairs: &[(String, Vec<u8>)],
@@ -6254,6 +6478,8 @@ fn blastp_results_to_psi_hits(
     out
 }
 
+/// blast-rs: Adapter from PSI-BLAST hits into public SearchResult values; not a
+/// direct NCBI C port.
 fn pssm_hits_to_search_results(
     db: &BlastDb,
     hits: &[crate::pssm::PsiBlastHit],
@@ -6301,6 +6527,8 @@ fn pssm_hits_to_search_results(
     results
 }
 
+/// blast-rs: Adapter from one PSI-BLAST hit into a public HSP; not a direct
+/// NCBI C port.
 fn pssm_hit_to_hsp(
     h: &crate::pssm::PsiBlastHit,
     query_aa: &[u8],
@@ -6379,31 +6607,37 @@ fn pssm_hit_to_hsp(
 /// Alias for `blastn_search` matching the old API.
 /// Note: at the crate root this is available as `blastn_search` since the `blastn` name
 /// is used by the builder-pattern module. Use `blast_rs::api::blastn()` for the function form.
+/// blast-rs: Public API compatibility alias; not a direct NCBI C port.
 pub fn blastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     blastn_search(db, query, params)
 }
 
 /// Alias for `blastp` — low-level protein search backend.
+/// blast-rs: Public API compatibility alias; not a direct NCBI C port.
 pub fn blast_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     blastp(db, query, params)
 }
 
 /// Low-level blastx search (alias for `blastx`).
+/// blast-rs: Public API compatibility alias; not a direct NCBI C port.
 pub fn blastx_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     blastx(db, query, params)
 }
 
 /// Low-level tblastn search (alias for `tblastn`).
+/// blast-rs: Public API compatibility alias; not a direct NCBI C port.
 pub fn tblastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     tblastn(db, query, params)
 }
 
 /// Low-level tblastx search (alias for `tblastx`).
+/// blast-rs: Public API compatibility alias; not a direct NCBI C port.
 pub fn tblastx_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     tblastx(db, query, params)
 }
 
 /// Low-level PSI-BLAST iteration (alias for `psiblast`).
+/// blast-rs: Public API compatibility alias; not a direct NCBI C port.
 pub fn psiblast_search(
     db: &BlastDb,
     query: &[u8],
@@ -6415,6 +6649,7 @@ pub fn psiblast_search(
 /// Six-frame translation with a specific genetic code number
 /// (1=standard, 2=mito, …). Public-API wrapper over the 1-1 port of NCBI
 /// `BLAST_GetAllTranslations`.
+/// blast-rs: Public genetic-code translation wrapper; not a direct NCBI C port.
 pub fn six_frame_translate_with_code(nt_seq: &[u8], genetic_code: u8) -> [TranslatedFrame; 6] {
     let table = crate::util::lookup_genetic_code(genetic_code);
     six_frame_translate_with_table(nt_seq, table)
@@ -6451,6 +6686,7 @@ pub struct PsiblastRun {
 }
 
 impl PsiblastParams {
+    /// blast-rs: Public PSI-BLAST parameter constructor; not a direct NCBI C port.
     pub fn new(search: SearchParams) -> Self {
         PsiblastParams {
             search,
@@ -6462,26 +6698,32 @@ impl PsiblastParams {
             restart_alignment: Vec::new(),
         }
     }
+    /// blast-rs: PsiblastParams builder setter; not a direct NCBI C port.
     pub fn num_iterations(mut self, v: u32) -> Self {
         self.num_iterations = v;
         self
     }
+    /// blast-rs: PsiblastParams builder setter; not a direct NCBI C port.
     pub fn inclusion_evalue(mut self, v: f64) -> Self {
         self.inclusion_evalue = v;
         self
     }
+    /// blast-rs: PsiblastParams builder setter; not a direct NCBI C port.
     pub fn pseudocount(mut self, v: i32) -> Self {
         self.pseudocount = v;
         self
     }
+    /// blast-rs: PsiblastParams builder setter; not a direct NCBI C port.
     pub fn gap_trigger(mut self, v: f64) -> Self {
         self.gap_trigger = v;
         self
     }
+    /// blast-rs: PsiblastParams builder setter; not a direct NCBI C port.
     pub fn initial_pssm(mut self, pssm: crate::pssm::Pssm) -> Self {
         self.initial_pssm = Some(pssm);
         self
     }
+    /// blast-rs: PsiblastParams builder setter; not a direct NCBI C port.
     pub fn restart_alignment(mut self, aligned_seqs: Vec<Vec<u8>>) -> Self {
         self.restart_alignment = aligned_seqs;
         self
@@ -6490,6 +6732,7 @@ impl PsiblastParams {
 
 /// Run iterative PSI-BLAST search.
 /// Returns final-round hits and the resulting PSSM.
+/// blast-rs: Public PSI-BLAST convenience wrapper; not a direct NCBI C port.
 pub fn psiblast(
     db: &BlastDb,
     query: &[u8],
@@ -6500,6 +6743,7 @@ pub fn psiblast(
 }
 
 /// Run iterative PSI-BLAST search and keep PSSM snapshots after each update.
+/// blast-rs: Public PSI-BLAST iterative API pipeline; not a direct NCBI C port.
 pub fn psiblast_with_rounds(db: &BlastDb, query: &[u8], params: &PsiblastParams) -> PsiblastRun {
     let query_aa = encode_ncbistdaa_sequence(query);
     let matrix = *get_matrix(params.search.matrix);
@@ -6661,6 +6905,8 @@ pub fn psiblast_with_rounds(db: &BlastDb, query: &[u8], params: &PsiblastParams)
     }
 }
 
+/// blast-rs: Projects PSI-BLAST hit alignment into query coordinates; not a
+/// direct NCBI C port.
 fn project_psiblast_hit_alignment_to_query(
     hit: &crate::pssm::PsiBlastHit,
     query_len: usize,
@@ -6844,6 +7090,27 @@ mod tests {
         assert_eq!(SearchParams::blastx().max_intron_length, 0);
         assert_eq!(SearchParams::tblastn().max_intron_length, 0);
         assert_eq!(SearchParams::tblastx().max_intron_length, 0);
+    }
+
+    #[test]
+    fn test_blastn_defaults_use_soft_lookup_masking() {
+        assert!(SearchParams::blastn().soft_masking);
+    }
+
+    #[test]
+    fn test_blastn_lookup_masks_lowercase_without_mutating_nomask_copy() {
+        let raw = b"ACGTaaaaACGT";
+        let mut lookup = encode_blastna_sequence(raw);
+        let nomask = lookup.clone();
+
+        apply_blastn_query_lookup_masks(&mut lookup, raw, false, true);
+
+        assert_eq!(nomask, encode_blastna_sequence(raw));
+        assert_eq!(&lookup[..4], &nomask[..4]);
+        assert!(lookup[4..8]
+            .iter()
+            .all(|&base| base == crate::filter::K_NUCL_MASK));
+        assert_eq!(&lookup[8..], &nomask[8..]);
     }
 
     #[test]

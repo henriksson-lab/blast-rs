@@ -91,11 +91,15 @@ pub const K_DEFAULT_REPEAT_FILTER_DB: &str = "repeat/repeat_9606";
 pub const K_NUCL_MASK: u8 = 14;
 pub const K_PROT_MASK: u8 = crate::encoding::NCBISTDAA_X;
 
+/// NCBI: SDustOptionsFree (blast_options.c:50).
+/// naming: Existing Rust symbol keeps the C `SDustOptions` type prefix as `sdust_options`.
 pub fn sdust_options_free(dust_options: &mut Option<SDustOptions>) -> Option<SDustOptions> {
     *dust_options = None;
     None
 }
 
+/// NCBI: SDustOptionsNew (blast_options.c:57).
+/// naming: Existing Rust symbol keeps the C `SDustOptions` type prefix as `sdust_options`.
 pub fn sdust_options_new(dust_options: &mut Option<SDustOptions>) -> i16 {
     *dust_options = Some(SDustOptions {
         level: K_DUST_LEVEL,
@@ -105,11 +109,15 @@ pub fn sdust_options_new(dust_options: &mut Option<SDustOptions>) -> i16 {
     0
 }
 
+/// NCBI: SSegOptionsFree (blast_options.c:70).
+/// naming: Existing Rust symbol keeps the C `SSegOptions` type prefix as `sseg_options`.
 pub fn sseg_options_free(seg_options: &mut Option<SSegOptions>) -> Option<SSegOptions> {
     *seg_options = None;
     None
 }
 
+/// NCBI: SSegOptionsNew (blast_options.c:77).
+/// naming: Existing Rust symbol keeps the C `SSegOptions` type prefix as `sseg_options`.
 pub fn sseg_options_new(seg_options: &mut Option<SSegOptions>) -> i16 {
     *seg_options = Some(SSegOptions {
         window: K_SEG_WINDOW,
@@ -119,6 +127,8 @@ pub fn sseg_options_new(seg_options: &mut Option<SSegOptions>) -> i16 {
     0
 }
 
+/// NCBI: SRepeatFilterOptionsFree (blast_options.c:117).
+/// naming: Existing Rust symbol keeps the C `SRepeatFilterOptions` type prefix as `srepeat_filter_options`.
 pub fn srepeat_filter_options_free(
     repeat_options: &mut Option<SRepeatFilterOptions>,
 ) -> Option<SRepeatFilterOptions> {
@@ -129,6 +139,8 @@ pub fn srepeat_filter_options_free(
     None
 }
 
+/// NCBI: SRepeatFilterOptionsNew (blast_options.c:127).
+/// naming: Existing Rust symbol keeps the C `SRepeatFilterOptions` type prefix as `srepeat_filter_options`.
 pub fn srepeat_filter_options_new(repeat_options: &mut Option<SRepeatFilterOptions>) -> i16 {
     *repeat_options = Some(SRepeatFilterOptions {
         database: Some(K_DEFAULT_REPEAT_FILTER_DB.to_string()),
@@ -136,6 +148,8 @@ pub fn srepeat_filter_options_new(repeat_options: &mut Option<SRepeatFilterOptio
     0
 }
 
+/// NCBI: SRepeatFilterOptionsResetDB (blast_options.c:142).
+/// naming: Existing Rust symbol keeps the C `SRepeatFilterOptions` type prefix as `srepeat_filter_options`.
 pub fn srepeat_filter_options_reset_db(
     repeat_options: &mut Option<SRepeatFilterOptions>,
     db: &str,
@@ -150,6 +164,8 @@ pub fn srepeat_filter_options_reset_db(
     0
 }
 
+/// NCBI: SWindowMaskerOptionsFree (blast_options.c:104).
+/// naming: Existing Rust symbol keeps the C `SWindowMaskerOptions` type prefix as `swindow_masker_options`.
 pub fn swindow_masker_options_free(
     winmask_options: &mut Option<SWindowMaskerOptions>,
 ) -> Option<SWindowMaskerOptions> {
@@ -160,6 +176,8 @@ pub fn swindow_masker_options_free(
     None
 }
 
+/// NCBI: SWindowMaskerOptionsNew (blast_options.c:90).
+/// naming: Existing Rust symbol keeps the C `SWindowMaskerOptions` type prefix as `swindow_masker_options`.
 pub fn swindow_masker_options_new(winmask_options: &mut Option<SWindowMaskerOptions>) -> i16 {
     *winmask_options = Some(SWindowMaskerOptions {
         taxid: 0,
@@ -168,6 +186,8 @@ pub fn swindow_masker_options_new(winmask_options: &mut Option<SWindowMaskerOpti
     0
 }
 
+/// NCBI: SWindowMaskerOptionsResetDB (blast_options.c:158).
+/// naming: Existing Rust symbol keeps the C `SWindowMaskerOptions` type prefix as `swindow_masker_options`.
 pub fn swindow_masker_options_reset_db(
     winmask_options: &mut Option<SWindowMaskerOptions>,
     db: Option<&str>,
@@ -182,6 +202,8 @@ pub fn swindow_masker_options_reset_db(
     0
 }
 
+/// NCBI: SReadQualityOptionsFree (blast_options.c:177).
+/// naming: Existing Rust symbol keeps the C `SReadQualityOptions` type prefix as `sread_quality_options`.
 pub fn sread_quality_options_free(
     read_quality_options: &mut Option<SReadQualityOptions>,
 ) -> Option<SReadQualityOptions> {
@@ -189,6 +211,8 @@ pub fn sread_quality_options_free(
     None
 }
 
+/// NCBI: SReadQualityOptionsNew (blast_options.c:187).
+/// naming: Existing Rust symbol keeps the C `SReadQualityOptions` type prefix as `sread_quality_options`.
 pub fn sread_quality_options_new(read_quality_options: &mut Option<SReadQualityOptions>) -> i16 {
     *read_quality_options = Some(SReadQualityOptions {
         frac_ambig: 0.5,
@@ -197,6 +221,8 @@ pub fn sread_quality_options_new(read_quality_options: &mut Option<SReadQualityO
     0
 }
 
+/// NCBI: SBlastFilterOptionsFree (blast_options.c:204).
+/// naming: Existing Rust symbol keeps the C `SBlastFilterOptions` type prefix as `sblast_filter_options`.
 pub fn sblast_filter_options_free(
     filter_options: &mut Option<SBlastFilterOptions>,
 ) -> Option<SBlastFilterOptions> {
@@ -211,6 +237,8 @@ pub fn sblast_filter_options_free(
     None
 }
 
+/// NCBI: SBlastFilterOptionsNew (blast_options.c:224).
+/// naming: Existing Rust symbol keeps the C `SBlastFilterOptions` type prefix as `sblast_filter_options`.
 pub fn sblast_filter_options_new(
     filter_options: &mut Option<SBlastFilterOptions>,
     filter_type: EFilterOptions,
@@ -244,14 +272,17 @@ pub fn sblast_filter_options_new(
     0
 }
 
+/// blast-rs: Native filter-string parser helper; not a direct NCBI C port.
 fn filter_string_is_nucleotide_program(program_number: program::ProgramType) -> bool {
     program_number == program::BLASTN || program_number == program::MAPPING
 }
 
+/// blast-rs: Native filter-string parser helper; not a direct NCBI C port.
 fn filter_string_token_is_keyword(token: &str) -> bool {
     matches!(
         token,
         "d" | "dust"
+            | "l"
             | "r"
             | "repeat"
             | "repeats"
@@ -264,6 +295,9 @@ fn filter_string_token_is_keyword(token: &str) -> bool {
             | "t"
             | "true"
             | "yes"
+            | "w"
+            | "-d"
+            | "-t"
             | "windowmasker"
             | "window_masker"
             | "window-masker"
@@ -275,6 +309,7 @@ fn filter_string_token_is_keyword(token: &str) -> bool {
     )
 }
 
+/// blast-rs: Native filter-string parser helper; not a direct NCBI C port.
 fn filter_string_take_i32(tokens: &[String], index: &mut usize) -> Option<i32> {
     let next = tokens.get(*index)?;
     if filter_string_token_is_keyword(next) {
@@ -285,6 +320,7 @@ fn filter_string_take_i32(tokens: &[String], index: &mut usize) -> Option<i32> {
     Some(value)
 }
 
+/// blast-rs: Native filter-string parser helper; not a direct NCBI C port.
 fn filter_string_take_f64(tokens: &[String], index: &mut usize) -> Option<f64> {
     let next = tokens.get(*index)?;
     if filter_string_token_is_keyword(next) {
@@ -295,6 +331,7 @@ fn filter_string_take_f64(tokens: &[String], index: &mut usize) -> Option<f64> {
     Some(value)
 }
 
+/// blast-rs: Native filter-string parser helper; not a direct NCBI C port.
 fn filter_string_take_text(tokens: &[String], index: &mut usize) -> Option<String> {
     let next = tokens.get(*index)?;
     if filter_string_token_is_keyword(next) {
@@ -304,6 +341,7 @@ fn filter_string_take_text(tokens: &[String], index: &mut usize) -> Option<Strin
     Some(next.clone())
 }
 
+/// blast-rs: Native filter-string parser helper; not a direct NCBI C port.
 fn filter_string_set_default_filter(
     options: &mut SBlastFilterOptions,
     program_number: program::ProgramType,
@@ -321,7 +359,7 @@ fn filter_string_set_default_filter(
     }
 }
 
-/// Port of NCBI internal `s_SafeStrCat` (`blast_filter.c:301`).
+/// NCBI: s_SafeStrCat (blast_filter.c:301).
 pub fn s_safe_str_cat(dest: &mut String, dest_size: usize, string2append: &str) -> Option<usize> {
     let needed = dest.len().checked_add(string2append.len())?;
     if needed >= dest_size {
@@ -331,7 +369,7 @@ pub fn s_safe_str_cat(dest: &mut String, dest_size: usize, string2append: &str) 
     Some(dest.len())
 }
 
-/// Port of NCBI internal `s_LoadOptionsToBuffer` (`blast_filter.c:54`).
+/// NCBI: s_LoadOptionsToBuffer (blast_filter.c:54).
 pub fn s_load_options_to_buffer(
     buffer: &mut String,
     dest_size: usize,
@@ -357,7 +395,7 @@ pub fn s_load_options_to_buffer(
     0
 }
 
-/// Port of NCBI internal `s_ParseSegOptions` (`blast_filter.c:242`).
+/// NCBI: s_ParseSegOptions (blast_filter.c:242).
 pub fn s_parse_seg_options(tokens: &[String], index: &mut usize) -> Result<SSegOptions, i16> {
     let mut seg = SSegOptions {
         window: K_SEG_WINDOW,
@@ -394,12 +432,14 @@ pub fn s_parse_seg_options(tokens: &[String], index: &mut usize) -> Result<SSegO
     Ok(seg)
 }
 
-/// Port of NCBI `BlastFilteringOptionsToString` (`blast_filter.c`).
+/// NCBI: BlastFilteringOptionsToString (blast_filter.c:320).
 pub fn blast_filtering_options_to_string(
     program_number: program::ProgramType,
     filter_options: Option<&SBlastFilterOptions>,
 ) -> Option<String> {
-    let options = filter_options?;
+    let Some(options) = filter_options else {
+        return Some("F".to_string());
+    };
     let mut buffer = String::new();
     let dest_size = usize::MAX;
 
@@ -411,7 +451,7 @@ pub fn blast_filtering_options_to_string(
                 linker: K_DUST_LINKER,
             })
         {
-            s_load_options_to_buffer(&mut buffer, dest_size, "D", &[]);
+            s_load_options_to_buffer(&mut buffer, dest_size, "L;", &[]);
         } else {
             s_load_options_to_buffer(
                 &mut buffer,
@@ -420,7 +460,7 @@ pub fn blast_filtering_options_to_string(
                 &[
                     dust.level.to_string(),
                     dust.window.to_string(),
-                    dust.linker.to_string(),
+                    format!("{};", dust.linker),
                 ],
             );
         }
@@ -434,7 +474,7 @@ pub fn blast_filtering_options_to_string(
                 hicut: K_SEG_HICUT,
             })
         {
-            s_load_options_to_buffer(&mut buffer, dest_size, "S", &[]);
+            s_load_options_to_buffer(&mut buffer, dest_size, "L;", &[]);
         } else {
             s_load_options_to_buffer(
                 &mut buffer,
@@ -443,7 +483,7 @@ pub fn blast_filtering_options_to_string(
                 &[
                     seg.window.to_string(),
                     seg.locut.to_string(),
-                    seg.hicut.to_string(),
+                    format!("{};", seg.hicut),
                 ],
             );
         }
@@ -452,10 +492,15 @@ pub fn blast_filtering_options_to_string(
     if let Some(repeat) = &options.repeat_filter_options {
         match repeat.database.as_deref() {
             Some(K_DEFAULT_REPEAT_FILTER_DB) | None => {
-                s_load_options_to_buffer(&mut buffer, dest_size, "R", &[]);
+                s_load_options_to_buffer(&mut buffer, dest_size, "R;", &[]);
             }
             Some(database) => {
-                s_load_options_to_buffer(&mut buffer, dest_size, "R", &[database.to_string()]);
+                s_load_options_to_buffer(
+                    &mut buffer,
+                    dest_size,
+                    "R",
+                    &["-d".to_string(), format!("{};", database)],
+                );
             }
         }
     }
@@ -465,20 +510,20 @@ pub fn blast_filtering_options_to_string(
             s_load_options_to_buffer(
                 &mut buffer,
                 dest_size,
-                "windowmasker_taxid",
-                &[window_masker.taxid.to_string()],
+                "W",
+                &["-t".to_string(), format!("{};", window_masker.taxid)],
             );
         }
         if let Some(database) = window_masker.database.as_deref() {
             s_load_options_to_buffer(
                 &mut buffer,
                 dest_size,
-                "windowmasker",
-                &[database.to_string()],
+                "W",
+                &["-d".to_string(), format!("{};", database)],
             );
         }
         if window_masker.taxid == 0 && window_masker.database.is_none() {
-            s_load_options_to_buffer(&mut buffer, dest_size, "windowmasker", &[]);
+            s_load_options_to_buffer(&mut buffer, dest_size, "W;", &[]);
         }
     }
 
@@ -489,34 +534,31 @@ pub fn blast_filtering_options_to_string(
             "read_quality",
             &[
                 read_quality.frac_ambig.to_string(),
-                read_quality.entropy.to_string(),
+                format!("{};", read_quality.entropy),
             ],
         );
     }
 
     if options.mask_at_hash {
-        s_load_options_to_buffer(&mut buffer, dest_size, "m", &[]);
+        s_load_options_to_buffer(&mut buffer, dest_size, "m;", &[]);
     }
 
     if buffer.is_empty() {
-        if filter_string_is_nucleotide_program(program_number) {
-            Some("F".to_string())
-        } else {
-            Some("none".to_string())
-        }
+        let _ = program_number;
+        Some("F".to_string())
     } else {
-        Some(buffer)
+        Some(buffer.replace("; ", ";"))
     }
 }
 
-/// Port of NCBI `BlastFilteringOptionsFromString` (`blast_filter.c`).
+/// NCBI: BlastFilteringOptionsFromString (blast_filter.c:435).
 pub fn blast_filtering_options_from_string(
     program_number: program::ProgramType,
     instructions: Option<&str>,
     filtering_options: &mut Option<SBlastFilterOptions>,
 ) -> i16 {
     let Some(instructions) = instructions else {
-        return crate::util::BLASTERR_INVALIDPARAM;
+        return sblast_filter_options_new(filtering_options, EFilterOptions::EEmpty);
     };
     let normalized = instructions.trim().to_ascii_lowercase();
     let tokens: Vec<String> = normalized
@@ -555,6 +597,10 @@ pub fn blast_filtering_options_from_string(
                 saw_filter_instruction = true;
                 filter_string_set_default_filter(options, program_number);
             }
+            "l" => {
+                saw_filter_instruction = true;
+                filter_string_set_default_filter(options, program_number);
+            }
             "m" => {
                 saw_filter_instruction = true;
                 options.mask_at_hash = true;
@@ -590,6 +636,9 @@ pub fn blast_filtering_options_from_string(
                     return crate::options::BLASTERR_OPTION_PROGRAM_INVALID;
                 }
                 saw_filter_instruction = true;
+                if tokens.get(index).is_some_and(|token| token == "-d") {
+                    index += 1;
+                }
                 let database = filter_string_take_text(&tokens, &mut index)
                     .unwrap_or_else(|| K_DEFAULT_REPEAT_FILTER_DB.to_string());
                 options.repeat_filter_options = Some(SRepeatFilterOptions {
@@ -597,7 +646,7 @@ pub fn blast_filtering_options_from_string(
                 });
             }
             "s" | "seg" => {
-                if filter_string_is_nucleotide_program(program_number) {
+                if program_number == program::BLASTN {
                     return crate::options::BLASTERR_OPTION_PROGRAM_INVALID;
                 }
                 saw_filter_instruction = true;
@@ -606,16 +655,31 @@ pub fn blast_filtering_options_from_string(
                     Err(status) => return status,
                 }
             }
-            "windowmasker" | "window_masker" | "window-masker" | "wm" => {
+            "w" | "windowmasker" | "window_masker" | "window-masker" | "wm" => {
                 saw_filter_instruction = true;
                 let mut winmask = SWindowMaskerOptions {
                     taxid: 0,
                     database: None,
                 };
-                if let Some(taxid) = filter_string_take_i32(&tokens, &mut index) {
-                    winmask.taxid = taxid;
-                } else {
-                    winmask.database = filter_string_take_text(&tokens, &mut index);
+                match tokens.get(index).map(String::as_str) {
+                    Some("-t") => {
+                        index += 1;
+                        let Some(taxid) = filter_string_take_i32(&tokens, &mut index) else {
+                            return crate::util::BLASTERR_INVALIDPARAM;
+                        };
+                        winmask.taxid = taxid;
+                    }
+                    Some("-d") => {
+                        index += 1;
+                        winmask.database = filter_string_take_text(&tokens, &mut index);
+                    }
+                    _ => {
+                        if let Some(taxid) = filter_string_take_i32(&tokens, &mut index) {
+                            winmask.taxid = taxid;
+                        } else {
+                            winmask.database = filter_string_take_text(&tokens, &mut index);
+                        }
+                    }
                 }
                 options.window_masker_options = Some(winmask);
             }
@@ -665,6 +729,7 @@ pub fn blast_filtering_options_from_string(
     0
 }
 
+/// NCBI: s_MergeDustOptions (blast_options.c:252).
 pub fn s_merge_dust_options(
     opt1: Option<&SDustOptions>,
     opt2: Option<&SDustOptions>,
@@ -692,6 +757,7 @@ pub fn s_merge_dust_options(
     }
 }
 
+/// NCBI: s_MergeSegOptions (blast_options.c:290).
 pub fn s_merge_seg_options(
     opt1: Option<&SSegOptions>,
     opt2: Option<&SSegOptions>,
@@ -719,6 +785,7 @@ pub fn s_merge_seg_options(
     }
 }
 
+/// NCBI: s_MergeRepeatOptions (blast_options.c:326).
 pub fn s_merge_repeat_options(
     opt1: Option<&SRepeatFilterOptions>,
     opt2: Option<&SRepeatFilterOptions>,
@@ -730,6 +797,7 @@ pub fn s_merge_repeat_options(
     }
 }
 
+/// NCBI: s_MergeWindowMaskerOptions (blast_options.c:356).
 pub fn s_merge_window_masker_options(
     opt1: Option<&SWindowMaskerOptions>,
     opt2: Option<&SWindowMaskerOptions>,
@@ -744,6 +812,8 @@ pub fn s_merge_window_masker_options(
     }
 }
 
+/// NCBI: SBlastFilterOptionsMerge (blast_options.c:390).
+/// naming: Existing Rust symbol keeps the C `SBlastFilterOptions` type prefix as `sblast_filter_options`.
 pub fn sblast_filter_options_merge(
     combined: &mut Option<SBlastFilterOptions>,
     opt1: Option<&SBlastFilterOptions>,
@@ -788,6 +858,8 @@ pub fn sblast_filter_options_merge(
     0
 }
 
+/// NCBI: SBlastFilterOptionsNoFiltering (blast_options.c:422).
+/// naming: Existing Rust symbol keeps the C `SBlastFilterOptions` type prefix as `sblast_filter_options`.
 pub fn sblast_filter_options_no_filtering(filter_options: Option<&SBlastFilterOptions>) -> bool {
     let Some(options) = filter_options else {
         return true;
@@ -800,11 +872,14 @@ pub fn sblast_filter_options_no_filtering(filter_options: Option<&SBlastFilterOp
         && options.read_quality_options.is_none()
 }
 
+/// NCBI: SBlastFilterOptionsMaskAtHash (blast_options.c:433).
+/// naming: Existing Rust symbol keeps the C `SBlastFilterOptions` type prefix as `sblast_filter_options`.
 pub fn sblast_filter_options_mask_at_hash(filter_options: Option<&SBlastFilterOptions>) -> bool {
     filter_options.is_some_and(|options| options.mask_at_hash)
 }
 
-/// Port of NCBI `SBlastFilterOptionsValidate` (`blast_options.c:441`).
+/// NCBI: SBlastFilterOptionsValidate (blast_options.c:441).
+/// naming: Existing Rust symbol keeps the C `SBlastFilterOptions` type prefix as `sblast_filter_options`.
 pub fn sblast_filter_options_validate(
     program_number: crate::program::ProgramType,
     filter_options: Option<&SBlastFilterOptions>,
@@ -829,14 +904,14 @@ pub fn sblast_filter_options_validate(
         return crate::options::BLASTERR_OPTION_PROGRAM_INVALID;
     }
 
-    if options.seg_options.is_some() && filter_string_is_nucleotide_program(program_number) {
+    if options.seg_options.is_some() && program_number == program::BLASTN {
         return crate::options::BLASTERR_OPTION_PROGRAM_INVALID;
     }
 
     0
 }
 
-/// Port of NCBI `BlastSeqLocNew` (`blast_filter.c:608`).
+/// NCBI: BlastSeqLocNew (blast_filter.c:608).
 pub fn blast_seq_loc_new(head: &mut Option<Box<BlastSeqLoc>>, start: i32, stop: i32) -> i16 {
     let node = Box::new(BlastSeqLoc {
         ssl: SSeqRange {
@@ -848,7 +923,7 @@ pub fn blast_seq_loc_new(head: &mut Option<Box<BlastSeqLoc>>, start: i32, stop: 
     blast_seq_loc_append(head, Some(node))
 }
 
-/// Port of NCBI `BlastSeqLocAppend` (`blast_filter.c:621`).
+/// NCBI: BlastSeqLocAppend (blast_filter.c:621).
 pub fn blast_seq_loc_append(
     head: &mut Option<Box<BlastSeqLoc>>,
     node: Option<Box<BlastSeqLoc>>,
@@ -873,7 +948,7 @@ pub fn blast_seq_loc_append(
     0
 }
 
-/// Port of NCBI internal `s_BlastSeqLocNodeDup` (`blast_filter.c:651`).
+/// NCBI: s_BlastSeqLocNodeDup (blast_filter.c:651).
 pub fn s_blast_seq_loc_node_dup(node: Option<&BlastSeqLoc>) -> Option<Box<BlastSeqLoc>> {
     let node = node?;
     Some(Box::new(BlastSeqLoc {
@@ -882,7 +957,7 @@ pub fn s_blast_seq_loc_node_dup(node: Option<&BlastSeqLoc>) -> Option<Box<BlastS
     }))
 }
 
-/// Port of NCBI internal `s_BlastSeqLocLen` (`blast_filter.c:664`).
+/// NCBI: s_BlastSeqLocLen (blast_filter.c:664).
 pub fn s_blast_seq_loc_len(head: Option<&BlastSeqLoc>) -> usize {
     let mut length = 0;
     let mut cursor = head;
@@ -893,7 +968,7 @@ pub fn s_blast_seq_loc_len(head: Option<&BlastSeqLoc>) -> usize {
     length
 }
 
-/// Port of NCBI internal `s_BlastSeqLocListToArrayOfPointers` (`blast_filter.c:681`).
+/// NCBI: s_BlastSeqLocListToArrayOfPointers (blast_filter.c:681).
 pub fn s_blast_seq_loc_list_to_array_of_pointers(head: Option<&BlastSeqLoc>) -> Vec<&BlastSeqLoc> {
     let mut array = Vec::with_capacity(s_blast_seq_loc_len(head));
     let mut cursor = head;
@@ -904,7 +979,7 @@ pub fn s_blast_seq_loc_list_to_array_of_pointers(head: Option<&BlastSeqLoc>) -> 
     array
 }
 
-/// Port of NCBI `BlastSeqLocListReverse` (`blast_filter.c:704`).
+/// NCBI: BlastSeqLocListReverse (blast_filter.c:704).
 pub fn blast_seq_loc_list_reverse(head: &mut Option<Box<BlastSeqLoc>>) -> i16 {
     let mut previous = None;
     let mut current = head.take();
@@ -920,7 +995,7 @@ pub fn blast_seq_loc_list_reverse(head: &mut Option<Box<BlastSeqLoc>>) -> i16 {
     0
 }
 
-/// Port of NCBI `BlastSeqLocNodeFree` (`blast_filter.c:727`).
+/// NCBI: BlastSeqLocNodeFree (blast_filter.c:727).
 pub fn blast_seq_loc_node_free(node: &mut Option<Box<BlastSeqLoc>>) -> Option<Box<BlastSeqLoc>> {
     if let Some(node) = node {
         node.next = None;
@@ -929,7 +1004,7 @@ pub fn blast_seq_loc_node_free(node: &mut Option<Box<BlastSeqLoc>>) -> Option<Bo
     None
 }
 
-/// Port of NCBI `BlastSeqLocFree` (`blast_filter.c:737`).
+/// NCBI: BlastSeqLocFree (blast_filter.c:737).
 pub fn blast_seq_loc_free(head: &mut Option<Box<BlastSeqLoc>>) -> Option<Box<BlastSeqLoc>> {
     while head.is_some() {
         let next = head.as_mut().and_then(|node| node.next.take());
@@ -938,7 +1013,7 @@ pub fn blast_seq_loc_free(head: &mut Option<Box<BlastSeqLoc>>) -> Option<Box<Bla
     None
 }
 
-/// Port of NCBI `BlastSeqLoc_RestrictToInterval` (`blast_setup.c:1030`).
+/// NCBI: BlastSeqLoc_RestrictToInterval (blast_setup.c:1030).
 pub fn blast_seq_loc_restrict_to_interval(
     mask: Option<&mut Option<Box<BlastSeqLoc>>>,
     from: i32,
@@ -965,7 +1040,7 @@ pub fn blast_seq_loc_restrict_to_interval(
     *mask = kept;
 }
 
-/// Port of NCBI `s_SeqLocListInvert` (`blast_nalookup.c:330`).
+/// NCBI: s_SeqLocListInvert (blast_nalookup.c:330).
 /// Returns the complement intervals between a non-empty, ordered mask list.
 pub fn s_seq_loc_list_invert(
     locations: Option<&BlastSeqLoc>,
@@ -996,6 +1071,7 @@ pub fn s_seq_loc_list_invert(
     retval
 }
 
+/// blast-rs: Native linked-list append helper for mask intervals; not a direct NCBI C port.
 fn append_seq_loc_tail(head: &mut Option<Box<BlastSeqLoc>>, start: i32, stop: i32) {
     if start > stop {
         return;
@@ -1016,7 +1092,7 @@ fn append_seq_loc_tail(head: &mut Option<Box<BlastSeqLoc>>, start: i32, stop: i3
     }
 }
 
-/// Port of NCBI `BlastSeqLocListDup` (`blast_filter.c:747`).
+/// NCBI: BlastSeqLocListDup (blast_filter.c:747).
 pub fn blast_seq_loc_list_dup(head: Option<&BlastSeqLoc>) -> Option<Box<BlastSeqLoc>> {
     let mut copied = None;
     let mut cursor = head;
@@ -1027,7 +1103,7 @@ pub fn blast_seq_loc_list_dup(head: Option<&BlastSeqLoc>) -> Option<Box<BlastSeq
     copied
 }
 
-/// Port of NCBI `BlastMaskLocNew` (`blast_filter.c:760`).
+/// NCBI: BlastMaskLocNew (blast_filter.c:760).
 pub fn blast_mask_loc_new(num_contexts: usize) -> Option<BlastMaskLoc> {
     if num_contexts == 0 {
         return None;
@@ -1037,7 +1113,7 @@ pub fn blast_mask_loc_new(num_contexts: usize) -> Option<BlastMaskLoc> {
     })
 }
 
-/// Port of NCBI `BlastMaskLocDup` (`blast_filter.c:770`).
+/// NCBI: BlastMaskLocDup (blast_filter.c:770).
 pub fn blast_mask_loc_dup(mask_loc: Option<&BlastMaskLoc>) -> Option<BlastMaskLoc> {
     let mask_loc = mask_loc?;
     let mut duplicate = BlastMaskLoc {
@@ -1051,7 +1127,7 @@ pub fn blast_mask_loc_dup(mask_loc: Option<&BlastMaskLoc>) -> Option<BlastMaskLo
     Some(duplicate)
 }
 
-/// Port of NCBI `BlastMaskLocFree` (`blast_filter.c:789`).
+/// NCBI: BlastMaskLocFree (blast_filter.c:789).
 pub fn blast_mask_loc_free(mask_loc: &mut Option<BlastMaskLoc>) -> Option<BlastMaskLoc> {
     if let Some(mask_loc) = mask_loc {
         for list in &mut mask_loc.masks {
@@ -1063,7 +1139,7 @@ pub fn blast_mask_loc_free(mask_loc: &mut Option<BlastMaskLoc>) -> Option<BlastM
     None
 }
 
-/// Port of NCBI `BlastMaskLocDNAToProtein` (`blast_filter.c:806`).
+/// NCBI: BlastMaskLocDNAToProtein (blast_filter.c:806).
 ///
 /// C gets each original nucleotide query length through
 /// `BlastQueryInfoGetQueryLength`; Rust callers pass those lengths explicitly
@@ -1139,7 +1215,7 @@ pub fn blast_mask_loc_dna_to_protein(
     0
 }
 
-/// Port of NCBI `BlastMaskLocProteinToDNA` (`blast_filter.c:892`).
+/// NCBI: BlastMaskLocProteinToDNA (blast_filter.c:892).
 pub fn blast_mask_loc_protein_to_dna(
     mask_loc: Option<&mut BlastMaskLoc>,
     query_info: &QueryInfo,
@@ -1163,13 +1239,13 @@ pub fn blast_mask_loc_protein_to_dna(
             while let Some(node) = loc {
                 let (mut from, mut to) = if frame < 0 {
                     (
-                        dna_length - crate::util::CODON_LENGTH as i32 * node.ssl.right + frame - 2,
+                        dna_length - crate::util::CODON_LENGTH as i32 * node.ssl.right + frame + 1,
                         dna_length - crate::util::CODON_LENGTH as i32 * node.ssl.left + frame,
                     )
                 } else {
                     (
                         crate::util::CODON_LENGTH as i32 * node.ssl.left + frame - 1,
-                        crate::util::CODON_LENGTH as i32 * node.ssl.right + frame + 1,
+                        crate::util::CODON_LENGTH as i32 * node.ssl.right + frame - 1,
                     )
                 };
 
@@ -1196,7 +1272,7 @@ pub fn blast_mask_loc_protein_to_dna(
     0
 }
 
-/// Port of NCBI `BlastIsReverseStrand` macro use in filtering paths.
+/// blast-rs: Native helper matching reverse-strand macro semantics; not a direct NCBI C port.
 ///
 /// Nucleotide query contexts alternate plus/minus strands, so odd contexts are
 /// reverse. Protein/translated contexts are not treated as nucleotide strands
@@ -1205,7 +1281,7 @@ pub fn blast_is_reverse_strand(is_nucl: bool, context: usize) -> bool {
     is_nucl && context % crate::util::NUM_STRANDS == 1
 }
 
-/// Port of NCBI `BlastSeqLocCombine` (`blast_filter.c:971`).
+/// NCBI: BlastSeqLocCombine (blast_filter.c:971).
 pub fn blast_seq_loc_combine(mask_loc: &mut Option<Box<BlastSeqLoc>>, link_value: i32) {
     let mut ranges = Vec::new();
     let mut cursor = mask_loc.as_deref();
@@ -1246,7 +1322,7 @@ pub fn blast_seq_loc_combine(mask_loc: &mut Option<Box<BlastSeqLoc>>, link_value
     }
 }
 
-/// Port of NCBI `BLAST_ComplementMaskLocations` (`blast_filter.c:1016`).
+/// NCBI: BLAST_ComplementMaskLocations (blast_filter.c:1016).
 pub fn blast_complement_mask_locations(
     program_number: crate::program::ProgramType,
     query_info: &QueryInfo,
@@ -1325,7 +1401,7 @@ pub fn blast_complement_mask_locations(
     0
 }
 
-/// Port of NCBI `BlastSeqLocReverse` (`blast_filter.c:1173`).
+/// NCBI: BlastSeqLocReverse (blast_filter.c:1173).
 pub fn blast_seq_loc_reverse(mut masks: Option<&mut BlastSeqLoc>, query_length: i32) {
     while let Some(node) = masks {
         let old_left = node.ssl.left;
@@ -1336,7 +1412,8 @@ pub fn blast_seq_loc_reverse(mut masks: Option<&mut BlastSeqLoc>, query_length: 
     }
 }
 
-/// Port of NCBI `BlastSetUp_MaskQuery` (`blast_filter.c:1349`).
+/// NCBI: BlastSetUp_MaskQuery (blast_filter.c:1349).
+/// naming: Existing Rust symbol spells `SetUp` as `setup`.
 pub fn blast_setup_mask_query(
     query_blk: &mut BlastSequenceBlk,
     query_info: &QueryInfo,
@@ -1401,7 +1478,7 @@ pub fn blast_setup_mask_query(
     }
 }
 
-/// Port of NCBI `Blast_MaskTheResidues` (`blast_filter.c:1306`).
+/// NCBI: Blast_MaskTheResidues (blast_filter.c:1306).
 pub fn blast_mask_the_residues(
     buffer: &mut [u8],
     is_na: bool,
@@ -1434,6 +1511,7 @@ pub fn blast_mask_the_residues(
     }
 }
 
+/// blast-rs: Native adapter from half-open `MaskLoc` regions to `BlastSeqLoc`; not a direct NCBI C port.
 fn append_mask_loc_regions(seq_loc: &mut Option<Box<BlastSeqLoc>>, mask: &MaskLoc) {
     for region in &mask.regions {
         if region.start < region.end {
@@ -1451,7 +1529,8 @@ fn append_mask_loc_regions(seq_loc: &mut Option<Box<BlastSeqLoc>>, mask: &MaskLo
     }
 }
 
-/// Port of NCBI `BlastSetUp_Filter` (`blast_filter.c:1121`).
+/// NCBI: BlastSetUp_Filter (blast_filter.c:1121).
+/// naming: Existing Rust symbol spells `SetUp` as `setup`.
 pub fn blast_setup_filter(
     program_number: crate::program::ProgramType,
     sequence: &[u8],
@@ -1509,8 +1588,7 @@ pub fn blast_setup_filter(
     0
 }
 
-/// Port of NCBI internal `s_GetFilteringLocationsForOneContext`
-/// (`blast_filter.c:1191`).
+/// NCBI: s_GetFilteringLocationsForOneContext (blast_filter.c:1191).
 ///
 /// Rust keeps lower-case masks outside `BlastSequenceBlk`, so callers pass the
 /// optional mask table explicitly; this function consumes the context entry
@@ -1573,7 +1651,8 @@ pub fn s_get_filtering_locations_for_one_context(
     0
 }
 
-/// Port of NCBI `BlastSetUp_GetFilteringLocations` (`blast_filter.c:1261`).
+/// NCBI: BlastSetUp_GetFilteringLocations (blast_filter.c:1261).
+/// naming: Existing Rust symbol spells `SetUp` as `setup`.
 pub fn blast_setup_get_filtering_locations(
     query_blk: &mut BlastSequenceBlk,
     query_info: &QueryInfo,
@@ -1613,7 +1692,7 @@ pub fn blast_setup_get_filtering_locations(
     0
 }
 
-/// Port of NCBI `Blast_MaskUnsupportedAA` (`blast_filter.c:1335`).
+/// NCBI: Blast_MaskUnsupportedAA (blast_filter.c:1335).
 pub fn blast_mask_unsupported_aa(seq: &mut [u8], min_invalid: u8) {
     for residue in seq {
         if *residue >= min_invalid {
@@ -1623,19 +1702,23 @@ pub fn blast_mask_unsupported_aa(seq: &mut [u8], min_invalid: u8) {
 }
 
 impl MaskLoc {
+    /// blast-rs: Native `MaskLoc` constructor; not a direct NCBI C port.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// blast-rs: Native `MaskLoc` region appender; not a direct NCBI C port.
     pub fn add(&mut self, start: i32, end: i32) {
         self.regions.push(MaskedRegion { start, end });
     }
 
+    /// blast-rs: Native `MaskLoc` query helper; not a direct NCBI C port.
     /// Check if a position is masked.
     pub fn is_masked(&self, pos: i32) -> bool {
         self.regions.iter().any(|r| pos >= r.start && pos < r.end)
     }
 
+    /// blast-rs: Native `MaskLoc` masking helper; not a direct NCBI C port.
     /// Apply masking to a sequence by replacing masked positions with sentinel value.
     pub fn apply(&self, sequence: &mut [u8], sentinel: u8) {
         for region in &self.regions {
@@ -1650,7 +1733,7 @@ impl MaskLoc {
 
 const NUM_DIMERS: usize = 1 << 4;
 
-/// Port of NCBI internal `s_FindDimerEntropy` (`jumper.c:4482`).
+/// NCBI: s_FindDimerEntropy (jumper.c:4482).
 pub fn s_find_dimer_entropy(sequence: &[u8]) -> i32 {
     let mut counts = [0i32; NUM_DIMERS];
     let mut num = 0i32;
@@ -1677,6 +1760,7 @@ pub fn s_find_dimer_entropy(sequence: &[u8]) -> i32 {
     (-sum * (1.0 / 16.0f64.ln()) + 0.5) as i32
 }
 
+/// blast-rs: Native read-quality masking helper; not a direct NCBI C port.
 fn s_mask_sequence(offset: i32, length: i32, seq_loc: &mut Option<SSeqRange>) -> i16 {
     *seq_loc = Some(SSeqRange {
         left: offset,
@@ -1685,7 +1769,7 @@ fn s_mask_sequence(offset: i32, length: i32, seq_loc: &mut Option<SSeqRange>) ->
     0
 }
 
-/// Port-shaped equivalent of NCBI `FilterQueriesForMapping` (`jumper.c:4531`).
+/// NCBI: FilterQueriesForMapping (jumper.c:4531).
 pub fn filter_queries_for_mapping(
     sequence: &[u8],
     offset: i32,
@@ -1716,7 +1800,7 @@ pub fn filter_queries_for_mapping(
     0
 }
 
-/// Port of NCBI `GetCutoffScore` (`jumper.c:4563`).
+/// NCBI: GetCutoffScore (jumper.c:4563).
 pub fn get_cutoff_score(query_length: i32) -> i32 {
     if query_length <= 20 {
         query_length
@@ -1759,6 +1843,7 @@ struct DustTriplets {
 }
 
 impl DustTriplets {
+    /// blast-rs: Native DUST state constructor; not a direct NCBI C port.
     fn new(window: usize, low_k: u8, thresholds: Vec<u32>) -> Self {
         Self {
             triplet_list: VecDeque::new(),
@@ -1777,21 +1862,25 @@ impl DustTriplets {
         }
     }
 
+    /// blast-rs: Native DUST triplet-count helper; not a direct NCBI C port.
     fn add_triplet_info(r: &mut u32, counts: &mut [u8; 64], t: u8) {
         *r += counts[t as usize] as u32;
         counts[t as usize] += 1;
     }
 
+    /// blast-rs: Native DUST triplet-count helper; not a direct NCBI C port.
     fn rem_triplet_info(r: &mut u32, counts: &mut [u8; 64], t: u8) {
         counts[t as usize] -= 1;
         *r -= counts[t as usize] as u32;
     }
 
+    /// blast-rs: Native DUST state predicate; not a direct NCBI C port.
     fn needs_processing(&self) -> bool {
         let count = self.stop - self.l;
         count < self.triplet_list.len() && 10 * self.r_w > self.thresholds[count]
     }
 
+    /// blast-rs: Native DUST window shifter; not a direct NCBI C port.
     fn shift_high(&mut self, t: u8) -> bool {
         let s = self.triplet_list.pop_back().unwrap();
         Self::rem_triplet_info(&mut self.r_w, &mut self.c_w, s);
@@ -1823,6 +1912,7 @@ impl DustTriplets {
         }
     }
 
+    /// blast-rs: Native DUST window shifter; not a direct NCBI C port.
     fn shift_window(&mut self, t: u8) -> bool {
         if self.triplet_list.len() >= self.max_size {
             if self.num_diff <= 1 {
@@ -1879,6 +1969,7 @@ impl DustTriplets {
         }
     }
 
+    /// blast-rs: Native DUST interval scorer; not a direct NCBI C port.
     fn find_perfect(&mut self) {
         let mut counts = self.c_v;
         let mut count = self.stop - self.l;
@@ -1933,6 +2024,7 @@ impl DustTriplets {
     }
 }
 
+/// blast-rs: Native DUST mask materialization helper; not a direct NCBI C port.
 fn save_masked_regions(
     mask: &mut MaskLoc,
     perfects: &mut Vec<PerfectInterval>,
@@ -1961,7 +2053,7 @@ fn save_masked_regions(
     }
 }
 
-/// Faithful port of NCBI's symmetric DUST interval finder (`symdust.cpp`).
+/// blast-rs: Rust implementation of NCBI symmetric DUST behavior; not a direct NCBI C port.
 ///
 /// `level`, `window`, and `linker` correspond to BLAST's real DUST settings.
 /// The returned intervals are half-open `[start, end)` regions over the input.
@@ -2057,6 +2149,7 @@ pub fn dust_filter(sequence: &[u8], level: u32, window: usize, linker: usize) ->
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+/// blast-rs: Native interval coalescing helper for `MaskLoc`; not a direct NCBI C port.
 /// Merge overlapping masked regions.
 fn merge_regions(mask: &mut MaskLoc) {
     if mask.regions.len() <= 1 {
@@ -2138,7 +2231,8 @@ struct SSeg {
     next: Option<Box<SSeg>>,
 }
 
-/// Port-shaped constructor for NCBI `s_SSequenceNew`.
+/// NCBI: s_SSequenceNew (blast_seg.c:1360).
+/// naming: Existing Rust symbol keeps the C `SSequence` type prefix as `ssequence`.
 #[allow(dead_code)]
 fn s_ssequence_new() -> SSequence {
     SSequence {
@@ -2157,7 +2251,8 @@ fn s_ssequence_new() -> SSequence {
     }
 }
 
-/// Rust ownership equivalent of NCBI `s_SSequenceFree`.
+/// NCBI: s_SSequenceFree (blast_seg.c:1406).
+/// naming: Existing Rust symbol keeps the C `SSequence` type prefix as `ssequence`.
 #[allow(dead_code)]
 fn s_ssequence_free(seq: Option<SSequence>) -> Option<SSequence> {
     if let Some(mut seq) = seq {
@@ -2168,7 +2263,7 @@ fn s_ssequence_free(seq: Option<SSequence>) -> Option<SSequence> {
     None
 }
 
-/// Rust ownership equivalent of NCBI `s_SegFree`.
+/// NCBI: s_SegFree (blast_seg.c:1424).
 #[allow(dead_code)]
 fn s_seg_free(seg: Option<Box<SSeg>>) -> Option<Box<SSeg>> {
     let mut seg = seg;
@@ -2178,6 +2273,7 @@ fn s_seg_free(seg: Option<Box<SSeg>>) -> Option<Box<SSeg>> {
     None
 }
 
+/// blast-rs: Native SEG parameter normalizer shared by wrappers; not a direct NCBI C port.
 fn normalize_seg_params(window: usize, locut: f64, hicut: f64) -> SegParameters {
     let window = if window == 0 {
         SEG_DEFAULT_WINDOW
@@ -2197,7 +2293,7 @@ fn normalize_seg_params(window: usize, locut: f64, hicut: f64) -> SegParameters 
     }
 }
 
-/// Port-shaped constructor for NCBI `SegParametersNewAa`.
+/// NCBI: SegParametersNewAa (blast_seg.c:2225).
 #[allow(dead_code)]
 fn seg_parameters_new_aa() -> SegParameters {
     let window = SEG_DEFAULT_WINDOW;
@@ -2206,7 +2302,7 @@ fn seg_parameters_new_aa() -> SegParameters {
     normalize_seg_params(window, locut, hicut)
 }
 
-/// Port-shaped validation/defaulting helper for NCBI `s_SegParametersCheck`.
+/// NCBI: s_SegParametersCheck (blast_seg.c:2246).
 #[allow(dead_code)]
 fn s_seg_parameters_check(params: &mut SegParameters) {
     let window = params.window;
@@ -2216,8 +2312,8 @@ fn s_seg_parameters_check(params: &mut SegParameters) {
     *params = checked;
 }
 
-/// Rust ownership drops SEG parameters; this exists to keep the audit mapping
-/// aligned with NCBI `SegParametersFree`.
+/// NCBI: SegParametersFree (blast_seg.c:2272).
+/// Rust ownership drops SEG parameters; this exists to keep the audit mapping.
 #[allow(dead_code)]
 fn seg_parameters_free(_params: Option<SegParameters>) {}
 
@@ -2238,6 +2334,7 @@ const SEG_ALPHA_INDEX_LUT: [u8; 256] = {
 };
 
 #[inline]
+/// blast-rs: Native lookup-table replacement for SEG alphabet scans; not a direct NCBI C port.
 fn seg_alpha_index(code: u8) -> Option<usize> {
     let idx = SEG_ALPHA_INDEX_LUT[code as usize];
     if idx == u8::MAX {
@@ -2248,21 +2345,25 @@ fn seg_alpha_index(code: u8) -> Option<usize> {
 }
 
 #[allow(dead_code)]
+/// NCBI: s_HasDash (blast_seg.c:1445).
 fn s_has_dash(seq: &[u8]) -> bool {
     seq.contains(&b'-')
 }
 
 #[allow(dead_code)]
+/// NCBI: s_StateCmp (blast_seg.c:1463).
 fn s_state_cmp(a: i32, b: i32) -> std::cmp::Ordering {
     b.cmp(&a)
 }
 
 #[allow(dead_code)]
+/// NCBI: s_lnfact (blast_seg.c:1854).
 fn s_lnfact(value: i32) -> f64 {
     crate::math::ln_factorial(value)
 }
 
 #[allow(dead_code)]
+/// NCBI: s_AA20alphaStd (blast_seg.c:2188).
 fn s_aa20alpha_std() -> &'static [u8; 20] {
     let alphabet = &SEG_VALID_AA_CODES;
     debug_assert_eq!(alphabet.len(), 20);
@@ -2271,6 +2372,7 @@ fn s_aa20alpha_std() -> &'static [u8; 20] {
     alphabet
 }
 
+/// NCBI: s_CompOn (blast_seg.c:1479).
 fn s_comp_on(seq: &[u8]) -> ([i32; 20], usize) {
     let mut composition = [0i32; 20];
     let mut bogus = 0usize;
@@ -2284,6 +2386,7 @@ fn s_comp_on(seq: &[u8]) -> ([i32; 20], usize) {
     (composition, bogus)
 }
 
+/// NCBI: s_StateOn (blast_seg.c:1515).
 fn s_state_on(seq: &[u8]) -> (Vec<i32>, usize) {
     let (composition, bogus) = s_comp_on(seq);
     let mut state: Vec<i32> = composition.into_iter().filter(|&count| count > 0).collect();
@@ -2291,7 +2394,7 @@ fn s_state_on(seq: &[u8]) -> (Vec<i32>, usize) {
     (state, bogus)
 }
 
-/// Port-shaped constructor for NCBI `s_OpenWin`.
+/// NCBI: s_OpenWin (blast_seg.c:1551).
 #[allow(dead_code)]
 fn s_open_win(parent: &SSequence, start: usize, length: usize) -> Option<SSequence> {
     if start.checked_add(length)? > parent.seq.len() {
@@ -2317,6 +2420,7 @@ fn s_open_win(parent: &SSequence, start: usize, length: usize) -> Option<SSequen
     })
 }
 
+/// NCBI: s_Entropy (blast_seg.c:1592).
 fn s_entropy(state: &[i32]) -> f64 {
     let total: i32 = state.iter().copied().sum();
     if total == 0 {
@@ -2338,7 +2442,7 @@ fn s_entropy(state: &[i32]) -> f64 {
     (ent / total as f64).abs()
 }
 
-/// Port of NCBI `s_DecrementSV`.
+/// NCBI: s_DecrementSV (blast_seg.c:1636).
 #[allow(dead_code)]
 fn s_decrement_sv(sv: &mut Vec<i32>, class: i32) {
     for i in 0..sv.len() {
@@ -2351,7 +2455,7 @@ fn s_decrement_sv(sv: &mut Vec<i32>, class: i32) {
     sv.sort_unstable_by(|a, b| b.cmp(a));
 }
 
-/// Port of NCBI `s_IncrementSV`.
+/// NCBI: s_IncrementSV (blast_seg.c:1654).
 #[allow(dead_code)]
 fn s_increment_sv(sv: &mut Vec<i32>, class: i32) {
     if class <= 0 {
@@ -2364,7 +2468,7 @@ fn s_increment_sv(sv: &mut Vec<i32>, class: i32) {
     sv.sort_unstable_by(|a, b| b.cmp(a));
 }
 
-/// Port-shaped window shifter for NCBI `s_ShiftWin1`.
+/// NCBI: s_ShiftWin1 (blast_seg.c:1672).
 #[allow(dead_code)]
 fn s_shift_win1(win: &mut SSequence) -> bool {
     if win.parent_seq.is_empty() || win.start + win.length >= win.parent_length {
@@ -2409,7 +2513,7 @@ fn s_shift_win1(win: &mut SSequence) -> bool {
     true
 }
 
-/// Rust ownership equivalent of NCBI `s_CloseWin`.
+/// NCBI: s_CloseWin (blast_seg.c:1718).
 #[allow(dead_code)]
 fn s_close_win(win: Option<SSequence>) -> Option<SSequence> {
     if let Some(mut win) = win {
@@ -2421,7 +2525,7 @@ fn s_close_win(win: Option<SSequence>) -> Option<SSequence> {
     None
 }
 
-/// Port of NCBI `s_EntropyOn`.
+/// NCBI: s_EntropyOn (blast_seg.c:1735).
 #[allow(dead_code)]
 fn s_entropy_on(win: &mut SSequence) {
     if win.state.is_empty() {
@@ -2432,11 +2536,13 @@ fn s_entropy_on(win: &mut SSequence) {
     win.entropy = s_entropy(&win.state);
 }
 
+/// blast-rs: Native tuple-returning wrapper around SEG entropy helpers; not a direct NCBI C port.
 fn seg_window_entropy(seq: &[u8]) -> (f64, Vec<i32>, usize) {
     let (state, bogus) = s_state_on(seq);
     (s_entropy(&state), state, bogus)
 }
 
+/// NCBI: s_SeqEntropy (blast_seg.c:1753).
 fn s_seq_entropy(seq: &[u8], window: usize, maxbogus: usize) -> Option<Vec<f64>> {
     if window > seq.len() {
         return None;
@@ -2460,6 +2566,7 @@ fn s_seq_entropy(seq: &[u8], window: usize, maxbogus: usize) -> Option<Vec<f64>>
     Some(values)
 }
 
+/// NCBI: s_FindLow (blast_seg.c:1813).
 fn s_find_low(i: usize, limit: usize, hicut: f64, entropies: &[f64]) -> usize {
     let mut j = i;
     loop {
@@ -2473,6 +2580,7 @@ fn s_find_low(i: usize, limit: usize, hicut: f64, entropies: &[f64]) -> usize {
     }
 }
 
+/// NCBI: s_FindHigh (blast_seg.c:1836).
 fn s_find_high(i: usize, limit: usize, hicut: f64, entropies: &[f64]) -> usize {
     let mut j = i;
     while j <= limit {
@@ -2484,6 +2592,7 @@ fn s_find_high(i: usize, limit: usize, hicut: f64, entropies: &[f64]) -> usize {
     limit
 }
 
+/// blast-rs: Native SEG probability helper; not a direct NCBI C port.
 fn seg_ln_perm(state: &[i32], window_length: usize) -> f64 {
     let mut ans = crate::math::ln_factorial(window_length as i32);
     for &count in state {
@@ -2492,6 +2601,7 @@ fn seg_ln_perm(state: &[i32], window_length: usize) -> f64 {
     ans
 }
 
+/// NCBI: s_LnAss (blast_seg.c:1892).
 fn s_ln_ass(state: &[i32], alphasize: usize) -> f64 {
     let mut ans = crate::math::ln_factorial(alphasize as i32);
     if state.is_empty() {
@@ -2527,10 +2637,12 @@ fn s_ln_ass(state: &[i32], alphasize: usize) -> f64 {
     ans
 }
 
+/// NCBI: s_GetProb (blast_seg.c:1943).
 fn s_get_prob(state: &[i32], total: usize) -> f64 {
     s_ln_ass(state, 20) + seg_ln_perm(state, total) - total as f64 * SEG_LN_20
 }
 
+/// NCBI: s_Trim (blast_seg.c:1973).
 fn s_trim(seq: &[u8], leftend: &mut usize, rightend: &mut usize, params: SegParameters) {
     let mut lend = 0usize;
     let mut rend = seq.len().saturating_sub(1);
@@ -2554,6 +2666,7 @@ fn s_trim(seq: &[u8], leftend: &mut usize, rightend: &mut usize, params: SegPara
     *rightend -= seq.len() - rend - 1;
 }
 
+/// NCBI: s_SegSeq (blast_seg.c:2029).
 fn s_seg_seq(seq: &[u8], params: SegParameters, segs: &mut Vec<SegSegment>, offset: usize) {
     if params.window == 0 || seq.is_empty() || params.window > seq.len() {
         return;
@@ -2602,6 +2715,7 @@ fn s_seg_seq(seq: &[u8], params: SegParameters, segs: &mut Vec<SegSegment>, offs
     }
 }
 
+/// NCBI: s_MergeSegs (blast_seg.c:2124).
 fn s_merge_segs(seq_len: usize, segs: &mut Vec<SegSegment>) {
     if segs.is_empty() {
         return;
@@ -2634,7 +2748,7 @@ fn s_merge_segs(seq_len: usize, segs: &mut Vec<SegSegment>) {
     *segs = merged;
 }
 
-/// Faithful port of NCBI's SEG low-complexity masking over NCBIstdaa input.
+/// blast-rs: Rust SEG entry point over NCBIstdaa input; not a direct NCBI C port.
 ///
 /// The returned intervals are half-open `[start, end)` regions.
 pub fn seg_filter_ncbistdaa(sequence: &[u8], window: usize, locut: f64, hicut: f64) -> MaskLoc {
@@ -2659,8 +2773,8 @@ pub fn seg_filter_ncbistdaa(sequence: &[u8], window: usize, locut: f64, hicut: f
     mask
 }
 
-/// Port-shaped Rust entry point for NCBI `SeqBufferSeg`; returns the same
-/// half-open mask representation used by this crate.
+/// NCBI: SeqBufferSeg (blast_seg.c:2281).
+/// Returns the same half-open mask representation used by this crate.
 #[allow(dead_code)]
 fn seq_buffer_seg(
     sequence: &[u8],
@@ -2680,6 +2794,7 @@ fn seq_buffer_seg(
 }
 
 #[allow(dead_code)]
+/// NCBI: s_SegsToBlastSeqLoc (blast_seg.c:2164).
 fn s_segs_to_blast_seq_loc(segs: &[SegSegment], offset: i32) -> MaskLoc {
     let mut mask = MaskLoc::new();
     for seg in segs {
@@ -2690,11 +2805,11 @@ fn s_segs_to_blast_seq_loc(segs: &[SegSegment], offset: i32) -> MaskLoc {
     mask
 }
 
-/// SEG filtering over ASCII amino-acid input.
+/// blast-rs: ASCII amino-acid adapter over SEG filtering; not a direct NCBI C port.
 ///
 /// The wrapper preserves the crate's historical ASCII-oriented API while
 /// delegating to the faithful NCBIstdaa implementation with the standard
-/// NCBI `hicut` default.
+/// high-cut default.
 pub fn seg_filter(sequence: &[u8], window: usize, locut: f64) -> MaskLoc {
     seg_filter_ncbistdaa(
         &crate::encoding::encode_ncbistdaa_sequence(sequence),
@@ -3103,7 +3218,7 @@ mod tests {
         );
         assert_eq!(
             sblast_filter_options_validate(crate::program::MAPPING, Some(&seg)),
-            crate::options::BLASTERR_OPTION_PROGRAM_INVALID
+            0
         );
         assert_eq!(
             sblast_filter_options_validate(crate::program::BLASTN, None),
@@ -3117,7 +3232,7 @@ mod tests {
         assert_eq!(
             blast_filtering_options_from_string(
                 crate::program::BLASTN,
-                Some("D 22 70 2 R repeat/custom m windowmasker_taxid 9606"),
+                Some("D 22 70 2; R -d repeat/custom; m; W -t 9606;"),
                 &mut options,
             ),
             0
@@ -3151,8 +3266,8 @@ mod tests {
             blast_filtering_options_to_string(crate::program::BLASTN, options.as_ref())
                 .expect("filter string");
         assert!(serialized.contains("D 22 70 2"));
-        assert!(serialized.contains("R repeat/custom"));
-        assert!(serialized.contains("windowmasker_taxid 9606"));
+        assert!(serialized.contains("R -d repeat/custom;"));
+        assert!(serialized.contains("W -t 9606;"));
         assert!(serialized.contains('m'));
 
         let mut round_tripped = None;
@@ -3205,6 +3320,44 @@ mod tests {
             ),
             crate::util::BLASTERR_INVALIDPARAM
         );
+
+        let mut empty_from_none = Some(options_ref.clone());
+        assert_eq!(
+            blast_filtering_options_from_string(crate::program::BLASTN, None, &mut empty_from_none),
+            0
+        );
+        assert!(sblast_filter_options_no_filtering(empty_from_none.as_ref()));
+        assert_eq!(
+            blast_filtering_options_to_string(crate::program::BLASTN, None).as_deref(),
+            Some("F")
+        );
+
+        let mut default_nucl = None;
+        assert_eq!(
+            blast_filtering_options_from_string(
+                crate::program::BLASTN,
+                Some("L;m;"),
+                &mut default_nucl,
+            ),
+            0
+        );
+        let default_nucl = default_nucl.expect("default nucleotide filter");
+        assert!(default_nucl.dust_options.is_some());
+        assert!(default_nucl.mask_at_hash);
+
+        let mut default_prot = None;
+        assert_eq!(
+            blast_filtering_options_from_string(
+                crate::program::BLASTP,
+                Some("T"),
+                &mut default_prot
+            ),
+            0
+        );
+        assert!(default_prot
+            .expect("default protein filter")
+            .seg_options
+            .is_some());
     }
 
     #[test]
@@ -3747,11 +3900,11 @@ mod tests {
         );
         assert_eq!(
             protein_masks.masks[0].as_ref().map(|node| node.ssl),
-            Some(SSeqRange { left: 0, right: 8 })
+            Some(SSeqRange { left: 0, right: 6 })
         );
         assert_eq!(
             protein_masks.masks[3].as_ref().map(|node| node.ssl),
-            Some(SSeqRange { left: 0, right: 8 })
+            Some(SSeqRange { left: 3, right: 8 })
         );
 
         assert_eq!(blast_mask_loc_dna_to_protein(None, &query_info, &[30]), 0);
