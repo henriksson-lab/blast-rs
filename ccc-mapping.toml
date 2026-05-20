@@ -994,11 +994,11 @@ rust  = "s_update_reevaluated_hsp_ungapped"
 other = "s_UpdateReevaluatedHSPUngapped"
 
 [[entries]]
-rust  = "blast_gapped_align"
+rust  = "blast_gapped_alignment_with_traceback"
 other = "BLAST_GappedAlignmentWithTraceback"
 
 [[entries]]
-rust  = "blast_gapped_score_only"
+rust  = "blast_semi_gapped_align"
 other = "Blast_SemiGappedAlign"
 
 [[entries]]
@@ -1279,7 +1279,7 @@ rust  = "blast_aa_lookup_finalize"
 other = "BlastAaLookupFinalize"
 
 [[entries]]
-rust  = "read_composition"
+rust  = "blast_read_aa_composition"
 other = "Blast_ReadAaComposition"
 
 [[entries]]
@@ -1299,19 +1299,19 @@ rust  = "composition_scale_matrix"
 other = "s_ScaleSquareMatrix"
 
 [[entries]]
-rust  = "adjust_evalue_composition"
+rust  = "s_adjust_evalues_for_composition"
 other = "s_AdjustEvaluesForComposition"
 
 [[entries]]
-rust  = "karlin_e_to_p"
+rust  = "blast_karlin_eto_p"
 other = "BLAST_KarlinEtoP"
 
 [[entries]]
-rust  = "overall_p_value"
+rust  = "blast_overall_p_value"
 other = "Blast_Overall_P_Value"
 
 [[entries]]
-rust  = "composition_matrix_adj"
+rust  = "blast_composition_matrix_adj"
 other = "Blast_CompositionMatrixAdj"
 
 [[entries]]
@@ -1319,7 +1319,7 @@ rust  = "MatrixAdjustRule"
 other = "EMatrixAdjustRule"
 
 [[entries]]
-rust  = "choose_matrix_adjust_rule"
+rust  = "blast_choose_matrix_adjust_rule"
 other = "Blast_ChooseMatrixAdjustRule"
 
 [[entries]]
@@ -2939,7 +2939,7 @@ rust  = "LOW_LAMBDA_BIN_CUT"
 other = "LOW_LAMBDA_BIN_CUT"
 
 [[entries]]
-rust  = "composition_pvalue"
+rust  = "blast_composition_pvalue"
 other = "Blast_CompositionPvalue"
 
 [[entries]]
@@ -3738,7 +3738,7 @@ rust  = "DbType"
 other = "ESeqType"
 
 [[entries]]
-rust  = "calc_lambda_full_precision"
+rust  = "blast_calc_lambda_full_precision"
 other = "Blast_CalcLambdaFullPrecision"
 
 [[entries]]
@@ -3823,7 +3823,7 @@ rust  = "blastn_gapped_search"
 other = "BLAST_GappedAlignmentWithTraceback"
 
 [[entries]]
-rust  = "gather_letter_probs"
+rust  = "s_gather_letter_probs"
 other = "s_GatherLetterProbs"
 
 [[entries]]
@@ -3906,7 +3906,7 @@ rust  = "TracebackExt"
 other = "EBlastTbackExt"
 
 [[entries]]
-rust  = "relative_entropy"
+rust  = "blast_get_relative_entropy"
 other = "Blast_GetRelativeEntropy"
 
 [[entries]]
@@ -4280,7 +4280,7 @@ rust  = "adjust_evalues_for_composition"
 other = "s_AdjustEvaluesForComposition"
 
 [[entries]]
-rust  = "karlin_e_to_p"
+rust  = "blast_karlin_eto_p"
 other = "BLAST_KarlinEtoP"
 
 [[entries]]
@@ -4288,7 +4288,7 @@ rust  = "karlin_p_to_e_compo"
 other = "BLAST_KarlinPtoE"
 
 [[entries]]
-rust  = "overall_p_value"
+rust  = "blast_overall_p_value"
 other = "Blast_Overall_P_Value"
 
 [[entries]]

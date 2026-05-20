@@ -21,6 +21,8 @@ pub fn strip_accession_version(s: &str) -> &str {
 pub const DEFAULT_TABULAR_COLUMNS: &str =
     "qaccver saccver pident length mismatch gapopen qstart qend sstart send evalue bitscore";
 
+// blast-rs: local parser helper for `-outfmt` token expansion; NCBI handles
+// this inside its command-line/output-format parser, not as a standalone helper.
 fn expand_column_token<'a>(token: &'a str, columns: &mut Vec<&'a str>) {
     if token == "std" {
         columns.extend(DEFAULT_TABULAR_COLUMNS.split_whitespace());
@@ -29,6 +31,26 @@ fn expand_column_token<'a>(token: &'a str, columns: &mut Vec<&'a str>) {
     }
 }
 
+fn remove_column_token(token: &str, columns: &mut Vec<&str>) {
+    if token == "std" {
+        for col in DEFAULT_TABULAR_COLUMNS.split_whitespace() {
+            columns.retain(|existing| *existing != col);
+        }
+    } else {
+        columns.retain(|existing| *existing != token);
+    }
+}
+
+fn apply_column_token<'a>(token: &'a str, columns: &mut Vec<&'a str>) {
+    if let Some(remove) = token.strip_prefix('-').filter(|remove| !remove.is_empty()) {
+        remove_column_token(remove, columns);
+    } else {
+        expand_column_token(token, columns);
+    }
+}
+
+// blast-rs: local normalization for permissive custom-column handling. It is
+// intentionally native glue around NCBI field names rather than a ported C API.
 fn normalize_column_tokens(cols: &mut Vec<&str>) {
     cols.retain(|col| field_display_name(col) != "unknown field");
     let mut seen = std::collections::HashSet::new();
@@ -42,7 +64,7 @@ pub fn expanded_column_tokens(columns: &str) -> Vec<&str> {
     let mut cols = Vec::new();
     for col in columns.split_whitespace() {
         if !col.starts_with("delim=") {
-            expand_column_token(col, &mut cols);
+            apply_column_token(col, &mut cols);
         }
     }
     normalize_column_tokens(&mut cols);
@@ -308,9 +330,7 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
                 qseq.bytes()
                     .zip(sseq.bytes())
                     .filter(|&(q, s)| {
-                        q != b'-'
-                            && s != b'-'
-                            && q.to_ascii_uppercase() != s.to_ascii_uppercase()
+                        q != b'-' && s != b'-' && q.to_ascii_uppercase() != s.to_ascii_uppercase()
                     })
                     .count()
                     .to_string()
@@ -458,16 +478,8 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
         // lowercase-display is a pairwise-only convention from `showalign.cpp`).
         // Our translated engines may leave soft-mask info in the alignment as
         // lowercase ASCII; force-uppercase here so tabular matches NCBI.
-        "qseq" => hit
-            .qseq
-            .as_deref()
-            .unwrap_or("N/A")
-            .to_ascii_uppercase(),
-        "sseq" => hit
-            .sseq
-            .as_deref()
-            .unwrap_or("N/A")
-            .to_ascii_uppercase(),
+        "qseq" => hit.qseq.as_deref().unwrap_or("N/A").to_ascii_uppercase(),
+        "sseq" => hit.sseq.as_deref().unwrap_or("N/A").to_ascii_uppercase(),
         "btop" => format_btop(hit),
         "sstrand" => {
             // NCBI emits `N/A` for sstrand whenever the subject is NOT a
@@ -530,6 +542,8 @@ fn format_btop(hit: &TabularHit) -> String {
     let mut out = String::new();
     let mut matches = 0;
     for (q, s) in qseq.bytes().zip(sseq.bytes()) {
+        let q = q.to_ascii_uppercase();
+        let s = s.to_ascii_uppercase();
         if q == s && q != b'-' {
             matches += 1;
         } else {
@@ -547,6 +561,8 @@ fn format_btop(hit: &TabularHit) -> String {
     out
 }
 
+// blast-rs: native interval merge for qcovs/qcovus aggregation across emitted
+// hits; NCBI computes equivalent coverage during formatting state assembly.
 fn compute_qcovs_by_query_subject(hits: &[TabularHit]) -> HashMap<(&str, &str), i32> {
     // (query_len, list of (start, end) intervals on this query×subject pair)
     type QCovBuckets<'a> = HashMap<(&'a str, &'a str), (i32, Vec<(i32, i32)>)>;
@@ -614,7 +630,7 @@ pub fn format_tabular_custom_with_delimiter<W: Write>(
                 delimiter_seen = true;
             }
         } else {
-            expand_column_token(col, &mut cols);
+            apply_column_token(col, &mut cols);
         }
     }
     normalize_column_tokens(&mut cols);
@@ -647,7 +663,7 @@ fn format_query_coverage(cov: f64) -> String {
 
 fn rounded_query_coverage(cov: f64) -> i32 {
     // NCBI-style half-up rounding via `BLAST_Nint`, clamped to 100.
-    (crate::math::nint(cov.min(100.0)) as i32).min(100)
+    (crate::math::blast_nint(cov.min(100.0)) as i32).min(100)
 }
 
 #[cfg(test)]
@@ -907,6 +923,33 @@ mod tests {
         assert_eq!(fields[3], "0"); // sframe
         assert_eq!(fields[4], "120"); // score
         assert_eq!(fields[5], "9606"); // staxid
+    }
+
+    #[test]
+    fn test_tabular_custom_columns_remove_fields() {
+        let hit = make_hit(Some("ACGTACGT"), Some("ACGT-CGT"));
+        let hits = vec![hit];
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "std -evalue -bitscore qseq").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let fields: Vec<&str> = output.trim().split('\t').collect();
+        let cols = expanded_column_tokens("std -evalue -bitscore qseq");
+
+        assert_eq!(
+            cols,
+            vec![
+                "qaccver", "saccver", "pident", "length", "mismatch", "gapopen", "qstart", "qend",
+                "sstart", "send", "qseq",
+            ]
+        );
+        assert_eq!(fields.len(), cols.len());
+        assert_eq!(fields.last().copied(), Some("ACGTACGT"));
+    }
+
+    #[test]
+    fn test_btop_normalizes_lowercase_masked_residues() {
+        let hit = make_hit(Some("acGt-A"), Some("ACgtTA"));
+        assert_eq!(get_field(&hit, "btop"), "4-T1");
     }
 
     #[test]

@@ -239,7 +239,7 @@ pub fn format_pairwise_alignment_full<W: Write>(
     evalue: f64,
     num_ident: i32,
     align_len: i32,
-    gap_opens: i32,
+    _gap_opens: i32,
     show_subject_header: bool,
     line_width: usize,
     query_lowercase_mask: Option<&[bool]>,
@@ -281,11 +281,7 @@ pub fn format_pairwise_alignment_full<W: Write>(
         .chain(subject_seq.iter())
         .filter(|&&b| b == 15)
         .count() as i32;
-    let gap_display = if gap_chars > 0 {
-        gap_chars
-    } else {
-        gap_opens
-    };
+    let gap_display = gap_chars;
     writeln!(
         writer,
         " Identities = {}/{} ({}%), Gaps = {}/{} ({}%)",
@@ -407,16 +403,25 @@ pub fn format_pairwise_alignment_full<W: Write>(
     Ok(())
 }
 
+// blast-rs: local text-emission helper for BLAST-like 80-column subject
+// headers; NCBI's formatter wraps inside its output stream classes.
 fn write_wrapped_subject_header<W: Write>(writer: &mut W, subject_id: &str) -> std::io::Result<()> {
     const MAX_HEADER_WIDTH: usize = 80;
     let mut line = format!(">{}", subject_id);
     while line.len() > MAX_HEADER_WIDTH {
-        let split = line[..MAX_HEADER_WIDTH]
+        let boundary = line
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .take_while(|&idx| idx <= MAX_HEADER_WIDTH)
+            .last()
+            .unwrap_or(0);
+        let split_end = line[..boundary]
             .rfind(' ')
             .filter(|&idx| idx > 0)
-            .unwrap_or(MAX_HEADER_WIDTH);
-        writeln!(writer, "{}", &line[..split + 1])?;
-        line = line[split + 1..].to_string();
+            .map(|idx| idx + 1)
+            .unwrap_or(boundary);
+        writeln!(writer, "{}", &line[..split_end])?;
+        line = line[split_end..].to_string();
     }
     writeln!(writer, "{}", line)
 }
@@ -486,6 +491,16 @@ mod tests {
     }
 
     #[test]
+    fn test_pairwise_wraps_non_ascii_subject_header_without_panic() {
+        let mut buf = Vec::new();
+        let subject = format!("{}é suffix", "A".repeat(78));
+        write_wrapped_subject_header(&mut buf, &subject).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains('é'));
+        assert!(output.lines().all(|line| line.is_char_boundary(line.len())));
+    }
+
+    #[test]
     fn test_pairwise_with_gaps() {
         // Query:   ACGT-ACGT (gap at position 4 in query => '-' = code 15 or 0xFF)
         // Subject: ACGTGACGT
@@ -510,6 +525,20 @@ mod tests {
             output.contains("|"),
             "match line should contain pipe characters"
         );
+    }
+
+    #[test]
+    fn test_pairwise_gap_count_uses_gap_characters_not_gap_opens() {
+        let query = vec![0u8, 1, 2, 3];
+        let subject = query.clone();
+        let mut buf = Vec::new();
+        format_pairwise_alignment(
+            &mut buf, "query1", "subject1", &query, &subject, 1, 4, 1, 4, 8, 16.0, 1e-3, 4, 4, 1,
+        )
+        .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("Gaps = 0/4"));
     }
 
     #[test]

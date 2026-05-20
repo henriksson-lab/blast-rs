@@ -1423,10 +1423,7 @@ mod tests {
         let fresh = IntervalTree::new(101, 201);
         let q = Interval::new(10, 40);
         let s = Interval::new(10, 40);
-        assert_eq!(
-            reused.is_contained(q, s, 50),
-            fresh.is_contained(q, s, 50)
-        );
+        assert_eq!(reused.is_contained(q, s, 50), fresh.is_contained(q, s, 50));
 
         // Inserts after reset should land in the empty tree.
         reused.insert(Interval::new(5, 95), Interval::new(5, 195), 200);

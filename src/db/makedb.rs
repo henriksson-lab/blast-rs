@@ -8,6 +8,13 @@ use crate::db::defline::encode_defline_asn1;
 use crate::db::index_writer::write_index_file;
 use crate::encoding::{encode_ncbi2na_ambiguity_data, encode_ncbi2na_sequence};
 
+fn db_component_path(base_path: &Path, ext: &str) -> std::path::PathBuf {
+    let mut path = base_path.as_os_str().to_os_string();
+    path.push(".");
+    path.push(ext);
+    path.into()
+}
+
 /// Create a BLAST v4 nucleotide database from a FASTA file.
 pub fn make_nucleotide_db(
     fasta_path: &Path,
@@ -44,7 +51,7 @@ pub fn make_nucleotide_db(
     let mut total_length = 0u64;
 
     // Write .nsq (sequence data)
-    let mut nsq = BufWriter::new(File::create(output_base.with_extension("nsq"))?);
+    let mut nsq = BufWriter::new(File::create(db_component_path(output_base, "nsq"))?);
     nsq.write_all(&[0u8])?; // sentinel byte
 
     let mut seq_offsets = vec![1u32]; // first seq starts at byte 1
@@ -66,7 +73,7 @@ pub fn make_nucleotide_db(
     nsq.flush()?;
 
     // Write .nhr (header data) — ASN.1 BER encoded Blast-def-line-set
-    let mut nhr = BufWriter::new(File::create(output_base.with_extension("nhr"))?);
+    let mut nhr = BufWriter::new(File::create(db_component_path(output_base, "nhr"))?);
     let mut hdr_offsets = vec![0u32];
     for (oid, (header, _)) in sequences.iter().enumerate() {
         let start = hdr_offsets.last().copied().unwrap_or(0);
@@ -82,7 +89,7 @@ pub fn make_nucleotide_db(
         .max()
         .unwrap_or(0);
     write_index_file(
-        &output_base.with_extension("nin"),
+        &db_component_path(output_base, "nin"),
         4,
         crate::db::DbType::Nucleotide,
         title,
@@ -115,9 +122,9 @@ mod tests {
         assert_eq!(total, 16); // 8 + 8
 
         // Verify files exist
-        assert!(db_base.with_extension("nin").exists());
-        assert!(db_base.with_extension("nsq").exists());
-        assert!(db_base.with_extension("nhr").exists());
+        assert!(db_component_path(&db_base, "nin").exists());
+        assert!(db_component_path(&db_base, "nsq").exists());
+        assert!(db_component_path(&db_base, "nhr").exists());
 
         // Try opening with our reader
         let db = super::super::index::BlastDb::open(&db_base).unwrap();
@@ -126,10 +133,28 @@ mod tests {
         assert!(is_blastdb_date(&db.date));
         assert_eq!(db.get_accession(0).as_deref(), Some("seq1"));
         assert_eq!(db.get_defline(0).as_deref(), Some("seq1"));
-        let raw_header = std::fs::read(db_base.with_extension("nhr")).unwrap();
+        let raw_header = std::fs::read(db_component_path(&db_base, "nhr")).unwrap();
         assert!(raw_header
             .windows(b"BL_ORD_ID".len())
             .any(|w| w == b"BL_ORD_ID"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_make_nucleotide_db_appends_component_extensions() {
+        let dir = std::env::temp_dir().join("blast_makedb_append_ext_test");
+        std::fs::create_dir_all(&dir).ok();
+
+        let fasta = dir.join("input.fa");
+        std::fs::write(&fasta, ">seq1\nACGT\n").unwrap();
+
+        let db_base = dir.join("testdb.00");
+        make_nucleotide_db(&fasta, &db_base, "Append Ext Test").unwrap();
+        assert!(db_component_path(&db_base, "nin").exists());
+        assert!(db_component_path(&db_base, "nsq").exists());
+        assert!(db_component_path(&db_base, "nhr").exists());
+        assert!(!db_base.with_extension("nin").exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }

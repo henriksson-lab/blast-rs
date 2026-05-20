@@ -56,8 +56,8 @@ pub static BLOSUM62_BG: [f64; COMPO_NUM_TRUE_AA] = [
 ];
 
 /// Relative entropy (Jensen-Shannon divergence square root).
-/// Port of NCBI Blast_GetRelativeEntropy.
-pub fn relative_entropy(a: &[f64], b: &[f64]) -> f64 {
+/// NCBI: Blast_GetRelativeEntropy (composition_adjustment.c).
+pub fn blast_get_relative_entropy(a: &[f64], b: &[f64]) -> f64 {
     let mut value = 0.0f64;
     for i in 0..COMPO_NUM_TRUE_AA {
         let temp = (a[i] + b[i]) / 2.0;
@@ -76,8 +76,8 @@ pub fn relative_entropy(a: &[f64], b: &[f64]) -> f64 {
     value.sqrt()
 }
 
-/// Port of NCBI s_HighPairFrequencies.
-fn high_pair_frequencies(letter_probs: &[f64], length: usize) -> bool {
+/// NCBI: s_HighPairFrequencies (composition_adjustment.c).
+fn s_high_pair_frequencies(letter_probs: &[f64], length: usize) -> bool {
     if length <= LENGTH_LOWER_THRESHOLD {
         return false;
     }
@@ -95,14 +95,14 @@ fn high_pair_frequencies(letter_probs: &[f64], length: usize) -> bool {
     (max + second) > HIGH_PAIR_THRESHOLD
 }
 
-/// Port of NCBI s_HighPairEitherSeq.
-fn high_pair_either_seq(p_query: &[f64], len1: usize, p_match: &[f64], len2: usize) -> bool {
-    high_pair_frequencies(p_query, len1) || high_pair_frequencies(p_match, len2)
+/// NCBI: s_HighPairEitherSeq (composition_adjustment.c).
+fn s_high_pair_either_seq(p_query: &[f64], len1: usize, p_match: &[f64], len2: usize) -> bool {
+    s_high_pair_frequencies(p_query, len1) || s_high_pair_frequencies(p_match, len2)
 }
 
-/// Port of NCBI s_TestToApplyREAdjustmentConditional.
+/// NCBI: s_TestToApplyREAdjustmentConditional (composition_adjustment.c).
 /// Decides whether to use full matrix optimization or just scaling.
-fn test_re_adjustment_conditional(
+fn s_test_to_apply_re_adjustment_conditional(
     len_query: usize,
     len_match: usize,
     p_query: &[f64; COMPO_NUM_TRUE_AA],
@@ -118,9 +118,9 @@ fn test_re_adjustment_conditional(
         _corr_factor += (p_query[i] - p_matrix[i]) * (p_match[i] - p_matrix[i]);
     }
 
-    let d_m_mat = relative_entropy(p_match, p_matrix);
-    let d_q_mat = relative_entropy(p_query, p_matrix);
-    let d_m_q = relative_entropy(p_match, p_query);
+    let d_m_mat = blast_get_relative_entropy(p_match, p_matrix);
+    let d_q_mat = blast_get_relative_entropy(p_query, p_matrix);
+    let d_m_q = blast_get_relative_entropy(p_match, p_query);
 
     // NCBI evaluates `numerator / 2.0 / D_m_mat / D_q_mat` as three
     // successive divisions (left-to-right). Replicating that chain
@@ -140,7 +140,7 @@ fn test_re_adjustment_conditional(
         (len_m, len_q)
     };
 
-    if high_pair_either_seq(p_query, len_query, p_match, len_match) {
+    if s_high_pair_either_seq(p_query, len_query, p_match, len_match) {
         MatrixAdjustRule::UserSpecifiedRelEntropy
     } else if d_m_q > QUERY_MATCH_DISTANCE_THRESHOLD
         && len_large / len_small > LENGTH_RATIO_THRESHOLD
@@ -152,9 +152,9 @@ fn test_re_adjustment_conditional(
     }
 }
 
-/// Port of NCBI Blast_ChooseMatrixAdjustRule.
+/// NCBI: Blast_ChooseMatrixAdjustRule (composition_adjustment.c).
 /// Returns the adjustment rule for a query-subject pair.
-pub fn choose_matrix_adjust_rule(
+pub fn blast_choose_matrix_adjust_rule(
     len_query: usize,
     len_match: usize,
     p_query: &[f64; COMPO_NUM_TRUE_AA],
@@ -164,7 +164,7 @@ pub fn choose_matrix_adjust_rule(
     match mode {
         0 => MatrixAdjustRule::DontAdjust,     // eNoCompositionBasedStats
         1 => MatrixAdjustRule::ScaleOldMatrix, // eCompositionBasedStats
-        2 => test_re_adjustment_conditional(
+        2 => s_test_to_apply_re_adjustment_conditional(
             // eCompositionMatrixAdjust
             len_query,
             len_match,
@@ -178,8 +178,8 @@ pub fn choose_matrix_adjust_rule(
 }
 
 /// Map 28-element NCBIstdaa probability array to 20-element true AA array.
-/// Port of NCBI s_GatherLetterProbs.
-pub fn gather_letter_probs(prob28: &[f64], out20: &mut [f64; COMPO_NUM_TRUE_AA]) {
+/// NCBI: s_GatherLetterProbs (composition_adjustment.c).
+pub fn s_gather_letter_probs(prob28: &[f64], out20: &mut [f64; COMPO_NUM_TRUE_AA]) {
     use crate::composition::TRUE_CHAR_POSITIONS;
     for (k, &idx) in TRUE_CHAR_POSITIONS.iter().enumerate() {
         out20[k] = if idx < prob28.len() { prob28[idx] } else { 0.0 };

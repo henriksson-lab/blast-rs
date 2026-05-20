@@ -107,7 +107,9 @@ pub fn write_sam_record_gapped<W: Write>(
 }
 
 /// Build a CIGAR string from aligned query and subject sequences.
-/// M = match/mismatch, I = insertion in query (gap in subject), D = deletion in query (gap in subject).
+/// M = match/mismatch, I = gap in subject/consumes query, D = gap in query/consumes subject.
+// blast-rs: SAM CIGAR synthesis from BLAST traceback strings; this is native
+// outfmt 17 glue, not a port of an isolated NCBI helper.
 fn build_cigar(query_aln: &[u8], subject_aln: &[u8]) -> String {
     let mut cigar = String::new();
     let mut current_op = ' ';

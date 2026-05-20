@@ -16,9 +16,11 @@ pub struct SearchConfig {
 impl SearchConfig {
     /// Create default configuration for blastn.
     pub fn default_blastn() -> Self {
+        let mut hit_saving = HitSavingOptions::default();
+        hit_saving.program_number = crate::program::BLASTN;
         SearchConfig {
             scoring: ScoringOptions::new_blastn(),
-            hit_saving: HitSavingOptions::default(),
+            hit_saving,
             initial_word: InitialWordOptions::new_blastn(),
             extension: ExtensionOptions::new_blastn(),
             eff_lengths: EffectiveLengthsOptions::default(),
@@ -62,6 +64,7 @@ mod tests {
         assert_eq!(config.scoring.penalty, -3);
         assert_eq!(config.initial_word.window_size, 0);
         assert_eq!(config.hit_saving.expect_value, 10.0);
+        assert_eq!(config.hit_saving.program_number, crate::program::BLASTN);
     }
 
     #[test]

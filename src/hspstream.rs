@@ -1589,7 +1589,7 @@ pub fn s_hsp_list_post_traceback_update(
         hsp_list.best_evalue = best_evalue;
     }
 
-    crate::hits::filter_by_evalue(hsp_list, hit_params.options.expect_value);
+    let _ = blast_hsp_list_reap_by_evalue(Some(hsp_list), &hit_params.options);
     s_hsp_list_rescale_scores(hsp_list, score_params.scale_factor);
 
     let kbp_array = if k_gapped && !sbp.kbp_gap.is_empty() {
@@ -2884,12 +2884,16 @@ pub fn blast_hsp_list_reap_by_evalue(
 /// (`blast_hits.c:2455`).
 /// naming: Rust keeps HSPs as a readable snake_case plural token.
 pub fn blast_hsp_list_purge_hsps_with_common_endpoints(hsp_list: Option<&mut HspList>) -> i16 {
-    blast_hsp_list_purge_hsps_with_common_endpoints_ex(crate::program::BLASTP, hsp_list, true)
+    blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
+        crate::program::BLASTP,
+        hsp_list,
+        true,
+    )
 }
 
-/// NCBI: Blast_HSPListPurgeHSPsWithCommonEndpoints (blast_hits.c:2455).
 /// Extended Rust entry point carrying the C program/purge switches.
-pub fn blast_hsp_list_purge_hsps_with_common_endpoints_ex(
+/// blast-rs: Native helper preserving the extra program/purge controls.
+pub fn blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
     program_number: crate::program::ProgramType,
     hsp_list: Option<&mut HspList>,
     purge: bool,
@@ -2898,10 +2902,10 @@ pub fn blast_hsp_list_purge_hsps_with_common_endpoints_ex(
         return 0;
     };
     if hsp_list.hsps.len() <= 1 {
-        return 0;
+        return hsp_list.hsps.len() as i16;
     }
     if crate::program::blast_program_is_phi_blast(program_number) {
-        return 0;
+        return hsp_list.hsps.len() as i16;
     }
     let trim_blastn = program_number == crate::program::BLASTN && !purge;
 
@@ -3027,7 +3031,7 @@ pub fn blast_hsp_list_purge_hsps_with_common_endpoints_ex(
     }
 
     hsp_list.best_evalue = s_blast_get_best_evalue(hsp_list);
-    0
+    hsp_list.hsps.len() as i16
 }
 
 /// 1-1 translation of `Blast_HSPListReapByQueryCoverage`
@@ -3719,7 +3723,7 @@ fn blast_context_to_frame_for_context(context: i32, contexts_per_query: i32) -> 
                 -1
             }
         }
-        6 => crate::util::blast_context_to_frame_blastx(context.rem_euclid(6) as u32),
+        6 => crate::util::blast_context_to_frame(context.rem_euclid(6) as u32),
         _ => 0,
     }
 }
@@ -6755,7 +6759,7 @@ mod tests {
 
         assert_eq!(
             blast_hsp_list_purge_hsps_with_common_endpoints(Some(&mut list)),
-            0
+            2
         );
         let remaining: Vec<(i32, i32, i32, i32, i32)> = list
             .hsps
@@ -6794,12 +6798,12 @@ mod tests {
         list.best_evalue = s_blast_get_best_evalue(&list);
 
         assert_eq!(
-            blast_hsp_list_purge_hsps_with_common_endpoints_ex(
+            blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
                 crate::program::PHI_BLASTN,
                 Some(&mut list),
                 true,
             ),
-            0
+            2
         );
         assert_eq!(list.hsps.len(), 2);
         assert_eq!(list.best_evalue, 1.0e-20);
@@ -6830,12 +6834,12 @@ mod tests {
         list.best_evalue = s_blast_get_best_evalue(&list);
 
         assert_eq!(
-            blast_hsp_list_purge_hsps_with_common_endpoints_ex(
+            blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
                 crate::program::BLASTN,
                 Some(&mut list),
                 false,
             ),
-            0
+            2
         );
         assert_eq!(list.hsps.len(), 2);
         let trimmed = list

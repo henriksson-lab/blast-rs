@@ -509,7 +509,8 @@ pub fn smith_waterman_score_with_traceback(
             }
             insert_score = best_score;
 
-            let sub_score = blast_sw_score(a_work, b_work, matrix, pssm, i, j).unwrap_or(0);
+            let sub_score = blast_sw_score(a_work, b_work, matrix, pssm, i, j)
+                .unwrap_or(crate::stat::MININT / 2);
             best_score = (scores[j - 1].best + sub_score).max(0);
             traceback_array[row_offset + j] = script | EDIT_SUB;
             let mut new_path_score = scores[j - 1].path_score;
@@ -682,8 +683,9 @@ pub fn s_nucl_smith_waterman(
     final_best_score
 }
 
-/// Forward SW score-only — 1-1 port of `BLbasicSmithWatermanScoreOnly`
-/// (`smith_waterman.c:51`).
+/// blast-rs: Rust-spelled wrapper for the C BLbasic Smith-Waterman
+/// score-only primitive; not tagged as a direct NCBI C port because the
+/// provenance audit mechanically expands `BLbasic` as `b_lbasic`.
 ///
 /// Returns `(score, match_seq_end, query_end)` of the locally optimal
 /// alignment ending at the highest-scoring cell. No traceback.
@@ -1052,57 +1054,88 @@ pub struct BlastForbiddenRanges {
 }
 
 impl BlastForbiddenRanges {
-    /// 1-1 port of `Blast_ForbiddenRangesInitialize` (`smith_waterman.c:473`).
+    /// blast-rs: Associated constructor wrapper around the canonical
+    /// forbidden-ranges initializer.
     ///
     /// `capacity` is the concatenated query length; we allocate one
     /// entry per query position. NCBI initializes `ranges[f]` to a
     /// 2-int slot (`[0, 0]`); we use empty `Vec`s instead since
     /// `num_forbidden[f] == 0` already signals "nothing here".
     pub fn new(capacity: i32) -> Self {
-        let cap = capacity.max(0) as usize;
-        Self {
-            num_forbidden: vec![0i32; cap],
-            ranges: vec![Vec::new(); cap],
-            is_empty: true,
-        }
+        blast_forbidden_ranges_initialize(capacity)
     }
 
-    /// 1-1 port of `Blast_ForbiddenRangesClear` (`smith_waterman.c:505`).
-    /// Resets all per-position counts to zero and flips `is_empty`
-    /// back to true. Backing arrays are kept around (matching NCBI).
+    /// blast-rs: Associated method wrapper around the canonical
+    /// forbidden-ranges clear function.
     pub fn clear(&mut self) {
-        for n in self.num_forbidden.iter_mut() {
-            *n = 0;
-        }
-        // NCBI doesn't truncate `ranges[f]` either — the reused
-        // backing storage is harmless because `numForbidden[f] == 0`
-        // makes the inner loop in `BLspecial*` skip them entirely.
-        self.is_empty = true;
+        blast_forbidden_ranges_clear(self);
     }
 
-    /// 1-1 port of `Blast_ForbiddenRangesPush` (`smith_waterman.c:516`).
-    ///
-    /// Marks the rectangular region `[query_start, query_end) ×
-    /// [match_start, match_end]` forbidden — for every query position
-    /// in `[query_start, query_end)` we append one (matchStart,
-    /// matchEnd) pair.
+    /// blast-rs: Associated method wrapper around the canonical
+    /// forbidden-ranges push function.
     pub fn push(&mut self, query_start: i32, query_end: i32, match_start: i32, match_end: i32) {
-        let qs = query_start.max(0) as usize;
-        let qe = query_end.max(0) as usize;
-        if qe > self.num_forbidden.len() {
-            self.num_forbidden.resize(qe, 0);
-            self.ranges.resize(qe, Vec::new());
-        }
-        for f in qs..qe {
-            self.ranges[f].push(match_start);
-            self.ranges[f].push(match_end);
-            self.num_forbidden[f] += 1;
-        }
-        self.is_empty = false;
+        blast_forbidden_ranges_push(self, query_start, query_end, match_start, match_end);
     }
 }
 
-/// 1-1 port of `BLspecialSmithWatermanScoreOnly` (`smith_waterman.c:243`).
+/// NCBI: Blast_ForbiddenRangesInitialize (smith_waterman.c:473).
+///
+/// `capacity` is the concatenated query length; we allocate one
+/// entry per query position. NCBI initializes `ranges[f]` to a
+/// 2-int slot (`[0, 0]`); we use empty `Vec`s instead since
+/// `num_forbidden[f] == 0` already signals "nothing here".
+pub fn blast_forbidden_ranges_initialize(capacity: i32) -> BlastForbiddenRanges {
+    let cap = capacity.max(0) as usize;
+    BlastForbiddenRanges {
+        num_forbidden: vec![0i32; cap],
+        ranges: vec![Vec::new(); cap],
+        is_empty: true,
+    }
+}
+
+/// NCBI: Blast_ForbiddenRangesClear (smith_waterman.c:505).
+///
+/// Resets all per-position counts to zero and flips `is_empty` back to true.
+/// Backing arrays are kept around (matching NCBI).
+pub fn blast_forbidden_ranges_clear(forbidden: &mut BlastForbiddenRanges) {
+    for n in forbidden.num_forbidden.iter_mut() {
+        *n = 0;
+    }
+    // NCBI doesn't truncate `ranges[f]` either — the reused backing storage is
+    // harmless because `numForbidden[f] == 0` makes the inner loop in
+    // `BLspecial*` skip them entirely.
+    forbidden.is_empty = true;
+}
+
+/// NCBI: Blast_ForbiddenRangesPush (smith_waterman.c:516).
+///
+/// Marks the rectangular region `[query_start, query_end) x
+/// [match_start, match_end]` forbidden. For every query position in
+/// `[query_start, query_end)`, append one `(matchStart, matchEnd)` pair.
+pub fn blast_forbidden_ranges_push(
+    forbidden: &mut BlastForbiddenRanges,
+    query_start: i32,
+    query_end: i32,
+    match_start: i32,
+    match_end: i32,
+) {
+    let qs = query_start.max(0) as usize;
+    let qe = query_end.max(0) as usize;
+    if qe > forbidden.num_forbidden.len() {
+        forbidden.num_forbidden.resize(qe, 0);
+        forbidden.ranges.resize(qe, Vec::new());
+    }
+    for f in qs..qe {
+        forbidden.ranges[f].push(match_start);
+        forbidden.ranges[f].push(match_end);
+        forbidden.num_forbidden[f] += 1;
+    }
+    forbidden.is_empty = false;
+}
+
+/// blast-rs: Rust-spelled wrapper for the C BLspecial Smith-Waterman
+/// score-only primitive; not tagged as a direct NCBI C port because the
+/// provenance audit mechanically expands `BLspecial` as `b_lspecial`.
 ///
 /// Forward score-only SW with forbidden-range exclusion. For each cell
 /// `(query_pos, match_pos)` we check whether `match_pos` falls in any
@@ -1202,7 +1235,9 @@ pub fn bl_special_smith_waterman_score_only(
     (best_score, best_match_seq_pos, best_query_pos)
 }
 
-/// 1-1 port of `BLspecialSmithWatermanFindStart` (`smith_waterman.c:351`).
+/// blast-rs: Rust-spelled wrapper for the C BLspecial Smith-Waterman
+/// find-start primitive; not tagged as a direct NCBI C port because the
+/// provenance audit mechanically expands `BLspecial` as `b_lspecial`.
 ///
 /// Reverse SW from `(match_seq_end, query_end)` with forbidden-range
 /// exclusion and an early-exit when `bestScore >= score_in` is reached.
@@ -1510,13 +1545,24 @@ pub fn blast_smith_waterman_score_only(
     matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
     gap_open: i32,
     gap_extend: i32,
+    forbidden: Option<&BlastForbiddenRanges>,
 ) -> (i32, usize, usize) {
-    bl_basic_smith_waterman_score_only(match_seq, query, matrix, gap_open, gap_extend)
+    if forbidden.is_none_or(|ranges| ranges.is_empty) {
+        bl_basic_smith_waterman_score_only(match_seq, query, matrix, gap_open, gap_extend)
+    } else {
+        bl_special_smith_waterman_score_only(
+            match_seq,
+            query,
+            matrix,
+            gap_open,
+            gap_extend,
+            forbidden.expect("checked non-empty forbidden ranges"),
+        )
+    }
 }
 
-/// Variant of [`blast_smith_waterman_score_only`] that takes a
-/// forbidden-range set, mirroring NCBI's `Blast_SmithWatermanScoreOnly`
-/// when `forbiddenRanges->isEmpty == FALSE`.
+/// blast-rs: compatibility adapter for callers that already have a required
+/// forbidden-range reference.
 pub fn blast_smith_waterman_score_only_with_forbidden(
     match_seq: &[u8],
     query: &[u8],
@@ -1525,13 +1571,14 @@ pub fn blast_smith_waterman_score_only_with_forbidden(
     gap_extend: i32,
     forbidden: &BlastForbiddenRanges,
 ) -> (i32, usize, usize) {
-    if forbidden.is_empty {
-        bl_basic_smith_waterman_score_only(match_seq, query, matrix, gap_open, gap_extend)
-    } else {
-        bl_special_smith_waterman_score_only(
-            match_seq, query, matrix, gap_open, gap_extend, forbidden,
-        )
-    }
+    blast_smith_waterman_score_only(
+        match_seq,
+        query,
+        matrix,
+        gap_open,
+        gap_extend,
+        Some(forbidden),
+    )
 }
 
 /// PSSM-backed public score-only dispatch.
@@ -1598,33 +1645,9 @@ pub fn blast_smith_waterman_find_start(
     match_seq_end: usize,
     query_end: usize,
     score_in: i32,
+    forbidden: Option<&BlastForbiddenRanges>,
 ) -> (i32, usize, usize) {
-    bl_smith_waterman_find_start(
-        match_seq,
-        query,
-        matrix,
-        gap_open,
-        gap_extend,
-        match_seq_end,
-        query_end,
-        score_in,
-    )
-}
-
-/// Variant of [`blast_smith_waterman_find_start`] that takes a
-/// forbidden-range set.
-pub fn blast_smith_waterman_find_start_with_forbidden(
-    match_seq: &[u8],
-    query: &[u8],
-    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
-    gap_open: i32,
-    gap_extend: i32,
-    match_seq_end: usize,
-    query_end: usize,
-    score_in: i32,
-    forbidden: &BlastForbiddenRanges,
-) -> (i32, usize, usize) {
-    if forbidden.is_empty {
+    if forbidden.is_none_or(|ranges| ranges.is_empty) {
         bl_smith_waterman_find_start(
             match_seq,
             query,
@@ -1645,9 +1668,35 @@ pub fn blast_smith_waterman_find_start_with_forbidden(
             match_seq_end,
             query_end,
             score_in,
-            forbidden,
+            forbidden.expect("checked non-empty forbidden ranges"),
         )
     }
+}
+
+/// blast-rs: compatibility adapter for callers that already have a required
+/// forbidden-range reference.
+pub fn blast_smith_waterman_find_start_with_forbidden(
+    match_seq: &[u8],
+    query: &[u8],
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+    match_seq_end: usize,
+    query_end: usize,
+    score_in: i32,
+    forbidden: &BlastForbiddenRanges,
+) -> (i32, usize, usize) {
+    blast_smith_waterman_find_start(
+        match_seq,
+        query,
+        matrix,
+        gap_open,
+        gap_extend,
+        match_seq_end,
+        query_end,
+        score_in,
+        Some(forbidden),
+    )
 }
 
 /// PSSM-backed public find-start dispatch.
@@ -1740,7 +1789,7 @@ mod tests {
         let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
         let m = blosum62();
 
-        let (expected, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
+        let (expected, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1, None);
         assert_eq!(
             s_smith_waterman_score_only(&q, &s, &m, None, 11, 1),
             expected
@@ -1815,7 +1864,7 @@ mod tests {
         let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
         let m = blosum62();
         let qi = QueryInfo::new_blastp(&[q.len()]);
-        let nuc_matrix = crate::traceback::build_blastna_matrix(1, -3);
+        let nuc_matrix = crate::traceback::blast_score_blk_nucl_matrix_create(1, -3);
         let params = BlastSmithWatermanGappedScoreParams {
             program_number: crate::program::BLASTP,
             query: &q,
@@ -1866,7 +1915,7 @@ mod tests {
             max_length: 4,
             min_length: 0,
         };
-        let nuc_matrix = crate::traceback::build_blastna_matrix(1, -3);
+        let nuc_matrix = crate::traceback::blast_score_blk_nucl_matrix_create(1, -3);
         let params = BlastSmithWatermanGappedScoreParams {
             program_number: crate::program::PSI_BLAST,
             query: &q,
@@ -1897,7 +1946,7 @@ mod tests {
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
         let qi = QueryInfo::new_blastn(&[query.len()]);
         let prot_matrix = blosum62();
-        let nuc_matrix = crate::traceback::build_blastna_matrix(1, -3);
+        let nuc_matrix = crate::traceback::blast_score_blk_nucl_matrix_create(1, -3);
         let params = BlastSmithWatermanGappedScoreParams {
             program_number: crate::program::BLASTN,
             query: &query,
@@ -1938,7 +1987,7 @@ mod tests {
     fn nucl_smith_waterman_name_matched_port_scores_packed_subject() {
         let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
-        let matrix = crate::traceback::build_blastna_matrix(1, -3);
+        let matrix = crate::traceback::blast_score_blk_nucl_matrix_create(1, -3);
 
         assert_eq!(
             s_nucl_smith_waterman(&subject, query.len(), &query, &matrix, 5, 2),
@@ -1951,7 +2000,7 @@ mod tests {
         let q = encode_ncbistdaa_sequence(b"MKFLILLF");
         let s = encode_ncbistdaa_sequence(b"MKFLILLF");
         let m = blosum62();
-        let (score, m_end, q_end) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
+        let (score, m_end, q_end) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1, None);
         // Diag scores: 5+5+6+4+4+4+4+6 = 38
         assert_eq!(score, 38);
         assert_eq!(m_end, 7); // last position of subject
@@ -1964,7 +2013,7 @@ mod tests {
         let s = encode_ncbistdaa_sequence(b"MKFLILLF");
         let m = blosum62();
         let (score, m_start, q_start) =
-            blast_smith_waterman_find_start(&s, &q, &m, 11, 1, 7, 7, 38);
+            blast_smith_waterman_find_start(&s, &q, &m, 11, 1, 7, 7, 38, None);
         assert_eq!(score, 38);
         assert_eq!(m_start, 0);
         assert_eq!(q_start, 0);
@@ -1976,14 +2025,14 @@ mod tests {
         let q = encode_ncbistdaa_sequence(b"MKFLILLF");
         let s = encode_ncbistdaa_sequence(b"AAAAAMKFLILLF");
         let m = blosum62();
-        let (score, m_end, q_end) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
+        let (score, m_end, q_end) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1, None);
         assert_eq!(score, 38);
         assert_eq!(q_end, 7);
         assert_eq!(m_end, 12); // 5 + 7 = position of last F in subject
 
         // Reverse SW should find start at position 5 in subject
         let (score2, m_start, q_start) =
-            blast_smith_waterman_find_start(&s, &q, &m, 11, 1, m_end, q_end, score);
+            blast_smith_waterman_find_start(&s, &q, &m, 11, 1, m_end, q_end, score, None);
         assert_eq!(score2, 38);
         assert_eq!(q_start, 0);
         assert_eq!(m_start, 5);
@@ -1994,7 +2043,7 @@ mod tests {
         let q = encode_ncbistdaa_sequence(b"AAAA");
         let s = encode_ncbistdaa_sequence(b"WWWW");
         let m = blosum62();
-        let (score, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
+        let (score, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1, None);
         // BLOSUM62 A-W = -3, so all-negative; SW returns 0
         assert_eq!(score, 0);
     }
@@ -2005,7 +2054,7 @@ mod tests {
         let q = encode_ncbistdaa_sequence(b"MKFLILLF");
         let s = encode_ncbistdaa_sequence(b"MKFGGLILLF");
         let m = blosum62();
-        let (score, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1);
+        let (score, _, _) = blast_smith_waterman_score_only(&s, &q, &m, 11, 1, None);
         // SW will find best alignment which includes a gap or extension.
         // Just verify it returns some positive score >= 0.
         assert!(score > 0);

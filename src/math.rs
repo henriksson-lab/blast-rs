@@ -17,7 +17,11 @@ pub const NCBIMATH_PI: f64 = std::f64::consts::PI;
 pub const LOGDERIV_ORDER_MAX: i32 = 4;
 pub const POLYGAMMA_ORDER_MAX: i32 = LOGDERIV_ORDER_MAX;
 
-/// exp(x) - 1 for small x (avoids catastrophic cancellation).
+/// blast-rs: C99/POSIX.1-2001 libm `expm1` helper outside BLAST provenance.
+///
+/// Computes `exp(x) - 1` for small x while avoiding catastrophic cancellation.
+/// This is a Rust-local implementation of the standard C99/POSIX libm `expm1`
+/// operation; it is not ported from NCBI BLAST source.
 pub fn expm1(x: f64) -> f64 {
     let absx = x.abs();
     if absx > 0.33 {
@@ -43,10 +47,11 @@ pub fn expm1(x: f64) -> f64 {
 }
 
 /// ln(1+x) for small x (avoids catastrophic cancellation).
-/// Verbatim port of NCBI `BLAST_Log1p` (`ncbi_math.c:64`): 500-term
+/// NCBI: BLAST_Log1p (ncbi_math.c:64).
+/// 500-term
 /// cap, DBL_EPSILON convergence check inside a two-step loop that
 /// processes one odd and one even Taylor term per iteration.
-pub fn log1p(x: f64) -> f64 {
+pub fn blast_log1p(x: f64) -> f64 {
     if x.abs() >= 0.2 {
         return (x + 1.0).ln();
     }
@@ -70,18 +75,29 @@ pub fn log1p(x: f64) -> f64 {
     sum
 }
 
-/// Port of NCBI `BLAST_Nint` (`ncbi_math.c:437`): round half-away-from-zero
+/// blast-rs: C99/POSIX.1-2001 libm `log1p` facade outside BLAST provenance.
+///
+/// Public name matches the standard C/POSIX libm operation. Implementation
+/// delegates to the BLAST_Log1p-compatible kernel above so BLAST math call
+/// sites keep the original Taylor cutoff and convergence behavior.
+pub fn log1p(x: f64) -> f64 {
+    blast_log1p(x)
+}
+
+/// NCBI: BLAST_Nint (ncbi_math.c:437).
+/// Round half-away-from-zero
 /// and cast to integer. Equivalent to Rust's `f64::round() as i64`, but
 /// named for parity-visibility at call sites that mirror NCBI code.
-pub fn nint(x: f64) -> i64 {
+pub fn blast_nint(x: f64) -> i64 {
     (x + if x >= 0.0 { 0.5 } else { -0.5 }) as i64
 }
 
-/// Port of NCBI `BLAST_Gcd` (`ncbi_math.c:405`). Only `b` is absolute-valued;
+/// NCBI: BLAST_Gcd (ncbi_math.c:405).
+/// Only `b` is absolute-valued;
 /// the swap ensures `a >= b` on entry to the Euclidean loop. In BLAST
 /// practice both args are non-negative, so the weirdness where a negative
 /// `a` could survive the swap is unreachable. Port is character-for-character.
-pub fn gcd(a: i32, b: i32) -> i32 {
+pub fn blast_gcd(a: i32, b: i32) -> i32 {
     let mut a = a;
     let mut b = b.abs();
     if b > a {
@@ -95,12 +111,13 @@ pub fn gcd(a: i32, b: i32) -> i32 {
     a
 }
 
-/// Port of NCBI `BLAST_Powi` (`ncbi_math.c:444`): integer-power via
+/// NCBI: BLAST_Powi (ncbi_math.c:444).
+/// Integer-power via
 /// repeated squaring. Matches NCBI's special cases: `x^0 = 1` (even
 /// when `x == 0`), `0^n = 0` for `n > 0`, `0^n = HUGE_VAL` for `n < 0`.
 /// Semantically identical to Rust's `f64::powi`; named for parity
 /// at sites that mirror NCBI.
-pub fn powi(mut x: f64, mut n: i32) -> f64 {
+pub fn blast_powi(mut x: f64, mut n: i32) -> f64 {
     if n == 0 {
         return 1.0;
     }
@@ -233,10 +250,10 @@ pub fn s_general_ln_gamma(x: f64, order: i32) -> f64 {
                 value += GAMMA_COEF[coef_index] / tmp;
             }
         } else {
-            value = GAMMA_COEF[xgamma_dim - 1] / powi(tmp, i as i32 + 1);
+            value = GAMMA_COEF[xgamma_dim - 1] / blast_powi(tmp, i as i32 + 1);
             for coef_index in (0..(xgamma_dim - 1)).rev() {
                 tmp -= 1.0;
-                value += GAMMA_COEF[coef_index] / powi(tmp, i as i32 + 1);
+                value += GAMMA_COEF[coef_index] / blast_powi(tmp, i as i32 + 1);
             }
             let factorial = blast_factorial(i as i32);
             value *= if i % 2 == 0 { factorial } else { -factorial };
@@ -264,7 +281,7 @@ pub fn s_general_ln_gamma(x: f64, order: i32) -> f64 {
         }
         _ => {
             let extra = blast_factorial(order - 2)
-                * powi(tmp, 1 - order)
+                * blast_powi(tmp, 1 - order)
                 * (1.0 + (order - 1) as f64 * xgamma_dim as f64 / tmp);
             if order % 2 == 0 {
                 value += extra;
@@ -318,7 +335,7 @@ pub fn s_poly_gamma(x: f64, order: i32) -> f64 {
             }
             value -= x.ln();
         } else {
-            let tmp = blast_factorial(order - 1) * powi(x, -order);
+            let tmp = blast_factorial(order - 1) * blast_powi(x, -order);
             value += if order % 2 == 0 { tmp } else { -tmp };
         }
         value
@@ -414,10 +431,11 @@ pub fn ln_factorial(n: i32) -> f64 {
     s_ln_gamma(n as f64 + 1.0)
 }
 
-/// Port of NCBI `BLAST_LnGammaInt` (`ncbi_math.c:323`): returns
+/// NCBI: BLAST_LnGammaInt (ncbi_math.c:323).
+/// Returns
 /// `ln(Gamma(n))` for positive integer `n`. Equivalent to
 /// `ln_factorial(n - 1)`.
-pub fn ln_gamma_int(n: i32) -> f64 {
+pub fn blast_ln_gamma_int(n: i32) -> f64 {
     if n <= 0 {
         return 0.0;
     }
@@ -426,7 +444,7 @@ pub fn ln_gamma_int(n: i32) -> f64 {
     ln_factorial(n - 1)
 }
 
-/// Port of NCBI `BLAST_RombergIntegrate` (`ncbi_math.c:346`).
+/// NCBI: BLAST_RombergIntegrate (ncbi_math.c:346).
 /// Adaptive Romberg quadrature of `f` over `[p, q]`, stopping when
 /// successive Romberg extrapolations agree within `eps`. Returns
 /// `f64::INFINITY` when the integrand returns `HUGE_VAL` or the method
@@ -435,7 +453,7 @@ pub fn ln_gamma_int(n: i32) -> f64 {
 /// `epsit` — minimum number of consecutive iterations that must satisfy
 /// `eps` before returning (clamped to `[1, 3]`).
 /// `itmin` — minimum iterations (clamped to `[1, MAX_DIAGS-1]`).
-pub fn romberg_integrate<F>(f: F, p: f64, q: f64, eps: f64, epsit: i32, itmin: i32) -> f64
+pub fn blast_romberg_integrate<F>(f: F, p: f64, q: f64, eps: f64, epsit: i32, itmin: i32) -> f64
 where
     F: Fn(f64) -> f64,
 {
@@ -533,11 +551,12 @@ pub fn s_ieee754_exp(x: f64) -> f64 {
     x.exp()
 }
 
-/// Port of NCBI `NCBI_ErfC` (`ncbi_erf.c:407`): Sun-style fdlibm erfc
+/// NCBI: NCBI_ErfC (ncbi_erf.c:407).
+/// Sun-style fdlibm erfc
 /// with piecewise rational approximations and IEEE 754 bit manipulation.
 /// Aliased by NCBI to `BLAST_ErfC` (`ncbi_erf.c:492`). Accurate to full
 /// `f64` precision across all finite inputs.
-pub fn erfc(x: f64) -> f64 {
+pub fn ncbi_erf_c(x: f64) -> f64 {
     const TINY: f64 = 1e-300;
     const HALF: f64 = 0.5;
     const ONE: f64 = 1.0;
@@ -688,13 +707,34 @@ pub fn erfc(x: f64) -> f64 {
     }
 }
 
-/// Port-shaped wrapper for NCBI `NCBI_Erf` (`ncbi_erf.c:352`).
+/// blast-rs: C99/POSIX.1-2001 libm `erfc` facade outside BLAST provenance.
+///
+/// Public name matches the standard C/POSIX libm operation. Implementation
+/// delegates to the fdlibm-derived NCBI_ErfC-compatible kernel above for
+/// reproducibility.
+pub fn erfc(x: f64) -> f64 {
+    ncbi_erf_c(x)
+}
+
+/// NCBI: NCBI_Erf (ncbi_erf.c:352).
 ///
 /// The C source implements `erf` and `erfc` from the same fdlibm coefficient
 /// tables. This Rust port keeps `erfc` as the full coefficient implementation
 /// above and derives the odd `erf` function from it, preserving the special
 /// values and sign behavior used by callers in BLAST math code.
-pub fn erf(x: f64) -> f64 {
+pub fn ncbi_erf(x: f64) -> f64 {
+    const EFX8: f64 = 1.027_033_336_764_100_7;
+    const PP0: f64 = 1.283_791_670_955_125_6e-1;
+    const PP1: f64 = -3.250_421_072_470_015e-1;
+    const PP2: f64 = -2.848_174_957_559_851e-2;
+    const PP3: f64 = -5.770_270_296_489_442e-3;
+    const PP4: f64 = -2.376_301_665_665_016_3e-5;
+    const QQ1: f64 = 3.979_172_239_591_553_6e-1;
+    const QQ2: f64 = 6.502_224_998_876_729e-2;
+    const QQ3: f64 = 5.081_306_281_875_765_5e-3;
+    const QQ4: f64 = 1.324_947_380_043_216_4e-4;
+    const QQ5: f64 = -3.960_228_278_775_368e-6;
+
     if x.is_nan() {
         return x;
     }
@@ -709,15 +749,45 @@ pub fn erf(x: f64) -> f64 {
     }
 
     let ax = x.abs();
-    let value = if ax >= 6.0 { 1.0 } else { 1.0 - erfc(ax) };
-    if x.is_sign_negative() {
+    let value = if ax >= 6.0 {
+        1.0
+    } else if ax < 0.84375 {
+        let bits = x.to_bits();
+        let ix = ((bits >> 32) as u32) & 0x7fff_ffff;
+        if ix < 0x3e30_0000 {
+            0.125 * (8.0 * x + EFX8 * x)
+        } else {
+            let z = x * x;
+            let r = PP0 + z * (PP1 + z * (PP2 + z * (PP3 + z * PP4)));
+            let s = 1.0 + z * (QQ1 + z * (QQ2 + z * (QQ3 + z * (QQ4 + z * QQ5))));
+            let y = r / s;
+            x + x * y
+        }
+    } else {
+        1.0 - ncbi_erf_c(ax)
+    };
+    if ax < 0.84375 {
+        value
+    } else if x.is_sign_negative() {
         -value
     } else {
         value
     }
 }
 
-/// Port of NCBI Boost-style `ErfImpl` (`boost_erf.c:52`).
+/// blast-rs: C99/POSIX.1-2001 libm `erf` facade outside BLAST provenance.
+///
+/// Public name matches the standard C/POSIX libm operation. Implementation
+/// delegates to the fdlibm-derived NCBI_Erf-compatible kernel above for
+/// reproducibility.
+pub fn erf(x: f64) -> f64 {
+    ncbi_erf(x)
+}
+
+/// blast-rs: Boost-style erf implementation helper outside BLAST provenance.
+///
+/// Ported from NCBI's bundled Boost-derived `ErfImpl` (`boost_erf.c:52`), not
+/// from the BLAST algorithm library itself.
 pub fn erf_impl(z: f64, invert: bool) -> f64 {
     let mut invert = invert;
     if z < 0.0 {
@@ -869,12 +939,16 @@ pub fn erf_impl(z: f64, invert: bool) -> f64 {
     }
 }
 
-/// Wrapper for NCBI Boost-style `Erf` (`boost_erf.c:247`).
+/// blast-rs: Boost-style `erf` wrapper outside BLAST provenance.
+///
+/// Ported from NCBI's bundled Boost-derived `Erf` wrapper (`boost_erf.c:247`).
 pub fn erf_boost(z: f64) -> f64 {
     erf_impl(z, false)
 }
 
-/// Wrapper for NCBI Boost-style `ErfC` (`boost_erf.c:252`).
+/// blast-rs: Boost-style `erfc` wrapper outside BLAST provenance.
+///
+/// Ported from NCBI's bundled Boost-derived `ErfC` wrapper (`boost_erf.c:252`).
 pub fn erfc_boost(z: f64) -> f64 {
     erf_impl(z, true)
 }
@@ -996,30 +1070,39 @@ mod tests {
     }
 
     #[test]
+    fn test_erf_preserves_tiny_ncbi_branch() {
+        let positive = erf(1e-300);
+        let negative = erf(-1e-300);
+        assert!(positive > 1e-300);
+        assert!(negative < -1e-300);
+        assert_eq!(positive, -negative);
+    }
+
+    #[test]
     fn test_gcd_matches_ncbi_semantics() {
         // Standard mathematical cases.
-        assert_eq!(gcd(12, 8), 4);
-        assert_eq!(gcd(8, 12), 4); // swap handled
-        assert_eq!(gcd(7, 5), 1);
-        assert_eq!(gcd(0, 5), 5);
-        assert_eq!(gcd(100, 0), 100);
+        assert_eq!(blast_gcd(12, 8), 4);
+        assert_eq!(blast_gcd(8, 12), 4); // swap handled
+        assert_eq!(blast_gcd(7, 5), 1);
+        assert_eq!(blast_gcd(0, 5), 5);
+        assert_eq!(blast_gcd(100, 0), 100);
         // NCBI `BLAST_Gcd(reward, penalty)` with negative penalty
         // takes abs of second arg before the swap.
-        assert_eq!(gcd(3, -12), 3);
-        assert_eq!(gcd(5, -15), 5);
+        assert_eq!(blast_gcd(3, -12), 3);
+        assert_eq!(blast_gcd(5, -15), 5);
     }
 
     #[test]
     fn test_powi_matches_ncbi_semantics() {
         // Matches `BLAST_Powi`: `x^0 == 1`, `0^n == 0` for n > 0,
         // `0^n == INFINITY` for n < 0.
-        assert_eq!(powi(2.0, 0), 1.0);
-        assert_eq!(powi(2.0, 3), 8.0);
-        assert_eq!(powi(2.0, -2), 0.25);
-        assert_eq!(powi(0.0, 5), 0.0);
-        assert_eq!(powi(0.0, 0), 1.0);
-        assert_eq!(powi(0.0, -1), f64::INFINITY);
-        assert_eq!(powi(-3.0, 3), -27.0);
+        assert_eq!(blast_powi(2.0, 0), 1.0);
+        assert_eq!(blast_powi(2.0, 3), 8.0);
+        assert_eq!(blast_powi(2.0, -2), 0.25);
+        assert_eq!(blast_powi(0.0, 5), 0.0);
+        assert_eq!(blast_powi(0.0, 0), 1.0);
+        assert_eq!(blast_powi(0.0, -1), f64::INFINITY);
+        assert_eq!(blast_powi(-3.0, 3), -27.0);
     }
 
     #[test]
@@ -1050,25 +1133,25 @@ mod tests {
     #[test]
     fn test_nint_matches_ncbi_semantics() {
         // Half-away-from-zero rounding.
-        assert_eq!(nint(0.0), 0);
-        assert_eq!(nint(0.4), 0);
-        assert_eq!(nint(0.5), 1);
-        assert_eq!(nint(1.5), 2);
-        assert_eq!(nint(2.5), 3);
-        assert_eq!(nint(-0.4), 0);
-        assert_eq!(nint(-0.5), -1);
-        assert_eq!(nint(-1.5), -2);
-        assert_eq!(nint(-2.5), -3);
+        assert_eq!(blast_nint(0.0), 0);
+        assert_eq!(blast_nint(0.4), 0);
+        assert_eq!(blast_nint(0.5), 1);
+        assert_eq!(blast_nint(1.5), 2);
+        assert_eq!(blast_nint(2.5), 3);
+        assert_eq!(blast_nint(-0.4), 0);
+        assert_eq!(blast_nint(-0.5), -1);
+        assert_eq!(blast_nint(-1.5), -2);
+        assert_eq!(blast_nint(-2.5), -3);
         // Irrational-looking values round normally.
-        assert_eq!(nint(3.7), 4);
-        assert_eq!(nint(-3.7), -4);
+        assert_eq!(blast_nint(3.7), 4);
+        assert_eq!(blast_nint(-3.7), -4);
     }
 
     #[test]
     fn test_romberg_integrates_polynomial_exactly() {
         // Integral of x^2 from 0 to 1 is 1/3. Romberg handles this
         // quickly with trapezoidal → 1/3 after a few refinements.
-        let got = romberg_integrate(|x| x * x, 0.0, 1.0, 1e-10, 2, 3);
+        let got = blast_romberg_integrate(|x| x * x, 0.0, 1.0, 1e-10, 2, 3);
         assert!(
             (got - 1.0 / 3.0).abs() < 1e-10,
             "got {got}, expected ~0.333"
@@ -1078,7 +1161,7 @@ mod tests {
     #[test]
     fn test_romberg_integrates_exp_smooth() {
         // Integral of exp(-x) from 0 to 5: [-exp(-x)]_0^5 = 1 - exp(-5).
-        let got = romberg_integrate(|x| (-x).exp(), 0.0, 5.0, 1e-12, 2, 3);
+        let got = blast_romberg_integrate(|x| (-x).exp(), 0.0, 5.0, 1e-12, 2, 3);
         let expected = 1.0 - (-5.0_f64).exp();
         assert!((got - expected).abs() < 1e-10, "got {got}, exp {expected}");
     }
@@ -1127,7 +1210,7 @@ mod tests {
     fn test_ln_gamma_int_matches_ln_factorial_offset() {
         // NCBI `BLAST_LnGammaInt(n)` == ln(Gamma(n)) == ln((n-1)!).
         for n in 1..=50 {
-            let got = ln_gamma_int(n);
+            let got = blast_ln_gamma_int(n);
             let expected = ln_factorial(n - 1);
             assert!(
                 (got - expected).abs() < 1e-10,
@@ -1139,7 +1222,7 @@ mod tests {
     #[test]
     fn test_romberg_respects_itmin() {
         // Tiny eps but large itmin: converges trivially on constant fn.
-        let got = romberg_integrate(|_| 1.0, 0.0, 1.0, 1e-15, 1, 5);
+        let got = blast_romberg_integrate(|_| 1.0, 0.0, 1.0, 1e-15, 1, 5);
         assert!((got - 1.0).abs() < 1e-15);
     }
 }

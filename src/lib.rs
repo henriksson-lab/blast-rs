@@ -107,7 +107,8 @@ pub use api::{
 // Re-export core types at crate root (matching old API)
 pub use db::BlastDb;
 pub use link_hsps::{
-    BLAST_LinkHsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters, LinkScoreBlock,
+    blast_link_hsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
+    LinkScoreBlock,
 };
 pub use matrix::AA_FREQUENCIES as BACKGROUND_FREQ;
 pub use program::BLASTN;

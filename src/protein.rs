@@ -893,7 +893,7 @@ use crate::stat::HSP_MAX_WINDOW;
 /// NCBI returns only `q_offset`; this port also returns the corresponding
 /// `s_offset` derived as `s_start + (q_offset - q_start)` (identical
 /// because the HSP is ungapped).
-pub fn get_start_for_gapped_alignment(
+pub fn blast_get_start_for_gapped_alignment(
     query: &[u8],
     subject: &[u8],
     q_start: usize,
@@ -949,7 +949,7 @@ pub fn get_start_for_gapped_alignment(
 
 /// Perform gapped protein alignment from a seed position using X-dropoff DP.
 ///
-/// This is the protein equivalent of `blast_gapped_score_only` from traceback.rs,
+/// This is the protein equivalent of `blast_semi_gapped_align` from traceback.rs,
 /// using a substitution matrix (e.g., BLOSUM62) instead of match/mismatch rewards.
 pub fn protein_gapped_align(
     query: &[u8],
@@ -1148,7 +1148,8 @@ pub fn protein_gapped_align_pssm(
 /// Returns `Some` with a `ProteinGappedResult` whose extent is at most
 /// `(q_extent, s_extent)`. Returns `None` if no positive-scoring
 /// alignment is found inside the rectangle.
-pub fn protein_sw_bounded_xdrop_align(
+#[allow(clippy::too_many_arguments)]
+pub fn s_sw_find_final_ends_using_xdrop(
     query: &[u8],
     subject: &[u8],
     seed_q: usize,
@@ -1253,7 +1254,7 @@ pub fn protein_sw_bounded_xdrop_align(
     })
 }
 
-/// Position-specific counterpart of [`protein_sw_bounded_xdrop_align`].
+/// Position-specific counterpart of [`s_sw_find_final_ends_using_xdrop`].
 ///
 /// Scores come from `pssm[query_offset + query_pos][subject_residue]`, while
 /// the bounded forward X-drop retry loop is identical to the square-matrix

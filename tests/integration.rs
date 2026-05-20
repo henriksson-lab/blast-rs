@@ -28441,8 +28441,8 @@ fn test_comp_ratio() {
     let p0dpq5 = records.iter().find(|r| r.id == "P0DPQ5").unwrap();
     let s_aa = blast_rs::encoding::encode_ncbistdaa_sequence(&p0dpq5.sequence);
 
-    let (qcomp, qn) = blast_rs::composition::read_composition(&q_aa, 28);
-    let (scomp, sn) = blast_rs::composition::read_composition(&s_aa, 28);
+    let (qcomp, qn) = blast_rs::composition::blast_read_aa_composition(&q_aa, 28);
+    let (scomp, sn) = blast_rs::composition::blast_read_aa_composition(&s_aa, 28);
     assert_eq!(qn, 250);
     assert_eq!(sn, 210);
 
@@ -28496,8 +28496,8 @@ fn test_comp_adjust_srta_p0dpq5_reference_internals() {
     let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
     let ungapped_lambda = 0.3176f64; // BLOSUM62 ungapped
 
-    let (qcomp28, qn) = blast_rs::composition::read_composition(&query_ncbi, 28);
-    let (scomp28, sn) = blast_rs::composition::read_composition(&subj_ncbi, 28);
+    let (qcomp28, qn) = blast_rs::composition::blast_read_aa_composition(&query_ncbi, 28);
+    let (scomp28, sn) = blast_rs::composition::blast_read_aa_composition(&subj_ncbi, 28);
 
     assert_eq!(query_ncbi.len(), 237);
     assert_eq!(qn, 237);
@@ -28543,7 +28543,7 @@ fn test_comp_adjust_srta_p0dpq5_reference_internals() {
 }
 
 #[test]
-fn composition_matrix_adj_short_exact_matches_reference_internals() {
+fn blast_composition_matrix_adj_short_exact_matches_reference_internals() {
     use blast_rs::compo_mode_condition::MatrixAdjustRule;
 
     let query = b"MKFLILLF";
@@ -28552,15 +28552,15 @@ fn composition_matrix_adj_short_exact_matches_reference_internals() {
     let subject_ncbi = blast_rs::encoding::encode_ncbistdaa_sequence(subject);
 
     let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
-    let (qcomp28, qn) = blast_rs::composition::read_composition(&query_ncbi, 28);
-    let (scomp28, sn) = blast_rs::composition::read_composition(&subject_ncbi, 28);
+    let (qcomp28, qn) = blast_rs::composition::blast_read_aa_composition(&query_ncbi, 28);
+    let (scomp28, sn) = blast_rs::composition::blast_read_aa_composition(&subject_ncbi, 28);
 
     let mut qp20 = [0.0f64; 20];
     let mut sp20 = [0.0f64; 20];
-    blast_rs::compo_mode_condition::gather_letter_probs(&qcomp28, &mut qp20);
-    blast_rs::compo_mode_condition::gather_letter_probs(&scomp28, &mut sp20);
+    blast_rs::compo_mode_condition::s_gather_letter_probs(&qcomp28, &mut qp20);
+    blast_rs::compo_mode_condition::s_gather_letter_probs(&scomp28, &mut sp20);
 
-    let rule = blast_rs::compo_mode_condition::choose_matrix_adjust_rule(
+    let rule = blast_rs::compo_mode_condition::blast_choose_matrix_adjust_rule(
         query_ncbi.len(),
         subject_ncbi.len(),
         &qp20,
@@ -28581,7 +28581,7 @@ fn composition_matrix_adj_short_exact_matches_reference_internals() {
 
     let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
     let mut adj_matrix = matrix;
-    let status = blast_rs::composition::composition_matrix_adj(
+    let status = blast_rs::composition::blast_composition_matrix_adj(
         &mut adj_matrix,
         blast_rs::matrix::AA_SIZE,
         rule,
@@ -28640,7 +28640,7 @@ fn composition_matrix_adj_short_exact_matches_reference_internals() {
     for specified_re in [0.40, 0.42, 0.44, 0.46, 0.48, 0.50] {
         let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
         let mut adj = matrix;
-        let status = blast_rs::composition::composition_matrix_adj(
+        let status = blast_rs::composition::blast_composition_matrix_adj(
             &mut adj,
             blast_rs::matrix::AA_SIZE,
             rule,
@@ -28679,7 +28679,7 @@ fn composition_matrix_adj_short_exact_matches_reference_internals() {
     for lambda in [0.315, 0.316, 0.317, 3177.0 / 10000.0, 0.318, 0.319, 0.320] {
         let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
         let mut adj = matrix;
-        let status = blast_rs::composition::composition_matrix_adj(
+        let status = blast_rs::composition::blast_composition_matrix_adj(
             &mut adj,
             blast_rs::matrix::AA_SIZE,
             rule,
@@ -28723,7 +28723,7 @@ fn composition_matrix_adj_short_exact_matches_reference_internals() {
     ] {
         let (joint_probs, first_std, second_std) = blast_rs::composition::blosum62_workspace();
         let mut adj = matrix;
-        let status = blast_rs::composition::composition_matrix_adj(
+        let status = blast_rs::composition::blast_composition_matrix_adj(
             &mut adj,
             blast_rs::matrix::AA_SIZE,
             test_rule,
@@ -29299,7 +29299,7 @@ fn test_lambda_ratio_biased_sprot_reference() {
 
     let glu_query = b"MEEEEKELEQEKKKLEEEKAEELEEELKKLEQEEVKEEIKELEEKLEEEQKEELKNELEEE";
     let glu_ncbi = blast_rs::encoding::encode_ncbistdaa_sequence(glu_query);
-    let (qcomp, qn) = blast_rs::composition::read_composition(&glu_ncbi, 28);
+    let (qcomp, qn) = blast_rs::composition::blast_read_aa_composition(&glu_ncbi, 28);
 
     assert_eq!(qn, 61);
 
@@ -29322,7 +29322,7 @@ fn test_lambda_ratio_biased_sprot_reference() {
     let subj_raw = db.get_sequence(top_oid);
     let subj_len = db.get_seq_len(top_oid) as usize;
     let subj_aa = &subj_raw[..subj_len];
-    let (scomp, sn) = blast_rs::composition::read_composition(subj_aa, 28);
+    let (scomp, sn) = blast_rs::composition::blast_read_aa_composition(subj_aa, 28);
     assert_eq!(top_oid, 6590);
     assert_eq!(sn, 444);
     let ratio =
@@ -29373,7 +29373,7 @@ fn test_lambda_ratio_biased_sprot_reference() {
     );
 }
 
-/// Verify that karlin_lambda_nr with Robinson&Robinson frequencies gives the
+/// Verify that blast_karlin_lambda_nr with Robinson&Robinson frequencies gives the
 /// correct standard BLOSUM62 ungapped lambda (0.3176).
 #[test]
 fn test_karlin_lambda_standard() {

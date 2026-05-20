@@ -117,7 +117,7 @@ pub const NCBISTDAA_STANDARD_RESIDUES: [u8; 20] = [
 /// Bit i is set iff i is one of the 20 standard NCBIstdaa residue codes.
 /// Used for the hot-path `is_ncbistdaa_standard_residue` check — replaces
 /// `.contains(&b)` on `NCBISTDAA_STANDARD_RESIDUES`, which was emitting
-/// memchr calls for every byte in `read_composition` (~50% of tblastx
+/// memchr calls for every byte in `blast_read_aa_composition` (~50% of tblastx
 /// per-subject runtime).
 const STANDARD_RESIDUE_MASK: u32 = {
     let mut mask: u32 = 0;
@@ -290,7 +290,7 @@ pub fn blastna_pair_score(a: u8, b: u8, reward: i32, penalty: i32) -> i32 {
     let degen = blastna_degeneracy(a.max(b)) as i32;
     // NCBI `blast_stat.c:1106`:
     //   (Int4)BLAST_Nint((double)((degeneracy[i2]-1)*penalty + reward) / degeneracy[i2])
-    crate::math::nint(((degen - 1) * penalty + reward) as f64 / degen as f64) as i32
+    crate::math::blast_nint(((degen - 1) * penalty + reward) as f64 / degen as f64) as i32
 }
 
 pub fn complement_blastna_base(b: u8) -> u8 {

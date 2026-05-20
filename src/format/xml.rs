@@ -2,6 +2,65 @@
 
 use std::io::Write;
 
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn format_xml_double_g(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let abs = value.abs();
+    if abs < 1e-4 || abs >= 1e6 {
+        let s = format!("{value:.5e}");
+        if let Some((mantissa, exponent)) = s.split_once('e') {
+            let mut mantissa = mantissa.trim_end_matches('0').to_string();
+            if mantissa.ends_with('.') {
+                mantissa.pop();
+            }
+            let exponent = exponent
+                .trim_start_matches('+')
+                .trim_start_matches('0')
+                .replace("-0", "-");
+            format!("{mantissa}e{exponent}")
+        } else {
+            s
+        }
+    } else {
+        let exp = abs.log10().floor() as i32;
+        let decimals = (5 - exp).max(0) as usize;
+        let mut s = format!("{value:.decimals$}");
+        if s.contains('.') {
+            while s.ends_with('0') {
+                s.pop();
+            }
+            if s.ends_with('.') {
+                s.pop();
+            }
+        }
+        s
+    }
+}
+
+fn format_xml_evalue(value: f64) -> String {
+    if value == 0.0 || value < 1.0e-180 {
+        "0".to_string()
+    } else {
+        format_xml_double_g(value)
+    }
+}
+
 /// Write BLAST XML header.
 pub fn write_xml_header<W: Write>(
     writer: &mut W,
@@ -15,14 +74,19 @@ pub fn write_xml_header<W: Write>(
     writeln!(
         writer,
         "  <BlastOutput_program>{}</BlastOutput_program>",
-        program
+        xml_escape(program)
     )?;
     writeln!(
         writer,
         "  <BlastOutput_version>{} {}</BlastOutput_version>",
-        program, version
+        xml_escape(program),
+        xml_escape(version)
     )?;
-    writeln!(writer, "  <BlastOutput_db>{}</BlastOutput_db>", db)?;
+    writeln!(
+        writer,
+        "  <BlastOutput_db>{}</BlastOutput_db>",
+        xml_escape(db)
+    )?;
     writeln!(writer, "  <BlastOutput_iterations>")?;
     Ok(())
 }
@@ -50,8 +114,12 @@ pub fn write_xml_hit<W: Write>(
 ) -> std::io::Result<()> {
     writeln!(writer, "    <Hit>")?;
     writeln!(writer, "      <Hit_num>{}</Hit_num>", hit_num)?;
-    writeln!(writer, "      <Hit_id>{}</Hit_id>", subject_id)?;
-    writeln!(writer, "      <Hit_def>{}</Hit_def>", subject_def)?;
+    writeln!(writer, "      <Hit_id>{}</Hit_id>", xml_escape(subject_id))?;
+    writeln!(
+        writer,
+        "      <Hit_def>{}</Hit_def>",
+        xml_escape(subject_def)
+    )?;
     writeln!(writer, "      <Hit_len>{}</Hit_len>", subject_len)?;
     writeln!(writer, "      <Hit_hsps>")?;
 
@@ -60,10 +128,14 @@ pub fn write_xml_hit<W: Write>(
         writeln!(writer, "          <Hsp_num>{}</Hsp_num>", i + 1)?;
         writeln!(
             writer,
-            "          <Hsp_bit-score>{:.4}</Hsp_bit-score>",
-            bit
+            "          <Hsp_bit-score>{}</Hsp_bit-score>",
+            format_xml_double_g(bit)
         )?;
-        writeln!(writer, "          <Hsp_evalue>{:.2e}</Hsp_evalue>", eval)?;
+        writeln!(
+            writer,
+            "          <Hsp_evalue>{}</Hsp_evalue>",
+            format_xml_evalue(eval)
+        )?;
         writeln!(writer, "          <Hsp_query-from>{}</Hsp_query-from>", qs)?;
         writeln!(writer, "          <Hsp_query-to>{}</Hsp_query-to>", qe)?;
         writeln!(writer, "          <Hsp_hit-from>{}</Hsp_hit-from>", ss)?;
@@ -187,5 +259,56 @@ mod tests {
         // Program info
         assert!(output.contains("<BlastOutput_program>blastn</BlastOutput_program>"));
         assert!(output.contains("<BlastOutput_db>testdb</BlastOutput_db>"));
+    }
+
+    #[test]
+    fn test_xml_escapes_text_fields() {
+        let mut buf = Vec::new();
+        write_xml_header(&mut buf, "blast<xn", "v\"1", "db&a").unwrap();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "hit<&\"'",
+            "def>with&chars",
+            10,
+            &[(1, 2, 3, 4, 1e-10, 56.0, 2, 2, 0)],
+        )
+        .unwrap();
+        write_xml_footer(&mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("<BlastOutput_program>blast&lt;xn</BlastOutput_program>"));
+        assert!(output.contains("<BlastOutput_version>blast&lt;xn v&quot;1</BlastOutput_version>"));
+        assert!(output.contains("<BlastOutput_db>db&amp;a</BlastOutput_db>"));
+        assert!(output.contains("<Hit_id>hit&lt;&amp;&quot;&apos;</Hit_id>"));
+        assert!(output.contains("<Hit_def>def&gt;with&amp;chars</Hit_def>"));
+    }
+
+    #[test]
+    fn test_xml_hsp_numbers_use_ncbi_general_format() {
+        let mut buf = Vec::new();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "hit",
+            "def",
+            10,
+            &[
+                (1, 2, 3, 4, 1e-10, 56.0, 2, 2, 0),
+                (1, 2, 3, 4, 0.000392118, 12.3456, 2, 2, 0),
+                (1, 2, 3, 4, 3.5e-40, 156.3, 2, 2, 0),
+                (1, 2, 3, 4, 1e-200, 1_234_567.0, 2, 2, 0),
+            ],
+        )
+        .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("<Hsp_bit-score>56</Hsp_bit-score>"));
+        assert!(output.contains("<Hsp_bit-score>156.3</Hsp_bit-score>"));
+        assert!(output.contains("<Hsp_bit-score>1.23457e6</Hsp_bit-score>"));
+        assert!(output.contains("<Hsp_evalue>1e-10</Hsp_evalue>"));
+        assert!(output.contains("<Hsp_evalue>0.000392118</Hsp_evalue>"));
+        assert!(output.contains("<Hsp_evalue>3.5e-40</Hsp_evalue>"));
+        assert!(output.contains("<Hsp_evalue>0</Hsp_evalue>"));
     }
 }

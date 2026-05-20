@@ -258,8 +258,8 @@ pub struct PsiSequenceWeights {
     pub independent_observations: Vec<f64>,
 }
 
-/// Port of NCBI `PSIMsaNew` (`blast_psi.c:462`).
-pub fn psi_msa_new(dimensions: Option<&PSIMsaDimensions>) -> Option<PSIMsa> {
+/// blast-rs public allocator for `PSIMsa`.
+pub fn psi_public_msa_new(dimensions: Option<&PSIMsaDimensions>) -> Option<PSIMsa> {
     let dimensions = *dimensions?;
     let rows = dimensions.num_seqs.saturating_add(1) as usize;
     let cols = dimensions.query_length as usize;
@@ -269,8 +269,8 @@ pub fn psi_msa_new(dimensions: Option<&PSIMsaDimensions>) -> Option<PSIMsa> {
     })
 }
 
-/// Rust ownership equivalent of NCBI `PSIMsaFree`.
-pub fn psi_msa_free(mut msa: Option<PSIMsa>) -> Option<PSIMsa> {
+/// blast-rs public deallocator for `PSIMsa`.
+pub fn psi_public_msa_free(mut msa: Option<PSIMsa>) -> Option<PSIMsa> {
     if let Some(msa) = msa.as_mut() {
         for row in &mut msa.data {
             row.clear();
@@ -370,7 +370,7 @@ fn psi_create_pssm_cleanup(
 ///
 /// This is the public PSI-BLAST PSSM constructor. It deliberately calls the
 /// translated private stages in the same order as C instead of delegating to the
-/// older simplified [`Pssm`] builder.
+/// standalone [`Pssm`] builder.
 pub fn psi_create_pssm_with_diagnostics(
     msap: Option<&PSIMsa>,
     options: Option<&crate::options::PSIBlastOptions>,
@@ -400,7 +400,7 @@ pub fn psi_create_pssm_with_diagnostics(
         return status;
     }
 
-    let Some(mut msa) = psi_internal_msa_new(Some(&packed_msa), sbp.alphabet_size as u32) else {
+    let Some(mut msa) = psi_msa_new(Some(&packed_msa), sbp.alphabet_size as u32) else {
         return PSIERR_OUTOFMEM;
     };
     let Some(mut aligned_block) = psi_aligned_block_new(msa.dimensions.query_length) else {
@@ -984,7 +984,7 @@ pub fn psi_purge_biased_segments(msa: Option<&mut PsiPackedMsa>) -> i32 {
 }
 
 /// Port of NCBI `_PSIMsaNew` (`blast_psi_priv.c:308`).
-pub fn psi_internal_msa_new(msa: Option<&PsiPackedMsa>, alphabet_size: u32) -> Option<PsiMsa> {
+pub fn psi_msa_new(msa: Option<&PsiPackedMsa>, alphabet_size: u32) -> Option<PsiMsa> {
     let msa = msa?;
     let num_seqs = psi_packed_msa_get_number_of_aligned_seqs(Some(msa));
     let dimensions = PSIMsaDimensions {
@@ -1038,7 +1038,7 @@ pub fn psi_internal_msa_new(msa: Option<&PsiPackedMsa>, alphabet_size: u32) -> O
 }
 
 /// Rust ownership equivalent of NCBI `_PSIMsaFree`.
-pub fn psi_internal_msa_free(mut msa: Option<PsiMsa>) -> Option<PsiMsa> {
+pub fn psi_msa_free(mut msa: Option<PsiMsa>) -> Option<PsiMsa> {
     if let Some(msa) = msa.as_mut() {
         for row in &mut msa.cell {
             row.clear();
@@ -1418,7 +1418,7 @@ pub fn s_psi_compute_frequencies_from_cds_cleanup(sum_weights: &mut Vec<f64>) {
     sum_weights.clear();
 }
 
-/// Port of NCBI `_PSIComputeFrequenciesFromCDs`.
+/// blast-rs spelling of the PSI CDs frequency routine; `CDs` is kept as one acronym.
 pub fn psi_compute_frequencies_from_cds(
     cd_msa: Option<&PSICdMsa>,
     sbp: Option<&crate::stat::BlastScoreBlk>,
@@ -1502,7 +1502,7 @@ fn psi_scale_pssm_by_factor(internal_pssm: &mut PsiInternalPssmData, factor: f64
         for j in 0..cols {
             let scaled = internal_pssm.scaled_pssm[i][j];
             internal_pssm.pssm[i][j] = if scaled != crate::stat::BLAST_SCORE_MIN {
-                crate::math::nint(factor * scaled as f64 / K_PSI_SCALE_FACTOR) as i32
+                crate::math::blast_nint(factor * scaled as f64 / K_PSI_SCALE_FACTOR) as i32
             } else {
                 crate::stat::BLAST_SCORE_MIN
             };
@@ -1613,7 +1613,7 @@ pub fn psi_scale_matrix(
     PSI_SUCCESS
 }
 
-/// Port of NCBI `_PSIComputeFreqRatiosFromCDs`.
+/// blast-rs spelling of the PSI CDs frequency-ratio routine; `CDs` is kept as one acronym.
 pub fn psi_compute_freq_ratios_from_cds(
     cd_msa: Option<&PSICdMsa>,
     seq_weights: Option<&PsiSequenceWeights>,
@@ -2003,7 +2003,7 @@ pub fn psi_compute_freq_ratios(
         return PSIERR_OUTOFMEM;
     };
     let std_prob_array = crate::stat::protein_std_freq_ncbistdaa();
-    let expno = initialize_exp_num_observations(&effective_bg_probs(&std_prob_array));
+    let expno = s_initialize_exp_num_observations(&effective_bg_probs(&std_prob_array));
     let x_residue = crate::encoding::NCBISTDAA_X;
 
     for p in 0..q {
@@ -2124,12 +2124,13 @@ pub fn psi_convert_freq_ratios_to_pssm(
             if q_over_p != 0.0 {
                 is_unaligned_column = false;
             }
-            internal_pssm.scaled_pssm[i][j] =
-                if q_over_p == 0.0 || std_probs.get(j).copied().unwrap_or(0.0) < POS_EPSILON {
-                    crate::stat::BLAST_SCORE_MIN
-                } else {
-                    crate::math::nint(K_PSI_SCALE_FACTOR * (q_over_p.ln() / ideal.lambda)) as i32
-                };
+            internal_pssm.scaled_pssm[i][j] = if q_over_p == 0.0
+                || std_probs.get(j).copied().unwrap_or(0.0) < POS_EPSILON
+            {
+                crate::stat::BLAST_SCORE_MIN
+            } else {
+                crate::math::blast_nint(K_PSI_SCALE_FACTOR * (q_over_p.ln() / ideal.lambda)) as i32
+            };
             if (j == x_residue || j == star_residue)
                 && sbp
                     .matrix
@@ -2161,7 +2162,7 @@ pub fn psi_convert_freq_ratios_to_pssm(
                     .copied()
                     .unwrap_or(crate::stat::BLAST_SCORE_MIN);
                 internal_pssm.scaled_pssm[i][j] = if freq_ratios.data[matrix_residue][j] != 0.0 {
-                    crate::math::nint(
+                    crate::math::blast_nint(
                         K_PSI_SCALE_FACTOR
                             * freq_ratios.bit_scale_factor as f64
                             * freq_ratios.data[matrix_residue][j].ln()
@@ -3052,8 +3053,7 @@ impl Pssm {
             }
 
             // Compute effective number of observations
-            let observations =
-                compute_effective_observations(aligned_seqs, pos, self.length, &std_prob);
+            let observations = s_effective_observations(aligned_seqs, pos, self.length, &std_prob);
 
             let pseudo_weight = fixed_pseudocount
                 .filter(|weight| *weight > 0.0)
@@ -3088,7 +3088,7 @@ impl Pssm {
                 // divides by std_prob in the next stage -- we go directly to score)
                 // Score = BLAST_Nint((1/lambda) * ln(q_over_p)).
                 if q_over_p > POS_EPSILON {
-                    let score = crate::math::nint(q_over_p.ln() / lambda) as i32;
+                    let score = crate::math::blast_nint(q_over_p.ln() / lambda) as i32;
                     self.scores[pos][r] = score;
                 } else {
                     self.scores[pos][r] = crate::stat::BLAST_SCORE_MIN;
@@ -3216,7 +3216,7 @@ fn extent_contains(extent: Option<(usize, usize)>, pos: usize) -> bool {
 /// Port of NCBI `s_effectiveObservations` (`blast_psi_priv.c`). The C code
 /// uses the aligned block spanning `columnNumber`; the compact Rust MSA rows
 /// infer that block from non-X row extents.
-fn compute_effective_observations(
+fn s_effective_observations(
     aligned_seqs: &[Vec<u8>],
     pos: usize,
     query_length: usize,
@@ -3227,7 +3227,7 @@ fn compute_effective_observations(
     }
 
     let bg20 = effective_bg_probs(bg_prob);
-    let expno = initialize_exp_num_observations(&bg20);
+    let expno = s_initialize_exp_num_observations(&bg20);
     let Some((left, right)) = aligned_block_extents(aligned_seqs, pos, query_length) else {
         return 0.0;
     };
@@ -3270,7 +3270,7 @@ fn aligned_block_extents(
 }
 
 /// Port of `s_initializeExpNumObservations`.
-fn initialize_exp_num_observations(
+fn s_initialize_exp_num_observations(
     bg20: &[f64; EFFECTIVE_ALPHABET],
 ) -> [f64; MAX_IND_OBSERVATIONS + 1] {
     let mut expno = [0.0f64; MAX_IND_OBSERVATIONS + 1];
@@ -4034,7 +4034,7 @@ mod tests {
         ];
         let mut dynamic_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
         let mut fixed_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
-        let mut legacy_fixed_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        let mut fixed_via_background_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
 
         dynamic_pssm.update_from_alignment_with_matrix(&aligned, "BLOSUM62");
         fixed_pssm.update_from_alignment_with_matrix_and_pseudocount(
@@ -4042,15 +4042,19 @@ mod tests {
             "BLOSUM62",
             Some(50.0),
         );
-        legacy_fixed_pssm.update_from_alignment(&aligned, &crate::matrix::AA_FREQUENCIES, 50.0);
+        fixed_via_background_pssm.update_from_alignment(
+            &aligned,
+            &crate::matrix::AA_FREQUENCIES,
+            50.0,
+        );
 
         assert_ne!(
             dynamic_pssm.scores, fixed_pssm.scores,
             "fixed pseudocount should use a distinct scoring path"
         );
         assert_eq!(
-            fixed_pssm.scores, legacy_fixed_pssm.scores,
-            "legacy PSSM update parameter should select the fixed pseudocount path"
+            fixed_pssm.scores, fixed_via_background_pssm.scores,
+            "background-frequency PSSM update should select the fixed pseudocount path"
         );
     }
 
@@ -4061,7 +4065,7 @@ mod tests {
         // With many diverse sequences, effective observations should be substantial
         let seqs: Vec<Vec<u8>> = (0..20).map(|i| vec![STD_RESIDUES[i % 20]]).collect();
 
-        let obs = compute_effective_observations(&seqs, 0, 1, &std_prob);
+        let obs = s_effective_observations(&seqs, 0, 1, &std_prob);
         assert!(obs > 0.0, "Should have positive effective observations");
     }
 
@@ -4405,11 +4409,11 @@ mod tests {
 
         // All identical residues: 1 distinct -> low effective observations
         let seqs_identical: Vec<Vec<u8>> = (0..10).map(|_| vec![1u8]).collect();
-        let obs_identical = compute_effective_observations(&seqs_identical, 0, 1, &std_prob);
+        let obs_identical = s_effective_observations(&seqs_identical, 0, 1, &std_prob);
 
         // All different residues: 10 distinct -> higher effective observations
         let seqs_diverse: Vec<Vec<u8>> = (0..10).map(|i| vec![STD_RESIDUES[i % 20]]).collect();
-        let obs_diverse = compute_effective_observations(&seqs_diverse, 0, 1, &std_prob);
+        let obs_diverse = s_effective_observations(&seqs_diverse, 0, 1, &std_prob);
 
         assert!(
             obs_diverse > obs_identical,
@@ -4482,8 +4486,8 @@ mod tests {
 
         // Check effective observations at each position
         for pos in 0..4 {
-            let obs_ident = compute_effective_observations(&seqs_identical, pos, 4, &std_prob);
-            let obs_varied = compute_effective_observations(&seqs_varied, pos, 4, &std_prob);
+            let obs_ident = s_effective_observations(&seqs_identical, pos, 4, &std_prob);
+            let obs_varied = s_effective_observations(&seqs_varied, pos, 4, &std_prob);
 
             assert!(
                 obs_varied > obs_ident,
@@ -4518,7 +4522,7 @@ mod tests {
             query_length: 3,
             num_seqs: 2,
         };
-        let mut msa = psi_msa_new(Some(&dims)).expect("msa");
+        let mut msa = psi_public_msa_new(Some(&dims)).expect("msa");
         assert_eq!(msa.data.len(), 3);
         assert_eq!(msa.data[0].len(), 3);
         assert_eq!(msa.data[0][0], PSIMsaCell::default());
@@ -4526,8 +4530,8 @@ mod tests {
             letter: crate::encoding::NCBISTDAA_A,
             is_aligned: true,
         };
-        assert!(psi_msa_free(Some(msa.clone())).is_none());
-        assert!(psi_msa_new(None).is_none());
+        assert!(psi_public_msa_free(Some(msa.clone())).is_none());
+        assert!(psi_public_msa_new(None).is_none());
 
         let matrix = psi_matrix_new(3, AA_SIZE as u32).expect("matrix");
         assert_eq!(matrix.ncols, 3);
@@ -4653,7 +4657,7 @@ mod tests {
             query_length: 2,
             num_seqs: 1,
         };
-        let mut msa = psi_msa_new(Some(&dims)).expect("msa");
+        let mut msa = psi_public_msa_new(Some(&dims)).expect("msa");
         msa.data[0][0] = PSIMsaCell {
             letter: crate::encoding::NCBISTDAA_A,
             is_aligned: true,
@@ -4674,7 +4678,7 @@ mod tests {
         let packed = psi_packed_msa_new(Some(&msa)).expect("packed");
         assert_eq!(packed.use_sequence, vec![true, true]);
         assert_eq!(psi_packed_msa_get_number_of_aligned_seqs(Some(&packed)), 1);
-        let internal = psi_internal_msa_new(Some(&packed), AA_SIZE as u32).expect("internal");
+        let internal = psi_msa_new(Some(&packed), AA_SIZE as u32).expect("internal");
         assert_eq!(internal.dimensions.num_seqs, 1);
         assert_eq!(
             internal.query,
@@ -4685,7 +4689,7 @@ mod tests {
             2
         );
         assert_eq!(internal.num_matching_seqs[1], 1);
-        assert!(psi_internal_msa_free(Some(internal)).is_none());
+        assert!(psi_msa_free(Some(internal)).is_none());
         assert!(psi_packed_msa_free(Some(packed)).is_none());
 
         let block = psi_aligned_block_new(2).expect("block");
@@ -4707,7 +4711,7 @@ mod tests {
             query_length: 3,
             num_seqs: 2,
         };
-        let mut msa = psi_msa_new(Some(&dims)).expect("msa");
+        let mut msa = psi_public_msa_new(Some(&dims)).expect("msa");
         for row in &mut msa.data {
             for cell in row {
                 *cell = PSIMsaCell {
@@ -4750,7 +4754,7 @@ mod tests {
             query_length: 5,
             num_seqs: 2,
         };
-        let mut msa = psi_msa_new(Some(&dims)).expect("msa");
+        let mut msa = psi_public_msa_new(Some(&dims)).expect("msa");
         let a = crate::encoding::NCBISTDAA_A;
         let c = crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize];
         let d = crate::encoding::AMINOACID_TO_NCBISTDAA[b'D' as usize];
@@ -4791,7 +4795,7 @@ mod tests {
             query_length: 4,
             num_seqs: 3,
         };
-        let mut msa = psi_msa_new(Some(&dims)).expect("msa");
+        let mut msa = psi_public_msa_new(Some(&dims)).expect("msa");
         let a = crate::encoding::NCBISTDAA_A;
         let c = crate::encoding::AMINOACID_TO_NCBISTDAA[b'C' as usize];
         let d = crate::encoding::AMINOACID_TO_NCBISTDAA[b'D' as usize];
@@ -6811,7 +6815,7 @@ mod tests {
     }
 
     #[test]
-    fn translated_matrix_frequency_ratio_alias_matches_psi_name() {
+    fn translated_matrix_frequency_ratios_with_scale_match_psi_name() {
         let ratios = crate::matrix::get_matrix_freq_ratios_with_scale("BLOSUM62").expect("ratios");
         assert_eq!(ratios.bit_scale_factor, 2);
         assert!(
@@ -6852,7 +6856,7 @@ mod tests {
             query_length: 3,
             num_seqs: 2,
         };
-        let mut msa = psi_msa_new(Some(&dims)).expect("msa");
+        let mut msa = psi_public_msa_new(Some(&dims)).expect("msa");
         let rows = [
             [
                 crate::encoding::NCBISTDAA_A,
@@ -7115,7 +7119,7 @@ mod tests {
         let options = crate::options::PSIBlastOptions::default();
         let mut sbp = psi_public_test_score_block();
         let request = psi_diagnostics_request_new_ex(true);
-        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
         let mut diagnostics =
             Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
 
@@ -7155,7 +7159,7 @@ mod tests {
         let mut sbp = psi_public_test_score_block();
         sbp.kbp_ideal = None;
         let request = psi_diagnostics_request_new_ex(true);
-        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
         let mut diagnostics =
             Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
 
@@ -7183,7 +7187,7 @@ mod tests {
         };
         let mut sbp = psi_public_test_score_block();
         let request = psi_diagnostics_request_new_ex(true);
-        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
         let mut diagnostics =
             Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
 
@@ -7212,7 +7216,7 @@ mod tests {
         let mut sbp = psi_public_test_score_block();
         sbp.alphabet_size = crate::encoding::BLASTAA_SIZE + 1;
         let request = psi_diagnostics_request_new_ex(true);
-        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
         let mut diagnostics =
             Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
 
@@ -7240,7 +7244,7 @@ mod tests {
         };
         let mut sbp = psi_public_test_score_block();
         let request = psi_diagnostics_request_new_ex(true);
-        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
         let mut diagnostics =
             Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
 
@@ -7293,7 +7297,7 @@ mod tests {
         let request = psi_diagnostics_request_new_ex(true);
         let assert_public_validation_error = |msa: &PSIMsa, expected_status: i32| {
             let mut sbp = psi_public_test_score_block();
-            let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+            let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
             let mut diagnostics =
                 Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
             assert_eq!(
@@ -7357,7 +7361,7 @@ mod tests {
         let request = psi_diagnostics_request_new_ex(true);
         let assert_bad_public_msa = |msa: &PSIMsa| {
             let mut sbp = psi_public_test_score_block();
-            let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+            let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
             let mut diagnostics =
                 Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
 
@@ -7431,7 +7435,7 @@ mod tests {
             row[1].is_aligned = false;
         }
         let mut sbp = psi_public_test_score_block();
-        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
         let mut diagnostics = None;
         let request = PSIDiagnosticsRequest {
             frequency_ratios: true,
@@ -7491,7 +7495,7 @@ mod tests {
         let mut query_gap = msa;
         query_gap.data[0][1].letter = crate::encoding::NCBISTDAA_GAP;
         let mut sbp = psi_public_test_score_block();
-        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("old pssm"));
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
         let mut diagnostics =
             Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
         assert_eq!(

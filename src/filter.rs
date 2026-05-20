@@ -1105,9 +1105,6 @@ pub fn blast_seq_loc_list_dup(head: Option<&BlastSeqLoc>) -> Option<Box<BlastSeq
 
 /// NCBI: BlastMaskLocNew (blast_filter.c:760).
 pub fn blast_mask_loc_new(num_contexts: usize) -> Option<BlastMaskLoc> {
-    if num_contexts == 0 {
-        return None;
-    }
     Some(BlastMaskLoc {
         masks: vec![None; num_contexts],
     })
@@ -1163,7 +1160,7 @@ pub fn blast_mask_loc_dna_to_protein(
             .collect();
 
         for context in 0..crate::util::NUM_FRAMES {
-            let frame = crate::util::blast_context_to_frame_blastx(context as u32);
+            let frame = crate::util::blast_context_to_frame(context as u32);
             let fallback = dna_seqlocs[0].as_deref();
             let mut iter = dna_seqlocs[context].as_deref().or(fallback);
 
@@ -1232,9 +1229,8 @@ pub fn blast_mask_loc_protein_to_dna(
         let dna_length = dna_lengths[index];
 
         for frame_index in frame_start..frame_start + crate::util::NUM_FRAMES {
-            let frame = crate::util::blast_context_to_frame_blastx(
-                (frame_index % crate::util::NUM_FRAMES) as u32,
-            );
+            let frame =
+                crate::util::blast_context_to_frame((frame_index % crate::util::NUM_FRAMES) as u32);
             let mut loc = mask_loc.masks[frame_index].as_deref_mut();
             while let Some(node) = loc {
                 let (mut from, mut to) = if frame < 0 {
@@ -1302,7 +1298,7 @@ pub fn blast_seq_loc_combine(mask_loc: &mut Option<Box<BlastSeqLoc>>, link_value
         }
 
         if let Some(last) = merged.last_mut() {
-            if range.left <= last.right.saturating_add(link_value).saturating_add(1) {
+            if last.right.saturating_add(link_value) > range.left {
                 last.right = last.right.max(range.right);
                 continue;
             }
@@ -1575,13 +1571,11 @@ pub fn blast_setup_filter(
             return status;
         }
         if let Some(range) = seq_range {
-            blast_seq_loc_append(
-                seqloc_retval,
-                Some(Box::new(BlastSeqLoc {
-                    ssl: range,
-                    next: None,
-                })),
-            );
+            blast_seq_loc_free(seqloc_retval);
+            *seqloc_retval = Some(Box::new(BlastSeqLoc {
+                ssl: range,
+                next: None,
+            }));
         }
     }
 
@@ -2321,8 +2315,8 @@ fn seg_parameters_free(_params: Option<SegParameters>) {}
 /// stores the position of that byte in `SEG_VALID_AA_CODES`, or `u8::MAX`
 /// if the byte isn't one of the 20 valid SEG amino-acid codes. Precomputed
 /// at compile time so `seg_alpha_index` is O(1) — replaces a linear
-/// `iter().position()` scan that was hot in `read_composition`-style loops
-/// during SEG filtering (`composition_matrix_adj` workload).
+/// `iter().position()` scan that was hot in `blast_read_aa_composition`-style
+/// loops during SEG filtering (`blast_composition_matrix_adj` workload).
 const SEG_ALPHA_INDEX_LUT: [u8; 256] = {
     let mut lut = [u8::MAX; 256];
     let mut i = 0;
@@ -3442,7 +3436,13 @@ mod tests {
         assert_eq!(s_blast_seq_loc_len(duplicate.masks[0].as_deref()), 4);
         assert!(duplicate.masks[1].is_none());
 
-        assert!(blast_mask_loc_new(0).is_none());
+        assert_eq!(
+            blast_mask_loc_new(0)
+                .expect("empty mask location")
+                .masks
+                .len(),
+            0
+        );
         assert_eq!(blast_mask_loc_free(&mut mask_loc), None);
         assert!(mask_loc.is_none());
 
@@ -3546,7 +3546,11 @@ mod tests {
         assert_eq!(
             ranges,
             vec![
-                SSeqRange { left: 5, right: 14 },
+                SSeqRange { left: 5, right: 10 },
+                SSeqRange {
+                    left: 12,
+                    right: 14,
+                },
                 SSeqRange {
                     left: 30,
                     right: 35,
@@ -3555,6 +3559,32 @@ mod tests {
                     left: 40,
                     right: 42,
                 },
+            ]
+        );
+
+        let mut adjacent = None;
+        assert_eq!(blast_seq_loc_new(&mut adjacent, 0, 2), 0);
+        assert_eq!(
+            blast_seq_loc_append(
+                &mut adjacent,
+                Some(Box::new(BlastSeqLoc {
+                    ssl: SSeqRange { left: 3, right: 5 },
+                    next: None,
+                })),
+            ),
+            0
+        );
+        blast_seq_loc_combine(&mut adjacent, 0);
+        let adjacent_ranges: Vec<SSeqRange> =
+            s_blast_seq_loc_list_to_array_of_pointers(adjacent.as_deref())
+                .iter()
+                .map(|node| node.ssl)
+                .collect();
+        assert_eq!(
+            adjacent_ranges,
+            vec![
+                SSeqRange { left: 0, right: 2 },
+                SSeqRange { left: 3, right: 5 },
             ]
         );
 
@@ -3666,6 +3696,40 @@ mod tests {
         assert_eq!(
             read_quality_locs.as_ref().map(|node| node.ssl),
             Some(SSeqRange { left: 7, right: 10 })
+        );
+
+        let combined_options = SBlastFilterOptions {
+            mask_at_hash: false,
+            dust_options: None,
+            seg_options: Some(SSegOptions {
+                window: 12,
+                locut: 2.2,
+                hicut: 2.5,
+            }),
+            repeat_filter_options: None,
+            window_masker_options: None,
+            read_quality_options: Some(SReadQualityOptions {
+                frac_ambig: 0.25,
+                entropy: 16,
+            }),
+        };
+        let mut replaced_locs = None;
+        assert_eq!(
+            blast_setup_filter(
+                crate::program::MAPPING,
+                &low_complexity,
+                3,
+                Some(&combined_options),
+                &mut replaced_locs,
+            ),
+            0
+        );
+        assert_eq!(
+            s_blast_seq_loc_list_to_array_of_pointers(replaced_locs.as_deref())
+                .iter()
+                .map(|node| node.ssl)
+                .collect::<Vec<_>>(),
+            vec![SSeqRange { left: 3, right: 34 }]
         );
 
         let mut invalid = Some(Box::new(BlastSeqLoc {
@@ -3854,7 +3918,7 @@ mod tests {
                 eff_searchsp: 0,
                 length_adjustment: 0,
                 query_index: 0,
-                frame: crate::util::blast_context_to_frame_blastx(context as u32),
+                frame: crate::util::blast_context_to_frame(context as u32),
                 is_valid: true,
                 segment_flags: crate::queryinfo::E_NO_SEGMENTS,
             })

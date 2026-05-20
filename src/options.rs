@@ -628,6 +628,9 @@ pub fn blast_scoring_options_validate(
     if program_number == program::TBLASTX && options.gapped_calculation {
         return BLASTERR_OPTION_PROGRAM_INVALID;
     }
+    if options.is_ooframe && !matches!(program_number, program::BLASTX | program::TBLASTN) {
+        return BLASTERR_OPTION_PROGRAM_INVALID;
+    }
 
     if program::blast_program_is_nucleotide(program_number) {
         if !(options.penalty == 0 && options.reward == 0) && options.penalty >= 0 {
@@ -637,11 +640,21 @@ pub fn blast_scoring_options_validate(
         if options.gapped_calculation && options.gap_open > 0 && options.gap_extend == 0 {
             return BLASTERR_OPTION_VALUE_INVALID;
         }
-    } else if options.gapped_calculation
-        && !program::blast_program_is_rps_blast(program_number)
-        && options.matrix_name.is_none()
-    {
-        return BLASTERR_OPTION_VALUE_INVALID;
+    } else if options.gapped_calculation && !program::blast_program_is_rps_blast(program_number) {
+        let Some(matrix_name) = options.matrix_name.as_deref() else {
+            return BLASTERR_OPTION_VALUE_INVALID;
+        };
+        let standard_only = !matches!(program_number, program::BLASTP | program::TBLASTN);
+        if crate::stat::blast_karlin_blk_gapped_load_from_tables(
+            None,
+            options.gap_open,
+            options.gap_extend,
+            Some(matrix_name),
+            standard_only,
+        ) != 0
+        {
+            return BLASTERR_OPTION_VALUE_INVALID;
+        }
     }
 
     0
@@ -967,7 +980,7 @@ impl ExtensionOptions {
 pub fn blast_extension_options_new(
     program: ProgramType,
     options: &mut Option<ExtensionOptions>,
-    _gapped: bool,
+    gapped: bool,
 ) -> i16 {
     let mut new_options = if program::blast_program_is_nucleotide(program) {
         ExtensionOptions::new_blastn()
@@ -975,6 +988,12 @@ pub fn blast_extension_options_new(
         ExtensionOptions::new_blastp()
     };
     new_options.program_number = program;
+    if gapped
+        && program::blast_query_is_pssm(program)
+        && !program::blast_subject_is_translated(program)
+    {
+        new_options.composition_based_stats = 1;
+    }
     *options = Some(new_options);
     0
 }
@@ -1961,10 +1980,48 @@ mod tests {
             0
         );
         assert_eq!(options.matrix_name.as_deref(), Some("BLOSUM45"));
+        options.gap_open = 13;
+        options.gap_extend = 3;
         assert_eq!(
             blast_scoring_options_validate(crate::program::BLASTP, Some(&options)),
             0
         );
+        options.gap_open = 1;
+        options.gap_extend = 1;
+        assert_eq!(
+            blast_scoring_options_validate(crate::program::BLASTP, Some(&options)),
+            BLASTERR_OPTION_VALUE_INVALID
+        );
+        options.gap_open = 13;
+        options.gap_extend = 3;
+        assert_eq!(
+            blast_scoring_options_validate(crate::program::RPS_BLAST, Some(&options)),
+            0
+        );
+        options.matrix_name = Some("IDENTITY".to_string());
+        options.gap_open = 15;
+        options.gap_extend = 2;
+        assert_eq!(
+            blast_scoring_options_validate(crate::program::BLASTX, Some(&options)),
+            BLASTERR_OPTION_VALUE_INVALID
+        );
+        assert_eq!(
+            blast_scoring_options_validate(crate::program::BLASTP, Some(&options)),
+            0
+        );
+        options.is_ooframe = true;
+        assert_eq!(
+            blast_scoring_options_validate(crate::program::BLASTP, Some(&options)),
+            BLASTERR_OPTION_PROGRAM_INVALID
+        );
+        assert_eq!(
+            blast_scoring_options_validate(crate::program::BLASTX, Some(&options)),
+            BLASTERR_OPTION_VALUE_INVALID
+        );
+        options.is_ooframe = false;
+        options.matrix_name = Some("BLOSUM62".to_string());
+        options.gap_open = GAP_OPEN_PROT;
+        options.gap_extend = GAP_EXTN_PROT;
 
         let mut blastn = ScoringOptions::new_blastn();
         assert_eq!(

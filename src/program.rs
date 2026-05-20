@@ -98,7 +98,7 @@ pub fn blast_program_is_valid(p: ProgramType) -> bool {
     }
 }
 
-/// Port of NCBI `BlastProgram2Number` (`blast_util.c:278`).
+/// NCBI: BlastProgram2Number (blast_util.c:278).
 /// naming: Rust preserves the C `2` spelling used in the source symbol.
 /// Returns `(status, program)`, where status is `1` only for a NULL input in C.
 /// Unknown non-null names return success with `eBlastTypeUndefined`.
@@ -138,7 +138,7 @@ pub fn blast_program_2_number(program: Option<&str>) -> (i16, ProgramType) {
     (0, number)
 }
 
-/// Port of NCBI `BlastNumber2Program` (`blast_util.c:312`).
+/// NCBI: BlastNumber2Program (blast_util.c:312).
 /// naming: Rust preserves the C `2` spelling used in the source symbol.
 /// Rust returns an owned canonical program name instead of allocating through
 /// the caller's `char**`; `None` models the C NULL output pointer error.
@@ -166,11 +166,11 @@ pub fn blast_number_2_program(number: ProgramType, program: Option<()>) -> (i16,
     (0, Some(name.to_owned()))
 }
 
-/// Port of NCBI `BLAST_GetNumberOfContexts` (`blast_util.c:1373`).
+/// NCBI: BLAST_GetNumberOfContexts (blast_util.c:1373).
 /// Returns `NUM_FRAMES` (6) for translated queries, `NUM_STRANDS` (2)
 /// for nucleotide queries, `1` for protein queries on valid programs,
 /// and `0` for invalid programs — matching NCBI's dispatch order.
-pub fn num_contexts(p: ProgramType) -> u32 {
+pub fn blast_get_number_of_contexts(p: ProgramType) -> u32 {
     if blast_query_is_translated(p) {
         6
     } else if blast_query_is_nucleotide(p) {
@@ -193,7 +193,7 @@ mod tests {
         assert!(blast_subject_is_nucleotide(BLASTN));
         assert!(!blast_query_is_protein(BLASTN));
         assert!(blast_program_is_valid(BLASTN));
-        assert_eq!(num_contexts(BLASTN), 2);
+        assert_eq!(blast_get_number_of_contexts(BLASTN), 2);
     }
 
     #[test]
@@ -202,7 +202,7 @@ mod tests {
         assert!(blast_query_is_protein(BLASTP));
         assert!(blast_subject_is_protein(BLASTP));
         assert!(blast_program_is_valid(BLASTP));
-        assert_eq!(num_contexts(BLASTP), 1);
+        assert_eq!(blast_get_number_of_contexts(BLASTP), 1);
     }
 
     #[test]
@@ -211,7 +211,7 @@ mod tests {
         assert!(blast_query_is_translated(BLASTX));
         assert!(blast_subject_is_protein(BLASTX));
         assert!(blast_program_is_valid(BLASTX));
-        assert_eq!(num_contexts(BLASTX), 6);
+        assert_eq!(blast_get_number_of_contexts(BLASTX), 6);
     }
 
     #[test]

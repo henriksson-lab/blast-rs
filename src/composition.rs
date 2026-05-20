@@ -67,8 +67,8 @@ pub const TRUE_CHAR_POSITIONS: [usize; COMPO_NUM_TRUE_AA] = {
 };
 
 /// Read amino acid composition from NCBIstdaa sequence.
-/// Port of NCBI Blast_ReadAaComposition.
-pub fn read_composition(seq: &[u8], alphsize: usize) -> (Vec<f64>, usize) {
+/// NCBI: Blast_ReadAaComposition (composition_adjustment.c).
+pub fn blast_read_aa_composition(seq: &[u8], alphsize: usize) -> (Vec<f64>, usize) {
     let mut prob = vec![0.0f64; alphsize];
     let mut num_true = 0usize;
     for &b in seq {
@@ -97,11 +97,11 @@ pub fn read_composition(seq: &[u8], alphsize: usize) -> (Vec<f64>, usize) {
 }
 
 /// Compute score probability distribution from matrix and compositions.
-/// Port of NCBI s_GetMatrixScoreProbs.
-/// Port of NCBI s_GetScoreRange + s_GetMatrixScoreProbs.
+/// NCBI: s_GetMatrixScoreProbs (composition_adjustment.c).
+/// naming: Includes the adjacent `s_GetScoreRange` scan in the same helper.
 /// Computes score probabilities from integer matrix and composition probabilities.
 /// Only considers true amino acid columns (trueCharPositions), matching NCBI exactly.
-fn get_matrix_score_probs(
+fn s_get_matrix_score_probs(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     alphsize: usize,
     query_prob: &[f64],
@@ -145,9 +145,9 @@ fn get_matrix_score_probs(
 }
 
 /// Compute lambda for a specific pair of compositions.
-/// Verbatim port of NCBI Blast_CalcLambdaFullPrecision.
+/// NCBI: Blast_CalcLambdaFullPrecision (composition_adjustment.c).
 /// Uses Newton iteration on f(x) where x = exp(-lambda).
-pub fn calc_lambda_full_precision(
+pub fn blast_calc_lambda_full_precision(
     score_matrix: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
     row_prob: &[f64],
     col_prob: &[f64],
@@ -246,22 +246,10 @@ pub fn calc_lambda_full_precision(
     (-1.0, LAMBDA_ITERATION_LIMIT)
 }
 
-/// Compute composition-based LambdaRatio.
-/// Port of NCBI Blast_CompositionBasedStats (score-only mode).
-///
-/// Returns LambdaRatio (adjusted_lambda / standard_lambda), or None if
-/// Public wrapper for `karlin_lambda_nr` so other modules (e.g.
-/// `blast_kappa::s_CalcLambda`) can call it without re-exporting the
-/// name. Forwards directly.
-pub fn karlin_lambda_nr_pub(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> f64 {
-    karlin_lambda_nr(sprob, obs_min, obs_max, lambda0)
-}
-
-/// adjustment is not applicable.
-/// Port of NCBI NlmKarlinLambdaNR + Blast_KarlinLambdaNR.
+/// NCBI: Blast_KarlinLambdaNR (blast_stat.c).
 /// Compute lambda from a score probability distribution using
 /// Newton-Raphson with Horner's polynomial evaluation.
-fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> f64 {
+pub fn blast_karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> f64 {
     let low = obs_min;
     let high = obs_max;
 
@@ -272,7 +260,7 @@ fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> 
             break;
         }
         if sprob[i as usize] != 0.0 {
-            d = crate::math::gcd(d, i);
+            d = crate::math::blast_gcd(d, i);
         }
     }
     if d <= 0 {
@@ -368,8 +356,8 @@ fn karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> 
     -x.ln() / d as f64
 }
 
-/// Compute the ungapped lambda for an integer scoring matrix with given
-/// background frequencies. Port of NCBI kbp_ideal computation.
+/// blast-rs: compute the ungapped lambda for an integer scoring matrix
+/// with given background frequencies, matching NCBI kbp_ideal setup.
 pub fn compute_ungapped_lambda(matrix: &[[i32; AA_SIZE]; AA_SIZE]) -> f64 {
     let mut bg_prob = [0.0f64; AA_SIZE];
     for (k, &idx) in TRUE_CHAR_POSITIONS.iter().enumerate() {
@@ -378,16 +366,17 @@ pub fn compute_ungapped_lambda(matrix: &[[i32; AA_SIZE]; AA_SIZE]) -> f64 {
     compute_ungapped_lambda_with_bg(matrix, &bg_prob)
 }
 
-/// Compute the ungapped lambda for an integer scoring matrix with
-/// specified background frequencies (in NCBIstdaa format).
+/// blast-rs: compute ungapped lambda for an integer scoring matrix with
+/// specified NCBIstdaa-format background frequencies.
 pub fn compute_ungapped_lambda_with_bg(matrix: &[[i32; AA_SIZE]; AA_SIZE], bg_prob: &[f64]) -> f64 {
-    let (score_probs, obs_min, obs_max) = get_matrix_score_probs(matrix, AA_SIZE, bg_prob, bg_prob);
+    let (score_probs, obs_min, obs_max) =
+        s_get_matrix_score_probs(matrix, AA_SIZE, bg_prob, bg_prob);
     // NCBI `BLAST_KARLIN_LAMBDA0_DEFAULT` = 0.5 (`blast_stat.c:70`).
-    karlin_lambda_nr(&score_probs, obs_min, obs_max, 0.5)
+    blast_karlin_lambda_nr(&score_probs, obs_min, obs_max, 0.5)
 }
 
-/// Compute composition-based LambdaRatio.
-/// Port of NCBI Blast_CompositionBasedStats (score-only mode).
+/// blast-rs: compute composition-based LambdaRatio using NCBI
+/// `Blast_CompositionBasedStats` score-only behavior.
 /// Uses s_GetMatrixScoreProbs + Blast_KarlinLambdaNR (1D score distribution).
 /// `standard_lambda` should be the ungapped lambda of the integer matrix
 /// (from compute_ungapped_lambda), NOT the continuous frequency-ratio lambda.
@@ -406,7 +395,7 @@ pub fn composition_lambda_ratio(
     )
 }
 
-/// Compute composition-based LambdaRatio with NCBI's p-value-adjustment
+/// blast-rs: compute composition-based LambdaRatio with NCBI's p-value-adjustment
 /// clamp choice. `p_value_adjustment=true` mirrors
 /// `Blast_CompositionBasedStats(..., pValueAdjustment=1)`, which skips the
 /// upper `MIN(1, LambdaRatio)` clamp.
@@ -419,7 +408,7 @@ pub fn composition_lambda_ratio_with_adjustment(
 ) -> Option<f64> {
     // Compute score probability array (port of s_GetMatrixScoreProbs)
     let (score_probs, obs_min, obs_max) =
-        get_matrix_score_probs(matrix, AA_SIZE, query_prob, subject_prob);
+        s_get_matrix_score_probs(matrix, AA_SIZE, query_prob, subject_prob);
 
     // NCBI's Blast_CompositionBasedStats lets the lambda solver fail with
     // `-1` when the expected score is nonnegative, then clamps the resulting
@@ -435,7 +424,7 @@ pub fn composition_lambda_ratio_with_adjustment(
     let adjusted_lambda = if avg >= 0.0 {
         -1.0
     } else {
-        karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda)
+        blast_karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda)
     };
 
     let mut ratio = adjusted_lambda / standard_lambda;
@@ -446,7 +435,8 @@ pub fn composition_lambda_ratio_with_adjustment(
     Some(ratio)
 }
 
-/// Port of NCBI Blast_CompositionBasedStats (matrix rescaling mode).
+/// blast-rs: matrix rescaling helper for the C Blast_CompositionBasedStats
+/// behavior; not a direct NCBI C port.
 /// Like [`composition_scale_matrix`] but also returns the
 /// `lambda_ratio` used to scale the matrix. Callers that recompute
 /// bit-scores or e-values after rescoring with the returned matrix
@@ -472,7 +462,7 @@ pub fn composition_scale_matrix_with_ratio(
     )
 }
 
-/// Rescale a square matrix and return NCBI's LambdaRatio, preserving the
+/// blast-rs: rescale a square matrix and return NCBI's LambdaRatio, preserving the
 /// `pValueAdjustment` clamp choice from `Blast_CompositionBasedStats`.
 pub fn composition_scale_matrix_with_ratio_and_adjustment(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -500,7 +490,7 @@ pub fn composition_scale_matrix_with_ratio_and_adjustment(
     Some((scaled, lr))
 }
 
-/// Rescales the scoring matrix using the composition-based lambda ratio.
+/// blast-rs: rescale the scoring matrix using the composition-based lambda ratio.
 /// Returns the rescaled matrix, or None if no adjustment needed.
 pub fn composition_scale_matrix(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -520,6 +510,8 @@ pub fn composition_scale_matrix(
     ))
 }
 
+/// blast-rs: shared matrix-rescaling implementation for
+/// `composition_scale_matrix*`; not a direct NCBI C port.
 fn composition_scale_matrix_at_ratio(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     query_prob: &[f64],
@@ -579,7 +571,7 @@ fn composition_scale_matrix_at_ratio(
             }
         }
     }
-    set_xuo_scores(&mut scores_f, AA_SIZE, &row_prob_std, &col_prob_std);
+    s_set_xuo_scores(&mut scores_f, AA_SIZE, &row_prob_std, &col_prob_std);
 
     let mut result = [[0i32; AA_SIZE]; AA_SIZE];
     for i in 0..AA_SIZE {
@@ -587,7 +579,7 @@ fn composition_scale_matrix_at_ratio(
             if scores_f[i][j] < i32::MIN as f64 {
                 result[i][j] = i32::MIN;
             } else {
-                result[i][j] = nint(scores_f[i][j]);
+                result[i][j] = crate::math::blast_nint(scores_f[i][j]) as i32;
             }
         }
     }
@@ -600,8 +592,8 @@ fn composition_scale_matrix_at_ratio(
 }
 
 /// Build an integer matrix directly from frequency ratios at a given lambda.
-/// Port of NCBI `Blast_Int4MatrixFromFreq` for the non-position-based case.
-pub fn matrix_from_freq_ratios(
+/// NCBI: Blast_Int4MatrixFromFreq (composition_adjustment.c).
+pub fn blast_int4_matrix_from_freq(
     lambda: f64,
     freq_ratios: &[[f64; AA_SIZE]; AA_SIZE],
 ) -> [[i32; AA_SIZE]; AA_SIZE] {
@@ -616,7 +608,7 @@ pub fn matrix_from_freq_ratios(
             result[i][j] = if score < i32::MIN as f64 {
                 i32::MIN
             } else {
-                nint(score)
+                crate::math::blast_nint(score) as i32
             };
         }
     }
@@ -624,11 +616,11 @@ pub fn matrix_from_freq_ratios(
 }
 
 /// Adjust e-value using composition-based statistics.
-/// Verbatim port of NCBI s_AdjustEvaluesForComposition.
+/// NCBI: s_AdjustEvaluesForComposition (composition_adjustment.c).
 ///
 /// Computes composition-specific lambda, derives a composition P-value,
 /// then combines it with the alignment P-value using Fisher's method.
-pub fn adjust_evalue_composition(
+pub fn s_adjust_evalues_for_composition(
     raw_evalue: f64,
     score: i32,
     query_prob: &[f64],
@@ -640,7 +632,7 @@ pub fn adjust_evalue_composition(
 ) -> f64 {
     // Score-only helper: compute the composition-specific lambda ratio and
     // scale the e-value. Full mode-2 matrix adjustment is handled by
-    // `composition_matrix_adj` at the search/redo call sites.
+    // `blast_composition_matrix_adj` at the search/redo call sites.
     match composition_lambda_ratio(matrix, query_prob, subject_prob, standard_lambda) {
         None => raw_evalue,
         Some(lambda_ratio) => {
@@ -650,31 +642,31 @@ pub fn adjust_evalue_composition(
     }
 }
 
-/// NCBI BLAST_KarlinEtoP: E-value to P-value conversion.
-pub fn karlin_e_to_p(x: f64) -> f64 {
+/// NCBI: BLAST_KarlinEtoP (blast_stat.c).
+pub fn blast_karlin_eto_p(x: f64) -> f64 {
     // NCBI: `return -BLAST_Expm1(-x);` (= 1 - exp(-x) stably).
     -crate::math::expm1(-x)
 }
 
-/// NCBI BLAST_KarlinPtoE: P-value to E-value conversion.
+/// NCBI: BLAST_KarlinPtoE (blast_stat.c).
 ///
 /// Mirrors NCBI `BLAST_KarlinPtoE` (`blast_stat.c:4175`) exactly:
 /// - `p < 0` or `p > 1` → returns `INT4_MIN` (cast to f64).
 /// - `p == 1` → returns `INT4_MAX` (cast to f64).
 /// - otherwise → `-log1p(-p)`.
-pub fn karlin_p_to_e_compo(p: f64) -> f64 {
+pub fn blast_karlin_pto_e(p: f64) -> f64 {
     if !(0.0..=1.0).contains(&p) {
         return i32::MIN as f64;
     }
     if p == 1.0 {
         return i32::MAX as f64;
     }
-    -crate::math::log1p(-p)
+    -crate::math::blast_log1p(-p)
 }
 
 /// Combine composition P-value with alignment P-value using Fisher's method.
-/// Port of NCBI Blast_Overall_P_Value.
-pub fn overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
+/// NCBI: Blast_Overall_P_Value (unified_pvalues.c).
+pub fn blast_overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
     let product = p_comp * p_alignment;
     if product > 0.0 {
         product * (1.0 - product.ln())
@@ -684,8 +676,8 @@ pub fn overall_p_value(p_comp: f64, p_alignment: f64) -> f64 {
 }
 
 /// Composition P-value from lambda using the precomputed table.
-/// Port of NCBI Blast_CompositionPvalue.
-pub fn composition_pvalue(lambda: f64) -> f64 {
+/// NCBI: Blast_CompositionPvalue (unified_pvalues.c).
+pub fn blast_composition_pvalue(lambda: f64) -> f64 {
     /// NCBI `LAMBDA_BIN_SIZE` (`unified_pvalues.c:47`).
     const LAMBDA_BIN_SIZE: f64 = 0.001;
     /// NCBI `LOW_LAMBDA_BIN_CUT` (`unified_pvalues.c:53`).
@@ -1875,9 +1867,9 @@ const E_OCHAR: usize = crate::encoding::NCBISTDAA_O as usize; // O = pyrrolysine
 const E_JCHAR: usize = crate::encoding::NCBISTDAA_J as usize; // J = I or L
 const MAXIMUM_X_SCORE: f64 = -1.0;
 
-/// Port of NCBI s_GatherLetterProbs.
+/// NCBI: s_GatherLetterProbs (composition_adjustment.c).
 /// Convert NCBIstdaa probabilities to 20-letter ARND... alphabet.
-fn gather_letter_probs(output: &mut [f64; COMPO_NUM_TRUE_AA], input: &[f64], alphsize: usize) {
+fn s_gather_letter_probs(output: &mut [f64; COMPO_NUM_TRUE_AA], input: &[f64], alphsize: usize) {
     for c in 0..alphsize.min(28) {
         if ALPHA_CONVERT[c] >= 0 {
             output[ALPHA_CONVERT[c] as usize] = input[c];
@@ -1885,9 +1877,9 @@ fn gather_letter_probs(output: &mut [f64; COMPO_NUM_TRUE_AA], input: &[f64], alp
     }
 }
 
-/// Port of NCBI s_UnpackLetterProbs.
+/// NCBI: s_UnpackLetterProbs (composition_adjustment.c).
 /// Convert 20-letter ARND... probs back to NCBIstdaa alphabet.
-fn unpack_letter_probs(std_probs: &mut [f64], alphsize: usize, probs: &[f64; COMPO_NUM_TRUE_AA]) {
+fn s_unpack_letter_probs(std_probs: &mut [f64], alphsize: usize, probs: &[f64; COMPO_NUM_TRUE_AA]) {
     for c in 0..alphsize.min(28) {
         if ALPHA_CONVERT[c] >= 0 {
             std_probs[c] = probs[ALPHA_CONVERT[c] as usize];
@@ -1897,8 +1889,8 @@ fn unpack_letter_probs(std_probs: &mut [f64], alphsize: usize, probs: &[f64; COM
     }
 }
 
-/// Port of NCBI Blast_ApplyPseudocounts.
-fn apply_pseudocounts(
+/// NCBI: Blast_ApplyPseudocounts (composition_adjustment.c).
+fn blast_apply_pseudocounts(
     probs20: &mut [f64; COMPO_NUM_TRUE_AA],
     number_of_observations: usize,
     background_probs20: &[f64; COMPO_NUM_TRUE_AA],
@@ -1918,9 +1910,9 @@ fn apply_pseudocounts(
     }
 }
 
-/// Port of NCBI Blast_CalcFreqRatios.
+/// NCBI: Blast_CalcFreqRatios (composition_adjustment.c).
 /// Converts joint probabilities to frequency ratios in place.
-fn calc_freq_ratios(
+fn blast_calc_freq_ratios(
     ratios: &mut [[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
     alphsize: usize,
     row_prob: &[f64],
@@ -1937,8 +1929,8 @@ fn calc_freq_ratios(
     }
 }
 
-/// Port of NCBI Blast_FreqRatioToScore.
-fn freq_ratio_to_score(
+/// NCBI: Blast_FreqRatioToScore (composition_adjustment.c).
+fn blast_freq_ratio_to_score(
     matrix: &mut [[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
     rows: usize,
     cols: usize,
@@ -1955,9 +1947,9 @@ fn freq_ratio_to_score(
     }
 }
 
-/// Port of NCBI Blast_TargetFreqEntropy.
+/// NCBI: Blast_TargetFreqEntropy (composition_adjustment.c).
 /// Compute relative entropy of target frequencies.
-fn target_freq_entropy(target_freq: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA]) -> f64 {
+fn blast_target_freq_entropy(target_freq: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA]) -> f64 {
     let mut row_prob = [0.0f64; COMPO_NUM_TRUE_AA];
     let mut col_prob = [0.0f64; COMPO_NUM_TRUE_AA];
     for i in 0..COMPO_NUM_TRUE_AA {
@@ -1976,8 +1968,8 @@ fn target_freq_entropy(target_freq: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_A
     entropy
 }
 
-/// Port of NCBI Blast_MatrixEntropy.
-fn matrix_entropy(
+/// NCBI: Blast_MatrixEntropy (composition_adjustment.c).
+fn blast_matrix_entropy(
     matrix: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
     alphsize: usize,
     row_prob: &[f64; COMPO_NUM_TRUE_AA],
@@ -1994,8 +1986,8 @@ fn matrix_entropy(
     entropy
 }
 
-/// Port of NCBI Blast_EntropyOldFreqNewContext.
-fn entropy_old_freq_new_context(
+/// NCBI: Blast_EntropyOldFreqNewContext (composition_adjustment.c).
+fn blast_entropy_old_freq_new_context(
     target_freq: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
     row_prob: &[f64; COMPO_NUM_TRUE_AA],
     col_prob: &[f64; COMPO_NUM_TRUE_AA],
@@ -2012,19 +2004,19 @@ fn entropy_old_freq_new_context(
 
     // Copy target_freq to scores, compute freq ratios, convert to scores
     let mut scores = *target_freq;
-    calc_freq_ratios(&mut scores, COMPO_NUM_TRUE_AA, &old_row_prob, &old_col_prob);
-    freq_ratio_to_score(&mut scores, COMPO_NUM_TRUE_AA, COMPO_NUM_TRUE_AA, 1.0);
+    blast_calc_freq_ratios(&mut scores, COMPO_NUM_TRUE_AA, &old_row_prob, &old_col_prob);
+    blast_freq_ratio_to_score(&mut scores, COMPO_NUM_TRUE_AA, COMPO_NUM_TRUE_AA, 1.0);
 
     let (lambda, iter_count) =
-        calc_lambda_full_precision(&scores, row_prob, col_prob, COMPO_NUM_TRUE_AA);
+        blast_calc_lambda_full_precision(&scores, row_prob, col_prob, COMPO_NUM_TRUE_AA);
     if iter_count >= LAMBDA_ITERATION_LIMIT {
         return None;
     }
-    let entropy = matrix_entropy(&scores, COMPO_NUM_TRUE_AA, row_prob, col_prob, lambda);
+    let entropy = blast_matrix_entropy(&scores, COMPO_NUM_TRUE_AA, row_prob, col_prob, lambda);
     Some((entropy, lambda))
 }
 
-/// Port of NCBI Blast_TrueAaToStdTargetFreqs.
+/// NCBI: Blast_TrueAaToStdTargetFreqs (composition_adjustment.c).
 /// Convert 20x20 target frequencies to NCBIstdaa alphabet matrix.
 ///
 /// The `E_*CHAR < std_alphsize` bounds checks below are verbatim from
@@ -2033,7 +2025,7 @@ fn entropy_old_freq_new_context(
 /// `E_*CHAR` is `< 28`, so the checks fold to true — `redundant_comparisons`
 /// is suppressed locally rather than removing the NCBI-verbatim guards.
 #[allow(clippy::redundant_comparisons)]
-fn true_aa_to_std_target_freqs(
+fn blast_true_aa_to_std_target_freqs(
     std_freq: &mut [[f64; AA_SIZE]; AA_SIZE],
     freq: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
 ) {
@@ -2091,8 +2083,8 @@ fn true_aa_to_std_target_freqs(
     }
 }
 
-/// Port of NCBI s_CalcAvgScore.
-fn calc_avg_score(m: &[f64], alphsize: usize, inc_m: usize, probs: &[f64]) -> f64 {
+/// NCBI: s_CalcAvgScore (composition_adjustment.c).
+fn s_calc_avg_score(m: &[f64], alphsize: usize, inc_m: usize, probs: &[f64]) -> f64 {
     let mut score_ix = 0.0f64;
     for j in 0..alphsize {
         if j < 28 && ALPHA_CONVERT[j] >= 0 {
@@ -2102,14 +2094,14 @@ fn calc_avg_score(m: &[f64], alphsize: usize, inc_m: usize, probs: &[f64]) -> f6
     score_ix
 }
 
-/// Port of NCBI s_SetXUOScores.
+/// NCBI: s_SetXUOScores (composition_adjustment.c).
 ///
 /// The `E_*CHAR < alphsize` guards are verbatim from NCBI; callers
 /// always pass `alphsize = AA_SIZE = 28` so every compile-time-constant
 /// E_*CHAR check folds to true. Suppress `redundant_comparisons`
 /// locally rather than removing the defensive NCBI guards.
 #[allow(clippy::redundant_comparisons)]
-fn set_xuo_scores(
+fn s_set_xuo_scores(
     m: &mut [[f64; AA_SIZE]; AA_SIZE],
     alphsize: usize,
     row_probs: &[f64],
@@ -2118,7 +2110,7 @@ fn set_xuo_scores(
     let mut score_xx = 0.0f64;
     for i in 0..alphsize {
         if i < 28 && ALPHA_CONVERT[i] >= 0 {
-            let avg_ix = calc_avg_score(&m[i], alphsize, 1, col_probs);
+            let avg_ix = s_calc_avg_score(&m[i], alphsize, 1, col_probs);
             if E_XCHAR < alphsize {
                 m[i][E_XCHAR] = avg_ix.min(MAXIMUM_X_SCORE);
             }
@@ -2131,7 +2123,7 @@ fn set_xuo_scores(
             }
             if E_XCHAR < alphsize {
                 m[E_XCHAR][i] =
-                    calc_avg_score(&col_vals, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
+                    s_calc_avg_score(&col_vals, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
             }
         }
     }
@@ -2142,30 +2134,30 @@ fn set_xuo_scores(
     // Set X scores for pairwise ambiguities
     if E_BCHAR < alphsize && E_XCHAR < alphsize {
         m[E_BCHAR][E_XCHAR] =
-            calc_avg_score(&m[E_BCHAR], alphsize, 1, col_probs).min(MAXIMUM_X_SCORE);
+            s_calc_avg_score(&m[E_BCHAR], alphsize, 1, col_probs).min(MAXIMUM_X_SCORE);
         let mut col_b = vec![0.0f64; alphsize];
         for r in 0..alphsize {
             col_b[r] = m[r][E_BCHAR];
         }
-        m[E_XCHAR][E_BCHAR] = calc_avg_score(&col_b, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
+        m[E_XCHAR][E_BCHAR] = s_calc_avg_score(&col_b, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
     }
     if E_ZCHAR < alphsize && E_XCHAR < alphsize {
         m[E_ZCHAR][E_XCHAR] =
-            calc_avg_score(&m[E_ZCHAR], alphsize, 1, col_probs).min(MAXIMUM_X_SCORE);
+            s_calc_avg_score(&m[E_ZCHAR], alphsize, 1, col_probs).min(MAXIMUM_X_SCORE);
         let mut col_z = vec![0.0f64; alphsize];
         for r in 0..alphsize {
             col_z[r] = m[r][E_ZCHAR];
         }
-        m[E_XCHAR][E_ZCHAR] = calc_avg_score(&col_z, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
+        m[E_XCHAR][E_ZCHAR] = s_calc_avg_score(&col_z, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
     }
     if alphsize > E_JCHAR {
         m[E_JCHAR][E_XCHAR] =
-            calc_avg_score(&m[E_JCHAR], alphsize, 1, col_probs).min(MAXIMUM_X_SCORE);
+            s_calc_avg_score(&m[E_JCHAR], alphsize, 1, col_probs).min(MAXIMUM_X_SCORE);
         let mut col_j = vec![0.0f64; alphsize];
         for r in 0..alphsize {
             col_j[r] = m[r][E_JCHAR];
         }
-        m[E_XCHAR][E_JCHAR] = calc_avg_score(&col_j, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
+        m[E_XCHAR][E_JCHAR] = s_calc_avg_score(&col_j, alphsize, 1, row_probs).min(MAXIMUM_X_SCORE);
     }
 
     // Copy C scores to U (Selenocysteine)
@@ -2184,15 +2176,9 @@ fn set_xuo_scores(
     }
 }
 
-/// Round to nearest integer (i32-narrowed view of `crate::math::nint`,
-/// which mirrors NCBI `BLAST_Nint`).
-fn nint(x: f64) -> i32 {
-    crate::math::nint(x) as i32
-}
-
-/// Port of NCBI s_ScoresStdAlphabet.
+/// NCBI: s_ScoresStdAlphabet (composition_adjustment.c).
 /// Build integer scoring matrix in NCBIstdaa alphabet from optimized target freqs.
-fn scores_std_alphabet(
+fn s_scores_std_alphabet(
     matrix: &mut [[i32; AA_SIZE]; AA_SIZE],
     alphsize: usize,
     target_freq: &[[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
@@ -2203,7 +2189,7 @@ fn scores_std_alphabet(
 ) {
     let mut row_prob_std = [0.0f64; AA_SIZE];
     let mut col_prob_std = [0.0f64; AA_SIZE];
-    unpack_letter_probs(&mut row_prob_std, alphsize, row_prob);
+    s_unpack_letter_probs(&mut row_prob_std, alphsize, row_prob);
     // Set pair ambiguity probs
     if E_BCHAR < alphsize {
         row_prob_std[E_BCHAR] = row_prob_std[E_DCHAR] + row_prob_std[E_NCHAR];
@@ -2215,7 +2201,7 @@ fn scores_std_alphabet(
         row_prob_std[E_JCHAR] = row_prob_std[E_ICHAR] + row_prob_std[E_LCHAR];
     }
 
-    unpack_letter_probs(&mut col_prob_std, alphsize, col_prob);
+    s_unpack_letter_probs(&mut col_prob_std, alphsize, col_prob);
     if E_BCHAR < alphsize {
         col_prob_std[E_BCHAR] = col_prob_std[E_DCHAR] + col_prob_std[E_NCHAR];
     }
@@ -2228,7 +2214,7 @@ fn scores_std_alphabet(
 
     // Build double matrix: target freqs → freq ratios → scores
     let mut scores_f = [[0.0f64; AA_SIZE]; AA_SIZE];
-    true_aa_to_std_target_freqs(&mut scores_f, target_freq);
+    blast_true_aa_to_std_target_freqs(&mut scores_f, target_freq);
 
     // Freq ratios
     for i in 0..alphsize {
@@ -2251,7 +2237,7 @@ fn scores_std_alphabet(
         }
     }
     // Set X/U/O scores
-    set_xuo_scores(&mut scores_f, alphsize, &row_prob_std, &col_prob_std);
+    s_set_xuo_scores(&mut scores_f, alphsize, &row_prob_std, &col_prob_std);
 
     // Round to integer matrix
     for i in 0..alphsize {
@@ -2259,7 +2245,7 @@ fn scores_std_alphabet(
             if scores_f[i][j] < i32::MIN as f64 {
                 matrix[i][j] = i32::MIN;
             } else {
-                matrix[i][j] = nint(scores_f[i][j]);
+                matrix[i][j] = crate::math::blast_nint(scores_f[i][j]) as i32;
             }
         }
     }
@@ -2270,12 +2256,12 @@ fn scores_std_alphabet(
     }
 }
 
-/// Port of NCBI Blast_CompositionMatrixAdj.
+/// NCBI: Blast_CompositionMatrixAdj (composition_adjustment.c).
 /// Adjusts the scoring matrix using composition-based optimization.
 ///
 /// Returns 0 on success, >0 if optimization didn't converge (fall back to scaling),
 /// <0 on fatal error.
-pub fn composition_matrix_adj(
+pub fn blast_composition_matrix_adj(
     matrix: &mut [[i32; AA_SIZE]; AA_SIZE],
     alphsize: usize,
     matrix_adjust_rule: crate::compo_mode_condition::MatrixAdjustRule,
@@ -2296,25 +2282,25 @@ pub fn composition_matrix_adj(
 
     let mut row_probs = [0.0f64; COMPO_NUM_TRUE_AA];
     let mut col_probs = [0.0f64; COMPO_NUM_TRUE_AA];
-    gather_letter_probs(&mut row_probs, stdaa_row_probs, alphsize);
-    gather_letter_probs(&mut col_probs, stdaa_col_probs, alphsize);
+    s_gather_letter_probs(&mut row_probs, stdaa_row_probs, alphsize);
+    s_gather_letter_probs(&mut col_probs, stdaa_col_probs, alphsize);
 
     let desired_re = match matrix_adjust_rule {
         MatrixAdjustRule::UnconstrainedRelEntropy => 0.0,
         MatrixAdjustRule::RelEntropyOldMatrixNewContext => {
-            match entropy_old_freq_new_context(joint_probs, &row_probs, &col_probs) {
+            match blast_entropy_old_freq_new_context(joint_probs, &row_probs, &col_probs) {
                 Some((re, _lambda)) => re,
                 None => 0.0, // leave unconstrained if we can't calculate
             }
         }
-        MatrixAdjustRule::RelEntropyOldMatrixOldContext => target_freq_entropy(joint_probs),
+        MatrixAdjustRule::RelEntropyOldMatrixOldContext => blast_target_freq_entropy(joint_probs),
         MatrixAdjustRule::UserSpecifiedRelEntropy => specified_re,
         _ => return -1, // shouldn't get here
     };
 
     // Apply pseudocounts
-    apply_pseudocounts(&mut row_probs, length1, first_standard_freq, pseudocounts);
-    apply_pseudocounts(&mut col_probs, length2, second_standard_freq, pseudocounts);
+    blast_apply_pseudocounts(&mut row_probs, length1, first_standard_freq, pseudocounts);
+    blast_apply_pseudocounts(&mut col_probs, length2, second_standard_freq, pseudocounts);
 
     // Flatten joint_probs for the optimizer
     let n = COMPO_NUM_TRUE_AA * COMPO_NUM_TRUE_AA;
@@ -2351,7 +2337,7 @@ pub fn composition_matrix_adj(
     }
 
     // Build the adjusted integer scoring matrix
-    scores_std_alphabet(
+    s_scores_std_alphabet(
         matrix,
         alphsize,
         &mat_final,
@@ -2364,8 +2350,9 @@ pub fn composition_matrix_adj(
     0
 }
 
-/// Initialize the composition workspace data for BLOSUM62.
-/// Port of NCBI Blast_CompositionWorkspaceInit + Blast_GetJointProbsForMatrix.
+/// blast-rs: initialize the BLOSUM62 composition workspace data using the C
+/// Blast_CompositionWorkspaceInit and Blast_GetJointProbsForMatrix behavior;
+/// not a direct NCBI C port.
 /// Returns (joint_probs, first_standard_freq, second_standard_freq).
 pub fn blosum62_workspace() -> (
     [[f64; COMPO_NUM_TRUE_AA]; COMPO_NUM_TRUE_AA],
@@ -2392,7 +2379,7 @@ mod tests {
 
     fn stdaa_composition(seq: &[u8]) -> (Vec<f64>, usize) {
         let stdaa = encode_ncbistdaa_sequence(seq);
-        read_composition(&stdaa, AA_SIZE)
+        blast_read_aa_composition(&stdaa, AA_SIZE)
     }
 
     fn blosum62_background_stdaa() -> [f64; AA_SIZE] {

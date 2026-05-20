@@ -83,7 +83,7 @@ pub trait BlastSeqSource: Send + Sync {
 
     /// Minimum sequence length.
     fn min_seq_len(&self) -> i32 {
-        1
+        BLAST_SEQSRC_MINLENGTH
     }
 
     /// Database name.
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(blast_seq_src_get_tot_len(&src), 6);
         assert_eq!(blast_seq_src_get_tot_len_stats(&src), 6);
         assert_eq!(blast_seq_src_get_max_seq_len(&src), 4);
-        assert_eq!(blast_seq_src_get_min_seq_len(&src), 1);
+        assert_eq!(blast_seq_src_get_min_seq_len(&src), BLAST_SEQSRC_MINLENGTH);
         assert_eq!(blast_seq_src_get_avg_seq_len(&src), 3);
         assert_eq!(blast_seq_src_get_name(&src), "mock");
         assert!(!blast_seq_src_get_is_prot(&src));
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(src.seq_len(3), 200);
         assert_eq!(src.seq_len(4), 75);
         assert_eq!(src.max_seq_len(), 200);
-        assert_eq!(src.min_seq_len(), 1);
+        assert_eq!(src.min_seq_len(), BLAST_SEQSRC_MINLENGTH);
         // avg = (100+1+50+200+75)/5 = 85 (integer division of 426/5 = 85)
         assert_eq!(src.avg_seq_len(), 85);
     }

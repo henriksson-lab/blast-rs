@@ -4,7 +4,7 @@ Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool). Prod
 
 Based on [NCBI BLAST+ 2.17.0](https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/) source distribution (`ncbi-blast-2.17.0+-src.tar.gz`, also on [GitHub](https://github.com/ncbi/blast)). The C core algorithms in `src/algo/blast/core/` were ported function-by-function to Rust.
 
-* 2026-05-15: Major audit ongoing. State is uncertain. Wait with using it
+* 2026-05-20: Further auditing done; **more auditing needed. do not use**
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
 

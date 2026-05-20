@@ -399,9 +399,9 @@ pub fn s_blast_mb_lookup_has_hits(lookup: &MbLookupTable, index: i64) -> i32 {
     }
 }
 
-fn blast_mb_lookup_retrieve_from_chain(
-    hashtable: &[i32],
-    next_pos: &[i32],
+/// NCBI: s_BlastMBLookupRetrieve (blast_nascan.c:1413).
+pub fn s_blast_mb_lookup_retrieve(
+    lookup: &MbLookupTable,
     index: i64,
     offset_pairs: &mut Vec<OffsetPair>,
     s_off: i32,
@@ -409,7 +409,7 @@ fn blast_mb_lookup_retrieve_from_chain(
     if index < 0 {
         return 0;
     }
-    let mut q_off = hashtable.get(index as usize).copied().unwrap_or(0);
+    let mut q_off = lookup.hashtable.get(index as usize).copied().unwrap_or(0);
     let mut count = 0;
     while q_off != 0 {
         offset_pairs.push(OffsetPair {
@@ -417,41 +417,32 @@ fn blast_mb_lookup_retrieve_from_chain(
             subject_offset: s_off,
         });
         count += 1;
-        q_off = next_pos.get(q_off as usize).copied().unwrap_or(0);
+        q_off = lookup.next_pos.get(q_off as usize).copied().unwrap_or(0);
     }
     count
 }
 
-/// Port of NCBI inline `s_BlastMBLookupRetrieve` (`blast_nascan.c:1413`).
-pub fn s_blast_mb_lookup_retrieve(
-    lookup: &MbLookupTable,
-    index: i64,
-    offset_pairs: &mut Vec<OffsetPair>,
-    s_off: i32,
-) -> i32 {
-    blast_mb_lookup_retrieve_from_chain(
-        &lookup.hashtable,
-        &lookup.next_pos,
-        index,
-        offset_pairs,
-        s_off,
-    )
-}
-
-/// Port of NCBI inline `s_BlastMBLookupRetrieve2` (`blast_nascan.c:1437`).
+/// NCBI: s_BlastMBLookupRetrieve2 (blast_nascan.c:1437).
 pub fn s_blast_mb_lookup_retrieve2(
     lookup: &MbLookupTable,
     index: i64,
     offset_pairs: &mut Vec<OffsetPair>,
     s_off: i32,
 ) -> i32 {
-    blast_mb_lookup_retrieve_from_chain(
-        &lookup.hashtable2,
-        &lookup.next_pos2,
-        index,
-        offset_pairs,
-        s_off,
-    )
+    if index < 0 {
+        return 0;
+    }
+    let mut q_off = lookup.hashtable2.get(index as usize).copied().unwrap_or(0);
+    let mut count = 0;
+    while q_off != 0 {
+        offset_pairs.push(OffsetPair {
+            query_offset: q_off - 1,
+            subject_offset: s_off,
+        });
+        count += 1;
+        q_off = lookup.next_pos2.get(q_off as usize).copied().unwrap_or(0);
+    }
+    count
 }
 
 /// Port of NCBI static `s_MBLookup` (`na_ungapped.c:49`).
@@ -1268,7 +1259,8 @@ pub fn s_blast_small_na_lookup_finalize(
     0
 }
 
-fn compute_table_index(wordsize: i32, charsize: i32, seq: &[u8]) -> usize {
+/// NCBI: s_ComputeTableIndex (blast_lookup.c).
+fn s_compute_table_index(wordsize: i32, charsize: i32, seq: &[u8]) -> usize {
     let mut index = 0usize;
     for &base in seq.iter().take(wordsize.max(0) as usize) {
         index = (index << charsize.max(0) as usize) | base as usize;
@@ -1276,14 +1268,15 @@ fn compute_table_index(wordsize: i32, charsize: i32, seq: &[u8]) -> usize {
     index
 }
 
-fn blast_lookup_add_word_hit_to_thin(
+/// NCBI: BlastLookupAddWordHit (blast_lookup.c:33).
+fn blast_lookup_add_word_hit(
     backbone: &mut [Option<Vec<i32>>],
     wordsize: i32,
     charsize: i32,
     seq: &[u8],
     query_offset: i32,
 ) {
-    let index = compute_table_index(wordsize, charsize, seq);
+    let index = s_compute_table_index(wordsize, charsize, seq);
     let Some(cell) = backbone.get_mut(index) else {
         return;
     };
@@ -1326,13 +1319,7 @@ pub fn blast_lookup_index_query_exact_matches(
             if word.iter().any(|base| (base & invalid_mask) != 0) {
                 continue;
             }
-            blast_lookup_add_word_hit_to_thin(
-                backbone,
-                lut_word_length,
-                charsize,
-                word,
-                start as i32,
-            );
+            blast_lookup_add_word_hit(backbone, lut_word_length, charsize, word, start as i32);
         }
     }
 }
@@ -2345,7 +2332,7 @@ pub fn s_fill_contig_mb_table(
                     packed_count & 0x0f
                 };
                 if count >= lookup_options.max_db_word_count {
-                    start += scan_step;
+                    start += 1;
                     continue;
                 }
             }
@@ -2776,11 +2763,6 @@ pub fn s_scan_subject_for_word_counts(
     0
 }
 
-fn mb_pv_array_bts(hashsize: usize, pv_size: usize) -> i32 {
-    let entries_per_bit = (hashsize / pv_size.max(1)).max(1);
-    entries_per_bit.trailing_zeros() as i32
-}
-
 /// Rust ownership translation of NCBI `BlastMBLookupTableNew`
 /// (`blast_nalookup.c:1227`).
 pub fn blast_mb_lookup_table_new(
@@ -2821,6 +2803,11 @@ pub fn blast_mb_lookup_table_new(
         pv_size = (pv_size / 2).max(1);
     }
 
+    let pv_array_bts = {
+        let entries_per_bit = (hashsize / pv_size.max(1)).max(1);
+        entries_per_bit.trailing_zeros() as i32
+    };
+
     let mut mb_lt = MbLookupTable {
         word_length: lookup_options.word_size,
         lut_word_length: lut_width,
@@ -2834,7 +2821,7 @@ pub fn blast_mb_lookup_table_new(
         next_pos: Vec::new(),
         next_pos2: Vec::new(),
         pv_array: vec![0; pv_size],
-        pv_array_bts: mb_pv_array_bts(hashsize, pv_size),
+        pv_array_bts,
         longest_chain: 0,
         scan_step: 0,
     };
@@ -2914,10 +2901,7 @@ pub fn rps_lookup_table_new(
         return -1;
     };
 
-    let mut alphabet_size = info.alphabet_size;
-    if alphabet_size == 26 {
-        alphabet_size = 28;
-    }
+    let alphabet_size = info.alphabet_size;
     if alphabet_size <= 0 || info.wordsize <= 0 {
         return -1;
     }
@@ -2986,14 +2970,6 @@ pub fn s_add_to_rps_bucket(bucket: &mut RpsBucket, q_off: u32, s_off: u32) {
     bucket.num_used += 1;
 }
 
-fn rps_compute_table_index(wordsize: i32, charsize: i32, seq: &[u8]) -> usize {
-    let mut index = 0usize;
-    for &letter in seq.iter().take(wordsize.max(0) as usize) {
-        index = (index << charsize.max(0) as usize) | letter as usize;
-    }
-    index
-}
-
 /// Scan a subject sequence against an RPS lookup table, matching
 /// `BlastRPSScanSubject`'s bucketed offset collection.
 ///
@@ -3028,7 +3004,7 @@ pub fn blast_rps_scan_subject(
     let mut totalhits = 0;
 
     for subject_offset in start..=last {
-        let index = rps_compute_table_index(
+        let index = s_compute_table_index(
             lookup.wordsize,
             lookup.charsize,
             &sequence[subject_offset..subject_offset + wordsize],
@@ -4133,7 +4109,7 @@ mod tests {
         assert_eq!(lookup.backbone.len(), 1usize << (BITS_PER_NUC * 4));
         assert!(lookup.longest_chain > 0);
 
-        let index = compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
+        let index = s_compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
         let wrap = LookupTableWrap::SmallNa(lookup);
         assert!(s_small_na_lookup(Some(&wrap), index, 0));
         assert!(s_small_na_lookup(Some(&wrap), index, 4));
@@ -4165,7 +4141,7 @@ mod tests {
         assert_eq!(lookup.mask, lookup.backbone_size - 1);
         assert!(lookup.longest_chain > 0);
 
-        let index = compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
+        let index = s_compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
         assert!(s_na_lookup(Some(&lookup), index, 0));
         assert!(s_na_lookup(Some(&lookup), index, 4));
         assert!(!s_na_lookup(Some(&lookup), index, 1));
@@ -4200,7 +4176,7 @@ mod tests {
         assert!(!lookup.pv_array.is_empty());
         assert!(lookup.pv_array_bts >= crate::stat::PV_ARRAY_BTS as i32);
 
-        let index = compute_table_index(9, BITS_PER_NUC as i32, &query[0..9]) as i32;
+        let index = s_compute_table_index(9, BITS_PER_NUC as i32, &query[0..9]) as i32;
         let wrap = LookupTableWrap::Megablast(lookup);
         assert!(s_mb_lookup(Some(&wrap), index, 0));
         assert!(!s_mb_lookup(Some(&wrap), index, 1));
@@ -5081,9 +5057,9 @@ mod tests {
         let mut lookup = None;
         assert_eq!(rps_lookup_table_new(Some(&info), &mut lookup), 0);
         let lookup_ref = lookup.as_ref().unwrap();
-        assert_eq!(lookup_ref.alphabet_size, 28);
+        assert_eq!(lookup_ref.alphabet_size, 26);
         assert_eq!(lookup_ref.wordsize, 3);
-        assert_eq!(lookup_ref.charsize, crate::util::ilog2(28) + 1);
+        assert_eq!(lookup_ref.charsize, crate::util::ilog2(26) + 1);
         assert_eq!(lookup_ref.num_buckets, 2);
         assert_eq!(lookup_ref.bucket_array[0].num_alloc, 1000);
         assert_eq!(lookup_ref.bucket_array[1].num_used, 2);
@@ -5115,7 +5091,7 @@ mod tests {
                 }],
             }],
         };
-        let index = rps_compute_table_index(3, 5, &[1, 2, 3]);
+        let index = s_compute_table_index(3, 5, &[1, 2, 3]);
         lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
             1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
         lookup.rps_backbone[index] = RpsBackboneCell {
@@ -5619,7 +5595,7 @@ mod tests {
         );
         let wrapped_ref = wrapped.as_ref().expect("nucleotide lookup");
         assert_eq!(wrapped_ref.table_type(), LookupTableType::SmallNaLookup);
-        let index = compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
+        let index = s_compute_table_index(4, BITS_PER_NUC as i32, &query[0..4]) as i32;
         assert!(s_small_na_lookup(wrapped.as_ref(), index, 0));
     }
 

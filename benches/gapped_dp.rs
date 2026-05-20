@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use blast_rs::encoding::encode_blastna_sequence;
-use blast_rs::traceback::{blast_gapped_align, blast_gapped_score_only};
+use blast_rs::traceback::{blast_gapped_alignment_with_traceback, blast_semi_gapped_align};
 
 fn timed(name: &str, iterations: usize, mut f: impl FnMut() -> i32) {
     let start = Instant::now();
@@ -46,7 +46,7 @@ fn main() {
     let seed_s = subject.len() / 2;
 
     timed("score_only", iterations, || {
-        blast_gapped_score_only(
+        blast_semi_gapped_align(
             black_box(&query),
             black_box(&subject),
             seed_q,
@@ -61,7 +61,7 @@ fn main() {
 
     let traceback_iterations = (iterations / 10).max(1);
     timed("traceback", traceback_iterations, || {
-        blast_gapped_align(
+        blast_gapped_alignment_with_traceback(
             black_box(&query),
             black_box(&subject),
             seed_q,
@@ -78,7 +78,7 @@ fn main() {
 
     let smoke_start = Instant::now();
     while smoke_start.elapsed() < Duration::from_millis(1) {
-        black_box(blast_gapped_score_only(
+        black_box(blast_semi_gapped_align(
             &query, &subject, seed_q, seed_s, 1, -3, 5, 2, 30,
         ));
     }

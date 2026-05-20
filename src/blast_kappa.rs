@@ -761,8 +761,8 @@ mod struct_tests {
     #[test]
     fn redo_one_alignment_perfect_blastn_match() {
         // BLASTNA-encoded perfect-match query/subject. Our
-        // `blast_gapped_align` operates on BLASTNA, so set up a 16x16
-        // matrix via build_blastna_matrix.
+        // `blast_gapped_alignment_with_traceback` operates on BLASTNA, so set up a 16x16
+        // matrix via blast_score_blk_nucl_matrix_create.
         let query_buf = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1];
         let subject_buf = query_buf.clone();
         let query = BlastCompoSequenceData {
@@ -1037,7 +1037,7 @@ mod struct_tests {
     fn blast_redo_one_match_with_callbacks_redoes_composition_adjusted() {
         let query_source = vec![1u8; 8];
         let (query_composition, _) =
-            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+            crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
             seq: BlastCompoSequenceData {
@@ -1103,7 +1103,7 @@ mod struct_tests {
     fn blast_redo_one_match_with_callbacks_redoes_position_based_composition_adjusted() {
         let query_source = vec![1u8; 8];
         let (query_composition, _) =
-            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+            crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
             seq: BlastCompoSequenceData {
@@ -1242,7 +1242,7 @@ mod struct_tests {
     fn blast_redo_one_match_smith_waterman_with_callbacks_redoes_composition_adjusted() {
         let query_source = vec![1u8; 8];
         let (query_composition, _) =
-            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+            crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
             seq: BlastCompoSequenceData {
@@ -1312,7 +1312,7 @@ mod struct_tests {
     ) {
         let query_source = vec![1u8; 8];
         let (query_composition, _) =
-            crate::composition::read_composition(&query_source, crate::matrix::AA_SIZE);
+            crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
             seq: BlastCompoSequenceData {
@@ -1830,7 +1830,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_one_match_in_memory_no_composition_redoes_blastx_alignment() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query_source, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -1890,7 +1890,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_one_match_in_memory_no_composition_redoes_blastx_second_context() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query_source, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -1953,7 +1953,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_one_match_in_memory_no_composition_redoes_tblastx_alignment() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query_source, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -2014,7 +2014,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_one_match_in_memory_no_composition_redoes_tblastx_second_context() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query_source, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query_source, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -2822,7 +2822,7 @@ mod struct_tests {
     }
 
     #[test]
-    fn blast_gap_align_struct_free_clears_slot() {
+    fn s_blast_gap_align_struct_free_clears_slot() {
         let mut workspace = blast_gap_align_struct_new(42).expect("workspace");
         workspace.score = 100;
         workspace.query_start = 3;
@@ -2836,7 +2836,7 @@ mod struct_tests {
             .expect("edit script")
             .push(crate::gapinfo::GapAlignOpType::Sub, 9);
         let mut slot = Some(workspace);
-        blast_gap_align_struct_free(&mut slot);
+        s_blast_gap_align_struct_free(&mut slot);
         assert!(slot.is_none());
 
         let workspace = blast_gap_align_struct_new(-5).expect("workspace");
@@ -5079,7 +5079,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_alignment_core_mt_in_memory_subject_redoes_blastx_match() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -5257,7 +5257,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_alignment_core_mt_in_memory_subject_redoes_blastx_composition_adjusted_match() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -5454,7 +5454,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_alignment_core_mt_in_memory_subject_redoes_second_blastx_context() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -5582,7 +5582,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_alignment_core_mt_in_memory_subject_redoes_tblastx_match() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -5946,7 +5946,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_alignment_core_mt_in_memory_subject_redoes_second_tblastx_context() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -7363,7 +7363,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_blastx_stream_match() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -7612,7 +7612,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_alignment_core_mt_in_memory_subjects_redoes_tblastx_stream_match() {
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -8981,7 +8981,7 @@ mod struct_tests {
         }
 
         let query_ncbi4na = vec![1u8, 8, 4, 4, 2, 8, 1, 8, 4, 4, 2, 8];
-        let (query, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (query, offsets) = crate::util::blast_get_all_translations(
             &query_ncbi4na,
             query_ncbi4na.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -11478,7 +11478,7 @@ mod struct_tests {
         scaled_kbp.lambda /= 2.0;
         scaled_kbp.round_down = false;
         let expected =
-            scaled_kbp.raw_to_evalue(8, 2_000.0) / crate::stat::gap_decay_divisor(0.5, 1);
+            scaled_kbp.raw_to_evalue(8, 2_000.0) / crate::stat::blast_gap_decay_divisor(0.5, 1);
         assert_eq!(status, 0);
         assert!((list.hsps[0].evalue - expected).abs() < 1e-12);
         assert_eq!(list.hsps[0].bit_score, 123.0);
@@ -12847,7 +12847,7 @@ pub fn get_composition(
     };
     let left = left.max(0) as usize;
     let right = right.max(left as i32) as usize;
-    crate::composition::read_composition(&data[left..right.min(data.len())], alphsize)
+    crate::composition::blast_read_aa_composition(&data[left..right.min(data.len())], alphsize)
 }
 
 /// NCBI: s_EvalueFromScore (redo_alignment.c:976).
@@ -13028,7 +13028,7 @@ pub fn s_hsp_list_normalize_scores(
 ) {
     for hsp in &mut hsp_list.hsps {
         // C: `hsp->score = (Int4)BLAST_Nint(((double) hsp->score) / scoreDivisor);`
-        hsp.score = crate::math::nint(hsp.score as f64 / score_divisor) as i32;
+        hsp.score = crate::math::blast_nint(hsp.score as f64 / score_divisor) as i32;
         // C: `hsp->bit_score = (hsp->score*lambda*scoreDivisor - logK)/NCBIMATH_LN2;`
         hsp.bit_score = (hsp.score as f64 * lambda * score_divisor - log_k) / NCBIMATH_LN2;
     }
@@ -13455,7 +13455,7 @@ pub fn new_alignment_using_xdrop_protein(
 ) -> Option<(BlastCompoAlignment, i32, i32)> {
     let q_extent = query_end.checked_sub(query_start)?;
     let s_extent = match_end.checked_sub(match_start)?;
-    let tb = crate::protein::protein_sw_bounded_xdrop_align(
+    let tb = crate::protein::s_sw_find_final_ends_using_xdrop(
         query.data(),
         subject.data(),
         query_start,
@@ -13552,7 +13552,7 @@ pub fn new_alignment_using_xdrop_protein_pssm(
 /// gapped_start_s)`, producing a fresh `BlastCompoAlignment` that
 /// supersedes the input alignment. NCBI calls
 /// `BLAST_GappedAlignmentWithTraceback` (the bidirectional driver);
-/// our Rust analog is `crate::traceback::blast_gapped_align`.
+/// our Rust analog is `crate::traceback::blast_gapped_alignment_with_traceback`.
 ///
 /// `gapped_start_q` and `gapped_start_s` are the per-HSP seed
 /// coordinates that NCBI reads from `hsp->query.gapped_start` /
@@ -13577,7 +13577,7 @@ pub fn redo_one_alignment(
     let q_start = (gapped_start_q - query_range.begin).max(0) as usize;
     let s_start = (gapped_start_s - subject_range.begin).max(0) as usize;
 
-    let tb = crate::traceback::blast_gapped_align(
+    let tb = crate::traceback::blast_gapped_alignment_with_traceback(
         query_data.data(),
         subject_data.data(),
         q_start,
@@ -13858,7 +13858,7 @@ pub fn pos_freq_ratios_to_pssm(freq_ratios: &[Vec<f64>], lambda: f64) -> Result<
             out[j] = if row[j] <= 0.0 {
                 COMPO_SCORE_MIN
             } else {
-                crate::math::nint(row[j].ln() / lambda) as i32
+                crate::math::blast_nint(row[j].ln() / lambda) as i32
             };
         }
         pssm.push(out);
@@ -13890,7 +13890,7 @@ pub fn pos_freq_ratios_to_scaled_pssm(freq_ratios: &[Vec<f64>]) -> Result<Vec<Ve
             out[j] = if row[j] <= 0.0 {
                 COMPO_SCORE_MIN
             } else {
-                crate::math::nint(row[j].ln() * PSI_PSSM_SCALE_FACTOR) as i32
+                crate::math::blast_nint(row[j].ln() * PSI_PSSM_SCALE_FACTOR) as i32
             };
         }
         scaled.push(out);
@@ -14045,7 +14045,7 @@ pub fn sw_find_final_ends_using_xdrop(
 /// `query_start/stop`, `subject_start/stop`, `edit_script`).
 ///
 /// Our Rust ports of the gap-align routines (`align_ex`,
-/// `blast_gapped_align`, `gapped_score_one_dir_*`) own their workspace
+/// `blast_gapped_alignment_with_traceback`, `gapped_score_one_dir_*`) own their workspace
 /// buffers internally, so the Rust analog here only carries the
 /// alignment **output** state plus the few control fields the kappa
 /// driver reads or writes (`gap_x_dropoff`).
@@ -14107,23 +14107,6 @@ pub fn blast_gap_align_struct_new(gap_x_dropoff: i32) -> Option<BlastGapAlignWor
     workspace.subject_stop = 0;
     workspace.edit_script = None;
     Some(workspace)
-}
-
-/// blast-rs: Compatibility alias for the name-matched gap-align free hook; not
-/// a direct NCBI C port.
-/// `Drop` handles deallocation; this hook is a parity marker.
-pub fn blast_gap_align_struct_free(slot: &mut Option<BlastGapAlignWorkspace>) {
-    if let Some(workspace) = slot.as_mut() {
-        workspace.gap_x_dropoff = 0;
-        workspace.score = 0;
-        workspace.query_start = 0;
-        workspace.query_stop = 0;
-        workspace.subject_start = 0;
-        workspace.subject_stop = 0;
-        workspace.edit_script =
-            crate::gapinfo::gap_edit_script_delete(workspace.edit_script.take());
-    }
-    *slot = None;
 }
 
 /// NCBI: s_BlastGapAlignStruct_Free (blast_kappa.c:2532).
@@ -18001,10 +17984,10 @@ fn freq_ratios_from_vec(
 fn composition_test_pvalue(query_prob: &[f64], subject_prob: &[f64]) -> f64 {
     let mut permuted_query = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
     let mut permuted_subject = [0.0f64; crate::composition::COMPO_NUM_TRUE_AA];
-    crate::compo_mode_condition::gather_letter_probs(query_prob, &mut permuted_query);
-    crate::compo_mode_condition::gather_letter_probs(subject_prob, &mut permuted_subject);
+    crate::compo_mode_condition::s_gather_letter_probs(query_prob, &mut permuted_query);
+    crate::compo_mode_condition::s_gather_letter_probs(subject_prob, &mut permuted_subject);
 
-    let (mut lambda_for_pair, iter_count) = crate::composition::calc_lambda_full_precision(
+    let (mut lambda_for_pair, iter_count) = crate::composition::blast_calc_lambda_full_precision(
         &crate::composition::BLOS62,
         &permuted_query,
         &permuted_subject,
@@ -18013,7 +17996,7 @@ fn composition_test_pvalue(query_prob: &[f64], subject_prob: &[f64]) -> f64 {
     if iter_count >= crate::composition::LAMBDA_ITERATION_LIMIT {
         lambda_for_pair = crate::composition::COMPO_MIN_LAMBDA;
     }
-    crate::composition::composition_pvalue(lambda_for_pair)
+    crate::composition::blast_composition_pvalue(lambda_for_pair)
 }
 
 /// blast-rs: PSSM score-probability helper for local position-based scaling; not a direct NCBI C port.
@@ -18076,7 +18059,7 @@ fn pssm_lambda_ratio(
     let adjusted_lambda = if avg >= 0.0 {
         -1.0
     } else {
-        crate::composition::karlin_lambda_nr_pub(&score_probs, obs_min, obs_max, ungapped_lambda)
+        crate::composition::blast_karlin_lambda_nr(&score_probs, obs_min, obs_max, ungapped_lambda)
     };
 
     let mut ratio = adjusted_lambda / ungapped_lambda;
@@ -18158,7 +18141,7 @@ pub fn composition_scale_pssm_with_ratio(
             matrix[p][j] = if row[j] < i32::MIN as f64 {
                 i32::MIN
             } else {
-                crate::math::nint(row[j]) as i32
+                crate::math::blast_nint(row[j]) as i32
             };
         }
         if E_STOP_CHAR < cols {
@@ -18624,7 +18607,7 @@ pub fn impala_scale_matrix(
     for c in 0..dim1 {
         for a in 0..dim2 {
             if pos_private_matrix[c][a] != crate::stat::BLAST_SCORE_MIN {
-                pos_matrix[c][a] = crate::math::nint(
+                pos_matrix[c][a] = crate::math::blast_nint(
                     pos_private_matrix[c][a] as f64 * factor / K_PSI_SCALE_FACTOR,
                 ) as i32;
             }
@@ -18645,9 +18628,9 @@ pub fn impala_scale_matrix(
     for c in 0..dim1 {
         for a in 0..dim2 {
             if pos_private_matrix[c][a] != crate::stat::BLAST_SCORE_MIN {
-                pos_private_matrix[c][a] =
-                    crate::math::nint(pos_private_matrix[c][a] as f64 * factor * scale_factor)
-                        as i32;
+                pos_private_matrix[c][a] = crate::math::blast_nint(
+                    pos_private_matrix[c][a] as f64 * factor * scale_factor,
+                ) as i32;
             }
         }
     }
@@ -18709,7 +18692,7 @@ pub fn blast_adjust_scores_with_workspace(
     // `query_length = max(query_num_true, num residues in prob)` since
     // the prob array already encodes the residue distribution. For most
     // callers `query_num_true` equals the window length; only matters
-    // when X-heavy windows reach `choose_matrix_adjust_rule`. Backward-
+    // when X-heavy windows reach `blast_choose_matrix_adjust_rule`. Backward-
     // compatible default; see [`blast_adjust_scores_with_workspace_v2`]
     // for the explicit-length variant that callers should prefer.
     blast_adjust_scores_with_workspace_v2(
@@ -18733,7 +18716,7 @@ pub fn blast_adjust_scores_with_workspace(
 /// blast-rs: `Blast_AdjustScores` adapter with explicit
 /// `queryLength`/`subjectLength` separate from `numTrueAminoAcids`. The
 /// naming: Version suffix distinguishes this Rust adapter from the compatibility entry point.
-/// length parameters are used for [`choose_matrix_adjust_rule`] (which
+/// length parameters are used for [`blast_choose_matrix_adjust_rule`] (which
 /// applies the high-pair/length-ratio thresholds against the full
 /// window length); the `num_true` counts are used for the
 /// pseudocount-weighted matrix optimization path.
@@ -18770,18 +18753,19 @@ pub fn blast_adjust_scores_with_workspace_v2(
             CompoAdjustMode::CompositionBasedStats
         )
     {
-        crate::compo_mode_condition::gather_letter_probs(query_prob, &mut permuted_query);
-        crate::compo_mode_condition::gather_letter_probs(subject_prob, &mut permuted_subject);
+        crate::compo_mode_condition::s_gather_letter_probs(query_prob, &mut permuted_query);
+        crate::compo_mode_condition::s_gather_letter_probs(subject_prob, &mut permuted_subject);
     }
 
     if composition_test_index > 0 {
-        *pvalue_for_this_pair = crate::composition::composition_pvalue({
-            let (mut lambda_for_pair, iter_count) = crate::composition::calc_lambda_full_precision(
-                &crate::composition::BLOS62,
-                &permuted_query,
-                &permuted_subject,
-                crate::composition::COMPO_NUM_TRUE_AA,
-            );
+        *pvalue_for_this_pair = crate::composition::blast_composition_pvalue({
+            let (mut lambda_for_pair, iter_count) =
+                crate::composition::blast_calc_lambda_full_precision(
+                    &crate::composition::BLOS62,
+                    &permuted_query,
+                    &permuted_subject,
+                    crate::composition::COMPO_NUM_TRUE_AA,
+                );
             if iter_count >= crate::composition::LAMBDA_ITERATION_LIMIT {
                 lambda_for_pair = crate::composition::COMPO_MIN_LAMBDA;
             }
@@ -18804,7 +18788,7 @@ pub fn blast_adjust_scores_with_workspace_v2(
     ) {
         MatrixAdjustRule::ScaleOldMatrix
     } else {
-        crate::compo_mode_condition::choose_matrix_adjust_rule(
+        crate::compo_mode_condition::blast_choose_matrix_adjust_rule(
             query_length,
             subject_length,
             &permuted_query,
@@ -18816,7 +18800,7 @@ pub fn blast_adjust_scores_with_workspace_v2(
     if matrix_adjust_rule != MatrixAdjustRule::ScaleOldMatrix {
         let workspace = workspace.ok_or(-1)?;
         let start_matrix = square_matrix_from_vec(&matrix_info.matrix).ok_or(-1)?;
-        let status = crate::composition::composition_matrix_adj(
+        let status = crate::composition::blast_composition_matrix_adj(
             matrix,
             matrix_info.cols.max(0) as usize,
             matrix_adjust_rule,
@@ -19246,8 +19230,8 @@ pub fn rescale_search(
             kbp.log_k = kbp.k.ln();
         }
     }
-    scoring.gap_open = crate::math::nint(scoring.gap_open as f64 * scale_factor) as i32;
-    scoring.gap_extend = crate::math::nint(scoring.gap_extend as f64 * scale_factor) as i32;
+    scoring.gap_open = crate::math::blast_nint(scoring.gap_open as f64 * scale_factor) as i32;
+    scoring.gap_extend = crate::math::blast_nint(scoring.gap_extend as f64 * scale_factor) as i32;
     scoring.scale_factor = scale_factor;
 }
 
@@ -19354,11 +19338,8 @@ pub fn s_sequence_get_translated_range(
         -3 => 5,
         _ => return Err("invalid translated subject frame"),
     };
-    let (translation, offsets) = crate::util::blast_get_all_translations_ncbi4na(
-        source_ncbi4na,
-        source_ncbi4na.len(),
-        genetic_code,
-    );
+    let (translation, offsets) =
+        crate::util::blast_get_all_translations(source_ncbi4na, source_ncbi4na.len(), genetic_code);
     let frame_begin = (offsets[context] + 1) as usize;
     let frame_end = offsets[context + 1] as usize;
     Ok(sequence_get_protein_range(
@@ -19487,7 +19468,8 @@ pub fn s_matrix_info_init(
 
     // C: `Blast_Int4MatrixFromFreq(self->startMatrix, self->cols,
     //                              self->startFreqRatios, self->ungappedLambda);`
-    let int_mat = crate::composition::matrix_from_freq_ratios(self_.ungapped_lambda, &freq_ratios);
+    let int_mat =
+        crate::composition::blast_int4_matrix_from_freq(self_.ungapped_lambda, &freq_ratios);
     self_.matrix = int_mat.iter().map(|row| row.to_vec()).collect();
     self_.rows = crate::matrix::AA_SIZE as i32;
     self_.cols = crate::matrix::AA_SIZE as i32;
@@ -19922,7 +19904,7 @@ pub fn fill_results_from_compo_heaps(heaps: &mut [BlastCompoHeap]) -> crate::hsp
 ///     (copied into an owned `BlastCompoSequenceData`)
 ///   - `eff_search_space` from the context's `eff_searchsp`
 ///   - `words` via [`create_word_array`] (1-1 with C's `s_CreateWordArray`)
-///   - `composition` via `crate::composition::read_composition` (1-1 with
+///   - `composition` via `crate::composition::blast_read_aa_composition` (1-1 with
 ///     C's `Blast_ReadAaComposition`); skipped when `skip == true`.
 ///
 /// NCBI uses `last_context + 1` as the array size; our `QueryInfo`
@@ -19947,8 +19929,10 @@ pub fn get_query_info(
             let composition = if skip {
                 Vec::new()
             } else {
-                let (probs, _num_true) =
-                    crate::composition::read_composition(&seq_slice, crate::matrix::AA_SIZE);
+                let (probs, _num_true) = crate::composition::blast_read_aa_composition(
+                    &seq_slice,
+                    crate::matrix::AA_SIZE,
+                );
                 probs
             };
             BlastCompoQueryInfo {
@@ -20161,7 +20145,7 @@ pub fn compute_num_identities_translated_subject(
     matrix: Option<&[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]>,
     genetic_code: &[u8; 64],
 ) -> Result<(), &'static str> {
-    let (translation, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+    let (translation, offsets) = crate::util::blast_get_all_translations(
         subject_ncbi4na,
         subject_ncbi4na.len(),
         genetic_code,
@@ -20193,7 +20177,7 @@ pub fn compute_num_identities_translated_subject(
 /// NCBI has these pieces available through `BlastScoreBlk`,
 /// `BlastQueryInfo`, and hit-saving parameters. Keeping them explicit here
 /// makes the Rust call site choose whether it is truly ready to take the
-/// `BLAST_LinkHsps` path.
+/// `blast_link_hsps` path.
 pub struct HitlistLinkContext<'a> {
     pub query_info: &'a crate::queryinfo::QueryInfo,
     pub score_block: &'a crate::link_hsps::LinkScoreBlock,
@@ -20204,7 +20188,7 @@ pub struct HitlistLinkContext<'a> {
 /// NCBI: s_HitlistEvaluateAndPurge (blast_kappa.c:394).
 ///
 /// Assigns final e-values and prunes the hit list. The full C function
-/// dispatches between `BLAST_LinkHsps` (sum-statistics branch) and
+/// dispatches between `blast_link_hsps` (sum-statistics branch) and
 /// `Blast_HSPListGetEvalues` (single-HSP branch), then applies
 /// `s_AdjustEvaluesForComposition` for blastp/blastx, then drops HSPs
 /// above the evalue threshold and reports `(best_score, best_evalue)`.
@@ -20284,7 +20268,7 @@ pub fn s_hitlist_evaluate_and_purge(
 }
 
 /// blast-rs: Bridge from the kappa `HspList` representation to the already-ported
-/// `BLAST_LinkHsps` dispatcher and back; not a direct NCBI C port.
+/// `blast_link_hsps` dispatcher and back; not a direct NCBI C port.
 pub fn blast_link_hsps_for_kappa(
     hsp_list: &mut HspList,
     program_number: ProgramType,
@@ -20350,7 +20334,7 @@ pub fn blast_link_hsps_for_kappa(
         best_evalue: hsp_list.best_evalue,
     };
 
-    let status = crate::link_hsps::BLAST_LinkHsps(
+    let status = crate::link_hsps::blast_link_hsps(
         program_number,
         &mut link_list,
         query_info,
@@ -20484,8 +20468,8 @@ pub fn blast_hsp_list_get_evalues(
     }
 
     let is_rps = crate::program::blast_program_is_rps_blast(program_number);
-    let gap_decay_divisor = if gap_decay_rate != 0.0 {
-        crate::stat::gap_decay_divisor(gap_decay_rate, 1)
+    let blast_gap_decay_divisor = if gap_decay_rate != 0.0 {
+        crate::stat::blast_gap_decay_divisor(gap_decay_rate, 1)
     } else {
         1.0
     };
@@ -20539,7 +20523,7 @@ pub fn blast_hsp_list_get_evalues(
             let search_space = context_info.eff_searchsp as f64;
             scaled_kbp.raw_to_evalue(score, search_space)
         };
-        hsp.evalue /= gap_decay_divisor;
+        hsp.evalue /= blast_gap_decay_divisor;
 
         if hsp.evalue < best_evalue {
             best_evalue = hsp.evalue;
@@ -20585,9 +20569,10 @@ pub fn adjust_evalues_for_composition(
         hsp.evalue *= db_to_sequence_scale;
         // Combine with composition p-value (Fisher's method) and convert
         // back to e-value, then rescale to DB-scale.
-        let align_p_value = crate::composition::karlin_e_to_p(hsp.evalue);
-        let combined_p_value = crate::composition::overall_p_value(comp_p_value, align_p_value);
-        hsp.evalue = crate::composition::karlin_p_to_e_compo(combined_p_value);
+        let align_p_value = crate::composition::blast_karlin_eto_p(hsp.evalue);
+        let combined_p_value =
+            crate::composition::blast_overall_p_value(comp_p_value, align_p_value);
+        hsp.evalue = crate::composition::blast_karlin_pto_e(combined_p_value);
         hsp.evalue /= db_to_sequence_scale;
 
         if hsp.evalue < best_evalue {
@@ -20875,9 +20860,9 @@ pub fn s_calc_lambda(probs: &[f64], min_score: i32, max_score: i32, lambda0: f64
         avg += (min_score + i as i32) as f64 * probs[i];
     }
     let _ = avg; // C populates `freq.score_avg` but `Blast_KarlinLambdaNR`
-                 // recomputes it internally; our karlin_lambda_nr does the
+                 // recomputes it internally; our blast_karlin_lambda_nr does the
                  // same.
-    crate::composition::karlin_lambda_nr_pub(probs, min_score, max_score, lambda0)
+    crate::composition::blast_karlin_lambda_nr(probs, min_score, max_score, lambda0)
 }
 
 #[cfg(test)]

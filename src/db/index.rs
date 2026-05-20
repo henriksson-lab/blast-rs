@@ -485,10 +485,10 @@ fn alias_base_and_volume_start_for_member(
 
     let alias_name = &name[..name.len() - 3];
     let alias_base = base_path.with_file_name(alias_name);
-    let alias_path = if alias_base.with_extension("nal").exists() {
-        alias_base.with_extension("nal")
-    } else if alias_base.with_extension("pal").exists() {
-        alias_base.with_extension("pal")
+    let alias_path = if db_path_with_ext(&alias_base, "nal").exists() {
+        db_path_with_ext(&alias_base, "nal")
+    } else if db_path_with_ext(&alias_base, "pal").exists() {
+        db_path_with_ext(&alias_base, "pal")
     } else {
         return Ok(None);
     };
@@ -556,7 +556,11 @@ fn parse_oid_bitmap(path: &Path) -> io::Result<Vec<bool>> {
             "OIDLIST file is too small",
         ));
     }
-    let bit_count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let last_oid = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let bit_count = last_oid
+        .checked_add(1)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "OIDLIST last OID overflow"))?
+        as usize;
     let needed = 4 + bit_count.div_ceil(8);
     if data.len() < needed {
         return Err(io::Error::new(
@@ -701,6 +705,22 @@ impl TaxNameDb {
         for _ in 0..4 {
             let _ = cur.read_u32::<BigEndian>()?;
         }
+        let expected_len = 24usize
+            .checked_add(count.checked_mul(8).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "taxdb.bti entry count overflow")
+            })?)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "taxdb.bti entry length overflow",
+                )
+            })?;
+        if bti_data.len() < expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "taxdb.bti truncated index entries",
+            ));
+        }
         // Read index entries: (taxid, offset) pairs, each 8 bytes, big-endian
         let mut index = Vec::with_capacity(count);
         for _ in 0..count {
@@ -735,6 +755,9 @@ impl TaxNameDb {
         let s = std::str::from_utf8(record).ok()?;
         let s = s.trim_end_matches('\0');
         let fields: Vec<&str> = s.split('\t').collect();
+        if fields.len() < 4 || fields[3].is_empty() {
+            return None;
+        }
         Some(TaxInfo {
             scientific_name: fields.first().unwrap_or(&"").to_string(),
             common_name: fields.get(1).unwrap_or(&"").to_string(),
@@ -789,27 +812,33 @@ impl BlastDb {
     /// Open a BLAST database from the given base path (without extension).
     /// Automatically detects nucleotide vs protein.
     pub fn open(base_path: &Path) -> io::Result<Self> {
-        // Try nucleotide first, then protein
-        let db_type = if db_path_with_ext(base_path, "nin").exists() {
-            DbType::Nucleotide
-        } else if db_path_with_ext(base_path, "pin").exists() {
-            DbType::Protein
-        } else if base_path.with_extension("nal").exists()
-            || base_path.with_extension("pal").exists()
+        // NCBI gives alias files precedence over physical volumes with the
+        // same base so alias filters/DBLIST redirection are honored.
+        if db_path_with_ext(base_path, "nal").exists()
+            || db_path_with_ext(base_path, "pal").exists()
         {
-            let alias_ext = if base_path.with_extension("nal").exists() {
+            let alias_ext = if db_path_with_ext(base_path, "nal").exists() {
                 "nal"
             } else {
                 "pal"
             };
-            let alias = crate::db::alias::parse_alias_file(&base_path.with_extension(alias_ext))?;
+            let alias =
+                crate::db::alias::parse_alias_file(&db_path_with_ext(base_path, alias_ext))?;
             // Surface any unsupported-filter fields (MEMB_BIT, GILIST, TILIST,
-            // SILIST, TAXIDLIST) to stderr so the user knows they are parsed
-            // but not applied. Silent on common/well-supported alias fields.
+            // SEQIDLIST, TAXIDLIST) to stderr so the user knows they are
+            // parsed but not applied. Silent on common/well-supported alias
+            // fields.
             for w in alias.unsupported_filter_warnings() {
                 eprintln!("{}", w);
             }
             return Self::open_alias(base_path, alias);
+        }
+
+        // Try nucleotide first, then protein.
+        let db_type = if db_path_with_ext(base_path, "nin").exists() {
+            DbType::Nucleotide
+        } else if db_path_with_ext(base_path, "pin").exists() {
+            DbType::Protein
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -3304,6 +3333,43 @@ fn test_tax_name_db() {
     assert_eq!(info2.common_name, "human");
 
     assert!(tdb.get_info(99999).is_none()); // not found
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_oid_bitmap_header_is_last_oid() {
+    let dir = std::env::temp_dir().join("blast_oid_bitmap_last_oid_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("mask.msk");
+    std::fs::write(&path, [0, 0, 0, 3, 0x90]).unwrap();
+
+    let bits = parse_oid_bitmap(&path).unwrap();
+    assert_eq!(bits, vec![true, false, false, true]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_tax_name_db_rejects_truncated_index_and_malformed_records() {
+    let dir = std::env::temp_dir().join("blast_taxdb_invalid_test");
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("taxdb.btd"), b"Only scientific\0").unwrap();
+
+    let mut bti = Vec::new();
+    bti.extend_from_slice(&0x8739u32.to_be_bytes());
+    bti.extend_from_slice(&1u32.to_be_bytes());
+    for _ in 0..4 {
+        bti.extend_from_slice(&0u32.to_be_bytes());
+    }
+    std::fs::write(dir.join("taxdb.bti"), &bti).unwrap();
+    assert!(TaxNameDb::open(&dir).is_err());
+
+    bti.extend_from_slice(&123i32.to_be_bytes());
+    bti.extend_from_slice(&0u32.to_be_bytes());
+    std::fs::write(dir.join("taxdb.bti"), &bti).unwrap();
+    let tdb = TaxNameDb::open(&dir).unwrap();
+    assert!(tdb.get_info(123).is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

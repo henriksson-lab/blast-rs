@@ -1,7 +1,8 @@
-use blast_rs::db::BlastDb;
+use blast_rs::db::{BlastDb, DbType};
 use blast_rs::search::decode_packed_ncbi2na_with_ambiguity;
 use std::path::PathBuf;
 
+/// blast-rs: diagnostic DB-window renderer; not a direct NCBI C port.
 fn render_raw_window(packed: &[u8], start: usize, end: usize) -> String {
     (start..end)
         .map(|pos| {
@@ -12,6 +13,7 @@ fn render_raw_window(packed: &[u8], start: usize, end: usize) -> String {
         .collect()
 }
 
+/// blast-rs: diagnostic decoded-window renderer; not a direct NCBI C port.
 fn render_decoded_window(decoded: &[u8], start: usize, end: usize) -> String {
     decoded[start..end]
         .iter()
@@ -44,18 +46,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|&oid| db.get_accession(oid).as_deref() == Some(accession.as_ref()))
         .ok_or("accession not found")?;
 
-    let packed = db.get_sequence(oid);
+    let sequence = db.get_sequence(oid);
     let seq_len = db.get_seq_len(oid) as usize;
     let start = start_1based.saturating_sub(1);
     let end = (start + len).min(seq_len);
 
     println!("oid={oid} seq_len={seq_len} start0={start} end0={end}");
-    println!("raw={}", render_raw_window(packed, start, end));
+    if db.db_type == DbType::Protein {
+        println!(
+            "protein={}",
+            blast_rs::encoding::ncbistdaa_to_aminoacid_string(&sequence[start..end])
+        );
+        return Ok(());
+    }
+
+    println!("raw={}", render_raw_window(sequence, start, end));
 
     match db.get_ambiguity_data(oid) {
         Some(amb) => {
             println!("ambiguity_len={}", amb.len());
-            let decoded = decode_packed_ncbi2na_with_ambiguity(packed, seq_len, amb);
+            let decoded = decode_packed_ncbi2na_with_ambiguity(sequence, seq_len, amb);
             println!("decoded={}", render_decoded_window(&decoded, start, end));
         }
         None => {

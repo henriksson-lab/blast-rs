@@ -30,8 +30,8 @@ use crate::stat::{
     blast_gumbel_blk_calc, blast_karlin_blk_gapped_calc, blast_karlin_blk_nucl_gapped_calc,
     blast_score_blk_kbp_ideal_calc, blast_score_blk_kbp_ungapped_calc, blast_score_blk_matrix_fill,
     blast_score_blk_new, blast_score_freq_new, blast_score_set_ambig_res,
-    compute_length_adjustment_exact, lookup_matrix_params, lookup_matrix_ungapped_alpha_beta,
-    nucl_alpha_beta, BlastScoreBlk, KarlinBlk, BLAST_GAP_EXTN_MEGABLAST, BLAST_GAP_OPEN_MEGABLAST,
+    compute_length_adjustment_exact, scaled_nucl_alpha_beta, BlastScoreBlk, KarlinBlk,
+    BLAST_GAP_EXTN_MEGABLAST, BLAST_GAP_OPEN_MEGABLAST,
 };
 use crate::util::{BlastSequenceBlk, SSeqRange};
 
@@ -40,7 +40,7 @@ pub const BLAST_REWARD: i32 = 1;
 /// `BLAST_PENALTY` (`blast_options.h:151`).
 pub const BLAST_PENALTY: i32 = -3;
 
-/// Port of NCBI `BlastSetup_Validate` (`blast_setup.c:535`).
+/// NCBI: BlastSetup_Validate (blast_setup.c:535).
 ///
 /// C asserts that per-context statistics pointers are NULL for invalid
 /// contexts. Rust stores most Karlin blocks by value, so only `sfp` keeps that
@@ -66,7 +66,7 @@ pub fn blast_setup_validate(query_info: &QueryInfo, score_blk: Option<&BlastScor
     }
 }
 
-/// Port of NCBI `Blast_ScoreBlkMatrixInit` (`blast_setup.c:330`).
+/// NCBI: Blast_ScoreBlkMatrixInit (blast_setup.c:330).
 pub fn blast_score_blk_matrix_init(
     program_number: ProgramType,
     scoring_options: Option<&ScoringOptions>,
@@ -117,7 +117,7 @@ pub fn blast_score_blk_matrix_init(
     blast_score_blk_matrix_fill(sbp)
 }
 
-/// Port of NCBI `Blast_ScoreBlkKbpGappedCalc` (`blast_setup.c:41`).
+/// NCBI: Blast_ScoreBlkKbpGappedCalc (blast_setup.c:41).
 pub fn blast_score_blk_kbp_gapped_calc(
     sbp: Option<&mut BlastScoreBlk>,
     scoring_options: Option<&ScoringOptions>,
@@ -202,6 +202,8 @@ pub fn blast_score_blk_kbp_gapped_calc(
 
 type PhiKbpResult = Result<(f64, f64), i16>;
 
+/// blast-rs: PHI-BLAST matrix/gap lookup table extracted from
+/// `s_PHIScoreBlkFill`; not a standalone NCBI C function.
 fn phi_blast_kbp_values(matrix: &str, gap_open: i32, gap_extend: i32) -> PhiKbpResult {
     let matrix = matrix.to_ascii_uppercase();
     let values = match matrix.as_str() {
@@ -261,7 +263,7 @@ fn phi_blast_kbp_values(matrix: &str, gap_open: i32, gap_extend: i32) -> PhiKbpR
     values.ok_or(-1)
 }
 
-/// Port of NCBI internal `s_PHIScoreBlkFill` (`blast_setup.c:129`).
+/// NCBI: s_PHIScoreBlkFill (blast_setup.c:129).
 pub fn s_phi_score_blk_fill(
     sbp: Option<&mut BlastScoreBlk>,
     options: Option<&ScoringOptions>,
@@ -322,7 +324,7 @@ pub fn s_phi_score_blk_fill(
     0
 }
 
-/// Port of NCBI internal `s_JumperScoreBlkFill` (`blast_setup.c:386`).
+/// NCBI: s_JumperScoreBlkFill (blast_setup.c:386).
 pub fn s_jumper_score_blk_fill(
     sbp: Option<&mut BlastScoreBlk>,
     query_info: Option<&QueryInfo>,
@@ -390,7 +392,7 @@ pub fn s_jumper_score_blk_fill(
     0
 }
 
-/// Port of NCBI `BlastSetup_ScoreBlkInit` (`blast_setup.c:456`).
+/// NCBI: BlastSetup_ScoreBlkInit (blast_setup.c:456).
 pub fn blast_setup_score_blk_init(
     query_blk: Option<&BlastSequenceBlk>,
     query_info: Option<&mut QueryInfo>,
@@ -464,7 +466,7 @@ pub fn blast_setup_score_blk_init(
     status
 }
 
-/// Port of NCBI `BLAST_MainSetUp` (`blast_setup.c:563`).
+/// NCBI: BLAST_MainSetUp (blast_setup.c:563).
 ///
 /// Rust passes `translated_dna_lengths` explicitly for the optional
 /// protein-to-DNA mask conversion because `QueryInfo` stores translated context
@@ -573,8 +575,8 @@ pub fn blast_main_set_up(
     0
 }
 
-/// Port of `s_GetEffectiveSearchSpaceForContext` (`blast_setup.c:676`).
-pub fn get_effective_search_space_for_context(
+/// NCBI: s_GetEffectiveSearchSpaceForContext (blast_setup.c:676).
+pub fn s_get_effective_search_space_for_context(
     eff_len_options: &EffectiveLengthsOptions,
     context_index: usize,
 ) -> i64 {
@@ -590,7 +592,7 @@ pub fn get_effective_search_space_for_context(
     }
 }
 
-/// Port of NCBI `BLAST_GetSubjectTotals` (`blast_setup.c:853`).
+/// NCBI: BLAST_GetSubjectTotals (blast_setup.c:853).
 pub fn blast_get_subject_totals(
     seqsrc: Option<&dyn BlastSeqSource>,
     total_length: Option<&mut i64>,
@@ -629,10 +631,12 @@ pub fn blast_get_subject_totals(
     }
 }
 
-/// Port of `BlastEffectiveLengthsOptions_IsSearchSpaceSet`
-/// (`blast_options.c:1019`). Returns `true` iff any
-/// `searchsp_eff[0..num_searchspaces]` entry is non-zero.
-pub fn is_search_space_set(options: &EffectiveLengthsOptions) -> bool {
+/// NCBI: BlastEffectiveLengthsOptions_IsSearchSpaceSet (blast_options.c:1019).
+///
+/// Returns `true` iff any `searchsp_eff[0..num_searchspaces]` entry is non-zero.
+pub fn blast_effective_lengths_options_is_search_space_set(
+    options: &EffectiveLengthsOptions,
+) -> bool {
     if options.searchsp_eff.is_empty() {
         return false;
     }
@@ -643,8 +647,10 @@ pub fn is_search_space_set(options: &EffectiveLengthsOptions) -> bool {
         .any(|&s| s != 0)
 }
 
-/// Port of `BLAST_GetAlphaBeta` (`blast_stat.c:3094`) for supported protein
-/// matrices. Used by `blast_calc_eff_lengths` for protein-on-protein scoring.
+/// NCBI: BLAST_GetAlphaBeta (blast_stat.c:3094).
+///
+/// Rust currently uses the supported protein-matrix subset needed by
+/// `blast_calc_eff_lengths`.
 fn blast_get_alpha_beta(
     matrix_name: &str,
     gap_open: i32,
@@ -652,21 +658,23 @@ fn blast_get_alpha_beta(
     gapped: bool,
     kbp_ungapped: &KarlinBlk,
 ) -> (f64, f64) {
-    if !gapped {
-        // Ungapped path in NCBI uses `alpha_arr[0]` / `beta_arr[0]` for
-        // the matrix; if no entry exists fall back to Lambda/H.
-        if let Some((alpha, beta)) = lookup_matrix_ungapped_alpha_beta(matrix_name) {
-            return (alpha, beta);
-        }
-        return (kbp_ungapped.lambda / kbp_ungapped.h, 0.0);
-    }
-    if let Some(p) = lookup_matrix_params(matrix_name, gap_open, gap_extend) {
-        return (p.alpha, p.beta);
-    }
-    (kbp_ungapped.lambda / kbp_ungapped.h, 0.0)
+    let mut alpha = kbp_ungapped.lambda / kbp_ungapped.h;
+    let mut beta = 0.0;
+    crate::stat::blast_get_alpha_beta(
+        Some(matrix_name),
+        &mut alpha,
+        &mut beta,
+        gapped,
+        gap_open,
+        gap_extend,
+        Some(kbp_ungapped),
+    );
+    (alpha, beta)
 }
 
-/// 1-1 port of NCBI `BLAST_CalcEffLengths` (`blast_setup.c:699`). Updates
+/// NCBI: BLAST_CalcEffLengths (blast_setup.c:699).
+///
+/// Updates
 /// `query_info` per-context `eff_searchsp` and `length_adjustment` in
 /// place. Returns 0 on success, -1 if mandatory inputs are missing — the
 /// same error code NCBI uses.
@@ -677,7 +685,7 @@ fn blast_get_alpha_beta(
 ///   `sbp->kbp` otherwise (matching the C `kbp_ptr` selection at
 ///   `blast_setup.c:768`).
 /// - `kbp_std_array`: per-context **ungapped** Karlin block array
-///   (`sbp->kbp_std`). Used only by `nucl_alpha_beta` /
+///   (`sbp->kbp_std`). Used only by `scaled_nucl_alpha_beta` /
 ///   `blast_get_alpha_beta` for the alpha/beta lookup.
 /// - `matrix_name`: protein matrix name. Ignored for nucleotide / mapping
 ///   / phi programs.
@@ -698,7 +706,7 @@ pub fn blast_calc_eff_lengths(
         eff_len_params.real_db_length
     };
 
-    if db_length == 0 && !is_search_space_set(eff_len_options) {
+    if db_length == 0 && !blast_effective_lengths_options_is_search_space_set(eff_len_options) {
         return 0;
     }
 
@@ -729,7 +737,7 @@ pub fn blast_calc_eff_lengths(
 
     for (index, ctx) in query_info.contexts.iter_mut().enumerate() {
         let mut effective_search_space =
-            get_effective_search_space_for_context(eff_len_options, index);
+            s_get_effective_search_space_for_context(eff_len_options, index);
 
         let kbp = match kbp_array.get(index) {
             Some(k) => k,
@@ -762,7 +770,7 @@ pub fn blast_calc_eff_lengths(
             } else {
                 (scoring_options.reward, scoring_options.penalty)
             };
-            nucl_alpha_beta(
+            scaled_nucl_alpha_beta(
                 rew,
                 pen,
                 scoring_options.gap_open,
@@ -842,7 +850,7 @@ pub fn blast_calc_eff_lengths_c(
     )
 }
 
-/// Port of NCBI `BLAST_OneSubjectUpdateParameters` (`blast_setup.c:1001`).
+/// NCBI: BLAST_OneSubjectUpdateParameters (blast_setup.c:1001).
 pub fn blast_one_subject_update_parameters(
     program_number: ProgramType,
     subject_length: u32,
@@ -911,7 +919,7 @@ pub fn blast_one_subject_update_parameters(
     status as i16
 }
 
-/// Port of NCBI `Blast_SetPHIPatternInfo` (`blast_setup.c:1065`).
+/// NCBI: Blast_SetPHIPatternInfo (blast_setup.c:1065).
 ///
 /// Rust keeps PHI pattern metadata separate from [`QueryInfo`], so this
 /// returns the allocated [`SphiQueryInfo`] through `pattern_info_out` while
@@ -1043,6 +1051,23 @@ mod tests {
     }
 
     #[test]
+    fn local_blast_get_alpha_beta_uses_best_gapped_matrix_row() {
+        let kbp = KarlinBlk {
+            lambda: 0.318,
+            k: 0.13,
+            log_k: 0.13_f64.ln(),
+            h: 0.4,
+            round_down: false,
+        };
+        let fallback_alpha = kbp.lambda / kbp.h;
+
+        let (alpha, beta) = blast_get_alpha_beta("BLOSUM62", 0, 0, true, &kbp);
+
+        assert_ne!(alpha, fallback_alpha);
+        assert_ne!(beta, 0.0);
+    }
+
+    #[test]
     fn setup_validate_reports_any_valid_context() {
         let mut query_info = QueryInfo {
             num_queries: 2,
@@ -1146,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn score_blk_kbp_gapped_calc_fills_valid_contexts_and_alias_vec() {
+    fn score_blk_kbp_gapped_calc_fills_valid_contexts_and_kbp_gap_vec() {
         let mut query_info = QueryInfo {
             num_queries: 2,
             contexts: vec![

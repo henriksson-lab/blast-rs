@@ -75,8 +75,8 @@ pub fn mbspace_new(num_space_arrays: i32) -> SMBSpace {
     }
 }
 
-/// Port of NCBI static `s_RefreshMBSpace`.
-pub fn s_refresh_mbspace(space: Option<&mut SMBSpace>) {
+/// NCBI: s_RefreshMBSpace (greedy_align.c).
+pub fn s_refresh_mb_space(space: Option<&mut SMBSpace>) {
     let Some(space) = space else {
         return;
     };
@@ -91,8 +91,8 @@ pub fn mbspace_free(space: &mut Option<SMBSpace>) {
     *space = None;
 }
 
-/// Port of NCBI static `s_GetMBSpace`.
-pub fn s_get_mbspace(pool: Option<&mut SMBSpace>, num_alloc: i32) -> Option<&mut [SGreedyOffset]> {
+/// NCBI: s_GetMBSpace (greedy_align.c).
+pub fn s_get_mb_space(pool: Option<&mut SMBSpace>, num_alloc: i32) -> Option<&mut [SGreedyOffset]> {
     let pool = pool?;
     if num_alloc < 0 {
         return None;
@@ -132,11 +132,12 @@ pub struct SGreedyAlignMem {
     pub space: SMBSpace,
 }
 
-fn blast_gdb3_values(a: &mut i32, b: &mut i32, c: &mut i32) -> i32 {
+// NCBI: BLAST_Gdb3 (ncbi_math.c:422).
+fn blast_gdb3(a: &mut i32, b: &mut i32, c: &mut i32) -> i32 {
     let g = if *b == 0 {
-        crate::math::gcd(*a, *c)
+        crate::math::blast_gcd(*a, *c)
     } else {
-        crate::math::gcd(*a, crate::math::gcd(*b, *c))
+        crate::math::blast_gcd(*a, crate::math::blast_gcd(*b, *c))
     };
     if g > 1 {
         *a /= g;
@@ -146,7 +147,7 @@ fn blast_gdb3_values(a: &mut i32, b: &mut i32, c: &mut i32) -> i32 {
     g
 }
 
-/// Port of NCBI static `s_BlastGreedyAlignMemAlloc` (`blast_gapalign.c:172`).
+/// NCBI: s_BlastGreedyAlignMemAlloc (blast_gapalign.c:172).
 ///
 /// The C function receives score/extension parameter structs. This Rust port
 /// takes the scalar fields used by the allocation logic and materializes the
@@ -212,15 +213,16 @@ pub fn s_blast_greedy_align_mem_alloc(
         max_score_max_d = max_d * ge_cost;
         let scaled_max_d = (max_d * ge_cost).max(0) as usize;
         let max_cost = mis_cost.max(gap_open_cost + ge_cost).max(0) as usize;
-        let gd = blast_gdb3_values(&mut mis_cost, &mut gap_open_cost, &mut ge_cost);
+        let gd = blast_gdb3(&mut mis_cost, &mut gap_open_cost, &mut ge_cost);
         if gd <= 0 {
             return None;
         }
         let d_diff = (xdrop + reward / 2) / gd + 1;
         mem.diag_bounds = vec![0; 2 * (scaled_max_d + 1 + max_cost)];
+        let affine_rows = scaled_max_d.max(max_cost) + 2;
         mem.last_seq2_off_affine = Some(vec![
             vec![SGreedyOffset::default(); 2 * max_d_1 + 6];
-            max_cost + 1
+            affine_rows
         ]);
         d_diff
     };
@@ -300,7 +302,10 @@ fn initial_greedy_max_dist(max_subject_length: usize) -> usize {
     GREEDY_MAX_COST.min(max_subject_length / GREEDY_MAX_COST_FRACTION + 1)
 }
 
-fn find_first_mismatch(
+// NCBI: s_FindFirstMismatch (greedy_align.c:315).
+// naming: This helper covers the uncompressed path; packed-subject matching is
+// kept in a separate native helper.
+fn s_find_first_mismatch(
     seq1: &[u8],
     seq2: &[u8],
     len1: usize,
@@ -332,39 +337,8 @@ fn find_first_mismatch(
     seq1_index - start
 }
 
-fn find_first_mismatch_packed(
-    seq1: &[u8],
-    seq2_packed: &[u8],
-    len1: usize,
-    len2: usize,
-    mut seq1_index: usize,
-    mut seq2_index: usize,
-    reverse: bool,
-    rem: usize,
-) -> usize {
-    let start = seq1_index;
-    if reverse {
-        while seq1_index < len1
-            && seq2_index < len2
-            && seq1[len1 - 1 - seq1_index]
-                == crate::encoding::ncbi2na_base_at(seq2_packed, len2 - 1 - seq2_index)
-        {
-            seq1_index += 1;
-            seq2_index += 1;
-        }
-    } else {
-        while seq1_index < len1
-            && seq2_index < len2
-            && seq1[seq1_index] == crate::encoding::ncbi2na_base_at(seq2_packed, seq2_index + rem)
-        {
-            seq1_index += 1;
-            seq2_index += 1;
-        }
-    }
-    seq1_index - start
-}
-
-fn get_next_non_affine_tback(last_seq2_off: &[Vec<i32>], d: usize, diag: usize) -> (usize, i32) {
+// NCBI: s_GetNextNonAffineTback (greedy_align.c:278).
+fn s_get_next_non_affine_tback(last_seq2_off: &[Vec<i32>], d: usize, diag: usize) -> (usize, i32) {
     let left = last_seq2_off[d - 1][diag - 1];
     let same = last_seq2_off[d - 1][diag];
     let right = last_seq2_off[d - 1][diag + 1];
@@ -377,7 +351,8 @@ fn get_next_non_affine_tback(last_seq2_off: &[Vec<i32>], d: usize, diag: usize) 
     }
 }
 
-fn prelim_to_gap_edit_script(
+// NCBI: Blast_PrelimEditBlockToGapEditScript (blast_gapalign.c:2482).
+fn blast_prelim_edit_block_to_gap_edit_script(
     rev_prelim_tback: &PrelimEditBlock,
     fwd_prelim_tback: &PrelimEditBlock,
 ) -> GapEditScript {
@@ -416,6 +391,8 @@ fn prelim_to_gap_edit_script(
     esp
 }
 
+// blast-rs: grow-and-retry wrapper around the local `BLAST_GreedyAlign` port;
+// NCBI allocates the maximum distance before entry instead.
 fn greedy_align_one_side_with_growth(
     query: &[u8],
     subject: &[u8],
@@ -452,7 +429,8 @@ fn greedy_align_one_side_with_growth(
     }
 }
 
-fn greedy_prelim_hsp_from_extensions(
+// blast-rs: small value-builder for the two one-sided greedy extensions.
+fn greedy_alignment_extents_from_extensions(
     q_seed: usize,
     s_seed: usize,
     reward: i32,
@@ -471,14 +449,15 @@ fn greedy_prelim_hsp_from_extensions(
     }
 }
 
-fn merge_greedy_prelim_ops(
+// blast-rs: owns the Rust edit-script merge and final C-shaped gap reduction.
+fn greedy_edit_script_from_extensions(
     left: &GreedySideAlignment,
     right: &GreedySideAlignment,
     query: &[u8],
     subject: &[u8],
     extents: GreedyAlignmentExtents,
 ) -> GapEditScript {
-    let mut merged = prelim_to_gap_edit_script(&left.prelim, &right.prelim);
+    let mut merged = blast_prelim_edit_block_to_gap_edit_script(&left.prelim, &right.prelim);
     s_reduce_gaps(
         &mut merged,
         &query[extents.query_start..extents.query_end],
@@ -487,7 +466,8 @@ fn merge_greedy_prelim_ops(
     merged
 }
 
-fn rebuild_edit_script(esp: &mut GapEditScript) {
+// NCBI: s_RebuildEditScript (blast_gapalign.c:2635).
+fn s_rebuild_edit_script(esp: &mut GapEditScript) {
     let len = esp.ops.len();
     let mut j: isize = -1;
     for i in 0..len {
@@ -525,6 +505,7 @@ fn rebuild_edit_script(esp: &mut GapEditScript) {
     esp.ops.truncate((j + 1).max(0) as usize);
 }
 
+// NCBI: s_UpdateEditScript (blast_gapalign.c:2573).
 fn s_update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
     // 1-1 port of NCBI `s_UpdateEditScript` (`blast_gapalign.c:2573`). The
     // `op_type[op] = Sub` write must precede the `op_type[pos-1] = Del/Ins`
@@ -619,6 +600,7 @@ fn s_update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
     }
 }
 
+// NCBI: s_ReduceGaps (blast_gapalign.c:2687).
 fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
     let (mut q1, mut s1) = (0usize, 0usize);
     let qf = query.len();
@@ -669,7 +651,7 @@ fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
             _ => {}
         }
     }
-    rebuild_edit_script(esp);
+    s_rebuild_edit_script(esp);
 
     let (mut q, mut s) = (0usize, 0usize);
     for i in 0..esp.ops.len() {
@@ -739,9 +721,12 @@ fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
             _ => {}
         }
     }
-    rebuild_edit_script(esp);
+    s_rebuild_edit_script(esp);
 }
 
+// NCBI: BLAST_GreedyAlign (greedy_align.c:348), specialized to one side.
+// naming: This private helper implements one directional half of the C routine;
+// the public `greedy_align` wrapper supplies the full two-sided alignment.
 fn blast_greedy_align_one_side(
     seq1: &[u8],
     seq2: &[u8],
@@ -761,7 +746,7 @@ fn blast_greedy_align_one_side(
     let mut last_seq2_off = vec![vec![INVALID_OFFSET; width]; max_dist + 2];
     let mut max_score = vec![0i32; max_dist + xdrop_offset + 1];
 
-    let index = find_first_mismatch(seq1, seq2, len1, len2, 0, 0, reverse);
+    let index = s_find_first_mismatch(seq1, seq2, len1, len2, 0, 0, reverse);
     let mut seq1_align_len = index;
     let mut seq2_align_len = index;
     let mut seed = GreedySeed {
@@ -816,7 +801,7 @@ fn blast_greedy_align_one_side(
             }
             diag_upper = k;
 
-            let matched = find_first_mismatch(
+            let matched = s_find_first_mismatch(
                 seq1,
                 seq2,
                 len1,
@@ -881,7 +866,7 @@ fn blast_greedy_align_one_side(
     let mut d = best_dist;
     let mut seq2_index = seq2_align_len as i32;
     while d > 0 {
-        let (new_diag, new_seq2_index) = get_next_non_affine_tback(&last_seq2_off, d, best_diag);
+        let (new_diag, new_seq2_index) = s_get_next_non_affine_tback(&last_seq2_off, d, best_diag);
         if new_diag == best_diag {
             ops.add(GapAlignOpType::Sub, seq2_index - new_seq2_index);
         } else if new_diag < best_diag {
@@ -898,206 +883,6 @@ fn blast_greedy_align_one_side(
     ops.add(GapAlignOpType::Sub, last_seq2_off[0][diag_origin].max(0));
 
     Some((best_dist as i32, seq1_align_len, seq2_align_len, ops, seed))
-}
-
-fn blast_greedy_align_one_side_packed_subject(
-    seq1: &[u8],
-    seq2_packed: &[u8],
-    len2: usize,
-    reverse: bool,
-    rem: usize,
-    xdrop_threshold: i32,
-    match_cost: i32,
-    mismatch_cost: i32,
-    max_dist: usize,
-) -> Option<(i32, usize, usize, PrelimEditBlock, GreedySeed)> {
-    let len1 = seq1.len();
-    let diag_origin = max_dist + 2;
-    let width = max_dist * 2 + 6;
-    let xdrop_offset =
-        ((xdrop_threshold + match_cost / 2) / (match_cost + mismatch_cost) + 1).max(1) as usize;
-
-    let mut last_seq2_off = vec![vec![INVALID_OFFSET; width]; max_dist + 2];
-    let mut max_score = vec![0i32; max_dist + xdrop_offset + 1];
-
-    let index = find_first_mismatch_packed(seq1, seq2_packed, len1, len2, 0, 0, reverse, rem);
-    let mut seq1_align_len = index;
-    let mut seq2_align_len = index;
-    let mut seed = GreedySeed {
-        start_q: 0,
-        start_s: 0,
-        match_length: index,
-    };
-    if index == len1 || index == len2 {
-        let mut ops = PrelimEditBlock::default();
-        ops.add(GapAlignOpType::Sub, index as i32);
-        return Some((0, seq1_align_len, seq2_align_len, ops, seed));
-    }
-
-    last_seq2_off[0][diag_origin] = index as i32;
-    max_score[xdrop_offset] = (index as i32) * match_cost;
-
-    let mut best_dist = 0usize;
-    let mut best_diag = 0usize;
-    let mut diag_lower = diag_origin - 1;
-    let mut diag_upper = diag_origin + 1;
-    let mut end1_reached = false;
-    let mut end2_reached = false;
-    let mut converged = false;
-
-    for d in 1..=max_dist {
-        let mut curr_extent = 0i32;
-        let mut curr_seq2_index = 0i32;
-        let mut curr_diag = 0usize;
-        let tmp_diag_lower = diag_lower;
-        let tmp_diag_upper = diag_upper;
-
-        last_seq2_off[d - 1][diag_lower - 1] = INVALID_OFFSET;
-        last_seq2_off[d - 1][diag_lower] = INVALID_OFFSET;
-        last_seq2_off[d - 1][diag_upper] = INVALID_OFFSET;
-        last_seq2_off[d - 1][diag_upper + 1] = INVALID_OFFSET;
-
-        let numerator = max_score[d] + (match_cost + mismatch_cost) * d as i32 - xdrop_threshold;
-        let xdrop_score = ceil_div_i32(numerator, match_cost / 2);
-
-        for k in tmp_diag_lower..=tmp_diag_upper {
-            let mut seq2_index = last_seq2_off[d - 1][k + 1].max(last_seq2_off[d - 1][k]) + 1;
-            seq2_index = seq2_index.max(last_seq2_off[d - 1][k - 1]);
-            let mut seq1_index = seq2_index + k as i32 - diag_origin as i32;
-
-            if seq2_index < 0 || seq1_index + seq2_index < xdrop_score {
-                if k == diag_lower {
-                    diag_lower += 1;
-                } else {
-                    last_seq2_off[d][k] = INVALID_OFFSET;
-                }
-                continue;
-            }
-            diag_upper = k;
-
-            let matched = find_first_mismatch_packed(
-                seq1,
-                seq2_packed,
-                len1,
-                len2,
-                seq1_index as usize,
-                seq2_index as usize,
-                reverse,
-                rem,
-            );
-            if matched > seed.match_length {
-                seed.start_q = seq1_index as usize;
-                seed.start_s = seq2_index as usize;
-                seed.match_length = matched;
-            }
-            seq1_index += matched as i32;
-            seq2_index += matched as i32;
-
-            last_seq2_off[d][k] = seq2_index;
-            if seq1_index + seq2_index > curr_extent {
-                curr_extent = seq1_index + seq2_index;
-                curr_seq2_index = seq2_index;
-                curr_diag = k;
-            }
-
-            if seq2_index as usize == len2 {
-                diag_lower = k + 1;
-                end2_reached = true;
-            }
-            if seq1_index as usize == len1 {
-                diag_upper = k - 1;
-                end1_reached = true;
-            }
-        }
-
-        let curr_score = curr_extent * (match_cost / 2) - d as i32 * (match_cost + mismatch_cost);
-        if curr_score >= max_score[d - 1 + xdrop_offset] {
-            max_score[d + xdrop_offset] = curr_score;
-            best_dist = d;
-            best_diag = curr_diag;
-            seq2_align_len = curr_seq2_index as usize;
-            seq1_align_len = (curr_seq2_index + curr_diag as i32 - diag_origin as i32) as usize;
-        } else {
-            max_score[d + xdrop_offset] = max_score[d - 1 + xdrop_offset];
-        }
-
-        if diag_lower > diag_upper {
-            converged = true;
-            break;
-        }
-        if !end2_reached {
-            diag_lower -= 1;
-        }
-        if !end1_reached {
-            diag_upper += 1;
-        }
-    }
-
-    if !converged {
-        return None;
-    }
-
-    let mut ops = PrelimEditBlock::default();
-    let mut d = best_dist;
-    let mut seq2_index = seq2_align_len as i32;
-    while d > 0 {
-        let (new_diag, new_seq2_index) = get_next_non_affine_tback(&last_seq2_off, d, best_diag);
-        if new_diag == best_diag {
-            ops.add(GapAlignOpType::Sub, seq2_index - new_seq2_index);
-        } else if new_diag < best_diag {
-            ops.add(GapAlignOpType::Sub, seq2_index - new_seq2_index);
-            ops.add(GapAlignOpType::Ins, 1);
-        } else {
-            ops.add(GapAlignOpType::Sub, seq2_index - new_seq2_index - 1);
-            ops.add(GapAlignOpType::Del, 1);
-        }
-        d -= 1;
-        best_diag = new_diag;
-        seq2_index = new_seq2_index;
-    }
-    ops.add(GapAlignOpType::Sub, last_seq2_off[0][diag_origin].max(0));
-
-    Some((best_dist as i32, seq1_align_len, seq2_align_len, ops, seed))
-}
-
-fn greedy_align_one_side_with_growth_packed_subject(
-    query: &[u8],
-    subject_packed: &[u8],
-    subject_len: usize,
-    reverse: bool,
-    rem: usize,
-    scaled_xdrop: i32,
-    scaled_reward: i32,
-    scaled_penalty: i32,
-    initial_max_dist: usize,
-    max_possible_dist: usize,
-) -> Option<GreedySideAlignment> {
-    let mut max_dist = initial_max_dist;
-    loop {
-        if let Some((dist, q_ext, s_ext, prelim, seed)) = blast_greedy_align_one_side_packed_subject(
-            query,
-            subject_packed,
-            subject_len,
-            reverse,
-            rem,
-            scaled_xdrop,
-            scaled_reward,
-            scaled_penalty,
-            max_dist,
-        ) {
-            return Some(GreedySideAlignment {
-                dist,
-                q_ext,
-                s_ext,
-                prelim,
-                seed,
-            });
-        }
-        if max_dist >= max_possible_dist {
-            return None;
-        }
-        max_dist = (max_dist * 2).min(max_possible_dist);
-    }
 }
 
 /// blast-rs: Seeded non-affine greedy alignment helper; not a direct NCBI C
@@ -1151,7 +936,8 @@ pub fn greedy_align_with_seed(
         initial_max_dist,
         max_possible_dist,
     )?;
-    let extents = greedy_prelim_hsp_from_extensions(q_seed, s_seed, reward, penalty, &left, &right);
+    let extents =
+        greedy_alignment_extents_from_extensions(q_seed, s_seed, reward, penalty, &left, &right);
     let (adjusted_seed_q, adjusted_seed_s) = adjusted_greedy_seed(
         q_seed,
         s_seed,
@@ -1162,7 +948,7 @@ pub fn greedy_align_with_seed(
         left.seed,
         right.seed,
     );
-    let merged = merge_greedy_prelim_ops(&left, &right, query, subject, extents);
+    let merged = greedy_edit_script_from_extensions(&left, &right, query, subject, extents);
 
     Some((
         extents.score,
@@ -1176,81 +962,7 @@ pub fn greedy_align_with_seed(
     ))
 }
 
-#[inline(never)]
-pub fn greedy_align_with_seed_packed_subject(
-    query: &[u8],
-    subject_packed: &[u8],
-    subject_len: usize,
-    q_seed: usize,
-    s_seed: usize,
-    reward: i32,
-    penalty: i32,
-    x_dropoff: i32,
-) -> Option<(i32, usize, usize, usize, usize, usize, usize)> {
-    let scaled_reward = if reward % 2 == 1 { reward * 2 } else { reward };
-    let scaled_penalty = if reward % 2 == 1 {
-        -penalty * 2
-    } else {
-        -penalty
-    };
-    let scaled_xdrop = if reward % 2 == 1 {
-        x_dropoff * 2
-    } else {
-        x_dropoff
-    };
-
-    let initial_max_dist = initial_greedy_max_dist(subject_len);
-    let max_possible_dist = query
-        .len()
-        .saturating_add(subject_len)
-        .max(initial_max_dist);
-
-    let right = greedy_align_one_side_with_growth_packed_subject(
-        &query[q_seed..],
-        &subject_packed[s_seed / 4..],
-        subject_len - s_seed,
-        false,
-        s_seed % 4,
-        scaled_xdrop,
-        scaled_reward,
-        scaled_penalty,
-        initial_max_dist,
-        max_possible_dist,
-    )?;
-    let left = greedy_align_one_side_with_growth_packed_subject(
-        &query[..q_seed],
-        subject_packed,
-        s_seed,
-        true,
-        0,
-        scaled_xdrop,
-        scaled_reward,
-        scaled_penalty,
-        initial_max_dist,
-        max_possible_dist,
-    )?;
-    let extents = greedy_prelim_hsp_from_extensions(q_seed, s_seed, reward, penalty, &left, &right);
-    let (adjusted_seed_q, adjusted_seed_s) = adjusted_greedy_seed(
-        q_seed,
-        s_seed,
-        extents.query_start,
-        extents.subject_start,
-        extents.query_end,
-        extents.subject_end,
-        left.seed,
-        right.seed,
-    );
-    Some((
-        extents.score,
-        extents.query_start,
-        extents.query_end,
-        extents.subject_start,
-        extents.subject_end,
-        adjusted_seed_q,
-        adjusted_seed_s,
-    ))
-}
-
+// blast-rs: choose a stable seed inside the merged greedy alignment extents.
 fn adjusted_greedy_seed(
     q_seed: usize,
     s_seed: usize,
@@ -1297,6 +1009,8 @@ fn adjusted_greedy_seed(
     }
 }
 
+/// blast-rs: Rust convenience wrapper that preserves the older tuple return
+/// shape by hiding the adjusted seed returned by `greedy_align_with_seed`.
 pub fn greedy_align(
     query: &[u8],
     subject: &[u8],
@@ -1328,14 +1042,14 @@ mod tests {
         assert_eq!(pool.space_allocated_per_chunk(), vec![MBSPACE_MIN_SPACE]);
 
         {
-            let slice = s_get_mbspace(Some(&mut pool), 2).expect("first allocation");
+            let slice = s_get_mb_space(Some(&mut pool), 2).expect("first allocation");
             assert_eq!(slice.len(), 2);
             slice[0].match_off = 17;
         }
         assert_eq!(pool.space_used_per_chunk(), vec![2]);
 
         {
-            let slice = s_get_mbspace(Some(&mut pool), MBSPACE_MIN_SPACE as i32)
+            let slice = s_get_mb_space(Some(&mut pool), MBSPACE_MIN_SPACE as i32)
                 .expect("spillover allocation");
             assert_eq!(slice.len(), MBSPACE_MIN_SPACE);
             slice[0].insert_off = 9;
@@ -1346,9 +1060,9 @@ mod tests {
         );
         assert_eq!(pool.space_used_per_chunk(), vec![2, MBSPACE_MIN_SPACE]);
 
-        s_refresh_mbspace(Some(&mut pool));
+        s_refresh_mb_space(Some(&mut pool));
         assert_eq!(pool.space_used_per_chunk(), vec![0, 0]);
-        assert!(s_get_mbspace(Some(&mut pool), -1).is_none());
+        assert!(s_get_mb_space(Some(&mut pool), -1).is_none());
 
         let mut slot = Some(pool);
         mbspace_free(&mut slot);
@@ -1379,7 +1093,7 @@ mod tests {
             mem.last_seq2_off_affine
                 .as_ref()
                 .map(|rows| (rows.len(), rows[0].len())),
-            Some((9, 14))
+            Some((14, 14))
         );
         assert_eq!(mem.diag_bounds.len(), 2 * (12 + 1 + 8));
         assert_eq!(mem.max_score.len(), 35);

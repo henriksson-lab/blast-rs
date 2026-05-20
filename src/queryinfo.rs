@@ -135,7 +135,7 @@ impl QueryInfo {
     /// blast-rs: QueryInfo constructor over translation offsets; not a direct
     /// NCBI C port.
     ///
-    /// The six contexts follow NCBI `BLAST_ContextToFrame` order:
+    /// The six contexts follow the translated BLAST frame order:
     /// `+1,+2,+3,-1,-2,-3`. Context offsets point into the flat translation
     /// buffer after the leading NULLB sentinel for each frame.
     pub fn new_translated_query_from_offsets(
@@ -152,7 +152,7 @@ impl QueryInfo {
                     eff_searchsp: 0,
                     length_adjustment: 0,
                     query_index: 0,
-                    frame: crate::util::blast_context_to_frame_blastx(ctx as u32),
+                    frame: crate::util::blast_context_to_frame(ctx as u32),
                     is_valid: query_length > 0,
                     segment_flags: E_NO_SEGMENTS,
                 }
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn test_queryinfo_blastx_six_contexts() {
         let nt = vec![1u8, 8, 4, 4, 2, 8]; // ATGGCT in NCBI4na.
-        let (_buf, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (_buf, offsets) = crate::util::blast_get_all_translations(
             &nt,
             nt.len(),
             &crate::util::STANDARD_GENETIC_CODE,
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn test_queryinfo_blastx_short_sequence_contexts_are_invalid() {
         let nt = vec![1u8, 2]; // AC in NCBI4na; no complete codons.
-        let (_buf, offsets) = crate::util::blast_get_all_translations_ncbi4na(
+        let (_buf, offsets) = crate::util::blast_get_all_translations(
             &nt,
             nt.len(),
             &crate::util::STANDARD_GENETIC_CODE,

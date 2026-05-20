@@ -133,7 +133,7 @@ pub struct SphiQueryInfo {
     pub pattern: Option<String>,
 }
 
-/// Port of NCBI `SPHIQueryInfoNew` (`pattern.c:478`).
+/// NCBI: SPHIQueryInfoNew (`pattern.c:478`).
 pub fn sphi_query_info_new() -> Option<SphiQueryInfo> {
     const MIN_PHI_LOOKUP_SIZE: usize = 8;
     Some(SphiQueryInfo {
@@ -143,7 +143,7 @@ pub fn sphi_query_info_new() -> Option<SphiQueryInfo> {
     })
 }
 
-/// Rust ownership equivalent of NCBI `SPHIQueryInfoFree`.
+/// NCBI: SPHIQueryInfoFree (pattern.c).
 pub fn sphi_query_info_free(mut query_info: Option<SphiQueryInfo>) -> Option<SphiQueryInfo> {
     if let Some(query_info) = query_info.as_mut() {
         query_info.occurrences.clear();
@@ -154,7 +154,7 @@ pub fn sphi_query_info_free(mut query_info: Option<SphiQueryInfo>) -> Option<Sph
     None
 }
 
-/// Port of NCBI `SPHIQueryInfoCopy` (`pattern.c:507`).
+/// NCBI: SPHIQueryInfoCopy (`pattern.c:507`).
 pub fn sphi_query_info_copy(pat_info: Option<&SphiQueryInfo>) -> Option<SphiQueryInfo> {
     let pat_info = pat_info?;
     let mut retval = SphiQueryInfo {
@@ -179,7 +179,8 @@ pub fn sphi_query_info_copy(pat_info: Option<&SphiQueryInfo>) -> Option<SphiQuer
     Some(retval)
 }
 
-fn phi_alphabet_size(is_dna: bool) -> usize {
+/// blast-rs: choose the PHI alphabet size from Rust's explicit sequence kind.
+fn blast_rs_phi_alphabet_size(is_dna: bool) -> usize {
     if is_dna {
         crate::encoding::BLASTNA_SIZE
     } else {
@@ -187,11 +188,8 @@ fn phi_alphabet_size(is_dna: bool) -> usize {
     }
 }
 
-fn phi_all_alphabet_bits(is_dna: bool) -> i32 {
-    (1 << phi_alphabet_size(is_dna)) - 1
-}
-
-fn phi_order(byte: u8, is_dna: bool) -> usize {
+/// blast-rs: map an ASCII pattern byte into the internal alphabet order.
+fn blast_rs_phi_order(byte: u8, is_dna: bool) -> usize {
     let index = (byte as usize) & 0x7f;
     if is_dna {
         crate::encoding::IUPACNA_TO_BLASTNA[index] as usize
@@ -200,19 +198,7 @@ fn phi_order(byte: u8, is_dna: bool) -> usize {
     }
 }
 
-fn phi_default_probabilities(is_dna: bool) -> Vec<f64> {
-    if is_dna {
-        vec![1.0 / crate::encoding::BLASTNA_SIZE as f64; crate::encoding::BLASTNA_SIZE]
-    } else {
-        crate::stat::protein_std_freq_ncbistdaa().to_vec()
-    }
-}
-
-fn ncbi2na_unpack_base(byte: i32, base_index: i32) -> usize {
-    ((byte >> (2 * base_index)) & 3) as usize
-}
-
-/// Port of NCBI `s_FindPrefixAndSuffixPos` (`phi_lookup.c:43`).
+/// NCBI: s_FindPrefixAndSuffixPos (`phi_lookup.c:43`).
 pub fn s_find_prefix_and_suffix_pos(
     s: &[i32],
     mask: i32,
@@ -222,10 +208,11 @@ pub fn s_find_prefix_and_suffix_pos(
 ) {
     let mask_left_plus_one = (mask << 1) + 1;
     for i in 0..PHI_ASCII_SIZE {
-        let a1 = ncbi2na_unpack_base(i as i32, 3);
-        let a2 = ncbi2na_unpack_base(i as i32, 2);
-        let a3 = ncbi2na_unpack_base(i as i32, 1);
-        let a4 = ncbi2na_unpack_base(i as i32, 0);
+        let byte = i as i32;
+        let a1 = ((byte >> 6) & 3) as usize;
+        let a2 = ((byte >> 4) & 3) as usize;
+        let a3 = ((byte >> 2) & 3) as usize;
+        let a4 = (byte & 3) as usize;
         let mut tmp =
             ((s.get(a4).copied().unwrap_or(0) >> 1) | mask) & s.get(a3).copied().unwrap_or(0);
         tmp = ((tmp >> 1) | mask) & s.get(a2).copied().unwrap_or(0);
@@ -240,7 +227,7 @@ pub fn s_find_prefix_and_suffix_pos(
     }
 }
 
-/// Port of NCBI `s_InitDNAPattern` (`phi_lookup.c:82`).
+/// NCBI: s_InitDNAPattern (`phi_lookup.c:82`).
 pub fn s_init_dna_pattern(pattern_blk: &mut PhiPatternSearchBlk) {
     if pattern_blk.flag_pattern_length != PatternType::OneWord {
         let Some(multiword_items) = pattern_blk.multi_word_items.as_mut() else {
@@ -287,7 +274,7 @@ pub fn s_init_dna_pattern(pattern_blk: &mut PhiPatternSearchBlk) {
     }
 }
 
-/// Port of NCBI `s_ExpandPattern` (`phi_lookup.c:130`).
+/// NCBI: s_ExpandPattern (`phi_lookup.c:130`).
 pub fn s_expand_pattern(
     input_pattern_masked: &mut [i32],
     input_pattern: &mut [u8],
@@ -361,7 +348,7 @@ pub fn s_expand_pattern(
     length
 }
 
-/// Port of NCBI `s_PackPattern` (`phi_lookup.c:200`).
+/// NCBI: s_PackPattern (`phi_lookup.c:200`).
 pub fn s_pack_pattern(input_pattern: &[u8], length: i32) -> i32 {
     let mut return_value = 0;
     for i in 0..length.max(0) as usize {
@@ -372,7 +359,7 @@ pub fn s_pack_pattern(input_pattern: &[u8], length: i32) -> i32 {
     return_value
 }
 
-/// Port of NCBI `s_PackLongPattern` (`phi_lookup.c:218`).
+/// NCBI: s_PackLongPattern (`phi_lookup.c:218`).
 pub fn s_pack_long_pattern(
     num_places: i32,
     input_pattern: &[u8],
@@ -417,7 +404,7 @@ pub fn s_pack_long_pattern(
     }
 }
 
-/// Port of NCBI `s_NumOfOne` (`phi_lookup.c:259`).
+/// NCBI: s_NumOfOne (`phi_lookup.c:259`).
 pub fn s_num_of_one(mut a: i32) -> i32 {
     let mut return_value = 0;
     while a > 0 {
@@ -429,7 +416,7 @@ pub fn s_num_of_one(mut a: i32) -> i32 {
     return_value
 }
 
-/// Port of NCBI `s_PackVeryLongPattern` (`phi_lookup.c:275`).
+/// NCBI: s_PackVeryLongPattern (`phi_lookup.c:275`).
 pub fn s_pack_very_long_pattern(
     input_pattern_masked: &[i32],
     num_places_in_pattern: i32,
@@ -501,7 +488,7 @@ pub fn s_pack_very_long_pattern(
     multiword_items.extra_long_items = Some(extra_items);
 }
 
-/// Port of NCBI `s_PatternSearchItemsInit` (`phi_lookup.c:354`).
+/// NCBI: s_PatternSearchItemsInit (`phi_lookup.c:354`).
 pub fn s_pattern_search_items_init() -> PhiPatternSearchBlk {
     PhiPatternSearchBlk {
         flag_pattern_length: PatternType::OneWord,
@@ -512,7 +499,7 @@ pub fn s_pattern_search_items_init() -> PhiPatternSearchBlk {
     }
 }
 
-/// Port of NCBI `s_MakePatternUpperCase` (`phi_lookup.c:374`).
+/// NCBI: s_MakePatternUpperCase (`phi_lookup.c:374`).
 pub fn s_make_pattern_upper_case(pattern_in: &str) -> String {
     pattern_in
         .bytes()
@@ -527,7 +514,8 @@ pub fn s_make_pattern_upper_case(pattern_in: &str) -> String {
         .collect()
 }
 
-fn parse_number_until(bytes: &[u8], index: &mut usize, stop: &[u8]) -> i32 {
+/// blast-rs: parse a decimal run inside PHI pattern syntax.
+fn parse_phi_pattern_number_until(bytes: &[u8], index: &mut usize, stop: &[u8]) -> i32 {
     let start = *index;
     while *index < bytes.len() && !stop.contains(&bytes[*index]) {
         *index += 1;
@@ -538,7 +526,7 @@ fn parse_number_until(bytes: &[u8], index: &mut usize, stop: &[u8]) -> i32 {
         .unwrap_or(0)
 }
 
-/// Port of NCBI `SPHIPatternSearchBlkNew` (`phi_lookup.c:388`).
+/// NCBI: SPHIPatternSearchBlkNew (`phi_lookup.c:388`).
 ///
 /// C obtains residue probabilities from `BlastScoreBlk`; Rust accepts them as
 /// an optional NCBIstdaa/BLASTNA-indexed slice and otherwise uses the same
@@ -549,10 +537,16 @@ pub fn sphi_pattern_search_blk_new(
     residue_probabilities: Option<&[f64]>,
 ) -> Result<PhiPatternSearchBlk, String> {
     const WILDCARD_THRESHOLD: i32 = 30;
-    let all_alphabet_bits = phi_all_alphabet_bits(is_dna);
+    let all_alphabet_bits = (1 << blast_rs_phi_alphabet_size(is_dna)) - 1;
     let probabilities = residue_probabilities
         .map(|p| p.to_vec())
-        .unwrap_or_else(|| phi_default_probabilities(is_dna));
+        .unwrap_or_else(|| {
+            if is_dna {
+                vec![1.0 / crate::encoding::BLASTNA_SIZE as f64; crate::encoding::BLASTNA_SIZE]
+            } else {
+                crate::stat::protein_std_freq_ncbistdaa().to_vec()
+            }
+        });
     let mut pattern_blk = s_pattern_search_items_init();
     pattern_blk.pattern = Some(s_make_pattern_upper_case(pattern_in));
     let pattern = pattern_blk
@@ -610,9 +604,11 @@ pub fn sphi_pattern_search_blk_new(
                     } else {
                         char_index += 1;
                         let mut parse_index = char_index;
-                        let min_wildcard = parse_number_until(bytes, &mut parse_index, b",");
+                        let min_wildcard =
+                            parse_phi_pattern_number_until(bytes, &mut parse_index, b",");
                         parse_index += usize::from(parse_index < bytes.len());
-                        let max_wildcard_raw = parse_number_until(bytes, &mut parse_index, b")");
+                        let max_wildcard_raw =
+                            parse_phi_pattern_number_until(bytes, &mut parse_index, b")");
                         let max_wildcard = max_wildcard_raw - min_wildcard;
                         current_wildcard_product *= max_wildcard + 1;
                         if current_wildcard_product > wildcard_product {
@@ -649,7 +645,7 @@ pub fn sphi_pattern_search_blk_new(
                 position_probability = 1.0;
             } else {
                 let prev_set_mask = current_set_mask;
-                let order = phi_order(next_char, is_dna);
+                let order = blast_rs_phi_order(next_char, is_dna);
                 current_set_mask = 1 << order;
                 char_set_mask = current_set_mask;
                 if (prev_set_mask & current_set_mask) == 0 {
@@ -674,7 +670,7 @@ pub fn sphi_pattern_search_blk_new(
                             .to_string(),
                     );
                 }
-                let order = phi_order(next_char, is_dna);
+                let order = blast_rs_phi_order(next_char, is_dna);
                 mask |= 1 << order;
                 probability += probabilities.get(order).copied().unwrap_or(0.0);
             }
@@ -696,7 +692,7 @@ pub fn sphi_pattern_search_blk_new(
                 if next_char == b'}' {
                     break;
                 }
-                let order = phi_order(next_char, is_dna);
+                let order = blast_rs_phi_order(next_char, is_dna);
                 mask -= mask & (1 << order);
                 probability -= probabilities.get(order).copied().unwrap_or(0.0);
             }
@@ -711,7 +707,7 @@ pub fn sphi_pattern_search_blk_new(
 
         if bytes.get(char_index + 1).copied() == Some(b'(') {
             char_index += 2;
-            let num_identical = parse_number_until(bytes, &mut char_index, b")");
+            let num_identical = parse_phi_pattern_number_until(bytes, &mut char_index, b")");
             pattern_blk.min_pattern_match_length += num_identical;
             while char_index < bytes.len() && bytes[char_index] != b')' {
                 char_index += 1;
@@ -814,7 +810,7 @@ pub fn sphi_pattern_search_blk_new(
         .multi_word_items
         .as_ref()
         .expect("multiword items retained");
-    for char_index in 0..phi_alphabet_size(is_dna) {
+    for char_index in 0..blast_rs_phi_alphabet_size(is_dna) {
         let mut this_mask = 0;
         for char_set_mask in 0..expanded_pos_index.max(0) as usize {
             if ((1 << char_index) & multiword_items.input_pattern_masked[char_set_mask]) != 0 {
@@ -831,7 +827,7 @@ pub fn sphi_pattern_search_blk_new(
     Ok(pattern_blk)
 }
 
-/// Rust ownership equivalent of NCBI `SPHIPatternSearchBlkFree`.
+/// NCBI: SPHIPatternSearchBlkFree (phi_lookup.c).
 pub fn sphi_pattern_search_blk_free(
     pattern_blk: Option<PhiPatternSearchBlk>,
 ) -> Option<PhiPatternSearchBlk> {
@@ -853,7 +849,7 @@ pub fn sphi_pattern_search_blk_free(
     None
 }
 
-/// Port of NCBI `s_PHIBlastAddPatternHit` (`pattern.c:530`).
+/// NCBI: s_PHIBlastAddPatternHit (`pattern.c:530`).
 pub fn s_phi_blast_add_pattern_hit(
     pattern_info: Option<&mut SphiQueryInfo>,
     offset: i32,
@@ -875,8 +871,8 @@ pub fn s_phi_blast_add_pattern_hit(
     0
 }
 
-/// Port of NCBI `_PHIGetRightOneBits` (`pattern.c:61`).
-pub fn _phi_get_right_one_bits(s: i32, mask: i32) -> (i32, i32) {
+/// NCBI: _PHIGetRightOneBits (`pattern.c:61`).
+pub fn phi_get_right_one_bits(s: i32, mask: i32) -> (i32, i32) {
     let checking_matches = s & mask;
     let mut left_index = -1;
     let mut right_index = 0;
@@ -897,14 +893,14 @@ pub fn _phi_get_right_one_bits(s: i32, mask: i32) -> (i32, i32) {
     (right_index, left_index)
 }
 
-/// Port of NCBI `s_LenOf` (`pattern.c:93`).
+/// NCBI: s_LenOf (`pattern.c:93`).
 pub fn s_len_of(s: i32, mask: i32) -> i32 {
-    let (right_one, right_mask_only) = _phi_get_right_one_bits(s, mask);
+    let (right_one, right_mask_only) = phi_get_right_one_bits(s, mask);
     right_one - right_mask_only
 }
 
-/// Port of NCBI `_PHIPatternWordsLeftShift` (`pattern.c:236`).
-pub fn _phi_pattern_words_left_shift(a: &mut [i32], mut b: u8, num_words: i32) {
+/// NCBI: _PHIPatternWordsLeftShift (`pattern.c:236`).
+pub fn phi_pattern_words_left_shift(a: &mut [i32], mut b: u8, num_words: i32) {
     let overflow_threshold = 1 << PHI_BITS_PACKED_PER_WORD;
     for value in a.iter_mut().take(num_words.max(0) as usize) {
         let x = (*value << 1) + i32::from(b);
@@ -918,15 +914,15 @@ pub fn _phi_pattern_words_left_shift(a: &mut [i32], mut b: u8, num_words: i32) {
     }
 }
 
-/// Port of NCBI `_PHIPatternWordsBitwiseOr` (`pattern.c:257`).
-pub fn _phi_pattern_words_bitwise_or(a: &mut [i32], b: &[i32], num_words: i32) {
+/// NCBI: _PHIPatternWordsBitwiseOr (`pattern.c:257`).
+pub fn phi_pattern_words_bitwise_or(a: &mut [i32], b: &[i32], num_words: i32) {
     for (left, right) in a.iter_mut().zip(b.iter()).take(num_words.max(0) as usize) {
         *left |= *right;
     }
 }
 
-/// Port of NCBI `_PHIPatternWordsBitwiseAnd` (`pattern.c:265`).
-pub fn _phi_pattern_words_bitwise_and(
+/// NCBI: _PHIPatternWordsBitwiseAnd (`pattern.c:265`).
+pub fn phi_pattern_words_bitwise_and(
     result: &mut [i32],
     a: &[i32],
     b: &[i32],
@@ -947,7 +943,7 @@ pub fn _phi_pattern_words_bitwise_and(
     return_value
 }
 
-/// Port of NCBI `s_LenOfL` (`pattern.c:286`).
+/// NCBI: s_LenOfL (`pattern.c:286`).
 pub fn s_len_of_l(s: &[i32], mask: &[i32], num_words: i32) -> i32 {
     let mut first_one_in_mask = -1;
     for word_index in 0..num_words.max(0) as usize {
@@ -966,8 +962,8 @@ pub fn s_len_of_l(s: &[i32], mask: &[i32], num_words: i32) -> i32 {
     -1
 }
 
-/// Port of NCBI `_PHIBlastFindHitsShort` (`pattern.c:104`).
-pub fn _phi_blast_find_hits_short(
+/// NCBI: _PHIBlastFindHitsShort (`pattern.c:104`).
+pub fn phi_blast_find_hits_short(
     hit_array: &mut Vec<i32>,
     seq: &[u8],
     len1: i32,
@@ -996,7 +992,7 @@ pub fn _phi_blast_find_hits_short(
     num_matches as i32
 }
 
-/// Port of NCBI `s_FindHitsShortDNA` (`pattern.c:154`).
+/// NCBI: s_FindHitsShortDNA (`pattern.c:154`).
 pub fn s_find_hits_short_dna(
     hit_array: &mut Vec<i32>,
     seq: &[u8],
@@ -1079,7 +1075,7 @@ pub fn s_find_hits_short_dna(
     twice_num_hits as i32
 }
 
-/// Port of NCBI `s_FindHitsShortHead` (`pattern.c:227`).
+/// NCBI: s_FindHitsShortHead (`pattern.c:227`).
 pub fn s_find_hits_short_head(
     hit_array: &mut Vec<i32>,
     seq: &[u8],
@@ -1099,10 +1095,10 @@ pub fn s_find_hits_short_head(
         );
     }
     let start = start.max(0) as usize;
-    _phi_blast_find_hits_short(hit_array, seq.get(start..).unwrap_or(&[]), len, pattern_blk)
+    phi_blast_find_hits_short(hit_array, seq.get(start..).unwrap_or(&[]), len, pattern_blk)
 }
 
-/// Port of NCBI `s_FindHitsLong` (`pattern.c:315`).
+/// NCBI: s_FindHitsLong (`pattern.c:315`).
 pub fn s_find_hits_long(
     hit_array: &mut Vec<i32>,
     seq: &[u8],
@@ -1123,11 +1119,11 @@ pub fn s_find_hits_long(
     mask.resize(words, 0);
     let mut prefix_matched_bit_pattern = vec![0; words];
 
-    _phi_pattern_words_left_shift(&mut mask, 1, num_words);
+    phi_pattern_words_left_shift(&mut mask, 1, num_words);
     let mut twice_num_hits = 0usize;
     for (i, &letter) in seq.iter().take(len1.max(0) as usize).enumerate() {
-        _phi_pattern_words_left_shift(&mut prefix_matched_bit_pattern, 0, num_words);
-        _phi_pattern_words_bitwise_or(&mut prefix_matched_bit_pattern, &mask, num_words);
+        phi_pattern_words_left_shift(&mut prefix_matched_bit_pattern, 0, num_words);
+        phi_pattern_words_bitwise_or(&mut prefix_matched_bit_pattern, &mask, num_words);
         let letter_bits = pattern_items
             .bit_pattern_by_letter
             .get(letter as usize)
@@ -1140,7 +1136,7 @@ pub fn s_find_hits_long(
         {
             *left &= *right;
         }
-        if _phi_pattern_words_bitwise_and(
+        if phi_pattern_words_bitwise_and(
             &mut match_result,
             &prefix_matched_bit_pattern,
             &pattern_items.match_mask_l,
@@ -1158,7 +1154,8 @@ pub fn s_find_hits_long(
     twice_num_hits as i32
 }
 
-fn short_items_for_long_word(
+/// blast-rs: adapt one packed long-pattern word into the short-pattern scanner.
+fn short_pattern_items_for_long_word(
     pattern_items: &LongPatternItems,
     word_index: usize,
     is_dna: u8,
@@ -1198,7 +1195,7 @@ fn short_items_for_long_word(
     }
 }
 
-/// Port of NCBI `s_FindHitsVeryLong` (`pattern.c:368`).
+/// NCBI: s_FindHitsVeryLong (`pattern.c:368`).
 pub fn s_find_hits_very_long(
     hit_array: &mut Vec<i32>,
     seq: &[u8],
@@ -1218,7 +1215,11 @@ pub fn s_find_hits_very_long(
     }
 
     let word_blk = PhiPatternSearchBlk {
-        one_word_items: short_items_for_long_word(multiword_items, most_specific_word, is_dna),
+        one_word_items: short_pattern_items_for_long_word(
+            multiword_items,
+            most_specific_word,
+            is_dna,
+        ),
         ..PhiPatternSearchBlk::default()
     };
     let mut twice_num_hits = s_find_hits_short_head(hit_array, seq, 0, len, is_dna, &word_blk);
@@ -1229,7 +1230,7 @@ pub fn s_find_hits_very_long(
 
     for word_index in (most_specific_word + 1)..multiword_items.num_words.max(0) as usize {
         let word_blk = PhiPatternSearchBlk {
-            one_word_items: short_items_for_long_word(multiword_items, word_index, is_dna),
+            one_word_items: short_pattern_items_for_long_word(multiword_items, word_index, is_dna),
             ..PhiPatternSearchBlk::default()
         };
         let mut hit_array1 = Vec::new();
@@ -1271,7 +1272,11 @@ pub fn s_find_hits_very_long(
     while word_index >= 0 {
         let word_index_usize = word_index as usize;
         let word_blk = PhiPatternSearchBlk {
-            one_word_items: short_items_for_long_word(multiword_items, word_index_usize, is_dna),
+            one_word_items: short_pattern_items_for_long_word(
+                multiword_items,
+                word_index_usize,
+                is_dna,
+            ),
             ..PhiPatternSearchBlk::default()
         };
         let mut hit_array1 = Vec::new();
@@ -1320,7 +1325,7 @@ pub fn s_find_hits_very_long(
     twice_num_hits
 }
 
-/// Port of NCBI `s_PHIGetShortPattern` (`phi_gapalign.c:320`).
+/// NCBI: s_PHIGetShortPattern (`phi_gapalign.c:320`).
 pub fn s_phi_get_short_pattern(
     seq: &[u8],
     len: i32,
@@ -1338,13 +1343,13 @@ pub fn s_phi_get_short_pattern(
             & pattern_items.which_position[letter as usize];
     }
 
-    let (right_one, right_mask_only) = _phi_get_right_one_bits(prefix_matched_bit_pattern, mask);
+    let (right_one, right_mask_only) = phi_get_right_one_bits(prefix_matched_bit_pattern, mask);
     *start = right_mask_only + 1;
     *end = right_one;
     0
 }
 
-/// Port of NCBI `s_PHIGetLongPattern` (`phi_gapalign.c:362`).
+/// NCBI: s_PHIGetLongPattern (`phi_gapalign.c:362`).
 pub fn s_phi_get_long_pattern(
     seq: &[u8],
     len: i32,
@@ -1368,11 +1373,11 @@ pub fn s_phi_get_long_pattern(
     let mut mask = multiword_items.match_mask_l[..words.min(PHI_BUF_SIZE)].to_vec();
     mask.resize(words, 0);
     let mut prefix_matched_bit_pattern = vec![0; words];
-    _phi_pattern_words_left_shift(&mut mask, 1, num_words);
+    phi_pattern_words_left_shift(&mut mask, 1, num_words);
 
     for &letter in seq.iter().take(len.max(0) as usize) {
-        _phi_pattern_words_left_shift(&mut prefix_matched_bit_pattern, 0, num_words);
-        _phi_pattern_words_bitwise_or(&mut prefix_matched_bit_pattern, &mask, num_words);
+        phi_pattern_words_left_shift(&mut prefix_matched_bit_pattern, 0, num_words);
+        phi_pattern_words_bitwise_or(&mut prefix_matched_bit_pattern, &mask, num_words);
         let letter_bits = multiword_items
             .bit_pattern_by_letter
             .get(letter as usize)
@@ -1388,7 +1393,7 @@ pub fn s_phi_get_long_pattern(
     }
 
     let mut matched = prefix_matched_bit_pattern.clone();
-    _phi_pattern_words_bitwise_and(
+    phi_pattern_words_bitwise_and(
         &mut matched,
         &prefix_matched_bit_pattern,
         &multiword_items.match_mask_l,
@@ -1421,7 +1426,7 @@ pub fn s_phi_get_long_pattern(
     }
 }
 
-/// Port of NCBI `s_PHIGetExtraLongPattern` (`phi_gapalign.c:419`).
+/// NCBI: s_PHIGetExtraLongPattern (`phi_gapalign.c:419`).
 pub fn s_phi_get_extra_long_pattern(
     seq: &[u8],
     len: i32,
@@ -1446,7 +1451,7 @@ pub fn s_phi_get_extra_long_pattern(
 
     for word_index in 1..num_words {
         let word_blk = PhiPatternSearchBlk {
-            one_word_items: short_items_for_long_word(multiword_items, word_index, 0),
+            one_word_items: short_pattern_items_for_long_word(multiword_items, word_index, 0),
             ..PhiPatternSearchBlk::default()
         };
         let mut hit_array1 = Vec::new();
@@ -1459,7 +1464,7 @@ pub fn s_phi_get_extra_long_pattern(
             );
             let mut one_word_hit_array = Vec::new();
             let seq_start = last_offset.max(0) as usize;
-            let twice_hits_one_word = _phi_blast_find_hits_short(
+            let twice_hits_one_word = phi_blast_find_hits_short(
                 &mut one_word_hit_array,
                 seq.get(seq_start..).unwrap_or(&[]),
                 scan_len.max(0),
@@ -1494,7 +1499,7 @@ pub fn s_phi_get_extra_long_pattern(
     -1
 }
 
-/// Port of NCBI `FindPatternHits` (`pattern.c:468`).
+/// NCBI: FindPatternHits (`pattern.c:468`).
 pub fn find_pattern_hits(
     hit_array: &mut Vec<i32>,
     seq: &[u8],
@@ -1509,7 +1514,7 @@ pub fn find_pattern_hits(
     }
 }
 
-/// Port of NCBI `PHIBlastScanSubject` (`phi_lookup.c:725`).
+/// NCBI: PHIBlastScanSubject (`phi_lookup.c:725`).
 pub fn phi_blast_scan_subject(
     pattern_blk: &PhiPatternSearchBlk,
     subject: &[u8],
@@ -1544,7 +1549,7 @@ pub fn phi_blast_scan_subject(
     count
 }
 
-/// Port of NCBI internal `s_PHISaveInitialHit` (`phi_extend.c:42`).
+/// NCBI: s_PHISaveInitialHit (`phi_extend.c:42`).
 pub fn s_phi_save_initial_hit(
     init_hitlist: &mut crate::extend::InitHitList,
     offset_pair: crate::extend::PhiInitialHit,
@@ -1561,7 +1566,7 @@ pub fn s_phi_save_initial_hit(
     }
 }
 
-/// Port of NCBI `PHIBlastWordFinder` (`phi_extend.c:53`).
+/// NCBI: PHIBlastWordFinder (`phi_extend.c:53`).
 pub fn phi_blast_word_finder(
     subject: &[u8],
     pattern_blk: &PhiPatternSearchBlk,
@@ -1601,7 +1606,7 @@ pub fn phi_blast_word_finder(
     0
 }
 
-/// Port of NCBI `PHIGetPatternOccurrences` (`pattern.c:557`).
+/// NCBI: PHIGetPatternOccurrences (`pattern.c:557`).
 pub fn phi_get_pattern_occurrences(
     pattern_blk: &PhiPatternSearchBlk,
     query_sequence: &[u8],
@@ -1657,27 +1662,27 @@ mod tests {
 
     #[test]
     fn phi_get_right_one_bits_and_len_match_c_rules() {
-        assert_eq!(_phi_get_right_one_bits(0b1000, 0b1010), (3, 1));
+        assert_eq!(phi_get_right_one_bits(0b1000, 0b1010), (3, 1));
         assert_eq!(s_len_of(0b1000, 0b1010), 2);
-        assert_eq!(_phi_get_right_one_bits(0, 0b1010), (0, 3));
+        assert_eq!(phi_get_right_one_bits(0, 0b1010), (0, 3));
         assert_eq!(s_len_of(0, 0b1010), -3);
     }
 
     #[test]
     fn phi_pattern_word_bit_operations_match_c_rules() {
         let mut words = vec![(1 << (PHI_BITS_PACKED_PER_WORD - 1)) - 1, 0];
-        _phi_pattern_words_left_shift(&mut words, 1, 2);
+        phi_pattern_words_left_shift(&mut words, 1, 2);
         assert_eq!(words, vec![(1 << PHI_BITS_PACKED_PER_WORD) - 1, 0]);
-        _phi_pattern_words_left_shift(&mut words, 0, 2);
+        phi_pattern_words_left_shift(&mut words, 0, 2);
         assert_eq!(words, vec![(1 << PHI_BITS_PACKED_PER_WORD) - 2, 1]);
 
         let mut left = vec![0b0011, 0b0100];
-        _phi_pattern_words_bitwise_or(&mut left, &[0b1100, 0b0010], 2);
+        phi_pattern_words_bitwise_or(&mut left, &[0b1100, 0b0010], 2);
         assert_eq!(left, vec![0b1111, 0b0110]);
 
         let mut result = vec![0, 0];
         assert_eq!(
-            _phi_pattern_words_bitwise_and(&mut result, &[0b1010, 0], &[0b1100, 0], 2),
+            phi_pattern_words_bitwise_and(&mut result, &[0b1010, 0], &[0b1100, 0], 2),
             1
         );
         assert_eq!(result, vec![0b1000, 0]);
@@ -1700,7 +1705,7 @@ mod tests {
         let mut hits = Vec::new();
 
         assert_eq!(
-            _phi_blast_find_hits_short(&mut hits, b"ABAB", 4, &pattern_blk),
+            phi_blast_find_hits_short(&mut hits, b"ABAB", 4, &pattern_blk),
             4
         );
         assert_eq!(hits, vec![1, 0, 3, 2]);

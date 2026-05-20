@@ -22,12 +22,16 @@ struct BlastParameterScoreBlock<'a> {
 }
 
 impl<'a> BlastParameterScoreBlock<'a> {
+    /// blast-rs: Score-block view helper for Rust parameter calculation; not a
+    /// direct NCBI C port.
     fn valid_kbp(&self, context: usize) -> Option<&KarlinBlk> {
         self.kbp
             .get(context)
             .filter(|kbp| stat::s_blast_karlin_blk_is_valid(Some(kbp)))
     }
 
+    /// blast-rs: Selects the Karlin block array for update calculations; not a
+    /// direct NCBI C port.
     fn update_kbp_array(&self) -> Option<(&[KarlinBlk], bool)> {
         if let Some(kbp_gap) = self.kbp_gap {
             Some((kbp_gap, true))
@@ -36,6 +40,8 @@ impl<'a> BlastParameterScoreBlock<'a> {
         }
     }
 
+    /// blast-rs: Selects the Karlin block array for hit-saving calculations;
+    /// not a direct NCBI C port.
     fn hit_saving_kbp_array(&self) -> Option<(&[KarlinBlk], bool)> {
         if let Some(kbp_gap) = self.kbp_gap {
             Some((kbp_gap, true))
@@ -48,6 +54,7 @@ impl<'a> BlastParameterScoreBlock<'a> {
 }
 
 impl<'a> From<&'a BlastScoreBlk> for BlastParameterScoreBlock<'a> {
+    /// blast-rs: Builds a Rust view over `BlastScoreBlk`; not a direct NCBI C port.
     fn from(sbp: &'a BlastScoreBlk) -> Self {
         Self {
             kbp: &sbp.kbp,
@@ -86,6 +93,8 @@ pub struct ScoringParameters {
 }
 
 impl ScoringParameters {
+    /// blast-rs: Native constructor from public scoring options; not a direct
+    /// NCBI C port.
     pub fn from_options(opts: &ScoringOptions, scale_factor: f64) -> Self {
         ScoringParameters {
             options: opts.clone(),
@@ -131,9 +140,9 @@ pub struct InitialWordParameters {
 }
 
 impl InitialWordParameters {
-    /// Build the nucleotide score table for 4-base packed words.
-    /// Each byte encodes 4 bases (2 bits each), and the table stores
-    /// the combined match/mismatch score for all 256 possible byte values.
+    /// blast-rs: Nucleotide packed-byte score-table builder for Rust lookup
+    /// parameters; not a direct NCBI C port.
+    ///
     /// Build the nucleotide score table for 4-base packed words.
     /// Indexed by XOR of query and subject packed bytes.
     /// Each bit pair in the XOR result: 00 = match (reward), != 00 = mismatch (penalty).
@@ -151,15 +160,13 @@ impl InitialWordParameters {
     }
 }
 
-fn first_valid_kbp<'a>(sbp: &'a BlastScoreBlk, query_info: &QueryInfo) -> Option<&'a KarlinBlk> {
-    stat::s_blast_find_valid_karlin_blk(&sbp.kbp, query_info).ok()
-}
-
+/// blast-rs: Local scale-factor helper matching the integer conversion used by
+/// BLAST parameter ports; not a standalone NCBI C function.
 fn scaled_i32(value: i32, scale_factor: f64) -> i32 {
     value.saturating_mul(scale_factor as i32)
 }
 
-/// Port of NCBI static `s_GetCutoffEvalue` (`blast_parameters.c:134`).
+/// NCBI: s_GetCutoffEvalue (blast_parameters.c:134).
 pub fn s_get_cutoff_evalue(program_number: ProgramType) -> f64 {
     match program_number {
         program::MAPPING | program::BLASTN | program::PHI_BLASTN => stat::CUTOFF_E_BLASTN,
@@ -171,8 +178,7 @@ pub fn s_get_cutoff_evalue(program_number: ProgramType) -> f64 {
     }
 }
 
-/// Port of NCBI static `s_GetEstimatedPhiExpect`
-/// (`blast_parameters.c:659`).
+/// NCBI: s_GetEstimatedPhiExpect (blast_parameters.c:659).
 ///
 /// C reads `paramC`/`Lambda` from `sbp->kbp[0]` and pattern probability
 /// from `query_info->pattern_info`. Rust keeps the PHI pattern block
@@ -200,8 +206,7 @@ pub fn s_get_estimated_phi_expect(
         * (-lambda * score).exp()
 }
 
-/// Port of NCBI static `s_PhiBlastCutoffScore`
-/// (`blast_parameters.c:689`).
+/// NCBI: s_PhiBlastCutoffScore (blast_parameters.c:689).
 pub fn s_phi_blast_cutoff_score(
     ethresh: f64,
     query_info: Option<&QueryInfo>,
@@ -249,7 +254,7 @@ pub fn s_phi_blast_cutoff_score(
     low_score
 }
 
-/// Port of NCBI `BlastScoringParametersNew` (`blast_parameters.c:542`).
+/// NCBI: BlastScoringParametersNew (blast_parameters.c:542).
 pub fn blast_scoring_parameters_new(
     score_options: Option<&ScoringOptions>,
     sbp: Option<&BlastScoreBlk>,
@@ -270,8 +275,8 @@ pub fn blast_scoring_parameters_new(
     0
 }
 
-/// Port of NCBI `BlastScoringParametersNew` (`blast_parameters.c:542`) with
-/// nullable output-pointer behavior.
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_scoring_parameters_new`]; not a direct NCBI C port.
 pub fn blast_scoring_parameters_new_c(
     score_options: Option<&ScoringOptions>,
     sbp: Option<&BlastScoreBlk>,
@@ -283,7 +288,8 @@ pub fn blast_scoring_parameters_new_c(
     blast_scoring_parameters_new(score_options, sbp, parameters)
 }
 
-/// Port of NCBI `BlastEffectiveLengthsParametersNew` (`blast_parameters.c:579`).
+/// blast-rs: Rust spelling of the effective-length parameters constructor; not
+/// a direct NCBI C port.
 pub fn blast_effective_lengths_parameters_new(
     options: &EffectiveLengthsOptions,
     db_length: i64,
@@ -298,8 +304,8 @@ pub fn blast_effective_lengths_parameters_new(
     0
 }
 
-/// Port of NCBI `BlastEffectiveLengthsParametersNew` (`blast_parameters.c:579`)
-/// with nullable output-pointer behavior.
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_effective_lengths_parameters_new`]; not a direct NCBI C port.
 pub fn blast_effective_lengths_parameters_new_c(
     options: Option<&EffectiveLengthsOptions>,
     db_length: i64,
@@ -315,7 +321,7 @@ pub fn blast_effective_lengths_parameters_new_c(
     blast_effective_lengths_parameters_new(options, db_length, num_seqs, parameters)
 }
 
-/// Port of NCBI `BlastLinkHSPParametersNew` (`blast_parameters.c:598`).
+/// NCBI: BlastLinkHSPParametersNew (blast_parameters.c:598).
 pub fn blast_link_hsp_parameters_new(
     program_number: ProgramType,
     gapped_calculation: bool,
@@ -335,8 +341,8 @@ pub fn blast_link_hsp_parameters_new(
     0
 }
 
-/// Port of NCBI `BlastLinkHSPParametersNew` (`blast_parameters.c:598`) with
-/// nullable output-pointer behavior.
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_link_hsp_parameters_new`]; not a direct NCBI C port.
 pub fn blast_link_hsp_parameters_new_c(
     program_number: ProgramType,
     gapped_calculation: bool,
@@ -348,7 +354,7 @@ pub fn blast_link_hsp_parameters_new_c(
     blast_link_hsp_parameters_new(program_number, gapped_calculation, link_hsp_params)
 }
 
-/// Port of NCBI `BlastLinkHSPParametersFree` (`blast_parameters.c:591`).
+/// NCBI: BlastLinkHSPParametersFree (blast_parameters.c:591).
 pub fn blast_link_hsp_parameters_free(
     parameters: &mut Option<LinkHSPParameters>,
 ) -> Option<LinkHSPParameters> {
@@ -356,7 +362,7 @@ pub fn blast_link_hsp_parameters_free(
     None
 }
 
-/// Port of NCBI `BlastLinkHSPParametersUpdate` (`blast_parameters.c:625`).
+/// NCBI: BlastLinkHSPParametersUpdate (blast_parameters.c:625).
 pub fn blast_link_hsp_parameters_update(
     word_params: Option<&InitialWordParameters>,
     hit_params: Option<&mut HitSavingParameters>,
@@ -371,7 +377,8 @@ pub fn blast_link_hsp_parameters_update(
     0
 }
 
-/// Port of NCBI `BlastLinkHSPParametersUpdate` (`blast_parameters.c:625`).
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_link_hsp_parameters_update`]; not a direct NCBI C port.
 pub fn blast_link_hsp_parameters_update_c(
     word_params: Option<&InitialWordParameters>,
     hit_params: Option<&mut HitSavingParameters>,
@@ -380,7 +387,7 @@ pub fn blast_link_hsp_parameters_update_c(
     blast_link_hsp_parameters_update(word_params, hit_params, gapped_calculation)
 }
 
-/// Port of NCBI `CalculateLinkHSPCutoffs` (`blast_parameters.c:998`).
+/// NCBI: CalculateLinkHSPCutoffs (blast_parameters.c:998).
 pub fn calculate_link_hsp_cutoffs(
     program: ProgramType,
     query_info: &QueryInfo,
@@ -405,7 +412,9 @@ pub fn calculate_link_hsp_cutoffs(
     link_hsp_params.gap_prob = gap_prob;
     let gap_decay_rate = link_hsp_params.gap_decay_rate;
 
-    let last_context = query_info.contexts.len() - 1;
+    let Some(last_context) = query_info.contexts.iter().rposition(|ctx| ctx.is_valid) else {
+        return;
+    };
     let last = &query_info.contexts[last_context];
     let mut query_length = (last.query_offset + last.query_length - 1) / (last_context as i32 + 1);
 
@@ -415,7 +424,7 @@ pub fn calculate_link_hsp_cutoffs(
     }
 
     let expected_length =
-        crate::math::nint((kbp.k * query_length as f64 * subject_length as f64).ln() / kbp.h)
+        crate::math::blast_nint((kbp.k * query_length as f64 * subject_length as f64).ln() / kbp.h)
             as i32;
     query_length = (query_length - expected_length).max(1);
     subject_length = (subject_length - expected_length).max(1);
@@ -449,7 +458,8 @@ pub fn calculate_link_hsp_cutoffs(
     link_hsp_params.cutoff_small_gap *= scale_factor;
 }
 
-/// Rust output-builder equivalent of NCBI debug `printBlastScoringParameters`.
+/// blast-rs: Rust output-builder equivalent of NCBI debug
+/// `printBlastScoringParameters`; not a direct C port.
 pub fn print_blast_scoring_parameters(params: Option<&ScoringParameters>) -> String {
     let Some(params) = params else {
         return "parameters{ null }\n".to_string();
@@ -479,7 +489,8 @@ pub fn print_blast_scoring_parameters(params: Option<&ScoringParameters>) -> Str
     out
 }
 
-/// Rust output-builder equivalent of NCBI debug `printBlastInitialWordParamters`.
+/// blast-rs: Rust output-builder equivalent of NCBI debug
+/// `printBlastInitialWordParamters`; not a direct C port.
 pub fn print_blast_initial_word_paramters(
     word_params: &InitialWordParameters,
     query_info: &QueryInfo,
@@ -514,7 +525,8 @@ pub fn print_blast_initial_word_paramters(
     out
 }
 
-/// Rust output-builder equivalent of NCBI debug `printBlastExtensionParameters`.
+/// blast-rs: Rust output-builder equivalent of NCBI debug
+/// `printBlastExtensionParameters`; not a direct C port.
 pub fn print_blast_extension_parameters(ext_params: &ExtensionParameters) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "BlastExtensionParameters:");
@@ -527,7 +539,8 @@ pub fn print_blast_extension_parameters(ext_params: &ExtensionParameters) -> Str
     out
 }
 
-/// Rust output-builder equivalent of NCBI debug `printBlastHitSavingParameters`.
+/// blast-rs: Rust output-builder equivalent of NCBI debug
+/// `printBlastHitSavingParameters`; not a direct C port.
 pub fn print_blast_hit_saving_parameters(
     hit_params: &HitSavingParameters,
     query_info: &QueryInfo,
@@ -555,7 +568,8 @@ pub fn print_blast_hit_saving_parameters(
     out
 }
 
-/// Rust output-builder equivalent of NCBI debug `printAllParameters`.
+/// blast-rs: Rust output-builder equivalent of NCBI debug `printAllParameters`;
+/// not a direct C port.
 pub fn print_all_parameters(
     hit_params: &HitSavingParameters,
     ext_params: &ExtensionParameters,
@@ -568,7 +582,7 @@ pub fn print_all_parameters(
     out
 }
 
-/// Port of NCBI static `s_FillReturnCutoffsInfo`.
+/// NCBI: s_FillReturnCutoffsInfo (blast_parameters.c).
 pub fn s_fill_return_cutoffs_info(
     return_cutoffs: Option<&mut crate::diagnostics::RawCutoffs>,
     _score_params: Option<&ScoringParameters>,
@@ -593,7 +607,7 @@ pub fn s_fill_return_cutoffs_info(
     0
 }
 
-/// Port of NCBI `BlastExtensionParametersNew` (`blast_parameters.c:422`).
+/// NCBI: BlastExtensionParametersNew (blast_parameters.c:422).
 pub fn blast_extension_parameters_new(
     program_number: ProgramType,
     options: &ExtensionOptions,
@@ -601,7 +615,7 @@ pub fn blast_extension_parameters_new(
     query_info: &QueryInfo,
     parameters: &mut Option<ExtensionParameters>,
 ) -> i16 {
-    if first_valid_kbp(sbp, query_info).is_none() {
+    if stat::s_blast_find_valid_karlin_blk(&sbp.kbp, query_info).is_err() {
         *parameters = None;
         return -1;
     }
@@ -644,8 +658,8 @@ pub fn blast_extension_parameters_new(
     0
 }
 
-/// Port of NCBI `BlastExtensionParametersNew` (`blast_parameters.c:425`) with
-/// nullable output-pointer behavior.
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_extension_parameters_new`]; not a direct NCBI C port.
 pub fn blast_extension_parameters_new_c(
     program_number: ProgramType,
     options: Option<&ExtensionOptions>,
@@ -663,7 +677,7 @@ pub fn blast_extension_parameters_new_c(
     blast_extension_parameters_new(program_number, options, sbp, query_info, parameters)
 }
 
-/// Port of NCBI `BlastHitSavingParametersUpdate` (`blast_parameters.c:831`).
+/// NCBI: BlastHitSavingParametersUpdate (blast_parameters.c:831).
 pub fn blast_hit_saving_parameters_update(
     program_number: ProgramType,
     sbp: &BlastScoreBlk,
@@ -682,7 +696,8 @@ pub fn blast_hit_saving_parameters_update(
     )
 }
 
-/// Port of NCBI `BlastHitSavingParametersUpdate` (`blast_parameters.c:831`).
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_hit_saving_parameters_update`]; not a direct NCBI C port.
 pub fn blast_hit_saving_parameters_update_c(
     program_number: ProgramType,
     sbp: Option<&BlastScoreBlk>,
@@ -709,8 +724,13 @@ pub fn blast_hit_saving_parameters_update_c(
     if params.options.cutoff_score > 0 {
         let new_cutoff = scaled_i32(params.options.cutoff_score, scale_factor);
         for cutoff in &mut params.cutoffs {
-            cutoff.cutoff_score = new_cutoff;
-            cutoff.cutoff_score_max = new_cutoff;
+            if program_number == program::BLASTN && sbp_view.matrix_only_scoring {
+                cutoff.cutoff_score = params.options.cutoff_score;
+                cutoff.cutoff_score_max = params.options.cutoff_score / 2;
+            } else {
+                cutoff.cutoff_score = new_cutoff;
+                cutoff.cutoff_score_max = new_cutoff;
+            }
         }
         params.cutoff_score_min = new_cutoff;
         return 0;
@@ -782,9 +802,10 @@ pub fn blast_hit_saving_parameters_update_c(
             .map_or(0.0, |link| link.gap_decay_rate);
         let evalue_hsp = 1.0;
         // NCBI uses `query_info->last_context` — the index of the last
-        // valid context; we approximate via `contexts.len() - 1`. For
-        // contexts with all valid this is equivalent.
-        let last_idx = query_info.contexts.len() - 1;
+        // valid context.
+        let Some(last_idx) = query_info.contexts.iter().rposition(|ctx| ctx.is_valid) else {
+            return -1;
+        };
         let last_ctx = &query_info.contexts[last_idx];
         let concat_qlen = last_ctx.query_offset + last_ctx.query_length;
         let avg_qlen = concat_qlen / (last_idx as i32 + 1);
@@ -810,7 +831,6 @@ pub fn blast_hit_saving_parameters_update_c(
             let current = params.cutoffs[context].cutoff_score;
             let merged = sum_cutoff.min(current);
             params.cutoffs[context].cutoff_score = merged;
-            params.cutoffs[context].cutoff_score_max = merged;
             cutoff_min = cutoff_min.min(merged);
         }
     }
@@ -818,7 +838,7 @@ pub fn blast_hit_saving_parameters_update_c(
     0
 }
 
-/// Port of NCBI `BlastHitSavingParametersNew` (`blast_parameters.c:734`).
+/// NCBI: BlastHitSavingParametersNew (blast_parameters.c:734).
 pub fn blast_hit_saving_parameters_new(
     program_number: ProgramType,
     options: &HitSavingOptions,
@@ -885,8 +905,8 @@ pub fn blast_hit_saving_parameters_new(
     status
 }
 
-/// Port of NCBI `BlastHitSavingParametersNew` (`blast_parameters.c:734`) with
-/// nullable output-pointer behavior.
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_hit_saving_parameters_new`]; not a direct NCBI C port.
 pub fn blast_hit_saving_parameters_new_c(
     program_number: ProgramType,
     options: Option<&HitSavingOptions>,
@@ -914,7 +934,7 @@ pub fn blast_hit_saving_parameters_new_c(
     )
 }
 
-/// Port of NCBI `BlastInitialWordParametersUpdate` (`blast_parameters.c:280`).
+/// NCBI: BlastInitialWordParametersUpdate (blast_parameters.c:280).
 pub fn blast_initial_word_parameters_update(
     program_number: ProgramType,
     hit_params: &HitSavingParameters,
@@ -969,15 +989,12 @@ pub fn blast_initial_word_parameters_update(
             else {
                 return -1;
             };
-            // NCBI `blast_parameters.c:359` passes `(Int8)subj_length *
-            // query_length` to `BLAST_Cutoffs`. The previous Rust port
-            // had `.saturating_mul((subject_length as u64).min(query_length))`
-            // which collapsed to `subj * MIN(subj, query)` — wrong when
-            // subject is smaller than query. `saturating_mul` already
-            // handles u64 overflow; the `.min()` was an unintentional
-            // clamp.
-            let searchsp =
-                (subject_length as u64).saturating_mul(query_length.max(1) as u64) as f64;
+            // NCBI `BlastInitialWordParametersUpdate` uses
+            // `subject_length * MIN(subject_length, query_length)` for
+            // ungapped cutoff search space.
+            let searchsp = (subject_length as u64)
+                .saturating_mul((subject_length as u64).min(query_length.max(1) as u64))
+                as f64;
             let (cutoff, _) = stat::blast_cutoffs(
                 1,
                 s_get_cutoff_evalue(program_number),
@@ -1000,14 +1017,20 @@ pub fn blast_initial_word_parameters_update(
         }
         curr_cutoffs.cutoff_score = new_cutoff;
         cutoff_min = cutoff_min.min(new_cutoff);
-        xdrop_max = xdrop_max.max(curr_cutoffs.x_dropoff_init);
+        let x_dropoff = if curr_cutoffs.x_dropoff_init == 0 {
+            new_cutoff
+        } else {
+            curr_cutoffs.x_dropoff_init
+        };
+        xdrop_max = xdrop_max.max(x_dropoff);
     }
     parameters.cutoff_score_min = cutoff_min;
     parameters.x_dropoff_max = xdrop_max;
     0
 }
 
-/// Port of NCBI `BlastInitialWordParametersUpdate` (`blast_parameters.c:280`).
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_initial_word_parameters_update`]; not a direct NCBI C port.
 pub fn blast_initial_word_parameters_update_c(
     program_number: ProgramType,
     hit_params: Option<&HitSavingParameters>,
@@ -1031,7 +1054,7 @@ pub fn blast_initial_word_parameters_update_c(
     )
 }
 
-/// Port of NCBI `BlastInitialWordParametersNew` (`blast_parameters.c:159`).
+/// NCBI: BlastInitialWordParametersNew (blast_parameters.c:159).
 pub fn blast_initial_word_parameters_new(
     program_number: ProgramType,
     word_options: &InitialWordOptions,
@@ -1041,7 +1064,7 @@ pub fn blast_initial_word_parameters_new(
     subject_length: u32,
     parameters: &mut Option<InitialWordParameters>,
 ) -> i16 {
-    if first_valid_kbp(sbp, query_info).is_none() {
+    if stat::s_blast_find_valid_karlin_blk(&sbp.kbp, query_info).is_err() {
         *parameters = None;
         return -1;
     }
@@ -1088,8 +1111,8 @@ pub fn blast_initial_word_parameters_new(
     status
 }
 
-/// Port of NCBI `BlastInitialWordParametersNew` (`blast_parameters.c:159`) with
-/// nullable output-pointer behavior.
+/// blast-rs: Nullable pointer-shaped adapter for
+/// [`blast_initial_word_parameters_new`]; not a direct NCBI C port.
 pub fn blast_initial_word_parameters_new_c(
     program_number: ProgramType,
     word_options: Option<&InitialWordOptions>,
@@ -1119,7 +1142,7 @@ pub fn blast_initial_word_parameters_new_c(
     )
 }
 
-/// Port of NCBI `BlastInitialWordParametersFree` (`blast_parameters.c:119`).
+/// NCBI: BlastInitialWordParametersFree (blast_parameters.c:119).
 pub fn blast_initial_word_parameters_free(
     parameters: &mut Option<InitialWordParameters>,
 ) -> Option<InitialWordParameters> {
@@ -1130,7 +1153,7 @@ pub fn blast_initial_word_parameters_free(
     None
 }
 
-/// Port of NCBI `BlastExtensionParametersFree` (`blast_parameters.c:493`).
+/// NCBI: BlastExtensionParametersFree (blast_parameters.c:493).
 pub fn blast_extension_parameters_free(
     parameters: &mut Option<ExtensionParameters>,
 ) -> Option<ExtensionParameters> {
@@ -1138,7 +1161,7 @@ pub fn blast_extension_parameters_free(
     None
 }
 
-/// Port of NCBI `BlastScoringParametersFree` (`blast_parameters.c:500`).
+/// NCBI: BlastScoringParametersFree (blast_parameters.c:500).
 pub fn blast_scoring_parameters_free(
     parameters: &mut Option<ScoringParameters>,
 ) -> Option<ScoringParameters> {
@@ -1146,7 +1169,7 @@ pub fn blast_scoring_parameters_free(
     None
 }
 
-/// Port of NCBI `BlastHitSavingParametersFree` (`blast_parameters.c:718`).
+/// NCBI: BlastHitSavingParametersFree (blast_parameters.c:718).
 pub fn blast_hit_saving_parameters_free(
     parameters: &mut Option<HitSavingParameters>,
 ) -> Option<HitSavingParameters> {
@@ -1167,7 +1190,8 @@ pub struct EffectiveLengthsParameters {
     pub real_num_seqs: i32,
 }
 
-/// Port of NCBI `BlastEffectiveLengthsParametersFree` (`blast_parameters.c:570`).
+/// blast-rs: Rust spelling of the effective-length parameters cleanup routine;
+/// not a direct NCBI C port.
 pub fn blast_effective_lengths_parameters_free(
     parameters: &mut Option<EffectiveLengthsParameters>,
 ) -> Option<EffectiveLengthsParameters> {
@@ -1175,7 +1199,7 @@ pub fn blast_effective_lengths_parameters_free(
     None
 }
 
-/// Port of NCBI static `s_BlastRunFullSearchCleanUp`.
+/// NCBI: s_BlastRunFullSearchCleanUp (blast_parameters.c).
 pub fn s_blast_run_full_search_clean_up(
     gap_align: &mut Option<crate::blast_kappa::BlastGapAlignWorkspace>,
     score_params: &mut Option<ScoringParameters>,
@@ -1183,7 +1207,7 @@ pub fn s_blast_run_full_search_clean_up(
     hit_params: &mut Option<HitSavingParameters>,
     eff_len_params: &mut Option<EffectiveLengthsParameters>,
 ) {
-    crate::blast_kappa::blast_gap_align_struct_free(gap_align);
+    crate::blast_kappa::s_blast_gap_align_struct_free(gap_align);
     let _ = blast_scoring_parameters_free(score_params);
     let _ = blast_hit_saving_parameters_free(hit_params);
     let _ = blast_extension_parameters_free(ext_params);
@@ -1653,6 +1677,29 @@ mod tests {
             hit_params.cutoffs[0].cutoff_score
         );
         assert!(hit_params.link_hsp_params.is_some());
+
+        let mut no_sum_opts = hit_opts.clone();
+        no_sum_opts.do_sum_stats = false;
+        let mut no_sum_hit_params = None;
+        assert_eq!(
+            blast_hit_saving_parameters_new(
+                program::BLASTP,
+                &no_sum_opts,
+                &score_block,
+                &query_info,
+                1000,
+                0,
+                &mut no_sum_hit_params,
+            ),
+            0
+        );
+        let no_sum_hit_params = no_sum_hit_params.expect("non-sum hit saving parameters");
+        assert_eq!(
+            hit_params.cutoffs[0].cutoff_score_max,
+            no_sum_hit_params.cutoffs[0].cutoff_score_max
+        );
+        assert!(hit_params.cutoffs[0].cutoff_score <= no_sum_hit_params.cutoffs[0].cutoff_score);
+
         assert_eq!(
             blast_hit_saving_parameters_new_c(
                 program::BLASTP,
@@ -1762,6 +1809,28 @@ mod tests {
             0
         );
 
+        let mut zero_xdrop_opts = InitialWordOptions::new_blastp();
+        zero_xdrop_opts.x_dropoff = 0.0;
+        let mut zero_xdrop_params = None;
+        assert_eq!(
+            blast_initial_word_parameters_new(
+                program::BLASTP,
+                &zero_xdrop_opts,
+                &hit_params,
+                &score_block,
+                &query_info,
+                1000,
+                &mut zero_xdrop_params,
+            ),
+            0
+        );
+        let zero_xdrop_params = zero_xdrop_params.expect("zero x-drop initial word parameters");
+        assert_eq!(zero_xdrop_params.cutoffs[0].x_dropoff_init, 0);
+        assert_eq!(
+            zero_xdrop_params.x_dropoff_max,
+            zero_xdrop_params.cutoffs[0].cutoff_score
+        );
+
         assert_eq!(
             blast_link_hsp_parameters_update(Some(&word_params), Some(&mut hit_params), true),
             0
@@ -1778,6 +1847,36 @@ mod tests {
                 .cutoff_small_gap,
             word_params.cutoff_score_min
         );
+    }
+
+    #[test]
+    fn blastn_matrix_only_explicit_cutoff_uses_c_max_half_cutoff() {
+        let query_info = QueryInfo::new_blastn(&[40]);
+        let kbp = test_kbp();
+        let mut score_block = test_score_blk(kbp, 2.0);
+        score_block.matrix_only_scoring = true;
+
+        let hit_opts = HitSavingOptions {
+            cutoff_score: 18,
+            ..HitSavingOptions::default()
+        };
+        let mut hit_params = None;
+        assert_eq!(
+            blast_hit_saving_parameters_new(
+                program::BLASTN,
+                &hit_opts,
+                &score_block,
+                &query_info,
+                1000,
+                0,
+                &mut hit_params,
+            ),
+            0
+        );
+        let hit_params = hit_params.expect("blastn matrix-only hit parameters");
+        assert_eq!(hit_params.cutoffs[0].cutoff_score, 18);
+        assert_eq!(hit_params.cutoffs[0].cutoff_score_max, 9);
+        assert_eq!(hit_params.cutoff_score_min, 36);
     }
 
     #[test]

@@ -18,22 +18,22 @@ pub struct HSPContainer {
 }
 
 /// Port of NCBI `HSPContainerNew` (`spliced_hits.c:37`).
-pub fn hspcontainer_new(hsp: &mut Option<Hsp>) -> Option<Box<HSPContainer>> {
+pub fn hsp_container_new(hsp: &mut Option<Hsp>) -> Option<Box<HSPContainer>> {
     hsp.take()
         .map(|hsp| Box::new(HSPContainer { hsp, next: None }))
 }
 
 /// Rust ownership equivalent of NCBI `HSPContainerFree` (`spliced_hits.c:50`).
-pub fn hspcontainer_free(_: Option<Box<HSPContainer>>) -> Option<Box<HSPContainer>> {
+pub fn hsp_container_free(_: Option<Box<HSPContainer>>) -> Option<Box<HSPContainer>> {
     None
 }
 
 /// Port of NCBI `HSPContainerDup` (`spliced_hits.c:66`).
-pub fn hspcontainer_dup(input: Option<&HSPContainer>) -> Option<Box<HSPContainer>> {
+pub fn hsp_container_dup(input: Option<&HSPContainer>) -> Option<Box<HSPContainer>> {
     let input = input?;
     Some(Box::new(HSPContainer {
         hsp: input.hsp.clone(),
-        next: hspcontainer_dup(input.next.as_deref()),
+        next: hsp_container_dup(input.next.as_deref()),
     }))
 }
 
@@ -60,20 +60,20 @@ const MAGICBLAST_MAX_INSERT_SIZE_SPLICED: i32 = 500_000;
 const MAGICBLAST_MAX_INSERT_SIZE_NONSPLICED: i32 = 1_000;
 
 /// Rust ownership equivalent of NCBI `HSPChainFree` (`spliced_hits.c:109`).
-pub fn hspchain_free(chain_list: Option<Box<HSPChain>>) -> Option<Box<HSPChain>> {
+pub fn hsp_chain_free(chain_list: Option<Box<HSPChain>>) -> Option<Box<HSPChain>> {
     let mut chain = chain_list;
     while let Some(mut current) = chain {
         let next = current.next.take();
         current.pair = None;
         current.pair_score = None;
-        current.hsps = hspcontainer_free(current.hsps.take());
+        current.hsps = hsp_container_free(current.hsps.take());
         chain = next;
     }
     None
 }
 
 /// Port of NCBI `HSPChainNew` (`spliced_hits.c:126`).
-pub fn hspchain_new(context: i32) -> Box<HSPChain> {
+pub fn hsp_chain_new(context: i32) -> Box<HSPChain> {
     Box::new(HSPChain {
         context,
         oid: 0,
@@ -96,7 +96,7 @@ pub fn clone_chain(chain: Option<&HSPChain>) -> Option<Box<HSPChain>> {
         context: chain.context,
         oid: chain.oid,
         score: chain.score,
-        hsps: hspcontainer_dup(chain.hsps.as_deref()),
+        hsps: hsp_container_dup(chain.hsps.as_deref()),
         count: chain.count,
         pair: None,
         pair_score: None,
@@ -249,7 +249,7 @@ pub fn blast_mapping_results_free(_: Option<BlastMappingResults>) -> Option<Blas
 /// The Rust `HitSavingOptions` type carries the fields used elsewhere in this
 /// port. Mapper-only C fields that are not represented there are initialized to
 /// the same neutral defaults used by the mapper when those features are absent.
-pub fn blast_hspmapper_params_new(
+pub fn blast_hsp_mapper_params_new(
     hit_options: Option<&HitSavingOptions>,
     scoring_options: Option<&ScoringOptions>,
 ) -> Option<BlastHSPMapperParams> {
@@ -273,14 +273,14 @@ pub fn blast_hspmapper_params_new(
 }
 
 /// Rust ownership equivalent of NCBI `BlastHSPMapperParamsFree`.
-pub fn blast_hspmapper_params_free(
+pub fn blast_hsp_mapper_params_free(
     _: Option<BlastHSPMapperParams>,
 ) -> Option<BlastHSPMapperParams> {
     None
 }
 
 /// Port of NCBI `BlastHSPMapperInfoNew` (`hspfilter_mapper.c:4933`).
-pub fn blast_hspmapper_info_new(params: BlastHSPMapperParams) -> BlastHSPMapperInfo {
+pub fn blast_hsp_mapper_info_new(params: BlastHSPMapperParams) -> BlastHSPMapperInfo {
     BlastHSPMapperInfo {
         new_fn: BlastHSPMapperCallback::PairedNew,
         params,
@@ -323,7 +323,7 @@ fn build_chain_list(mut chains: Vec<Box<HSPChain>>) -> Option<Box<HSPChain>> {
     list
 }
 
-fn drain_hspcontainer_list(mut list: Option<Box<HSPContainer>>) -> Vec<Box<HSPContainer>> {
+fn drain_hsp_container_list(mut list: Option<Box<HSPContainer>>) -> Vec<Box<HSPContainer>> {
     let mut out = Vec::new();
     while let Some(mut container) = list {
         list = container.next.take();
@@ -332,7 +332,7 @@ fn drain_hspcontainer_list(mut list: Option<Box<HSPContainer>>) -> Vec<Box<HSPCo
     out
 }
 
-fn build_hspcontainer_list(mut hsps: Vec<Box<HSPContainer>>) -> Option<Box<HSPContainer>> {
+fn build_hsp_container_list(mut hsps: Vec<Box<HSPContainer>>) -> Option<Box<HSPContainer>> {
     let mut list = None;
     while let Some(mut container) = hsps.pop() {
         container.next = list;
@@ -341,8 +341,8 @@ fn build_hspcontainer_list(mut hsps: Vec<Box<HSPContainer>>) -> Option<Box<HSPCo
     list
 }
 
-/// Port of NCBI `s_HSPChainListInsertOne_OLD` (`hspfilter_mapper.c:64`).
-pub fn s_hspchain_list_insert_one_old(
+/// Score-sorted chain insertion used when no cutoff filtering is requested.
+pub fn s_hsp_chain_list_insert_one_by_score(
     list: &mut Option<Box<HSPChain>>,
     chain: Option<Box<HSPChain>>,
     check_for_duplicates: bool,
@@ -394,7 +394,7 @@ pub fn s_test_cutoffs(chain: Option<&HSPChain>, cutoff_score: i32, cutoff_edit_d
 }
 
 /// Port of NCBI `s_HSPChainListInsertOne` (`hspfilter_mapper.c:165`).
-pub fn s_hspchain_list_insert_one(
+pub fn s_hsp_chain_list_insert_one(
     list: &mut Option<Box<HSPChain>>,
     chain: Option<Box<HSPChain>>,
     check_for_duplicates: bool,
@@ -434,19 +434,19 @@ pub fn s_hspchain_list_insert_one(
 }
 
 /// Port of NCBI `HSPChainListInsert` (`hspfilter_mapper.c:238`).
-pub fn hspchain_list_insert(
+pub fn hsp_chain_list_insert(
     list: &mut Option<Box<HSPChain>>,
     chain: &mut Option<Box<HSPChain>>,
     cutoff_score: i32,
-    cutoff_edit_dist: i32,
+    _cutoff_edit_dist: i32,
     check_for_duplicates: bool,
 ) -> i32 {
     let mut status = 0;
     for ch in drain_chain_list(chain.take()) {
         if cutoff_score <= 0 {
-            status = s_hspchain_list_insert_one_old(list, Some(ch), check_for_duplicates);
-        } else if s_test_cutoffs(Some(&ch), cutoff_score, cutoff_edit_dist) {
-            status = s_hspchain_list_insert_one(list, Some(ch), check_for_duplicates);
+            status = s_hsp_chain_list_insert_one_by_score(list, Some(ch), check_for_duplicates);
+        } else if ch.score >= cutoff_score {
+            status = s_hsp_chain_list_insert_one(list, Some(ch), check_for_duplicates);
         }
         if status != 0 {
             return status;
@@ -456,7 +456,7 @@ pub fn hspchain_list_insert(
 }
 
 /// Port of NCBI `HSPChainListTrim` (`hspfilter_mapper.c:277`).
-pub fn hspchain_list_trim(list: &mut Option<Box<HSPChain>>, margin: i32) -> i32 {
+pub fn hsp_chain_list_trim(list: &mut Option<Box<HSPChain>>, margin: i32) -> i32 {
     let Some(head) = list.as_ref() else {
         return -1;
     };
@@ -515,7 +515,7 @@ pub fn s_test_chains_sorted(chain: Option<&HSPChain>) -> bool {
 }
 
 /// Port of NCBI `s_BlastHSPMapperPairedInit` (`hspfilter_mapper.c:388`).
-pub fn s_blast_hspmapper_paired_init(data: &mut BlastHSPMapperData, num_queries: i32) -> i32 {
+pub fn s_blast_hsp_mapper_paired_init(data: &mut BlastHSPMapperData, num_queries: i32) -> i32 {
     data.saved_chains.clear();
     data.saved_chains
         .extend((0..num_queries.max(0)).map(|_| None));
@@ -523,7 +523,7 @@ pub fn s_blast_hspmapper_paired_init(data: &mut BlastHSPMapperData, num_queries:
 }
 
 /// Port of NCBI `s_BlastHSPMapperPairedNew` (`hspfilter_mapper.c:4871`).
-pub fn s_blast_hspmapper_paired_new(
+pub fn s_blast_hsp_mapper_paired_new(
     params: Option<BlastHSPMapperParams>,
     query_info: Option<&QueryInfo>,
     query: Option<&[u8]>,
@@ -543,7 +543,7 @@ pub fn s_blast_hspmapper_paired_new(
 }
 
 /// Rust ownership equivalent of NCBI `s_BlastHSPMapperFree`.
-pub fn s_blast_hspmapper_free(_: Option<BlastHSPMapperWriter>) -> Option<BlastHSPMapperWriter> {
+pub fn s_blast_hsp_mapper_free(_: Option<BlastHSPMapperWriter>) -> Option<BlastHSPMapperWriter> {
     None
 }
 
@@ -634,11 +634,34 @@ fn s_compute_alignment_score(hsp: &Hsp, score_options: &ScoringOptions, query_le
     let _ = query_len;
     if let Some(script) = hsp.edit_script.as_ref() {
         let mut score = 0;
+        let edit_positions = hsp
+            .map_info
+            .as_ref()
+            .and_then(|info| info.edits.as_ref())
+            .map(|edits| edits.edits.as_slice())
+            .unwrap_or(&[]);
+        let mut query_pos = hsp.query_offset;
         for &(op, count) in &script.ops {
             match op {
-                GapAlignOpType::Sub => score += count * score_options.reward,
+                GapAlignOpType::Sub => {
+                    let query_end = query_pos.saturating_add(count);
+                    let mismatches = edit_positions
+                        .iter()
+                        .filter(|edit| {
+                            edit.query_pos >= query_pos
+                                && edit.query_pos < query_end
+                                && edit.query_base != 15
+                                && edit.subject_base != 15
+                                && edit.query_base != edit.subject_base
+                        })
+                        .count() as i32;
+                    score += (count - mismatches) * score_options.reward
+                        + mismatches * score_options.penalty;
+                    query_pos = query_end;
+                }
                 GapAlignOpType::Ins | GapAlignOpType::Ins1 | GapAlignOpType::Ins2 => {
                     score -= score_options.gap_open + count * score_options.gap_extend;
+                    query_pos = query_pos.saturating_add(count);
                 }
                 GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2 => {
                     score -= score_options.gap_open + count * score_options.gap_extend;
@@ -686,13 +709,23 @@ pub fn s_compute_chain_score(
             hsp.score
         };
 
-        let query_gap = hsp.query_offset.saturating_sub(previous.query_end).max(0);
-        let subject_gap = hsp
-            .subject_offset
-            .saturating_sub(previous.subject_end)
-            .max(0);
-        score += s_compute_gap_score(query_gap, -12, -1, -4);
-        score += s_compute_gap_score(subject_gap, -12, -1, -4);
+        let current_left_splice = hsp
+            .map_info
+            .as_ref()
+            .is_some_and(|info| info.left_edge & MAPPER_SPLICE_SIGNAL != 0);
+        let previous_right_splice = previous
+            .map_info
+            .as_ref()
+            .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
+        if !current_left_splice || !previous_right_splice {
+            let query_gap = hsp.query_offset.saturating_sub(previous.query_end).max(0);
+            let subject_gap = hsp
+                .subject_offset
+                .saturating_sub(previous.subject_end)
+                .max(0);
+            score += s_compute_gap_score(query_gap, -12, -1, -4);
+            score += s_compute_gap_score(subject_gap, -12, -1, -4);
+        }
 
         previous = hsp;
         current = container.next.as_deref();
@@ -1324,7 +1357,7 @@ pub fn s_set_adapter(
                 continue;
             }
 
-            let mut hsps = drain_hspcontainer_list(chain.hsps.take());
+            let mut hsps = drain_hsp_container_list(chain.hsps.take());
             let mut recompute_score = false;
             if let Some(idx) = hsps
                 .iter()
@@ -1354,7 +1387,7 @@ pub fn s_set_adapter(
             if let Some(last) = hsps.last_mut() {
                 mapper_mark_right_edge(&mut last.hsp, MAPPER_ADAPTER | MAPPER_EXON);
             }
-            chain.hsps = build_hspcontainer_list(hsps);
+            chain.hsps = build_hsp_container_list(hsps);
             if recompute_score {
                 let _ = s_compute_chain_score(Some(&mut chain), Some(scores), query_len, false);
             }
@@ -1370,7 +1403,7 @@ pub fn s_set_adapter(
 
             chain.adapter = adapter_pos;
             let pos_minus = query_len.saturating_sub(adapter_pos).saturating_sub(1);
-            let mut hsps = drain_hspcontainer_list(chain.hsps.take());
+            let mut hsps = drain_hsp_container_list(chain.hsps.take());
             let Some(idx) = hsps
                 .iter()
                 .position(|container| container.hsp.query_end > pos_minus + 5)
@@ -1401,7 +1434,7 @@ pub fn s_set_adapter(
                     chain.score += first_kept.hsp.score - old_score;
                 }
             }
-            chain.hsps = build_hspcontainer_list(hsps);
+            chain.hsps = build_hsp_container_list(hsps);
             let _ = s_compute_chain_score(Some(&mut chain), Some(scores), query_len, false);
             if chain.hsps.is_some() {
                 kept.push(chain);
@@ -1431,6 +1464,7 @@ pub fn s_find_adapter_in_sequence(
         return -1;
     };
     let to = hsp_to.min(query_len).min(query.len() as i32);
+    let query_limit = query_len.min(query.len() as i32);
     let from = hsp_from.max(0);
     if from >= to {
         return -1;
@@ -1439,10 +1473,14 @@ pub fn s_find_adapter_in_sequence(
     for adapter in ADAPTERS {
         let len = adapter.len() as i32;
         let mut q = (to - len).max(from);
-        while q < to {
+        while q < query_limit - 4 {
+            if query[q as usize..(q + 4) as usize] != adapter[..4] {
+                q += 1;
+                continue;
+            }
             let mut errors = 2;
             let mut pos = q;
-            while pos < to && pos - q < len {
+            while pos < query_limit && pos - q < len {
                 let query_base = query[pos as usize];
                 let adapter_base = adapter[(pos - q) as usize];
                 if query_base != adapter_base {
@@ -1453,7 +1491,7 @@ pub fn s_find_adapter_in_sequence(
                 }
                 pos += 1;
             }
-            if pos == to || pos - q == len {
+            if pos == query_limit || pos - q == len {
                 return q;
             }
             q += 1;
@@ -1555,9 +1593,12 @@ pub fn s_find_adapters(
             continue;
         }
 
-        let mut longest_overhang = i32::MIN;
-        let mut search_bounds = None;
-        let mut cursor = saved[query_idx].as_deref();
+        let mut longest_overhang = 0;
+        let mut search_bounds =
+            best.and_then(|chain| chain_adapter_search_bounds(chain, query_len));
+        let mut cursor = saved[query_idx]
+            .as_deref()
+            .and_then(|chain| chain.next.as_deref());
         while let Some(chain) = cursor {
             if let Some(overhang) = chain_adapter_overhang(chain, query_len) {
                 if overhang > longest_overhang {
@@ -1862,14 +1903,22 @@ pub fn s_find_splice_junctions(
                 let h = &mut *h_ptr;
                 let (query_gap, overlaps_query, can_short_merge, score_pair) = {
                     let next = h.next.as_ref().expect("checked above");
-                    let query_gap = next.hsp.query_offset.saturating_sub(h.hsp.query_end);
-                    let subject_gap = next.hsp.subject_offset.saturating_sub(h.hsp.subject_end);
+                    let query_gap = next.hsp.query_offset as i64 - h.hsp.query_end as i64;
+                    let subject_gap = next.hsp.subject_offset as i64 - h.hsp.subject_end as i64;
+                    let right_overhang_len = h
+                        .hsp
+                        .map_info
+                        .as_ref()
+                        .and_then(|info| info.subject_overhangs.as_ref())
+                        .and_then(|overhangs| overhangs.right.as_ref())
+                        .map_or(0, |right| right.len() as i64);
                     (
                         query_gap,
                         next.hsp.query_offset <= h.hsp.query_end
                             && next.hsp.query_offset > h.hsp.query_offset,
                         subject_gap >= 0
-                            && subject_gap.saturating_sub(query_gap) < 30
+                            && subject_gap - query_gap < 30
+                            && subject_gap < right_overhang_len
                             && next.hsp.subject_offset >= h.hsp.subject_end,
                         h.hsp.score > 50 && next.hsp.score > 50,
                     )
@@ -1906,7 +1955,22 @@ pub fn s_find_splice_junctions(
                         .map_info
                         .as_ref()
                         .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
-                    if !has_splice {
+                    if has_splice {
+                        let should_merge = h
+                            .next
+                            .as_ref()
+                            .is_some_and(|next| next.hsp.subject_offset - h.hsp.subject_end < 30);
+                        if should_merge {
+                            let old_next_start = h.next.as_ref().map(|next| next.hsp.query_offset);
+                            let status = s_intron_to_gap(h, Some(query), Some(scoring_opts));
+                            if status != 0 {
+                                return status;
+                            }
+                            if h.next.as_ref().map(|next| next.hsp.query_offset) != old_next_start {
+                                continue;
+                            }
+                        }
+                    } else {
                         let status = {
                             let next = h.next.as_deref_mut().expect("checked above");
                             s_trim_overlap(&mut h.hsp, &mut next.hsp, Some(query))
@@ -1926,11 +1990,19 @@ pub fn s_find_splice_junctions(
                         .as_ref()
                         .and_then(|info| info.subject_overhangs.as_ref())
                         .and_then(|overhangs| overhangs.right.as_ref())
-                        .is_some_and(|right| query_gap < right.len() as i32);
+                        .is_some_and(|right| query_gap < right.len() as i64)
+                        && h.next.as_ref().is_some_and(|next| {
+                            next.hsp
+                                .map_info
+                                .as_ref()
+                                .and_then(|info| info.subject_overhangs.as_ref())
+                                .and_then(|overhangs| overhangs.left.as_ref())
+                                .is_some_and(|left| query_gap < left.len() as i64)
+                        });
                     if can_try_gap_splice {
                         let status = {
                             let next = h.next.as_deref_mut().expect("checked above");
-                            s_find_splice_junctions_for_gap_from_map_info(
+                            s_find_splice_junctions_for_gap_using_map_info(
                                 &mut h.hsp,
                                 &mut next.hsp,
                                 Some(query),
@@ -1948,6 +2020,20 @@ pub fn s_find_splice_junctions(
                         .as_ref()
                         .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
                     if has_splice {
+                        let should_merge = h
+                            .next
+                            .as_ref()
+                            .is_some_and(|next| next.hsp.subject_offset - h.hsp.subject_end < 30);
+                        if should_merge {
+                            let old_next_start = h.next.as_ref().map(|next| next.hsp.query_offset);
+                            let status = s_intron_to_gap(h, Some(query), Some(scoring_opts));
+                            if status != 0 {
+                                return status;
+                            }
+                            if h.next.as_ref().map(|next| next.hsp.query_offset) != old_next_start {
+                                continue;
+                            }
+                        }
                         h_ptr = h.next.as_deref_mut().expect("checked above") as *mut HSPContainer;
                         continue;
                     }
@@ -2250,15 +2336,15 @@ fn chain_from_hsp(mut hsp: Hsp, oid: i32, query_info: &QueryInfo) -> Option<Box<
     let context = hsp.context;
     let score = hsp.score;
     let mut hsp_slot = Some(hsp);
-    let mut chain = hspchain_new(context);
+    let mut chain = hsp_chain_new(context);
     chain.oid = oid;
     chain.score = score;
     chain.count = 1;
-    chain.hsps = hspcontainer_new(&mut hsp_slot);
+    chain.hsps = hsp_container_new(&mut hsp_slot);
     Some(chain)
 }
 
-fn hspchain_list_append_splice_candidate(
+fn hsp_chain_list_append_splice_candidate(
     list: &mut Option<Box<HSPChain>>,
     hsp: Hsp,
     oid: i32,
@@ -2325,7 +2411,7 @@ fn hspchain_list_append_splice_candidate(
 /// multi-HSP chains, uses `ContextInfo::segment_flags` to identify paired read
 /// segments, and then reuses the audited chain insert, splice-junction, pairing,
 /// and trim helpers.
-pub fn s_blast_hspmapper_spliced_paired_run(
+pub fn s_blast_hsp_mapper_spliced_paired_run(
     data: &mut BlastHSPMapperData,
     hsp_list: Option<HspList>,
 ) -> i32 {
@@ -2386,7 +2472,7 @@ pub fn s_blast_hspmapper_spliced_paired_run(
 
         let cutoff_score = s_mapper_cutoff_score(&params, context_info.query_length);
         let status = if params.splice {
-            hspchain_list_append_splice_candidate(
+            hsp_chain_list_append_splice_candidate(
                 &mut per_query[query_idx],
                 hsp,
                 hsp_list.oid,
@@ -2396,7 +2482,7 @@ pub fn s_blast_hspmapper_spliced_paired_run(
             )
         } else {
             let mut chain = chain_from_hsp(hsp, hsp_list.oid, &query_info);
-            hspchain_list_insert(
+            hsp_chain_list_insert(
                 &mut per_query[query_idx],
                 &mut chain,
                 cutoff_score,
@@ -2460,7 +2546,7 @@ pub fn s_blast_hspmapper_spliced_paired_run(
             if per_query[idx].is_none() {
                 continue;
             }
-            let status = hspchain_list_insert(
+            let status = hsp_chain_list_insert(
                 &mut data.saved_chains[idx],
                 &mut per_query[idx],
                 0,
@@ -2471,7 +2557,7 @@ pub fn s_blast_hspmapper_spliced_paired_run(
                 return status;
             }
             if data.saved_chains[idx].is_some() {
-                let _ = hspchain_list_trim(&mut data.saved_chains[idx], pair_bonus);
+                let _ = hsp_chain_list_trim(&mut data.saved_chains[idx], pair_bonus);
             }
         }
 
@@ -2708,7 +2794,7 @@ pub fn s_remove_overlaps(
 
     let mut head = chain_list.remove(0);
     let tail = chain_list;
-    let hsps = drain_hspcontainer_list(head.hsps.take());
+    let hsps = drain_hsp_container_list(head.hsps.take());
     if hsps.is_empty() {
         head.hsps = None;
         let mut rebuilt = vec![head];
@@ -2746,7 +2832,7 @@ pub fn s_remove_overlaps(
             cloned.next = None;
             cloned
         };
-        split_chain.hsps = build_hspcontainer_list(chunk);
+        split_chain.hsps = build_hsp_container_list(chunk);
         if rescore {
             let _ =
                 s_compute_chain_score(Some(&mut split_chain), Some(score_opts), query_len, false);
@@ -2885,7 +2971,7 @@ pub fn s_finalize(
 /// Audit caveat: C receives opaque `void*` writer data and mapping-result
 /// pointers. Rust uses typed references and returns `-1` when required mapper
 /// fields are absent instead of dereferencing null pointers.
-pub fn s_blast_hspmapper_final(
+pub fn s_blast_hsp_mapper_final(
     data: &mut BlastHSPMapperData,
     results: &mut BlastMappingResults,
 ) -> i32 {
@@ -3164,12 +3250,10 @@ fn mapper_query_base(query: &[u8], pos: i32, query_len: i32) -> Option<u8> {
     query.get(pos as usize).copied()
 }
 
-/// Conservative Rust port of NCBI `s_FindSpliceJunctionsForGap`
-/// (`hspfilter_mapper.c:3010`).
-///
 /// Variant of [`s_find_splice_junctions_for_gap`] that reads overhangs from
 /// the C-shaped `hsp->map_info` field now represented on Rust HSPs.
-pub fn s_find_splice_junctions_for_gap_from_map_info(
+/// blast-rs: Native helper adapting Rust HSP map-info storage to the C-shaped port.
+pub fn s_find_splice_junctions_for_gap_using_map_info(
     first: &mut Hsp,
     second: &mut Hsp,
     query: Option<&[u8]>,
@@ -3267,9 +3351,10 @@ pub fn s_find_splice_junctions_for_gap(
                 continue;
             }
             let start = second_len
+                .saturating_sub(1)
                 .saturating_sub(query_gap)
-                .saturating_add(q)
-                .saturating_sub(2);
+                .saturating_sub(2)
+                .saturating_sub(q);
             let lo = start.saturating_sub(1).max(0);
             let hi = start.saturating_add(1).min(second_len.saturating_sub(2));
             for i in lo..=hi {
@@ -3341,6 +3426,16 @@ pub fn s_find_splice_junctions_for_gap(
         for &signal in &SIGNALS {
             if low != (signal & 0x0f) {
                 continue;
+            }
+            if q > 1
+                && second
+                    .map_info
+                    .as_ref()
+                    .and_then(|info| info.edits.as_ref())
+                    .and_then(|edits| edits.edits.first())
+                    .is_some_and(|edit| edit.query_pos < q - 2)
+            {
+                break;
             }
             let end = query_gap.saturating_add(q);
             let lo = end.saturating_sub(1).max(0);
@@ -3613,7 +3708,7 @@ pub fn s_compare_chains_by_oid(a: &HSPChain, b: &HSPChain) -> i32 {
 }
 
 /// Port of NCBI `s_HSPNodeArrayCopy` (`hspfilter_mapper.c:2431`).
-pub fn s_hspnode_array_copy(dest: &mut [HSPNode], source: &[HSPNode], num: i32) -> i32 {
+pub fn s_hsp_node_array_copy(dest: &mut [HSPNode], source: &[HSPNode], num: i32) -> i32 {
     if num < 0 {
         return -1;
     }
@@ -3636,12 +3731,12 @@ pub fn s_hspnode_array_copy(dest: &mut [HSPNode], source: &[HSPNode], num: i32) 
 }
 
 /// Rust ownership equivalent of NCBI `HSPPathFree` (`hspfilter_mapper.c:2454`).
-pub fn hsppath_free(_: Option<HSPPath>) -> Option<HSPPath> {
+pub fn hsp_path_free(_: Option<HSPPath>) -> Option<HSPPath> {
     None
 }
 
 /// Port of NCBI `HSPPathNew` (`hspfilter_mapper.c:2466`).
-pub fn hsppath_new() -> HSPPath {
+pub fn hsp_path_new() -> HSPPath {
     HSPPath {
         start: vec![None; MAX_NUM_HSP_PATHS],
         num_paths: 0,
@@ -3678,10 +3773,10 @@ mod tests {
 
     fn chain(score: i32, context: i32, oid: i32, q: i32, s: i32) -> Box<HSPChain> {
         let mut hsp_slot = Some(hsp(score, context, q, s, 9));
-        let mut chain = hspchain_new(context);
+        let mut chain = hsp_chain_new(context);
         chain.oid = oid;
         chain.score = score;
-        chain.hsps = hspcontainer_new(&mut hsp_slot);
+        chain.hsps = hsp_container_new(&mut hsp_slot);
         chain
     }
 
@@ -3698,15 +3793,15 @@ mod tests {
     #[test]
     fn hsp_container_new_dup_free_take_ownership() {
         let mut missing_hsp = None;
-        assert!(hspcontainer_new(&mut missing_hsp).is_none());
-        assert!(hspcontainer_dup(None).is_none());
+        assert!(hsp_container_new(&mut missing_hsp).is_none());
+        assert!(hsp_container_dup(None).is_none());
 
         let mut hsp_slot = Some(hsp(10, 0, 0, 0, 8));
-        let container = hspcontainer_new(&mut hsp_slot).unwrap();
+        let container = hsp_container_new(&mut hsp_slot).unwrap();
         assert!(hsp_slot.is_none());
-        let dup = hspcontainer_dup(Some(&container)).unwrap();
+        let dup = hsp_container_dup(Some(&container)).unwrap();
         assert_eq!(dup.hsp.score, 10);
-        assert!(hspcontainer_free(Some(container)).is_none());
+        assert!(hsp_container_free(Some(container)).is_none());
     }
 
     #[test]
@@ -3719,8 +3814,8 @@ mod tests {
         assert_eq!(cloned.oid, 5);
         assert!(cloned.next.is_none());
         assert!(clone_chain(None).is_none());
-        assert!(hspchain_free(Some(chain)).is_none());
-        assert!(hspchain_free(None).is_none());
+        assert!(hsp_chain_free(Some(chain)).is_none());
+        assert!(hsp_chain_free(None).is_none());
         let results = blast_mapping_results_new();
         assert_eq!(results.num_queries, 0);
         assert!(blast_mapping_results_free(Some(results)).is_none());
@@ -3807,19 +3902,19 @@ mod tests {
     }
 
     #[test]
-    fn chain_list_insert_old_sorts_and_skips_duplicates() {
+    fn chain_list_insert_by_score_sorts_and_skips_duplicates() {
         let mut list = None;
         assert_eq!(
-            s_hspchain_list_insert_one_old(&mut list, Some(chain(10, 0, 1, 0, 0)), true),
+            s_hsp_chain_list_insert_one_by_score(&mut list, Some(chain(10, 0, 1, 0, 0)), true),
             0
         );
         assert_eq!(
-            s_hspchain_list_insert_one_old(&mut list, Some(chain(30, 0, 2, 1, 1)), true),
+            s_hsp_chain_list_insert_one_by_score(&mut list, Some(chain(30, 0, 2, 1, 1)), true),
             0
         );
         assert_eq!(scores(&list), vec![30, 10]);
         assert_eq!(
-            s_hspchain_list_insert_one_old(&mut list, Some(chain(30, 0, 2, 1, 1)), true),
+            s_hsp_chain_list_insert_one_by_score(&mut list, Some(chain(30, 0, 2, 1, 1)), true),
             0
         );
         assert_eq!(scores(&list), vec![30, 10]);
@@ -3829,12 +3924,12 @@ mod tests {
     fn test_cutoffs_and_best_score_insert() {
         let mut list = Some(chain(20, 0, 1, 0, 0));
         assert_eq!(
-            s_hspchain_list_insert_one(&mut list, Some(chain(10, 0, 2, 1, 1)), false),
+            s_hsp_chain_list_insert_one(&mut list, Some(chain(10, 0, 2, 1, 1)), false),
             0
         );
         assert_eq!(scores(&list), vec![20]);
         assert_eq!(
-            s_hspchain_list_insert_one(&mut list, Some(chain(40, 0, 3, 2, 2)), false),
+            s_hsp_chain_list_insert_one(&mut list, Some(chain(40, 0, 3, 2, 2)), false),
             0
         );
         assert_eq!(scores(&list), vec![40]);
@@ -3848,8 +3943,11 @@ mod tests {
         extreme.hsps.as_mut().unwrap().hsp.num_ident = 0;
         assert!(!s_test_cutoffs(Some(&extreme), 30, i32::MAX - 1));
 
-        assert_eq!(s_hspchain_list_insert_one_old(&mut list, None, true), -1);
-        assert_eq!(s_hspchain_list_insert_one(&mut list, None, true), -1);
+        assert_eq!(
+            s_hsp_chain_list_insert_one_by_score(&mut list, None, true),
+            -1
+        );
+        assert_eq!(s_hsp_chain_list_insert_one(&mut list, None, true), -1);
         assert_eq!(scores(&list), vec![40]);
     }
 
@@ -3862,30 +3960,46 @@ mod tests {
         let mut list = None;
         let mut missing_incoming = None;
         assert_eq!(
-            hspchain_list_insert(&mut list, &mut missing_incoming, 0, -1, false),
+            hsp_chain_list_insert(&mut list, &mut missing_incoming, 0, -1, false),
             0
         );
         assert!(list.is_none());
         assert_eq!(
-            hspchain_list_insert(&mut list, &mut incoming, 0, -1, false),
+            hsp_chain_list_insert(&mut list, &mut incoming, 0, -1, false),
             0
         );
         assert!(incoming.is_none());
         assert_eq!(scores(&list), vec![50, 45, 20]);
-        assert_eq!(hspchain_list_trim(&mut list, 5), 0);
+        assert_eq!(hsp_chain_list_trim(&mut list, 5), 0);
         assert_eq!(scores(&list), vec![50, 45]);
         assert!(s_test_chains_sorted(list.as_deref()));
 
         let mut empty = None;
-        assert_eq!(hspchain_list_trim(&mut empty, 5), -1);
+        assert_eq!(hsp_chain_list_trim(&mut empty, 5), -1);
 
         let mut below_cutoff = Some(chain(10, 0, 4, 60, 60));
         assert_eq!(
-            hspchain_list_insert(&mut list, &mut below_cutoff, 30, -1, false),
+            hsp_chain_list_insert(&mut list, &mut below_cutoff, 30, -1, false),
             0
         );
         assert!(below_cutoff.is_none());
         assert_eq!(scores(&list), vec![50, 45]);
+
+        let mut edit_distance_filtered = Some(chain(50, 0, 7, 80, 80));
+        edit_distance_filtered
+            .as_mut()
+            .unwrap()
+            .hsps
+            .as_mut()
+            .unwrap()
+            .hsp
+            .num_ident = 0;
+        assert_eq!(
+            hsp_chain_list_insert(&mut list, &mut edit_distance_filtered, 30, 1, false),
+            0
+        );
+        assert!(edit_distance_filtered.is_none());
+        assert_eq!(scores(&list), vec![50, 45, 50]);
 
         let mut bad_context = chain(30, 0, 5, 0, 0);
         bad_context.hsps.as_mut().unwrap().hsp.context = 1;
@@ -3893,7 +4007,7 @@ mod tests {
 
         let mut bad_order = chain(30, 0, 6, 10, 10);
         let mut previous_hsp = Some(hsp(20, 0, 5, 5, 10));
-        bad_order.hsps.as_mut().unwrap().next = hspcontainer_new(&mut previous_hsp);
+        bad_order.hsps.as_mut().unwrap().next = hsp_container_new(&mut previous_hsp);
         assert!(!s_test_chains(Some(&bad_order)));
 
         let mut unsorted = chain(20, 0, 7, 0, 0);
@@ -3904,14 +4018,14 @@ mod tests {
     #[test]
     fn mapper_paired_init_allocates_saved_chain_slots() {
         let mut data = BlastHSPMapperData::default();
-        assert_eq!(s_blast_hspmapper_paired_init(&mut data, 3), 0);
+        assert_eq!(s_blast_hsp_mapper_paired_init(&mut data, 3), 0);
         assert_eq!(data.saved_chains.len(), 3);
         assert!(data.saved_chains.iter().all(Option::is_none));
         data.saved_chains[1] = Some(chain(20, 0, 1, 0, 0));
-        assert_eq!(s_blast_hspmapper_paired_init(&mut data, 2), 0);
+        assert_eq!(s_blast_hsp_mapper_paired_init(&mut data, 2), 0);
         assert_eq!(data.saved_chains.len(), 2);
         assert!(data.saved_chains.iter().all(Option::is_none));
-        assert_eq!(s_blast_hspmapper_paired_init(&mut data, -1), 0);
+        assert_eq!(s_blast_hsp_mapper_paired_init(&mut data, -1), 0);
         assert!(data.saved_chains.is_empty());
     }
 
@@ -3922,7 +4036,7 @@ mod tests {
         hit_options.cutoff_score = 37;
         let scoring_options = ScoringOptions::new_blastn();
 
-        let params = blast_hspmapper_params_new(Some(&hit_options), Some(&scoring_options))
+        let params = blast_hsp_mapper_params_new(Some(&hit_options), Some(&scoring_options))
             .expect("mapper params");
         assert_eq!(params.program, MAPPING);
         assert_eq!(params.hitlist_size, 10);
@@ -3933,15 +4047,15 @@ mod tests {
             params.scoring_options.gap_extend,
             -scoring_options.gap_extend
         );
-        assert!(blast_hspmapper_params_new(None, Some(&scoring_options)).is_none());
-        assert!(blast_hspmapper_params_new(Some(&hit_options), None).is_none());
+        assert!(blast_hsp_mapper_params_new(None, Some(&scoring_options)).is_none());
+        assert!(blast_hsp_mapper_params_new(Some(&hit_options), None).is_none());
 
-        let info = blast_hspmapper_info_new(params.clone());
+        let info = blast_hsp_mapper_info_new(params.clone());
         assert_eq!(info.new_fn, BlastHSPMapperCallback::PairedNew);
 
         let query_info = QueryInfo::new_blastn(&[12]);
         let query = [0, 1, 2, 3];
-        let writer = s_blast_hspmapper_paired_new(Some(params), Some(&query_info), Some(&query));
+        let writer = s_blast_hsp_mapper_paired_new(Some(params), Some(&query_info), Some(&query));
         assert_eq!(writer.init_fn, BlastHSPMapperCallback::PairedInit);
         assert_eq!(writer.final_fn, BlastHSPMapperCallback::Final);
         assert_eq!(writer.free_fn, BlastHSPMapperCallback::Free);
@@ -3951,15 +4065,15 @@ mod tests {
             writer.data.query_info.as_ref().map(|info| info.num_queries),
             Some(1)
         );
-        assert!(s_blast_hspmapper_free(Some(writer)).is_none());
+        assert!(s_blast_hsp_mapper_free(Some(writer)).is_none());
 
-        let missing_writer = s_blast_hspmapper_paired_new(None, None, None);
+        let missing_writer = s_blast_hsp_mapper_paired_new(None, None, None);
         assert!(missing_writer.data.params.is_none());
         assert!(missing_writer.data.query.is_none());
         assert!(missing_writer.data.query_info.is_none());
         assert!(missing_writer.data.saved_chains.is_empty());
 
-        assert!(blast_hspmapper_params_free(None).is_none());
+        assert!(blast_hsp_mapper_params_free(None).is_none());
     }
 
     #[test]
@@ -3995,7 +4109,7 @@ mod tests {
     fn compute_chain_score_adds_hsps_and_gap_penalties() {
         let mut scored_chain = chain(30, 0, 1, 0, 0);
         let mut second_hsp = Some(hsp(20, 0, 15, 14, 8));
-        scored_chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_hsp);
+        scored_chain.hsps.as_mut().unwrap().next = hsp_container_new(&mut second_hsp);
         let opts = ScoringOptions::new_blastn();
         assert_eq!(
             s_compute_chain_score(Some(&mut scored_chain), Some(&opts), 100, false),
@@ -4009,7 +4123,7 @@ mod tests {
         );
         assert_eq!(scored_chain.score, 18);
 
-        let mut empty_chain = hspchain_new(0);
+        let mut empty_chain = hsp_chain_new(0);
         empty_chain.score = 27;
         assert_eq!(
             s_compute_chain_score(Some(&mut empty_chain), Some(&opts), 100, false),
@@ -4027,12 +4141,34 @@ mod tests {
         );
         assert_eq!(scripted.score, -4);
 
+        let mut edited = chain(99, 0, 2, 0, 0);
+        edited.hsps.as_mut().unwrap().hsp.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 5)],
+        });
+        edited.hsps.as_mut().unwrap().hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![JumperEdit {
+                    query_pos: 4,
+                    query_base: b'A',
+                    subject_base: b'C',
+                }],
+            }),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: 0,
+        });
+        assert_eq!(
+            s_compute_chain_score(Some(&mut edited), Some(&opts), 100, true),
+            1
+        );
+        assert_eq!(edited.score, 1);
+
         let mut extreme_chain = chain(30, 0, 1, i32::MIN, i32::MIN);
         let mut extreme_second_hsp = hsp(20, 0, 0, 0, 1);
         extreme_second_hsp.query_offset = i32::MAX;
         extreme_second_hsp.subject_offset = i32::MAX;
         let mut extreme_second = Some(extreme_second_hsp);
-        extreme_chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut extreme_second);
+        extreme_chain.hsps.as_mut().unwrap().next = hsp_container_new(&mut extreme_second);
         assert_eq!(
             s_compute_chain_score(Some(&mut extreme_chain), Some(&opts), 100, false),
             18
@@ -4042,11 +4178,38 @@ mod tests {
     }
 
     #[test]
+    fn compute_chain_score_skips_gap_penalty_between_splice_edges() {
+        let mut scored_chain = chain(30, 0, 1, 0, 0);
+        scored_chain.hsps.as_mut().unwrap().hsp.map_info =
+            Some(crate::hspstream::BlastHSPMappingInfo {
+                edits: None,
+                subject_overhangs: None,
+                left_edge: 0,
+                right_edge: MAPPER_SPLICE_SIGNAL,
+            });
+        let mut second = hsp(20, 0, 15, 14, 8);
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: None,
+            left_edge: MAPPER_SPLICE_SIGNAL,
+            right_edge: 0,
+        });
+        let mut second_hsp = Some(second);
+        scored_chain.hsps.as_mut().unwrap().next = hsp_container_new(&mut second_hsp);
+        let opts = ScoringOptions::new_blastn();
+
+        assert_eq!(
+            s_compute_chain_score(Some(&mut scored_chain), Some(&opts), 100, false),
+            50
+        );
+    }
+
+    #[test]
     fn mapper_cutoff_and_chain_from_hsp_follow_context_rules() {
         let mut hit_options = HitSavingOptions::default();
         hit_options.cutoff_score = 0;
         let scores = ScoringOptions::new_blastn();
-        let mut params = blast_hspmapper_params_new(Some(&hit_options), Some(&scores)).unwrap();
+        let mut params = blast_hsp_mapper_params_new(Some(&hit_options), Some(&scores)).unwrap();
         params.cutoff_score_fun = [1000, 200];
         assert_eq!(s_mapper_cutoff_score(&params, 50), 110);
 
@@ -4076,12 +4239,12 @@ mod tests {
         let mut plus = chain(30, 1, 4, 0, 11);
         let mut minus = chain(40, -1, 4, 0, 20);
         let mut tail = Some(hsp(5, -1, 20, 50, 5));
-        minus.hsps.as_mut().unwrap().next = hspcontainer_new(&mut tail);
+        minus.hsps.as_mut().unwrap().next = hsp_container_new(&mut tail);
 
         assert_eq!(s_find_fragment_start(Some(&plus)), 11);
         assert_eq!(s_find_fragment_start(Some(&minus)), 59);
         assert_eq!(s_find_fragment_start(None), -1);
-        assert_eq!(s_find_fragment_start(Some(&hspchain_new(0))), -1);
+        assert_eq!(s_find_fragment_start(Some(&hsp_chain_new(0))), -1);
         let mut extreme_minus = minus.clone();
         extreme_minus
             .hsps
@@ -4468,10 +4631,10 @@ mod tests {
         });
         let mut first_slot = Some(first);
         let mut second_slot = Some(second);
-        let mut chain = hspchain_new(0);
+        let mut chain = hsp_chain_new(0);
         chain.score = 20;
-        chain.hsps = hspcontainer_new(&mut first_slot);
-        chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_slot);
+        chain.hsps = hsp_container_new(&mut first_slot);
+        chain.hsps.as_mut().unwrap().next = hsp_container_new(&mut second_slot);
 
         assert_eq!(
             s_trim_chain_start_to_subj_pos(Some(&mut chain), 13, -4, -12, -1, Some(&[0; 40])),
@@ -4520,12 +4683,12 @@ mod tests {
         let mut first_slot = Some(first);
         let mut second_slot = Some(second);
         let mut third_slot = Some(third);
-        let mut chain = hspchain_new(0);
+        let mut chain = hsp_chain_new(0);
         chain.score = 35;
-        chain.hsps = hspcontainer_new(&mut first_slot);
-        chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_slot);
+        chain.hsps = hsp_container_new(&mut first_slot);
+        chain.hsps.as_mut().unwrap().next = hsp_container_new(&mut second_slot);
         chain.hsps.as_mut().unwrap().next.as_mut().unwrap().next =
-            hspcontainer_new(&mut third_slot);
+            hsp_container_new(&mut third_slot);
 
         assert_eq!(
             s_trim_chain_end_to_subj_pos(Some(&mut chain), 18, -4, -12, -1, Some(&[0; 40])),
@@ -4556,7 +4719,7 @@ mod tests {
         second.query_end = 25;
         second.subject_end = 25;
         let mut second_slot = Some(second);
-        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_slot);
+        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hsp_container_new(&mut second_slot);
 
         let scores = ScoringOptions::new_blastn();
         assert_eq!(s_set_adapter(&mut list, 20, None, 40, Some(&scores)), 0);
@@ -4586,7 +4749,7 @@ mod tests {
         second.query_end = 25;
         second.subject_end = 25;
         let mut second_slot = Some(second);
-        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_slot);
+        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hsp_container_new(&mut second_slot);
 
         let scores = ScoringOptions::new_blastn();
         assert_eq!(s_set_adapter(&mut list, 20, None, 40, Some(&scores)), 0);
@@ -4843,9 +5006,9 @@ mod tests {
         let mut second_slot = Some(second);
         let mut head = HSPContainer {
             hsp: first,
-            next: hspcontainer_new(&mut second_slot),
+            next: hsp_container_new(&mut second_slot),
         };
-        head.next.as_mut().unwrap().next = hspcontainer_new(&mut third_slot);
+        head.next.as_mut().unwrap().next = hsp_container_new(&mut third_slot);
 
         assert_eq!(s_intron_to_gap(&mut head, Some(&[0; 40]), Some(&scores)), 0);
 
@@ -4876,7 +5039,7 @@ mod tests {
         let mut second_slot = Some(second);
         let mut head = HSPContainer {
             hsp: first,
-            next: hspcontainer_new(&mut second_slot),
+            next: hsp_container_new(&mut second_slot),
         };
 
         assert_eq!(s_intron_to_gap(&mut head, Some(&[0; 40]), Some(&scores)), 0);
@@ -4903,7 +5066,7 @@ mod tests {
         let mut second = Some(hsp(10, 0, 14, 14, 10));
         let mut head = HSPContainer {
             hsp: first,
-            next: hspcontainer_new(&mut second),
+            next: hsp_container_new(&mut second),
         };
 
         assert_eq!(s_intron_to_gap(&mut head, None, Some(&scores)), -1);
@@ -4931,6 +5094,15 @@ mod tests {
         first.edit_script = Some(crate::gapinfo::GapEditScript {
             ops: vec![(GapAlignOpType::Sub, 10)],
         });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left: None,
+                right: Some(vec![0, 0, 0]),
+            }),
+            left_edge: 0,
+            right_edge: 0,
+        });
         let mut second = hsp(10, 0, 12, 12, 8);
         second.query_end = 20;
         second.subject_end = 20;
@@ -4938,10 +5110,10 @@ mod tests {
             ops: vec![(GapAlignOpType::Sub, 8)],
         });
         let mut second_slot = Some(second);
-        let mut chain = hspchain_new(0);
+        let mut chain = hsp_chain_new(0);
         chain.hsps = Some(Box::new(HSPContainer {
             hsp: first,
-            next: hspcontainer_new(&mut second_slot),
+            next: hsp_container_new(&mut second_slot),
         }));
         chain.count = 2;
 
@@ -4976,10 +5148,10 @@ mod tests {
             ops: vec![(GapAlignOpType::Sub, 10)],
         });
         let mut second_slot = Some(second);
-        let mut chain = hspchain_new(0);
+        let mut chain = hsp_chain_new(0);
         chain.hsps = Some(Box::new(HSPContainer {
             hsp: first,
-            next: hspcontainer_new(&mut second_slot),
+            next: hsp_container_new(&mut second_slot),
         }));
         chain.count = 2;
 
@@ -5002,7 +5174,7 @@ mod tests {
     #[test]
     fn find_splice_junctions_rejects_missing_state_and_scores_empty_chain() {
         let scores = ScoringOptions::new_blastn();
-        let mut empty_chain = hspchain_new(0);
+        let mut empty_chain = hsp_chain_new(0);
         empty_chain.score = 42;
         empty_chain.next = Some(chain(30, 0, 1, 0, 0));
 
@@ -5035,9 +5207,9 @@ mod tests {
         extreme_second.subject_end = 0;
         let mut extreme_first_slot = Some(extreme_first);
         let mut extreme_second_slot = Some(extreme_second);
-        let mut extreme_chain = hspchain_new(0);
-        extreme_chain.hsps = hspcontainer_new(&mut extreme_first_slot);
-        extreme_chain.hsps.as_mut().unwrap().next = hspcontainer_new(&mut extreme_second_slot);
+        let mut extreme_chain = hsp_chain_new(0);
+        extreme_chain.hsps = hsp_container_new(&mut extreme_first_slot);
+        extreme_chain.hsps.as_mut().unwrap().next = hsp_container_new(&mut extreme_second_slot);
         assert_eq!(
             s_find_splice_junctions(Some(&mut extreme_chain), Some(&[0; 40]), 40, Some(&scores)),
             -1
@@ -5085,9 +5257,9 @@ mod tests {
             ops: vec![(GapAlignOpType::Sub, 120)],
         });
         let mut first_slot = Some(plus);
-        let mut first_list = Some(hspchain_new(1));
+        let mut first_list = Some(hsp_chain_new(1));
         first_list.as_mut().unwrap().score = 120;
-        first_list.as_mut().unwrap().hsps = hspcontainer_new(&mut first_slot);
+        first_list.as_mut().unwrap().hsps = hsp_container_new(&mut first_slot);
 
         let mut minus = hsp(20, -1, 0, 180, 20);
         minus.query_end = 20;
@@ -5096,9 +5268,9 @@ mod tests {
             ops: vec![(GapAlignOpType::Sub, 20)],
         });
         let mut second_slot = Some(minus);
-        let mut second_list = Some(hspchain_new(-1));
+        let mut second_list = Some(hsp_chain_new(-1));
         second_list.as_mut().unwrap().score = 20;
-        second_list.as_mut().unwrap().hsps = hspcontainer_new(&mut second_slot);
+        second_list.as_mut().unwrap().hsps = hsp_container_new(&mut second_slot);
 
         let mut pair_info = Vec::new();
         assert!(s_find_best_pairs(
@@ -5173,7 +5345,7 @@ mod tests {
     #[test]
     fn spliced_paired_run_returns_zero_for_absent_hsp_list() {
         let mut data = BlastHSPMapperData::default();
-        assert_eq!(s_blast_hspmapper_spliced_paired_run(&mut data, None), 0);
+        assert_eq!(s_blast_hsp_mapper_spliced_paired_run(&mut data, None), 0);
         assert!(data.saved_chains.is_empty());
     }
 
@@ -5187,21 +5359,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            s_blast_hspmapper_spliced_paired_run(&mut missing_params, Some(hsp_list.clone())),
+            s_blast_hsp_mapper_spliced_paired_run(&mut missing_params, Some(hsp_list.clone())),
             -1
         );
         assert!(missing_params.saved_chains.is_empty());
 
         let scores = ScoringOptions::new_blastn();
         let mut params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
         params.splice = false;
         let mut missing_query_info = BlastHSPMapperData {
             params: Some(params.clone()),
             ..Default::default()
         };
         assert_eq!(
-            s_blast_hspmapper_spliced_paired_run(&mut missing_query_info, Some(hsp_list.clone())),
+            s_blast_hsp_mapper_spliced_paired_run(&mut missing_query_info, Some(hsp_list.clone())),
             -1
         );
         assert!(missing_query_info.saved_chains.is_empty());
@@ -5214,7 +5386,7 @@ mod tests {
             saved_chains: vec![None],
         };
         assert_eq!(
-            s_blast_hspmapper_spliced_paired_run(&mut missing_splice_query, Some(hsp_list),),
+            s_blast_hsp_mapper_spliced_paired_run(&mut missing_splice_query, Some(hsp_list),),
             -1
         );
         assert!(missing_splice_query
@@ -5228,7 +5400,7 @@ mod tests {
         let query_info = QueryInfo::new_blastn(&[50]);
         let scores = ScoringOptions::new_blastn();
         let mut params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
         params.cutoff_score = 25;
         params.cutoff_edit_dist = -1;
 
@@ -5254,7 +5426,7 @@ mod tests {
         };
 
         assert_eq!(
-            s_blast_hspmapper_spliced_paired_run(&mut data, Some(hsp_list)),
+            s_blast_hsp_mapper_spliced_paired_run(&mut data, Some(hsp_list)),
             0
         );
 
@@ -5271,7 +5443,7 @@ mod tests {
         let query_info = QueryInfo::new_blastn(&[50]);
         let scores = ScoringOptions::new_blastn();
         let mut params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
         params.cutoff_score = 1;
         params.cutoff_score_fun = [1000, 200];
         params.cutoff_edit_dist = -1;
@@ -5287,7 +5459,7 @@ mod tests {
         };
 
         assert_eq!(
-            s_blast_hspmapper_spliced_paired_run(&mut data, Some(hsp_list)),
+            s_blast_hsp_mapper_spliced_paired_run(&mut data, Some(hsp_list)),
             0
         );
         assert_eq!(data.saved_chains.len(), 1);
@@ -5301,7 +5473,7 @@ mod tests {
         query_info.set_query_segment_flags(2, crate::queryinfo::E_LAST_SEGMENT);
         let scores = ScoringOptions::new_blastn();
         let mut params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
         params.cutoff_score = 1;
         params.cutoff_edit_dist = -1;
 
@@ -5324,7 +5496,7 @@ mod tests {
         };
 
         assert_eq!(
-            s_blast_hspmapper_spliced_paired_run(&mut data, Some(hsp_list)),
+            s_blast_hsp_mapper_spliced_paired_run(&mut data, Some(hsp_list)),
             0
         );
 
@@ -5346,7 +5518,7 @@ mod tests {
         let query_info = QueryInfo::new_blastn(&[40]);
         let scores = ScoringOptions::new_blastn();
         let mut params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
         params.splice = true;
         params.cutoff_score = 1;
         params.cutoff_edit_dist = -1;
@@ -5355,6 +5527,15 @@ mod tests {
         first.query_frame = 1;
         first.edit_script = Some(crate::gapinfo::GapEditScript {
             ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left: None,
+                right: Some(vec![0, 0, 0]),
+            }),
+            left_edge: 0,
+            right_edge: 0,
         });
         let mut second = hsp(10, 0, 12, 12, 8);
         second.query_frame = 1;
@@ -5376,7 +5557,7 @@ mod tests {
         };
 
         assert_eq!(
-            s_blast_hspmapper_spliced_paired_run(&mut data, Some(hsp_list)),
+            s_blast_hsp_mapper_spliced_paired_run(&mut data, Some(hsp_list)),
             0
         );
 
@@ -5484,7 +5665,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_chains_clears_mate_when_partner_is_pruned_like_hspchain_free() {
+    fn prune_chains_clears_mate_when_partner_is_pruned_like_hsp_chain_free() {
         let mut pruned_partner = chain(10, 1, 1, 0, 0);
         pruned_partner.pair = Some(1);
         pruned_partner.pair_score = Some(100);
@@ -5530,7 +5711,7 @@ mod tests {
         second.query_end = 18;
         second.subject_end = 30;
         let mut second_slot = Some(second);
-        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_slot);
+        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hsp_container_new(&mut second_slot);
         list.as_mut().unwrap().pair = Some(1);
         list.as_mut().unwrap().pair_score = Some(40);
 
@@ -5557,7 +5738,7 @@ mod tests {
         second.query_end = 22;
         second.subject_end = 30;
         let mut second_slot = Some(second);
-        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hspcontainer_new(&mut second_slot);
+        list.as_mut().unwrap().hsps.as_mut().unwrap().next = hsp_container_new(&mut second_slot);
 
         let scores = ScoringOptions::new_blastn();
         assert_eq!(s_remove_overlaps(&mut list, Some(&scores), 40), 0);
@@ -5604,7 +5785,7 @@ mod tests {
         assert_eq!(remove_overlaps_from_chain_list(&mut empty, &scores, 40), 0);
         assert!(empty.is_none());
 
-        let mut no_hsps = hspchain_new(1);
+        let mut no_hsps = hsp_chain_new(1);
         no_hsps.oid = 9;
         no_hsps.score = 17;
         let mut list = Some(no_hsps);
@@ -5688,12 +5869,12 @@ mod tests {
     }
 
     #[test]
-    fn blast_hspmapper_final_delegates_finalize_and_clears_saved_chains() {
+    fn blast_hsp_mapper_final_delegates_finalize_and_clears_saved_chains() {
         let query_info = QueryInfo::new_blastn(&[12]);
         let query = vec![3; 100];
         let scores = ScoringOptions::new_blastn();
         let mut params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
         params.cutoff_score = 20;
         params.cutoff_edit_dist = -1;
 
@@ -5705,14 +5886,14 @@ mod tests {
         };
         let mut results = blast_mapping_results_new();
 
-        assert_eq!(s_blast_hspmapper_final(&mut data, &mut results), 0);
+        assert_eq!(s_blast_hsp_mapper_final(&mut data, &mut results), 0);
         assert!(data.saved_chains.is_empty());
         assert_eq!(results.num_queries, 1);
         assert_eq!(results.chain_array[0].as_ref().unwrap().oid, 1);
     }
 
     #[test]
-    fn blast_hspmapper_final_runs_adapter_and_poly_a_passes() {
+    fn blast_hsp_mapper_final_runs_adapter_and_poly_a_passes() {
         let query_info = QueryInfo::new_blastn(&[60, 20]);
         let mut query = vec![3; 164];
         query[30..42].copy_from_slice(&[0, 2, 0, 3, 1, 2, 2, 0, 0, 2, 0, 2]);
@@ -5728,7 +5909,7 @@ mod tests {
 
         let scores = ScoringOptions::new_blastn();
         let mut params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
         params.cutoff_score = i32::MIN;
         params.cutoff_edit_dist = -1;
 
@@ -5740,7 +5921,7 @@ mod tests {
         };
         let mut results = blast_mapping_results_new();
 
-        assert_eq!(s_blast_hspmapper_final(&mut data, &mut results), 0);
+        assert_eq!(s_blast_hsp_mapper_final(&mut data, &mut results), 0);
         assert!(data.saved_chains.is_empty());
 
         let adapter = results.chain_array[0].as_ref().unwrap();
@@ -5766,17 +5947,17 @@ mod tests {
     }
 
     #[test]
-    fn blast_hspmapper_final_rejects_missing_required_state() {
+    fn blast_hsp_mapper_final_rejects_missing_required_state() {
         let mut empty = BlastHSPMapperData::default();
         let mut results = blast_mapping_results_new();
-        assert_eq!(s_blast_hspmapper_final(&mut empty, &mut results), 0);
+        assert_eq!(s_blast_hsp_mapper_final(&mut empty, &mut results), 0);
         assert_eq!(results.num_queries, 0);
 
         let query_info = QueryInfo::new_blastn(&[12]);
         let query = vec![3; 100];
         let scores = ScoringOptions::new_blastn();
         let params =
-            blast_hspmapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
+            blast_hsp_mapper_params_new(Some(&HitSavingOptions::default()), Some(&scores)).unwrap();
 
         let mut missing_params = BlastHSPMapperData {
             params: None,
@@ -5785,7 +5966,7 @@ mod tests {
             saved_chains: vec![Some(chain(30, 1, 1, 0, 0))],
         };
         assert_eq!(
-            s_blast_hspmapper_final(&mut missing_params, &mut results),
+            s_blast_hsp_mapper_final(&mut missing_params, &mut results),
             -1
         );
         assert!(missing_params.saved_chains[0].is_some());
@@ -5797,7 +5978,7 @@ mod tests {
             saved_chains: vec![Some(chain(30, 1, 1, 0, 0))],
         };
         assert_eq!(
-            s_blast_hspmapper_final(&mut missing_query_info, &mut results),
+            s_blast_hsp_mapper_final(&mut missing_query_info, &mut results),
             -1
         );
         assert!(missing_query_info.saved_chains[0].is_some());
@@ -5809,7 +5990,7 @@ mod tests {
             saved_chains: vec![Some(chain(30, 1, 1, 0, 0))],
         };
         assert_eq!(
-            s_blast_hspmapper_final(&mut missing_query, &mut results),
+            s_blast_hsp_mapper_final(&mut missing_query, &mut results),
             -1
         );
         assert!(missing_query.saved_chains[0].is_some());
@@ -6181,7 +6362,7 @@ mod tests {
         });
 
         assert_eq!(
-            s_find_splice_junctions_for_gap_from_map_info(
+            s_find_splice_junctions_for_gap_using_map_info(
                 &mut first,
                 &mut second,
                 Some(&query),
@@ -6210,6 +6391,8 @@ mod tests {
         assert_eq!(s_find_adapter_in_sequence(0, 22, Some(&query), 30), 10);
         query[15] = 0;
         assert_eq!(s_find_adapter_in_sequence(0, 22, Some(&query), 30), 10);
+        query[10] = 1;
+        assert_eq!(s_find_adapter_in_sequence(0, 22, Some(&query), 30), -1);
         assert_eq!(s_find_adapter_in_sequence(12, 12, Some(&query), 30), -1);
         assert_eq!(s_find_adapter_in_sequence(0, 30, None, 30), -1);
     }
@@ -6250,7 +6433,7 @@ mod tests {
             .map_info
             .is_none());
 
-        let mut no_hsps = Some(hspchain_new(1));
+        let mut no_hsps = Some(hsp_chain_new(1));
         assert_eq!(s_set_poly_a_tail(&mut no_hsps, 12, -1, 20), 0);
         assert_eq!(no_hsps.as_ref().unwrap().poly_a, 0);
 
@@ -6344,7 +6527,7 @@ mod tests {
     }
 
     #[test]
-    fn hspnode_array_copy_retargets_path_indexes() {
+    fn hsp_node_array_copy_retargets_path_indexes() {
         let source = vec![
             HSPNode {
                 hsp_index: Some(0),
@@ -6358,29 +6541,29 @@ mod tests {
             },
         ];
         let mut dest = vec![HSPNode::default(); 2];
-        assert_eq!(s_hspnode_array_copy(&mut dest, &source, 2), 0);
+        assert_eq!(s_hsp_node_array_copy(&mut dest, &source, 2), 0);
         assert_eq!(dest, source);
-        assert_eq!(s_hspnode_array_copy(&mut dest, &source, 0), 0);
-        assert_eq!(s_hspnode_array_copy(&mut dest, &source, -1), -1);
-        assert_eq!(s_hspnode_array_copy(&mut dest[..1], &source, 2), -1);
-        assert_eq!(s_hspnode_array_copy(&mut dest, &source[..1], 2), -1);
+        assert_eq!(s_hsp_node_array_copy(&mut dest, &source, 0), 0);
+        assert_eq!(s_hsp_node_array_copy(&mut dest, &source, -1), -1);
+        assert_eq!(s_hsp_node_array_copy(&mut dest[..1], &source, 2), -1);
+        assert_eq!(s_hsp_node_array_copy(&mut dest, &source[..1], 2), -1);
 
         let invalid = vec![HSPNode {
             hsp_index: Some(0),
             best_score: 1,
             path_next: Some(3),
         }];
-        assert_eq!(s_hspnode_array_copy(&mut dest[..1], &invalid, 1), -1);
+        assert_eq!(s_hsp_node_array_copy(&mut dest[..1], &invalid, 1), -1);
     }
 
     #[test]
-    fn hsppath_new_and_free_match_c_lifecycle() {
-        let mut path = hsppath_new();
+    fn hsp_path_new_and_free_match_c_lifecycle() {
+        let mut path = hsp_path_new();
         assert_eq!(path.start.len(), MAX_NUM_HSP_PATHS);
         assert_eq!(path.num_paths, 0);
         assert_eq!(path.score, 0);
         path.start[0] = Some(7);
-        assert!(hsppath_free(Some(path)).is_none());
-        assert!(hsppath_free(None).is_none());
+        assert!(hsp_path_free(Some(path)).is_none());
+        assert!(hsp_path_free(None).is_none());
     }
 }

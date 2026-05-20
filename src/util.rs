@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 /// Takes 3 NCBI2na bases (2-bit unambiguous A=0/C=1/G=2/T=3) and
 /// returns the amino acid in NCBIstdaa encoding.
 ///
-/// For NCBI4na input with ambiguity resolution, use [`codon_to_aa`] —
+/// For NCBI4na input with ambiguity resolution, use [`s_codon_to_aa`] —
 /// the 1-1 port of NCBI's `s_CodonToAA`.
 pub fn translate_codon(b1: u8, b2: u8, b3: u8, genetic_code: &[u8; 64]) -> u8 {
     let idx = ((b1 & 3) as usize) * 16 + ((b2 & 3) as usize) * 4 + (b3 & 3) as usize;
@@ -19,18 +19,21 @@ pub fn translate_codon(b1: u8, b2: u8, b3: u8, genetic_code: &[u8; 64]) -> u8 {
 /// Port of NCBI `s_CodonToAA` (`blast_util.c:369`). When an input base
 /// is an ambiguity code matching multiple unambiguous bases, enumerates
 /// every compatible codon; returns the unique amino acid if they all
-/// agree, otherwise returns NCBIstdaa `X`. Bytes > 15 (malformed
-/// or FENCE_SENTRY) also yield `X`.
+/// agree, otherwise returns NCBIstdaa `X`. `FENCE_SENTRY` is preserved;
+/// other malformed bytes > 15 yield `X`.
 ///
 /// NCBI's C iterates `mapping[4] = {T=8, C=2, A=1, G=4}` so its
 /// `codes` table is TCAG-ordered. Our [`STANDARD_GENETIC_CODE`] is
 /// ACGT-ordered, so `MAPPING` here is `[A=1, C=2, G=4, T=8]`.
-pub fn codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
+pub fn s_codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
     const MAPPING: [u8; 4] = [1, 2, 4, 8];
 
     let c0 = codon[0];
     let c1 = codon[1];
     let c2 = codon[2];
+    if c0 == FENCE_SENTRY || c1 == FENCE_SENTRY || c2 == FENCE_SENTRY {
+        return FENCE_SENTRY;
+    }
     if (c0 | c1 | c2) > 15 {
         return crate::encoding::NCBISTDAA_X;
     }
@@ -38,10 +41,12 @@ pub fn codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
     // Fast path for unambiguous codons (each base is a single bit, i.e. one of
     // 1/2/4/8). This covers the vast majority of bytes in `blast_get_translation`
     // hot loops, eliminating the 4×4×4 ambiguity enumeration.
-    let all_single =
-        c0 != 0 && (c0 & (c0 - 1)) == 0 &&
-        c1 != 0 && (c1 & (c1 - 1)) == 0 &&
-        c2 != 0 && (c2 & (c2 - 1)) == 0;
+    let all_single = c0 != 0
+        && (c0 & (c0 - 1)) == 0
+        && c1 != 0
+        && (c1 & (c1 - 1)) == 0
+        && c2 != 0
+        && (c2 & (c2 - 1)) == 0;
     if all_single {
         let i = c0.trailing_zeros() as usize;
         let j = c1.trailing_zeros() as usize;
@@ -267,7 +272,7 @@ pub struct SDynamicSGenCodeNodeArray {
 }
 
 /// Port of NCBI `DynamicSGenCodeNodeArrayNew` (`blast_dynarray.c:292`).
-pub fn dynamic_sgen_code_node_array_new() -> SDynamicSGenCodeNodeArray {
+pub fn dynamic_s_gen_code_node_array_new() -> SDynamicSGenCodeNodeArray {
     SDynamicSGenCodeNodeArray {
         num_used: 0,
         num_allocated: INIT_NUM_GEN_CODES as u32,
@@ -276,14 +281,14 @@ pub fn dynamic_sgen_code_node_array_new() -> SDynamicSGenCodeNodeArray {
 }
 
 /// Rust equivalent of NCBI `DynamicSGenCodeNodeArrayFree` (`blast_dynarray.c:201`).
-pub fn dynamic_sgen_code_node_array_free(
+pub fn dynamic_s_gen_code_node_array_free(
     _: Option<SDynamicSGenCodeNodeArray>,
 ) -> Option<SDynamicSGenCodeNodeArray> {
     None
 }
 
 /// Port of NCBI `s_DynamicSGenCodeNodeArray_ReallocIfNecessary` (`blast_dynarray.c:313`).
-pub fn s_dynamic_sgen_code_node_array_realloc_if_necessary(
+pub fn s_dynamic_s_gen_code_node_array_realloc_if_necessary(
     arr: &mut SDynamicSGenCodeNodeArray,
 ) -> i16 {
     if arr.num_used + 1 > arr.num_allocated {
@@ -300,7 +305,7 @@ pub fn s_dynamic_sgen_code_node_array_realloc_if_necessary(
 }
 
 /// Port of NCBI `s_DynamicSGenCodeNodeArray_IsSorted` (`blast_dynarray.c:335`).
-pub fn s_dynamic_sgen_code_node_array_is_sorted(arr: Option<&SDynamicSGenCodeNodeArray>) -> bool {
+pub fn s_dynamic_s_gen_code_node_array_is_sorted(arr: Option<&SDynamicSGenCodeNodeArray>) -> bool {
     let Some(arr) = arr else {
         return true;
     };
@@ -313,7 +318,7 @@ pub fn s_dynamic_sgen_code_node_array_is_sorted(arr: Option<&SDynamicSGenCodeNod
 }
 
 /// Port of NCBI `s_SGenCodeNodeCompare` (`blast_dynarray.c:354`).
-pub fn s_sgen_code_node_compare(a: &SGenCodeNode, b: &SGenCodeNode) -> i32 {
+pub fn s_s_gen_code_node_compare(a: &SGenCodeNode, b: &SGenCodeNode) -> i32 {
     match a.gc_id.cmp(&b.gc_id) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -322,18 +327,18 @@ pub fn s_sgen_code_node_compare(a: &SGenCodeNode, b: &SGenCodeNode) -> i32 {
 }
 
 /// Port of NCBI `s_DynamicSGenCodeNodeArray_Sort` (`blast_dynarray.c:368`).
-pub fn s_dynamic_sgen_code_node_array_sort(arr: Option<&mut SDynamicSGenCodeNodeArray>) {
+pub fn s_dynamic_s_gen_code_node_array_sort(arr: Option<&mut SDynamicSGenCodeNodeArray>) {
     let Some(arr) = arr else {
         return;
     };
-    if arr.num_used <= 1 || s_dynamic_sgen_code_node_array_is_sorted(Some(arr)) {
+    if arr.num_used <= 1 || s_dynamic_s_gen_code_node_array_is_sorted(Some(arr)) {
         return;
     }
     arr.data[..arr.num_used as usize].sort_by_key(|node| node.gc_id);
 }
 
 /// Port of NCBI `DynamicSGenCodeNodeArray_Append` (`blast_dynarray.c:384`).
-pub fn dynamic_sgen_code_node_array_append(
+pub fn dynamic_s_gen_code_node_array_append(
     arr: &mut SDynamicSGenCodeNodeArray,
     element: SGenCodeNode,
 ) -> i16 {
@@ -341,11 +346,11 @@ pub fn dynamic_sgen_code_node_array_append(
         return BLASTERR_INVALIDPARAM;
     };
 
-    if dynamic_sgen_code_node_array_find(arr, element.gc_id).is_some() {
+    if dynamic_s_gen_code_node_array_find(arr, element.gc_id).is_some() {
         return 0;
     }
 
-    let retval = s_dynamic_sgen_code_node_array_realloc_if_necessary(arr);
+    let retval = s_dynamic_s_gen_code_node_array_realloc_if_necessary(arr);
     if retval != 0 {
         return retval;
     }
@@ -358,12 +363,12 @@ pub fn dynamic_sgen_code_node_array_append(
         gc_str: Some(copied),
     });
     arr.num_used += 1;
-    s_dynamic_sgen_code_node_array_sort(Some(arr));
+    s_dynamic_s_gen_code_node_array_sort(Some(arr));
     retval
 }
 
 /// Port of NCBI `s_DynamicSGenCodeNodeArray_BinSearch` (`blast_dynarray.c:417`).
-pub fn s_dynamic_sgen_code_node_array_bin_search(
+pub fn s_dynamic_s_gen_code_node_array_bin_search(
     arr: &SDynamicSGenCodeNodeArray,
     gen_code_id: u32,
 ) -> i32 {
@@ -381,11 +386,11 @@ pub fn s_dynamic_sgen_code_node_array_bin_search(
 }
 
 /// Port of NCBI `DynamicSGenCodeNodeArray_Find` (`blast_dynarray.c:438`).
-pub fn dynamic_sgen_code_node_array_find(
+pub fn dynamic_s_gen_code_node_array_find(
     arr: &SDynamicSGenCodeNodeArray,
     gen_code_id: u32,
 ) -> Option<&[u8]> {
-    let index = s_dynamic_sgen_code_node_array_bin_search(arr, gen_code_id) as usize;
+    let index = s_dynamic_s_gen_code_node_array_bin_search(arr, gen_code_id) as usize;
     if index < arr.num_used as usize && arr.data[index].gc_id == gen_code_id {
         arr.data[index].gc_str.as_deref()
     } else {
@@ -405,7 +410,7 @@ pub fn gen_code_singleton_init() {
         .lock()
         .expect("genetic-code singleton lock poisoned");
     if singleton.is_none() {
-        *singleton = Some(dynamic_sgen_code_node_array_new());
+        *singleton = Some(dynamic_s_gen_code_node_array_new());
     }
 }
 
@@ -415,7 +420,7 @@ pub fn gen_code_singleton_fini() {
         .lock()
         .expect("genetic-code singleton lock poisoned");
     let owned = singleton.take();
-    *singleton = dynamic_sgen_code_node_array_free(owned);
+    *singleton = dynamic_s_gen_code_node_array_free(owned);
 }
 
 /// Port of NCBI `GenCodeSingletonAdd`.
@@ -424,12 +429,12 @@ pub fn gen_code_singleton_add(gen_code_id: u32, gen_code_str: &[u8]) -> i16 {
         .lock()
         .expect("genetic-code singleton lock poisoned");
     if singleton.is_none() {
-        *singleton = Some(dynamic_sgen_code_node_array_new());
+        *singleton = Some(dynamic_s_gen_code_node_array_new());
     }
     let Some(arr) = singleton.as_mut() else {
         return BLASTERR_INVALIDPARAM;
     };
-    dynamic_sgen_code_node_array_append(
+    dynamic_s_gen_code_node_array_append(
         arr,
         SGenCodeNode {
             gc_id: gen_code_id,
@@ -444,7 +449,7 @@ pub fn gen_code_singleton_find(gen_code_id: u32) -> Option<Vec<u8>> {
         .lock()
         .expect("genetic-code singleton lock poisoned");
     let arr = singleton.as_ref()?;
-    dynamic_sgen_code_node_array_find(arr, gen_code_id).map(|code| code.to_vec())
+    dynamic_s_gen_code_node_array_find(arr, gen_code_id).map(|code| code.to_vec())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -454,7 +459,7 @@ pub struct SSeqRange {
 }
 
 /// Port of NCBI `SSeqRangeNew` (`blast_util.c:40`).
-pub fn sseq_range_new(start: i32, stop: i32) -> SSeqRange {
+pub fn s_seq_range_new(start: i32, stop: i32) -> SSeqRange {
     SSeqRange {
         left: start,
         right: stop,
@@ -462,7 +467,7 @@ pub fn sseq_range_new(start: i32, stop: i32) -> SSeqRange {
 }
 
 /// Port of NCBI `SSeqRangeArrayLessThanOrEqual` (`blast_util.c:47`).
-pub fn sseq_range_array_less_than_or_equal(ranges: Option<&[SSeqRange]>, target: i32) -> i32 {
+pub fn s_seq_range_array_less_than_or_equal(ranges: Option<&[SSeqRange]>, target: i32) -> i32 {
     let Some(ranges) = ranges else {
         return -1;
     };
@@ -585,7 +590,7 @@ pub fn blast_target_translation_new(
         } else {
             let rev = get_reverse_nucl_sequence(seq, subject_blk.length.max(0) as usize);
             for context in 0..NUM_FRAMES {
-                let frame = blast_context_to_frame_blastx(context as u32);
+                let frame = blast_context_to_frame(context as u32);
                 let mut translation = vec![0; subject_blk.length.max(0) as usize / 3 + 2];
                 blast_get_translation(
                     seq,
@@ -1002,7 +1007,7 @@ pub fn blast_compress_blastna_sequence(seq_blk: Option<&mut BlastSequenceBlk>) -
 /// Port of NCBI `BSearchInt4` (`blast_util.c:1231`).
 /// Returns the lower bracket index from a sorted ascending array. Like the C
 /// helper, values smaller than the first element and empty arrays return `0`.
-pub fn bsearch_int4(n: i32, a: &[i32]) -> i32 {
+pub fn b_search_int4(n: i32, a: &[i32]) -> i32 {
     let mut b = 0usize;
     let mut e = a.len();
 
@@ -1300,7 +1305,7 @@ pub fn is_residue(x: u8) -> bool {
 /// Port of `BLAST_ContextToFrame` (`blast_util.c:839`) for blastx-style
 /// programs (eBlastTypeBlastx/Tblastx/RpsTblastn). Maps the 6 contexts
 /// 0..5 to frames 1, 2, 3, -1, -2, -3.
-pub fn blast_context_to_frame_blastx(context_number: u32) -> i32 {
+pub fn blast_context_to_frame(context_number: u32) -> i32 {
     match (context_number as usize) % NUM_FRAMES {
         0 => 1,
         1 => 2,
@@ -1377,7 +1382,7 @@ pub fn blast_get_translation(
                     *nucl_ptr.add(index + 2),
                 ]
             };
-            let residue = codon_to_aa(codon, genetic_code);
+            let residue = s_codon_to_aa(codon, genetic_code);
             // C: if (IS_residue(residue) || residue == FENCE_SENTRY)
             if is_residue(residue) || residue == FENCE_SENTRY {
                 unsafe {
@@ -1400,7 +1405,7 @@ pub fn blast_get_translation(
 /// Frame `ctx`'s residues are at
 /// `&translation_buffer[frame_offsets[ctx] + 1 .. frame_offsets[ctx+1]]`
 /// (matching C's `translation_buffer + frame_offsets[ctx] + 1`).
-pub fn blast_get_all_translations_ncbi4na(
+pub fn blast_get_all_translations(
     nucl_seq: &[u8],
     nucl_length: usize,
     genetic_code: &[u8; 64],
@@ -1415,7 +1420,7 @@ pub fn blast_get_all_translations_ncbi4na(
     frame_offsets[0] = 0;
 
     for context in 0..NUM_FRAMES {
-        let frame = blast_context_to_frame_blastx(context as u32);
+        let frame = blast_context_to_frame(context as u32);
         let length = blast_get_translation(
             nucl_seq,
             &nucl_seq_rev,
@@ -1637,13 +1642,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_sgen_code_node_array_append_sort_find() {
-        let mut arr = dynamic_sgen_code_node_array_new();
+    fn test_dynamic_s_gen_code_node_array_append_sort_find() {
+        let mut arr = dynamic_s_gen_code_node_array_new();
         let code_a = vec![b'A'; GENCODE_STRLEN];
         let code_b = vec![b'B'; GENCODE_STRLEN];
 
         assert_eq!(
-            dynamic_sgen_code_node_array_append(
+            dynamic_s_gen_code_node_array_append(
                 &mut arr,
                 SGenCodeNode {
                     gc_id: 11,
@@ -1653,7 +1658,7 @@ mod tests {
             0
         );
         assert_eq!(
-            dynamic_sgen_code_node_array_append(
+            dynamic_s_gen_code_node_array_append(
                 &mut arr,
                 SGenCodeNode {
                     gc_id: 1,
@@ -1662,20 +1667,20 @@ mod tests {
             ),
             0
         );
-        assert!(s_dynamic_sgen_code_node_array_is_sorted(Some(&arr)));
+        assert!(s_dynamic_s_gen_code_node_array_is_sorted(Some(&arr)));
         assert_eq!(arr.data[0].gc_id, 1);
         assert_eq!(
-            dynamic_sgen_code_node_array_find(&arr, 1),
+            dynamic_s_gen_code_node_array_find(&arr, 1),
             Some(code_a.as_slice())
         );
         assert_eq!(
-            dynamic_sgen_code_node_array_find(&arr, 11),
+            dynamic_s_gen_code_node_array_find(&arr, 11),
             Some(code_b.as_slice())
         );
-        assert_eq!(dynamic_sgen_code_node_array_find(&arr, 99), None);
+        assert_eq!(dynamic_s_gen_code_node_array_find(&arr, 99), None);
 
         assert_eq!(
-            dynamic_sgen_code_node_array_append(
+            dynamic_s_gen_code_node_array_append(
                 &mut arr,
                 SGenCodeNode {
                     gc_id: 1,
@@ -1686,7 +1691,7 @@ mod tests {
         );
         assert_eq!(arr.num_used, 2);
         assert_eq!(
-            dynamic_sgen_code_node_array_append(
+            dynamic_s_gen_code_node_array_append(
                 &mut arr,
                 SGenCodeNode {
                     gc_id: 2,
@@ -1695,8 +1700,8 @@ mod tests {
             ),
             BLASTERR_INVALIDPARAM
         );
-        assert_eq!(s_sgen_code_node_compare(&arr.data[0], &arr.data[1]), -1);
-        assert_eq!(dynamic_sgen_code_node_array_free(Some(arr)), None);
+        assert_eq!(s_s_gen_code_node_compare(&arr.data[0], &arr.data[1]), -1);
+        assert_eq!(dynamic_s_gen_code_node_array_free(Some(arr)), None);
     }
 
     #[test]
@@ -1720,18 +1725,18 @@ mod tests {
     }
 
     #[test]
-    fn test_sseq_range_helpers_match_ncbi() {
+    fn test_s_seq_range_helpers_match_ncbi() {
         let ranges = [
-            sseq_range_new(10, 20),
-            sseq_range_new(30, 40),
-            sseq_range_new(50, 60),
+            s_seq_range_new(10, 20),
+            s_seq_range_new(30, 40),
+            s_seq_range_new(50, 60),
         ];
-        assert_eq!(sseq_range_array_less_than_or_equal(None, 10), -1);
-        assert_eq!(sseq_range_array_less_than_or_equal(Some(&[]), 10), -1);
-        assert_eq!(sseq_range_array_less_than_or_equal(Some(&ranges), 5), 0);
-        assert_eq!(sseq_range_array_less_than_or_equal(Some(&ranges), 35), 1);
-        assert_eq!(sseq_range_array_less_than_or_equal(Some(&ranges), 45), 2);
-        assert_eq!(sseq_range_array_less_than_or_equal(Some(&ranges), 80), 2);
+        assert_eq!(s_seq_range_array_less_than_or_equal(None, 10), -1);
+        assert_eq!(s_seq_range_array_less_than_or_equal(Some(&[]), 10), -1);
+        assert_eq!(s_seq_range_array_less_than_or_equal(Some(&ranges), 5), 0);
+        assert_eq!(s_seq_range_array_less_than_or_equal(Some(&ranges), 35), 1);
+        assert_eq!(s_seq_range_array_less_than_or_equal(Some(&ranges), 45), 2);
+        assert_eq!(s_seq_range_array_less_than_or_equal(Some(&ranges), 80), 2);
     }
 
     #[test]
@@ -1747,7 +1752,7 @@ mod tests {
         assert_eq!(blk.sequence_nomask.as_deref(), Some(&[1, 2, 3][..]));
         assert!(blk.sequence_start_allocated);
 
-        let ranges = [sseq_range_new(7, 8), sseq_range_new(9, 10)];
+        let ranges = [s_seq_range_new(7, 8), s_seq_range_new(9, 10)];
         assert_eq!(
             blast_seq_blk_set_seq_ranges(
                 Some(&mut blk),
@@ -1760,7 +1765,7 @@ mod tests {
         );
         assert_eq!(
             blk.seq_ranges.as_deref(),
-            Some(&[sseq_range_new(0, 8), sseq_range_new(9, 3)][..])
+            Some(&[s_seq_range_new(0, 8), s_seq_range_new(9, 3)][..])
         );
         assert_eq!(blk.num_seq_ranges, 2);
         assert!(blk.seq_ranges_allocated);
@@ -1781,7 +1786,7 @@ mod tests {
         let mut blk = blk.unwrap();
         blk.oof_sequence = Some(vec![1, 2, 3]);
         blk.oof_sequence_allocated = true;
-        blk.seq_ranges = Some(vec![sseq_range_new(0, 2)]);
+        blk.seq_ranges = Some(vec![s_seq_range_new(0, 2)]);
         blk.seq_ranges_allocated = true;
         blk.num_seq_ranges = 1;
 
@@ -1872,14 +1877,14 @@ mod tests {
     }
 
     #[test]
-    fn test_bsearch_int4_matches_ncbi_lower_bracket() {
+    fn test_b_search_int4_matches_ncbi_lower_bracket() {
         let values = [2, 4, 8, 16, 32];
-        assert_eq!(bsearch_int4(1, &values), 0);
-        assert_eq!(bsearch_int4(2, &values), 0);
-        assert_eq!(bsearch_int4(7, &values), 1);
-        assert_eq!(bsearch_int4(8, &values), 2);
-        assert_eq!(bsearch_int4(100, &values), 4);
-        assert_eq!(bsearch_int4(100, &[]), 0);
+        assert_eq!(b_search_int4(1, &values), 0);
+        assert_eq!(b_search_int4(2, &values), 0);
+        assert_eq!(b_search_int4(7, &values), 1);
+        assert_eq!(b_search_int4(8, &values), 2);
+        assert_eq!(b_search_int4(100, &values), 4);
+        assert_eq!(b_search_int4(100, &[]), 0);
     }
 
     #[test]
@@ -1944,7 +1949,7 @@ mod tests {
         let table = s_blast_get_translation_table(Some(&STANDARD_GENETIC_CODE), false).unwrap();
         let rc_table = s_blast_get_translation_table(Some(&STANDARD_GENETIC_CODE), true).unwrap();
         let (flat, offsets) =
-            blast_get_all_translations_ncbi4na(&ncbi4na, ncbi4na.len(), &STANDARD_GENETIC_CODE);
+            blast_get_all_translations(&ncbi4na, ncbi4na.len(), &STANDARD_GENETIC_CODE);
 
         for (context, frame) in [1, 2, 3, -1, -2, -3].into_iter().enumerate() {
             let mut prot = vec![0u8; ncbi4na.len() / CODON_LENGTH + 3];
@@ -2071,13 +2076,12 @@ mod tests {
     fn test_six_frame() {
         // ACGTACGTAC (10 bases) in NCBI4na: A=1, C=2, G=4, T=8
         let seq = vec![1u8, 2, 4, 8, 1, 2, 4, 8, 1, 2];
-        let (_buf, offsets) =
-            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        let (_buf, offsets) = blast_get_all_translations(&seq, seq.len(), &STANDARD_GENETIC_CODE);
         // Frame +1 covers ACG TAC GTA → 3 residues.
         assert_eq!(offsets[1] - offsets[0] - 1, 3);
         // Frame names are produced in order 1, 2, 3, -1, -2, -3.
-        assert_eq!(blast_context_to_frame_blastx(0), 1);
-        assert_eq!(blast_context_to_frame_blastx(3), -1);
+        assert_eq!(blast_context_to_frame(0), 1);
+        assert_eq!(blast_context_to_frame(3), -1);
     }
 
     #[test]
@@ -2175,56 +2179,64 @@ mod tests {
     }
 
     #[test]
-    fn test_codon_to_aa_unambiguous() {
+    fn test_s_codon_to_aa_unambiguous() {
         // ATG -> M (12): NCBI4na A=1, T=8, G=4
-        assert_eq!(codon_to_aa([1, 8, 4], &STANDARD_GENETIC_CODE), 12);
+        assert_eq!(s_codon_to_aa([1, 8, 4], &STANDARD_GENETIC_CODE), 12);
         // TAA -> *.
         assert_eq!(
-            codon_to_aa([8, 1, 1], &STANDARD_GENETIC_CODE),
+            s_codon_to_aa([8, 1, 1], &STANDARD_GENETIC_CODE),
             crate::encoding::NCBISTDAA_STOP
         );
         // GCT -> A (1)
-        assert_eq!(codon_to_aa([4, 2, 8], &STANDARD_GENETIC_CODE), 1);
+        assert_eq!(s_codon_to_aa([4, 2, 8], &STANDARD_GENETIC_CODE), 1);
     }
 
     #[test]
-    fn test_codon_to_aa_ambiguity_resolves_to_x() {
+    fn test_s_codon_to_aa_ambiguity_resolves_to_x() {
         // CTN: CTA=L, CTC=L, CTG=L, CTT=L — all leucine, so resolves to L (11).
         // CTN with N=15
-        assert_eq!(codon_to_aa([2, 8, 15], &STANDARD_GENETIC_CODE), 11);
+        assert_eq!(s_codon_to_aa([2, 8, 15], &STANDARD_GENETIC_CODE), 11);
 
         // ATN: ATA=I, ATC=I, ATG=M, ATT=I — mixed, must return X.
         assert_eq!(
-            codon_to_aa([1, 8, 15], &STANDARD_GENETIC_CODE),
+            s_codon_to_aa([1, 8, 15], &STANDARD_GENETIC_CODE),
             crate::encoding::NCBISTDAA_X
         );
 
         // YTA (Y=C|T=10): CTA=L, TTA=L — both L, so resolves to L (11).
-        assert_eq!(codon_to_aa([10, 8, 1], &STANDARD_GENETIC_CODE), 11);
+        assert_eq!(s_codon_to_aa([10, 8, 1], &STANDARD_GENETIC_CODE), 11);
 
         // RTA (R=A|G=5): ATA=I, GTA=V — mixed, X.
         assert_eq!(
-            codon_to_aa([5, 8, 1], &STANDARD_GENETIC_CODE),
+            s_codon_to_aa([5, 8, 1], &STANDARD_GENETIC_CODE),
             crate::encoding::NCBISTDAA_X
         );
     }
 
     #[test]
-    fn test_codon_to_aa_n_in_first_position_mixed() {
+    fn test_s_codon_to_aa_n_in_first_position_mixed() {
         // NCT (N=15): all four first-base options. ACT=T, CCT=P, GCT=A, TCT=S.
         // Mixed → X.
         assert_eq!(
-            codon_to_aa([15, 2, 8], &STANDARD_GENETIC_CODE),
+            s_codon_to_aa([15, 2, 8], &STANDARD_GENETIC_CODE),
             crate::encoding::NCBISTDAA_X
         );
     }
 
     #[test]
-    fn test_codon_to_aa_malformed_returns_x() {
-        // Any byte > 15 (e.g. FENCE_SENTRY) → X.
+    fn test_s_codon_to_aa_malformed_returns_x() {
+        // Non-sentinel malformed bytes > 15 yield X.
         assert_eq!(
-            codon_to_aa([1, 8, 200], &STANDARD_GENETIC_CODE),
+            s_codon_to_aa([1, 8, 200], &STANDARD_GENETIC_CODE),
             crate::encoding::NCBISTDAA_X
+        );
+    }
+
+    #[test]
+    fn test_s_codon_to_aa_preserves_fence_sentry() {
+        assert_eq!(
+            s_codon_to_aa([1, FENCE_SENTRY, 4], &STANDARD_GENETIC_CODE),
+            FENCE_SENTRY
         );
     }
 
@@ -2269,10 +2281,9 @@ mod tests {
     }
 
     #[test]
-    fn test_blast_get_all_translations_ncbi4na_offsets_and_frames() {
+    fn test_blast_get_all_translations_offsets_and_frames() {
         let seq: Vec<u8> = vec![1, 8, 4, 4, 2, 8]; // ATGGCT
-        let (buf, offsets) =
-            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        let (buf, offsets) = blast_get_all_translations(&seq, seq.len(), &STANDARD_GENETIC_CODE);
         // Six contexts, frame ∈ {1,2,3,-1,-2,-3}; lengths in residues are
         // 2, 1, 1, 2, 1, 1 for ATGGCT (frame +1: ATG GCT → M A; frame +2:
         // TGG → W; frame +3: GGC → G; reverse-complement is AGCCAT,
@@ -2402,8 +2413,7 @@ mod tests {
     fn test_six_frame_translation_short_seq() {
         // Sequence shorter than 3 bases (NCBI4na: A=1, C=2): no codons in any frame.
         let seq = vec![1u8, 2]; // AC
-        let (_buf, offsets) =
-            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        let (_buf, offsets) = blast_get_all_translations(&seq, seq.len(), &STANDARD_GENETIC_CODE);
         for ctx in 0..NUM_FRAMES {
             assert_eq!(
                 offsets[ctx + 1] - offsets[ctx],
@@ -2417,8 +2427,7 @@ mod tests {
     fn test_six_frame_translation_exact_codon() {
         // Exactly 3 bases (NCBI4na): ATG = Met. A=1, T=8, G=4.
         let seq = vec![1u8, 8, 4];
-        let (buf, offsets) =
-            blast_get_all_translations_ncbi4na(&seq, seq.len(), &STANDARD_GENETIC_CODE);
+        let (buf, offsets) = blast_get_all_translations(&seq, seq.len(), &STANDARD_GENETIC_CODE);
         // Frame +1 has 1 residue (Met = 12).
         assert_eq!(offsets[1] - offsets[0] - 1, 1);
         assert_eq!(buf[(offsets[0] + 1) as usize], 12);
@@ -2431,12 +2440,12 @@ mod tests {
     fn test_six_frame_frame_numbers() {
         // Frame numbering follows BLAST_ContextToFrame for blastx-style programs:
         // contexts 0..5 → frames 1, 2, 3, -1, -2, -3.
-        assert_eq!(blast_context_to_frame_blastx(0), 1);
-        assert_eq!(blast_context_to_frame_blastx(1), 2);
-        assert_eq!(blast_context_to_frame_blastx(2), 3);
-        assert_eq!(blast_context_to_frame_blastx(3), -1);
-        assert_eq!(blast_context_to_frame_blastx(4), -2);
-        assert_eq!(blast_context_to_frame_blastx(5), -3);
+        assert_eq!(blast_context_to_frame(0), 1);
+        assert_eq!(blast_context_to_frame(1), 2);
+        assert_eq!(blast_context_to_frame(2), 3);
+        assert_eq!(blast_context_to_frame(3), -1);
+        assert_eq!(blast_context_to_frame(4), -2);
+        assert_eq!(blast_context_to_frame(5), -3);
     }
 
     #[test]

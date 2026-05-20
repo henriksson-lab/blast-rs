@@ -7,11 +7,12 @@
 //! | Rust                             | NCBI source (blast_gapalign.c)           |
 //! | -------------------------------- | ---------------------------------------- |
 //! | `align_ex`                       | `ALIGN_EX` (line 374)                    |
-//! | `blast_gapped_align`             | `BLAST_GappedAlignmentWithTraceback`     |
-//! | `blast_gapped_score_only`        | `Blast_SemiGappedAlign`                  |
-//! | `blast_gapped_score_only_packed_subject` | `s_BlastDynProgNtGappedAlignment` / `s_BlastAlignPackedNucl` |
+//! | `blast_gapped_alignment_with_traceback` | `BLAST_GappedAlignmentWithTraceback`     |
+//! | `blast_semi_gapped_align`        | `Blast_SemiGappedAlign`                  |
+//! | `s_blast_dyn_prog_nt_gapped_alignment` | `s_BlastDynProgNtGappedAlignment`        |
+//! | `s_blast_align_packed_nucl`      | `s_BlastAlignPackedNucl`                 |
 //! | `gapped_score_one_dir`           | inner recurrence of `Blast_SemiGappedAlign` |
-//! | `build_blastna_matrix`           | `BLAST_ScoreBlk` matrix fill (blast_stat.c) |
+//! | `blast_score_blk_nucl_matrix_create` | `BlastScoreBlkNuclMatrixCreate` (blast_stat.c) |
 //! | `traceback_align` / `_abs`       | standalone NW helper, no C analog        |
 //!
 //! Script/op constants match NCBI exactly (see `SCRIPT_SUB` etc.) —
@@ -595,7 +596,7 @@ pub(crate) fn align_ex(
 
 /// Build full BLASTNA scoring matrix — verbatim port of NCBI
 /// `BlastScoreBlkNuclMatrixCreate` (`blast_stat.c:1060`).
-pub fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
+pub fn blast_score_blk_nucl_matrix_create(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
     use crate::encoding::{blastna_pair_score, BLASTNA_SIZE};
 
     let mut matrix = [[0i32; 16]; BLASTNA_SIZE];
@@ -621,7 +622,7 @@ pub fn build_blastna_matrix(reward: i32, penalty: i32) -> [[i32; 16]; 16] {
 /// BLAST-style gapped alignment with traceback — extends bidirectionally from seed.
 /// Fast score-only gapped extension (no traceback).
 /// Port of C engine's Blast_SemiGappedAlign — computes only the score.
-pub fn blast_gapped_score_only(
+pub fn blast_semi_gapped_align(
     query: &[u8],
     subject: &[u8],
     seed_q: usize,
@@ -633,7 +634,7 @@ pub fn blast_gapped_score_only(
     x_dropoff: i32,
 ) -> i32 {
     let gap_oe = gap_open + gap_extend;
-    let matrix = build_blastna_matrix(reward, penalty);
+    let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
 
     // Left extension (score only)
     let score_l = gapped_score_one_dir(
@@ -666,37 +667,6 @@ pub fn blast_gapped_score_only(
     };
 
     score_l + score_r
-}
-
-/// Score-only port of BLASTN's packed-subject preliminary DP path
-/// (`s_BlastDynProgNtGappedAlignment` + `s_BlastAlignPackedNucl`).
-pub fn blast_gapped_score_only_packed_subject(
-    query: &[u8],
-    subject_packed: &[u8],
-    subject_len: usize,
-    seed_q: usize,
-    seed_s: usize,
-    reward: i32,
-    penalty: i32,
-    gap_open: i32,
-    gap_extend: i32,
-    x_dropoff: i32,
-    ungapped_score: i32,
-) -> i32 {
-    blast_gapped_score_extents_packed_subject(
-        query,
-        subject_packed,
-        subject_len,
-        seed_q,
-        seed_s,
-        reward,
-        penalty,
-        gap_open,
-        gap_extend,
-        x_dropoff,
-        ungapped_score,
-    )
-    .0
 }
 
 /// Name-aligned wrapper for NCBI `s_BlastDynProgNtGappedAlignment`
@@ -733,7 +703,7 @@ pub fn s_blast_dyn_prog_nt_gapped_alignment(
     i32,
     i32,
 ) {
-    blast_gapped_score_extents_packed_subject(
+    s_blast_dyn_prog_nt_gapped_alignment_extents(
         query,
         subject_packed,
         subject_len,
@@ -748,10 +718,9 @@ pub fn s_blast_dyn_prog_nt_gapped_alignment(
     )
 }
 
-/// Packed-subject preliminary DP that returns the same information NCBI's
-/// `s_BlastDynProgNtGappedAlignment` derives before saving a prelim HSP:
-/// score plus preliminary extents around the chosen start.
-pub fn blast_gapped_score_extents_packed_subject(
+/// blast-rs: shared preliminary-extent helper for
+/// `s_blast_dyn_prog_nt_gapped_alignment`; not a direct NCBI C port.
+fn s_blast_dyn_prog_nt_gapped_alignment_extents(
     query: &[u8],
     subject_packed: &[u8],
     subject_len: usize,
@@ -791,7 +760,7 @@ pub fn blast_gapped_score_extents_packed_subject(
         s_length = s_length.saturating_sub(4);
     }
 
-    let matrix = build_blastna_matrix(reward, penalty);
+    let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
     let gap_oe = gap_open + gap_extend;
     let (score_left, private_q_start, private_s_start) = gapped_score_one_dir_packed_subject(
         query,
@@ -873,7 +842,7 @@ pub fn s_blast_align_packed_nucl(
     x_dropoff: i32,
     reverse: bool,
 ) -> (i32, usize, usize) {
-    let matrix = build_blastna_matrix(reward, penalty);
+    let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
     gapped_score_one_dir_packed_subject(
         query,
         subject_packed,
@@ -954,13 +923,13 @@ fn gapped_score_one_dir(
             } else {
                 bi + 1
             };
-            if b_idx >= b.len() {
-                break;
-            }
-            let b_letter = b[b_idx];
 
             let sgc = sa[bi].best_gap;
-            let next_sc = sa[bi].best + mrow[b_letter as usize & 0x0F];
+            let next_sc = if b_idx < b.len() {
+                sa[bi].best + mrow[b[b_idx] as usize & 0x0F]
+            } else {
+                MININT
+            };
 
             // Three-way max
             if sc < sgc {
@@ -1431,8 +1400,7 @@ fn gapped_score_one_dir_generic(
     (best_score, a_off, b_off)
 }
 
-/// Port-shaped Rust equivalent of NCBI `s_PHIGappedAlignment`
-/// (`phi_gapalign.c:670`).
+/// NCBI: s_PHIGappedAlignment (`phi_gapalign.c:670`).
 #[allow(clippy::too_many_arguments)]
 pub fn s_phi_gapped_alignment(
     query: &[u8],
@@ -1507,8 +1475,8 @@ pub fn s_phi_gapped_alignment(
     0
 }
 
-/// Port-shaped Rust equivalent of NCBI `PHIGetGappedScore`
-/// (`phi_gapalign.c:739`) over Rust's explicit PHI initial-hit view.
+/// NCBI: PHIGetGappedScore (`phi_gapalign.c:739`) over Rust's
+/// explicit PHI initial-hit view.
 #[allow(clippy::too_many_arguments)]
 pub fn phi_get_gapped_score(
     query: &[u8],
@@ -1606,14 +1574,8 @@ pub fn phi_get_gapped_score(
     0
 }
 
-fn prefixed_segment(sequence: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(sequence.len() + 1);
-    out.push(0);
-    out.extend_from_slice(sequence);
-    out
-}
-
-fn add_banded_or_sub_pattern_segment(
+/// blast-rs: bridge PHI pattern segments to the shared banded-align script API.
+fn align_phi_pattern_segment_blast_rs(
     query_segment: &[u8],
     subject_segment: &[u8],
     align_script: &mut crate::gapinfo::GapPrelimEditBlock,
@@ -1633,8 +1595,12 @@ fn add_banded_or_sub_pattern_segment(
         return 0;
     }
 
-    let query_prefixed = prefixed_segment(query_segment);
-    let subject_prefixed = prefixed_segment(subject_segment);
+    let mut query_prefixed = Vec::with_capacity(query_segment.len() + 1);
+    query_prefixed.push(0);
+    query_prefixed.extend_from_slice(query_segment);
+    let mut subject_prefixed = Vec::with_capacity(subject_segment.len() + 1);
+    subject_prefixed.push(0);
+    subject_prefixed.extend_from_slice(subject_segment);
     crate::gapinfo::s_banded_align(
         &query_prefixed,
         &subject_prefixed,
@@ -1649,8 +1615,7 @@ fn add_banded_or_sub_pattern_segment(
     )
 }
 
-/// Port-shaped Rust equivalent of NCBI static `s_PHIBlastAlignPatterns`
-/// (`phi_gapalign.c:497`).
+/// NCBI: s_PHIBlastAlignPatterns (`phi_gapalign.c:497`).
 #[allow(clippy::too_many_arguments)]
 pub fn s_phi_blast_align_patterns(
     query_seq: &[u8],
@@ -1728,7 +1693,7 @@ pub fn s_phi_blast_align_patterns(
                     .get(query_cursor..query_cursor + query_len)
                     .unwrap_or(&[]);
                 let db_slice = db_seq.get(db_cursor..db_cursor + db_len).unwrap_or(&[]);
-                score += add_banded_or_sub_pattern_segment(
+                score += align_phi_pattern_segment_blast_rs(
                     query_slice,
                     db_slice,
                     align_script,
@@ -1745,7 +1710,7 @@ pub fn s_phi_blast_align_patterns(
 
     let prefix_query = start_query_match.max(0) as usize;
     let prefix_db = start_db_match.max(0) as usize;
-    let mut local_score = add_banded_or_sub_pattern_segment(
+    let mut local_score = align_phi_pattern_segment_blast_rs(
         query_seq.get(..prefix_query).unwrap_or(&[]),
         db_seq.get(..prefix_db).unwrap_or(&[]),
         align_script,
@@ -1756,7 +1721,7 @@ pub fn s_phi_blast_align_patterns(
 
     let query_match_len = (end_query_match - start_query_match + 1).max(0) as usize;
     let db_match_len = (end_db_match - start_db_match + 1).max(0) as usize;
-    local_score += add_banded_or_sub_pattern_segment(
+    local_score += align_phi_pattern_segment_blast_rs(
         query_seq
             .get(prefix_query..prefix_query + query_match_len)
             .unwrap_or(&[]),
@@ -1771,7 +1736,7 @@ pub fn s_phi_blast_align_patterns(
 
     let query_suffix_start = (end_query_match + 1).max(0) as usize;
     let db_suffix_start = (end_db_match + 1).max(0) as usize;
-    local_score += add_banded_or_sub_pattern_segment(
+    local_score += align_phi_pattern_segment_blast_rs(
         query_seq.get(query_suffix_start..).unwrap_or(&[]),
         db_seq.get(db_suffix_start..).unwrap_or(&[]),
         align_script,
@@ -1783,8 +1748,7 @@ pub fn s_phi_blast_align_patterns(
     local_score
 }
 
-/// Port-shaped Rust equivalent of NCBI `PHIGappedAlignmentWithTraceback`
-/// (`phi_gapalign.c:837`).
+/// NCBI: PHIGappedAlignmentWithTraceback (`phi_gapalign.c:837`).
 #[allow(clippy::too_many_arguments)]
 pub fn phi_gapped_alignment_with_traceback(
     query: &[u8],
@@ -1886,8 +1850,7 @@ pub fn phi_gapped_alignment_with_traceback(
     0
 }
 
-/// Port-shaped Rust equivalent of NCBI internal `s_PHITracebackFromHSPList`
-/// (`blast_traceback.c:752`).
+/// NCBI: s_PHITracebackFromHSPList (`blast_traceback.c:752`).
 #[allow(clippy::too_many_arguments)]
 pub fn s_phi_traceback_from_hsp_list(
     program_number: crate::program::ProgramType,
@@ -2043,12 +2006,12 @@ fn gapped_score_one_dir_packed_subject(
             } else {
                 bi + 1
             };
-            if q_idx >= query.len() {
-                break;
-            }
-            let q_base = query[q_idx];
             let sgc = sa[bi].best_gap;
-            let next_sc = sa[bi].best + mrow[q_base as usize & 0x0F];
+            let next_sc = if q_idx < query.len() {
+                sa[bi].best + mrow[query[q_idx] as usize & 0x0F]
+            } else {
+                MININT
+            };
 
             if sc < sgc {
                 sc = sgc;
@@ -2130,7 +2093,7 @@ fn gapped_score_one_dir_packed_subject(
 /// implementation below only keeps the affine branch — mirroring
 /// `blast_hits.c:517-526`.
 #[allow(clippy::too_many_arguments)]
-pub fn reevaluate_with_ambiguities_gapped(
+pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
     tb: &mut TracebackResult,
     query: &[u8],
     subject: &[u8],
@@ -2143,7 +2106,7 @@ pub fn reevaluate_with_ambiguities_gapped(
     // Build the BLASTNA scoring matrix exactly like `align_ex` so that
     // substitution scoring matches what the DP used. NCBI does the same via
     // `sbp->matrix->data[*query & 0x0f][*subject]` (`blast_hits.c:548`).
-    let matrix = build_blastna_matrix(reward, penalty);
+    let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
     if tb.edit_script.ops.is_empty() {
         return true;
     }
@@ -2407,7 +2370,7 @@ pub fn s_update_reevaluated_hsp_ungapped(
     )
 }
 
-pub fn blast_gapped_align(
+pub fn blast_gapped_alignment_with_traceback(
     query: &[u8],
     subject: &[u8],
     seed_q: usize,
@@ -2419,7 +2382,7 @@ pub fn blast_gapped_align(
     x_dropoff: i32,
 ) -> Option<TracebackResult> {
     // Build full BLASTNA scoring matrix matching C engine (handles ambiguous bases)
-    let matrix = build_blastna_matrix(reward, penalty);
+    let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
 
     // Left extension (reverse)
     let (score_l, ql, sl, left_ops) = align_ex(
@@ -3056,67 +3019,6 @@ fn oof_step_frame_with_script(
     script
 }
 
-fn oof_step_frame(
-    score_array: &mut [OofScoreCell],
-    b_index: usize,
-    score_row: &mut i32,
-    score_col: &mut i32,
-    score_other_a: &mut i32,
-    score_other_b: &mut i32,
-    best_score: &mut i32,
-    a_offset: &mut i32,
-    b_offset: &mut i32,
-    a_index: usize,
-    frame_score: i32,
-    gap_open_extend: i32,
-    gap_extend: i32,
-    shift_penalty: i32,
-    x_dropoff: i32,
-    first_b_index: &mut usize,
-    last_b_index: &mut usize,
-) {
-    let minint = i32::MIN / 4;
-    let mut score = (*score_other_a).max(*score_other_b) - shift_penalty;
-    score = score.max(*score_col) + frame_score;
-    *score_other_a = (*score_col).max(score_array[b_index].best);
-    *score_col = score_array[b_index].best;
-    let score_gap_col = score_array[b_index].best_gap;
-
-    if score < score_gap_col.max(*score_row) {
-        score = score_gap_col.max(*score_row);
-        if *best_score - score > x_dropoff {
-            if *first_b_index == b_index {
-                *first_b_index = b_index + 1;
-            } else {
-                score_array[b_index].best = minint;
-            }
-        } else {
-            *last_b_index = b_index;
-            score_array[b_index].best = score;
-            score_array[b_index].best_gap = score_gap_col - gap_extend;
-            *score_row -= gap_extend;
-        }
-    } else if *best_score - score > x_dropoff {
-        if *first_b_index == b_index {
-            *first_b_index = b_index + 1;
-        } else {
-            score_array[b_index].best = minint;
-        }
-    } else {
-        *last_b_index = b_index;
-        score_array[b_index].best = score;
-        if score > *best_score {
-            *best_score = score;
-            *a_offset = a_index as i32;
-            *b_offset = b_index as i32;
-        }
-        score -= gap_open_extend;
-        *score_row -= gap_extend;
-        *score_row = score.max(*score_row);
-        score_array[b_index].best_gap = score.max(score_gap_col - gap_extend);
-    }
-}
-
 /// Port-shaped low-level OOF score/traceback dispatcher for NCBI
 /// `s_OutOfFrameGappedAlign` (`blast_gapalign.c:1950`).
 #[allow(clippy::too_many_arguments)]
@@ -3240,7 +3142,7 @@ pub fn s_out_of_frame_gapped_align(
                 oof_subject_letter(b, b_index, reversed),
                 reversed,
             );
-            oof_step_frame(
+            let _ = oof_step_frame_with_script(
                 &mut score_array,
                 b_index,
                 &mut score_row1,
@@ -3258,6 +3160,8 @@ pub fn s_out_of_frame_gapped_align(
                 x_dropoff,
                 &mut first_b_index,
                 &mut last_b_index,
+                SCRIPT_NEXT_IN_FRAME,
+                false,
             );
             b_index += 1;
             if b_index >= b_size {
@@ -3277,7 +3181,7 @@ pub fn s_out_of_frame_gapped_align(
                 oof_subject_letter(b, b_index, reversed),
                 reversed,
             );
-            oof_step_frame(
+            let _ = oof_step_frame_with_script(
                 &mut score_array,
                 b_index,
                 &mut score_row2,
@@ -3295,6 +3199,8 @@ pub fn s_out_of_frame_gapped_align(
                 x_dropoff,
                 &mut first_b_index,
                 &mut last_b_index,
+                SCRIPT_NEXT_IN_FRAME,
+                true,
             );
             b_index += 1;
             if b_index >= b_size {
@@ -3315,7 +3221,7 @@ pub fn s_out_of_frame_gapped_align(
                 reversed,
             );
             let old_other2 = score_other_frame2;
-            oof_step_frame(
+            let _ = oof_step_frame_with_script(
                 &mut score_array,
                 b_index,
                 &mut score_row3,
@@ -3333,6 +3239,8 @@ pub fn s_out_of_frame_gapped_align(
                 x_dropoff,
                 &mut first_b_index,
                 &mut last_b_index,
+                SCRIPT_NEXT_IN_FRAME,
+                true,
             );
             score_other_frame1 = old_other2;
             b_index += 1;
@@ -3489,7 +3397,7 @@ mod tests {
         // `(int)(100 * ln2 / 1.374) = 50`.
         let seed_q = 34;
         let seed_s = 34;
-        let r = blast_gapped_align(&q, &s, seed_q, seed_s, 1, -3, 5, 2, 50)
+        let r = blast_gapped_alignment_with_traceback(&q, &s, seed_q, seed_s, 1, -3, 5, 2, 50)
             .expect("alignment should succeed");
         assert_eq!(r.score, 62, "score should be 62");
         assert_eq!((r.query_start, r.query_end), (0, 82));
@@ -3534,7 +3442,7 @@ mod tests {
             subject_start: 0,
             subject_end: 10,
         };
-        let delete = reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
+        let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
         assert!(!delete);
         assert_eq!(tb.score, 10);
         assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 10)]);
@@ -3555,7 +3463,7 @@ mod tests {
             subject_start: 0,
             subject_end: 0,
         };
-        let delete = reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
+        let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
         assert!(delete);
     }
 
@@ -3576,7 +3484,7 @@ mod tests {
             subject_start: 0,
             subject_end: 5,
         };
-        let delete = reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 0, 0, 1);
+        let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 0, 0, 1);
         assert!(!delete);
         assert_eq!(tb.score, 5);
         assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 5)]);
@@ -3598,7 +3506,7 @@ mod tests {
             subject_start: 0,
             subject_end: 4,
         };
-        let delete = reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 5);
+        let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 5);
         assert!(delete);
     }
 
@@ -3619,7 +3527,7 @@ mod tests {
             subject_start: 0,
             subject_end: 4,
         };
-        let delete = reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
+        let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
         assert!(!delete);
         assert_eq!(tb.score, 6);
         assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 6)]);
@@ -3644,7 +3552,7 @@ mod tests {
             subject_start: 0,
             subject_end: 15,
         };
-        let delete = reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
+        let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
         assert!(!delete);
         assert_eq!(tb.score, 10);
         assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 10)]);
@@ -3756,10 +3664,10 @@ mod tests {
     }
 
     #[test]
-    fn test_blast_gapped_align_basic() {
+    fn test_blast_gapped_alignment_with_traceback_basic() {
         let q = vec![0u8, 1, 2, 3, 0, 1, 2, 3]; // ACGTACGT
         let s = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
-        let r = blast_gapped_align(&q, &s, 4, 4, 1, -3, 5, 2, 30);
+        let r = blast_gapped_alignment_with_traceback(&q, &s, 4, 4, 1, -3, 5, 2, 30);
         assert!(r.is_some(), "Should find alignment");
         let r = r.unwrap();
         assert!(r.score > 0, "score={}", r.score);
@@ -3773,19 +3681,19 @@ mod tests {
     }
 
     #[test]
-    fn test_blast_gapped_align_exact_match_extends_to_edges() {
+    fn test_blast_gapped_alignment_with_traceback_exact_match_extends_to_edges() {
         let q = crate::encoding::encode_blastna_sequence(
             b"GAATCCATGCTGTGGGCCAGCAAGAGTTAAGGTGCTCATGGTTTTGAGAAAACATCTGAGGACTCTGACAGCACTCTCCCATCCTTGGTCTCCACAGTCT",
         );
-        let r =
-            blast_gapped_align(&q, &q, 50, 50, 1, -3, 5, 2, 20).expect("exact match should align");
+        let r = blast_gapped_alignment_with_traceback(&q, &q, 50, 50, 1, -3, 5, 2, 20)
+            .expect("exact match should align");
         assert_eq!(r.score, 100);
         assert_eq!((r.query_start, r.query_end), (0, 100));
         assert_eq!((r.subject_start, r.subject_end), (0, 100));
     }
 
     #[test]
-    fn test_blast_gapped_align_single_internal_gap() {
+    fn test_blast_gapped_alignment_with_traceback_single_internal_gap() {
         let q: Vec<u8> = [
             0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
         ]
@@ -3795,7 +3703,7 @@ mod tests {
         ]
         .to_vec();
 
-        let r = blast_gapped_align(&q, &s, 12, 12, 2, -3, 3, 1, 30)
+        let r = blast_gapped_alignment_with_traceback(&q, &s, 12, 12, 2, -3, 3, 1, 30)
             .expect("single-gap alignment should succeed");
         assert!(
             r.edit_script.ops.iter().any(|(op, _)| matches!(
@@ -3991,7 +3899,7 @@ mod tests {
         let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let subject = vec![0u8, 1, 2, 3, 0, 1, 3, 3, 0, 1, 2, 3];
         let packed = pack_ncbi2na_bases(&subject);
-        let matrix = build_blastna_matrix(1, -3);
+        let matrix = blast_score_blk_nucl_matrix_create(1, -3);
         let left_decoded =
             gapped_score_one_dir(&query[..6], &subject[..6], 6, 6, &matrix, 7, 2, 12, true);
         let left_packed = gapped_score_one_dir_packed_subject(
@@ -4015,7 +3923,7 @@ mod tests {
         let subject = vec![0u8, 1, 2, 3, 0, 1, 3, 3, 0, 1, 2, 3];
         let packed = pack_ncbi2na_bases(&subject);
 
-        let extents = blast_gapped_score_extents_packed_subject(
+        let extents = s_blast_dyn_prog_nt_gapped_alignment_extents(
             &query,
             &packed,
             subject.len(),
@@ -4055,7 +3963,7 @@ mod tests {
         assert_eq!(wrapped_extents.11, extents.11);
         assert_eq!(wrapped_extents.12, extents.12);
 
-        let matrix = build_blastna_matrix(1, -3);
+        let matrix = blast_score_blk_nucl_matrix_create(1, -3);
         assert_eq!(
             s_blast_align_packed_nucl(&query[..6], &packed, 6, 6, 0, 1, -3, 5, 2, 12, true),
             gapped_score_one_dir_packed_subject(

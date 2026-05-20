@@ -4,6 +4,13 @@
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+fn db_component_path(base_path: &Path, ext: &str) -> PathBuf {
+    let mut path = base_path.as_os_str().to_os_string();
+    path.push(".");
+    path.push(ext);
+    path.into()
+}
+
 /// Parsed alias file.
 #[derive(Debug)]
 pub struct AliasFile {
@@ -30,7 +37,7 @@ pub struct AliasFile {
     /// NCBI `TILIST` — path to a Trace ID list file. Parsed only.
     pub tilist: Option<PathBuf>,
     pub raw_tilist: Option<String>,
-    /// NCBI `SILIST` — path to a seqid list file. Parsed only.
+    /// NCBI `SEQIDLIST` — path to a seqid list file. Parsed only.
     pub silist: Option<PathBuf>,
     pub raw_silist: Option<String>,
     /// NCBI `TAXIDLIST` — path to a taxonomy ID list file. Parsed only.
@@ -65,7 +72,7 @@ impl AliasFile {
         }
         if let Some(p) = &self.raw_silist {
             warnings.push(format!(
-                "Warning: alias SILIST {} is parsed but seqid-list filtering is not yet applied",
+                "Warning: alias SEQIDLIST {} is parsed but seqid-list filtering is not yet applied",
                 p
             ));
         }
@@ -152,7 +159,10 @@ pub fn parse_alias_file(path: &Path) -> io::Result<AliasFile> {
                 alias.raw_tilist = Some(v.to_string());
                 alias.tilist = Some(dir.join(v));
             }
-        } else if let Some(rest) = line.strip_prefix("SILIST ") {
+        } else if let Some(rest) = line
+            .strip_prefix("SEQIDLIST ")
+            .or_else(|| line.strip_prefix("SILIST "))
+        {
             let v = rest.trim();
             if !v.is_empty() {
                 alias.raw_silist = Some(v.to_string());
@@ -172,16 +182,16 @@ pub fn parse_alias_file(path: &Path) -> io::Result<AliasFile> {
 
 /// Check if a database path has an alias file.
 pub fn has_alias(base_path: &Path) -> bool {
-    base_path.with_extension("nal").exists() || base_path.with_extension("pal").exists()
+    db_component_path(base_path, "nal").exists() || db_component_path(base_path, "pal").exists()
 }
 
 /// Get the alias file path if it exists.
 pub fn alias_path(base_path: &Path) -> Option<PathBuf> {
-    let nal = base_path.with_extension("nal");
+    let nal = db_component_path(base_path, "nal");
     if nal.exists() {
         return Some(nal);
     }
-    let pal = base_path.with_extension("pal");
+    let pal = db_component_path(base_path, "pal");
     if pal.exists() {
         return Some(pal);
     }
@@ -212,7 +222,7 @@ mod tests {
         writeln!(f, "MEMB_BIT 256").unwrap();
         writeln!(f, "GILIST taxa.gil").unwrap();
         writeln!(f, "TILIST traces.til").unwrap();
-        writeln!(f, "SILIST ids.sil").unwrap();
+        writeln!(f, "SEQIDLIST ids.sil").unwrap();
         writeln!(f, "TAXIDLIST taxids.txt").unwrap();
         drop(f);
 
@@ -244,7 +254,7 @@ mod tests {
         assert!(warnings[0].contains("MEMB_BIT=256"));
         assert!(warnings[1].contains("GILIST taxa.gil"));
         assert!(warnings[2].contains("TILIST traces.til"));
-        assert!(warnings[3].contains("SILIST ids.sil"));
+        assert!(warnings[3].contains("SEQIDLIST ids.sil"));
         assert!(warnings[4].contains("TAXIDLIST taxids.txt"));
 
         std::fs::remove_dir_all(&dir).ok();

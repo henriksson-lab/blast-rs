@@ -8,8 +8,8 @@ use crate::itree::{Interval, IntervalTree};
 use crate::parameters::InitialWordParameters;
 use crate::stat::KarlinBlk;
 use crate::traceback::{
-    blast_gapped_align, blast_gapped_score_only, reevaluate_with_ambiguities_gapped,
-    TracebackResult,
+    blast_gapped_alignment_with_traceback, blast_hsp_reevaluate_with_ambiguities_gapped,
+    blast_semi_gapped_align, TracebackResult,
 };
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -298,7 +298,7 @@ fn affine_traceback_alignment(
     gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<TracebackResult> {
-    blast_gapped_align(
+    blast_gapped_alignment_with_traceback(
         query,
         subject,
         seed_q.min(query.len().saturating_sub(1)),
@@ -558,6 +558,8 @@ struct LookupSegmentStats {
     max_q_off: usize,
 }
 
+// blast-rs: local lookup-sizing summary used to choose between Rust lookup
+// table layouts while preserving NCBI's small-query admission limits.
 fn lookup_segment_stats(query: &[u8], word_size: usize) -> LookupSegmentStats {
     let mut stats = LookupSegmentStats::default();
     if word_size == 0 {
@@ -584,6 +586,8 @@ fn lookup_segment_stats(query: &[u8], word_size: usize) -> LookupSegmentStats {
     stats
 }
 
+// blast-rs: Rust-side encoding of the small-lookup overflow guard; the
+// thresholds mirror NCBI constants, but this helper has no direct C symbol.
 fn should_use_small_na_lookup(word_size: usize, approx_entries: usize, max_q_off: usize) -> bool {
     let small_candidate = match word_size {
         4..=8 => true,
@@ -596,6 +600,8 @@ fn should_use_small_na_lookup(word_size: usize, approx_entries: usize, max_q_off
     small_candidate && approx_entries < 32_767 && max_q_off < 32_768
 }
 
+// blast-rs: selector adapter that keeps the public constructor shape stable
+// while switching to the megablast lookup-width policy after small-table overflow.
 fn choose_lut_word_for_table(
     choose_lut_word: fn(usize, usize) -> usize,
     use_small_table: bool,
@@ -611,6 +617,8 @@ fn choose_lut_word_for_table(
     }
 }
 
+// blast-rs: local mask-run cache for lookup construction; NCBI performs the
+// equivalent admission checks in scanner setup rather than through this helper.
 fn eligible_lookup_run_ends(query: &[u8], word_size: usize) -> Vec<usize> {
     let mut run_ends = vec![0usize; query.len()];
     let mut pos = 0usize;
@@ -633,6 +641,8 @@ fn eligible_lookup_run_ends(query: &[u8], word_size: usize) -> Vec<usize> {
     run_ends
 }
 
+// blast-rs: mirrors the small-nucleotide lookup table word selection
+// thresholds used by the NCBI BLAST scanner setup; not a direct NCBI C port.
 fn choose_small_na_lut_word(word_size: usize, approx_entries: usize) -> usize {
     match word_size {
         4..=6 => word_size,
@@ -669,6 +679,8 @@ fn choose_small_na_lut_word(word_size: usize, approx_entries: usize) -> usize {
     }
 }
 
+// blast-rs: mirrors the contiguous megablast lookup table word selection
+// thresholds used by the NCBI BLAST scanner setup; not a direct NCBI C port.
 fn choose_contiguous_mb_lut_word(word_size: usize, approx_entries: usize) -> usize {
     match word_size {
         0..=8 => word_size,
@@ -956,7 +968,7 @@ fn blastn_ungapped_search_inner(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn small_na_extend_packed_hits(
+fn extend_packed_lookup_hits(
     query: &[u8],
     subject_packed: &[u8],
     subject_len: usize,
@@ -1041,7 +1053,7 @@ fn blast_na_extend_packed_generic(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    small_na_extend_packed_hits(
+    extend_packed_lookup_hits(
         query,
         subject_packed,
         subject_len,
@@ -1090,7 +1102,7 @@ fn blast_na_extend_packed_aligned(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    small_na_extend_packed_hits(
+    extend_packed_lookup_hits(
         query,
         subject_packed,
         subject_len,
@@ -1986,7 +1998,7 @@ fn s_blast_na_hash_scan_subject_any(
     scratch0.resize_and_clear(lookup0.diag_array_len);
     scratch1.resize_and_clear(lookup1.diag_array_len);
 
-    scan_byte_oriented_lut6_step2_pair(
+    packed_scan_byte_oriented_lut6_step2_pair(
         subject_packed,
         subject_len,
         end,
@@ -2047,6 +2059,8 @@ fn s_blast_na_hash_scan_subject_any_packed(
     )
 }
 
+// blast-rs: packed-subject dispatch analogue of the NCBI nucleotide word
+// finder scan path; not a direct NCBI C port.
 #[allow(clippy::too_many_arguments)]
 fn blast_na_word_finder_scan_lookup_packed(
     word_size: usize,
@@ -2253,7 +2267,7 @@ fn blast_na_word_finder_scan_lookup_packed(
             | SmallNaScanSubject::SBlastSmallNaScanSubject82Mod4
             | SmallNaScanSubject::SBlastSmallNaScanSubject83Mod4
             | SmallNaScanSubject::SBlastSmallNaScanSubject84 => {
-                s_scan_na_lookup_shape_packed(
+                dispatch_na_lookup_shape_packed(
                     lookup,
                     scratch,
                     subject_packed,
@@ -2411,7 +2425,7 @@ fn blast_na_word_finder_scan_lookup_packed(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn s_scan_na_lookup_shape_packed(
+fn dispatch_na_lookup_shape_packed(
     lookup: &NaLookup<'_>,
     scratch: &mut PackedDiagScratch,
     subject_packed: &[u8],
@@ -2431,8 +2445,8 @@ fn s_scan_na_lookup_shape_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    if lut_word == 8 && scan_step % 4 == 0 {
-        scan_step4_unrolled(
+    if lut_word == 8 && scan_start == 0 && scan_step == 4 {
+        packed_scan_step4_unrolled(
             subject_packed,
             subject_len,
             word_size,
@@ -2454,14 +2468,14 @@ fn s_scan_na_lookup_shape_packed(
             hsps,
         );
     } else if lut_word == 8 && scan_step == 1 {
-        // `scan_byte_oriented_lut8_mod1` advances `byte_idx` only on the
+        // `packed_scan_byte_oriented_lut8_mod1` advances `byte_idx` only on the
         // state-3 branch, which is correct iff `scan_step == 1` (state
         // cycles 0→1→2→3→0 and we cross a byte every 4 positions). For
         // any other `scan_step` (e.g. word_size 9/10/12 with lut_word 8)
         // the function never advances past the first packed byte and
-        // returns nearly zero hits. Route those to the generic `scan_step1`
+        // returns nearly zero hits. Route those to the generic `packed_scan_step1`
         // which uses position-based `packed_hash_at` instead.
-        scan_byte_oriented_lut8_mod1(
+        packed_scan_byte_oriented_lut8_mod1(
             subject_packed,
             subject_len,
             end,
@@ -2487,34 +2501,7 @@ fn s_scan_na_lookup_shape_packed(
             hsps,
         );
     } else if lut_word >= 8 {
-        scan_step1(
-            subject_packed,
-            subject_len,
-            end,
-            lut_word,
-            lookup.lut_mask,
-            scan_start,
-            scan_step,
-            lookup.query,
-            word_size,
-            &lookup.lut,
-            &lookup.next,
-            &lookup.pv,
-            &mut scratch.last_hit,
-            lookup.diag_mask,
-            reward,
-            penalty,
-            x_dropoff,
-            kbp,
-            search_space,
-            evalue_threshold,
-            lookup.context,
-            nucl_score_table,
-            reduced_nucl_cutoff_score,
-            hsps,
-        );
-    } else if lut_word >= 9 {
-        scan_step1(
+        packed_scan_step1(
             subject_packed,
             subject_len,
             end,
@@ -2588,7 +2575,7 @@ fn s_blast_small_na_scan_subject_5_1_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2628,7 +2615,7 @@ fn s_blast_small_na_scan_subject_6_1_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2668,7 +2655,7 @@ fn s_blast_small_na_scan_subject_6_2_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2708,7 +2695,7 @@ fn s_blast_small_na_scan_subject_7_2_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2748,7 +2735,7 @@ fn s_blast_small_na_scan_subject_7_3_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2788,7 +2775,7 @@ fn s_blast_small_na_scan_subject_8_1_mod4_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2828,7 +2815,7 @@ fn s_blast_small_na_scan_subject_8_2_mod4_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2868,7 +2855,7 @@ fn s_blast_small_na_scan_subject_8_3_mod4_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2908,7 +2895,7 @@ fn s_blast_small_na_scan_subject_8_4_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2948,7 +2935,7 @@ fn s_mb_scan_subject_9_1_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -2988,7 +2975,7 @@ fn s_mb_scan_subject_9_2_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3028,7 +3015,7 @@ fn s_mb_scan_subject_10_1_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3068,7 +3055,7 @@ fn s_mb_scan_subject_10_2_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3108,7 +3095,7 @@ fn s_mb_scan_subject_10_3_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3148,7 +3135,7 @@ fn s_mb_scan_subject_11_1_mod4_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3188,7 +3175,7 @@ fn s_mb_scan_subject_11_2_mod4_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3228,7 +3215,7 @@ fn s_mb_scan_subject_11_3_mod4_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3268,7 +3255,7 @@ fn s_blast_small_na_scan_subject_any_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3308,7 +3295,7 @@ fn s_mb_scan_subject_any_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    s_scan_na_lookup_shape_packed(
+    dispatch_na_lookup_shape_packed(
         lookup,
         scratch,
         subject_packed,
@@ -3347,7 +3334,7 @@ fn sort_ungapped_hsps_ncbi_no_dedup(hsps: &mut [SearchHsp]) {
 /// Only checks every 4th subject position; the process_hit function handles
 /// extending to verify the remaining bases of the full word.
 #[allow(clippy::too_many_arguments)]
-fn scan_step4_unrolled(
+fn packed_scan_step4_unrolled(
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
@@ -3542,7 +3529,7 @@ fn s_blast_small_na_scan_subject_7_1_packed(
     }
 
     if lut_word == 6 && scan_start == 1 && scan_step == 2 {
-        scan_byte_oriented_lut6_step2(
+        packed_scan_byte_oriented_lut6_step2(
             subject_packed,
             subject_len,
             end,
@@ -3721,7 +3708,7 @@ fn s_blast_small_na_scan_subject_7_1_packed(
 }
 
 #[allow(clippy::too_many_arguments, dead_code)]
-fn scan_byte_oriented_lut8_mod1(
+fn packed_scan_byte_oriented_lut8_mod1(
     subject_packed: &[u8],
     subject_len: usize,
     end: usize,
@@ -3833,7 +3820,7 @@ fn scan_byte_oriented_lut8_mod1(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan_byte_oriented_lut6_step2(
+fn packed_scan_byte_oriented_lut6_step2(
     subject_packed: &[u8],
     subject_len: usize,
     end: usize,
@@ -3940,7 +3927,7 @@ fn scan_byte_oriented_lut6_step2(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan_byte_oriented_lut6_step2_pair(
+fn packed_scan_byte_oriented_lut6_step2_pair(
     subject_packed: &[u8],
     subject_len: usize,
     end: usize,
@@ -4126,7 +4113,7 @@ fn packed_hash_at(packed: &[u8], pos: usize, lut_word: usize, lut_mask: u32) -> 
 
 /// Fallback step-1 scanning (every position). Used when scan_step != 4.
 #[allow(clippy::too_many_arguments)]
-fn scan_step1(
+fn packed_scan_step1(
     subject_packed: &[u8],
     _subject_len: usize,
     end: usize,
@@ -4726,11 +4713,13 @@ fn dedup_hsps_with_min_diag_separation(hsps: &mut Vec<SearchHsp>, min_diag_separ
     hsps.sort_by(score_compare_search_hsps);
 }
 
+// blast-rs: compatibility pruning for packed megablast shift duplicates seen
+// after Rust-side exact extension. This is not a direct NCBI helper.
 fn prune_megablast_shift_artifacts(hsps: &mut Vec<SearchHsp>) {
     let mut drop = vec![false; hsps.len()];
     let flanks = hsps
         .iter()
-        .map(mismatch_flanks)
+        .map(mismatch_flank_lengths)
         .collect::<Vec<Option<(i32, i32)>>>();
 
     for i in 0..hsps.len() {
@@ -4748,7 +4737,7 @@ fn prune_megablast_shift_artifacts(hsps: &mut Vec<SearchHsp>) {
                 continue;
             };
             if same_full_subject_shift(&hsps[i], &hsps[j])
-                && same_periodic_shift_step(&hsps[i], &hsps[j])
+                && query_starts_differ_by_packed_byte(&hsps[i], &hsps[j])
                 && i_before > i_after
                 && j_before <= i_before
                 && hsps[j].query_start > hsps[i].query_start
@@ -4784,7 +4773,7 @@ fn prune_megablast_shift_artifacts(hsps: &mut Vec<SearchHsp>) {
     });
 }
 
-fn mismatch_flanks(hsp: &SearchHsp) -> Option<(i32, i32)> {
+fn mismatch_flank_lengths(hsp: &SearchHsp) -> Option<(i32, i32)> {
     if hsp.gap_opens != 0 || hsp.mismatches == 0 {
         return None;
     }
@@ -4833,7 +4822,7 @@ fn reaches_subject_max_for_context(hsp: &SearchHsp, hsps: &[SearchHsp]) -> bool 
         == Some(hsp.subject_end)
 }
 
-fn same_periodic_shift_step(a: &SearchHsp, b: &SearchHsp) -> bool {
+fn query_starts_differ_by_packed_byte(a: &SearchHsp, b: &SearchHsp) -> bool {
     (a.query_start - b.query_start).abs() == 4
 }
 
@@ -4892,30 +4881,6 @@ fn keep_common_endpoint_group_leaders(hsps: &mut Vec<SearchHsp>, start_endpoint:
     });
 }
 
-fn candidate_context(candidate: &GappedCandidate) -> i32 {
-    candidate.context
-}
-
-fn candidate_query_start(candidate: &GappedCandidate) -> i32 {
-    candidate.tb.query_start as i32
-}
-
-fn candidate_query_end(candidate: &GappedCandidate) -> i32 {
-    candidate.tb.query_end as i32
-}
-
-fn candidate_subject_start(candidate: &GappedCandidate) -> i32 {
-    candidate.tb.subject_start as i32
-}
-
-fn candidate_subject_end(candidate: &GappedCandidate) -> i32 {
-    candidate.tb.subject_end as i32
-}
-
-fn candidate_score(candidate: &GappedCandidate) -> i32 {
-    candidate.tb.score
-}
-
 fn candidate_query_for_context<'a>(
     context: i32,
     query_plus_nomask: &'a [u8],
@@ -4934,21 +4899,21 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
     }
 
     candidates.sort_by(|a, b| {
-        candidate_context(a)
-            .cmp(&candidate_context(b))
-            .then_with(|| candidate_query_start(a).cmp(&candidate_query_start(b)))
-            .then_with(|| candidate_subject_start(a).cmp(&candidate_subject_start(b)))
-            .then_with(|| candidate_score(b).cmp(&candidate_score(a)))
-            .then_with(|| candidate_query_end(b).cmp(&candidate_query_end(a)))
-            .then_with(|| candidate_subject_end(b).cmp(&candidate_subject_end(a)))
+        a.context
+            .cmp(&b.context)
+            .then_with(|| a.tb.query_start.cmp(&b.tb.query_start))
+            .then_with(|| a.tb.subject_start.cmp(&b.tb.subject_start))
+            .then_with(|| b.tb.score.cmp(&a.tb.score))
+            .then_with(|| b.tb.query_end.cmp(&a.tb.query_end))
+            .then_with(|| b.tb.subject_end.cmp(&a.tb.subject_end))
     });
     let mut i = 0usize;
     while i < candidates.len() {
         let mut j = i + 1;
         while j < candidates.len()
-            && candidate_context(&candidates[i]) == candidate_context(&candidates[j])
-            && candidate_query_start(&candidates[i]) == candidate_query_start(&candidates[j])
-            && candidate_subject_start(&candidates[i]) == candidate_subject_start(&candidates[j])
+            && candidates[i].context == candidates[j].context
+            && candidates[i].tb.query_start == candidates[j].tb.query_start
+            && candidates[i].tb.subject_start == candidates[j].tb.subject_start
         {
             if keep_exact_seed_beside_large_gap_traceback(&candidates[i], &candidates[j]) {
                 j += 1;
@@ -4960,21 +4925,21 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
     }
 
     candidates.sort_by(|a, b| {
-        candidate_context(a)
-            .cmp(&candidate_context(b))
-            .then_with(|| candidate_query_end(a).cmp(&candidate_query_end(b)))
-            .then_with(|| candidate_subject_end(a).cmp(&candidate_subject_end(b)))
-            .then_with(|| candidate_score(b).cmp(&candidate_score(a)))
-            .then_with(|| candidate_query_start(b).cmp(&candidate_query_start(a)))
-            .then_with(|| candidate_subject_start(b).cmp(&candidate_subject_start(a)))
+        a.context
+            .cmp(&b.context)
+            .then_with(|| a.tb.query_end.cmp(&b.tb.query_end))
+            .then_with(|| a.tb.subject_end.cmp(&b.tb.subject_end))
+            .then_with(|| b.tb.score.cmp(&a.tb.score))
+            .then_with(|| b.tb.query_start.cmp(&a.tb.query_start))
+            .then_with(|| b.tb.subject_start.cmp(&a.tb.subject_start))
     });
     let mut i = 0usize;
     while i < candidates.len() {
         let j = i + 1;
         while j < candidates.len()
-            && candidate_context(&candidates[i]) == candidate_context(&candidates[j])
-            && candidate_query_end(&candidates[i]) == candidate_query_end(&candidates[j])
-            && candidate_subject_end(&candidates[i]) == candidate_subject_end(&candidates[j])
+            && candidates[i].context == candidates[j].context
+            && candidates[i].tb.query_end == candidates[j].tb.query_end
+            && candidates[i].tb.subject_end == candidates[j].tb.subject_end
         {
             candidates.remove(j);
         }
@@ -6355,7 +6320,7 @@ fn render_traceback_candidate(
         let original_tb = tb.clone();
         let (orig_align_len, orig_num_ident, orig_gap_opens) =
             original_tb.edit_script.count_identities(q_window, s_window);
-        if reevaluate_with_ambiguities_gapped(
+        if blast_hsp_reevaluate_with_ambiguities_gapped(
             &mut tb,
             query,
             subject,
@@ -6778,7 +6743,7 @@ fn preliminary_gapped_score_and_seed_affine(
         query.len(),
     );
     let adjusted_subject = &subject[start_shift..start_shift + adjusted_subject_len];
-    let score = blast_gapped_score_only(
+    let score = blast_semi_gapped_align(
         query,
         adjusted_subject,
         seed_q,
@@ -7297,14 +7262,8 @@ mod tests {
             SmallNaScanSubject::SBlastSmallNaScanSubject62
         );
 
-        let small_8_3 = NaLookup::new(
-            0,
-            &query[..20_000],
-            10,
-            20_000,
-            choose_small_na_lut_word,
-        )
-        .expect("small lut8 step3");
+        let small_8_3 = NaLookup::new(0, &query[..20_000], 10, 20_000, choose_small_na_lut_word)
+            .expect("small lut8 step3");
         assert_eq!(
             s_small_na_choose_scan_subject(&small_8_3),
             SmallNaScanSubject::SBlastSmallNaScanSubject83Mod4

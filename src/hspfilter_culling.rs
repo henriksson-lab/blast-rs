@@ -807,16 +807,20 @@ fn s_import_from_hitlist(
             ) else {
                 continue;
             };
-            imported.push(LinkedHspBestHit {
+            let node = LinkedHspBestHit {
                 hsp,
                 sid: list.oid,
                 begin,
                 end: begin + len,
                 len,
-            });
+            };
+            let pos = imported
+                .iter()
+                .position(|existing: &LinkedHspBestHit| existing.begin >= begin)
+                .unwrap_or(imported.len());
+            imported.insert(pos, node);
         }
     }
-    imported.sort_by_key(|node| node.begin);
     data.num_hsps[qid] = imported.len() as i32;
     data.max_hsps[qid] = data.num_hsps[qid] * 2;
     data.best_list[qid] = imported;
@@ -1395,16 +1399,17 @@ pub fn s_add_hsp_to_list(list: &mut Option<Box<LinkedHsp>>, mut y: Box<LinkedHsp
     *list = Some(y);
 }
 
-/// 1-1 port of `s_ProcessHSPList` (`hspfilter_culling.c:136`).
+/// blast-rs: Rust-owned implementation boundary for `s_ProcessHSPList`.
 ///
-/// For every list element `r`, if `y` dominates `r` (and `r != y`),
-/// decrement `r.merit`; remove `r` when `merit <= 0`. Returns the
-/// number of list elements remaining.
-///
-/// `y` is identified by **pointer-equality** in NCBI; in Rust we
-/// compare by `(begin, end, score, subject_id)` since two adjacent
-/// references can't safely share an identity in safe code.
-pub fn s_process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32 {
+/// NCBI skips exactly the inserted HSP pointer (`r != y`). Rust callers pass
+/// `skip_first_match` only for the host list where the just-inserted node is
+/// known to be present at the head; tree/subtree walks pass `false` so
+/// distinct value-identical HSPs still get processed.
+fn s_process_hsp_list_impl(
+    list: &mut Option<Box<LinkedHsp>>,
+    y: &LinkedHsp,
+    skip_first_match: bool,
+) -> i32 {
     /// blast-rs: Local identity predicate replacing C pointer equality; not a
     /// direct NCBI C port.
     fn matches_y(node: &LinkedHsp, y: &LinkedHsp) -> bool {
@@ -1415,11 +1420,19 @@ pub fn s_process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i
             && node.context_id == y.context_id
     }
     let mut num = 0i32;
+    let mut skipped_self = !skip_first_match;
     // Walk in place; on removal, we splice the chain. Use a current
     // owned slot pattern to keep ownership clear.
     let mut cursor = list;
     while cursor.is_some() {
-        let head_is_y = cursor.as_ref().map(|n| matches_y(n, y)).unwrap_or(false);
+        let head_is_y = if skipped_self {
+            false
+        } else {
+            cursor.as_ref().map(|n| matches_y(n, y)).unwrap_or(false)
+        };
+        if head_is_y {
+            skipped_self = true;
+        }
         // Decide whether to drop the head node based on dominance.
         let drop_head = if !head_is_y {
             if let Some(node) = cursor.as_mut() {
@@ -1446,6 +1459,16 @@ pub fn s_process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i
         }
     }
     num
+}
+
+/// 1-1 port of `s_ProcessHSPList` (`hspfilter_culling.c:136`).
+///
+/// For every list element `r`, if `y` dominates `r`, decrement `r.merit`;
+/// remove `r` when `merit <= 0`. Returns the number of list elements
+/// remaining. This entry point is used for lists that do not contain the
+/// inserted C pointer `y`.
+pub fn s_process_hsp_list(list: &mut Option<Box<LinkedHsp>>, y: &LinkedHsp) -> i32 {
+    s_process_hsp_list_impl(list, y, false)
 }
 
 /// 1-1 port of `s_MarkDownHSPList` (`hspfilter_culling.c:166`).
@@ -1802,12 +1825,12 @@ pub fn s_save_hsp(tree: &mut CTreeNode, a: &mut LinkedHsp) -> bool {
     let x = s_hsp_copy(a);
 
     if host.left.is_none() && host.right.is_none() {
-        if s_process_hsp_list(&mut host.hsp_list, &x) >= K_NUM_HSP_TO_FORK {
+        if s_process_hsp_list_impl(&mut host.hsp_list, &x, true) >= K_NUM_HSP_TO_FORK {
             host.fork_children();
         }
         return true;
     }
-    s_process_hsp_list(&mut host.hsp_list, &x);
+    s_process_hsp_list_impl(&mut host.hsp_list, &x, true);
     s_process_ctree(&mut host.left, &x);
     s_process_ctree(&mut host.right, &x);
     true
@@ -1930,6 +1953,19 @@ mod tests {
         let remaining = s_process_hsp_list(&mut list, &y);
         assert_eq!(remaining, 0);
         assert!(list.is_none());
+    }
+
+    #[test]
+    fn process_hsp_list_host_skip_only_ignores_first_value_match() {
+        let mut list: Option<Box<LinkedHsp>> = None;
+        s_add_hsp_to_list(&mut list, mk(100, 0, 100, 1));
+        s_add_hsp_to_list(&mut list, mk(100, 0, 100, 1));
+        let y = *mk(100, 0, 100, 1);
+
+        let remaining = s_process_hsp_list_impl(&mut list, &y, true);
+
+        assert_eq!(remaining, 1);
+        assert!(list.as_ref().is_some_and(|node| node.next.is_none()));
     }
 
     #[test]
@@ -2472,6 +2508,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![100, 80]
         );
+    }
+
+    #[test]
+    fn import_from_hitlist_reverses_equal_begin_insertion_order() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 0,
+        };
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 20,
+            hsp_num_max: 10,
+            program_number: crate::program::BLASTP,
+            ..crate::options::HitSavingOptions::default()
+        };
+        let opts = BlastHSPBestHitOptions {
+            overhang: 0.1,
+            score_edge: 0.1,
+        };
+        let params = blast_hsp_best_hit_params_new(&hit, &opts, 0, true);
+        let mut data = s_blast_hsp_best_hit_pipe_new(params, &qi);
+        let results = crate::hspstream::HspResults::new(1);
+        let _ = s_blast_hsp_best_hit_init(&mut data, &results);
+
+        let mut list = crate::hspstream::HspList::new(9);
+        list.add_hsp(hsp(100, 0, 10, 0));
+        list.add_hsp(hsp(80, 0, 10, 20));
+        let mut hitlist = crate::hspstream::HitList::new();
+        hitlist.hsp_lists.push(list);
+
+        assert_eq!(s_import_from_hitlist(0, &mut data, &mut hitlist), 0);
+        assert_eq!(data.best_list[0].len(), 2);
+        assert_eq!(data.best_list[0][0].hsp.score, 80);
+        assert_eq!(data.best_list[0][1].hsp.score, 100);
     }
 
     #[test]

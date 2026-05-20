@@ -12,7 +12,7 @@
 use crate::encoding::encode_ncbistdaa_sequence;
 use crate::encoding::ncbistdaa_to_aminoacid_char;
 use crate::matrix::AA_SIZE;
-use crate::protein::{get_start_for_gapped_alignment, protein_gapped_align};
+use crate::protein::{blast_get_start_for_gapped_alignment, protein_gapped_align};
 use crate::pssm::Pssm;
 
 /// Result of a protein hit after extension.
@@ -180,7 +180,7 @@ fn compressed_reciprocal_alphabet_size(compressed_alphabet_size: usize) -> u64 {
     if compressed_alphabet_size == 0 {
         0
     } else {
-        (1u64 << 32) / compressed_alphabet_size as u64
+        (1u64 << 32).div_ceil(compressed_alphabet_size as u64)
     }
 }
 
@@ -307,6 +307,9 @@ impl ProteinLookupTable {
         if query.len() >= word_size {
             for i in 0..=(query.len() - word_size) {
                 let query_word = &query[i..i + word_size];
+                if !protein_lookup_word_is_valid(query_word.iter().copied()) {
+                    continue;
+                }
                 let hash = word_hash(query_word, alphabet_size);
                 exact_backbone[hash].push(i as i32);
             }
@@ -377,6 +380,7 @@ impl ProteinLookupTable {
     }
 }
 
+/// NCBI: BlastAaLookupFinalize (blast_aalookup.c).
 /// Conservative Rust port of NCBI `BlastAaLookupFinalize`
 /// (`blast_aalookup.c:267`).
 ///
@@ -430,6 +434,7 @@ pub fn blast_aa_lookup_finalize(
     0
 }
 
+/// NCBI: s_AddWordHits (blast_aalookup.c).
 fn s_add_word_hits(
     backbone: &mut [Vec<i32>],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -475,6 +480,7 @@ fn s_add_word_hits(
     s_add_word_hits_core(backbone, &mut info, score, 0);
 }
 
+/// NCBI: s_AddWordHitsCore (blast_aalookup.c).
 fn s_add_word_hits_core(
     backbone: &mut [Vec<i32>],
     info: &mut NeighborInfo<'_>,
@@ -510,6 +516,7 @@ fn s_add_word_hits_core(
     }
 }
 
+/// NCBI: s_AddPSSMNeighboringWords (blast_aalookup.c).
 /// Add neighboring words from position-specific rows, matching
 /// `s_AddPSSMNeighboringWords` in NCBI's protein lookup builder.
 ///
@@ -572,6 +579,8 @@ pub fn s_add_pssm_neighboring_words(
     total
 }
 
+/// blast-rs: Range wrapper around the C s_AddPSSMNeighboringWords helper; not
+/// a direct NCBI C port.
 fn s_add_pssm_neighboring_range(
     backbone: &mut [Vec<i32>],
     pssm: &Pssm,
@@ -623,6 +632,7 @@ fn s_add_pssm_neighboring_range(
     total
 }
 
+/// NCBI: s_AddPSSMWordHits (blast_aalookup.c).
 fn s_add_pssm_word_hits(
     backbone: &mut [Vec<i32>],
     pssm: &Pssm,
@@ -648,6 +658,7 @@ fn s_add_pssm_word_hits(
     s_add_pssm_word_hits_core(backbone, &mut info, score, 0)
 }
 
+/// NCBI: s_AddPSSMWordHitsCore (blast_aalookup.c).
 fn s_add_pssm_word_hits_core(
     backbone: &mut [Vec<i32>],
     info: &mut PssmNeighborInfo<'_>,
@@ -685,6 +696,7 @@ fn s_add_pssm_word_hits_core(
     added
 }
 
+/// NCBI: s_CompressedListGetNewCell (blast_aalookup.c).
 /// Allocate the next compressed-overflow cell, matching
 /// `s_CompressedListGetNewCell`'s bank/cursor state.
 ///
@@ -709,6 +721,7 @@ pub fn s_compressed_list_get_new_cell(lookup: &mut BlastCompressedAaLookupTable)
     Some(cell_index)
 }
 
+/// NCBI: s_CompressedLookupAddWordHit (blast_aalookup.c).
 /// Add one query offset to a compressed-alphabet lookup cell, following
 /// `s_CompressedLookupAddWordHit`'s inline-to-overflow transition.
 ///
@@ -768,8 +781,10 @@ pub fn s_compressed_lookup_add_word_hit(
     0
 }
 
-/// Add one already-compressed word to the compressed lookup table, matching
-/// `s_CompressedLookupAddEncoded`'s fixed-radix index formulas.
+/// NCBI: s_CompressedLookupAddEncoded (blast_aalookup.c).
+/// Add one already-compressed word to the compressed lookup table, preserving
+/// the fixed-radix index formulas and packed backbone/overflow insertion
+/// layout used by the C implementation.
 pub fn s_compressed_lookup_add_encoded(
     lookup: &mut BlastCompressedAaLookupTable,
     word: &[u8],
@@ -840,12 +855,14 @@ pub fn s_compressed_lookup_add_encoded(
                 + W7P5[word[5] as usize]
                 + W7P6[word[6] as usize]
         }
-        _ => 0,
+        _ => return -1,
     };
 
     s_compressed_lookup_add_word_hit(lookup, index, query_offset)
 }
 
+/// blast-rs: Unencoded-input adapter for the C s_CompressedLookupAddEncoded
+/// helper; not a direct NCBI C port.
 fn s_compressed_lookup_add_unencoded(
     lookup: &mut BlastCompressedAaLookupTable,
     word: &[u8],
@@ -869,6 +886,7 @@ fn s_compressed_lookup_add_unencoded(
     s_compressed_lookup_add_encoded(lookup, &encoded, query_offset)
 }
 
+/// NCBI: s_LoadSortedMatrix (blast_aalookup.c).
 pub fn s_load_sorted_matrix(info: &mut CompressedNeighborInfo<'_>) {
     for long_char in 0..AA_SIZE {
         let mut pairs: Vec<(i32, u8)> = (0..info.compressed_alphabet_size)
@@ -888,6 +906,10 @@ pub fn s_load_sorted_matrix(info: &mut CompressedNeighborInfo<'_>) {
     }
 }
 
+/// blast-rs: Owned setup for NCBI `CompressedNeighborInfo`.
+/// Mirrors the row-max and sorted-matrix preparation that the recursive
+/// compressed-neighbor enumerator consumes, but returns a Rust value instead
+/// of filling caller-owned C storage.
 fn compressed_neighbor_info<'a>(
     lookup: &BlastCompressedAaLookupTable,
     matrix: &'a [[i32; AA_SIZE]; AA_SIZE],
@@ -912,6 +934,7 @@ fn compressed_neighbor_info<'a>(
     info
 }
 
+/// NCBI: s_CompressedAddWordHitsCore (blast_aalookup.c).
 /// Recursive compressed-neighbor enumeration, matching
 /// `s_CompressedAddWordHitsCore`.
 ///
@@ -966,6 +989,7 @@ pub fn s_compressed_add_word_hits_core(
     added
 }
 
+/// NCBI: s_CompressedAddWordHits (blast_aalookup.c).
 pub fn s_compressed_add_word_hits(
     lookup: &mut BlastCompressedAaLookupTable,
     info: &CompressedNeighborInfo<'_>,
@@ -1018,6 +1042,7 @@ pub fn s_compressed_add_word_hits(
         )
 }
 
+/// NCBI: s_CompressedAddNeighboringWords (blast_aalookup.c).
 /// Index compressed-alphabet neighboring words over optional half-open query
 /// ranges, matching `s_CompressedAddNeighboringWords`'s setup and loop shape.
 pub fn s_compressed_add_neighboring_words(
@@ -1051,6 +1076,7 @@ pub fn s_compressed_add_neighboring_words(
     total
 }
 
+/// NCBI: s_CompressedLookupFinalize (blast_aalookup.c).
 /// Complete compressed lookup construction by building the presence vector and
 /// longest-chain metadata, matching `s_CompressedLookupFinalize`.
 pub fn s_compressed_lookup_finalize(lookup: &mut BlastCompressedAaLookupTable) -> i32 {
@@ -1085,6 +1111,9 @@ pub fn s_compressed_lookup_finalize(lookup: &mut BlastCompressedAaLookupTable) -
     0
 }
 
+/// blast-rs: Owned materialization of the packed compressed-lookup payloads.
+/// This reconstructs the logical query-offset list from the backbone cell,
+/// inline slots, and overflow cells that NCBI stores as a linked cell chain.
 fn compressed_cell_query_offsets(
     lookup: &BlastCompressedAaLookupTable,
     cell: &CompressedLookupBackboneCell,
@@ -1119,6 +1148,7 @@ fn compressed_cell_query_offsets(
     offsets
 }
 
+/// NCBI: s_BlastCompressedAaScanSubject (blast_aalookup.c).
 /// Scan a subject sequence with a compressed amino-acid lookup table, matching
 /// `s_BlastCompressedAaScanSubject`'s PV test and offset-pair copy behavior.
 ///
@@ -1254,6 +1284,7 @@ pub fn s_blast_compressed_aa_scan_subject(
 /// AA_SIZE=28, charsize=5 (rounds up to 32). Matches NCBI BLAST+ `charsize`.
 const CHARSIZE: usize = 5;
 
+/// NCBI: BlastLookupAddWordHit (blast_lookup.c).
 /// 1-1 port of `BlastLookupAddWordHit` (`blast_lookup.c:33`) over the Rust
 /// vector-backed thin backbone.
 ///
@@ -1268,10 +1299,16 @@ pub(crate) fn blast_lookup_add_word_hit(
     seq: &[u8],
     query_offset: i32,
 ) {
+    if !protein_lookup_word_is_valid(seq.iter().take(wordsize).copied()) {
+        return;
+    }
     let index = s_compute_table_index(wordsize, charsize, seq);
-    backbone[index].push(query_offset);
+    if let Some(cell) = backbone.get_mut(index) {
+        cell.push(query_offset);
+    }
 }
 
+/// NCBI: s_ComputeTableIndex (lookup_util.c).
 fn s_compute_table_index(wordsize: usize, charsize: usize, word: &[u8]) -> usize {
     let mut index = 0usize;
     for &letter in word.iter().take(wordsize) {
@@ -1280,10 +1317,12 @@ fn s_compute_table_index(wordsize: usize, charsize: usize, word: &[u8]) -> usize
     index
 }
 
-/// Mask for the hash: (1 << (word_size * CHARSIZE)) - 1.
-/// For word_size=3: mask = (1 << 15) - 1 = 32767.
-#[allow(dead_code)]
-const HASH_MASK_W3: usize = (1 << (3 * CHARSIZE)) - 1;
+fn protein_lookup_word_is_valid<I>(word: I) -> bool
+where
+    I: IntoIterator<Item = u8>,
+{
+    word.into_iter().all(|letter| (letter as usize) < AA_SIZE)
+}
 
 /// Hash a word using NCBI-style shift+or (matching ComputeTableIndex).
 /// hash = (w[0] << (n-1)*charsize) | (w[1] << (n-2)*charsize) | ... | w[n-1]
@@ -1292,10 +1331,10 @@ fn word_hash(word: &[u8], _alphabet_size: usize) -> usize {
     s_compute_table_index(word.len(), CHARSIZE, word)
 }
 
-/// Incremental hash update (NCBI ComputeTableIndexIncremental).
+/// NCBI: s_ComputeTableIndexIncremental (lookup_util.c).
 #[inline]
 #[allow(dead_code)]
-fn word_hash_incremental(prev_hash: usize, new_char: u8, mask: usize) -> usize {
+fn s_compute_table_index_incremental(prev_hash: usize, new_char: u8, mask: usize) -> usize {
     ((prev_hash << CHARSIZE) | new_char as usize) & mask
 }
 
@@ -1344,7 +1383,7 @@ fn subject_has_merged_pv_hit(subject: &[u8], word_size: usize, merged_pv: &[u64]
     let mut hash = word_hash(&subject[0..word_size], 0);
     for s_pos in 0..=last_pos {
         if s_pos > 0 {
-            hash = word_hash_incremental(hash, subject[s_pos + word_size - 1], mask);
+            hash = s_compute_table_index_incremental(hash, subject[s_pos + word_size - 1], mask);
         }
         if merged_pv
             .get(hash >> 6)
@@ -1356,7 +1395,9 @@ fn subject_has_merged_pv_hit(subject: &[u8], word_size: usize, merged_pv: &[u64]
     false
 }
 
-/// Batch scan: scan ONE subject against MULTIPLE queries using a merged PV.
+/// blast-rs: Public batch-scan wrapper for one subject against multiple
+/// protein queries. This is not an NCBI C entry point; it combines a merged PV
+/// prefilter with the translated single-query two-hit scanner below.
 ///
 /// The merged PV is used only as a conservative no-hit prefilter. Once any
 /// possible word is present, each query still runs through
@@ -1400,8 +1441,9 @@ pub fn s_blast_aa_scan_subject(
     results
 }
 
-/// Scan a subject sequence against a query using the protein lookup table,
-/// performing ungapped extensions for each hit.
+/// blast-rs: Public convenience wrapper that builds a protein lookup table and
+/// scans one subject. Keep this Rust API name stable; the translated NCBI
+/// scanner is reached through `protein_scan_with_table`.
 ///
 /// Returns a list of `ProteinHit` sorted by descending score.
 pub fn blast_choose_protein_scan_subject(
@@ -1419,7 +1461,9 @@ pub fn blast_choose_protein_scan_subject(
     protein_scan_with_table(query, subject, matrix, &table, x_dropoff)
 }
 
-/// Scan a subject using a pre-built lookup table (avoids rebuilding per subject).
+/// blast-rs: Rust convenience wrapper around `s_blast_aa_word_finder_two_hit`
+/// that owns the diagonal scratch buffer for callers that do not batch scans.
+/// Keep this public API name stable for Rust call sites.
 pub fn protein_scan_with_table(
     query: &[u8],
     subject: &[u8],
@@ -1434,6 +1478,7 @@ pub fn protein_scan_with_table(
 /// Two-hit window size (matches NCBI BLAST+ default for protein).
 const TWO_HIT_WINDOW: i32 = 40;
 
+/// NCBI: s_BlastAaExtendLeft (aa_ungapped.c).
 /// Extend left from position (q_start-1, s_start-1) with x-dropoff.
 /// Returns (best_score, left_displacement, num_identities).
 /// Matches NCBI `s_BlastAaExtendLeft`.
@@ -1487,6 +1532,7 @@ fn s_blast_aa_extend_left(
     (best, best_d, best_ident)
 }
 
+/// NCBI: s_BlastAaExtendRight (aa_ungapped.c).
 /// Extend right from position (q_start, s_start) with x-dropoff.
 /// `init_score` is the cumulative score from left extension.
 /// Returns (best_score, right_displacement, num_identities, s_last_off_delta).
@@ -1575,6 +1621,7 @@ pub enum TwoHitOutcome {
     },
 }
 
+/// NCBI: s_BlastAaExtendTwoHit (aa_ungapped.c).
 /// Port of NCBI `s_BlastAaExtendTwoHit` (`aa_ungapped.c:1089`), reduced to
 /// the local slice-based scanner state. Returns NCBI's `right_extend` /
 /// `s_last_off` plus the optional ungapped HSP.
@@ -1659,8 +1706,9 @@ fn s_blast_aa_extend_two_hit(
     }
 }
 
-/// Name-matched port of NCBI `s_BlastAaWordFinder_TwoHit`
-/// (`aa_ungapped.c:440`) over the Rust lookup-table representation.
+/// NCBI: s_BlastAaWordFinder_TwoHit (aa_ungapped.c).
+/// Port of NCBI `s_BlastAaWordFinder_TwoHit` (`aa_ungapped.c:440`), over the
+/// Rust lookup-table representation.
 ///
 /// Uses the NCBI BLAST+ two-hit algorithm: a word hit on a diagonal only
 /// triggers ungapped extension if a second hit was seen on the same diagonal
@@ -1794,7 +1842,9 @@ pub fn s_blast_aa_word_finder_two_hit(
     hits
 }
 
-/// Like `protein_scan_with_table` but reuses a diagonal tracking buffer.
+/// blast-rs: Rust convenience wrapper around `s_blast_aa_word_finder_two_hit`
+/// that lets higher-level search code reuse the diagonal scratch buffer across
+/// subjects.
 pub fn protein_scan_with_table_reuse(
     query: &[u8],
     subject: &[u8],
@@ -1806,7 +1856,8 @@ pub fn protein_scan_with_table_reuse(
     s_blast_aa_word_finder_two_hit(query, subject, matrix, table, x_dropoff, diag_buf)
 }
 
-/// Scan + gapped extension: find ungapped seeds, then perform gapped DP on top hits.
+/// blast-rs: Rust convenience wrapper that builds a protein lookup table, scans
+/// ungapped seeds, then runs local gapped extension on accepted seeds.
 ///
 /// This is the standard two-phase BLAST approach:
 /// 1. Find seeds via lookup table + ungapped extension
@@ -1837,7 +1888,8 @@ pub fn protein_gapped_scan(
     )
 }
 
-/// Gapped scan using a pre-built lookup table.
+/// blast-rs: Rust convenience wrapper for the two-phase protein scan when the
+/// caller already owns a pre-built lookup table.
 pub fn protein_gapped_scan_with_table(
     query: &[u8],
     subject: &[u8],
@@ -1863,7 +1915,7 @@ pub fn protein_gapped_scan_with_table(
             continue;
         }
 
-        let (seed_q, seed_s) = get_start_for_gapped_alignment(
+        let (seed_q, seed_s) = blast_get_start_for_gapped_alignment(
             query,
             subject,
             uh.query_start,
@@ -1941,6 +1993,13 @@ mod tests {
             }
         }
         m
+    }
+
+    #[test]
+    fn compressed_reciprocal_alphabet_size_matches_ncbi_ceil_constants() {
+        assert_eq!(compressed_reciprocal_alphabet_size(15), 286_331_154);
+        assert_eq!(compressed_reciprocal_alphabet_size(10), 429_496_730);
+        assert_eq!(compressed_reciprocal_alphabet_size(0), 0);
     }
 
     #[test]
@@ -2087,6 +2146,17 @@ mod tests {
             0
         );
         assert_eq!(lookup7.backbone[index7].query_offset, 44);
+    }
+
+    #[test]
+    fn compressed_lookup_add_encoded_rejects_unsupported_word_lengths() {
+        let mut lookup = BlastCompressedAaLookupTable::new(4, 15, 1);
+
+        assert_eq!(
+            s_compressed_lookup_add_encoded(&mut lookup, &[1, 2, 3, 4], 42),
+            -1
+        );
+        assert_eq!(lookup.backbone[0].num_used, 0);
     }
 
     #[test]
@@ -2467,8 +2537,15 @@ mod tests {
         );
 
         assert!(!hits.is_empty());
-        let expected =
-            get_start_for_gapped_alignment(&query, &subject, 0, query.len(), 0, subject.len(), &m);
+        let expected = blast_get_start_for_gapped_alignment(
+            &query,
+            &subject,
+            0,
+            query.len(),
+            0,
+            subject.len(),
+            &m,
+        );
         assert_eq!((hits[0].gapped_start_q, hits[0].gapped_start_s), expected);
         assert_ne!(
             (hits[0].gapped_start_q, hits[0].gapped_start_s),
