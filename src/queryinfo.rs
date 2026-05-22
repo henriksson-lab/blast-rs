@@ -58,6 +58,8 @@ impl QueryInfo {
 
 impl QueryInfo {
     /// Create QueryInfo for protein-query programs with one context per query.
+    /// blast-rs: QueryInfo constructor over Rust query lengths; not a direct
+    /// NCBI C port.
     pub fn new_blastp(query_lengths: &[usize]) -> Self {
         let num_queries = query_lengths.len() as i32;
         let mut contexts = Vec::new();
@@ -87,6 +89,8 @@ impl QueryInfo {
     }
 
     /// Create QueryInfo for blastn with the given query lengths.
+    /// blast-rs: QueryInfo constructor over Rust query lengths; not a direct
+    /// NCBI C port.
     pub fn new_blastn(query_lengths: &[usize]) -> Self {
         let num_queries = query_lengths.len() as i32;
         let mut contexts = Vec::new();
@@ -101,7 +105,7 @@ impl QueryInfo {
                 length_adjustment: 0,
                 query_index: qi as i32,
                 frame: 1,
-                is_valid: true,
+                is_valid: qlen > 0,
                 segment_flags: E_NO_SEGMENTS,
             });
             offset += qlen as i32 + 1; // +1 for sentinel between strands
@@ -114,7 +118,7 @@ impl QueryInfo {
                 length_adjustment: 0,
                 query_index: qi as i32,
                 frame: -1,
-                is_valid: true,
+                is_valid: qlen > 0,
                 segment_flags: E_NO_SEGMENTS,
             });
             offset += qlen as i32 + 1;
@@ -177,19 +181,25 @@ impl QueryInfo {
         self.contexts.get(context).map_or(-1, |c| c.query_index)
     }
 
+    /// blast-rs: Segment-flag accessor over modeled context spans; not a
+    /// direct NCBI C port.
     pub fn query_segment_flags(&self, query_idx: usize) -> i32 {
+        let contexts_per_query = self.contexts_per_query();
         self.contexts
-            .get(query_idx * crate::util::NUM_STRANDS)
+            .get(query_idx.saturating_mul(contexts_per_query))
             .map_or(E_NO_SEGMENTS, |context| context.segment_flags)
     }
 
+    /// blast-rs: Segment-flag updater over modeled context spans; not a direct
+    /// NCBI C port.
     pub fn set_query_segment_flags(&mut self, query_idx: usize, segment_flags: i32) {
-        let first_context = query_idx * crate::util::NUM_STRANDS;
+        let contexts_per_query = self.contexts_per_query();
+        let first_context = query_idx.saturating_mul(contexts_per_query);
         for context in self
             .contexts
             .iter_mut()
             .skip(first_context)
-            .take(crate::util::NUM_STRANDS)
+            .take(contexts_per_query)
         {
             context.segment_flags = segment_flags;
         }
@@ -198,6 +208,20 @@ impl QueryInfo {
     /// Number of contexts.
     pub fn num_contexts(&self) -> usize {
         self.contexts.len()
+    }
+
+    /// blast-rs: Infer per-query context span from modeled QueryInfo; not a
+    /// direct NCBI C port.
+    fn contexts_per_query(&self) -> usize {
+        if self.num_queries > 0 && !self.contexts.is_empty() {
+            self.contexts
+                .len()
+                .checked_div(self.num_queries as usize)
+                .filter(|&span| span > 0)
+                .unwrap_or(1)
+        } else {
+            1
+        }
     }
 }
 
@@ -300,6 +324,19 @@ mod tests {
         assert_eq!(qi.num_contexts(), 4);
         assert_eq!(qi.max_length, 100);
         assert_eq!(qi.contexts[2].query_index, 1);
+    }
+
+    #[test]
+    fn test_new_blastn_empty_query_contexts_are_invalid() {
+        let qi = QueryInfo::new_blastn(&[0]);
+        assert_eq!(qi.num_queries, 1);
+        assert_eq!(qi.num_contexts(), 2);
+        assert_eq!(qi.max_length, 0);
+        assert_eq!(qi.min_length, 0);
+        assert_eq!(qi.contexts[0].query_length, 0);
+        assert_eq!(qi.contexts[1].query_length, 0);
+        assert!(!qi.contexts[0].is_valid);
+        assert!(!qi.contexts[1].is_valid);
     }
 
     #[test]
@@ -441,6 +478,24 @@ mod tests {
                 prev.query_length
             );
         }
+    }
+
+    #[test]
+    fn test_query_segment_flags_use_program_context_span() {
+        let mut blastp = QueryInfo::new_blastp(&[10, 20]);
+        blastp.set_query_segment_flags(0, E_FIRST_SEGMENT);
+        assert_eq!(blastp.contexts[0].segment_flags, E_FIRST_SEGMENT);
+        assert_eq!(blastp.contexts[1].segment_flags, E_NO_SEGMENTS);
+        assert_eq!(blastp.query_segment_flags(0), E_FIRST_SEGMENT);
+        assert_eq!(blastp.query_segment_flags(1), E_NO_SEGMENTS);
+
+        let mut blastx = QueryInfo::new_translated_query_from_offsets(&[0, 4, 8, 12, 16, 20, 24]);
+        blastx.set_query_segment_flags(0, E_LAST_SEGMENT);
+        assert!(blastx
+            .contexts
+            .iter()
+            .all(|context| context.segment_flags == E_LAST_SEGMENT));
+        assert_eq!(blastx.query_segment_flags(0), E_LAST_SEGMENT);
     }
 
     #[test]

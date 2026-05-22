@@ -438,14 +438,14 @@ pub fn hsp_chain_list_insert(
     list: &mut Option<Box<HSPChain>>,
     chain: &mut Option<Box<HSPChain>>,
     cutoff_score: i32,
-    _cutoff_edit_dist: i32,
+    cutoff_edit_dist: i32,
     check_for_duplicates: bool,
 ) -> i32 {
     let mut status = 0;
     for ch in drain_chain_list(chain.take()) {
         if cutoff_score <= 0 {
             status = s_hsp_chain_list_insert_one_by_score(list, Some(ch), check_for_duplicates);
-        } else if ch.score >= cutoff_score {
+        } else if s_test_cutoffs(Some(&ch), cutoff_score, cutoff_edit_dist) {
             status = s_hsp_chain_list_insert_one(list, Some(ch), check_for_duplicates);
         }
         if status != 0 {
@@ -548,41 +548,20 @@ pub fn s_blast_hsp_mapper_free(_: Option<BlastHSPMapperWriter>) -> Option<BlastH
 }
 
 /// Port of NCBI `s_GetOverlapCost` (`hspfilter_mapper.c:402`) for the Rust
-/// `Hsp` shape. Rust HSPs do not carry mapper edit-position arrays, so the
-/// public wrapper uses empty edit lists while the implementation keeps the C
-/// edit-penalty walk available for callers that have those positions.
+/// `Hsp` shape.
 pub fn s_get_overlap_cost(a: &Hsp, b: &Hsp, edit_penalty: i32) -> i32 {
-    let a_edit_positions: &[i32] = &[];
-    let b_edit_positions: &[i32] = &[];
+    let a_edit_positions = mapper_edit_positions(a);
+    let b_edit_positions = mapper_edit_positions(b);
 
-    if (a.query_offset <= b.query_offset && a.query_end >= b.query_end)
-        || (b.query_offset <= a.query_offset && b.query_end >= a.query_end)
-    {
-        return a.score.min(b.score);
-    }
-    if a.query_end <= b.query_offset || b.query_end <= a.query_offset {
-        return 0;
-    }
+    s_get_overlap_cost_with_edits(a, b, edit_penalty, &a_edit_positions, &b_edit_positions)
+}
 
-    let (first, second, first_edits, second_edits) = if a.query_offset < b.query_offset {
-        (a, b, a_edit_positions, b_edit_positions)
-    } else {
-        (b, a, b_edit_positions, a_edit_positions)
-    };
-
-    let mut first_overlap = first.query_end.saturating_sub(second.query_offset);
-    let mut second_overlap = first_overlap;
-    for &query_pos in first_edits {
-        if query_pos >= second.query_offset {
-            first_overlap = first_overlap.saturating_sub(edit_penalty);
-        }
-    }
-    for &query_pos in second_edits {
-        if query_pos < first.query_end {
-            second_overlap = second_overlap.saturating_sub(edit_penalty);
-        }
-    }
-    first_overlap.min(second_overlap)
+fn mapper_edit_positions(hsp: &Hsp) -> Vec<i32> {
+    hsp.map_info
+        .as_ref()
+        .and_then(|info| info.edits.as_ref())
+        .map(|edits| edits.edits.iter().map(|edit| edit.query_pos).collect())
+        .unwrap_or_default()
 }
 
 pub fn s_get_overlap_cost_with_edits(
@@ -1916,15 +1895,19 @@ pub fn s_find_splice_junctions(
                         query_gap,
                         next.hsp.query_offset <= h.hsp.query_end
                             && next.hsp.query_offset > h.hsp.query_offset,
-                        subject_gap >= 0
-                            && subject_gap - query_gap < 30
-                            && subject_gap < right_overhang_len
-                            && next.hsp.subject_offset >= h.hsp.subject_end,
+                        subject_gap - query_gap < 30 && subject_gap < right_overhang_len,
                         h.hsp.score > 50 && next.hsp.score > 50,
                     )
                 };
 
                 if can_short_merge {
+                    if query_gap > 1 {
+                        let status =
+                            mapper_extend_hsp(&mut h.hsp, query_gap as i32, 0, false, scoring_opts);
+                        if status != 0 {
+                            return status;
+                        }
+                    }
                     let old_next_start = h.next.as_ref().map(|next| next.hsp.query_offset);
                     let status = s_intron_to_gap(h, Some(query), Some(scoring_opts));
                     if status != 0 {
@@ -3060,12 +3043,192 @@ fn mapper_mark_right_edge(hsp: &mut Hsp, flags: u8) {
     info.right_edge |= flags;
 }
 
+fn mapper_overlap_edit_counts(first: &Hsp, second: &Hsp) -> (usize, usize) {
+    let first_count = first
+        .map_info
+        .as_ref()
+        .and_then(|info| info.edits.as_ref())
+        .map(|edits| {
+            edits
+                .edits
+                .iter()
+                .rev()
+                .take_while(|edit| edit.query_pos >= second.query_offset)
+                .count()
+        })
+        .unwrap_or(0);
+    let second_count = second
+        .map_info
+        .as_ref()
+        .and_then(|info| info.edits.as_ref())
+        .map(|edits| {
+            edits
+                .edits
+                .iter()
+                .take_while(|edit| edit.query_pos < first.query_end)
+                .count()
+        })
+        .unwrap_or(0);
+    (first_count, second_count)
+}
+
+fn mapper_overlap_edits_remain(first: &Hsp, second: &Hsp) -> bool {
+    let first_remains = first
+        .map_info
+        .as_ref()
+        .and_then(|info| info.edits.as_ref())
+        .and_then(|edits| edits.edits.last())
+        .is_some_and(|edit| edit.query_pos >= second.query_offset);
+    let second_remains = second
+        .map_info
+        .as_ref()
+        .and_then(|info| info.edits.as_ref())
+        .and_then(|edits| edits.edits.first())
+        .is_some_and(|edit| edit.query_pos < first.query_end);
+    first_remains || second_remains
+}
+
+fn mapper_trim_first_overlap_edits(
+    first: &mut Hsp,
+    second_query_offset: i32,
+    query: &[u8],
+    query_len: i32,
+) -> i32 {
+    const GAP_BASE: u8 = 15;
+    loop {
+        let edit = first
+            .map_info
+            .as_ref()
+            .and_then(|info| info.edits.as_ref())
+            .and_then(|edits| edits.edits.last())
+            .copied();
+        let Some(edit) = edit else {
+            return 0;
+        };
+        if edit.query_pos < second_query_offset {
+            return 0;
+        }
+
+        let mut edge = first
+            .map_info
+            .as_ref()
+            .map(|info| info.right_edge)
+            .unwrap_or_default();
+        if edit.query_pos >= first.query_end.saturating_sub(1) {
+            if edit.subject_base != GAP_BASE {
+                edge >>= 2;
+                edge |= (edit.subject_base as u8) << 2;
+            }
+        } else if edit.query_pos == query_len.saturating_sub(2) && edit.subject_base == GAP_BASE {
+            if let Some(&base) = query.get(query_len.saturating_sub(1).max(0) as usize) {
+                edge = (edge << 2) | base;
+            }
+        } else if edit.subject_base != GAP_BASE && edit.query_base != GAP_BASE {
+            if let Some(&base) = query.get(edit.query_pos.saturating_add(1).max(0) as usize) {
+                edge = ((edit.subject_base as u8) << 2) | base;
+            }
+        } else if edit.subject_base == GAP_BASE {
+            if let (Some(&left), Some(&right)) = (
+                query.get(edit.query_pos.saturating_add(1).max(0) as usize),
+                query.get(edit.query_pos.saturating_add(2).max(0) as usize),
+            ) {
+                edge = (left << 2) | right;
+            }
+        } else {
+            edge = ((edit.subject_base as u8) << 2)
+                | query
+                    .get(edit.query_pos.max(0) as usize)
+                    .copied()
+                    .unwrap_or_default();
+        }
+
+        let mut trim_by = first.query_end.saturating_sub(edit.query_pos);
+        let status = if edit.query_base == GAP_BASE {
+            trim_by = trim_by.saturating_add(1);
+            s_trim_hsp(first, trim_by, false, false, -4, -4, -4, Some(query))
+        } else {
+            s_trim_hsp(first, trim_by, true, false, -4, -4, -4, Some(query))
+        };
+        if status != 0 {
+            return status;
+        }
+        if let Some(info) = first.map_info.as_mut() {
+            info.right_edge = edge;
+        }
+    }
+}
+
+fn mapper_trim_second_overlap_edits(second: &mut Hsp, first_query_end: i32, query: &[u8]) -> i32 {
+    const GAP_BASE: u8 = 15;
+    loop {
+        let edit = second
+            .map_info
+            .as_ref()
+            .and_then(|info| info.edits.as_ref())
+            .and_then(|edits| edits.edits.first())
+            .copied();
+        let Some(edit) = edit else {
+            return 0;
+        };
+        if edit.query_pos >= first_query_end {
+            return 0;
+        }
+
+        let mut edge = second
+            .map_info
+            .as_ref()
+            .map(|info| info.left_edge)
+            .unwrap_or_default();
+        if edit.query_pos == 0 {
+            if edit.subject_base != GAP_BASE {
+                edge <<= 2;
+                edge |= edit.subject_base as u8;
+            }
+        } else if edit.query_pos == 1 && edit.subject_base == GAP_BASE {
+            if let Some(&base) = query.first() {
+                edge = (edge << 2) | base;
+            }
+        } else if edit.subject_base == GAP_BASE {
+            if let (Some(&left), Some(&right)) = (
+                query.get(edit.query_pos.saturating_sub(2).max(0) as usize),
+                query.get(edit.query_pos.saturating_sub(1).max(0) as usize),
+            ) {
+                edge = (left << 2) | right;
+            }
+        } else {
+            edge = (query
+                .get(edit.query_pos.saturating_sub(1).max(0) as usize)
+                .copied()
+                .unwrap_or_default()
+                << 2)
+                | edit.subject_base as u8;
+        }
+
+        let trim_by = edit
+            .query_pos
+            .saturating_sub(second.query_offset)
+            .saturating_add(1);
+        let status = if edit.query_base == GAP_BASE {
+            s_trim_hsp(second, trim_by, false, true, -4, -4, -4, Some(query))
+        } else {
+            s_trim_hsp(second, trim_by, true, true, -4, -4, -4, Some(query))
+        };
+        if status != 0 {
+            return status;
+        }
+        if let Some(info) = second.map_info.as_mut() {
+            info.left_edge = edge;
+        }
+    }
+}
+
 /// Conservative Rust port of NCBI `s_FindSpliceJunctionsForOverlaps`
 /// (`hspfilter_mapper.c:2504`).
 ///
 /// This ports C's coordinate guards, splice-signal search over the reconstructed
 /// overlap when query flanks are available, mapper splice-edge updates, exact
-/// split trimming at the signal, and the existing overlap-removal fallback.
+/// split trimming at the signal, and the edit-aware overlap pre-split. The
+/// caller performs overlap-removal fallback.
 pub fn s_find_splice_junctions_for_overlaps(
     first: &mut Hsp,
     second: &mut Hsp,
@@ -3095,52 +3258,83 @@ pub fn s_find_splice_junctions_for_overlaps(
 
     if let Some(query) = query {
         let query_len = query_len.max(0).min(query.len() as i32);
-        let left = second.query_offset.saturating_sub(2);
-        let right = first.query_end.saturating_add(2);
-        if left >= 0 && right <= query_len {
-            let mut subject = Vec::with_capacity(overlap_len as usize + 4);
-            subject.extend_from_slice(&query[left as usize..second.query_offset as usize]);
-            subject
-                .extend_from_slice(&query[second.query_offset as usize..first.query_end as usize]);
-            subject.extend_from_slice(&query[first.query_end as usize..right as usize]);
+        let (first_edits, second_edits) = mapper_overlap_edit_counts(first, second);
+        if first_edits > 0 || second_edits > 0 {
+            if first_edits > second_edits {
+                let status =
+                    mapper_trim_first_overlap_edits(first, second.query_offset, query, query_len);
+                if status != 0 {
+                    return status;
+                }
+            } else if second_edits > first_edits {
+                let status = mapper_trim_second_overlap_edits(second, first.query_end, query);
+                if status != 0 {
+                    return status;
+                }
+            } else {
+                mapper_clear_splice_signal(first, second);
+                return 0;
+            }
 
-            let num_signals = if consensus_only { 2 } else { SIGNALS.len() };
-            for &signal in SIGNALS.iter().take(num_signals) {
-                for i in 0..=overlap_len as usize {
-                    if mapper_splice_signal_at(&subject, i) != Some(signal) {
-                        continue;
-                    }
+            if mapper_overlap_edits_remain(first, second) {
+                mapper_clear_splice_signal(first, second);
+                return 0;
+            }
+        }
 
-                    let trim_first = first
-                        .query_end
-                        .saturating_sub(second.query_offset.saturating_add(i as i32));
-                    if trim_first > 0 {
-                        let status =
-                            s_trim_hsp(first, trim_first, true, false, -4, -4, -4, Some(query));
-                        if status != 0 {
-                            return status;
+        let overlap_len = first.query_end.saturating_sub(second.query_offset);
+        if overlap_len <= 0 {
+            mapper_clear_splice_signal(first, second);
+            return 0;
+        }
+        if second.query_offset >= 0 && first.query_end <= query_len {
+            if let (Some(first_right_edge), Some(second_left_edge)) = (
+                first.map_info.as_ref().map(|info| info.right_edge & 0x0f),
+                second.map_info.as_ref().map(|info| info.left_edge & 0x0f),
+            ) {
+                let mut subject = Vec::with_capacity(overlap_len as usize + 4);
+                subject.push((second_left_edge >> 2) & 0x03);
+                subject.push(second_left_edge & 0x03);
+                subject.extend_from_slice(
+                    &query[second.query_offset as usize..first.query_end as usize],
+                );
+                subject.push((first_right_edge >> 2) & 0x03);
+                subject.push(first_right_edge & 0x03);
+
+                let num_signals = if consensus_only { 2 } else { SIGNALS.len() };
+                for &signal in SIGNALS.iter().take(num_signals) {
+                    for i in 0..=overlap_len as usize {
+                        if mapper_splice_signal_at(&subject, i) != Some(signal) {
+                            continue;
                         }
-                    }
-                    if i > 0 {
-                        let status =
-                            s_trim_hsp(second, i as i32, true, true, -4, -4, -4, Some(query));
-                        if status != 0 {
-                            return status;
+
+                        let trim_first = first
+                            .query_end
+                            .saturating_sub(second.query_offset.saturating_add(i as i32));
+                        if trim_first > 0 {
+                            let status =
+                                s_trim_hsp(first, trim_first, true, false, -4, -4, -4, Some(query));
+                            if status != 0 {
+                                return status;
+                            }
                         }
+                        if i > 0 {
+                            let status =
+                                s_trim_hsp(second, i as i32, true, true, -4, -4, -4, Some(query));
+                            if status != 0 {
+                                return status;
+                            }
+                        }
+                        mapper_set_splice_signal(first, second, signal);
+                        return 0;
                     }
-                    mapper_set_splice_signal(first, second, signal);
-                    return 0;
                 }
             }
         }
     }
 
     mapper_clear_splice_signal(first, second);
-    if second.score <= first.score {
-        s_trim_hsp(second, overlap_len, true, true, -4, -4, -4, query)
-    } else {
-        s_trim_hsp(first, overlap_len, true, false, -4, -4, -4, query)
-    }
+    0
 }
 
 /// Rust ownership equivalent of NCBI `s_ExtendAlignmentCleanup`
@@ -3999,7 +4193,7 @@ mod tests {
             0
         );
         assert!(edit_distance_filtered.is_none());
-        assert_eq!(scores(&list), vec![50, 45, 50]);
+        assert_eq!(scores(&list), vec![50, 45]);
 
         let mut bad_context = chain(30, 0, 5, 0, 0);
         bad_context.hsps.as_mut().unwrap().hsp.context = 1;
@@ -4090,6 +4284,23 @@ mod tests {
         d.query_end = 16;
         assert_eq!(s_get_overlap_cost_with_edits(&a, &d, 2, &[11], &[8]), 2);
         assert_eq!(s_get_overlap_cost_with_edits(&d, &a, 2, &[8], &[11]), 2);
+
+        let mut edited_a = hsp(50, 0, 0, 0, 10);
+        edited_a.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![JumperEdit {
+                    query_pos: 8,
+                    query_base: 0,
+                    subject_base: 1,
+                }],
+            }),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: 0,
+        });
+        let mut edited_b = hsp(30, 0, 6, 6, 9);
+        edited_b.query_end = 16;
+        assert_eq!(s_get_overlap_cost(&edited_a, &edited_b, 2), 2);
 
         let mut reverse_containment = hsp(70, 0, -2, -2, 10);
         reverse_containment.query_end = 20;
@@ -5129,9 +5340,14 @@ mod tests {
         assert!(head.next.is_none());
         assert_eq!(
             head.hsp.edit_script.as_ref().unwrap().ops,
-            vec![(GapAlignOpType::Sub, 20)]
+            vec![
+                (GapAlignOpType::Sub, 10),
+                (GapAlignOpType::Ins, 2),
+                (GapAlignOpType::Del, 2),
+                (GapAlignOpType::Sub, 8)
+            ]
         );
-        assert_eq!(chain.score, 20);
+        assert_eq!(chain.score, 0);
     }
 
     #[test]
@@ -5571,7 +5787,12 @@ mod tests {
         assert!(head.next.is_none());
         assert_eq!(
             head.hsp.edit_script.as_ref().unwrap().ops,
-            vec![(GapAlignOpType::Sub, 20)]
+            vec![
+                (GapAlignOpType::Sub, 10),
+                (GapAlignOpType::Ins, 2),
+                (GapAlignOpType::Del, 2),
+                (GapAlignOpType::Sub, 8)
+            ]
         );
     }
 
@@ -5997,7 +6218,7 @@ mod tests {
     }
 
     #[test]
-    fn find_splice_junctions_for_overlaps_trims_lower_scoring_second_hsp() {
+    fn find_splice_junctions_for_overlaps_clears_splice_bits_without_trimming_second_hsp() {
         let mut first = hsp(30, 0, 0, 10, 20);
         first.query_end = 20;
         first.subject_end = 30;
@@ -6011,27 +6232,43 @@ mod tests {
         second.edit_script = Some(crate::gapinfo::GapEditScript {
             ops: vec![(GapAlignOpType::Sub, 15)],
         });
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: None,
+            left_edge: MAPPER_SPLICE_SIGNAL | 1,
+            right_edge: 0,
+        });
 
         assert_eq!(
             s_find_splice_junctions_for_overlaps(&mut first, &mut second, None, 30, false),
             0
         );
         assert_eq!(first.query_end, 20);
-        assert_eq!(second.query_offset, 20);
-        assert_eq!(second.subject_offset, 45);
+        assert_eq!(second.query_offset, 15);
+        assert_eq!(second.subject_offset, 40);
         assert_eq!(
             second.edit_script.as_ref().unwrap().ops,
-            vec![(GapAlignOpType::Sub, 10)]
+            vec![(GapAlignOpType::Sub, 15)]
+        );
+        assert_eq!(
+            second.map_info.as_ref().unwrap().left_edge & MAPPER_SPLICE_SIGNAL,
+            0
         );
     }
 
     #[test]
-    fn find_splice_junctions_for_overlaps_trims_lower_scoring_first_hsp() {
+    fn find_splice_junctions_for_overlaps_clears_splice_bits_without_trimming_first_hsp() {
         let mut first = hsp(10, 0, 0, 10, 20);
         first.query_end = 20;
         first.subject_end = 30;
         first.edit_script = Some(crate::gapinfo::GapEditScript {
             ops: vec![(GapAlignOpType::Sub, 20)],
+        });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: MAPPER_SPLICE_SIGNAL | 1,
         });
 
         let mut second = hsp(30, 0, 15, 40, 15);
@@ -6045,12 +6282,16 @@ mod tests {
             s_find_splice_junctions_for_overlaps(&mut first, &mut second, None, 30, true),
             0
         );
-        assert_eq!(first.query_end, 15);
-        assert_eq!(first.subject_end, 25);
+        assert_eq!(first.query_end, 20);
+        assert_eq!(first.subject_end, 30);
         assert_eq!(second.query_offset, 15);
         assert_eq!(
             first.edit_script.as_ref().unwrap().ops,
-            vec![(GapAlignOpType::Sub, 15)]
+            vec![(GapAlignOpType::Sub, 20)]
+        );
+        assert_eq!(
+            first.map_info.as_ref().unwrap().right_edge & MAPPER_SPLICE_SIGNAL,
+            0
         );
     }
 
@@ -6071,6 +6312,293 @@ mod tests {
     }
 
     #[test]
+    fn find_splice_junctions_for_overlaps_trims_first_when_it_has_more_overlap_edits() {
+        let query = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 3, 1, 2];
+        let mut first = hsp(100, 0, 0, 0, 10);
+        first.query_end = 10;
+        first.subject_end = 10;
+        first.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![
+                    JumperEdit {
+                        query_pos: 4,
+                        query_base: 0,
+                        subject_base: 1,
+                    },
+                    JumperEdit {
+                        query_pos: 8,
+                        query_base: 0,
+                        subject_base: 2,
+                    },
+                    JumperEdit {
+                        query_pos: 9,
+                        query_base: 3,
+                        subject_base: 1,
+                    },
+                ],
+            }),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: MAPPER_SPLICE_SIGNAL | 0x03,
+        });
+
+        let mut second = hsp(100, 0, 8, 20, 10);
+        second.query_end = 18;
+        second.subject_end = 30;
+        second.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock::default()),
+            subject_overhangs: None,
+            left_edge: MAPPER_SPLICE_SIGNAL | 0x02,
+            right_edge: 0,
+        });
+
+        assert_eq!(
+            s_find_splice_junctions_for_overlaps(&mut first, &mut second, Some(&query), 12, true),
+            0
+        );
+        assert_eq!(first.query_end, 8);
+        assert_eq!(first.subject_end, 8);
+        assert_eq!(second.query_offset, 8);
+        assert_eq!(
+            first.edit_script.as_ref().unwrap().ops,
+            vec![(GapAlignOpType::Sub, 8)]
+        );
+        assert_eq!(
+            first
+                .map_info
+                .as_ref()
+                .unwrap()
+                .edits
+                .as_ref()
+                .unwrap()
+                .edits,
+            vec![JumperEdit {
+                query_pos: 4,
+                query_base: 0,
+                subject_base: 1,
+            }]
+        );
+        assert_eq!(
+            first.map_info.as_ref().unwrap().right_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+    }
+
+    #[test]
+    fn find_splice_junctions_for_overlaps_boundary_edit_does_not_block_signal_split() {
+        let query = vec![0, 1, 2, 3, 0, 1, 2, 3, 2, 3, 0, 3, 1, 2];
+        let mut first = hsp(100, 0, 0, 0, 12);
+        first.query_end = 12;
+        first.subject_end = 12;
+        first.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 12)],
+        });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![
+                    JumperEdit {
+                        query_pos: 10,
+                        query_base: 0,
+                        subject_base: 2,
+                    },
+                    JumperEdit {
+                        query_pos: 11,
+                        query_base: 3,
+                        subject_base: 1,
+                    },
+                ],
+            }),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: 0,
+        });
+
+        let mut second = hsp(100, 0, 8, 20, 10);
+        second.query_end = 18;
+        second.subject_end = 30;
+        second.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![JumperEdit {
+                    query_pos: 10,
+                    query_base: 0,
+                    subject_base: 1,
+                }],
+            }),
+            subject_overhangs: None,
+            left_edge: 0x02,
+            right_edge: 0,
+        });
+
+        assert_eq!(
+            s_find_splice_junctions_for_overlaps(&mut first, &mut second, Some(&query), 14, true),
+            0
+        );
+        assert_eq!(first.query_end, 8);
+        assert_eq!(second.query_offset, 8);
+        assert_ne!(
+            first.map_info.as_ref().unwrap().right_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+        assert_ne!(
+            second.map_info.as_ref().unwrap().left_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+    }
+
+    #[test]
+    fn find_splice_junctions_for_overlaps_trims_second_when_it_has_more_overlap_edits() {
+        let query = vec![0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 0, 3, 1, 2];
+        let mut first = hsp(100, 0, 0, 0, 10);
+        first.query_end = 10;
+        first.subject_end = 10;
+        first.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock::default()),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: MAPPER_SPLICE_SIGNAL | 0x03,
+        });
+
+        let mut second = hsp(100, 0, 8, 20, 10);
+        second.query_end = 18;
+        second.subject_end = 30;
+        second.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![
+                    JumperEdit {
+                        query_pos: 8,
+                        query_base: 1,
+                        subject_base: 2,
+                    },
+                    JumperEdit {
+                        query_pos: 9,
+                        query_base: 2,
+                        subject_base: 3,
+                    },
+                    JumperEdit {
+                        query_pos: 12,
+                        query_base: 1,
+                        subject_base: 0,
+                    },
+                ],
+            }),
+            subject_overhangs: None,
+            left_edge: MAPPER_SPLICE_SIGNAL | 0x02,
+            right_edge: 0,
+        });
+
+        assert_eq!(
+            s_find_splice_junctions_for_overlaps(&mut first, &mut second, Some(&query), 14, true),
+            0
+        );
+        assert_eq!(first.query_end, 10);
+        assert_eq!(second.query_offset, 10);
+        assert_eq!(second.subject_offset, 22);
+        assert_eq!(
+            second.edit_script.as_ref().unwrap().ops,
+            vec![(GapAlignOpType::Sub, 8)]
+        );
+        assert_eq!(
+            second
+                .map_info
+                .as_ref()
+                .unwrap()
+                .edits
+                .as_ref()
+                .unwrap()
+                .edits,
+            vec![JumperEdit {
+                query_pos: 12,
+                query_base: 1,
+                subject_base: 0,
+            }]
+        );
+        assert_eq!(
+            second.map_info.as_ref().unwrap().left_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+    }
+
+    #[test]
+    fn find_splice_junctions_for_overlaps_equal_overlap_edits_clear_without_trimming() {
+        let query = vec![0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 0, 3];
+        let mut first = hsp(100, 0, 0, 0, 10);
+        first.query_end = 10;
+        first.subject_end = 10;
+        first.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![JumperEdit {
+                    query_pos: 9,
+                    query_base: 2,
+                    subject_base: 3,
+                }],
+            }),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: MAPPER_SPLICE_SIGNAL | 0x03,
+        });
+
+        let mut second = hsp(100, 0, 8, 20, 10);
+        second.query_end = 18;
+        second.subject_end = 30;
+        second.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![JumperEdit {
+                    query_pos: 8,
+                    query_base: 1,
+                    subject_base: 2,
+                }],
+            }),
+            subject_overhangs: None,
+            left_edge: MAPPER_SPLICE_SIGNAL | 0x02,
+            right_edge: 0,
+        });
+
+        assert_eq!(
+            s_find_splice_junctions_for_overlaps(&mut first, &mut second, Some(&query), 12, true),
+            0
+        );
+        assert_eq!(first.query_end, 10);
+        assert_eq!(second.query_offset, 8);
+        assert_eq!(
+            first.edit_script.as_ref().unwrap().ops,
+            vec![(GapAlignOpType::Sub, 10)]
+        );
+        assert_eq!(
+            second.edit_script.as_ref().unwrap().ops,
+            vec![(GapAlignOpType::Sub, 10)]
+        );
+        assert_eq!(
+            first.map_info.as_ref().unwrap().right_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+        assert_eq!(
+            second.map_info.as_ref().unwrap().left_edge & MAPPER_SPLICE_SIGNAL,
+            0
+        );
+    }
+
+    #[test]
     fn find_splice_junctions_for_overlaps_uses_signal_split_when_query_flanks_available() {
         let mut query = vec![1; 40];
         query[6..10].copy_from_slice(&[0, 2, 2, 3]);
@@ -6081,6 +6609,12 @@ mod tests {
         first.edit_script = Some(crate::gapinfo::GapEditScript {
             ops: vec![(GapAlignOpType::Sub, 10)],
         });
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: 0x0b,
+        });
 
         let mut second = hsp(100, 0, 8, 8, 20);
         second.query_offset = 8;
@@ -6089,6 +6623,12 @@ mod tests {
         second.subject_end = 20;
         second.edit_script = Some(crate::gapinfo::GapEditScript {
             ops: vec![(GapAlignOpType::Sub, 10)],
+        });
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: None,
+            subject_overhangs: None,
+            left_edge: 0x02,
+            right_edge: 0,
         });
 
         assert_eq!(

@@ -21,7 +21,7 @@ pub struct AliasFile {
     pub length: Option<u64>,
     pub stats_nseq: Option<u64>,
     pub stats_total_length: Option<u64>,
-    /// One-based inclusive OID range used by BLAST alias files.
+    /// Zero-based half-open OID range used by BLAST alias files.
     pub first_oid: Option<u32>,
     pub last_oid: Option<u32>,
     pub oidlist: Option<PathBuf>,
@@ -31,16 +31,15 @@ pub struct AliasFile {
     /// actual filtering is not yet applied at the DB-reader level.
     pub memb_bit: Option<u32>,
     /// NCBI `GILIST` — path to a text or binary GI list file.
-    /// Parsed but not yet applied (no GI-based OID filtering).
     pub gilist: Option<PathBuf>,
     pub raw_gilist: Option<String>,
     /// NCBI `TILIST` — path to a Trace ID list file. Parsed only.
     pub tilist: Option<PathBuf>,
     pub raw_tilist: Option<String>,
-    /// NCBI `SEQIDLIST` — path to a seqid list file. Parsed only.
+    /// NCBI `SEQIDLIST` — path to a text seqid list file.
     pub silist: Option<PathBuf>,
     pub raw_silist: Option<String>,
-    /// NCBI `TAXIDLIST` — path to a taxonomy ID list file. Parsed only.
+    /// NCBI `TAXIDLIST` — path to a taxonomy ID list file.
     pub taxidlist: Option<PathBuf>,
     pub raw_taxidlist: Option<String>,
 }
@@ -58,27 +57,9 @@ impl AliasFile {
                 n
             ));
         }
-        if let Some(p) = &self.raw_gilist {
-            warnings.push(format!(
-                "Warning: alias GILIST {} is parsed but GI-based filtering is not yet applied",
-                p
-            ));
-        }
         if let Some(p) = &self.raw_tilist {
             warnings.push(format!(
                 "Warning: alias TILIST {} is parsed but trace-id filtering is not yet applied",
-                p
-            ));
-        }
-        if let Some(p) = &self.raw_silist {
-            warnings.push(format!(
-                "Warning: alias SEQIDLIST {} is parsed but seqid-list filtering is not yet applied",
-                p
-            ));
-        }
-        if let Some(p) = &self.raw_taxidlist {
-            warnings.push(format!(
-                "Warning: alias TAXIDLIST {} is parsed but taxid-based filtering is not yet applied",
                 p
             ));
         }
@@ -248,14 +229,13 @@ mod tests {
         assert_eq!(alias.raw_taxidlist.as_deref(), Some("taxids.txt"));
         assert_eq!(alias.taxidlist, Some(dir.join("taxids.txt")));
 
-        // `unsupported_filter_warnings` should surface all populated filters.
+        // `unsupported_filter_warnings` should surface populated filters that
+        // are still parsed-only. GILIST, SEQIDLIST, and TAXIDLIST are applied
+        // by the DB reader.
         let warnings = alias.unsupported_filter_warnings();
-        assert_eq!(warnings.len(), 5);
+        assert_eq!(warnings.len(), 2);
         assert!(warnings[0].contains("MEMB_BIT=256"));
-        assert!(warnings[1].contains("GILIST taxa.gil"));
-        assert!(warnings[2].contains("TILIST traces.til"));
-        assert!(warnings[3].contains("SEQIDLIST ids.sil"));
-        assert!(warnings[4].contains("TAXIDLIST taxids.txt"));
+        assert!(warnings[1].contains("TILIST traces.til"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

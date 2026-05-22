@@ -6,28 +6,38 @@ use crate::encoding::{
 };
 
 /// Encode an IUPAC nucleotide string to BLASTNA.
+/// blast-rs: Rust wrapper over local BLASTNA encoding table; not a direct
+/// NCBI C port.
 pub fn encode_nucleotide(iupac: &[u8]) -> Vec<u8> {
     encode_blastna_sequence(iupac)
 }
 
 /// Convert IUPAC character to BLASTNA encoding.
+/// blast-rs: Rust wrapper over local BLASTNA encoding table; not a direct
+/// NCBI C port.
 #[inline]
 pub fn iupac_to_blastna(c: u8) -> u8 {
     iupacna_to_blastna_base(c)
 }
 
 /// Complement a BLASTNA-encoded nucleotide.
+/// blast-rs: Rust wrapper over local complement table; not a direct NCBI C
+/// port.
 #[inline]
 pub fn complement_blastna(b: u8) -> u8 {
     complement_blastna_base(b)
 }
 
 /// Reverse complement a BLASTNA sequence.
+/// blast-rs: Rust wrapper over local reverse-complement helper; not a direct
+/// NCBI C port.
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     reverse_complement_blastna_sequence(seq)
 }
 
 /// Encode a query for blastn: returns (plus_strand, minus_strand) in BLASTNA.
+/// blast-rs: Query-sequence adapter over Rust byte slices; not a direct NCBI
+/// C port.
 pub fn encode_query_blastn(iupac: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let plus = encode_nucleotide(iupac);
     let minus = reverse_complement(&plus);
@@ -37,6 +47,8 @@ pub fn encode_query_blastn(iupac: &[u8]) -> (Vec<u8>, Vec<u8>) {
 /// Build the concatenated query block for blastn (with sentinel bytes).
 /// Returns (encoded_block, context_offsets) where context_offsets has
 /// (offset_relative_to_sequence, length) for each context.
+/// blast-rs: Query-block constructor over Rust byte slices; not a direct NCBI
+/// C port.
 pub fn build_query_block(queries: &[&[u8]]) -> (Vec<u8>, Vec<(i32, i32)>) {
     let mut encoded = Vec::new();
     let mut offsets = Vec::new();
@@ -63,6 +75,8 @@ pub fn build_query_block(queries: &[&[u8]]) -> (Vec<u8>, Vec<(i32, i32)>) {
 }
 
 /// BLASTNA to IUPAC character for display.
+/// blast-rs: Rust wrapper over local BLASTNA display table; not a direct NCBI
+/// C port.
 pub fn blastna_to_iupac(b: u8) -> char {
     blastna_to_iupacna_char(b)
 }

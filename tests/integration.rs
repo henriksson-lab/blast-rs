@@ -3774,6 +3774,36 @@ fn blastn_subject_ncbi_parity_culling_limit() {
 }
 
 #[test]
+fn blastn_subject_ncbi_parity_culling_pipe_cross_subject_dominated_hits() {
+    assert_blastn_subject_task_outfmt_matches_ncbi(
+        ">q1\nACGTCGATGCTAGCTAGGCTAACCGTATCGGATCCGTAAGCTTAGCTAGGATCCGATACGGTTAGCCTA\n",
+        ">s_full\nACGTCGATGCTAGCTAGGCTAACCGTATCGGATCCGTAAGCTTAGCTAGGATCCGATACGGTTAGCCTA\n>s_left\nACGTCGATGCTAGCTAGGCTAACCGTATCGGATCCGTA\n>s_right\nGTAAGCTTAGCTAGGATCCGATACGGTTAGCCTA\n",
+        "blastn",
+        "6 sseqid qstart qend sstart send length score bitscore btop",
+        &[
+            "--dust",
+            "no",
+            "--word_size",
+            "7",
+            "--max_target_seqs",
+            "10",
+            "--culling_limit",
+            "1",
+        ],
+        &[
+            "-dust",
+            "no",
+            "-word_size",
+            "7",
+            "-max_target_seqs",
+            "10",
+            "-culling_limit",
+            "1",
+        ],
+    );
+}
+
+#[test]
 fn blastn_subject_ncbi_parity_filter_boundary_values() {
     let query = ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n";
     let subject = ">s_exact\nACGTACGTACGTACGTACGTACGTACGTACGT\n>s_imperfect\nACGTACGTACGTACGTTCGTACGTACGTACGT\n>s_partial\nACGTACGTACGTACGTACGT\n";
@@ -29035,6 +29065,46 @@ fn test_blastn_search_api_multithreaded_matches_single_threaded() {
         signature(blastn(&db, query, &base)),
         signature(blastn(&db, query, &parallel)),
         "parallel blastn API results must match single-threaded results"
+    );
+}
+
+#[test]
+fn test_blastn_search_api_culling_removes_duplicate_subject_hit() {
+    let wide = b"ACGTCGATGCTAGCTAGGCTAACCGTATCGGATCCGTAAGCTTAGCTAGGATCCGATACGGTTAGCCTA";
+    let (_tmp, db) = build_nucleotide_db(vec![
+        nt_entry(
+            "wide",
+            "wide query-prefix match",
+            std::str::from_utf8(wide).unwrap(),
+        ),
+        nt_entry(
+            "wide_duplicate",
+            "duplicate query-prefix match",
+            std::str::from_utf8(wide).unwrap(),
+        ),
+    ]);
+    let base_params = SearchParams::blastn()
+        .word_size(7)
+        .evalue(1.0e20)
+        .max_target_seqs(10)
+        .num_threads(1)
+        .filter_low_complexity(false)
+        .sum_stats(false);
+
+    let uncull = blastn(&db, wide, &base_params);
+    let results = blastn(&db, wide, &base_params.culling_limit(Some(1)));
+    let accessions: Vec<&str> = results
+        .iter()
+        .map(|result| result.subject_accession.as_str())
+        .collect();
+
+    assert_eq!(uncull.len(), 2);
+    assert_eq!(accessions, vec!["wide"]);
+    assert!(
+        results
+            .iter()
+            .all(|result| result.hsps.iter().all(|hsp| hsp.score > 0)),
+        "culled API results should retain only real HSPs"
     );
 }
 

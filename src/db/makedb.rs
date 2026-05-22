@@ -6,7 +6,9 @@ use std::path::Path;
 
 use crate::db::defline::encode_defline_asn1;
 use crate::db::index_writer::write_index_file;
-use crate::encoding::{encode_ncbi2na_ambiguity_data, encode_ncbi2na_sequence};
+use crate::encoding::{
+    encode_ncbi2na_ambiguity_data, encode_ncbi2na_sequence, encode_ncbistdaa_sequence,
+};
 
 fn db_component_path(base_path: &Path, ext: &str) -> std::path::PathBuf {
     let mut path = base_path.as_os_str().to_os_string();
@@ -99,6 +101,89 @@ pub fn make_nucleotide_db(
         &hdr_offsets,
         &seq_offsets,
         Some(&amb_offsets),
+    )?;
+
+    Ok((num_seqs, total_length))
+}
+
+/// Create a BLAST v4 protein database from a FASTA file.
+/// blast-rs: Standalone Rust makeblastdb-style protein writer; not a direct
+/// NCBI C port.
+pub fn make_protein_db(
+    fasta_path: &Path,
+    output_base: &Path,
+    title: &str,
+) -> io::Result<(u32, u64)> {
+    // returns (num_seqs, total_length)
+    let fasta_data = std::fs::read_to_string(fasta_path)?;
+    let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+
+    let mut current_header = String::new();
+    let mut current_seq = Vec::new();
+
+    for line in fasta_data.lines() {
+        if let Some(hdr) = line.strip_prefix('>') {
+            if !current_header.is_empty() || !current_seq.is_empty() {
+                sequences.push((current_header, current_seq));
+            }
+            current_header = hdr.to_string();
+            current_seq = Vec::new();
+        } else {
+            for &b in line.trim().as_bytes() {
+                if b.is_ascii_alphabetic() || b == b'*' {
+                    current_seq.push(b);
+                }
+            }
+        }
+    }
+    if !current_header.is_empty() || !current_seq.is_empty() {
+        sequences.push((current_header, current_seq));
+    }
+
+    let num_seqs = sequences.len() as u32;
+    let mut total_length = 0u64;
+
+    // Write .psq (protein sequence data in NCBIstdaa)
+    let mut psq = BufWriter::new(File::create(db_component_path(output_base, "psq"))?);
+    psq.write_all(&[0u8])?; // sentinel byte
+
+    let mut seq_offsets = vec![1u32]; // first seq starts at byte 1
+    for (_, seq) in &sequences {
+        let encoded = encode_ncbistdaa_sequence(seq);
+        psq.write_all(&encoded)?;
+        psq.write_all(&[0u8])?; // sentinel between sequences
+        seq_offsets.push(seq_offsets.last().copied().unwrap_or(1) + encoded.len() as u32 + 1);
+        total_length += seq.len() as u64;
+    }
+    psq.flush()?;
+
+    // Write .phr (header data) — ASN.1 BER encoded Blast-def-line-set
+    let mut phr = BufWriter::new(File::create(db_component_path(output_base, "phr"))?);
+    let mut hdr_offsets = vec![0u32];
+    for (oid, (header, _)) in sequences.iter().enumerate() {
+        let start = hdr_offsets.last().copied().unwrap_or(0);
+        let asn1 = encode_defline_asn1(header, oid as i32);
+        phr.write_all(&asn1)?;
+        hdr_offsets.push(start + asn1.len() as u32);
+    }
+    phr.flush()?;
+
+    let max_len = sequences
+        .iter()
+        .map(|(_, s)| s.len() as u32)
+        .max()
+        .unwrap_or(0);
+    write_index_file(
+        &db_component_path(output_base, "pin"),
+        4,
+        crate::db::DbType::Protein,
+        title,
+        num_seqs,
+        total_length,
+        max_len,
+        &hdr_offsets,
+        &seq_offsets,
+        None,
     )?;
 
     Ok((num_seqs, total_length))
@@ -245,8 +330,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Protein DB creation is not yet implemented, but we test that the nucleotide
-    /// DB can handle protein-like data (all same letters) without crashing.
+    /// Nucleotide DB creation handles small edge-case sequences without crashing.
     #[test]
     fn test_create_nucleotide_db_edge_cases() {
         let dir = std::env::temp_dir().join("blast_makedb_edge");
@@ -271,6 +355,43 @@ mod tests {
         assert_eq!(total2, 8);
         let db2 = super::super::index::BlastDb::open(&db_base2).unwrap();
         assert_eq!(db2.get_seq_len(0), 8);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_make_protein_db_roundtrips_with_reader() {
+        let dir = std::env::temp_dir().join("blast_makedb_protein");
+        std::fs::create_dir_all(&dir).ok();
+
+        let fasta = dir.join("protein.fa");
+        std::fs::write(&fasta, ">prot1 desc\nMTEYK\n>prot2\nACDEFGHIK\n").unwrap();
+
+        let db_base = dir.join("protdb");
+        let (nseq, total) = make_protein_db(&fasta, &db_base, "Protein Test").unwrap();
+        assert_eq!(nseq, 2);
+        assert_eq!(total, 14);
+
+        assert!(db_component_path(&db_base, "pin").exists());
+        assert!(db_component_path(&db_base, "psq").exists());
+        assert!(db_component_path(&db_base, "phr").exists());
+
+        let db = super::super::index::BlastDb::open(&db_base).unwrap();
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.db_type, super::super::index::DbType::Protein);
+        assert_eq!(db.total_length, 14);
+        assert_eq!(db.get_seq_len(0), 5);
+        assert_eq!(db.get_seq_len(1), 9);
+        assert_eq!(db.get_accession(0).as_deref(), Some("prot1"));
+        assert_eq!(db.get_defline(0).as_deref(), Some("prot1 desc"));
+        assert_eq!(
+            db.get_sequence(0),
+            crate::encoding::encode_ncbistdaa_sequence(b"MTEYK")
+        );
+        assert_eq!(
+            db.get_sequence(1),
+            crate::encoding::encode_ncbistdaa_sequence(b"ACDEFGHIK")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

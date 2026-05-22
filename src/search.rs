@@ -509,8 +509,8 @@ impl<'a> NaLookup<'a> {
         let lut_word = choose_lut_word(word_size, approx_entries);
         let lut_size = 1usize << (2 * lut_word);
         let lut_mask = (lut_size - 1) as u32;
-        let scan_start = 0usize;
         let scan_step = word_size - lut_word + 1;
+        let scan_start = choose_na_scan_start(lut_word, scan_step);
 
         let mut lut: Vec<i32> = vec![-1; lut_size];
         let mut next: Vec<i32> = vec![-1; query.len()];
@@ -614,6 +614,17 @@ fn choose_lut_word_for_table(
         choose_contiguous_mb_lut_word
     } else {
         choose_lut_word
+    }
+}
+
+// NCBI's small-NA word-7/lut-6 scanner starts at subject offset 1 and advances
+// by two bases (`s_BlastSmallNaScanSubject_6_2`). Exact-hit extension expands
+// that interior lookup word back to the full configured word.
+fn choose_na_scan_start(lut_word: usize, scan_step: usize) -> usize {
+    if lut_word == 6 && scan_step == 2 {
+        1
+    } else {
+        0
     }
 }
 
@@ -1919,11 +1930,16 @@ fn s_blast_na_scan_subject_any_packed(
     last_hit_scratch: &mut [PackedDiagScratch],
     hsps: &mut Vec<SearchHsp>,
 ) {
+    let paired_end = prepared
+        .lookups
+        .first()
+        .map(|lookup| packed_lookup_scan_end(subject_len, lookup.lut_word))
+        .unwrap_or(end);
     if s_blast_na_hash_scan_subject_any(
         prepared,
         subject_packed,
         subject_len,
-        end,
+        paired_end,
         reward,
         penalty,
         x_dropoff,
@@ -1940,13 +1956,14 @@ fn s_blast_na_scan_subject_any_packed(
 
     for (lookup, scratch) in prepared.lookups.iter().zip(last_hit_scratch.iter_mut()) {
         scratch.resize_and_clear(lookup.diag_array_len);
+        let lookup_end = packed_lookup_scan_end(subject_len, lookup.lut_word);
         blast_na_word_finder_scan_lookup_packed(
             prepared.word_size,
             lookup,
             scratch,
             subject_packed,
             subject_len,
-            end,
+            lookup_end,
             reward,
             penalty,
             x_dropoff,
@@ -1958,6 +1975,10 @@ fn s_blast_na_scan_subject_any_packed(
             hsps,
         );
     }
+}
+
+fn packed_lookup_scan_end(subject_len: usize, lut_word: usize) -> usize {
+    subject_len.saturating_sub(lut_word).saturating_add(1)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7257,6 +7278,7 @@ mod tests {
         let query = vec![0u8; 400_000];
         let small_6_2 = NaLookup::new(0, &query[..8], 7, 8, choose_small_na_lut_word)
             .expect("small lut6 step2");
+        assert_eq!(small_6_2.scan_start, 1);
         assert_eq!(
             s_small_na_choose_scan_subject(&small_6_2),
             SmallNaScanSubject::SBlastSmallNaScanSubject62
@@ -7956,6 +7978,41 @@ mod tests {
         assert_eq!(
             u.score, p.score,
             "Packed and unpacked should agree on score"
+        );
+    }
+
+    #[test]
+    fn packed_word7_lut6_scanner_finds_terminal_full_word() {
+        let query = encode_blastna_sequence(b"ACGTACG");
+        let rc = reverse_complement_blastna_sequence(&query);
+        let subject_packed = pack_ncbi2na_bases(&query);
+        let kbp = test_kbp();
+        let prepared = PreparedBlastnQuery::new(&query, &rc, 7);
+
+        assert_eq!(prepared.lookups[0].lut_word, 6);
+        assert_eq!(prepared.lookups[0].scan_start, 1);
+        assert_eq!(prepared.lookups[0].scan_step, 2);
+
+        let results = blastn_ungapped_search_packed_prepared(
+            &prepared,
+            &subject_packed,
+            query.len(),
+            1,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
+        );
+
+        assert!(
+            results.iter().any(|hsp| hsp.context == 0
+                && hsp.query_start == 0
+                && hsp.query_end == 7
+                && hsp.subject_start == 0
+                && hsp.subject_end == 7
+                && hsp.score == 7),
+            "word-7/lut-6 scanner missed terminal exact hit: {results:?}"
         );
     }
 

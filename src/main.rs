@@ -6861,22 +6861,38 @@ fn run_blastn_rust(
         let ungapped_plus = plus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
         let ungapped_minus = minus_kbp_results[0].clone().unwrap_or(default_kbp.clone());
 
-        let (gkbp_plus, _) = blast_rs::stat::scaled_nucl_gapped_kbp_lookup(
+        let mut gkbp_plus = blast_rs::stat::KarlinBlk::default();
+        let mut round_down_plus = false;
+        let mut gapped_error_plus = None;
+        if blast_rs::stat::blast_karlin_blk_nucl_gapped_calc(
+            Some(&mut gkbp_plus),
             args.gapopen(),
             args.gapextend(),
             reward,
             penalty,
-            &ungapped_plus,
-        )
-        .unwrap_or((ungapped_plus.clone(), false));
-        let (gkbp_minus, _) = blast_rs::stat::scaled_nucl_gapped_kbp_lookup(
+            Some(&ungapped_plus),
+            Some(&mut round_down_plus),
+            Some(&mut gapped_error_plus),
+        ) != 0
+        {
+            gkbp_plus = ungapped_plus.clone();
+        }
+        let mut gkbp_minus = blast_rs::stat::KarlinBlk::default();
+        let mut round_down_minus = false;
+        let mut gapped_error_minus = None;
+        if blast_rs::stat::blast_karlin_blk_nucl_gapped_calc(
+            Some(&mut gkbp_minus),
             args.gapopen(),
             args.gapextend(),
             reward,
             penalty,
-            &ungapped_minus,
-        )
-        .unwrap_or((ungapped_minus.clone(), false));
+            Some(&ungapped_minus),
+            Some(&mut round_down_minus),
+            Some(&mut gapped_error_minus),
+        ) != 0
+        {
+            gkbp_minus = ungapped_minus.clone();
+        }
 
         let stats_kbp_plus = if args.ungapped {
             ungapped_plus.clone()
@@ -6904,7 +6920,8 @@ fn run_blastn_rust(
                     kbp,
                 )
             } else {
-                let (alpha, beta) = blast_rs::stat::scaled_nucl_alpha_beta(
+                let (mut alpha, mut beta) = (0.0, 0.0);
+                let _ = blast_rs::stat::blast_get_nucl_alpha_beta(
                     reward,
                     penalty,
                     args.gapopen(),
@@ -6912,6 +6929,8 @@ fn run_blastn_rust(
                     ukbp.lambda,
                     ukbp.h,
                     true,
+                    &mut alpha,
+                    &mut beta,
                 );
                 blast_rs::stat::compute_length_adjustment_exact(
                     kbp.k,
@@ -13882,14 +13901,22 @@ fn blastn_subject_kbps(
     )[0]
     .clone()
     .unwrap_or(default_kbp);
-    let (gapped_kbp, _) = blast_rs::stat::scaled_nucl_gapped_kbp_lookup(
+    let mut gapped_kbp = blast_rs::stat::KarlinBlk::default();
+    let mut round_down = false;
+    let mut gapped_error = None;
+    if blast_rs::stat::blast_karlin_blk_nucl_gapped_calc(
+        Some(&mut gapped_kbp),
         args.gapopen(),
         args.gapextend(),
         reward,
         penalty,
-        &ungapped,
-    )
-    .unwrap_or((ungapped.clone(), false));
+        Some(&ungapped),
+        Some(&mut round_down),
+        Some(&mut gapped_error),
+    ) != 0
+    {
+        gapped_kbp = ungapped.clone();
+    }
     let kbp = if args.ungapped {
         ungapped.clone()
     } else {
@@ -13918,7 +13945,8 @@ fn blastn_subject_stats(
     let len_adj = if args.ungapped {
         blast_rs::stat::compute_length_adjustment(qlen, database_length, num_subjects, &kbp)
     } else {
-        let (alpha, beta) = blast_rs::stat::scaled_nucl_alpha_beta(
+        let (mut alpha, mut beta) = (0.0, 0.0);
+        let _ = blast_rs::stat::blast_get_nucl_alpha_beta(
             reward,
             penalty,
             args.gapopen(),
@@ -13926,6 +13954,8 @@ fn blastn_subject_stats(
             ungapped.lambda,
             ungapped.h,
             true,
+            &mut alpha,
+            &mut beta,
         );
         blast_rs::stat::compute_length_adjustment_exact(
             kbp.k,
@@ -14929,59 +14959,13 @@ fn compare_hsps_for_max_hsps(a: &TabularHit, b: &TabularHit) -> std::cmp::Orderi
     let b_query_offset = b.query_start.min(b.query_end) - 1;
     let a_query_end = a.query_start.max(a.query_end);
     let b_query_end = b.query_start.max(b.query_end);
-    let a_gap_balance = hsp_difference_balance(a);
-    let b_gap_balance = hsp_difference_balance(b);
-    let query_start_order = || {
-        if (a_gap_balance.is_some() && b_gap_balance.is_some()) || (a.sframe < 0 && b.sframe < 0) {
-            b_query_offset.cmp(&a_query_offset)
-        } else {
-            a_query_offset.cmp(&b_query_offset)
-        }
-    };
-    let query_end_order = || {
-        if a.sframe < 0 && b.sframe < 0 {
-            a_query_end.cmp(&b_query_end)
-        } else {
-            b_query_end.cmp(&a_query_end)
-        }
-    };
 
     b.raw_score
         .cmp(&a.raw_score)
         .then_with(|| a_subject_offset.cmp(&b_subject_offset))
         .then_with(|| b_subject_end.cmp(&a_subject_end))
-        .then_with(|| b.sframe.cmp(&a.sframe))
-        .then_with(|| {
-            a_gap_balance
-                .unwrap_or(i32::MAX)
-                .cmp(&b_gap_balance.unwrap_or(i32::MAX))
-        })
-        .then_with(query_start_order)
-        .then_with(query_end_order)
-}
-
-fn hsp_difference_balance(hit: &TabularHit) -> Option<i32> {
-    if hit.gap_opens <= 0 && hit.mismatches <= 0 {
-        return None;
-    }
-    let qseq = hit.qseq.as_deref()?;
-    let sseq = hit.sseq.as_deref()?;
-    let pairs = qseq.bytes().zip(sseq.bytes()).collect::<Vec<_>>();
-    let diff_start = pairs
-        .iter()
-        .position(|&(q, s)| q == b'-' || s == b'-' || q != s)?;
-    let diff_end = pairs
-        .iter()
-        .rposition(|&(q, s)| q == b'-' || s == b'-' || q != s)?;
-    let before = pairs[..diff_start]
-        .iter()
-        .filter(|&&(q, s)| q != b'-' && s != b'-')
-        .count() as i32;
-    let after = pairs[diff_end + 1..]
-        .iter()
-        .filter(|&&(q, s)| q != b'-' && s != b'-')
-        .count() as i32;
-    Some((before - after).abs())
+        .then_with(|| a_query_offset.cmp(&b_query_offset))
+        .then_with(|| b_query_end.cmp(&a_query_end))
 }
 
 fn apply_max_target_seqs_filter(hits: &mut Vec<TabularHit>, max_subjects: usize) {
@@ -15095,6 +15079,24 @@ fn apply_culling_limit(hits: &mut Vec<TabularHit>, culling_limit: usize, program
             .take(culling_limit)
             .count();
         if enveloping < culling_limit {
+            let mut idx = 0usize;
+            while idx < kept_nodes.len() {
+                let same_query = kept[idx].query_id == hit.query_id;
+                let same_context = tabular_culling_context_id(&kept[idx], program)
+                    == tabular_culling_context_id(&hit, program);
+                if same_query
+                    && same_context
+                    && blast_rs::hspfilter_culling::s_dominate_test(&candidate, &kept_nodes[idx])
+                {
+                    kept_nodes[idx].merit -= 1;
+                    if kept_nodes[idx].merit <= 0 {
+                        kept_nodes.remove(idx);
+                        kept.remove(idx);
+                        continue;
+                    }
+                }
+                idx += 1;
+            }
             kept_nodes.push(candidate);
             kept.push(hit);
         }
@@ -17830,6 +17832,19 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].subject_id, "z_first");
+    }
+
+    #[test]
+    fn test_culling_accepted_hsp_removes_dominated_earlier_hsp() {
+        let mut hits = vec![
+            tabular_hit_for_best_hit_filter("lower_evalue", 1, 40, 20, 1.0e-50),
+            tabular_hit_for_best_hit_filter("higher_score", 1, 40, 80, 1.0e-20),
+        ];
+
+        apply_culling_limit(&mut hits, 1, CliProgram::Blastn);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].subject_id, "higher_score");
     }
 
     #[test]

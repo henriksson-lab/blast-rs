@@ -855,6 +855,7 @@ pub fn blast_hit_saving_parameters_new(
         return 1;
     }
 
+    let mut params_options = options.clone();
     let mut link_hsp_params = None;
     if options.do_sum_stats {
         blast_link_hsp_parameters_new(program_number, gapped_calculation, &mut link_hsp_params);
@@ -870,6 +871,7 @@ pub fn blast_hit_saving_parameters_new(
                             / crate::util::CODON_LENGTH as i32;
                     } else if max_protein_gap <= 0 {
                         link_hsp_params = None;
+                        params_options.do_sum_stats = false;
                     } else {
                         link.longest_intron = max_protein_gap;
                     }
@@ -881,7 +883,7 @@ pub fn blast_hit_saving_parameters_new(
     }
 
     let mut params = HitSavingParameters {
-        options: options.clone(),
+        options: params_options,
         cutoff_score_min: 0,
         low_score: if options.low_score_perc > 0.00001 {
             vec![0; query_info.num_queries.max(0) as usize]
@@ -1699,6 +1701,27 @@ mod tests {
             no_sum_hit_params.cutoffs[0].cutoff_score_max
         );
         assert!(hit_params.cutoffs[0].cutoff_score <= no_sum_hit_params.cutoffs[0].cutoff_score);
+
+        let mut too_short_gap_opts = hit_opts.clone();
+        too_short_gap_opts.do_sum_stats = true;
+        too_short_gap_opts.longest_intron = 2;
+        let mut too_short_gap_params = None;
+        assert_eq!(
+            blast_hit_saving_parameters_new(
+                program::BLASTX,
+                &too_short_gap_opts,
+                &score_block,
+                &query_info,
+                1000,
+                0,
+                &mut too_short_gap_params,
+            ),
+            0
+        );
+        let too_short_gap_params =
+            too_short_gap_params.expect("too-short intron hit saving parameters");
+        assert!(too_short_gap_params.link_hsp_params.is_none());
+        assert!(!too_short_gap_params.options.do_sum_stats);
 
         assert_eq!(
             blast_hit_saving_parameters_new_c(

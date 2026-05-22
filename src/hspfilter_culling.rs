@@ -779,8 +779,7 @@ fn s_export_to_hitlist(
             tmp_hit_list.hsp_lists.push(list);
         }
     }
-    for mut list in tmp_hit_list.hsp_lists.drain(..) {
-        let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(&mut list));
+    for list in tmp_hit_list.hsp_lists.drain(..) {
         let _ = hit_list.blast_hit_list_update(list);
     }
     0
@@ -940,6 +939,9 @@ pub fn s_blast_hsp_best_hit_final(
         }
         let mut hitlist = crate::hspstream::blast_hit_list_new(data.num_hsps[qid]);
         let _ = s_export_to_hitlist(qid, data, &mut hitlist);
+        for list in hitlist.hsp_lists.iter_mut() {
+            let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(list));
+        }
         let _ = crate::hspstream::blast_hit_list_sort_by_evalue(&mut hitlist);
         let target = results.hitlists[qid].get_or_insert_with(|| {
             crate::hspstream::blast_hit_list_new(data.params.prelim_hitlist_size)
@@ -2552,6 +2554,64 @@ mod tests {
         assert_eq!(data.best_list[0].len(), 2);
         assert_eq!(data.best_list[0][0].hsp.score, 80);
         assert_eq!(data.best_list[0][1].hsp.score, 100);
+    }
+
+    #[test]
+    fn export_to_hitlist_does_not_sort_hsps_before_final_stage() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 0,
+        };
+        let hit = crate::options::HitSavingOptions {
+            hitlist_size: 20,
+            hsp_num_max: 10,
+            program_number: crate::program::BLASTP,
+            ..crate::options::HitSavingOptions::default()
+        };
+        let opts = BlastHSPBestHitOptions {
+            overhang: 0.1,
+            score_edge: 0.1,
+        };
+        let params = blast_hsp_best_hit_params_new(&hit, &opts, 0, true);
+        let mut data = s_blast_hsp_best_hit_pipe_new(params, &qi);
+        let results = crate::hspstream::HspResults::new(1);
+        let _ = s_blast_hsp_best_hit_init(&mut data, &results);
+
+        data.best_list[0].push(LinkedHspBestHit {
+            hsp: hsp(60, 0, 0, 0),
+            sid: 5,
+            begin: 0,
+            end: 10,
+            len: 10,
+        });
+        data.best_list[0].push(LinkedHspBestHit {
+            hsp: hsp(100, 0, 20, 20),
+            sid: 5,
+            begin: 20,
+            end: 30,
+            len: 10,
+        });
+        data.num_hsps[0] = 2;
+
+        let mut hitlist = crate::hspstream::blast_hit_list_new(10);
+        assert_eq!(s_export_to_hitlist(0, &mut data, &mut hitlist), 0);
+
+        let list = &hitlist.hsp_lists[0];
+        assert_eq!(
+            list.hsps.iter().map(|hsp| hsp.score).collect::<Vec<_>>(),
+            vec![60, 100]
+        );
     }
 
     #[test]

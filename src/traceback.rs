@@ -118,11 +118,11 @@ pub fn traceback_align(
     // DP matrices
     let cols = n + 1;
     let mut h = vec![vec![0i32; cols]; m + 1];
-    let mut e = vec![vec![i32::MIN / 2; cols]; m + 1]; // gap in query
-    let mut f = vec![vec![i32::MIN / 2; cols]; m + 1]; // gap in subject
+    let mut e = vec![vec![i32::MIN / 2; cols]; m + 1]; // gap in subject
+    let mut f = vec![vec![i32::MIN / 2; cols]; m + 1]; // gap in query
 
     // Traceback direction matrix
-    // 0=diag, 1=left(ins), 2=up(del)
+    // 0=diag, 1=left(del), 2=up(ins)
     let mut trace = vec![vec![0u8; cols]; m + 1];
 
     for i in 1..=m {
@@ -144,9 +144,9 @@ pub fn traceback_align(
             } else if h[i][j] == diag {
                 trace[i][j] = 0; // diagonal
             } else if h[i][j] == f[i][j] {
-                trace[i][j] = 1; // left (gap in subject)
+                trace[i][j] = 1; // left (gap in query)
             } else {
-                trace[i][j] = 2; // up (gap in query)
+                trace[i][j] = 2; // up (gap in subject)
             }
         }
     }
@@ -187,20 +187,7 @@ pub fn traceback_align(
                 j -= 1;
             }
             1 => {
-                // Left (gap in subject = insertion)
-                if let Some(last) = ops.last_mut() {
-                    if last.0 == GapAlignOpType::Ins {
-                        last.1 += 1;
-                    } else {
-                        ops.push((GapAlignOpType::Ins, 1));
-                    }
-                } else {
-                    ops.push((GapAlignOpType::Ins, 1));
-                }
-                j -= 1;
-            }
-            2 => {
-                // Up (gap in query = deletion)
+                // Left consumes subject only: gap in query.
                 if let Some(last) = ops.last_mut() {
                     if last.0 == GapAlignOpType::Del {
                         last.1 += 1;
@@ -209,6 +196,19 @@ pub fn traceback_align(
                     }
                 } else {
                     ops.push((GapAlignOpType::Del, 1));
+                }
+                j -= 1;
+            }
+            2 => {
+                // Up consumes query only: gap in subject.
+                if let Some(last) = ops.last_mut() {
+                    if last.0 == GapAlignOpType::Ins {
+                        last.1 += 1;
+                    } else {
+                        ops.push((GapAlignOpType::Ins, 1));
+                    }
+                } else {
+                    ops.push((GapAlignOpType::Ins, 1));
                 }
                 i -= 1;
             }
@@ -3752,10 +3752,10 @@ mod tests {
         .to_vec(); // 28 bp
         let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
         assert!(score > 0, "should find alignment, score={}", score);
-        // The edit script should contain an Ins operation (extra subject bases => gap in query)
-        // In gapinfo convention: Ins = "insertion in query" = advancing subject without query
-        let has_ins = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Ins);
-        assert!(has_ins, "expected Ins (gap in query), ops={:?}", esp.ops);
+        // Extra subject bases are represented as Del in gapinfo/C script
+        // convention: deletion in query, i.e. a gap in query.
+        let has_del = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Del);
+        assert!(has_del, "expected Del (gap in query), ops={:?}", esp.ops);
     }
 
     /// Alignment where subject has a deletion relative to query (gap in subject).
@@ -3773,10 +3773,10 @@ mod tests {
         .to_vec(); // 24 bp
         let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
         assert!(score > 0, "should find alignment, score={}", score);
-        // The edit script should contain a Del operation (extra query bases => gap in subject)
-        // In gapinfo convention: Del = "deletion in query" = advancing query without subject
-        let has_del = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Del);
-        assert!(has_del, "expected Del (gap in subject), ops={:?}", esp.ops);
+        // Extra query bases are represented as Ins in gapinfo/C script
+        // convention: insertion in query, i.e. a gap in subject.
+        let has_ins = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Ins);
+        assert!(has_ins, "expected Ins (gap in subject), ops={:?}", esp.ops);
     }
 
     /// Alignment requiring multiple gaps.
@@ -3789,7 +3789,7 @@ mod tests {
         let s = vec![0u8, 1, 2, 0, 0, 3, 3, 0, 1, 1, 2, 3]; // ACGAATTACCGT (12 bp)
         let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
         assert!(score > 0, "should find alignment, score={}", score);
-        // Count gap operations (Del = gap in query)
+        // Count gap operations (Del = gap in query, Ins = gap in subject).
         let gap_ops: Vec<_> = esp
             .ops
             .iter()
@@ -3865,12 +3865,12 @@ mod tests {
                 GapAlignOpType::Del => {
                     // Gap in query: consume subject
                     computed_score -= gap_open + gap_ext * count;
-                    qi += *count as usize;
+                    si += *count as usize;
                 }
                 GapAlignOpType::Ins => {
                     // Gap in subject: consume query
                     computed_score -= gap_open + gap_ext * count;
-                    si += *count as usize;
+                    qi += *count as usize;
                 }
                 _ => {}
             }

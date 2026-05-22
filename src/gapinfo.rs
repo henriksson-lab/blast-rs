@@ -4559,6 +4559,7 @@ fn jumper_na_word_finder_impl(
             .unwrap_or(subject_length.max(0) as u32);
         for batch in word_hit_batches {
             last_s_range = batch.s_range;
+            total_hits += batch.offset_pairs.len() as i32;
             for pair in batch.offset_pairs {
                 let q_off = pair.query_offset;
                 let s_off = pair.subject_offset;
@@ -9468,6 +9469,7 @@ mod tests {
             0
         );
         assert!(gapped_stats.extensions > 0);
+        assert!(ungapped_stats.lookup_hits > 0);
         assert_eq!(ungapped_stats.good_init_extends, gapped_stats.extensions);
         assert!(word_hits.num.iter().all(|&num| num == 0));
         assert!(!list.hsps.is_empty());

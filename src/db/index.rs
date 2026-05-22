@@ -4,6 +4,7 @@
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use memmap2::{Advice, Mmap, UncheckedAdvice};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -173,6 +174,18 @@ impl BlastDbVolume {
             self.seq_offsets[local_oid as usize + 1].saturating_sub(1) as usize
         };
         &self.seq_mmap[start..end]
+    }
+
+    fn get_header(&self, local_oid: u32) -> &[u8] {
+        assert!(
+            (local_oid as usize) < self.hdr_offsets.len().saturating_sub(1),
+            "local OID {} out of range (num_oids={})",
+            local_oid,
+            self.num_oids
+        );
+        let start = self.hdr_offsets[local_oid as usize] as usize;
+        let end = self.hdr_offsets[local_oid as usize + 1] as usize;
+        &self.hdr_mmap[start..end]
     }
 
     fn get_seq_len(&self, local_oid: u32) -> u32 {
@@ -530,7 +543,12 @@ fn offset_slice_logical_oids(slice: &mut BlastDbVolumeSlice, offset: u64) {
 }
 
 fn alias_has_filters(alias: &crate::db::alias::AliasFile) -> bool {
-    alias.first_oid.is_some() || alias.last_oid.is_some() || alias.oidlist.is_some()
+    alias.first_oid.is_some()
+        || alias.last_oid.is_some()
+        || alias.oidlist.is_some()
+        || alias.gilist.is_some()
+        || alias.silist.is_some()
+        || alias.taxidlist.is_some()
 }
 
 fn volume_slices_stats(slices: &[BlastDbVolumeSlice]) -> (u64, u64) {
@@ -578,11 +596,98 @@ fn parse_oid_bitmap(path: &Path) -> io::Result<Vec<bool>> {
     Ok(bits)
 }
 
+fn parse_gilist(path: &Path) -> io::Result<HashSet<u32>> {
+    let data = std::fs::read(path)?;
+    if data.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let text_like = data
+        .iter()
+        .all(|&b| b.is_ascii_digit() || b.is_ascii_whitespace() || b == b'+' || b == b'-');
+    if text_like {
+        return Ok(String::from_utf8_lossy(&data)
+            .split_whitespace()
+            .filter_map(|token| token.parse::<u32>().ok())
+            .collect());
+    }
+
+    if data.len() % 4 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "binary GILIST length is not a multiple of 4 bytes",
+        ));
+    }
+
+    let words: Vec<u32> = data
+        .chunks_exact(4)
+        .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+    let values = if words
+        .first()
+        .is_some_and(|&count| count as usize == words.len().saturating_sub(1))
+    {
+        &words[1..]
+    } else {
+        &words[..]
+    };
+    Ok(values.iter().copied().collect())
+}
+
+fn parse_taxidlist(path: &Path) -> io::Result<HashSet<i32>> {
+    let text = std::fs::read_to_string(path)?;
+    text.split_whitespace()
+        .map(|token| {
+            token.parse::<i32>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid TAXIDLIST entry: {token}"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn parse_seqidlist(path: &Path) -> io::Result<HashSet<String>> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(text
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn seqid_list_matches_header(seqids: &HashSet<String>, hdr: &[u8]) -> bool {
+    let mut candidates = Vec::new();
+    if let Some(id) = extract_accession_from_header(hdr) {
+        if let Some((bare, _)) = id.rsplit_once('.') {
+            candidates.push(bare.to_string());
+        }
+        candidates.push(id);
+    }
+    if let Some(id) = extract_textseq_display_id_from_asn(hdr) {
+        candidates.push(id);
+    }
+    if let Some(id) = extract_blast_seqid_chain_from_asn(hdr) {
+        candidates.push(id);
+    }
+    if let Some(id) = extract_textseq_bare_accession_from_asn(hdr) {
+        candidates.push(id);
+    }
+    candidates.iter().any(|id| seqids.contains(id))
+}
+
 fn apply_alias_filters(
     mut slices: Vec<BlastDbVolumeSlice>,
     alias: &crate::db::alias::AliasFile,
 ) -> io::Result<Vec<BlastDbVolumeSlice>> {
-    if alias.first_oid.is_none() && alias.last_oid.is_none() && alias.oidlist.is_none() {
+    if alias.first_oid.is_none()
+        && alias.last_oid.is_none()
+        && alias.oidlist.is_none()
+        && alias.gilist.is_none()
+        && alias.silist.is_none()
+        && alias.taxidlist.is_none()
+    {
         return Ok(slices);
     }
 
@@ -592,18 +697,32 @@ fn apply_alias_filters(
         .map(|run| run.logical_start + run.count as u64)
         .max()
         .unwrap_or(0);
-    let first_one_based = alias.first_oid.unwrap_or(1);
-    let last_one_based = alias
+    // NCBI alias files store FIRST_OID/LAST_OID as a zero-based half-open
+    // range: writedb emits GetFrom() and GetToOpen().
+    let first_oid = alias.first_oid.unwrap_or(0);
+    let last_oid = alias
         .last_oid
         .unwrap_or_else(|| total_oids.min(u32::MAX as u64) as u32);
-    let wanted_start = first_one_based.saturating_sub(1) as u64;
-    let wanted_end = if first_one_based == 0 || last_one_based < first_one_based {
+    let wanted_start = first_oid as u64;
+    let wanted_end = if last_oid < first_oid {
         0
     } else {
-        (last_one_based as u64).min(total_oids)
+        (last_oid as u64).min(total_oids)
     };
     let oid_bitmap = match &alias.oidlist {
         Some(path) => Some(parse_oid_bitmap(path)?),
+        None => None,
+    };
+    let gi_list = match &alias.gilist {
+        Some(path) => Some(parse_gilist(path)?),
+        None => None,
+    };
+    let taxid_list = match &alias.taxidlist {
+        Some(path) => Some(parse_taxidlist(path)?),
+        None => None,
+    };
+    let seqid_list = match &alias.silist {
+        Some(path) => Some(parse_seqidlist(path)?),
         None => None,
     };
 
@@ -621,7 +740,39 @@ fn apply_alias_filters(
                     .as_ref()
                     .map(|bits| bits.get(logical_oid as usize).copied().unwrap_or(false))
                     .unwrap_or(true);
-                if keep_range && keep_bitmap {
+                let keep_gi = gi_list
+                    .as_ref()
+                    .map(|gis| {
+                        extract_gi_from_header(slice.volume.get_header(run.physical_start + offset))
+                            .is_some_and(|gi| gis.contains(&gi))
+                    })
+                    .unwrap_or(true);
+                let keep_taxid = taxid_list
+                    .as_ref()
+                    .map(|taxids| {
+                        slice
+                            .volume
+                            .tax_lookup
+                            .as_ref()
+                            .map(|lookup| {
+                                lookup
+                                    .get_taxids(run.physical_start + offset)
+                                    .iter()
+                                    .any(|taxid| taxids.contains(taxid))
+                            })
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(true);
+                let keep_seqid = seqid_list
+                    .as_ref()
+                    .map(|seqids| {
+                        seqid_list_matches_header(
+                            seqids,
+                            slice.volume.get_header(run.physical_start + offset),
+                        )
+                    })
+                    .unwrap_or(true);
+                if keep_range && keep_bitmap && keep_gi && keep_taxid && keep_seqid {
                     if active_start.is_none() {
                         active_start = Some(run.physical_start + offset);
                         active_logical_start = logical_oid;
@@ -824,9 +975,8 @@ impl BlastDb {
             };
             let alias =
                 crate::db::alias::parse_alias_file(&db_path_with_ext(base_path, alias_ext))?;
-            // Surface any unsupported-filter fields (MEMB_BIT, GILIST, TILIST,
-            // SEQIDLIST, TAXIDLIST) to stderr so the user knows they are
-            // parsed but not applied. Silent on common/well-supported alias
+            // Surface unsupported-filter fields to stderr so the user knows
+            // they are parsed but not applied. Silent on supported alias
             // fields.
             for w in alias.unsupported_filter_warnings() {
                 eprintln!("{}", w);
@@ -2985,6 +3135,224 @@ mod tests {
             db.volume_oid_ranges(),
             vec![(0, seqn_db.num_oids), (seqn_db.num_oids, db.num_oids)]
         );
+    }
+
+    #[test]
+    fn test_alias_first_last_oid_are_zero_based_half_open() {
+        let seqn = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seqn/seqn");
+        if !seqn.with_extension("nin").exists() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("slice.nal"),
+            format!(
+                "TITLE oid slice\nDBLIST {}\nFIRST_OID 1\nLAST_OID 3\n",
+                seqn.display(),
+            ),
+        )
+        .unwrap();
+
+        let seqn_db = BlastDb::open(&seqn).unwrap();
+        let db = BlastDb::open(&tmp.path().join("slice")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.get_seq_len(0), seqn_db.get_seq_len(1));
+        assert_eq!(db.get_seq_len(1), seqn_db.get_seq_len(2));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 2)]);
+    }
+
+    fn write_test_string(buf: &mut Vec<u8>, value: &str) {
+        buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        buf.extend_from_slice(value.as_bytes());
+    }
+
+    fn write_tiny_gi_nucl_db(base: &Path, gis: &[u32]) {
+        let mut headers = Vec::new();
+        let mut hdr_offsets = Vec::with_capacity(gis.len() + 1);
+        hdr_offsets.push(0u32);
+        for &gi in gis {
+            let bytes = gi.to_be_bytes();
+            let first = bytes.iter().position(|&b| b != 0).unwrap_or(3);
+            headers.push(0x8b);
+            headers.push((4 - first) as u8);
+            headers.extend_from_slice(&bytes[first..]);
+            hdr_offsets.push(headers.len() as u32);
+        }
+        std::fs::write(db_path_with_ext(base, "nhr"), headers).unwrap();
+
+        let seq_data = vec![1u8; gis.len()];
+        std::fs::write(db_path_with_ext(base, "nsq"), seq_data).unwrap();
+
+        let n = gis.len() as u32;
+        let mut index = Vec::new();
+        index.extend_from_slice(&4u32.to_be_bytes());
+        index.extend_from_slice(&0u32.to_be_bytes());
+        write_test_string(&mut index, "tiny gi db");
+        write_test_string(&mut index, "May 22, 2026");
+        index.extend_from_slice(&n.to_be_bytes());
+        index.extend_from_slice(&(gis.len() as u64).to_le_bytes());
+        index.extend_from_slice(&1u32.to_be_bytes());
+        for &offset in &hdr_offsets {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 0..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 1..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        index.extend_from_slice(&n.to_be_bytes());
+        std::fs::write(db_path_with_ext(base, "nin"), index).unwrap();
+    }
+
+    fn write_tiny_accession_nucl_db(base: &Path, accessions: &[&str]) {
+        let mut headers = Vec::new();
+        let mut hdr_offsets = Vec::with_capacity(accessions.len() + 1);
+        hdr_offsets.push(0u32);
+        for (oid, accession) in accessions.iter().enumerate() {
+            headers.extend_from_slice(&crate::db::defline::encode_defline_asn1(
+                &format!("{accession} synthetic record"),
+                oid as i32,
+            ));
+            hdr_offsets.push(headers.len() as u32);
+        }
+        std::fs::write(db_path_with_ext(base, "nhr"), headers).unwrap();
+
+        let seq_data = vec![1u8; accessions.len()];
+        std::fs::write(db_path_with_ext(base, "nsq"), seq_data).unwrap();
+
+        let n = accessions.len() as u32;
+        let mut index = Vec::new();
+        index.extend_from_slice(&4u32.to_be_bytes());
+        index.extend_from_slice(&0u32.to_be_bytes());
+        write_test_string(&mut index, "tiny accession db");
+        write_test_string(&mut index, "May 22, 2026");
+        index.extend_from_slice(&n.to_be_bytes());
+        index.extend_from_slice(&(accessions.len() as u64).to_le_bytes());
+        index.extend_from_slice(&1u32.to_be_bytes());
+        for &offset in &hdr_offsets {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 0..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 1..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        index.extend_from_slice(&n.to_be_bytes());
+        std::fs::write(db_path_with_ext(base, "nin"), index).unwrap();
+    }
+
+    fn write_tiny_oid_to_taxids(base: &Path, taxids_by_oid: &[&[i32]]) {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(taxids_by_oid.len() as u64).to_le_bytes());
+        let mut cumulative = 0u64;
+        for taxids in taxids_by_oid {
+            cumulative += taxids.len() as u64;
+            data.extend_from_slice(&cumulative.to_le_bytes());
+        }
+        for taxids in taxids_by_oid {
+            for taxid in *taxids {
+                data.extend_from_slice(&taxid.to_le_bytes());
+            }
+        }
+        std::fs::write(db_path_with_ext(base, "not"), data).unwrap();
+    }
+
+    #[test]
+    fn test_alias_seqidlist_filters_header_accessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write_tiny_accession_nucl_db(&base, &["seq1", "seq2", "seq3", "seq4"]);
+        std::fs::write(tmp.path().join("keep.sil"), "seq2\nseq4\n").unwrap();
+        std::fs::write(
+            tmp.path().join("seqid_masked.nal"),
+            "TITLE seqid masked\nDBLIST base\nSEQIDLIST keep.sil\n",
+        )
+        .unwrap();
+
+        let db = BlastDb::open(&tmp.path().join("seqid_masked")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.stats_num_oids, 2);
+        assert_eq!(db.get_accession(0).as_deref(), Some("seq2"));
+        assert_eq!(db.get_accession(1).as_deref(), Some("seq4"));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_gilist_filters_header_gis() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write_tiny_gi_nucl_db(&base, &[101, 102, 103, 104]);
+        std::fs::write(tmp.path().join("keep.gil"), "102\n104\n").unwrap();
+        std::fs::write(
+            tmp.path().join("masked.nal"),
+            "TITLE gi masked\nDBLIST base\nGILIST keep.gil\n",
+        )
+        .unwrap();
+
+        let db = BlastDb::open(&tmp.path().join("masked")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.stats_num_oids, 2);
+        assert_eq!(db.get_gi(0), Some(102));
+        assert_eq!(db.get_gi(1), Some(104));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_taxidlist_filters_oid_taxids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write_tiny_gi_nucl_db(&base, &[101, 102, 103, 104]);
+        write_tiny_oid_to_taxids(&base, &[&[6239], &[9606, 9605], &[7227], &[9606]]);
+        std::fs::write(tmp.path().join("keep.taxids"), "9606\n").unwrap();
+        std::fs::write(
+            tmp.path().join("tax_masked.nal"),
+            "TITLE taxid masked\nDBLIST base\nTAXIDLIST keep.taxids\n",
+        )
+        .unwrap();
+
+        let db = BlastDb::open(&tmp.path().join("tax_masked")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.stats_num_oids, 2);
+        assert_eq!(db.get_gi(0), Some(102));
+        assert_eq!(db.get_taxids(0), vec![9606, 9605]);
+        assert_eq!(db.get_gi(1), Some(104));
+        assert_eq!(db.get_taxids(1), vec![9606]);
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn test_parse_taxidlist_rejects_non_numeric_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.taxids");
+        std::fs::write(&path, "9606\nnot-a-taxid\n").unwrap();
+
+        let err = parse_taxidlist(&path).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_parse_binary_gilist_with_count_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keep.gil");
+        let mut data = Vec::new();
+        for value in [2u32, 101, 103] {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+        std::fs::write(&path, data).unwrap();
+
+        let gis = parse_gilist(&path).unwrap();
+
+        assert_eq!(gis.len(), 2);
+        assert!(gis.contains(&101));
+        assert!(gis.contains(&103));
     }
 
     #[test]

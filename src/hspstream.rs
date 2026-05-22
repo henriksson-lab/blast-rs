@@ -3168,7 +3168,42 @@ pub fn s_filter_blast_results(
     results: &mut HspResults,
     hit_options: &HitSavingOptions,
     query_lengths_by_context: &[i32],
+    query_info: Option<&crate::queryinfo::QueryInfo>,
 ) {
+    if let Some((best_hit_opts, query_info)) = hit_options
+        .hsp_filt_opt
+        .as_ref()
+        .and_then(|opts| opts.best_hit.as_ref())
+        .zip(query_info)
+    {
+        let params = crate::hspfilter_culling::blast_hsp_best_hit_params_new(
+            hit_options,
+            best_hit_opts,
+            0,
+            true,
+        );
+        let mut data = crate::hspfilter_culling::s_blast_hsp_best_hit_pipe_new(params, query_info);
+        let _ = crate::hspfilter_culling::s_blast_hsp_best_hit_pipe_run(&mut data, results);
+    }
+
+    if let Some((culling_opts, query_info)) = hit_options
+        .hsp_filt_opt
+        .as_ref()
+        .and_then(|opts| opts.culling_opts.as_ref())
+        .zip(query_info)
+    {
+        let params = crate::hspfilter_culling::blast_hsp_culling_params_new(
+            hit_options,
+            culling_opts,
+            0,
+            hit_options.program_number,
+            0,
+            true,
+        );
+        let mut data = crate::hspfilter_culling::blast_hsp_culling_pipe_new(params, query_info);
+        crate::hspfilter_culling::blast_hsp_culling_pipe_run(&mut data, results);
+    }
+
     for hitlist in results.hitlists.iter_mut().flatten() {
         for hsp_list in &mut hitlist.hsp_lists {
             if hit_options.max_hsps_per_subject != 0 {
@@ -3644,6 +3679,7 @@ where
                 opts.best_hit
                     .as_ref()
                     .map(|_| ())
+                    .or(opts.culling_opts.map(|_| ()))
                     .or(opts.subject_besthit_opts.map(|_| ()))
             })
             .is_some()
@@ -3653,7 +3689,7 @@ where
             .iter()
             .map(|ctx| ctx.query_length)
             .collect();
-        s_filter_blast_results(&mut results, hit_options, &query_lengths);
+        s_filter_blast_results(&mut results, hit_options, &query_lengths, Some(query_info));
     }
     if database_search {
         let _ = blast_hsp_results_sort_by_evalue(&mut results);
@@ -6482,7 +6518,7 @@ mod tests {
             query_cov_hsp_perc: 50.0,
             ..HitSavingOptions::default()
         };
-        s_filter_blast_results(&mut results, &hit_options, &[100]);
+        s_filter_blast_results(&mut results, &hit_options, &[100], None);
 
         let hitlist = results.hitlists[0].as_ref().expect("hitlist");
         let summary: Vec<(i32, Vec<i32>)> = hitlist
@@ -6587,8 +6623,120 @@ mod tests {
             ..HitSavingOptions::default()
         };
 
-        s_filter_blast_results(&mut results, &hit_options, &[100]);
+        s_filter_blast_results(&mut results, &hit_options, &[100], None);
         let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists[0].hsps.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 100);
+    }
+
+    #[test]
+    fn test_filter_blast_results_applies_best_hit_pipe() {
+        let mut results = blast_hsp_results_new(1);
+        let mut hitlist = blast_hit_list_new(10);
+        let mut list = HspList::new(11);
+        let mut best = make_hsp(100, 1e-30);
+        best.query_offset = 0;
+        best.query_end = 40;
+        best.context = 0;
+        let mut contained = make_hsp(40, 1e-20);
+        contained.query_offset = 5;
+        contained.query_end = 33;
+        contained.context = 0;
+        list.hsps = vec![best, contained];
+        list.best_evalue = s_blast_get_best_evalue(&list);
+        hitlist.hsp_lists.push(list);
+        results.hitlists[0] = Some(hitlist);
+
+        let mut filter_opts = crate::hspfilter_culling::blast_hspfiltering_options_new();
+        filter_opts.best_hit = Some(crate::hspfilter_culling::blast_hspbest_hit_options_new(
+            0.1, 0.1,
+        ));
+        let hit_options = HitSavingOptions {
+            program_number: crate::program::BLASTP,
+            hsp_filt_opt: Some(filter_opts),
+            hitlist_size: 10,
+            ..HitSavingOptions::default()
+        };
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 100,
+        };
+
+        s_filter_blast_results(&mut results, &hit_options, &[100], Some(&query_info));
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists[0].hsps.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 100);
+    }
+
+    #[test]
+    fn test_filter_blast_results_applies_culling_pipe_across_subjects() {
+        let mut results = blast_hsp_results_new(1);
+        let mut hitlist = blast_hit_list_new(10);
+
+        let mut strong_list = HspList::new(11);
+        let mut strong = make_hsp(100, 1e-30);
+        strong.query_offset = 0;
+        strong.query_end = 80;
+        strong.subject_offset = 0;
+        strong.subject_end = 80;
+        strong.context = 0;
+        strong_list.hsps.push(strong);
+        strong_list.best_evalue = s_blast_get_best_evalue(&strong_list);
+
+        let mut weak_list = HspList::new(12);
+        let mut weak = make_hsp(40, 1e-20);
+        weak.query_offset = 10;
+        weak.query_end = 70;
+        weak.subject_offset = 10;
+        weak.subject_end = 70;
+        weak.context = 0;
+        weak_list.hsps.push(weak);
+        weak_list.best_evalue = s_blast_get_best_evalue(&weak_list);
+
+        hitlist.hsp_lists = vec![weak_list, strong_list];
+        results.hitlists[0] = Some(hitlist);
+
+        let mut filter_opts = crate::hspfilter_culling::blast_hspfiltering_options_new();
+        filter_opts.culling_opts =
+            Some(crate::hspfilter_culling::BlastHSPCullingOptions { max_hits: 1 });
+        let hit_options = HitSavingOptions {
+            program_number: crate::program::BLASTP,
+            hsp_filt_opt: Some(filter_opts),
+            hitlist_size: 10,
+            ..HitSavingOptions::default()
+        };
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 100,
+        };
+
+        s_filter_blast_results(&mut results, &hit_options, &[100], Some(&query_info));
+
+        let hitlist = results.hitlists[0].as_ref().expect("hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 11);
         assert_eq!(hitlist.hsp_lists[0].hsps.len(), 1);
         assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 100);
     }
@@ -7383,6 +7531,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![100]
         );
+    }
+
+    #[test]
+    fn blast_compute_traceback_applies_culling_only_pipe() {
+        let stream = HspStream::new(1);
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[100]);
+
+        let mut weak_list = HspList::new(12);
+        let mut weak = make_hsp(40, 1.0e-20);
+        weak.context = 0;
+        weak.query_offset = 10;
+        weak.query_end = 70;
+        weak.subject_offset = 10;
+        weak.subject_end = 70;
+        weak_list.add_hsp(weak);
+        assert_eq!(stream.blast_hspstream_write(0, weak_list), 0);
+
+        let mut strong_list = HspList::new(11);
+        let mut strong = make_hsp(100, 1.0e-30);
+        strong.context = 0;
+        strong.query_offset = 0;
+        strong.query_end = 80;
+        strong.subject_offset = 0;
+        strong.subject_end = 80;
+        strong_list.add_hsp(strong);
+        assert_eq!(stream.blast_hspstream_write(0, strong_list), 0);
+
+        let mut filter_opts = crate::hspfilter_culling::blast_hspfiltering_options_new();
+        filter_opts.culling_opts =
+            Some(crate::hspfilter_culling::BlastHSPCullingOptions { max_hits: 1 });
+        let hit_options = HitSavingOptions {
+            hitlist_size: 10,
+            mask_level: 101,
+            hsp_filt_opt: Some(filter_opts),
+            ..HitSavingOptions::default()
+        };
+
+        let (status, results) = blast_compute_traceback(
+            crate::program::BLASTP,
+            Some(&stream),
+            Some(&query_info),
+            &hit_options,
+            100,
+            true,
+            |_hsp_list| 0,
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let results = results.expect("results");
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 11);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].score, 100);
     }
 
     #[test]

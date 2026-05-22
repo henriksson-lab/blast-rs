@@ -285,8 +285,9 @@ impl ProteinLookupTable {
         threshold: f64,
     ) -> Self {
         let alphabet_size = AA_SIZE;
-        // Table size uses power-of-2 charsize (NCBI approach) for fast shift-based hashing
-        let table_size = 1usize << (word_size * CHARSIZE);
+        // NCBI sizes the AA backbone to the highest valid BLASTAA index plus
+        // one; the rolling scan mask is still the full charsize bit mask.
+        let table_size = aa_lookup_backbone_size(word_size);
         let mut backbone: Vec<Vec<i32>> = vec![Vec::new(); table_size];
         let mut exact_backbone: Vec<Vec<i32>> = vec![Vec::new(); table_size];
 
@@ -378,6 +379,16 @@ impl ProteinLookupTable {
             pv,
         }
     }
+}
+
+/// NCBI: `BlastAaLookupTableNew` backbone sizing (`blast_aalookup.c`).
+/// naming: Local helper for one constructor substep, not the full C constructor.
+fn aa_lookup_backbone_size(word_size: usize) -> usize {
+    let mut backbone_size = 0usize;
+    for i in 0..word_size {
+        backbone_size |= (AA_SIZE - 1) << (i * CHARSIZE);
+    }
+    backbone_size + 1
 }
 
 /// NCBI: BlastAaLookupFinalize (blast_aalookup.c).
@@ -2012,11 +2023,22 @@ mod tests {
     }
 
     #[test]
+    fn aa_lookup_backbone_size_matches_ncbi_valid_index_range() {
+        let c_sized = aa_lookup_backbone_size(3);
+        let full_charsize_space = 1usize << (3 * CHARSIZE);
+
+        assert_eq!(c_sized, word_hash(&[27, 27, 27], AA_SIZE) + 1);
+        assert_eq!(c_sized, 28_540);
+        assert!(c_sized < full_charsize_space);
+    }
+
+    #[test]
     fn test_lookup_table_build() {
         let m = simple_matrix();
         // Query: 3 amino acids, word_size=3, threshold=12 (exact match only with score 4*3=12)
         let query = vec![1u8, 2, 3];
         let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        assert_eq!(table.backbone.len(), aa_lookup_backbone_size(3));
         let hash = word_hash(&[1, 2, 3], AA_SIZE);
         let cell = &table.backbone[hash];
         assert!(cell.num_used > 0, "Cell should have hits");

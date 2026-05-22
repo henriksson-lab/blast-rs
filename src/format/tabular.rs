@@ -437,7 +437,13 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             if hit.subject_taxids.is_empty() {
                 "N/A".to_string()
             } else {
-                hit.subject_taxids
+                let mut unique_taxids = Vec::new();
+                for taxid in &hit.subject_taxids {
+                    if !unique_taxids.contains(taxid) {
+                        unique_taxids.push(*taxid);
+                    }
+                }
+                unique_taxids
                     .iter()
                     .map(|t| t.to_string())
                     .collect::<Vec<_>>()
@@ -854,6 +860,14 @@ mod tests {
         hit.subject_taxids = vec![9606, 9605];
         assert_eq!(get_field(&hit, "staxid"), "9606");
         assert_eq!(get_field(&hit, "staxids"), "9606;9605");
+    }
+
+    #[test]
+    fn test_taxids_are_unique_preserving_first_seen_order() {
+        let mut hit = make_hit(None, None);
+        hit.subject_taxids = vec![9606, 9605, 9606, 9604, 9605];
+        assert_eq!(get_field(&hit, "staxid"), "9606");
+        assert_eq!(get_field(&hit, "staxids"), "9606;9605;9604");
     }
 
     #[test]

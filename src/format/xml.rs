@@ -61,6 +61,27 @@ fn format_xml_evalue(value: f64) -> String {
     }
 }
 
+fn xml_hit_accession(subject_id: &str) -> &str {
+    let parts: Vec<&str> = subject_id
+        .split('|')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let accession = if parts.len() >= 3 {
+        parts[parts.len() - 1]
+    } else {
+        subject_id
+    };
+    if let Some(dot) = accession.rfind('.') {
+        let suffix = &accession[dot + 1..];
+        if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            return &accession[..dot];
+        }
+    }
+    accession
+}
+
+const BLAST_XML_REFERENCE: &str = "Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.";
+
 /// Write BLAST XML header.
 pub fn write_xml_header<W: Write>(
     writer: &mut W,
@@ -84,6 +105,11 @@ pub fn write_xml_header<W: Write>(
     )?;
     writeln!(
         writer,
+        "  <BlastOutput_reference>{}</BlastOutput_reference>",
+        BLAST_XML_REFERENCE
+    )?;
+    writeln!(
+        writer,
         "  <BlastOutput_db>{}</BlastOutput_db>",
         xml_escape(db)
     )?;
@@ -100,8 +126,8 @@ pub fn write_xml_footer<W: Write>(writer: &mut W) -> std::io::Result<()> {
 
 /// One HSP's XML fields, packed in NCBI's `<Hsp>` element order:
 /// `(query_start, query_end, subject_start, subject_end, evalue,
-/// bit_score, num_ident, align_length, num_gaps)`.
-pub type XmlHsp = (i32, i32, i32, i32, f64, f64, i32, i32, i32);
+/// bit_score, raw_score, num_ident, align_length, num_gaps)`.
+pub type XmlHsp = (i32, i32, i32, i32, f64, f64, i32, i32, i32, i32);
 
 /// Write one hit in XML format.
 pub fn write_xml_hit<W: Write>(
@@ -120,10 +146,15 @@ pub fn write_xml_hit<W: Write>(
         "      <Hit_def>{}</Hit_def>",
         xml_escape(subject_def)
     )?;
+    writeln!(
+        writer,
+        "      <Hit_accession>{}</Hit_accession>",
+        xml_escape(xml_hit_accession(subject_id))
+    )?;
     writeln!(writer, "      <Hit_len>{}</Hit_len>", subject_len)?;
     writeln!(writer, "      <Hit_hsps>")?;
 
-    for (i, &(qs, qe, ss, se, eval, bit, ident, alen, gaps)) in hsps.iter().enumerate() {
+    for (i, &(qs, qe, ss, se, eval, bit, raw_score, ident, alen, gaps)) in hsps.iter().enumerate() {
         writeln!(writer, "        <Hsp>")?;
         writeln!(writer, "          <Hsp_num>{}</Hsp_num>", i + 1)?;
         writeln!(
@@ -131,6 +162,7 @@ pub fn write_xml_hit<W: Write>(
             "          <Hsp_bit-score>{}</Hsp_bit-score>",
             format_xml_double_g(bit)
         )?;
+        writeln!(writer, "          <Hsp_score>{}</Hsp_score>", raw_score)?;
         writeln!(
             writer,
             "          <Hsp_evalue>{}</Hsp_evalue>",
@@ -141,8 +173,8 @@ pub fn write_xml_hit<W: Write>(
         writeln!(writer, "          <Hsp_hit-from>{}</Hsp_hit-from>", ss)?;
         writeln!(writer, "          <Hsp_hit-to>{}</Hsp_hit-to>", se)?;
         writeln!(writer, "          <Hsp_identity>{}</Hsp_identity>", ident)?;
-        writeln!(writer, "          <Hsp_align-len>{}</Hsp_align-len>", alen)?;
         writeln!(writer, "          <Hsp_gaps>{}</Hsp_gaps>", gaps)?;
+        writeln!(writer, "          <Hsp_align-len>{}</Hsp_align-len>", alen)?;
         writeln!(writer, "        </Hsp>")?;
     }
 
@@ -165,7 +197,7 @@ mod tests {
             "subj1",
             "test subject",
             1000,
-            &[(1, 50, 100, 149, 1e-10, 56.0, 50, 50, 0)],
+            &[(1, 50, 100, 149, 1e-10, 56.0, 104, 50, 50, 0)],
         )
         .unwrap();
         write_xml_footer(&mut buf).unwrap();
@@ -185,7 +217,7 @@ mod tests {
             "hit1",
             "first hit",
             500,
-            &[(10, 60, 200, 250, 1e-20, 100.0, 48, 51, 0)],
+            &[(10, 60, 200, 250, 1e-20, 100.0, 184, 48, 51, 0)],
         )
         .unwrap();
         write_xml_hit(
@@ -194,7 +226,7 @@ mod tests {
             "hit2",
             "second hit",
             800,
-            &[(1, 30, 50, 80, 5e-5, 45.0, 28, 31, 1)],
+            &[(1, 30, 50, 80, 5e-5, 45.0, 82, 28, 31, 1)],
         )
         .unwrap();
         write_xml_footer(&mut buf).unwrap();
@@ -233,7 +265,7 @@ mod tests {
             "gi|12345|ref|NM_001.1|",
             "Homo sapiens gene",
             2500,
-            &[(1, 100, 500, 599, 3.5e-40, 156.3, 95, 100, 2)],
+            &[(1, 100, 500, 599, 3.5e-40, 156.3, 289, 95, 100, 2)],
         )
         .unwrap();
         write_xml_footer(&mut buf).unwrap();
@@ -243,9 +275,11 @@ mod tests {
         assert!(output.contains("<Hit_num>1</Hit_num>"));
         assert!(output.contains("<Hit_id>gi|12345|ref|NM_001.1|</Hit_id>"));
         assert!(output.contains("<Hit_def>Homo sapiens gene</Hit_def>"));
+        assert!(output.contains("<Hit_accession>NM_001</Hit_accession>"));
         assert!(output.contains("<Hit_len>2500</Hit_len>"));
         // HSP data fields
         assert!(output.contains("<Hsp_num>1</Hsp_num>"));
+        assert!(output.contains("<Hsp_score>289</Hsp_score>"));
         assert!(output.contains("<Hsp_query-from>1</Hsp_query-from>"));
         assert!(output.contains("<Hsp_query-to>100</Hsp_query-to>"));
         assert!(output.contains("<Hsp_hit-from>500</Hsp_hit-from>"));
@@ -258,6 +292,7 @@ mod tests {
         assert!(output.contains("<Hsp_bit-score>"));
         // Program info
         assert!(output.contains("<BlastOutput_program>blastn</BlastOutput_program>"));
+        assert!(output.contains("<BlastOutput_reference>Stephen F. Altschul"));
         assert!(output.contains("<BlastOutput_db>testdb</BlastOutput_db>"));
     }
 
@@ -271,7 +306,7 @@ mod tests {
             "hit<&\"'",
             "def>with&chars",
             10,
-            &[(1, 2, 3, 4, 1e-10, 56.0, 2, 2, 0)],
+            &[(1, 2, 3, 4, 1e-10, 56.0, 104, 2, 2, 0)],
         )
         .unwrap();
         write_xml_footer(&mut buf).unwrap();
@@ -282,6 +317,46 @@ mod tests {
         assert!(output.contains("<BlastOutput_db>db&amp;a</BlastOutput_db>"));
         assert!(output.contains("<Hit_id>hit&lt;&amp;&quot;&apos;</Hit_id>"));
         assert!(output.contains("<Hit_def>def&gt;with&amp;chars</Hit_def>"));
+        assert!(output.contains("<Hit_accession>hit&lt;&amp;&quot;&apos;</Hit_accession>"));
+    }
+
+    #[test]
+    fn test_xml_header_reference_matches_ncbi_order() {
+        let mut buf = Vec::new();
+        write_xml_header(&mut buf, "blastn", "2.12.0+", "testdb").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("<BlastOutput_reference>Stephen F. Altschul"));
+        assert!(
+            output.find("<BlastOutput_version>").unwrap()
+                < output.find("<BlastOutput_reference>").unwrap()
+                && output.find("<BlastOutput_reference>").unwrap()
+                    < output.find("<BlastOutput_db>").unwrap(),
+            "BlastOutput_reference should follow version and precede db"
+        );
+    }
+
+    #[test]
+    fn test_xml_hit_accession_matches_ncbi_seqid_shape() {
+        let mut buf = Vec::new();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "gi|12345|ref|NM_001.1|",
+            "def",
+            10,
+            &[(1, 2, 3, 4, 1e-10, 56.0, 104, 2, 2, 0)],
+        )
+        .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("<Hit_id>gi|12345|ref|NM_001.1|</Hit_id>"));
+        assert!(output.contains("<Hit_accession>NM_001</Hit_accession>"));
+        assert!(
+            output.find("<Hit_def>").unwrap() < output.find("<Hit_accession>").unwrap()
+                && output.find("<Hit_accession>").unwrap() < output.find("<Hit_len>").unwrap(),
+            "Hit_accession should follow BLAST XML Hit_def and precede Hit_len"
+        );
     }
 
     #[test]
@@ -294,10 +369,10 @@ mod tests {
             "def",
             10,
             &[
-                (1, 2, 3, 4, 1e-10, 56.0, 2, 2, 0),
-                (1, 2, 3, 4, 0.000392118, 12.3456, 2, 2, 0),
-                (1, 2, 3, 4, 3.5e-40, 156.3, 2, 2, 0),
-                (1, 2, 3, 4, 1e-200, 1_234_567.0, 2, 2, 0),
+                (1, 2, 3, 4, 1e-10, 56.0, 104, 2, 2, 0),
+                (1, 2, 3, 4, 0.000392118, 12.3456, 23, 2, 2, 0),
+                (1, 2, 3, 4, 3.5e-40, 156.3, 289, 2, 2, 0),
+                (1, 2, 3, 4, 1e-200, 1_234_567.0, 2_000_000, 2, 2, 0),
             ],
         )
         .unwrap();
@@ -310,5 +385,50 @@ mod tests {
         assert!(output.contains("<Hsp_evalue>0.000392118</Hsp_evalue>"));
         assert!(output.contains("<Hsp_evalue>3.5e-40</Hsp_evalue>"));
         assert!(output.contains("<Hsp_evalue>0</Hsp_evalue>"));
+    }
+
+    #[test]
+    fn test_xml_hsp_score_matches_ncbi_field_order() {
+        let mut buf = Vec::new();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "hit",
+            "def",
+            10,
+            &[(1, 2, 3, 4, 1e-10, 56.0, 104, 2, 2, 0)],
+        )
+        .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("<Hsp_score>104</Hsp_score>"));
+        assert!(
+            output.find("<Hsp_bit-score>").unwrap() < output.find("<Hsp_score>").unwrap()
+                && output.find("<Hsp_score>").unwrap() < output.find("<Hsp_evalue>").unwrap(),
+            "Hsp_score should follow Hsp_bit-score and precede Hsp_evalue"
+        );
+    }
+
+    #[test]
+    fn test_xml_hsp_gaps_precede_align_len() {
+        let mut buf = Vec::new();
+        write_xml_hit(
+            &mut buf,
+            1,
+            "hit",
+            "def",
+            10,
+            &[(1, 2, 3, 4, 1e-10, 56.0, 104, 2, 2, 1)],
+        )
+        .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("<Hsp_gaps>1</Hsp_gaps>"));
+        assert!(output.contains("<Hsp_align-len>2</Hsp_align-len>"));
+        assert!(
+            output.find("<Hsp_identity>").unwrap() < output.find("<Hsp_gaps>").unwrap()
+                && output.find("<Hsp_gaps>").unwrap() < output.find("<Hsp_align-len>").unwrap(),
+            "Hsp_gaps should follow Hsp_identity and precede Hsp_align-len"
+        );
     }
 }

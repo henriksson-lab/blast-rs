@@ -27,11 +27,11 @@ use crate::seqsrc::{
     blast_seq_src_get_tot_len, blast_seq_src_get_tot_len_stats, BlastSeqSource,
 };
 use crate::stat::{
-    blast_gumbel_blk_calc, blast_karlin_blk_gapped_calc, blast_karlin_blk_nucl_gapped_calc,
-    blast_score_blk_kbp_ideal_calc, blast_score_blk_kbp_ungapped_calc, blast_score_blk_matrix_fill,
-    blast_score_blk_new, blast_score_freq_new, blast_score_set_ambig_res,
-    compute_length_adjustment_exact, scaled_nucl_alpha_beta, BlastScoreBlk, KarlinBlk,
-    BLAST_GAP_EXTN_MEGABLAST, BLAST_GAP_OPEN_MEGABLAST,
+    blast_get_nucl_alpha_beta, blast_gumbel_blk_calc, blast_karlin_blk_gapped_calc,
+    blast_karlin_blk_nucl_gapped_calc, blast_score_blk_kbp_ideal_calc,
+    blast_score_blk_kbp_ungapped_calc, blast_score_blk_matrix_fill, blast_score_blk_new,
+    blast_score_freq_new, blast_score_set_ambig_res, compute_length_adjustment_exact,
+    BlastScoreBlk, KarlinBlk, BLAST_GAP_EXTN_MEGABLAST, BLAST_GAP_OPEN_MEGABLAST,
 };
 use crate::util::{BlastSequenceBlk, SSeqRange};
 
@@ -163,6 +163,7 @@ pub fn blast_score_blk_kbp_gapped_calc(
             } else {
                 (scoring_options.reward, scoring_options.penalty)
             };
+            let mut error_return = None;
             blast_karlin_blk_nucl_gapped_calc(
                 Some(&mut sbp.kbp_gap_std[index]),
                 scoring_options.gap_open,
@@ -171,7 +172,7 @@ pub fn blast_score_blk_kbp_gapped_calc(
                 penalty,
                 sbp.kbp_std.get(index),
                 Some(&mut sbp.round_down),
-                None,
+                Some(&mut error_return),
             )
         } else {
             blast_karlin_blk_gapped_calc(
@@ -685,8 +686,8 @@ fn blast_get_alpha_beta(
 ///   `sbp->kbp` otherwise (matching the C `kbp_ptr` selection at
 ///   `blast_setup.c:768`).
 /// - `kbp_std_array`: per-context **ungapped** Karlin block array
-///   (`sbp->kbp_std`). Used only by `scaled_nucl_alpha_beta` /
-///   `blast_get_alpha_beta` for the alpha/beta lookup.
+///   (`sbp->kbp_std`). Used by the nucleotide `Blast_GetNuclAlphaBeta`
+///   path and protein `BLAST_GetAlphaBeta` path for alpha/beta lookup.
 /// - `matrix_name`: protein matrix name. Ignored for nucleotide / mapping
 ///   / phi programs.
 pub fn blast_calc_eff_lengths(
@@ -743,6 +744,7 @@ pub fn blast_calc_eff_lengths(
             Some(k) => k,
             None => {
                 ctx.eff_searchsp = effective_search_space;
+                ctx.length_adjustment = 0;
                 continue;
             }
         };
@@ -750,6 +752,7 @@ pub fn blast_calc_eff_lengths(
             Some(k) => k,
             None => {
                 ctx.eff_searchsp = effective_search_space;
+                ctx.length_adjustment = 0;
                 continue;
             }
         };
@@ -757,6 +760,7 @@ pub fn blast_calc_eff_lengths(
         let query_length = ctx.query_length;
         if !ctx.is_valid || query_length <= 0 {
             ctx.eff_searchsp = effective_search_space;
+            ctx.length_adjustment = 0;
             continue;
         }
 
@@ -770,7 +774,8 @@ pub fn blast_calc_eff_lengths(
             } else {
                 (scoring_options.reward, scoring_options.penalty)
             };
-            scaled_nucl_alpha_beta(
+            let (mut alpha, mut beta) = (0.0, 0.0);
+            let _ = blast_get_nucl_alpha_beta(
                 rew,
                 pen,
                 scoring_options.gap_open,
@@ -778,7 +783,10 @@ pub fn blast_calc_eff_lengths(
                 kbp_std.lambda,
                 kbp_std.h,
                 scoring_options.gapped_calculation,
-            )
+                &mut alpha,
+                &mut beta,
+            );
+            (alpha, beta)
         } else {
             blast_get_alpha_beta(
                 matrix_name,
@@ -1309,6 +1317,56 @@ mod tests {
     }
 
     #[test]
+    fn score_blk_kbp_gapped_calc_rejects_unsupported_blastn_gap_costs() {
+        let query_info = QueryInfo {
+            num_queries: 1,
+            contexts: vec![ContextInfo {
+                query_offset: 0,
+                query_length: 20,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 1,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 20,
+            min_length: 0,
+        };
+        let scoring = ScoringOptions {
+            reward: 1,
+            penalty: -2,
+            gap_open: 1,
+            gap_extend: 3,
+            gapped_calculation: true,
+            matrix_name: None,
+            is_ooframe: false,
+        };
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("sbp");
+        sbp.kbp_std[0] = KarlinBlk {
+            lambda: 1.28,
+            k: 0.46,
+            log_k: 0.46f64.ln(),
+            h: 0.85,
+            ..KarlinBlk::default()
+        };
+
+        assert_eq!(
+            blast_score_blk_kbp_gapped_calc(
+                Some(&mut sbp),
+                Some(&scoring),
+                crate::program::BLASTN,
+                Some(&query_info),
+            ),
+            1
+        );
+        assert_eq!(sbp.kbp_gap_std[0].lambda, 0.0);
+        assert_eq!(sbp.kbp_gap_std[0].k, 0.0);
+        assert_eq!(sbp.kbp_gap_std[0].h, 0.0);
+    }
+
+    #[test]
     fn phi_score_blk_fill_uses_phi_specific_gap_table() {
         let options = ScoringOptions {
             reward: 0,
@@ -1707,6 +1765,68 @@ mod tests {
         );
         assert_eq!(rc, 0);
         assert_eq!(qi.contexts[0].eff_searchsp, 987_654_321);
+    }
+
+    #[test]
+    fn calc_eff_lengths_clears_stale_adjustment_for_invalid_context() {
+        let mut qi = QueryInfo {
+            num_queries: 1,
+            contexts: vec![
+                ContextInfo {
+                    query_offset: 0,
+                    query_length: 100,
+                    eff_searchsp: 0,
+                    length_adjustment: 0,
+                    query_index: 0,
+                    frame: 0,
+                    is_valid: true,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+                ContextInfo {
+                    query_offset: 100,
+                    query_length: 100,
+                    eff_searchsp: 123,
+                    length_adjustment: 77,
+                    query_index: 0,
+                    frame: 0,
+                    is_valid: false,
+                    segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+                },
+            ],
+            max_length: 100,
+            min_length: 0,
+        };
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let eff = EffectiveLengthsParameters {
+            options: EffectiveLengthsOptions::default(),
+            real_db_length: 1_000_000,
+            real_num_seqs: 1000,
+        };
+        let kbp = vec![protein_kbp(), protein_kbp()];
+
+        assert_eq!(
+            blast_calc_eff_lengths(
+                crate::program::BLASTP,
+                &scoring,
+                &eff,
+                &kbp,
+                &kbp,
+                "BLOSUM62",
+                &mut qi,
+            ),
+            0
+        );
+        assert!(qi.contexts[0].length_adjustment > 0);
+        assert_eq!(qi.contexts[1].eff_searchsp, 0);
+        assert_eq!(qi.contexts[1].length_adjustment, 0);
     }
 
     #[test]

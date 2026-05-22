@@ -932,6 +932,7 @@ pub enum PrelimGapExt {
     DynProgScoreOnly,
     GreedyScoreOnly,
     SmithWatermanScoreOnly,
+    JumperWithTraceback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1090,6 +1091,12 @@ fn blast_extension_scoring_options_validate(
         && score_options.gap_extend == 0
         && ext_options.prelim_gap_ext != PrelimGapExt::GreedyScoreOnly
         && ext_options.traceback_ext != TracebackExt::GreedyTbck
+    {
+        return BLASTERR_OPTION_VALUE_INVALID;
+    }
+
+    if program_number == program::MAPPING
+        && ext_options.prelim_gap_ext != PrelimGapExt::JumperWithTraceback
     {
         return BLASTERR_OPTION_VALUE_INVALID;
     }
@@ -2138,6 +2145,41 @@ mod tests {
                 Some(&hit)
             ),
             BLASTERR_OPTION_VALUE_INVALID
+        );
+
+        let mapping_lookup = LookupTableOptions {
+            word_size: WORDSIZE_MEGABLAST,
+            lut_type: LookupTableType::MegablastLookup,
+            program_number: crate::program::MAPPING,
+            ..LookupTableOptions::default()
+        };
+        let mapping_score = ScoringOptions::new_blastn();
+        let mapping_word = InitialWordOptions::new_blastn();
+        let mapping_ext = ExtensionOptions::new_blastn();
+        assert_eq!(
+            blast_validate_options(
+                crate::program::MAPPING,
+                Some(&mapping_ext),
+                Some(&mapping_score),
+                Some(&mapping_lookup),
+                Some(&mapping_word),
+                Some(&hit)
+            ),
+            BLASTERR_OPTION_VALUE_INVALID
+        );
+
+        let mut mapping_ext = mapping_ext;
+        mapping_ext.prelim_gap_ext = PrelimGapExt::JumperWithTraceback;
+        assert_eq!(
+            blast_validate_options(
+                crate::program::MAPPING,
+                Some(&mapping_ext),
+                Some(&mapping_score),
+                Some(&mapping_lookup),
+                Some(&mapping_word),
+                Some(&hit)
+            ),
+            0
         );
 
         let rps_lookup = LookupTableOptions {

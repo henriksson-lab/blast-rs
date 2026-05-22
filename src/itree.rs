@@ -11,18 +11,22 @@ pub struct Interval {
 }
 
 impl Interval {
+    /// blast-rs: Small interval constructor for the translated tree; not a direct NCBI C port.
     pub fn new(start: i32, end: i32) -> Self {
         Interval { start, end }
     }
 
+    /// blast-rs: Half-open containment predicate used by the ported tree; not a direct NCBI C port.
     pub fn contains(&self, other: &Interval) -> bool {
         self.start <= other.start && self.end >= other.end
     }
 
+    /// blast-rs: Half-open overlap predicate for local tests/helpers; not a direct NCBI C port.
     pub fn overlaps(&self, other: &Interval) -> bool {
         self.start < other.end && other.start < self.end
     }
 
+    /// blast-rs: Half-open interval length helper; not a direct NCBI C port.
     pub fn length(&self) -> i32 {
         self.end - self.start
     }
@@ -56,6 +60,7 @@ pub struct SIntervalNode {
 }
 
 impl Default for SIntervalNode {
+    /// blast-rs: Rust default initializer for interval-node storage; not a direct NCBI C port.
     fn default() -> Self {
         Self {
             leftend: 0,
@@ -94,12 +99,14 @@ pub enum CommonEndpointHsp {
 }
 
 impl IntervalTree {
+    /// blast-rs: Public constructor wrapper around the translated interval-tree initializer.
     pub fn new(q_max: i32, s_max: i32) -> Self {
         blast_interval_tree_init(0, q_max, 0, s_max)
     }
 
     /// Check if a new HSP is contained within any existing interval.
     /// Returns true if the new interval should be rejected (contained).
+    /// blast-rs: Convenience wrapper over translated interval-tree containment semantics.
     pub fn is_contained(&self, query: Interval, subject: Interval, score: i32) -> bool {
         self.is_contained_with_metadata(query, subject, score, 0, 0)
     }
@@ -127,6 +134,7 @@ impl IntervalTree {
 
     /// Check if a new HSP is contained within any existing interval, using
     /// NCBI megablast's diagonal-separation rule when nonzero.
+    /// blast-rs: Convenience wrapper over translated interval-tree containment semantics.
     pub fn is_contained_with_min_diag_separation(
         &self,
         query: Interval,
@@ -144,6 +152,7 @@ impl IntervalTree {
         )
     }
 
+    /// blast-rs: Interval adapter for translated interval-tree containment semantics.
     pub fn is_contained_with_metadata_and_min_diag_separation(
         &self,
         query: Interval,
@@ -179,10 +188,12 @@ impl IntervalTree {
     /// Without this dedup our tree accumulates multiple HSPs sharing
     /// endpoints, and the larger of them envelops legitimate seeds that
     /// NCBI's tree wouldn't envelop.
+    /// blast-rs: Convenience wrapper over translated interval-tree insertion semantics.
     pub fn insert(&mut self, query: Interval, subject: Interval, score: i32) {
         self.insert_with_metadata(query, subject, score, 0, 0)
     }
 
+    /// blast-rs: Interval adapter for translated interval-tree insertion semantics.
     pub fn insert_with_metadata(
         &mut self,
         query: Interval,
@@ -213,10 +224,12 @@ impl IntervalTree {
         let _ = blast_interval_tree_add_interval(self, candidate, true);
     }
 
+    /// blast-rs: Exposes translated tree occupancy for tests/callers; not a direct NCBI C port.
     pub fn len(&self) -> usize {
         self.hsp_count
     }
 
+    /// blast-rs: Public wrapper around translated interval-tree reset semantics.
     pub fn reset(&mut self) {
         blast_interval_tree_reset(self);
     }
@@ -226,6 +239,7 @@ impl IntervalTree {
     /// a single `BlastIntervalTree` and calling `Blast_IntervalTreeReset`
     /// between subjects, but also refreshes the recorded bounds since
     /// our callers pass the actual subject length rather than INT4_MAX.
+    /// blast-rs: Reinitialization helper for reusable Rust-owned tree storage.
     pub fn reset_for_query(&mut self, q_max: i32, s_max: i32) {
         self.s_min = 0;
         self.s_max = s_max;
@@ -615,6 +629,7 @@ pub fn s_hsps_have_common_endpoint(
     Some(CommonEndpointHsp::Tree)
 }
 
+/// blast-rs: Interval adapter for translated endpoint lookup semantics.
 fn s_interval_tree_has_hsp_endpoint_for_interval(
     tree: &mut IntervalTree,
     hsp: &Interval2D,
@@ -744,6 +759,7 @@ pub fn s_midpoint_tree_contains_hsp(
     s_midpoint_tree_contains_interval(tree, root_index, &candidate, min_diag_separation)
 }
 
+/// blast-rs: Interval adapter for translated midpoint endpoint lookup semantics.
 fn s_midpoint_tree_has_hsp_endpoint_interval(
     tree: &mut IntervalTree,
     root_index: i32,
@@ -839,6 +855,7 @@ fn s_midpoint_tree_has_hsp_endpoint_interval(
     }
 }
 
+/// blast-rs: Interval adapter for translated interval-tree insertion.
 fn blast_interval_tree_add_interval(
     tree: &mut IntervalTree,
     hsp: Interval2D,
@@ -855,6 +872,7 @@ fn blast_interval_tree_add_interval(
     blast_interval_tree_add_prechecked_interval(tree, hsp, index_subject)
 }
 
+/// blast-rs: Internal split of translated interval-tree insertion after endpoint checks.
 fn blast_interval_tree_add_prechecked_interval(
     tree: &mut IntervalTree,
     hsp: Interval2D,
@@ -999,6 +1017,7 @@ pub fn s_hsp_is_contained(
         )
 }
 
+/// blast-rs: Interval adapter for translated midpoint containment.
 fn s_midpoint_tree_contains_interval(
     tree: &IntervalTree,
     root_index: i32,
@@ -1049,6 +1068,7 @@ fn s_midpoint_tree_contains_interval(
     }
 }
 
+/// blast-rs: Interval adapter for translated interval-tree containment.
 fn blast_interval_tree_contains_interval(
     tree: &IntervalTree,
     hsp: &Interval2D,
@@ -1088,6 +1108,7 @@ fn blast_interval_tree_contains_interval(
     }
 }
 
+/// blast-rs: Interval adapter for translated redundant-HSP counting.
 fn blast_interval_tree_num_redundant_interval(tree: &IntervalTree, hsp: &Interval2D) -> i32 {
     if tree.nodes[0].midptr != 0 && tree.nodes[tree.nodes[0].midptr as usize].hsp.is_none() {
         return num_redundant_all_nodes(tree, hsp);
@@ -1141,6 +1162,7 @@ fn blast_interval_tree_num_redundant_interval(tree: &IntervalTree, hsp: &Interva
     }
 }
 
+/// blast-rs: Conservative fallback scan for translated redundant-HSP counting.
 fn num_redundant_all_nodes(tree: &IntervalTree, hsp: &Interval2D) -> i32 {
     tree.nodes
         .iter()
@@ -1158,6 +1180,7 @@ fn num_redundant_all_nodes(tree: &IntervalTree, hsp: &Interval2D) -> i32 {
         .sum()
 }
 
+/// blast-rs: Interval adapter for translated masklevel HSP filtering.
 fn blast_interval_tree_masks_interval(
     tree: &IntervalTree,
     hsp: &Interval2D,
@@ -1241,6 +1264,7 @@ fn blast_interval_tree_masks_interval(
     }
 }
 
+/// blast-rs: Rust traversal helper for midpoint subtrees during masklevel checks.
 fn masklevel_subtree_any_leaf(
     tree: &IntervalTree,
     root_index: i32,
@@ -1324,18 +1348,22 @@ pub fn s_hsp_query_range_is_masklevel_contained(
     0
 }
 
+/// blast-rs: Adapter from Rust `Hsp` to translated query interval.
 fn hsp_query_interval(hsp: &Hsp) -> Interval {
     Interval::new(hsp.query_offset, hsp.query_end)
 }
 
+/// blast-rs: Adapter from Rust `Hsp` to translated subject interval.
 fn hsp_subject_interval(hsp: &Hsp) -> Interval {
     Interval::new(hsp.subject_offset, hsp.subject_end)
 }
 
+/// blast-rs: Frame-sign predicate matching the translated containment gate.
 fn same_subject_frame_sign(a: i32, b: i32) -> bool {
     (a == 0 && b == 0) || (a > 0 && b > 0) || (a < 0 && b < 0)
 }
 
+/// blast-rs: Diagonal-separation predicate for translated megablast containment.
 fn intervals_are_close_on_diagonal(
     existing_query: Interval,
     existing_subject: Interval,
@@ -1361,6 +1389,7 @@ fn intervals_are_close_on_diagonal(
         ) < min_diag_separation
 }
 
+/// blast-rs: Diagonal distance helper for translated megablast containment.
 fn diagonal_distance(q1: i32, s1: i32, q2: i32, s2: i32) -> i32 {
     ((q1 - s1) - (q2 - s2)).abs()
 }

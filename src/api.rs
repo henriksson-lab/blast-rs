@@ -21,7 +21,7 @@ use crate::encoding::{
 use crate::matrix::AA_SIZE;
 use crate::search::{blastn_gapped_search_nomask, SearchHsp};
 use crate::stat::{
-    compute_length_adjustment_exact, scaled_nucl_alpha_beta, scaled_nucl_gapped_kbp_lookup,
+    blast_get_nucl_alpha_beta, blast_karlin_blk_nucl_gapped_calc, compute_length_adjustment_exact,
     ungapped_kbp_calc, GappedParams, GumbelBlk, KarlinBlk, UngappedKbpContext,
 };
 use crate::traceback::blast_score_blk_nucl_matrix_create;
@@ -208,28 +208,43 @@ fn apply_api_culling_limit(
         .map(|result| vec![true; result.hsps.len()])
         .collect();
 
-    let mut accepted: Vec<(usize, usize)> = Vec::with_capacity(hsp_count);
+    let mut accepted: Vec<(usize, usize, crate::hspfilter_culling::LinkedHsp)> =
+        Vec::with_capacity(hsp_count);
     for (result_idx, hsp_idx, hsp) in ordered {
         let mut candidate = api_hsp_as_culling_node(hsp, results[result_idx].subject_oid);
         candidate.merit = culling_limit as i32;
         let enveloping = accepted
             .iter()
-            .filter(|&&(accepted_result_idx, accepted_hsp_idx)| {
-                let existing = &results[accepted_result_idx].hsps[accepted_hsp_idx];
+            .filter(|(accepted_result_idx, accepted_hsp_idx, dominator)| {
+                let existing = &results[*accepted_result_idx].hsps[*accepted_hsp_idx];
                 if api_culling_context_id(existing, program) != api_culling_context_id(hsp, program)
                 {
                     return false;
                 }
-                let dominator =
-                    api_hsp_as_culling_node(existing, results[accepted_result_idx].subject_oid);
-                crate::hspfilter_culling::s_dominate_test(&dominator, &candidate)
+                crate::hspfilter_culling::s_dominate_test(dominator, &candidate)
             })
             .take(culling_limit)
             .count();
         if enveloping >= culling_limit {
             keep[result_idx][hsp_idx] = false;
         } else {
-            accepted.push((result_idx, hsp_idx));
+            let mut idx = 0usize;
+            while idx < accepted.len() {
+                let (accepted_result_idx, accepted_hsp_idx, accepted_node) = &mut accepted[idx];
+                let existing = &results[*accepted_result_idx].hsps[*accepted_hsp_idx];
+                if api_culling_context_id(existing, program) == api_culling_context_id(hsp, program)
+                    && crate::hspfilter_culling::s_dominate_test(&candidate, accepted_node)
+                {
+                    accepted_node.merit -= 1;
+                    if accepted_node.merit <= 0 {
+                        keep[*accepted_result_idx][*accepted_hsp_idx] = false;
+                        accepted.remove(idx);
+                        continue;
+                    }
+                }
+                idx += 1;
+            }
+            accepted.push((result_idx, hsp_idx, candidate));
         }
     }
 
@@ -3606,9 +3621,22 @@ fn blastn_api_kbps(
         h: 1.286,
         round_down: false,
     });
-    let gapped = scaled_nucl_gapped_kbp_lookup(gap_open, gap_extend, reward, penalty, &ungapped)
-        .map(|(kbp, _)| kbp)
-        .unwrap_or_else(|_| ungapped.clone());
+    let mut gapped = KarlinBlk::default();
+    let mut round_down = false;
+    let mut matrix_error = None;
+    if blast_karlin_blk_nucl_gapped_calc(
+        Some(&mut gapped),
+        gap_open,
+        gap_extend,
+        reward,
+        penalty,
+        Some(&ungapped),
+        Some(&mut round_down),
+        Some(&mut matrix_error),
+    ) != 0
+    {
+        gapped = ungapped.clone();
+    }
     (ungapped, gapped)
 }
 
@@ -3636,7 +3664,8 @@ fn blastn_api_stats(
     } else {
         total_subject_len
     };
-    let (alpha, beta) = crate::stat::scaled_nucl_alpha_beta(
+    let (mut alpha, mut beta) = (0.0, 0.0);
+    let _ = blast_get_nucl_alpha_beta(
         params.match_score,
         params.mismatch,
         params.gap_open,
@@ -3644,6 +3673,8 @@ fn blastn_api_stats(
         ungapped.lambda,
         ungapped.h,
         true,
+        &mut alpha,
+        &mut beta,
     );
     let qlen = query_plus.len() as i32;
     let len_adj = compute_length_adjustment_exact(
@@ -5692,7 +5723,8 @@ impl BlastnSearch {
             self.gap_extend,
         );
 
-        let (alpha, beta) = scaled_nucl_alpha_beta(
+        let (mut alpha, mut beta) = (0.0, 0.0);
+        let _ = blast_get_nucl_alpha_beta(
             self.reward,
             self.penalty,
             self.gap_open,
@@ -5700,6 +5732,8 @@ impl BlastnSearch {
             ungapped_kbp.lambda,
             ungapped_kbp.h,
             true,
+            &mut alpha,
+            &mut beta,
         );
         let db_length = self.subject_raw.len() as i64;
         let (len_adj, _) = compute_length_adjustment_exact(
@@ -7069,6 +7103,33 @@ mod tests {
 
         let oids: Vec<u32> = results.iter().map(|result| result.subject_oid).collect();
         assert_eq!(oids, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_api_culling_limit_accepted_hsp_removes_dominated_earlier_hsp() {
+        let mut results = vec![
+            SearchResult {
+                subject_oid: 0,
+                subject_title: "lower_evalue".to_string(),
+                subject_accession: "lower_evalue".to_string(),
+                subject_len: 200,
+                hsps: vec![test_hsp(20, 1.0e-50, 10, 50)],
+                taxids: Vec::new(),
+            },
+            SearchResult {
+                subject_oid: 1,
+                subject_title: "higher_score".to_string(),
+                subject_accession: "higher_score".to_string(),
+                subject_len: 200,
+                hsps: vec![test_hsp(80, 1.0e-20, 10, 50)],
+                taxids: Vec::new(),
+            },
+        ];
+
+        apply_api_culling_limit(&mut results, 1, crate::program::BLASTP);
+
+        let oids: Vec<u32> = results.iter().map(|result| result.subject_oid).collect();
+        assert_eq!(oids, vec![1]);
     }
 
     #[test]

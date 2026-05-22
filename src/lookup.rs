@@ -1826,6 +1826,9 @@ pub fn s_na_hash_lookup_remove_poly_a_words(lookup: Option<&mut BlastNaHashLooku
     let Some(lookup) = lookup else {
         return -1;
     };
+    if lookup.lut_word_length != 16 || lookup.pv_array_bts != crate::stat::PV_ARRAY_BTS as i32 {
+        return -1;
+    }
     let pv_array_bts = lookup.pv_array_bts.max(0) as usize;
     let word_size = lookup.lut_word_length.max(0);
 
@@ -4547,7 +4550,7 @@ mod tests {
     #[test]
     fn na_hash_lookup_remove_poly_a_words_clears_c_poly_a_bits() {
         let mut lookup = BlastNaHashLookupTable {
-            lut_word_length: 4,
+            lut_word_length: 16,
             pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
             pv: vec![u32::MAX; 1],
             ..Default::default()
@@ -4562,6 +4565,28 @@ mod tests {
             );
         }
         assert_eq!(s_na_hash_lookup_remove_poly_a_words(None), -1);
+
+        let mut unsupported_width = BlastNaHashLookupTable {
+            lut_word_length: 15,
+            pv_array_bts: crate::stat::PV_ARRAY_BTS as i32,
+            pv: vec![u32::MAX; 1],
+            ..Default::default()
+        };
+        assert_eq!(
+            s_na_hash_lookup_remove_poly_a_words(Some(&mut unsupported_width)),
+            -1
+        );
+
+        let mut compressed_pv = BlastNaHashLookupTable {
+            lut_word_length: 16,
+            pv_array_bts: crate::stat::PV_ARRAY_BTS as i32 + 1,
+            pv: vec![u32::MAX; 1],
+            ..Default::default()
+        };
+        assert_eq!(
+            s_na_hash_lookup_remove_poly_a_words(Some(&mut compressed_pv)),
+            -1
+        );
     }
 
     #[test]
