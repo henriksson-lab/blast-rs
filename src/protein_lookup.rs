@@ -1504,6 +1504,16 @@ pub fn protein_scan_with_table(
 /// Two-hit window size (matches NCBI BLAST+ default for protein).
 const TWO_HIT_WINDOW: i32 = 40;
 
+/// Inter-query sentinel byte for the concatenated multi-query buffer (see
+/// `blastp_batch`). Chosen `>= AA_SIZE` so the lookup builder's
+/// `protein_lookup_word_is_valid` skips any word spanning a query boundary, and
+/// so ungapped extension stops here (the value never appears in an encoded
+/// query, where `encode_ncbistdaa_sequence` only emits 0..=27). This mirrors
+/// NCBI's NULLB inter-context sentinel in the concatenated query (NCBI uses 0;
+/// 255 is used here to guarantee no interference with the single-query path,
+/// whose extension boundary check would otherwise need a never-in-query value).
+pub(crate) const PROTEIN_CONCAT_SENTINEL: u8 = 255;
+
 /// Unsupported branches for the local `BlastAaWordFinder` representation.
 ///
 /// Retained for API stability. The `WindowSize` variant is no longer produced:
@@ -1564,6 +1574,13 @@ fn s_blast_aa_extend_left(
     loop {
         unsafe {
             let q = *query.as_ptr().add(qi);
+            // Concatenated multi-query buffers place a sentinel between queries;
+            // stop extension at the query boundary (NCBI stops at the NULLB
+            // inter-context sentinel). Never triggers for single-query scans,
+            // whose encoded query contains no sentinel byte.
+            if q == PROTEIN_CONCAT_SENTINEL {
+                break;
+            }
             let s = *subject.as_ptr().add(si);
             score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
             if q == s {
@@ -1626,6 +1643,13 @@ fn s_blast_aa_extend_right(
     while qi < qlen && si < slen {
         unsafe {
             let q = *query.as_ptr().add(qi);
+            // Concatenated multi-query buffers place a sentinel between queries;
+            // stop extension at the query boundary (NCBI stops at the NULLB
+            // inter-context sentinel). Never triggers for single-query scans,
+            // whose encoded query contains no sentinel byte.
+            if q == PROTEIN_CONCAT_SENTINEL {
+                break;
+            }
             let s = *subject.as_ptr().add(si);
             score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
             if q == s {
@@ -1768,6 +1792,13 @@ fn s_blast_aa_extend_left_with_score(
     loop {
         unsafe {
             let q = *query.as_ptr().add(qi);
+            // Concatenated multi-query buffers place a sentinel between queries;
+            // stop extension at the query boundary (NCBI stops at the NULLB
+            // inter-context sentinel). Never triggers for single-query scans,
+            // whose encoded query contains no sentinel byte.
+            if q == PROTEIN_CONCAT_SENTINEL {
+                break;
+            }
             let s = *subject.as_ptr().add(si);
             score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
             if q == s {

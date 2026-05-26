@@ -4109,13 +4109,31 @@ fn run_blastp_with_output_labels(
     let mut psiblast_converged = false;
     let mut subject_deflines = std::collections::HashMap::new();
     let mut xml_hit_metadata = std::collections::HashMap::new();
-    for qrec in &queries {
+    // Plain (non-PSI) blastp scans the database ONCE over all queries
+    // concatenated into a single lookup table, instead of re-scanning the whole
+    // DB per query. PSI-BLAST keeps the per-query iterative path.
+    let batched_blastp: Option<Vec<Vec<blast_rs::api::SearchResult>>> =
+        if !(psiblast_pairwise && should_run_iterative_psiblast(args)) {
+            let qseqs: Vec<&[u8]> = queries.iter().map(|q| q.sequence.as_slice()).collect();
+            Some(blast_rs::api::blastp_batch(&db, &qseqs, &params))
+        } else {
+            None
+        };
+    for (qi, qrec) in queries.iter().enumerate() {
         let query_ids = psiblast_restart_query_ids
             .as_ref()
             .cloned()
             .unwrap_or_else(|| fasta_record_ids(qrec, args.parse_deflines));
-        let (results, pssm) =
-            protein_search_results_with_pssm(&db, &qrec.sequence, &params, args, psiblast_pairwise);
+        let (results, pssm) = match &batched_blastp {
+            Some(b) => (b[qi].clone(), None),
+            None => protein_search_results_with_pssm(
+                &db,
+                &qrec.sequence,
+                &params,
+                args,
+                psiblast_pairwise,
+            ),
+        };
         if let Some(artifacts) = pssm.as_ref() {
             write_psiblast_pssm_artifacts(args, &qrec.sequence, artifacts)?;
             psiblast_converged |= artifacts.converged;
