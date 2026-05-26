@@ -68,6 +68,7 @@ pub use api::{
     blastp,
     blastp_batch,
     blastx,
+    blastx_batch,
     blastx_search,
     // PSSM functions
     build_pssm,

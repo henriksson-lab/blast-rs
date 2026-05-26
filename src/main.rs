@@ -5680,8 +5680,14 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if db.db_type != DbType::Protein {
             return Err("blastx requires a protein database".into());
         }
-        for qrec in &queries {
-            let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
+        // Scan the database once over all queries' frames concatenated, instead
+        // of re-scanning per query (NCBI's concatenated-query engine).
+        let mut batched_blastx = {
+            let qseqs: Vec<&[u8]> = queries.iter().map(|q| q.sequence.as_slice()).collect();
+            blast_rs::api::blastx_batch(&db, &qseqs, &params)
+        };
+        for (qi, qrec) in queries.iter().enumerate() {
+            let results = std::mem::take(&mut batched_blastx[qi]);
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
