@@ -482,12 +482,426 @@ impl<'a> PreparedBlastnQuery<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Concatenated multi-query megablast scan.
+//
+// NCBI BLAST scans each database subject ONCE over a single concatenated query
+// buffer (all contexts back-to-back, sentinel separated), then maps each hit's
+// concatenated query offset back to a query via the context table
+// (`blast_engine.c` / `blast_query_info.c`). The per-query Rust path rescans
+// every subject once per query, which is ~Nx slower for N queries.
+//
+// The functions below build one concatenated lookup table per strand and scan a
+// packed subject ONCE, collecting verified word hits attributed to their source
+// query. Each query's hits are then replayed through the *unmodified* per-query
+// ungapped + gapped pipeline (with that query's own stats / diagonal arrays), so
+// the output is byte-identical to the per-query path.
+//
+// The full configured word is always re-verified (`find_exact_word_hit_packed`)
+// during the scan, so the concatenated lookup may legitimately pick a different
+// lookup-word width than a single query would: the set of verified word hits is
+// invariant to that choice (only the lookup-table index width changes).
+// ---------------------------------------------------------------------------
+
+/// A verified word hit collected by the concatenated scan, in LOCAL (per-query)
+/// query coordinates. Collected in subject-scan order, matching the order a
+/// per-query scan would visit them.
+#[derive(Clone, Copy)]
+pub struct ConcatCollectedHit {
+    hit: ExactWordHit,
+}
+
+/// Concatenated per-strand query buffers and offset table for a batch of blastn
+/// queries. Both strand buffers share the same per-query offset layout.
+pub struct ConcatenatedBlastnQuery {
+    /// All plus-strand query buffers, sentinel separated.
+    plus_buf: Vec<u8>,
+    /// All minus-strand query buffers, sentinel separated.
+    minus_buf: Vec<u8>,
+    /// Byte offset of each query's strand buffer within `plus_buf`/`minus_buf`.
+    query_offsets: Vec<usize>,
+    /// Whether each query contributes a plus strand (non-empty plus buffer).
+    has_plus: Vec<bool>,
+    /// Whether each query contributes a minus strand.
+    has_minus: Vec<bool>,
+}
+
+const CONCAT_QUERY_SENTINEL: u8 = 15;
+
+impl ConcatenatedBlastnQuery {
+    /// Build concatenated plus/minus buffers from per-query strand buffers.
+    /// `plus[i]` / `minus[i]` are the BLASTNA-encoded (masked) strand buffers for
+    /// query `i`; an empty buffer means that strand is not searched.
+    pub fn new(plus: &[&[u8]], minus: &[&[u8]]) -> Self {
+        assert_eq!(plus.len(), minus.len());
+        let n = plus.len();
+        let mut plus_buf = Vec::new();
+        let mut minus_buf = Vec::new();
+        let mut query_offsets = Vec::with_capacity(n);
+        let mut has_plus = Vec::with_capacity(n);
+        let mut has_minus = Vec::with_capacity(n);
+        for i in 0..n {
+            // Both strands share the same offset layout. Use the maximum strand
+            // length for the slot so coordinates line up across strands.
+            let offset = plus_buf.len();
+            query_offsets.push(offset);
+            has_plus.push(!plus[i].is_empty());
+            has_minus.push(!minus[i].is_empty());
+            let slot_len = plus[i].len().max(minus[i].len());
+            // Plus buffer: real plus bases, then sentinel padding up to slot_len.
+            plus_buf.extend_from_slice(plus[i]);
+            for _ in plus[i].len()..slot_len {
+                plus_buf.push(CONCAT_QUERY_SENTINEL);
+            }
+            plus_buf.push(CONCAT_QUERY_SENTINEL);
+            // Minus buffer mirrors the layout.
+            minus_buf.extend_from_slice(minus[i]);
+            for _ in minus[i].len()..slot_len {
+                minus_buf.push(CONCAT_QUERY_SENTINEL);
+            }
+            minus_buf.push(CONCAT_QUERY_SENTINEL);
+        }
+        ConcatenatedBlastnQuery {
+            plus_buf,
+            minus_buf,
+            query_offsets,
+            has_plus,
+            has_minus,
+        }
+    }
+
+    pub fn num_queries(&self) -> usize {
+        self.query_offsets.len()
+    }
+
+    /// Resolve a concatenated plus/minus-buffer offset to `(query_idx, local)`.
+    #[inline]
+    fn resolve(&self, concat_off: usize) -> (usize, usize) {
+        // query_offsets is ascending; find the last offset <= concat_off.
+        let qi = match self.query_offsets.binary_search(&concat_off) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        (qi, concat_off - self.query_offsets[qi])
+    }
+}
+
+/// One concatenated lookup table per strand, built once and reused across all
+/// subjects.
+pub struct PreparedConcatenatedBlastn<'a> {
+    word_size: usize,
+    plus_lookup: Option<NaLookup<'a>>,
+    minus_lookup: Option<NaLookup<'a>>,
+}
+
+impl<'a> PreparedConcatenatedBlastn<'a> {
+    /// Build concatenated megablast lookup tables over the concatenated buffers.
+    pub fn new_megablast(concat: &'a ConcatenatedBlastnQuery, word_size: usize) -> Self {
+        let plus_lookup = if concat.has_plus.iter().any(|&b| b) {
+            NaLookup::new_contiguous_mb(0, &concat.plus_buf, word_size)
+        } else {
+            None
+        };
+        let minus_lookup = if concat.has_minus.iter().any(|&b| b) {
+            NaLookup::new_contiguous_mb(1, &concat.minus_buf, word_size)
+        } else {
+            None
+        };
+        PreparedConcatenatedBlastn {
+            word_size,
+            plus_lookup,
+            minus_lookup,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.plus_lookup.is_none() && self.minus_lookup.is_none()
+    }
+
+    fn lookup_for(&self, context: i32) -> Option<&NaLookup<'a>> {
+        if context == 0 {
+            self.plus_lookup.as_ref()
+        } else {
+            self.minus_lookup.as_ref()
+        }
+    }
+}
+
+impl<'a> NaLookup<'a> {
+    /// Build a contiguous-megablast lookup table, always using the megablast
+    /// word-width policy (32-bit offsets), suitable for large concatenated query
+    /// buffers whose offsets exceed the small-table 16-bit limit.
+    fn new_contiguous_mb(context: i32, query: &'a [u8], word_size: usize) -> Option<Self> {
+        let stats = lookup_segment_stats(query, word_size);
+        Self::new(
+            context,
+            query,
+            word_size,
+            stats.approx_table_entries,
+            choose_contiguous_mb_lut_word,
+        )
+    }
+}
+
+/// Scan a packed subject ONCE for the given strand lookup, collecting all
+/// verified word hits per query (in local coordinates, subject-scan order).
+///
+/// Mirrors the candidate-generation half of `packed_scan_step1` /
+/// `blast_na_extend_packed_generic`: every PV-hit subject position walks the
+/// `next` chain and the full configured word is re-verified. The per-diagonal
+/// `last_hit` short-circuit and the X-drop extension are intentionally NOT done
+/// here; they are reproduced per query during replay.
+#[allow(clippy::too_many_arguments)]
+fn concat_scan_collect_strand(
+    lookup: &NaLookup<'_>,
+    concat: &ConcatenatedBlastnQuery,
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: usize,
+    per_query_hits: &mut [Vec<ConcatCollectedHit>],
+) {
+    if subject_len < word_size {
+        return;
+    }
+    let end = packed_lookup_scan_end(subject_len, lookup.lut_word);
+    let lut_word = lookup.lut_word;
+    let lut_mask = lookup.lut_mask;
+    let scan_step = lookup.scan_step;
+    let scan_start = lookup.scan_start;
+    let query = lookup.query;
+    let lut = &lookup.lut;
+    let next = &lookup.next;
+    let pv = &lookup.pv;
+
+    let mut handle_position = |s_pos: usize, h: usize| {
+        if pv[h >> 6] & (1u64 << (h & 63)) == 0 {
+            return;
+        }
+        let mut q_pos = lut[h];
+        while q_pos >= 0 {
+            let qp = q_pos as usize;
+            if let Some(hit) = find_exact_word_hit_packed(
+                query,
+                subject_packed,
+                subject_len,
+                word_size,
+                lut_word,
+                qp,
+                s_pos,
+            ) {
+                // Resolve the verified hit's query-start to (query_idx, local).
+                let (qi, local_q_start) = concat.resolve(hit.query_start);
+                let local_hit = ExactWordHit {
+                    query_start: local_q_start,
+                    subject_start: hit.subject_start,
+                    subject_match_end: hit.subject_match_end,
+                };
+                per_query_hits[qi].push(ConcatCollectedHit { hit: local_hit });
+            }
+            q_pos = next[qp];
+        }
+    };
+
+    if scan_step != 1 || scan_start != 0 {
+        let mut s_pos = scan_start;
+        while s_pos < end {
+            let h = packed_hash_at(subject_packed, s_pos, lut_word, lut_mask);
+            handle_position(s_pos, h);
+            s_pos += scan_step;
+        }
+    } else {
+        let mut hash: u32 = 0;
+        for i in 0..(lut_word - 1).min(7) {
+            hash = (hash << 2) | packed_base_at(subject_packed, i) as u32;
+        }
+        let mut s_pos = 0;
+        while s_pos < end {
+            hash = ((hash << 2)
+                | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32)
+                & lut_mask;
+            handle_position(s_pos, hash as usize);
+            s_pos += 1;
+        }
+    }
+}
+
+/// Per-query statistics needed to replay a single query's collected hits through
+/// the ungapped + gapped pipeline. Mirrors the scalar arguments the per-query
+/// path threads through `blastn_gapped_search_packed_prepared_with_xdrops`.
+#[derive(Clone)]
+pub struct ConcatQueryStats {
+    pub kbp: KarlinBlk,
+    pub search_space: f64,
+    pub evalue_threshold: f64,
+    pub ungapped_x_dropoff: i32,
+    pub gapped_x_dropoff: i32,
+    pub gapped_x_dropoff_final: i32,
+}
+
+/// Replay a single query's collected verified hits through the ungapped diagonal
+/// extension (byte-identical to the per-query preliminary scan), producing
+/// ungapped HSPs in LOCAL query coordinates.
+#[allow(clippy::too_many_arguments)]
+fn concat_replay_ungapped_for_query(
+    prepared: &PreparedBlastnQuery<'_>,
+    plus_hits: &[ConcatCollectedHit],
+    minus_hits: &[ConcatCollectedHit],
+    subject_packed: &[u8],
+    subject_len: usize,
+    reward: i32,
+    penalty: i32,
+    stats: &ConcatQueryStats,
+) -> Vec<SearchHsp> {
+    let nucl_score_table = InitialWordParameters::build_nucl_score_table(reward, penalty);
+    // The preliminary ungapped scan relaxes the evalue threshold by 1000x
+    // (see `collect_packed_prepared_ungapped`).
+    let prelim_evalue = stats.evalue_threshold * 1000.0;
+    let reduced_nucl_cutoff_score =
+        ((stats.kbp.evalue_to_raw(prelim_evalue, stats.search_space) as f64) * 0.8) as i32;
+
+    let mut hsps: Vec<SearchHsp> = Vec::new();
+    for lookup in prepared.lookups.iter() {
+        let (hits, ctx_query) = if lookup.context == 0 {
+            (plus_hits, lookup.query)
+        } else {
+            (minus_hits, lookup.query)
+        };
+        if hits.is_empty() {
+            continue;
+        }
+        let mut last_hit = vec![0i32; lookup.diag_array_len];
+        let diag_mask = lookup.diag_mask;
+        for collected in hits {
+            diag_initial_hit_core_packed(
+                ctx_query,
+                subject_packed,
+                subject_len,
+                prepared.word_size,
+                &mut last_hit,
+                diag_mask,
+                reward,
+                penalty,
+                stats.ungapped_x_dropoff,
+                &stats.kbp,
+                stats.search_space,
+                prelim_evalue,
+                lookup.context,
+                &nucl_score_table,
+                reduced_nucl_cutoff_score,
+                collected.hit,
+                &mut hsps,
+            );
+        }
+    }
+    hsps.sort_by(score_compare_search_hsps);
+    dedup_hsps_with_min_diag_separation(
+        &mut hsps,
+        min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
+    );
+    hsps
+}
+
+/// Full single-pass concatenated megablast gapped search over one subject.
+///
+/// Scans the subject ONCE per strand, collecting verified word hits attributed
+/// to each query, then replays each query's hits through the unmodified
+/// per-query ungapped + gapped pipeline. Returns `(query_idx, hsps)` for queries
+/// with at least one gapped HSP.
+#[allow(clippy::too_many_arguments)]
+pub fn blastn_gapped_search_concat_megablast(
+    concat: &ConcatenatedBlastnQuery,
+    concat_lookup: &PreparedConcatenatedBlastn<'_>,
+    per_query_prepared: &[PreparedBlastnQuery<'_>],
+    per_query_plus_nomask: &[&[u8]],
+    per_query_minus_nomask: &[&[u8]],
+    per_query_stats: &[ConcatQueryStats],
+    subject_packed: &[u8],
+    subject_len: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+) -> Vec<(usize, Vec<SearchHsp>)> {
+    let n = concat.num_queries();
+    let word_size = concat_lookup.word_size;
+    let mut plus_hits: Vec<Vec<ConcatCollectedHit>> = vec![Vec::new(); n];
+    let mut minus_hits: Vec<Vec<ConcatCollectedHit>> = vec![Vec::new(); n];
+
+    if subject_len >= word_size {
+        if let Some(lookup) = concat_lookup.lookup_for(0) {
+            concat_scan_collect_strand(
+                lookup,
+                concat,
+                subject_packed,
+                subject_len,
+                word_size,
+                &mut plus_hits,
+            );
+        }
+        if let Some(lookup) = concat_lookup.lookup_for(1) {
+            concat_scan_collect_strand(
+                lookup,
+                concat,
+                subject_packed,
+                subject_len,
+                word_size,
+                &mut minus_hits,
+            );
+        }
+    }
+
+    let mut results: Vec<(usize, Vec<SearchHsp>)> = Vec::new();
+    for qi in 0..n {
+        if plus_hits[qi].is_empty() && minus_hits[qi].is_empty() {
+            continue;
+        }
+        let prepared = &per_query_prepared[qi];
+        let stats = &per_query_stats[qi];
+        let ungapped = concat_replay_ungapped_for_query(
+            prepared,
+            &plus_hits[qi],
+            &minus_hits[qi],
+            subject_packed,
+            subject_len,
+            reward,
+            penalty,
+            stats,
+        );
+        if ungapped.is_empty() {
+            continue;
+        }
+        let hsps = blastn_full_search_packed_prepared_with_split_xdrop(
+            prepared,
+            per_query_plus_nomask[qi],
+            per_query_minus_nomask[qi],
+            subject_packed,
+            subject_len,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            stats.gapped_x_dropoff,
+            stats.gapped_x_dropoff_final.max(stats.gapped_x_dropoff),
+            &stats.kbp,
+            stats.search_space,
+            stats.evalue_threshold,
+            ungapped,
+        );
+        if !hsps.is_empty() {
+            results.push((qi, hsps));
+        }
+    }
+    results
+}
+
 impl<'a> NaLookup<'a> {
     fn new_contiguous(context: i32, query: &'a [u8], word_size: usize) -> Option<Self> {
         let stats = lookup_segment_stats(query, word_size);
         let approx_entries = stats.approx_table_entries;
         let max_q_off = stats.max_q_off;
-        let choose_lut_word = if should_use_small_na_lookup(word_size, approx_entries, max_q_off) {
+        let choose_lut_word = if std::env::var_os("BLAST_RS_FORCE_MB").is_some() {
+            choose_contiguous_mb_lut_word
+        } else if should_use_small_na_lookup(word_size, approx_entries, max_q_off) {
             choose_small_na_lut_word
         } else {
             choose_contiguous_mb_lut_word
