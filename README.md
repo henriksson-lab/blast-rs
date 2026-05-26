@@ -28,26 +28,6 @@ But:
 * **Check the original Github pages for information about the package**. This README is kept sparse on purpose. It is not meant to be the primary source of information
 
 
-
-## Features
-
-- **Pure Rust** -- zero C/C++ FFI calls, no unsafe dependencies
-- **Byte-identical output** to NCBI BLAST+ for blastn searches
-- **Low startup overhead** for CLI use, with a library API for avoiding repeated process and database setup
-- **All major programs**: blastn, blastp, blastx, tblastn, tblastx, psiblast
-- **High-level library API**: `blastp()`, `blastn_search()`, `blastx()`, `tblastn()`, `tblastx()` with builder-pattern `SearchParams`
-- **Database creation**: `BlastDbBuilder` for creating protein and nucleotide databases programmatically
-- **Subcommand CLI**: `blast-cli blastn`, `blast-cli blastp`, etc.
-- **Task presets**: `--task blastn-short` for primer search with automatic parameter tuning
-- Protein search with BLOSUM62 scoring and neighborhood-word lookup table (matching NCBI's algorithm)
-- PSI-BLAST with Henikoff position-based weighting and proper PSSM computation
-- Six-frame translation with correct nucleotide coordinate mapping
-- Reads standard BLAST database files (v4/v5 `.nin/.nsq/.nhr`) with taxonomy support (`.nto`, `taxdb.bti`/`taxdb.btd`)
-- **Full tabular field support**: `qseq`, `sseq`, `qframe`, `sframe`, `sstrand`, `score`, `staxid`, `ssciname`, `scomname`, `sskingdom`, `sblastname`, BTOP, commented tabular, CSV, and all standard columns
-- FASTA-vs-FASTA search (`--subject` mode) without pre-built database
-- Multi-threaded search via rayon
-- **Broad passing test coverage**: latest local verification covers 552 library unit tests, 39 CLI unit tests, 565 integration tests, 4 stress tests, and 1 doc test, plus ignored large-fixture parity tests
-
 ## Installation
 
 ```bash
@@ -438,7 +418,11 @@ This is a faithful port of the NCBI BLAST+ C engine algorithms:
 ## Compatibility
 
 - Reads BLAST databases created by NCBI `makeblastdb` (v4 and v5 format), including taxonomy (`.nto` taxid files, `taxdb.bti`/`taxdb.btd` name database)
-- Output matches NCBI BLAST+ 2.17.0 byte-for-byte for blastn tabular format (`-outfmt 6`)
+- Output matches NCBI BLAST+ 2.17.0 byte-for-byte for blastn tabular format
+  (`-outfmt 6`) on the curated fixture set and on simple queries. On large/real
+  queries, e-values, bit scores, and HSP coordinates match exactly, but gap
+  *placement* can differ on a small fraction of HSPs (score-equivalent
+  co-optimal alignments — see "Known limitations")
 - Supports scoring parameters: reward/penalty 1/-1 through 5/-4, gap costs 0/0 through 12/8
 - Protein programs (blastp/blastx/tblastn/tblastx) use BLOSUM62 with lookup-table seeding and gapped X-dropoff DP extension; CLI output includes tabular/CSV plus parity-tested pairwise, XML, and commented-tabular subsets, with unsupported formats rejected explicitly.
 
@@ -459,6 +443,41 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
 - **Protein k-mer search** -- `proteinkmer/` for fast protein pre-filtering
 - **NCBI application framework** -- `corelib/` (logging, config, threading, diagnostics)
 - **blast_formatter** -- standalone tool for reformatting archived BLAST results
+
+### Search-feature gaps
+
+- **Out-of-frame (OOF) translated search** -- intentionally not exposed via the
+  CLI, matching NCBI BLAST+ 2.17.0, where the `-frame_shift_penalty` argument is
+  commented out in both `blastx_args.cpp` and `tblastn_args.cpp` (the installed
+  `blastx`/`tblastn` accept no `-ooframe`/`-frame_shift_penalty` option). The
+  out-of-frame gapped-alignment DP kernels and the query-/subject-side
+  mixed-frame translation primitives are ported and unit-tested at the
+  library/API level, but — like NCBI 2.17.0 — there is no CLI surface and no
+  `SearchParams.is_ooframe` wiring. Because the reference binary rejects the
+  flag, CLI parity fixtures cannot be captured, so end-to-end OOF search remains
+  an API-only capability rather than a CLI feature.
+
+### Known limitations
+
+- **blastn gap placement on co-optimal alignments** -- on large/real queries, a
+  small fraction of HSPs (≈3/46 on a 2000 bp C. elegans query) report a
+  different gap layout than NCBI 2.17.0. Every reportable metric is identical —
+  pident, length, mismatches, query/subject coordinates, raw score, bit score,
+  e-value — only the `gapopen` count and the gap positions within the alignment
+  differ. These are score-equivalent co-optimal alignments: blast-rs runs greedy
+  traceback from every word-hit seed and picks a survivor, whereas NCBI gates
+  seeds through an interval tree against already-aligned regions so exactly one
+  canonical seed is tracebacked per HSP (`blast_gapalign.c:3993`/`:4176`).
+  Matching NCBI's gap choice requires porting that in-loop seed gate (replacing
+  the post-hoc traceback dedup in `src/search.rs`) and rebaselining the gapped
+  parity fixtures — a dedicated effort, not yet done.
+- **Multi-query throughput** -- blast-rs re-scans the database once per query, so
+  wall time grows roughly linearly with the number of queries. NCBI concatenates
+  all queries into one lookup table and scans the database once, staying nearly
+  flat. For a single query blast-rs is competitive (~1.3× NCBI); for many
+  queries it is substantially slower (e.g. ~20 s vs ~1 s for 60 × 2000 bp vs the
+  C. elegans genome). Peak RSS is comparable. Closing this requires a
+  concatenated-query lookup table and single-scan engine (planned).
 
 ### Struct-field gaps relative to NCBI
 

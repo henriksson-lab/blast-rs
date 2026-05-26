@@ -6768,6 +6768,22 @@ mod tests {
     }
 
     #[test]
+    fn blast_karlin_lh_to_k_named_port_keeps_c_special_case() {
+        let mut sfp = SfDist::new(-1, 1);
+        sfp.obs_min = -1;
+        sfp.obs_max = 1;
+        *sfp.p_mut(-1) = 0.75;
+        *sfp.p_mut(1) = 0.25;
+        sfp.score_avg = -0.5;
+
+        let k = blast_karlin_lh_to_k(&sfp, 1.0, 1.0);
+        assert!((k - (1.0 / 3.0)).abs() < 1e-15);
+        assert_eq!(blast_karlin_lh_to_k(&sfp, 0.0, 1.0), -1.0);
+        sfp.score_avg = 0.0;
+        assert_eq!(blast_karlin_lh_to_k(&sfp, 1.0, 1.0), -1.0);
+    }
+
+    #[test]
     fn translated_score_blk_kbp_ungapped_calc_fills_context_arrays() {
         let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFGHIKLMNPQRSTVWY");
         let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);

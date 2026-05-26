@@ -26,14 +26,15 @@ pub struct AliasFile {
     pub last_oid: Option<u32>,
     pub oidlist: Option<PathBuf>,
     pub raw_oidlist: Option<String>,
-    /// NCBI `MEMB_BIT` — which membership bit in the `.nin` v5 header to
-    /// consult when filtering OIDs. Parsed for forward compatibility; the
-    /// actual filtering is not yet applied at the DB-reader level.
+    /// NCBI `MEMB_BIT` — which membership bit to consult when filtering
+    /// deflines by their ASN.1 `memberships` field. This is not an OID-list
+    /// filter; applying it faithfully requires per-defline header rewriting.
+    /// Parsed for forward compatibility, but not yet applied by the DB reader.
     pub memb_bit: Option<u32>,
     /// NCBI `GILIST` — path to a text or binary GI list file.
     pub gilist: Option<PathBuf>,
     pub raw_gilist: Option<String>,
-    /// NCBI `TILIST` — path to a Trace ID list file. Parsed only.
+    /// NCBI `TILIST` — path to a Trace ID list file.
     pub tilist: Option<PathBuf>,
     pub raw_tilist: Option<String>,
     /// NCBI `SEQIDLIST` — path to a text seqid list file.
@@ -53,14 +54,8 @@ impl AliasFile {
         let mut warnings = Vec::new();
         if let Some(n) = self.memb_bit {
             warnings.push(format!(
-                "Warning: alias MEMB_BIT={} is parsed but membership-bit filtering is not yet applied",
+                "Warning: alias MEMB_BIT={} is parsed but defline membership filtering is not yet applied",
                 n
-            ));
-        }
-        if let Some(p) = &self.raw_tilist {
-            warnings.push(format!(
-                "Warning: alias TILIST {} is parsed but trace-id filtering is not yet applied",
-                p
             ));
         }
         warnings
@@ -230,12 +225,12 @@ mod tests {
         assert_eq!(alias.taxidlist, Some(dir.join("taxids.txt")));
 
         // `unsupported_filter_warnings` should surface populated filters that
-        // are still parsed-only. GILIST, SEQIDLIST, and TAXIDLIST are applied
-        // by the DB reader.
+        // are still parsed-only. GILIST, TILIST, SEQIDLIST, and TAXIDLIST are
+        // applied by the DB reader.
         let warnings = alias.unsupported_filter_warnings();
-        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("MEMB_BIT=256"));
-        assert!(warnings[1].contains("TILIST traces.til"));
+        assert!(warnings[0].contains("defline membership filtering"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

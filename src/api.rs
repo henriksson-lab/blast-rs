@@ -233,6 +233,7 @@ fn apply_api_culling_limit(
                 let (accepted_result_idx, accepted_hsp_idx, accepted_node) = &mut accepted[idx];
                 let existing = &results[*accepted_result_idx].hsps[*accepted_hsp_idx];
                 if api_culling_context_id(existing, program) == api_culling_context_id(hsp, program)
+                    && api_culling_candidate_can_displace_accepted(hsp, existing)
                     && crate::hspfilter_culling::s_dominate_test(&candidate, accepted_node)
                 {
                     accepted_node.merit -= 1;
@@ -257,6 +258,14 @@ fn apply_api_culling_limit(
         });
     }
     results.retain(|result| !result.hsps.is_empty());
+}
+
+/// blast-rs: Public API culling tie helper; not a direct NCBI C port.
+fn api_culling_candidate_can_displace_accepted(candidate: &Hsp, accepted: &Hsp) -> bool {
+    candidate.score > accepted.score
+        || (candidate.score == accepted.score
+            && crate::hspstream::evalue_comp(candidate.evalue, accepted.evalue)
+                == std::cmp::Ordering::Less)
 }
 
 /// blast-rs: Public API culling helper; not a direct NCBI C port.
@@ -815,7 +824,7 @@ fn apply_tblastn_linked_sum_stats(
     query_info: &crate::queryinfo::QueryInfo,
     prot_kbp: &KarlinBlk,
     gumbel_blk: Option<&crate::stat::GumbelBlk>,
-    translated_db_length: i64,
+    statistical_db_length: i64,
     recompute_evalues_before_linking: bool,
     _gap_open: i32,
     _gap_extend: i32,
@@ -837,7 +846,7 @@ fn apply_tblastn_linked_sum_stats(
         kbp: vec![prot_kbp.clone()],
         kbp_gap: vec![prot_kbp.clone()],
         gbp: gumbel_blk.cloned(),
-        link_gbp_db_length: Some(translated_db_length.max(1)),
+        link_gbp_db_length: Some(statistical_db_length.max(1)),
         recompute_evalues_before_uneven_linking: recompute_evalues_before_linking,
     };
     let link_params = LinkHSPParameters {
@@ -1626,6 +1635,7 @@ fn protein_alignment_hits(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     lookup_table: &crate::protein_lookup::ProteinLookupTable,
     x_drop_ungapped: i32,
+    window: i32,
     gap_open: i32,
     gap_extend: i32,
     x_drop_gapped: i32,
@@ -1640,6 +1650,7 @@ fn protein_alignment_hits(
         matrix,
         lookup_table,
         x_drop_ungapped,
+        window,
         &mut scratch.diag_buf,
     );
     // Caller passes the desired seed cutoff directly. Keep the program-specific
@@ -1670,18 +1681,35 @@ fn protein_alignment_hits_ungapped_only(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     lookup_table: &crate::protein_lookup::ProteinLookupTable,
     x_drop_ungapped: i32,
+    window: i32,
     seed_cutoff: i32,
     scratch: &mut ProteinScratch,
 ) -> Vec<crate::protein_lookup::ProteinHit> {
     scratch.diag_buf.clear();
-    let ungapped_hits = crate::protein_lookup::protein_scan_with_table_reuse(
+    let mut ungapped_hits = crate::protein_lookup::protein_scan_with_table_reuse(
         query_aa,
         subj_aa,
         matrix,
         lookup_table,
         x_drop_ungapped,
+        window,
         &mut scratch.diag_buf,
     );
+    ungapped_hits
+        .iter_mut()
+        .filter(|uh| uh.score >= seed_cutoff)
+        .for_each(|uh| {
+            let qseq = query_aa[uh.query_start..uh.query_end]
+                .iter()
+                .map(|&aa| ncbistdaa_to_aminoacid_char(aa))
+                .collect();
+            let sseq = subj_aa[uh.subject_start..uh.subject_end]
+                .iter()
+                .map(|&aa| ncbistdaa_to_aminoacid_char(aa))
+                .collect();
+            uh.qseq = Some(qseq);
+            uh.sseq = Some(sseq);
+        });
     ungapped_hits
         .into_iter()
         .filter(|uh| uh.score >= seed_cutoff)
@@ -2369,6 +2397,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     let evalue_threshold = params.evalue_threshold;
     let gap_open = params.gap_open;
     let gap_extend = params.gap_extend;
+    let two_hit_window = params.two_hit_window as i32;
 
     // Process a single subject OID — extracted so it can be called
     // either sequentially or in parallel without per-call pool overhead.
@@ -2394,6 +2423,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             &matrix,
             &lookup_table,
             x_drop_ungapped,
+            two_hit_window,
             &mut scratch.diag_buf,
         );
         if ungapped_hits.is_empty() {
@@ -3845,6 +3875,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                     &matrix,
                     &lookup_table,
                     x_drop_ungapped,
+                    params.two_hit_window as i32,
                     1,
                     &mut scratch,
                 )
@@ -3855,6 +3886,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                     &matrix,
                     &lookup_table,
                     x_drop_ungapped,
+                    params.two_hit_window as i32,
                     params.gap_open,
                     params.gap_extend,
                     x_drop_gapped,
@@ -4222,23 +4254,36 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 min_subject_length,
                 search_space,
             );
-            // tblastn `-ungapped` mode would emit ungapped HSPs here; the
-            // current attempt has the scan returning 0 hits for reasons
-            // not yet diagnosed (lookup_table seems fine in default mode).
-            // Documented in memory as a remaining gap.
-            let phits = protein_alignment_hits(
-                &query_aa,
-                prot,
-                &matrix,
-                &lookup_table,
-                x_drop_ungapped,
-                params.gap_open,
-                params.gap_extend,
-                x_drop_gapped,
-                x_drop_final,
-                tblastn_seed_cutoff,
-                scratch,
-            );
+            let phits = if params.ungapped {
+                // NCBI `-ungapped` stops after the protein word-finder's
+                // ungapped extensions. Keep all positive HSPs here and let
+                // the final e-value threshold decide reporting.
+                protein_alignment_hits_ungapped_only(
+                    &query_aa,
+                    prot,
+                    &matrix,
+                    &lookup_table,
+                    x_drop_ungapped,
+                    params.two_hit_window as i32,
+                    1,
+                    scratch,
+                )
+            } else {
+                protein_alignment_hits(
+                    &query_aa,
+                    prot,
+                    &matrix,
+                    &lookup_table,
+                    x_drop_ungapped,
+                    params.two_hit_window as i32,
+                    params.gap_open,
+                    params.gap_extend,
+                    x_drop_gapped,
+                    x_drop_final,
+                    tblastn_seed_cutoff,
+                    scratch,
+                )
+            };
             if phits.is_empty() {
                 continue;
             }
@@ -4285,19 +4330,23 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 search_space,
             );
             let (final_phits, use_adj_matrix, lambda_ratio_opt, comp_adjust_method_id) =
-                apply_compositional_adjustment_per_subject(
-                    &query_aa,
-                    prot,
-                    &matrix,
-                    phits,
-                    params.gap_open,
-                    params.gap_extend,
-                    x_drop_final,
-                    params.comp_adjust,
-                    cutoff_s_tblastn,
-                    prot_kbp.lambda,
-                    scratch,
-                );
+                if params.ungapped {
+                    (phits, false, None, 0)
+                } else {
+                    apply_compositional_adjustment_per_subject(
+                        &query_aa,
+                        prot,
+                        &matrix,
+                        phits,
+                        params.gap_open,
+                        params.gap_extend,
+                        x_drop_final,
+                        params.comp_adjust,
+                        cutoff_s_tblastn,
+                        prot_kbp.lambda,
+                        scratch,
+                    )
+                };
             for mut ph in final_phits {
                 if ph.score < cutoff_s_tblastn {
                     continue;
@@ -4452,7 +4501,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             &query_info,
             &prot_kbp,
             gumbel_blk.as_ref(),
-            translated_total_subj_len as i64,
+            stats_db_len,
             params.comp_adjust == 0,
             params.gap_open,
             params.gap_extend,
@@ -4736,6 +4785,7 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     &matrix,
                     &q_plan.lookup_table,
                     x_drop_ungapped,
+                    params.two_hit_window as i32,
                     &mut scan_diag_buf,
                 );
                 for ph in ungapped_hits {
@@ -6479,6 +6529,16 @@ pub fn search_with_pssm(
     .1;
 
     let subj_pairs = pssm_subject_pairs(db);
+    let gumbel_blk = if params.effective_search_space > 0 {
+        None
+    } else {
+        protein_gumbel_for_matrix(
+            params.matrix,
+            params.gap_open,
+            params.gap_extend,
+            stats_db_len,
+        )
+    };
 
     let hits = crate::pssm::psi_blast_iteration(
         pssm,
@@ -6488,10 +6548,13 @@ pub fn search_with_pssm(
         search_space,
         prot_kbp.lambda,
         prot_kbp.k,
+        gumbel_blk.as_ref(),
         params.gap_open,
         params.gap_extend,
         (params.x_drop_gapped as f64 * crate::math::NCBIMATH_LN2 / prot_kbp.lambda) as i32,
         1,
+        protein_matrix_name(params.matrix),
+        params.comp_adjust > 0,
     );
 
     pssm_hits_to_search_results(db, &hits, &query_aa, pssm, &prot_kbp, params)
@@ -6531,6 +6594,7 @@ fn blastp_results_to_psi_hits(
             out.push(crate::pssm::PsiBlastHit {
                 subject_id: subj_id.clone(),
                 score: hsp.score,
+                bit_score: hsp.bit_score,
                 evalue: hsp.evalue,
                 query_start: hsp.query_start,
                 query_end: hsp.query_end,
@@ -6602,7 +6666,7 @@ fn pssm_hit_to_hsp(
     query_aa: &[u8],
     subject_aa: &[u8],
     pssm: &crate::pssm::Pssm,
-    prot_kbp: &KarlinBlk,
+    _prot_kbp: &KarlinBlk,
 ) -> Option<Hsp> {
     let query_end = h.query_end.min(query_aa.len());
     let subject_end = h.subject_end.min(subject_aa.len());
@@ -6653,7 +6717,7 @@ fn pssm_hit_to_hsp(
     let alignment_length = query_aln.len().min(subject_aln.len());
     Some(Hsp {
         score: h.score,
-        bit_score: prot_kbp.raw_to_bit(h.score),
+        bit_score: h.bit_score,
         evalue: h.evalue,
         query_start: h.query_start,
         query_end,
@@ -6859,6 +6923,16 @@ pub fn psiblast_with_rounds(db: &BlastDb, query: &[u8], params: &PsiblastParams)
     let mut round_results = Vec::new();
     let mut round_pssms = Vec::new();
     let mut converged = false;
+    let gumbel_blk = if params.search.effective_search_space > 0 {
+        None
+    } else {
+        protein_gumbel_for_matrix(
+            params.search.matrix,
+            params.search.gap_open,
+            params.search.gap_extend,
+            stats_db_len,
+        )
+    };
 
     // Build subject pairs for PSI-BLAST iteration
     let subj_pairs = pssm_subject_pairs(db);
@@ -6896,11 +6970,14 @@ pub fn psiblast_with_rounds(db: &BlastDb, query: &[u8], params: &PsiblastParams)
                 search_space,
                 prot_kbp.lambda,
                 prot_kbp.k,
+                gumbel_blk.as_ref(),
                 params.search.gap_open,
                 params.search.gap_extend,
                 (params.search.x_drop_gapped as f64 * crate::math::NCBIMATH_LN2 / prot_kbp.lambda)
                     as i32,
                 gap_trigger_raw,
+                matrix_name,
+                params.search.comp_adjust > 0,
             )
         };
 
@@ -7130,6 +7207,41 @@ mod tests {
 
         let oids: Vec<u32> = results.iter().map(|result| result.subject_oid).collect();
         assert_eq!(oids, vec![1]);
+    }
+
+    #[test]
+    fn test_api_culling_limit_two_dominators_exhaust_earlier_hsp_merit() {
+        let mut results = vec![
+            SearchResult {
+                subject_oid: 0,
+                subject_title: "lower_evalue".to_string(),
+                subject_accession: "lower_evalue".to_string(),
+                subject_len: 200,
+                hsps: vec![test_hsp(20, 1.0e-50, 10, 50)],
+                taxids: Vec::new(),
+            },
+            SearchResult {
+                subject_oid: 1,
+                subject_title: "higher_score_1".to_string(),
+                subject_accession: "higher_score_1".to_string(),
+                subject_len: 200,
+                hsps: vec![test_hsp(80, 1.0e-20, 10, 50)],
+                taxids: Vec::new(),
+            },
+            SearchResult {
+                subject_oid: 2,
+                subject_title: "higher_score_2".to_string(),
+                subject_accession: "higher_score_2".to_string(),
+                subject_len: 200,
+                hsps: vec![test_hsp(70, 1.0e-18, 10, 50)],
+                taxids: Vec::new(),
+            },
+        ];
+
+        apply_api_culling_limit(&mut results, 2, crate::program::BLASTP);
+
+        let oids: Vec<u32> = results.iter().map(|result| result.subject_oid).collect();
+        assert_eq!(oids, vec![1, 2]);
     }
 
     #[test]
@@ -7406,6 +7518,42 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "documents the remaining TBLASTN singleton sum-stats parity blocker"]
+    fn tblastn_singleton_sum_stats_repro_expected_ncbi_evalue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("tblastn_db");
+        let mut builder = BlastDbBuilder::new(DbType::Nucleotide, "tblastn_db");
+        builder.add(SequenceEntry {
+            title: "s1".to_string(),
+            accession: "s1".to_string(),
+            sequence: b"ATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT".to_vec(),
+            taxid: None,
+        });
+        builder.write(&base).unwrap();
+        let db = BlastDb::open(&base).unwrap();
+
+        let params = SearchParams::tblastn()
+            .filter_low_complexity(false)
+            .comp_adjust(0)
+            .sum_stats(true)
+            .evalue(1000.0);
+        let results = tblastn(&db, b"MKFLILLFMKFLILLF", &params);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].hsps.len(), 1);
+        let hsp = &results[0].hsps[0];
+        assert_eq!(hsp.score, 63);
+        assert_eq!(hsp.alignment_length, 18);
+        assert_eq!((hsp.query_start, hsp.query_end), (0, 16));
+        assert_eq!((hsp.subject_start, hsp.subject_end), (0, 54));
+        assert!(
+            (hsp.evalue - 9.28e-09).abs() <= 0.01e-09,
+            "NCBI 2.12 reports 9.28e-09; Rust currently reports {}",
+            hsp.evalue
+        );
+    }
+
+    #[test]
     fn test_blastp_batch_matches_single_query_statistics() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("db");
@@ -7665,6 +7813,7 @@ mod tests {
             crate::pssm::PsiBlastHit {
                 subject_id: "0".to_string(),
                 score: 18,
+                bit_score: 123.0,
                 evalue: 1.0e-6,
                 query_start: 0,
                 query_end: 3,
@@ -7678,6 +7827,7 @@ mod tests {
             crate::pssm::PsiBlastHit {
                 subject_id: "0".to_string(),
                 score: 18,
+                bit_score: 456.0,
                 evalue: 1.0e-6,
                 query_start: 3,
                 query_end: 6,
@@ -7707,6 +7857,14 @@ mod tests {
             .hsps
             .iter()
             .any(|hsp| (hsp.query_start, hsp.subject_start) == (3, 5)));
+        assert!(results[0]
+            .hsps
+            .iter()
+            .any(|hsp| (hsp.query_start, hsp.bit_score) == (0, 123.0)));
+        assert!(results[0]
+            .hsps
+            .iter()
+            .any(|hsp| (hsp.query_start, hsp.bit_score) == (3, 456.0)));
     }
 
     #[test]
@@ -7767,6 +7925,8 @@ mod tests {
             scores: vec![[-10; AA_SIZE]; query_aa.len()],
             length: query_aa.len(),
             info_content: vec![0.0; query_aa.len()],
+            start_numerator: None,
+            ancillary_gap_kbp: None,
         };
         pssm.scores[2][subject_aa[0] as usize] = 12;
         let params = SearchParams::blastp()
@@ -7805,6 +7965,8 @@ mod tests {
             scores: vec![[-20; AA_SIZE]; query_aa.len()],
             length: query_aa.len(),
             info_content: vec![0.0; query_aa.len()],
+            start_numerator: None,
+            ancillary_gap_kbp: None,
         };
         for (pos, &aa) in query_aa.iter().enumerate() {
             pssm.scores[pos][aa as usize] = 10;
@@ -7850,6 +8012,8 @@ mod tests {
             scores: vec![[-20; AA_SIZE]; 1],
             length: 1,
             info_content: vec![0.0],
+            start_numerator: None,
+            ancillary_gap_kbp: None,
         };
         pssm.scores[0][query_aa[0] as usize] = 8;
         let params = SearchParams::blastp()
@@ -7977,6 +8141,7 @@ mod tests {
         let hit = crate::pssm::PsiBlastHit {
             subject_id: "0".to_string(),
             score: 42,
+            bit_score: 0.0,
             evalue: 1.0e-20,
             query_start: 0,
             query_end: 3,
@@ -8002,6 +8167,7 @@ mod tests {
         let hit = crate::pssm::PsiBlastHit {
             subject_id: "0".to_string(),
             score: 42,
+            bit_score: 0.0,
             evalue: 1.0e-20,
             query_start: 1,
             query_end: 4,

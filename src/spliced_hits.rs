@@ -667,47 +667,59 @@ pub fn s_compute_chain_score(
     let Some(score_options) = score_options else {
         return -1;
     };
-    let Some(first) = chain.hsps.as_deref() else {
+    let Some(first) = chain.hsps.as_deref_mut() else {
         chain.score = 0;
         return 0;
     };
 
-    let mut score = if comp_hsp_score {
-        s_compute_alignment_score(&first.hsp, score_options, query_len)
-    } else {
-        first.hsp.score
-    };
+    if comp_hsp_score {
+        first.hsp.score = s_compute_alignment_score(&first.hsp, score_options, query_len);
+    }
+    let mut score = first.hsp.score;
+    let mut previous_query_end = first.hsp.query_end;
+    let mut previous_subject_end = first.hsp.subject_end;
+    let mut previous_right_splice = first
+        .hsp
+        .map_info
+        .as_ref()
+        .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
 
-    let mut previous = &first.hsp;
-    let mut current = first.next.as_deref();
+    let mut current = first.next.as_deref_mut();
     while let Some(container) = current {
-        let hsp = &container.hsp;
-        score += if comp_hsp_score {
-            s_compute_alignment_score(hsp, score_options, query_len)
-        } else {
-            hsp.score
-        };
+        if comp_hsp_score {
+            container.hsp.score =
+                s_compute_alignment_score(&container.hsp, score_options, query_len);
+        }
+        score += container.hsp.score;
 
-        let current_left_splice = hsp
+        let current_left_splice = container
+            .hsp
             .map_info
             .as_ref()
             .is_some_and(|info| info.left_edge & MAPPER_SPLICE_SIGNAL != 0);
-        let previous_right_splice = previous
-            .map_info
-            .as_ref()
-            .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
         if !current_left_splice || !previous_right_splice {
-            let query_gap = hsp.query_offset.saturating_sub(previous.query_end).max(0);
-            let subject_gap = hsp
+            let query_gap = container
+                .hsp
+                .query_offset
+                .saturating_sub(previous_query_end)
+                .max(0);
+            let subject_gap = container
+                .hsp
                 .subject_offset
-                .saturating_sub(previous.subject_end)
+                .saturating_sub(previous_subject_end)
                 .max(0);
             score += s_compute_gap_score(query_gap, -12, -1, -4);
             score += s_compute_gap_score(subject_gap, -12, -1, -4);
         }
 
-        previous = hsp;
-        current = container.next.as_deref();
+        previous_query_end = container.hsp.query_end;
+        previous_subject_end = container.hsp.subject_end;
+        previous_right_splice = container
+            .hsp
+            .map_info
+            .as_ref()
+            .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
+        current = container.next.as_deref_mut();
     }
 
     chain.score = score;
@@ -2088,6 +2100,27 @@ pub struct PairInfo {
     pub conf: u8,
 }
 
+/// Port of NCBI `s_ComparePairs` (`hspfilter_mapper.c`), matching the pair
+/// ranking used by `s_FindBestPairs`: higher score first, then lower pair
+/// configuration rank, then shorter distance.
+pub fn s_compare_pairs(a: &PairInfo, b: &PairInfo) -> i32 {
+    if a.score > b.score {
+        -1
+    } else if a.score < b.score {
+        1
+    } else if a.conf < b.conf {
+        -1
+    } else if a.conf > b.conf {
+        1
+    } else if a.distance < b.distance {
+        -1
+    } else if a.distance > b.distance {
+        1
+    } else {
+        0
+    }
+}
+
 /// Conservative Rust port of NCBI `s_FindBestPairs`
 /// (`hspfilter_mapper.c:4214`).
 ///
@@ -2199,12 +2232,7 @@ pub fn s_find_best_pairs(
         return false;
     }
 
-    pair_info.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.conf.cmp(&b.conf))
-            .then_with(|| a.distance.cmp(&b.distance))
-    });
+    pair_info.sort_by(|a, b| s_compare_pairs(a, b).cmp(&0));
 
     let best_score = pair_info[0].score;
     let margin = 5;
@@ -4317,6 +4345,58 @@ mod tests {
     }
 
     #[test]
+    fn overlap_cost_wrapper_uses_mapper_edits_from_both_hsps() {
+        let mut first = hsp(40, 0, 0, 0, 10);
+        first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![
+                    JumperEdit {
+                        query_pos: 5,
+                        query_base: 0,
+                        subject_base: 1,
+                    },
+                    JumperEdit {
+                        query_pos: 6,
+                        query_base: 0,
+                        subject_base: 1,
+                    },
+                ],
+            }),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: 0,
+        });
+
+        let mut second = hsp(35, 0, 5, 5, 10);
+        second.query_end = 15;
+        second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
+            edits: Some(crate::gapinfo::JumperEditsBlock {
+                edits: vec![
+                    JumperEdit {
+                        query_pos: 4,
+                        query_base: 0,
+                        subject_base: 1,
+                    },
+                    JumperEdit {
+                        query_pos: 9,
+                        query_base: 0,
+                        subject_base: 1,
+                    },
+                ],
+            }),
+            subject_overhangs: None,
+            left_edge: 0,
+            right_edge: 0,
+        });
+
+        assert_eq!(
+            s_get_overlap_cost(&first, &second, 2),
+            s_get_overlap_cost_with_edits(&first, &second, 2, &[5, 6], &[4, 9])
+        );
+        assert_eq!(s_get_overlap_cost(&first, &second, 2), 1);
+    }
+
+    #[test]
     fn compute_chain_score_adds_hsps_and_gap_penalties() {
         let mut scored_chain = chain(30, 0, 1, 0, 0);
         let mut second_hsp = Some(hsp(20, 0, 15, 14, 8));
@@ -4373,6 +4453,7 @@ mod tests {
             1
         );
         assert_eq!(edited.score, 1);
+        assert_eq!(edited.hsps.as_ref().unwrap().hsp.score, 1);
 
         let mut extreme_chain = chain(30, 0, 1, i32::MIN, i32::MIN);
         let mut extreme_second_hsp = hsp(20, 0, 0, 0, 1);
@@ -5462,6 +5543,44 @@ mod tests {
         assert_eq!(second.pair_conf, PAIR_CONVERGENT);
         assert_eq!(pair_info[0].conf, PAIR_CONVERGENT);
         assert_eq!(pair_info[0].distance, 100);
+    }
+
+    #[test]
+    fn compare_pairs_matches_find_best_pairs_sort_order() {
+        let best = PairInfo {
+            first: 0,
+            second: 0,
+            score: 60,
+            trim_first: 0,
+            trim_second: 0,
+            valid_pair: false,
+            distance: 120,
+            conf: PAIR_CONVERGENT,
+        };
+        let lower_score = PairInfo {
+            score: 59,
+            ..best.clone()
+        };
+        let lower_conf = PairInfo {
+            score: 60,
+            conf: PAIR_PARALLEL,
+            ..best.clone()
+        };
+        let farther = PairInfo {
+            score: 60,
+            distance: 150,
+            ..best.clone()
+        };
+
+        assert_eq!(s_compare_pairs(&best, &best), 0);
+        assert!(s_compare_pairs(&best, &lower_score) < 0);
+        assert!(s_compare_pairs(&lower_score, &best) > 0);
+        assert!(s_compare_pairs(&best, &lower_conf) < 0);
+        assert!(s_compare_pairs(&best, &farther) < 0);
+
+        let mut pairs = vec![farther, lower_conf, lower_score, best.clone()];
+        pairs.sort_by(|a, b| s_compare_pairs(a, b).cmp(&0));
+        assert_eq!(pairs[0], best);
     }
 
     #[test]

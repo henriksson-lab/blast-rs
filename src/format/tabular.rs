@@ -212,7 +212,7 @@ pub fn format_bitscore(val: f64) -> String {
     } else if val > 99.9 {
         format!("{:.0}", val as i64)
     } else {
-        format!("{:.1}", val)
+        format!("{:4.1}", val)
     }
 }
 

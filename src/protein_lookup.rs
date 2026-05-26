@@ -1443,8 +1443,15 @@ pub fn s_blast_aa_scan_subject(
     let mut results = Vec::new();
     let mut diag_buf = Vec::new();
     for (qi, (&query, &table)) in queries.iter().zip(tables.iter()).enumerate() {
-        let hits =
-            protein_scan_with_table_reuse(query, subject, matrix, table, x_dropoff, &mut diag_buf);
+        let hits = protein_scan_with_table_reuse(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            TWO_HIT_WINDOW,
+            &mut diag_buf,
+        );
         if !hits.is_empty() {
             results.push((qi, hits));
         }
@@ -1483,11 +1490,52 @@ pub fn protein_scan_with_table(
     x_dropoff: i32,
 ) -> Vec<ProteinHit> {
     let mut diag_buf = Vec::new();
-    protein_scan_with_table_reuse(query, subject, matrix, table, x_dropoff, &mut diag_buf)
+    protein_scan_with_table_reuse(
+        query,
+        subject,
+        matrix,
+        table,
+        x_dropoff,
+        TWO_HIT_WINDOW,
+        &mut diag_buf,
+    )
 }
 
 /// Two-hit window size (matches NCBI BLAST+ default for protein).
 const TWO_HIT_WINDOW: i32 = 40;
+
+/// Unsupported branches for the local `BlastAaWordFinder` representation.
+///
+/// Retained for API stability. The `WindowSize` variant is no longer produced:
+/// the two-hit scanner now threads an arbitrary two-hit window through
+/// (`-window_size`), so non-default windows are represented. No
+/// `BlastAaWordFinder` dispatch branch is currently unsupported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlastAaWordFinderUnsupported {
+    /// Historically reported when a non-default two-hit window was requested.
+    /// Now unused — non-default windows are honored by the scanner.
+    WindowSize { requested: i32, supported: i32 },
+}
+
+/// blast-rs: owned result for the represented protein word-finder side
+/// channels that NCBI fills through `BlastInitHitList`/`BlastUngappedStats`.
+#[derive(Debug, Clone, Default)]
+pub struct BlastAaWordFinderScan {
+    pub hits: Vec<ProteinHit>,
+    pub total_hits: i32,
+    pub hits_extended: i32,
+    init_hits: Vec<BlastAaInitHitRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct BlastAaInitHitRecord {
+    q_start: i32,
+    s_start: i32,
+    q_off: i32,
+    s_off: i32,
+    len: i32,
+    score: i32,
+}
 
 /// NCBI: s_BlastAaExtendLeft (aa_ungapped.c).
 /// Extend left from position (q_start-1, s_start-1) with x-dropoff.
@@ -1613,6 +1661,137 @@ fn s_blast_aa_extend_right(
     (best, best_d, best_ident, last_off_delta)
 }
 
+/// NCBI: s_BlastAaExtendOneHit (aa_ungapped.c).
+/// Port of NCBI `s_BlastAaExtendOneHit` (`aa_ungapped.c:1019`), reduced to
+/// ordinary substitution-matrix scoring over the Rust slice representation.
+fn s_blast_aa_extend_one_hit(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    word_size: usize,
+    x_dropoff: i32,
+    q_off: usize,
+    s_off: usize,
+) -> (Option<ProteinHit>, i32) {
+    let mut score = 0i32;
+    let mut sum = 0i32;
+    let mut q_left_off = q_off;
+    let mut q_best_left_off = q_off;
+    let mut q_right_off = q_off;
+
+    for i in 0..word_size {
+        let qi = q_off + i;
+        let si = s_off + i;
+        if qi >= query.len() || si >= subject.len() {
+            break;
+        }
+        sum += matrix[query[qi] as usize][subject[si] as usize];
+        if sum > score {
+            score = sum;
+            q_best_left_off = q_left_off;
+            q_right_off = qi;
+        } else if sum <= 0 {
+            sum = 0;
+            q_left_off = qi + 1;
+        }
+    }
+
+    let init_hit_width = q_right_off.saturating_sub(q_left_off) + 1;
+    let q_left_off = q_best_left_off;
+    let diag_delta = s_off as isize - q_off as isize;
+    let s_left_off = (q_left_off as isize + diag_delta) as usize;
+    let s_right_off = (q_right_off as isize + diag_delta) as usize;
+
+    let (left_score, left_d, left_ident) = s_blast_aa_extend_left_with_score(
+        query, subject, matrix, q_left_off, s_left_off, x_dropoff, score,
+    );
+    let (total_score, right_d, right_ident, s_last_off_delta) = s_blast_aa_extend_right(
+        query,
+        subject,
+        matrix,
+        q_right_off + 1,
+        s_right_off + 1,
+        x_dropoff,
+        left_score,
+    );
+    let s_last_off = s_right_off as i32 + 1 + s_last_off_delta;
+    if total_score <= 0 {
+        return (None, s_last_off);
+    }
+
+    let qs = q_left_off - left_d as usize;
+    let ss = s_left_off - left_d as usize;
+    let alen = left_d + right_d + init_hit_width as i32;
+    let ident = left_ident + right_ident;
+    (
+        Some(ProteinHit {
+            query_start: qs,
+            query_end: qs + alen as usize,
+            subject_start: ss,
+            subject_end: ss + alen as usize,
+            score: total_score,
+            num_ident: ident,
+            align_length: alen,
+            mismatches: alen - ident,
+            gap_opens: 0,
+            qseq: None,
+            sseq: None,
+            scaled_score: None,
+            gapped_start_q: 0,
+            gapped_start_s: 0,
+        }),
+        s_last_off,
+    )
+}
+
+#[inline]
+fn s_blast_aa_extend_left_with_score(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    q_start: usize,
+    s_start: usize,
+    x_dropoff: i32,
+    init_score: i32,
+) -> (i32, i32, i32) {
+    let mut score = init_score;
+    let mut best = init_score;
+    let mut best_d = 0i32;
+    let mut ident = 0i32;
+    let mut best_ident = 0i32;
+    if q_start == 0 || s_start == 0 {
+        return (best, 0, 0);
+    }
+    let mut qi = q_start - 1;
+    let mut si = s_start - 1;
+    let mut d = 1i32;
+    loop {
+        unsafe {
+            let q = *query.as_ptr().add(qi);
+            let s = *subject.as_ptr().add(si);
+            score += *matrix.get_unchecked(q as usize).get_unchecked(s as usize);
+            if q == s {
+                ident += 1;
+            }
+        }
+        if score > best {
+            best = score;
+            best_d = d;
+            best_ident = ident;
+        }
+        if best - score >= x_dropoff {
+            break;
+        }
+        if qi == 0 || si == 0 {
+            break;
+        }
+        qi -= 1;
+        si -= 1;
+        d += 1;
+    }
+    (best, best_d, best_ident)
+}
+
 /// Result of `s_blast_aa_extend_two_hit`. NCBI distinguishes:
 ///   - left extension did NOT reach the first hit (`right_extend == FALSE`),
 ///   - left reached first AND right extended (`right_extend == TRUE`), with the
@@ -1622,7 +1801,8 @@ fn s_blast_aa_extend_right(
 pub enum TwoHitOutcome {
     /// Left extension did not reach first hit. NCBI's caller updates
     /// `diag.last_hit` from the current subject offset, not `s_last_off`.
-    NoReach,
+    /// The left-only extension may still be saved before that diagonal update.
+    NoReach { hit: Option<ProteinHit> },
     /// Left reached first hit (right extension ran). NCBI's caller updates
     /// `diag.last_hit` from `s_last_off - (wordsize - 1)`. HSP is only saved
     /// when present (`score > 0`).
@@ -1670,9 +1850,33 @@ fn s_blast_aa_extend_two_hit(
         s_blast_aa_extend_left(query, subject, matrix, ext_q, ext_s, x_dropoff);
     let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
     if !reached_first {
-        // NCBI `s_BlastAaExtendTwoHit` sets `*right_extend = FALSE` here and
-        // returns; the caller falls back to `subject_offset + diag_offset`.
-        return TwoHitOutcome::NoReach;
+        // NCBI `s_BlastAaExtendTwoHit` leaves `right_extend = FALSE`, but it
+        // still returns `left_score` plus hsp_q/hsp_s/hsp_len. The caller saves
+        // that left-only HSP before updating diag.last_hit from subject_offset.
+        let hit = (left_score > 0 && left_d > 0).then(|| {
+            let qs = ext_q - left_d as usize;
+            let qe = ext_q;
+            let ss = ext_s - left_d as usize;
+            let se = ext_s;
+            let alen = left_d;
+            ProteinHit {
+                query_start: qs,
+                query_end: qe,
+                subject_start: ss,
+                subject_end: se,
+                score: left_score,
+                num_ident: left_ident,
+                align_length: alen,
+                mismatches: alen - left_ident,
+                gap_opens: 0,
+                qseq: None,
+                sseq: None,
+                scaled_score: None,
+                gapped_start_q: 0,
+                gapped_start_s: 0,
+            }
+        });
+        return TwoHitOutcome::NoReach { hit };
     }
 
     let (right_score, right_d_r, right_ident, s_last_off_delta) =
@@ -1723,28 +1927,43 @@ fn s_blast_aa_extend_two_hit(
 ///
 /// Uses the NCBI BLAST+ two-hit algorithm: a word hit on a diagonal only
 /// triggers ungapped extension if a second hit was seen on the same diagonal
-/// within `TWO_HIT_WINDOW` positions. Rust returns collected ungapped hits
-/// instead of filling C's `BlastInitHitList` and stats side channels.
+/// within `TWO_HIT_WINDOW` positions. Use
+/// [`blast_aa_word_finder_with_side_channels`] for the C-shaped
+/// `BlastInitHitList`/stats effects.
 pub fn s_blast_aa_word_finder_two_hit(
     query: &[u8],
     subject: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     table: &ProteinLookupTable,
     x_dropoff: i32,
+    window: i32,
     diag_buf: &mut Vec<(i32, bool)>,
 ) -> Vec<ProteinHit> {
+    s_blast_aa_word_finder_two_hit_scan(query, subject, matrix, table, x_dropoff, window, diag_buf)
+        .hits
+}
+
+fn s_blast_aa_word_finder_two_hit_scan(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    window: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+) -> BlastAaWordFinderScan {
     let word_size = table.word_size;
     if query.len() < word_size || subject.len() < word_size {
-        return Vec::new();
+        return BlastAaWordFinderScan::default();
     }
 
     let mut diag_count = 1usize;
-    while diag_count < query.len() + TWO_HIT_WINDOW as usize {
+    while diag_count < query.len() + window as usize {
         diag_count <<= 1;
     }
     let diag_mask = diag_count - 1;
     diag_buf.clear();
-    diag_buf.resize(diag_count, (-TWO_HIT_WINDOW, false));
+    diag_buf.resize(diag_count, (-window, false));
     let diag_array = diag_buf;
 
     let mut hits: Vec<ProteinHit> = Vec::new();
@@ -1764,7 +1983,10 @@ pub fn s_blast_aa_word_finder_two_hit(
     let overflow = table.overflow.as_ptr();
     let subj = subject.as_ptr();
     let diag_ptr = diag_array.as_mut_ptr();
-    let diag_offset = TWO_HIT_WINDOW;
+    let diag_offset = window;
+    let mut total_hits = 0i32;
+    let mut hits_extended = 0i32;
+    let mut init_hits = Vec::new();
 
     for s_pos in 0..=last_pos {
         if s_pos > 0 {
@@ -1785,6 +2007,7 @@ pub fn s_blast_aa_word_finder_two_hit(
             if num == 0 {
                 continue;
             }
+            total_hits += num as i32;
 
             let (hit_ptr, hit_len) = if num <= HITS_PER_CELL {
                 (cell.entries.as_ptr(), num)
@@ -1807,7 +2030,7 @@ pub fn s_blast_aa_word_finder_two_hit(
                     continue;
                 }
                 let diff = s_off - (last_hit - diag_offset);
-                if diff >= TWO_HIT_WINDOW {
+                if diff >= window {
                     *diag_ptr.add(diag) = (s_off + diag_offset, false);
                     continue;
                 }
@@ -1818,6 +2041,7 @@ pub fn s_blast_aa_word_finder_two_hit(
                 let s_left_off = (last_hit - diag_offset + ws) as usize; // end of first hit
                 let s_right_off = s_pos;
                 let q_right_off = q_pos;
+                hits_extended += 1;
 
                 match s_blast_aa_extend_two_hit(
                     query,
@@ -1836,10 +2060,31 @@ pub fn s_blast_aa_word_finder_two_hit(
                         // below the save cutoff.
                         *diag_ptr.add(diag) = (s_last_off - (ws - 1) + diag_offset, true);
                         if let Some(hit) = hit {
+                            let record = BlastAaInitHitRecord {
+                                q_start: hit.query_start as i32,
+                                s_start: hit.subject_start as i32,
+                                q_off: q_right_off as i32,
+                                s_off: s_right_off as i32,
+                                len: hit.align_length,
+                                score: hit.score,
+                            };
                             hits.push(hit);
+                            init_hits.push(record);
                         }
                     }
-                    TwoHitOutcome::NoReach => {
+                    TwoHitOutcome::NoReach { hit } => {
+                        if let Some(hit) = hit {
+                            let record = BlastAaInitHitRecord {
+                                q_start: hit.query_start as i32,
+                                s_start: hit.subject_start as i32,
+                                q_off: q_right_off as i32,
+                                s_off: s_right_off as i32,
+                                len: hit.align_length,
+                                score: hit.score,
+                            };
+                            hits.push(hit);
+                            init_hits.push(record);
+                        }
                         *diag_ptr.add(diag) = (s_off + diag_offset, false);
                     }
                 }
@@ -1850,7 +2095,210 @@ pub fn s_blast_aa_word_finder_two_hit(
     if hits.len() > 1 {
         hits.sort_unstable_by(score_compare_protein_hits);
     }
-    hits
+    BlastAaWordFinderScan {
+        hits,
+        total_hits,
+        hits_extended,
+        init_hits,
+    }
+}
+
+/// NCBI: s_BlastAaWordFinder_OneHit (aa_ungapped.c).
+/// Port of NCBI `s_BlastAaWordFinder_OneHit` (`aa_ungapped.c:713`) over the
+/// local lookup-table and diagonal-scratch representations.
+pub fn s_blast_aa_word_finder_one_hit(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+) -> Vec<ProteinHit> {
+    s_blast_aa_word_finder_one_hit_scan(query, subject, matrix, table, x_dropoff, diag_buf).hits
+}
+
+fn s_blast_aa_word_finder_one_hit_scan(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+) -> BlastAaWordFinderScan {
+    let word_size = table.word_size;
+    if query.len() < word_size || subject.len() < word_size {
+        return BlastAaWordFinderScan::default();
+    }
+
+    let mut diag_count = 1usize;
+    while diag_count < query.len() + subject.len() + 1 {
+        diag_count <<= 1;
+    }
+    let diag_mask = diag_count - 1;
+    diag_buf.clear();
+    diag_buf.resize(diag_count, (0, false));
+
+    let mut hits = Vec::new();
+    let ws = word_size as i32;
+    let mask = (1usize << (word_size * CHARSIZE)) - 1;
+    let last_pos = subject.len() - word_size;
+    let mut hash = word_hash(&subject[0..word_size], 0);
+
+    let pv = table.pv.as_ptr();
+    let backbone = table.backbone.as_ptr();
+    let overflow = table.overflow.as_ptr();
+    let subj = subject.as_ptr();
+    let diag_ptr = diag_buf.as_mut_ptr();
+    let mut total_hits = 0i32;
+    let mut hits_extended = 0i32;
+    let mut init_hits = Vec::new();
+
+    for s_pos in 0..=last_pos {
+        if s_pos > 0 {
+            unsafe {
+                let new = *subj.add(s_pos + word_size - 1) as usize;
+                hash = ((hash << CHARSIZE) | new) & mask;
+            }
+        }
+
+        unsafe {
+            if *pv.add(hash >> 6) & (1u64 << (hash & 63)) == 0 {
+                continue;
+            }
+
+            let cell = &*backbone.add(hash);
+            let num = cell.num_used as usize;
+            if num == 0 {
+                continue;
+            }
+            total_hits += num as i32;
+
+            let (hit_ptr, hit_len) = if num <= HITS_PER_CELL {
+                (cell.entries.as_ptr(), num)
+            } else {
+                let cursor = cell.entries[0] as usize;
+                (overflow.add(cursor), num)
+            };
+
+            for i in 0..hit_len {
+                let q_pos = *hit_ptr.add(i) as usize;
+                let diag = s_pos.wrapping_sub(q_pos) & diag_mask;
+                let last_hit = (*diag_ptr.add(diag)).0;
+                let diff = s_pos as i32 - last_hit;
+                if diff < 0 {
+                    continue;
+                }
+                hits_extended += 1;
+
+                let (hit, s_last_off) = s_blast_aa_extend_one_hit(
+                    query, subject, matrix, word_size, x_dropoff, q_pos, s_pos,
+                );
+                *diag_ptr.add(diag) = (s_last_off - (ws - 1), false);
+                if let Some(hit) = hit {
+                    let record = BlastAaInitHitRecord {
+                        q_start: hit.query_start as i32,
+                        s_start: hit.subject_start as i32,
+                        q_off: q_pos as i32,
+                        s_off: s_pos as i32,
+                        len: hit.align_length,
+                        score: hit.score,
+                    };
+                    hits.push(hit);
+                    init_hits.push(record);
+                }
+            }
+        }
+    }
+
+    if hits.len() > 1 {
+        hits.sort_unstable_by(score_compare_protein_hits);
+    }
+    BlastAaWordFinderScan {
+        hits,
+        total_hits,
+        hits_extended,
+        init_hits,
+    }
+}
+
+/// NCBI: BlastAaWordFinder (aa_ungapped.c).
+/// C-shaped dispatch wrapper over the locally represented protein word-finder
+/// branch. NCBI switches between one-hit and two-hit scanning from the lookup
+/// options window.
+pub fn blast_aa_word_finder(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    window_size: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+) -> Result<Vec<ProteinHit>, BlastAaWordFinderUnsupported> {
+    if window_size <= 0 {
+        return Ok(s_blast_aa_word_finder_one_hit(
+            query, subject, matrix, table, x_dropoff, diag_buf,
+        ));
+    }
+    Ok(s_blast_aa_word_finder_two_hit(
+        query,
+        subject,
+        matrix,
+        table,
+        x_dropoff,
+        window_size,
+        diag_buf,
+    ))
+}
+
+/// blast-rs: side-channel preserving wrapper around `BlastAaWordFinder`
+/// (`aa_ungapped.c`).
+///
+/// Side-channel preserving wrapper for callers that want the C-shaped
+/// `BlastInitHitList` and `BlastUngappedStats` effects. The scan records the
+/// exact seed offsets that C passes to `BlastSaveInitHsp`, then sorts the
+/// resulting init-hit list by score just like `BlastAaWordFinder`.
+pub fn blast_aa_word_finder_with_side_channels(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    window_size: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+    init_hitlist: Option<&mut crate::extend::InitHitList>,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> Result<BlastAaWordFinderScan, BlastAaWordFinderUnsupported> {
+    let scan = if window_size <= 0 {
+        s_blast_aa_word_finder_one_hit_scan(query, subject, matrix, table, x_dropoff, diag_buf)
+    } else {
+        s_blast_aa_word_finder_two_hit_scan(
+            query, subject, matrix, table, x_dropoff, window_size, diag_buf,
+        )
+    };
+
+    let saved_hits = scan.hits.len() as i32;
+    if let Some(init_hitlist) = init_hitlist {
+        for hit in &scan.init_hits {
+            crate::extend::blast_save_init_hsp(
+                init_hitlist,
+                hit.q_start,
+                hit.s_start,
+                hit.q_off,
+                hit.s_off,
+                hit.len,
+                hit.score,
+            );
+        }
+        crate::extend::blast_init_hit_list_sort_by_score(init_hitlist);
+    }
+    crate::diagnostics::blast_ungapped_stats_update(
+        ungapped_stats,
+        scan.total_hits,
+        scan.hits_extended,
+        saved_hits,
+    );
+
+    Ok(scan)
 }
 
 /// blast-rs: Rust convenience wrapper around `s_blast_aa_word_finder_two_hit`
@@ -1862,9 +2310,17 @@ pub fn protein_scan_with_table_reuse(
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
     table: &ProteinLookupTable,
     x_dropoff: i32,
+    window: i32,
     diag_buf: &mut Vec<(i32, bool)>,
 ) -> Vec<ProteinHit> {
-    s_blast_aa_word_finder_two_hit(query, subject, matrix, table, x_dropoff, diag_buf)
+    // NCBI `-window_size 0` selects the single-hit algorithm; any positive
+    // window uses the two-hit method with that window. Mirrors the dispatch in
+    // `blast_aa_word_finder`.
+    if window <= 0 {
+        s_blast_aa_word_finder_one_hit(query, subject, matrix, table, x_dropoff, diag_buf)
+    } else {
+        s_blast_aa_word_finder_two_hit(query, subject, matrix, table, x_dropoff, window, diag_buf)
+    }
 }
 
 /// blast-rs: Rust convenience wrapper that builds a protein lookup table, scans
@@ -2106,6 +2562,8 @@ mod tests {
             scores,
             length: 3,
             info_content: vec![0.0; 3],
+            start_numerator: None,
+            ancillary_gap_kbp: None,
         };
         let table_size = 1usize << (2 * CHARSIZE);
         let mut backbone = vec![Vec::new(); table_size];
@@ -2489,6 +2947,252 @@ mod tests {
             "Should find hits for identical sequences"
         );
         // hits2 may or may not be empty depending on BLOSUM62 neighborhood
+    }
+
+    #[test]
+    fn blast_aa_word_finder_dispatches_default_two_hit_window() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+        let subject = vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        let mut direct_diag = Vec::new();
+        let mut dispatch_diag = Vec::new();
+
+        let direct = s_blast_aa_word_finder_two_hit(
+            &query,
+            &subject,
+            &m,
+            &table,
+            20,
+            TWO_HIT_WINDOW,
+            &mut direct_diag,
+        );
+        let dispatch = blast_aa_word_finder(
+            &query,
+            &subject,
+            &m,
+            &table,
+            20,
+            TWO_HIT_WINDOW,
+            &mut dispatch_diag,
+        )
+        .expect("default protein window should use the represented two-hit scanner");
+
+        assert_eq!(dispatch.len(), direct.len());
+        for (hit, exp) in dispatch.iter().zip(direct.iter()) {
+            assert_eq!(
+                (
+                    hit.query_start,
+                    hit.query_end,
+                    hit.subject_start,
+                    hit.subject_end,
+                    hit.score,
+                    hit.num_ident,
+                ),
+                (
+                    exp.query_start,
+                    exp.query_end,
+                    exp.subject_start,
+                    exp.subject_end,
+                    exp.score,
+                    exp.num_ident,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn blast_aa_word_finder_honors_non_default_window() {
+        // Non-default two-hit windows are now threaded through to the scanner
+        // (previously rejected as BlastAaWordFinderUnsupported::WindowSize). The
+        // dispatch result must match a direct two-hit scan using the same window.
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+        let subject = vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        let mut direct_diag = Vec::new();
+        let mut dispatch_diag = Vec::new();
+
+        let direct =
+            s_blast_aa_word_finder_two_hit(&query, &subject, &m, &table, 20, 12, &mut direct_diag);
+        let dispatch = blast_aa_word_finder(&query, &subject, &m, &table, 20, 12, &mut dispatch_diag)
+            .expect("non-default window is now supported");
+        assert_eq!(dispatch.len(), direct.len());
+        for (hit, exp) in dispatch.iter().zip(direct.iter()) {
+            assert_eq!(
+                (hit.query_start, hit.subject_start, hit.score),
+                (exp.query_start, exp.subject_start, exp.score)
+            );
+        }
+    }
+
+    #[test]
+    fn blast_aa_word_finder_dispatches_one_hit_window() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5];
+        let subject = vec![9u8, 1, 2, 3, 4, 5, 9];
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        let mut direct_diag = Vec::new();
+        let mut dispatch_diag = Vec::new();
+
+        let direct =
+            s_blast_aa_word_finder_one_hit(&query, &subject, &m, &table, 20, &mut direct_diag);
+        let dispatch =
+            blast_aa_word_finder(&query, &subject, &m, &table, 20, 0, &mut dispatch_diag)
+                .expect("zero window should use the represented one-hit scanner");
+
+        assert!(!dispatch.is_empty());
+        assert_eq!(dispatch.len(), direct.len());
+        for (hit, exp) in dispatch.iter().zip(direct.iter()) {
+            assert_eq!(
+                (
+                    hit.query_start,
+                    hit.query_end,
+                    hit.subject_start,
+                    hit.subject_end,
+                    hit.score,
+                    hit.num_ident,
+                ),
+                (
+                    exp.query_start,
+                    exp.query_end,
+                    exp.subject_start,
+                    exp.subject_end,
+                    exp.score,
+                    exp.num_ident,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn blast_aa_word_finder_with_side_channels_fills_init_list_and_stats() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6];
+        let subject = query.clone();
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        let mut diag = Vec::new();
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        let scan = blast_aa_word_finder_with_side_channels(
+            &query,
+            &subject,
+            &m,
+            &table,
+            20,
+            0,
+            &mut diag,
+            Some(&mut init_hitlist),
+            Some(&mut stats),
+        )
+        .expect("one-hit side-channel scan");
+
+        assert_eq!(scan.hits.len(), 1);
+        assert!(scan.total_hits >= scan.hits_extended);
+        assert_eq!(scan.hits_extended, 1);
+        assert_eq!(init_hitlist.total(), scan.hits.len());
+        assert_eq!(init_hitlist.hits[0].query_offset, 0);
+        assert_eq!(init_hitlist.hits[0].subject_offset, 0);
+        assert_eq!(
+            init_hitlist.hits[0]
+                .ungapped_data
+                .as_ref()
+                .map(|data| { (data.q_start, data.s_start, data.length, data.score) }),
+            Some((
+                scan.hits[0].query_start as i32,
+                scan.hits[0].subject_start as i32,
+                scan.hits[0].align_length,
+                scan.hits[0].score,
+            ))
+        );
+        assert_eq!(stats.lookup_hits, scan.total_hits as i64);
+        assert_eq!(stats.num_seqs_lookup_hits, 1);
+        assert_eq!(stats.init_extends, scan.hits_extended);
+        assert_eq!(stats.good_init_extends, scan.hits.len() as i32);
+        assert_eq!(stats.num_seqs_passed, 1);
+    }
+
+    #[test]
+    fn blast_aa_word_finder_side_channels_preserve_two_hit_seed_offsets() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+        let subject = vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        let mut diag = Vec::new();
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        let scan = blast_aa_word_finder_with_side_channels(
+            &query,
+            &subject,
+            &m,
+            &table,
+            20,
+            TWO_HIT_WINDOW,
+            &mut diag,
+            Some(&mut init_hitlist),
+            Some(&mut stats),
+        )
+        .expect("two-hit side-channel scan");
+
+        assert!(!scan.hits.is_empty());
+        assert_eq!(init_hitlist.total(), scan.hits.len());
+        assert!(
+            init_hitlist.hits.iter().any(|init| {
+                let data = init.ungapped_data.as_ref().expect("ungapped data");
+                init.query_offset > data.q_start && init.subject_offset > data.s_start
+            }),
+            "two-hit side channels should preserve triggering seed offsets, not only HSP starts"
+        );
+        assert_eq!(stats.good_init_extends, scan.hits.len() as i32);
+    }
+
+    #[test]
+    fn one_hit_scanner_suppresses_covered_diagonal_words() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6];
+        let subject = query.clone();
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+        let mut diag = Vec::new();
+
+        let hits = s_blast_aa_word_finder_one_hit(&query, &subject, &m, &table, 20, &mut diag);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (
+                hits[0].query_start,
+                hits[0].query_end,
+                hits[0].subject_start,
+                hits[0].subject_end,
+            ),
+            (0, 6, 0, 6)
+        );
+    }
+
+    #[test]
+    fn two_hit_scanner_saves_left_only_hsp_when_first_hit_not_reached() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 4, 4, 4, 4, 4, 4, 5, 6, 7];
+        let subject = vec![1u8, 2, 3, 8, 8, 8, 8, 8, 8, 8, 5, 6, 7];
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+
+        let hits = protein_scan_with_table(&query, &subject, &m, &table, 1);
+
+        assert!(
+            hits.iter().any(|hit| {
+                (
+                    hit.query_start,
+                    hit.query_end,
+                    hit.subject_start,
+                    hit.subject_end,
+                    hit.score,
+                    hit.num_ident,
+                    hit.align_length,
+                ) == (10, 13, 10, 13, 12, 3, 3)
+            }),
+            "left-only HSP from the second word hit should be saved: {hits:?}"
+        );
     }
 
     #[test]

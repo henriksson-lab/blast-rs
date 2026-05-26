@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::db::defline::encode_defline_asn1;
 use crate::db::index_writer::write_index_file;
+use crate::db::DbType;
 use crate::encoding::{
     encode_ncbi2na_ambiguity_data, encode_ncbi2na_sequence, encode_ncbistdaa_sequence,
 };
@@ -17,13 +18,12 @@ fn db_component_path(base_path: &Path, ext: &str) -> std::path::PathBuf {
     path.into()
 }
 
-/// Create a BLAST v4 nucleotide database from a FASTA file.
-pub fn make_nucleotide_db(
+/// blast-rs: Shared FASTA parser for standalone makeblastdb-style writers; not
+/// a direct NCBI C port.
+fn parse_fasta_sequences(
     fasta_path: &Path,
-    output_base: &Path,
-    title: &str,
-) -> io::Result<(u32, u64)> {
-    // returns (num_seqs, total_length)
+    allow_protein_stop: bool,
+) -> io::Result<Vec<(String, Vec<u8>)>> {
     let fasta_data = std::fs::read_to_string(fasta_path)?;
     let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
 
@@ -39,7 +39,7 @@ pub fn make_nucleotide_db(
             current_seq = Vec::new();
         } else {
             for &b in line.trim().as_bytes() {
-                if b.is_ascii_alphabetic() {
+                if b.is_ascii_alphabetic() || (allow_protein_stop && b == b'*') {
                     current_seq.push(b);
                 }
             }
@@ -48,6 +48,20 @@ pub fn make_nucleotide_db(
     if !current_header.is_empty() || !current_seq.is_empty() {
         sequences.push((current_header, current_seq));
     }
+
+    Ok(sequences)
+}
+
+/// Create a BLAST v4 nucleotide database from a FASTA file.
+/// blast-rs: Standalone Rust makeblastdb-style nucleotide writer; not a
+/// direct NCBI C port.
+pub fn make_nucleotide_db(
+    fasta_path: &Path,
+    output_base: &Path,
+    title: &str,
+) -> io::Result<(u32, u64)> {
+    // returns (num_seqs, total_length)
+    let sequences = parse_fasta_sequences(fasta_path, false)?;
 
     let num_seqs = sequences.len() as u32;
     let mut total_length = 0u64;
@@ -106,6 +120,21 @@ pub fn make_nucleotide_db(
     Ok((num_seqs, total_length))
 }
 
+/// Create a BLAST v4 database from a FASTA file, dispatching on database type.
+/// blast-rs: Standalone Rust makeblastdb-style writer dispatcher; not a
+/// direct NCBI C port.
+pub fn make_db(
+    db_type: DbType,
+    fasta_path: &Path,
+    output_base: &Path,
+    title: &str,
+) -> io::Result<(u32, u64)> {
+    match db_type {
+        DbType::Nucleotide => make_nucleotide_db(fasta_path, output_base, title),
+        DbType::Protein => make_protein_db(fasta_path, output_base, title),
+    }
+}
+
 /// Create a BLAST v4 protein database from a FASTA file.
 /// blast-rs: Standalone Rust makeblastdb-style protein writer; not a direct
 /// NCBI C port.
@@ -115,30 +144,7 @@ pub fn make_protein_db(
     title: &str,
 ) -> io::Result<(u32, u64)> {
     // returns (num_seqs, total_length)
-    let fasta_data = std::fs::read_to_string(fasta_path)?;
-    let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
-
-    let mut current_header = String::new();
-    let mut current_seq = Vec::new();
-
-    for line in fasta_data.lines() {
-        if let Some(hdr) = line.strip_prefix('>') {
-            if !current_header.is_empty() || !current_seq.is_empty() {
-                sequences.push((current_header, current_seq));
-            }
-            current_header = hdr.to_string();
-            current_seq = Vec::new();
-        } else {
-            for &b in line.trim().as_bytes() {
-                if b.is_ascii_alphabetic() || b == b'*' {
-                    current_seq.push(b);
-                }
-            }
-        }
-    }
-    if !current_header.is_empty() || !current_seq.is_empty() {
-        sequences.push((current_header, current_seq));
-    }
+    let sequences = parse_fasta_sequences(fasta_path, true)?;
 
     let num_seqs = sequences.len() as u32;
     let mut total_length = 0u64;
@@ -240,6 +246,58 @@ mod tests {
         assert!(db_component_path(&db_base, "nsq").exists());
         assert!(db_component_path(&db_base, "nhr").exists());
         assert!(!db_base.with_extension("nin").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_make_db_dispatches_by_database_type() {
+        let dir = std::env::temp_dir().join("blast_makedb_dispatch");
+        std::fs::create_dir_all(&dir).ok();
+
+        let nt_fasta = dir.join("nt.fa");
+        std::fs::write(&nt_fasta, ">nt1\nACGT\n").unwrap();
+        let nt_base = dir.join("ntdb");
+        let (nt_nseq, nt_total) =
+            make_db(super::super::DbType::Nucleotide, &nt_fasta, &nt_base, "nt").unwrap();
+        assert_eq!((nt_nseq, nt_total), (1, 4));
+        assert!(db_component_path(&nt_base, "nin").exists());
+        assert!(!db_component_path(&nt_base, "pin").exists());
+
+        let prot_fasta = dir.join("prot.fa");
+        std::fs::write(&prot_fasta, ">prot1\nMTEYK\n").unwrap();
+        let prot_base = dir.join("protdb");
+        let (prot_nseq, prot_total) = make_db(
+            super::super::DbType::Protein,
+            &prot_fasta,
+            &prot_base,
+            "prot",
+        )
+        .unwrap();
+        assert_eq!((prot_nseq, prot_total), (1, 5));
+        assert!(db_component_path(&prot_base, "pin").exists());
+        assert!(!db_component_path(&prot_base, "nin").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_make_db_protein_dispatch_preserves_stop_residue() {
+        let dir = std::env::temp_dir().join("blast_makedb_dispatch_stop");
+        std::fs::create_dir_all(&dir).ok();
+
+        let fasta = dir.join("prot.fa");
+        std::fs::write(&fasta, ">prot_stop\nMA*R\n").unwrap();
+        let db_base = dir.join("protdb");
+        let (nseq, total) =
+            make_db(super::super::DbType::Protein, &fasta, &db_base, "prot stop").unwrap();
+        assert_eq!((nseq, total), (1, 4));
+
+        let db = super::super::index::BlastDb::open(&db_base).unwrap();
+        assert_eq!(
+            db.get_sequence(0),
+            crate::encoding::encode_ncbistdaa_sequence(b"MA*R")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

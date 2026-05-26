@@ -8236,6 +8236,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results,
         );
@@ -8320,6 +8321,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut adjusted_results,
         );
@@ -8502,6 +8504,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results,
         );
@@ -8578,6 +8581,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results_sw,
         );
@@ -8785,6 +8789,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results,
         );
@@ -8875,6 +8880,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results_sw,
         );
@@ -9091,6 +9097,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results,
         );
@@ -9205,6 +9212,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results_comp,
         );
@@ -9280,6 +9288,7 @@ mod struct_tests {
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
+                link_context: None,
             },
             &mut results_comp_sw,
         );
@@ -14424,6 +14433,30 @@ pub struct BlastRedoSeqSrcSubjectConfig<'a> {
     pub expect_value: f64,
     pub hitlist_size: i32,
     pub inclusion_ethresh: f64,
+    pub link_context: Option<&'a HitlistLinkContext<'a>>,
+}
+
+/// Inputs for the represented RPS-BLAST profile/query redo boundary.
+///
+/// RPS traceback enters kappa redo with the profile as the position-specific
+/// query and the user's protein query as the materialized subject. The returned
+/// HSP list deliberately remains in that pre-`s_BlastHSPListRPSUpdate`
+/// orientation so the existing RPS traceback driver can restore coordinates in
+/// the same place as NCBI.
+#[derive(Clone)]
+pub struct BlastRpsRedoProfileConfig<'a> {
+    pub matrix_name: &'a str,
+    pub kbp_gap: crate::stat::KarlinBlk,
+    pub kbp_ideal_lambda: f64,
+    pub scoring: crate::parameters::ScoringParameters,
+    pub gapping_params: BlastCompoGappingParams,
+    pub compo_adjust_mode: CompoAdjustMode,
+    pub local_scaling_factor: f64,
+    pub cutoff_s: i32,
+    pub expect_value: f64,
+    pub hitlist_size: i32,
+    pub inclusion_ethresh: f64,
+    pub smith_waterman: bool,
 }
 
 /// External callback-backed subject settings for
@@ -14478,6 +14511,199 @@ fn seqsrc_encoding_for_redo_program(program: ProgramType) -> crate::seqsrc::SeqE
     } else {
         crate::seqsrc::SeqEncoding::Protein
     }
+}
+
+fn matrix_info_init_rps_profile(
+    self_: &mut BlastMatrixInfo,
+    matrix_name: &str,
+    profile_pssm: &[Vec<i32>],
+    profile_freq_ratios: Option<&[Vec<f64>]>,
+    profile_length: usize,
+    kbp_ideal_lambda: f64,
+    scale_factor: f64,
+) -> i32 {
+    if profile_length == 0 || profile_pssm.len() < profile_length || scale_factor <= 0.0 {
+        return -1;
+    }
+
+    let Some(freq_ratio_info) = crate::matrix::get_matrix_freq_ratios_with_scale(matrix_name)
+    else {
+        return -1;
+    };
+
+    let mut matrix = Vec::with_capacity(profile_length);
+    for row in profile_pssm.iter().take(profile_length) {
+        if row.len() < crate::matrix::AA_SIZE {
+            return -1;
+        }
+        matrix.push(row[..crate::matrix::AA_SIZE].to_vec());
+    }
+
+    let start_freq_ratios = if let Some(freq_rows) = profile_freq_ratios {
+        if freq_rows.len() < profile_length {
+            return -1;
+        }
+        let mut ratios = Vec::with_capacity(profile_length);
+        for row in freq_rows.iter().take(profile_length) {
+            if row.len() < crate::matrix::AA_SIZE {
+                return -1;
+            }
+            ratios.push(row[..crate::matrix::AA_SIZE].to_vec());
+        }
+        ratios
+    } else {
+        vec![vec![1.0; crate::matrix::AA_SIZE]; profile_length]
+    };
+
+    self_.matrix_name = matrix_name.to_string();
+    self_.positional = true;
+    self_.bit_scale_factor = freq_ratio_info.bit_scale_factor;
+    self_.ungapped_lambda = kbp_ideal_lambda / scale_factor;
+    self_.rows = profile_length as i32;
+    self_.cols = crate::matrix::AA_SIZE as i32;
+    self_.matrix = matrix.clone();
+    self_.scaled_matrix = matrix;
+    self_.start_freq_ratios = start_freq_ratios;
+    0
+}
+
+/// blast-rs: RPS profile/query integration boundary for
+/// `Blast_RedoAlignmentCore` / `Blast_TracebackFromHSPList`; not a complete
+/// direct NCBI C port.
+///
+/// This wires an owned RPS profile row selection into the existing
+/// position-specific composition redo core. The profile consensus and PSSM
+/// rows become the kappa "query", the user's protein query is the materialized
+/// subject, and the incoming HSP list is updated in place with the redone
+/// gapped HSPs when they pass the configured significance gates.
+pub fn blast_rps_redo_alignment_core_profile(
+    profile_consensus: &[u8],
+    user_query: &[u8],
+    profile_pssm: &[Vec<i32>],
+    profile_freq_ratios: Option<&[Vec<f64>]>,
+    hsp_list: &mut HspList,
+    cfg: BlastRpsRedoProfileConfig<'_>,
+) -> i32 {
+    let profile_length = profile_consensus.len();
+    if profile_length == 0 || user_query.is_empty() || hsp_list.hsps.is_empty() {
+        return if hsp_list.hsps.is_empty() { 0 } else { -1 };
+    }
+
+    let mut matrix_info = BlastMatrixInfo::default();
+    if matrix_info_init_rps_profile(
+        &mut matrix_info,
+        cfg.matrix_name,
+        profile_pssm,
+        profile_freq_ratios,
+        profile_length,
+        cfg.kbp_ideal_lambda,
+        cfg.local_scaling_factor,
+    ) != 0
+    {
+        return -1;
+    }
+
+    let mut local_list = hsp_list.clone();
+    for hsp in &mut local_list.hsps {
+        if hsp.query_offset < 0
+            || hsp.query_end > profile_length as i32
+            || hsp.subject_offset < 0
+            || hsp.subject_end > user_query.len() as i32
+        {
+            return -1;
+        }
+        hsp.context = 0;
+        hsp.query_frame = 0;
+        hsp.subject_frame = 0;
+    }
+
+    let query_info = crate::queryinfo::QueryInfo {
+        num_queries: 1,
+        contexts: vec![crate::queryinfo::ContextInfo {
+            query_offset: 0,
+            query_length: profile_length as i32,
+            eff_searchsp: (profile_length.max(1) * user_query.len().max(1)) as i64,
+            length_adjustment: 0,
+            query_index: 0,
+            frame: 0,
+            is_valid: true,
+            segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+        }],
+        max_length: profile_length as u32,
+        min_length: profile_length as u32,
+    };
+
+    let mut kbp_gap = vec![cfg.kbp_gap.clone()];
+    let mut matrix = matrix_info.matrix.clone();
+    let mut scoring = cfg.scoring;
+    let align_params = blast_redo_align_params_new(
+        matrix_info,
+        cfg.gapping_params,
+        cfg.compo_adjust_mode,
+        cfg.local_scaling_factor,
+        true,
+        false,
+        false,
+        profile_length as i32,
+        cfg.cutoff_s,
+        cfg.expect_value,
+        false,
+        0.0,
+    );
+    let mut saved = BlastKappaSavedParameters::s_saved_parameters_new(
+        profile_length as i32,
+        1,
+        cfg.compo_adjust_mode,
+        true,
+    );
+    let mut results = crate::hspstream::HspResults::new(1);
+
+    let status = blast_redo_alignment_core_mt_in_memory_subject(
+        crate::program::PSI_BLAST,
+        1,
+        profile_consensus,
+        &query_info,
+        &mut kbp_gap,
+        &mut matrix,
+        &mut scoring,
+        &align_params,
+        &mut saved,
+        &mut local_list,
+        &mut results,
+        BlastRedoInMemorySubject {
+            subject_source: user_query,
+            reward: 0,
+            penalty: 0,
+            genetic_code: &crate::util::STANDARD_GENETIC_CODE,
+            smith_waterman: cfg.smith_waterman,
+            expect_value: cfg.expect_value,
+            hitlist_size: cfg.hitlist_size,
+            inclusion_ethresh: cfg.inclusion_ethresh,
+            link_context: None,
+        },
+    );
+    if status != 0 {
+        return status;
+    }
+
+    if let Some(hitlist) = results.hitlists.into_iter().next().flatten() {
+        if let Some(mut redone) = hitlist
+            .hsp_lists
+            .into_iter()
+            .find(|list| list.oid == hsp_list.oid)
+        {
+            redone.hsp_max = hsp_list.hsp_max;
+            *hsp_list = redone;
+        } else {
+            hsp_list.hsps.clear();
+            hsp_list.best_evalue = i32::MAX as f64;
+        }
+    } else {
+        hsp_list.hsps.clear();
+        hsp_list.best_evalue = i32::MAX as f64;
+    }
+
+    0
 }
 
 /// blast-rs: Callback-backed branch of `Blast_RedoAlignmentCore_MT`; not a complete direct NCBI C port.
@@ -14779,7 +15005,8 @@ pub fn blast_redo_alignment_core_mt_in_memory_subjects(
 /// protein-space and position-based/PSSM composition adjustment are handled by
 /// the shared materialized one-match redo path. Program/mode combinations that
 /// NCBI does not route through protein-space adjustment are rejected at that
-/// boundary.
+/// boundary. Sum-stat/link-HSP evaluation is passed through when the caller
+/// supplies [`BlastRedoSeqSrcSubjectConfig::link_context`].
 #[allow(clippy::too_many_arguments)]
 pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
     program: ProgramType,
@@ -14873,7 +15100,7 @@ pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
                     expect_value: subject_cfg.expect_value,
                     hitlist_size: subject_cfg.hitlist_size,
                     inclusion_ethresh: subject_cfg.inclusion_ethresh,
-                    link_context: None,
+                    link_context: subject_cfg.link_context,
                 },
             );
             if status != 0 {
@@ -18345,13 +18572,17 @@ pub fn fill_sfp(
         return None;
     }
 
+    let score_range = (max_score - min_score + 1) as usize;
+    let mut sprob = Vec::new();
+    sprob.try_reserve_exact(score_range).ok()?;
+    sprob.resize(score_range, 0.0);
     let mut sfp = crate::stat::ScoreFreq {
         score_min: min_score,
         score_max: max_score,
         obs_min: min_score,
         obs_max: max_score,
         score_avg: 0.0,
-        sprob: vec![0.0; (max_score - min_score + 1) as usize],
+        sprob,
     };
     let one_pos_frac = 1.0 / matrix_length as f64;
     for row in matrix.iter().take(matrix_length) {
@@ -18411,13 +18642,17 @@ pub fn psi_compute_score_probabilities(
         return None;
     }
 
+    let score_range = (max_score - min_score + 1) as usize;
+    let mut sprob = Vec::new();
+    sprob.try_reserve_exact(score_range).ok()?;
+    sprob.resize(score_range, 0.0);
     let mut sfp = crate::stat::ScoreFreq {
         score_min: min_score,
         score_max: max_score,
         obs_min: min_score,
         obs_max: max_score,
         score_avg: 0.0,
-        sprob: vec![0.0; (max_score - min_score + 1) as usize],
+        sprob,
     };
     for p in 0..query_length {
         if query[p] == crate::encoding::NCBISTDAA_X {

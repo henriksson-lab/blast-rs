@@ -44,6 +44,941 @@ fn db_path_with_ext(base_path: &Path, ext: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn megablast_index_volume_path(base_path: &Path, volume: u32) -> PathBuf {
+    let mut path = base_path.as_os_str().to_os_string();
+    path.push(format!(".{volume:02}.idx"));
+    PathBuf::from(path)
+}
+
+fn megablast_index_super_header_path(base_path: &Path) -> PathBuf {
+    let mut path = base_path.as_os_str().to_os_string();
+    path.push(".shd");
+    PathBuf::from(path)
+}
+
+/// Native MegaBLAST index format carried by an `.NN.idx` volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MegablastIndexFormat {
+    /// NCBI dbindex format version 5, with fixed stride/ws-hint defaults.
+    Legacy,
+    /// NCBI dbindex format version 6, with stride/ws-hint in the volume header.
+    Current,
+}
+
+/// Parsed `<prefix>.shd` native MegaBLAST index superheader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MegablastIndexSuperHeader {
+    pub path: PathBuf,
+    pub version: u32,
+    pub num_oids: u32,
+    pub num_volumes: u32,
+}
+
+/// Parsed native MegaBLAST `.NN.idx` volume header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MegablastIndexVolumeMetadata {
+    pub path: PathBuf,
+    pub volume: u32,
+    pub format: MegablastIndexFormat,
+    pub hkey_width: u32,
+    pub stride: u32,
+    pub word_size_hint: u32,
+    pub start_oid: u32,
+    pub start_chunk: u32,
+    pub stop_oid: u32,
+    pub stop_chunk: u32,
+    pub num_oids: u32,
+}
+
+/// Parsed native MegaBLAST index boundary for a database/index prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MegablastIndexMetadata {
+    pub prefix: PathBuf,
+    pub super_header: Option<MegablastIndexSuperHeader>,
+    pub volumes: Vec<MegablastIndexVolumeMetadata>,
+    pub total_num_oids: u32,
+}
+
+/// Parsed native MegaBLAST offset-list payload from an `.NN.idx` volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MegablastIndexOffsetData {
+    /// File offset where the offset-list section starts.
+    pub file_offset: usize,
+    /// Number of 32-bit words in `offsets`, as stored by NCBI.
+    pub total_words: u32,
+    /// One-based offsets into `offsets`; zero means the hash key is absent.
+    pub hash_table: Vec<u32>,
+    /// Concatenated offset lists. Word zero is the leading sentinel; each
+    /// present hash key points at a zero-terminated list inside this vector.
+    pub offsets: Vec<u32>,
+}
+
+impl MegablastIndexOffsetData {
+    /// Return the raw zero-terminated offset list for a hash key.
+    pub fn offset_list_words(&self, hash_key: u32) -> Option<&[u32]> {
+        let start = *self.hash_table.get(hash_key as usize)? as usize;
+        if start == 0 || start >= self.offsets.len() {
+            return None;
+        }
+        let rel_end = self.offsets[start..].iter().position(|&word| word == 0)?;
+        Some(&self.offsets[start..start + rel_end])
+    }
+}
+
+/// Parsed native MegaBLAST subject-map payload from an `.NN.idx` volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MegablastIndexSubjectMap {
+    /// File offset where the subject-map section starts.
+    pub file_offset: usize,
+    pub offset_bits: u32,
+    pub lengths: Vec<u32>,
+    /// Four words per local logical id: start chunk, end chunk, sequence-store
+    /// start, and sequence-store end.
+    pub lid_map_words: Vec<u32>,
+    /// OID/chunk to logical-id map, as stored by CSubjectMap.
+    pub subjects: Vec<u32>,
+    /// Per-chunk sequence-store starts.
+    pub chunks: Vec<u32>,
+    /// Raw compressed subject sequence store bytes exposed at C's
+    /// `GetSeqStoreBase` boundary.
+    pub seq_store: Vec<u8>,
+}
+
+/// Decoded native MegaBLAST offset-list word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MegablastIndexDecodedOffset {
+    pub logical_id: u32,
+    pub logical_offset: u32,
+}
+
+/// Native MegaBLAST offset localized to a result chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MegablastIndexChunkOffset {
+    pub logical_id: u32,
+    pub logical_chunk_id: u32,
+    pub relative_chunk: u32,
+    pub chunk_offset: u32,
+}
+
+impl MegablastIndexSubjectMap {
+    const COMPRESSED_BASES_PER_BYTE: u32 = 4;
+
+    fn code_bits(stride: u32) -> Option<u32> {
+        if stride == 0 {
+            return None;
+        }
+        let mut stride = stride;
+        let mut result = 0;
+        loop {
+            stride >>= 1;
+            result += 1;
+            if stride == 0 {
+                return Some(result);
+            }
+        }
+    }
+
+    fn min_offset(stride: u32) -> Option<u32> {
+        let shift = 2u32.checked_mul(Self::code_bits(stride)?)?;
+        1u32.checked_shl(shift)
+    }
+
+    pub fn encoded_min_offset(stride: u32) -> Option<u32> {
+        Self::min_offset(stride)
+    }
+
+    /// Decode a raw offset-list word using NCBI `CSubjectMap::DecodeOffset`.
+    ///
+    /// Boundary-control words below `GetMinOffset(stride)` are intentionally
+    /// rejected here; callers that need boundary-pair extension can keep using
+    /// the raw offset list until that path is represented.
+    pub fn decode_offset(
+        &self,
+        encoded_offset: u32,
+        stride: u32,
+    ) -> Option<MegablastIndexDecodedOffset> {
+        let min_offset = Self::min_offset(stride)?;
+        if encoded_offset < min_offset {
+            return None;
+        }
+        let adjusted = encoded_offset.checked_sub(min_offset)?;
+        let offset_mask = 1u32.checked_shl(self.offset_bits)?.checked_sub(1)?;
+        let logical_id = adjusted >> self.offset_bits;
+        let logical_offset =
+            min_offset.checked_add((adjusted & offset_mask).checked_mul(stride)?)?;
+        Some(MegablastIndexDecodedOffset {
+            logical_id,
+            logical_offset,
+        })
+    }
+
+    /// Map a local OID/chunk pair to CSearchResults' one-based logical chunk id.
+    pub fn logical_chunk_id_for_subject_chunk(&self, local_oid: u32, chunk: u32) -> Option<u32> {
+        self.subjects
+            .get(local_oid as usize)
+            .copied()
+            .and_then(|first_chunk| first_chunk.checked_add(chunk))
+            .filter(|&logical_chunk_id| {
+                logical_chunk_id > 0 && logical_chunk_id <= self.chunks.len() as u32
+            })
+    }
+
+    fn chunk_offset_for_logical_offset(
+        &self,
+        logical_id: u32,
+        logical_offset: u32,
+    ) -> Option<MegablastIndexChunkOffset> {
+        let lid_word = (logical_id as usize).checked_mul(4)?;
+        let start_chunk = *self.lid_map_words.get(lid_word)?;
+        let end_chunk = *self.lid_map_words.get(lid_word + 1)?;
+        let lid_start = *self.lid_map_words.get(lid_word + 2)?;
+        if start_chunk >= end_chunk || end_chunk as usize > self.chunks.len() {
+            return None;
+        }
+
+        let abs_offset = lid_start.checked_add(logical_offset / Self::COMPRESSED_BASES_PER_BYTE)?;
+        let chunk_range = &self.chunks[start_chunk as usize..end_chunk as usize];
+        let rel_upper = chunk_range.partition_point(|&chunk_start| chunk_start <= abs_offset);
+        if rel_upper == 0 {
+            return None;
+        }
+
+        let relative_chunk = (rel_upper - 1) as u32;
+        let chunk_start = chunk_range[rel_upper - 1];
+        let chunk_base_delta = chunk_start.checked_sub(lid_start)?;
+        let chunk_base_start = chunk_base_delta.checked_mul(Self::COMPRESSED_BASES_PER_BYTE)?;
+        let chunk_offset = logical_offset.checked_sub(chunk_base_start)?;
+        let absolute_chunk = start_chunk.checked_add(relative_chunk)?;
+
+        Some(MegablastIndexChunkOffset {
+            logical_id,
+            logical_chunk_id: absolute_chunk.checked_add(1)?,
+            relative_chunk,
+            chunk_offset,
+        })
+    }
+
+    fn subject_oid_for_logical_chunk_id(
+        &self,
+        start_oid: u32,
+        logical_chunk_id: u32,
+    ) -> Option<u32> {
+        if logical_chunk_id == 0 {
+            return None;
+        }
+
+        self.subjects
+            .iter()
+            .enumerate()
+            .filter_map(|(local_oid, &first_chunk)| {
+                if first_chunk == 0 || first_chunk > logical_chunk_id {
+                    return None;
+                }
+                let next_first_chunk = self
+                    .subjects
+                    .iter()
+                    .copied()
+                    .filter(|&candidate| candidate > first_chunk)
+                    .min()
+                    .unwrap_or_else(|| self.chunks.len() as u32 + 1);
+                (logical_chunk_id < next_first_chunk)
+                    .then(|| start_oid.checked_add(local_oid as u32))
+                    .flatten()
+            })
+            .next()
+    }
+
+    /// Decode a raw offset-list word and localize it to a result chunk.
+    pub fn chunk_offset_for_encoded_offset(
+        &self,
+        encoded_offset: u32,
+        stride: u32,
+    ) -> Option<MegablastIndexChunkOffset> {
+        let decoded = self.decode_offset(encoded_offset, stride)?;
+        self.chunk_offset_for_logical_offset(decoded.logical_id, decoded.logical_offset)
+    }
+
+    /// Decode and localize the subject offset as `CSearchResults::SaveSeed`
+    /// sees it after `CSearch_Base::ProcessOffset` subtracts GetMinOffset().
+    pub fn chunk_seed_offset_for_encoded_offset(
+        &self,
+        encoded_offset: u32,
+        stride: u32,
+    ) -> Option<MegablastIndexChunkOffset> {
+        let decoded = self.decode_offset(encoded_offset, stride)?;
+        let seed_offset = decoded
+            .logical_offset
+            .checked_sub(Self::min_offset(stride)?)?;
+        self.chunk_offset_for_logical_offset(decoded.logical_id, seed_offset)
+    }
+}
+
+/// Parsed native MegaBLAST `.NN.idx` volume including offset lists and subject
+/// map representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MegablastIndexVolume {
+    pub metadata: MegablastIndexVolumeMetadata,
+    pub offset_data: MegablastIndexOffsetData,
+    pub subject_map: MegablastIndexSubjectMap,
+}
+
+impl MegablastIndexVolume {
+    /// Return database OIDs that have at least one raw native-index hit for
+    /// the supplied encoded query.
+    ///
+    /// This is the command-path pre-search boundary: it consumes the same
+    /// offset lists as `MB_IndexedWordFinder` but only asks which subjects are
+    /// worth scanning. Boundary-control words are paired with the following
+    /// real offset exactly as the callback adapter does.
+    pub fn candidate_oids_for_query(&self, query: &[u8]) -> Vec<u32> {
+        self.candidate_oids_for_query_locations(query, &all_query_location(query))
+    }
+
+    /// Return native-index candidate OIDs for explicit unmasked query ranges.
+    pub fn candidate_oids_for_query_locations(
+        &self,
+        query: &[u8],
+        locations: &[crate::util::SSeqRange],
+    ) -> Vec<u32> {
+        let keys = crate::gapinfo::megablast_index_query_keys_for_locations(
+            query,
+            self.metadata.hkey_width,
+            locations,
+        );
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let Some(min_encoded_offset) =
+            MegablastIndexSubjectMap::encoded_min_offset(self.metadata.stride)
+        else {
+            return Vec::new();
+        };
+
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        for key in keys {
+            let Some(offsets) = self.offset_data.offset_list_words(key.hash_key) else {
+                continue;
+            };
+            let mut index = 0usize;
+            while index < offsets.len() {
+                let encoded_offset = offsets[index];
+                let real_encoded_offset = if encoded_offset < min_encoded_offset {
+                    let Some(&next_offset) = offsets.get(index + 1) else {
+                        break;
+                    };
+                    index += 2;
+                    if next_offset < min_encoded_offset {
+                        continue;
+                    }
+                    next_offset
+                } else {
+                    index += 1;
+                    encoded_offset
+                };
+
+                let Some(chunk_offset) = self.subject_map.chunk_seed_offset_for_encoded_offset(
+                    real_encoded_offset,
+                    self.metadata.stride,
+                ) else {
+                    continue;
+                };
+                let Some(oid) = self.subject_map.subject_oid_for_logical_chunk_id(
+                    self.metadata.start_oid,
+                    chunk_offset.logical_chunk_id,
+                ) else {
+                    continue;
+                };
+                if seen.insert(oid) {
+                    candidates.push(oid);
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates
+    }
+}
+
+fn all_query_location(query: &[u8]) -> [crate::util::SSeqRange; 1] {
+    [crate::util::SSeqRange {
+        left: 0,
+        right: query.len().saturating_sub(1) as i32,
+    }]
+}
+
+impl crate::gapinfo::MegablastIndexedOffsetSource for MegablastIndexVolume {
+    fn hkey_width(&self) -> u32 {
+        self.metadata.hkey_width
+    }
+
+    fn start_oid(&self) -> u32 {
+        self.metadata.start_oid
+    }
+
+    fn stop_oid(&self) -> u32 {
+        self.metadata.stop_oid
+    }
+
+    fn offset_list_words(&self, hash_key: u32) -> Option<&[u32]> {
+        self.offset_data.offset_list_words(hash_key)
+    }
+
+    fn logical_chunk_id_for_subject_chunk(&self, local_oid: u32, chunk: u32) -> Option<u32> {
+        self.subject_map
+            .logical_chunk_id_for_subject_chunk(local_oid, chunk)
+    }
+
+    fn chunk_offset_for_encoded_offset(&self, encoded_offset: u32) -> Option<(u32, u32)> {
+        let chunk_offset = self
+            .subject_map
+            .chunk_offset_for_encoded_offset(encoded_offset, self.metadata.stride)?;
+        Some((chunk_offset.logical_chunk_id, chunk_offset.chunk_offset))
+    }
+
+    fn chunk_seed_offset_for_encoded_offset(&self, encoded_offset: u32) -> Option<(u32, u32)> {
+        let chunk_offset = self
+            .subject_map
+            .chunk_seed_offset_for_encoded_offset(encoded_offset, self.metadata.stride)?;
+        Some((chunk_offset.logical_chunk_id, chunk_offset.chunk_offset))
+    }
+
+    fn min_encoded_offset(&self) -> Option<u32> {
+        MegablastIndexSubjectMap::encoded_min_offset(self.metadata.stride)
+    }
+}
+
+/// Return the native MegaBLAST index volumes for a database/index prefix.
+///
+/// blast-rs: Native MegaBLAST index volume discovery for `makembindex` output.
+///
+/// `makembindex` writes volume files as `<prefix>.00.idx`,
+/// `<prefix>.01.idx`, ... and `blastn -use_index true` treats the database
+/// name or `-index_name` value as that prefix. This helper intentionally only
+/// discovers the native index volumes; the search path can still fall back to
+/// the ordinary database scan until the indexed callback reader is wired in.
+pub fn megablast_index_volume_paths(base_path: impl AsRef<Path>) -> Vec<PathBuf> {
+    let base_path = base_path.as_ref();
+    (0..100)
+        .map(|volume| megablast_index_volume_path(base_path, volume))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+pub fn megablast_index_exists(base_path: impl AsRef<Path>) -> bool {
+    !megablast_index_volume_paths(base_path).is_empty()
+}
+
+/// Parse native MegaBLAST index metadata for a database/index prefix.
+///
+/// This mirrors the boundary used by NCBI's `CIndexedDb_New::AddIndexInfo`:
+/// `<prefix>.shd` gives the expected number of OIDs and index volumes, and
+/// each `<prefix>.NN.idx` volume header gives the indexed OID span. The offset
+/// lists and subject map remain below this metadata boundary.
+pub fn megablast_index_metadata(
+    base_path: impl AsRef<Path>,
+) -> io::Result<Option<MegablastIndexMetadata>> {
+    let base_path = base_path.as_ref();
+    let super_header_path = megablast_index_super_header_path(base_path);
+    let super_header = if super_header_path.exists() {
+        Some(parse_megablast_index_super_header(&super_header_path)?)
+    } else {
+        None
+    };
+
+    let volume_paths = if let Some(super_header) = &super_header {
+        (0..super_header.num_volumes)
+            .map(|volume| {
+                let path = megablast_index_volume_path(base_path, volume);
+                if path.exists() {
+                    Ok((volume, path))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("missing native MegaBLAST index volume {}", path.display()),
+                    ))
+                }
+            })
+            .collect::<io::Result<Vec<_>>>()?
+    } else {
+        megablast_index_volume_paths(base_path)
+            .into_iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_suffix(".idx"))
+                    .and_then(|name| name.rsplit_once('.'))
+                    .and_then(|(_, volume)| volume.parse::<u32>().ok())
+                    .map(|volume| (volume, path))
+            })
+            .collect()
+    };
+
+    if volume_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let mut volumes = Vec::with_capacity(volume_paths.len());
+    for (volume, path) in volume_paths {
+        volumes.push(parse_megablast_index_volume_header(&path, volume)?);
+    }
+
+    let total_num_oids = volumes.iter().try_fold(0u32, |acc, volume| {
+        acc.checked_add(volume.num_oids).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native MegaBLAST index OID total overflows u32",
+            )
+        })
+    })?;
+    if let Some(super_header) = &super_header {
+        if total_num_oids != super_header.num_oids {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native MegaBLAST index volume OID total does not match superheader",
+            ));
+        }
+        if volumes.len() != super_header.num_volumes as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native MegaBLAST index volume count does not match superheader",
+            ));
+        }
+    }
+
+    Ok(Some(MegablastIndexMetadata {
+        prefix: base_path.to_path_buf(),
+        super_header,
+        volumes,
+        total_num_oids,
+    }))
+}
+
+/// Parse a native MegaBLAST `.NN.idx` volume beyond the metadata header.
+///
+/// This represents the payload boundary used by NCBI's `CDbIndex_Impl`: the
+/// offset-list hash table and concatenated offset lists are parsed first, then
+/// the `CSubjectMap` lengths, local-id map, subject/chunk map, and compressed
+/// sequence-store boundary are validated and exposed. Search callbacks are not
+/// wired to this representation yet.
+pub fn megablast_index_volume(
+    path: impl AsRef<Path>,
+    volume: u32,
+) -> io::Result<MegablastIndexVolume> {
+    let path = path.as_ref();
+    let data = std::fs::read(path)?;
+    let metadata = parse_megablast_index_volume_header_from_data(path, volume, &data)?;
+    let (offset_data, subject_map_offset) =
+        parse_megablast_index_offset_data(&data, &metadata, HEADER_SIZE)?;
+    let (subject_map, end_offset) =
+        parse_megablast_index_subject_map(&data, &metadata, subject_map_offset)?;
+    if end_offset > data.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST index payload extends past file end",
+        ));
+    }
+
+    Ok(MegablastIndexVolume {
+        metadata,
+        offset_data,
+        subject_map,
+    })
+}
+
+/// Parse all native MegaBLAST `.NN.idx` volumes for a database/index prefix.
+///
+/// This is the parsed-volume side of NCBI's indexed DB result holder: callers
+/// that replace the ordinary DB scan need every indexed volume resident enough
+/// to answer `CheckOid`/`GetResults` callback requests without re-discovering
+/// files per subject.
+pub fn megablast_index_volumes(
+    base_path: impl AsRef<Path>,
+) -> io::Result<Vec<MegablastIndexVolume>> {
+    let Some(metadata) = megablast_index_metadata(base_path)? else {
+        return Ok(Vec::new());
+    };
+
+    metadata
+        .volumes
+        .into_iter()
+        .map(|volume| megablast_index_volume(volume.path, volume.volume))
+        .collect()
+}
+
+const HEADER_SIZE: usize = 16 + 7 * std::mem::size_of::<u32>();
+
+fn parse_megablast_index_super_header(path: &Path) -> io::Result<MegablastIndexSuperHeader> {
+    let data = std::fs::read(path)?;
+    if data.len() != 16 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST index superheader has unexpected size",
+        ));
+    }
+
+    let endianness = read_u32_le_at(&data, 0)?;
+    if endianness != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST index superheader is not little-endian",
+        ));
+    }
+    let version = read_u32_le_at(&data, 4)?;
+    if version != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported native MegaBLAST index superheader version {version}"),
+        ));
+    }
+
+    Ok(MegablastIndexSuperHeader {
+        path: path.to_path_buf(),
+        version,
+        num_oids: read_u32_le_at(&data, 8)?,
+        num_volumes: read_u32_le_at(&data, 12)?,
+    })
+}
+
+fn parse_megablast_index_volume_header(
+    path: &Path,
+    volume: u32,
+) -> io::Result<MegablastIndexVolumeMetadata> {
+    let data = std::fs::read(path)?;
+    parse_megablast_index_volume_header_from_data(path, volume, &data)
+}
+
+fn parse_megablast_index_volume_header_from_data(
+    path: &Path,
+    volume: u32,
+    data: &[u8],
+) -> io::Result<MegablastIndexVolumeMetadata> {
+    const LEGACY_VERSION: u8 = 5;
+    const CURRENT_VERSION: u8 = 6;
+    const LEGACY_STRIDE: u32 = 5;
+    const LEGACY_WORD_SIZE_HINT: u32 = 28;
+
+    if data.len() < HEADER_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST index volume header is truncated",
+        ));
+    }
+
+    let format = match data[0] {
+        LEGACY_VERSION => MegablastIndexFormat::Legacy,
+        CURRENT_VERSION => MegablastIndexFormat::Current,
+        version => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported native MegaBLAST index volume version {version}"),
+            ))
+        }
+    };
+
+    let hkey_width = read_u32_le_at(&data, 16)?;
+    if hkey_width > 15 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST index hkey width is out of range",
+        ));
+    }
+    let (stride, word_size_hint) = match format {
+        MegablastIndexFormat::Legacy => (LEGACY_STRIDE, LEGACY_WORD_SIZE_HINT),
+        MegablastIndexFormat::Current => (read_u32_le_at(&data, 20)?, read_u32_le_at(&data, 24)?),
+    };
+    if stride == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST index stride is zero",
+        ));
+    }
+
+    let start_oid = read_u32_le_at(&data, 28)?;
+    let start_chunk = read_u32_le_at(&data, 32)?;
+    let stop_oid = read_u32_le_at(&data, 36)?;
+    let stop_chunk = read_u32_le_at(&data, 40)?;
+    let num_oids = stop_oid.checked_sub(start_oid).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST index volume has inverted OID range",
+        )
+    })?;
+
+    Ok(MegablastIndexVolumeMetadata {
+        path: path.to_path_buf(),
+        volume,
+        format,
+        hkey_width,
+        stride,
+        word_size_hint,
+        start_oid,
+        start_chunk,
+        stop_oid,
+        stop_chunk,
+        num_oids,
+    })
+}
+
+fn parse_megablast_index_offset_data(
+    data: &[u8],
+    metadata: &MegablastIndexVolumeMetadata,
+    offset: usize,
+) -> io::Result<(MegablastIndexOffsetData, usize)> {
+    let hash_table_size = 1usize.checked_shl(2 * metadata.hkey_width).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST hash table is too large",
+        )
+    })?;
+    let hash_table_words = hash_table_size.checked_add(1).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST hash table size overflows",
+        )
+    })?;
+
+    let total_words = read_u32_le_at(data, offset)?;
+    let hash_offset = offset.checked_add(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST offset overflow",
+        )
+    })?;
+    let hash_bytes = hash_table_words.checked_mul(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST hash table byte size overflows",
+        )
+    })?;
+    let offsets_offset = hash_offset.checked_add(hash_bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST offset overflow",
+        )
+    })?;
+    let offset_words = total_words as usize;
+    let offset_bytes = offset_words.checked_mul(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST offset-list byte size overflows",
+        )
+    })?;
+    let end_offset = offsets_offset.checked_add(offset_bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST offset overflow",
+        )
+    })?;
+    if data.len() < end_offset {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST offset-list payload is truncated",
+        ));
+    }
+
+    let hash_table = read_u32_le_vec_at(data, hash_offset, hash_table_words)?;
+    if hash_table.last().copied() != Some(total_words) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST offset-list sentinel does not match total",
+        ));
+    }
+    for &entry in &hash_table[..hash_table.len().saturating_sub(1)] {
+        if entry > total_words {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native MegaBLAST offset-list hash entry is out of range",
+            ));
+        }
+    }
+
+    let offsets = read_u32_le_vec_at(data, offsets_offset, offset_words)?;
+    if !offsets.is_empty() && offsets[0] != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST offset-list storage is missing leading sentinel",
+        ));
+    }
+    for &entry in &hash_table[..hash_table.len().saturating_sub(1)] {
+        if entry != 0
+            && offsets
+                .get(entry as usize..)
+                .and_then(|list| list.iter().position(|&word| word == 0))
+                .is_none()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native MegaBLAST offset-list hash entry has no terminator",
+            ));
+        }
+    }
+
+    Ok((
+        MegablastIndexOffsetData {
+            file_offset: offset,
+            total_words,
+            hash_table,
+            offsets,
+        },
+        end_offset,
+    ))
+}
+
+fn parse_megablast_index_subject_map(
+    data: &[u8],
+    metadata: &MegablastIndexVolumeMetadata,
+    offset: usize,
+) -> io::Result<(MegablastIndexSubjectMap, usize)> {
+    let mut cursor = offset;
+    let lengths_bytes = read_u32_le_at(data, cursor)? as usize;
+    if lengths_bytes % 4 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map lengths byte count is unaligned",
+        ));
+    }
+    cursor = cursor.checked_add(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+    let offset_bits = read_u32_le_at(data, cursor)?;
+    if offset_bits >= 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset bits are out of range",
+        ));
+    }
+    cursor = cursor.checked_add(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+    let lengths_words = lengths_bytes / 4;
+    let lengths = read_u32_le_vec_at(data, cursor, lengths_words)?;
+    cursor = cursor.checked_add(lengths_bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+
+    let lid_map_bytes = read_u32_le_at(data, cursor)? as usize;
+    if lid_map_bytes % 16 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map lid map byte count is unaligned",
+        ));
+    }
+    cursor = cursor.checked_add(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+    let lid_map_words = read_u32_le_vec_at(data, cursor, lid_map_bytes / 4)?;
+    cursor = cursor.checked_add(lid_map_bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+
+    let subject_map_bytes = read_u32_le_at(data, cursor)? as usize;
+    if subject_map_bytes % 4 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map byte count is unaligned",
+        ));
+    }
+    cursor = cursor.checked_add(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+    let c_subject_count = metadata
+        .stop_oid
+        .checked_sub(metadata.start_oid)
+        .and_then(|span| span.checked_add(1))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native MegaBLAST subject-map OID span overflows",
+            )
+        })? as usize;
+    let subject_words = subject_map_bytes / 4;
+    if subject_words < c_subject_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map has too few subject entries",
+        ));
+    }
+    let subjects = read_u32_le_vec_at(data, cursor, c_subject_count)?;
+    cursor = cursor.checked_add(c_subject_count * 4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+    let chunk_words = subject_words - c_subject_count;
+    let chunks = read_u32_le_vec_at(data, cursor, chunk_words)?;
+    cursor = cursor.checked_add(chunk_words * 4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+
+    let seq_store_size = read_u32_le_at(data, cursor)? as usize;
+    cursor = cursor.checked_add(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+    let padded_seq_store_words = 1usize.checked_add(seq_store_size / 4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST sequence-store size overflows",
+        )
+    })?;
+    let padded_seq_store_bytes = padded_seq_store_words.checked_mul(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST sequence-store byte size overflows",
+        )
+    })?;
+    let padded_end = cursor.checked_add(padded_seq_store_bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map offset overflow",
+        )
+    })?;
+    if data.len() < padded_end || data.len() < cursor + seq_store_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native MegaBLAST subject-map sequence store is truncated",
+        ));
+    }
+    let seq_store = data[cursor..cursor + seq_store_size].to_vec();
+
+    Ok((
+        MegablastIndexSubjectMap {
+            file_offset: offset,
+            offset_bits,
+            lengths,
+            lid_map_words,
+            subjects,
+            chunks,
+            seq_store,
+        },
+        padded_end,
+    ))
+}
+
 /// A BLAST database, which may be a single physical volume or a multi-volume
 /// alias database.
 pub struct BlastDb {
@@ -445,6 +1380,32 @@ fn read_u64_le_at(buf: &[u8], offset: usize) -> io::Result<u64> {
     ]))
 }
 
+fn read_u32_le_at(buf: &[u8], offset: usize) -> io::Result<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "u32 offset overflow"))?;
+    let bytes = buf
+        .get(offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated u32"))?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_u32_le_vec_at(buf: &[u8], offset: usize, count: usize) -> io::Result<Vec<u32>> {
+    let byte_len = count
+        .checked_mul(4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "u32 array size overflow"))?;
+    let end = offset
+        .checked_add(byte_len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "u32 array offset overflow"))?;
+    let bytes = buf
+        .get(offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated u32 array"))?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
 fn read_index_num_oids(base_path: &Path, db_type: DbType) -> io::Result<u32> {
     let idx_data = std::fs::read(db_path_with_ext(base_path, db_type.index_ext()))?;
     let mut cur = Cursor::new(&idx_data);
@@ -543,10 +1504,14 @@ fn offset_slice_logical_oids(slice: &mut BlastDbVolumeSlice, offset: u64) {
 }
 
 fn alias_has_filters(alias: &crate::db::alias::AliasFile) -> bool {
+    // MEMB_BIT is intentionally absent here. NCBI applies it while filtering
+    // ASN.1 deflines by their `memberships` field; it is not an OID predicate
+    // like OIDLIST/GILIST/TILIST/SEQIDLIST/TAXIDLIST.
     alias.first_oid.is_some()
         || alias.last_oid.is_some()
         || alias.oidlist.is_some()
         || alias.gilist.is_some()
+        || alias.tilist.is_some()
         || alias.silist.is_some()
         || alias.taxidlist.is_some()
 }
@@ -612,18 +1577,61 @@ fn parse_gilist(path: &Path) -> io::Result<HashSet<u32>> {
             .collect());
     }
 
+    parse_binary_u32_id_list(&data, "GILIST")
+}
+
+fn parse_trace_id_token(token: &str) -> Option<u32> {
+    let token = token.trim();
+    let token = token
+        .strip_prefix("gnl|TRACE_ASSM|")
+        .or_else(|| token.strip_prefix("TRACE_ASSM|"))
+        .unwrap_or(token);
+    let token = token
+        .strip_prefix("ti")
+        .or_else(|| token.strip_prefix("TI"))
+        .unwrap_or(token);
+    token.parse::<u32>().ok()
+}
+
+fn parse_tilist(path: &Path) -> io::Result<HashSet<u32>> {
+    let data = std::fs::read(path)?;
+    if data.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let text_like = data.iter().all(|&b| {
+        b.is_ascii_alphanumeric()
+            || b.is_ascii_whitespace()
+            || matches!(b, b'+' | b'-' | b'_' | b'|')
+    });
+    if text_like {
+        return Ok(String::from_utf8_lossy(&data)
+            .split_whitespace()
+            .filter_map(parse_trace_id_token)
+            .collect());
+    }
+
+    parse_binary_u32_id_list(&data, "TILIST")
+}
+
+fn parse_binary_u32_id_list(data: &[u8], label: &str) -> io::Result<HashSet<u32>> {
     if data.len() % 4 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "binary GILIST length is not a multiple of 4 bytes",
+            format!("binary {label} length is not a multiple of 4 bytes"),
         ));
     }
-
     let words: Vec<u32> = data
         .chunks_exact(4)
         .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
-    let values = if words
+    let values = if words.first() == Some(&0xffff_ffff)
+        && words
+            .get(1)
+            .is_some_and(|&count| count as usize == words.len().saturating_sub(2))
+    {
+        &words[2..]
+    } else if words
         .first()
         .is_some_and(|&count| count as usize == words.len().saturating_sub(1))
     {
@@ -685,6 +1693,7 @@ fn apply_alias_filters(
         && alias.last_oid.is_none()
         && alias.oidlist.is_none()
         && alias.gilist.is_none()
+        && alias.tilist.is_none()
         && alias.silist.is_none()
         && alias.taxidlist.is_none()
     {
@@ -717,6 +1726,10 @@ fn apply_alias_filters(
         Some(path) => Some(parse_gilist(path)?),
         None => None,
     };
+    let trace_id_list = match &alias.tilist {
+        Some(path) => Some(parse_tilist(path)?),
+        None => None,
+    };
     let taxid_list = match &alias.taxidlist {
         Some(path) => Some(parse_taxidlist(path)?),
         None => None,
@@ -747,6 +1760,15 @@ fn apply_alias_filters(
                             .is_some_and(|gi| gis.contains(&gi))
                     })
                     .unwrap_or(true);
+                let keep_trace_id = trace_id_list
+                    .as_ref()
+                    .map(|trace_ids| {
+                        extract_trace_id_from_header(
+                            slice.volume.get_header(run.physical_start + offset),
+                        )
+                        .is_some_and(|trace_id| trace_ids.contains(&trace_id))
+                    })
+                    .unwrap_or(true);
                 let keep_taxid = taxid_list
                     .as_ref()
                     .map(|taxids| {
@@ -772,7 +1794,8 @@ fn apply_alias_filters(
                         )
                     })
                     .unwrap_or(true);
-                if keep_range && keep_bitmap && keep_gi && keep_taxid && keep_seqid {
+                if keep_range && keep_bitmap && keep_gi && keep_trace_id && keep_taxid && keep_seqid
+                {
                     if active_start.is_none() {
                         active_start = Some(run.physical_start + offset);
                         active_logical_start = logical_oid;
@@ -919,6 +1942,33 @@ impl TaxNameDb {
 }
 
 impl BlastDb {
+    /// Return native MegaBLAST index candidate OIDs for encoded query strands.
+    ///
+    /// This is exposed through `BlastDb` so callers can use the parsed native
+    /// index pre-search boundary without depending on private DB module
+    /// internals.
+    pub fn megablast_index_candidate_oids<'a>(
+        &self,
+        index_prefix: impl AsRef<Path>,
+        queries: impl IntoIterator<Item = &'a [u8]>,
+    ) -> io::Result<Vec<u32>> {
+        let volumes = megablast_index_volumes(index_prefix)?;
+        if volumes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates = std::collections::BTreeSet::new();
+        for query in queries {
+            for volume in &volumes {
+                candidates.extend(volume.candidate_oids_for_query(query));
+            }
+        }
+        Ok(candidates
+            .into_iter()
+            .filter(|&oid| oid < self.num_oids)
+            .collect())
+    }
+
     /// Global OID ranges for each physical volume in database order.
     pub fn volume_oid_ranges(&self) -> Vec<(u32, u32)> {
         self.volume_starts
@@ -2022,6 +3072,52 @@ fn extract_general_accession_from_seqid(hdr: &[u8], pos: usize) -> Option<(Strin
     Some((format!("gnl|{}|{}", db, tag), after_seq_id))
 }
 
+fn extract_trace_id_from_header(hdr: &[u8]) -> Option<u32> {
+    let mut i = 0;
+    while i < hdr.len() {
+        if hdr[i] != 0xaa {
+            i += 1;
+            continue;
+        }
+        let (mut j, seq_id_end, after_seq_id) = match asn1_value_bounds(hdr, i, 0xaa, 512) {
+            Some(bounds) => bounds,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+        let mut scan_end = seq_id_end;
+        if let Some((seq_start, seq_end, _)) = asn1_value_bounds(hdr, j, 0x30, 512) {
+            j = seq_start;
+            scan_end = seq_end;
+        }
+
+        let mut db: Option<String> = None;
+        let mut tag: Option<String> = None;
+        while j < scan_end {
+            if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa0, 128) {
+                db = extract_visible_string(hdr, field_start, field_end);
+                j = after;
+                continue;
+            }
+            if let Some((field_start, field_end, after)) = asn1_value_bounds(hdr, j, 0xa1, 128) {
+                tag = extract_object_id_value(hdr, field_start, field_end);
+                j = after;
+                continue;
+            }
+            j += 1;
+        }
+
+        if db.as_deref() == Some("TRACE_ASSM") {
+            if let Some(trace_id) = tag.as_deref().and_then(parse_trace_id_token) {
+                return Some(trace_id);
+            }
+        }
+        i = after_seq_id.max(i + 1);
+    }
+    None
+}
+
 fn extract_general_accession_from_asn(hdr: &[u8]) -> Option<String> {
     let mut i = 0;
     while i < hdr.len() {
@@ -2743,6 +3839,355 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seqn/seqn")
     }
 
+    fn write_megablast_super_header(path: &Path, num_oids: u32, num_volumes: u32) {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&num_oids.to_le_bytes());
+        data.extend_from_slice(&num_volumes.to_le_bytes());
+        std::fs::write(path, data).expect("write native index superheader");
+    }
+
+    fn write_megablast_volume_header(
+        path: &Path,
+        version: u8,
+        hkey_width: u32,
+        stride: u32,
+        word_size_hint: u32,
+        start_oid: u32,
+        stop_oid: u32,
+    ) {
+        let mut data = vec![version];
+        data.extend_from_slice(&[0; 7]);
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&hkey_width.to_le_bytes());
+        data.extend_from_slice(&stride.to_le_bytes());
+        data.extend_from_slice(&word_size_hint.to_le_bytes());
+        data.extend_from_slice(&start_oid.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&stop_oid.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::write(path, data).expect("write native index volume");
+    }
+
+    fn megablast_volume_header_bytes(
+        version: u8,
+        hkey_width: u32,
+        stride: u32,
+        word_size_hint: u32,
+        start_oid: u32,
+        stop_oid: u32,
+    ) -> Vec<u8> {
+        let mut data = vec![version];
+        data.extend_from_slice(&[0; 7]);
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&hkey_width.to_le_bytes());
+        data.extend_from_slice(&stride.to_le_bytes());
+        data.extend_from_slice(&word_size_hint.to_le_bytes());
+        data.extend_from_slice(&start_oid.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&stop_oid.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data
+    }
+
+    fn write_synthetic_megablast_volume_payload(path: &Path) {
+        let mut data = megablast_volume_header_bytes(6, 1, 4, 16, 0, 1);
+
+        data.extend_from_slice(&6u32.to_le_bytes());
+        for word in [1u32, 0, 4, 0, 6] {
+            data.extend_from_slice(&word.to_le_bytes());
+        }
+        for word in [0u32, 111, 222, 0, 333, 0] {
+            data.extend_from_slice(&word.to_le_bytes());
+        }
+
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&4u32.to_le_bytes());
+        for word in [20u32, 30] {
+            data.extend_from_slice(&word.to_le_bytes());
+        }
+
+        data.extend_from_slice(&32u32.to_le_bytes());
+        for word in [0u32, 1, 0, 4, 1, 2, 4, 8] {
+            data.extend_from_slice(&word.to_le_bytes());
+        }
+
+        data.extend_from_slice(&16u32.to_le_bytes());
+        for word in [1u32, 2, 0, 8] {
+            data.extend_from_slice(&word.to_le_bytes());
+        }
+
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        std::fs::write(path, data).expect("write native index volume payload");
+    }
+
+    #[test]
+    fn megablast_index_volume_discovery_uses_makembindex_volume_names() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let index_prefix = tmp.path().join("testdb");
+        std::fs::write(index_prefix.with_extension("00.idx"), b"volume0").expect("write volume 0");
+        std::fs::write(index_prefix.with_extension("02.idx"), b"volume2").expect("write volume 2");
+        std::fs::write(index_prefix.with_extension("idx"), b"legacy").expect("write legacy file");
+
+        let paths = megablast_index_volume_paths(&index_prefix);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], index_prefix.with_extension("00.idx"));
+        assert_eq!(paths[1], index_prefix.with_extension("02.idx"));
+        assert!(megablast_index_exists(&index_prefix));
+    }
+
+    #[test]
+    fn megablast_index_volume_discovery_rejects_missing_prefix() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let index_prefix = tmp.path().join("missing");
+        assert!(megablast_index_volume_paths(&index_prefix).is_empty());
+        assert!(!megablast_index_exists(&index_prefix));
+    }
+
+    #[test]
+    fn megablast_index_metadata_parses_superheader_and_volume_headers() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let index_prefix = tmp.path().join("testdb");
+        write_megablast_super_header(&megablast_index_super_header_path(&index_prefix), 7, 2);
+        write_megablast_volume_header(
+            &megablast_index_volume_path(&index_prefix, 0),
+            6,
+            13,
+            4,
+            24,
+            0,
+            3,
+        );
+        write_megablast_volume_header(
+            &megablast_index_volume_path(&index_prefix, 1),
+            5,
+            12,
+            0,
+            0,
+            3,
+            7,
+        );
+
+        let metadata = megablast_index_metadata(&index_prefix)
+            .expect("parse metadata")
+            .expect("metadata exists");
+
+        assert_eq!(metadata.total_num_oids, 7);
+        assert_eq!(metadata.super_header.as_ref().unwrap().num_volumes, 2);
+        assert_eq!(metadata.volumes.len(), 2);
+        assert_eq!(metadata.volumes[0].format, MegablastIndexFormat::Current);
+        assert_eq!(metadata.volumes[0].hkey_width, 13);
+        assert_eq!(metadata.volumes[0].stride, 4);
+        assert_eq!(metadata.volumes[0].word_size_hint, 24);
+        assert_eq!(metadata.volumes[0].num_oids, 3);
+        assert_eq!(metadata.volumes[1].format, MegablastIndexFormat::Legacy);
+        assert_eq!(metadata.volumes[1].stride, 5);
+        assert_eq!(metadata.volumes[1].word_size_hint, 28);
+        assert_eq!(metadata.volumes[1].start_oid, 3);
+        assert_eq!(metadata.volumes[1].stop_oid, 7);
+    }
+
+    #[test]
+    fn megablast_index_metadata_rejects_superheader_oid_mismatch() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let index_prefix = tmp.path().join("testdb");
+        write_megablast_super_header(&megablast_index_super_header_path(&index_prefix), 8, 1);
+        write_megablast_volume_header(
+            &megablast_index_volume_path(&index_prefix, 0),
+            6,
+            12,
+            5,
+            28,
+            0,
+            7,
+        );
+
+        let err = megablast_index_metadata(&index_prefix).expect_err("metadata mismatch");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("OID total"));
+    }
+
+    #[test]
+    fn megablast_index_volume_parses_offset_lists_and_subject_map_payload() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("testdb.00.idx");
+        write_synthetic_megablast_volume_payload(&path);
+
+        let volume = megablast_index_volume(&path, 0).expect("parse native volume payload");
+
+        assert_eq!(volume.metadata.hkey_width, 1);
+        assert_eq!(volume.metadata.stride, 4);
+        assert_eq!(volume.offset_data.total_words, 6);
+        assert_eq!(volume.offset_data.hash_table, vec![1, 0, 4, 0, 6]);
+        assert_eq!(
+            volume.offset_data.offset_list_words(0),
+            Some(&[111, 222][..])
+        );
+        assert_eq!(volume.offset_data.offset_list_words(1), None);
+        assert_eq!(volume.offset_data.offset_list_words(2), Some(&[333][..]));
+
+        assert_eq!(volume.subject_map.offset_bits, 4);
+        assert_eq!(volume.subject_map.lengths, vec![20, 30]);
+        assert_eq!(volume.subject_map.lid_map_words.len(), 8);
+        assert_eq!(volume.subject_map.subjects, vec![1, 2]);
+        assert_eq!(volume.subject_map.chunks, vec![0, 8]);
+        assert_eq!(
+            volume.subject_map.seq_store,
+            vec![8, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd]
+        );
+    }
+
+    #[test]
+    fn megablast_index_volumes_loads_all_parsed_payloads() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let index_prefix = tmp.path().join("testdb");
+        write_megablast_super_header(&megablast_index_super_header_path(&index_prefix), 2, 2);
+        write_synthetic_megablast_volume_payload(&megablast_index_volume_path(&index_prefix, 0));
+        write_synthetic_megablast_volume_payload(&megablast_index_volume_path(&index_prefix, 1));
+
+        let volumes = megablast_index_volumes(&index_prefix).expect("parse native volumes");
+
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0].metadata.volume, 0);
+        assert_eq!(volumes[1].metadata.volume, 1);
+        assert_eq!(
+            volumes[0].offset_data.offset_list_words(2),
+            Some(&[333][..])
+        );
+        assert_eq!(
+            volumes[1].offset_data.offset_list_words(0),
+            Some(&[111, 222][..])
+        );
+    }
+
+    #[test]
+    fn megablast_subject_map_decodes_offsets_to_logical_chunks() {
+        let subject_map = MegablastIndexSubjectMap {
+            file_offset: 0,
+            offset_bits: 4,
+            lengths: vec![120, 120],
+            lid_map_words: vec![0, 1, 0, 40, 1, 2, 32, 72],
+            subjects: vec![1, 2, 0],
+            chunks: vec![0, 32],
+            seq_store: Vec::new(),
+        };
+
+        assert_eq!(
+            subject_map.decode_offset(64, 4),
+            Some(MegablastIndexDecodedOffset {
+                logical_id: 0,
+                logical_offset: 64,
+            })
+        );
+        assert_eq!(
+            subject_map.chunk_offset_for_encoded_offset(64, 4),
+            Some(MegablastIndexChunkOffset {
+                logical_id: 0,
+                logical_chunk_id: 1,
+                relative_chunk: 0,
+                chunk_offset: 64,
+            })
+        );
+        assert_eq!(
+            subject_map.chunk_seed_offset_for_encoded_offset(64, 4),
+            Some(MegablastIndexChunkOffset {
+                logical_id: 0,
+                logical_chunk_id: 1,
+                relative_chunk: 0,
+                chunk_offset: 0,
+            })
+        );
+        assert_eq!(
+            subject_map.chunk_offset_for_encoded_offset(80, 4),
+            Some(MegablastIndexChunkOffset {
+                logical_id: 1,
+                logical_chunk_id: 2,
+                relative_chunk: 0,
+                chunk_offset: 64,
+            })
+        );
+        assert_eq!(
+            subject_map.chunk_seed_offset_for_encoded_offset(80, 4),
+            Some(MegablastIndexChunkOffset {
+                logical_id: 1,
+                logical_chunk_id: 2,
+                relative_chunk: 0,
+                chunk_offset: 0,
+            })
+        );
+        assert_eq!(
+            subject_map.logical_chunk_id_for_subject_chunk(0, 0),
+            Some(1)
+        );
+        assert_eq!(
+            subject_map.logical_chunk_id_for_subject_chunk(1, 0),
+            Some(2)
+        );
+        assert_eq!(subject_map.decode_offset(63, 4), None);
+    }
+
+    #[test]
+    fn megablast_index_volume_reports_query_candidate_oids() {
+        let mut hash_table = vec![0u32; (1usize << 2) + 1];
+        hash_table[1] = 1;
+        hash_table[2] = 4;
+        hash_table[4] = 6;
+        let volume = MegablastIndexVolume {
+            metadata: MegablastIndexVolumeMetadata {
+                path: PathBuf::from("synthetic.00.idx"),
+                volume: 0,
+                format: MegablastIndexFormat::Current,
+                hkey_width: 1,
+                stride: 4,
+                word_size_hint: 16,
+                start_oid: 10,
+                start_chunk: 0,
+                stop_oid: 12,
+                stop_chunk: 0,
+                num_oids: 2,
+            },
+            offset_data: MegablastIndexOffsetData {
+                file_offset: 0,
+                total_words: 6,
+                hash_table,
+                offsets: vec![0, 63, 64, 0, 80, 0],
+            },
+            subject_map: MegablastIndexSubjectMap {
+                file_offset: 0,
+                offset_bits: 4,
+                lengths: vec![120, 120],
+                lid_map_words: vec![0, 1, 0, 40, 1, 2, 32, 72],
+                subjects: vec![1, 2, 0],
+                chunks: vec![0, 32],
+                seq_store: Vec::new(),
+            },
+        };
+
+        assert_eq!(volume.candidate_oids_for_query(&[1, 2, 1]), vec![10, 11]);
+        assert_eq!(volume.candidate_oids_for_query(&[3, 3]), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn megablast_index_volume_rejects_invalid_offset_hash_entry() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("testdb.00.idx");
+        write_synthetic_megablast_volume_payload(&path);
+        let mut data = std::fs::read(&path).expect("read synthetic volume");
+        data[HEADER_SIZE + 4..HEADER_SIZE + 8].copy_from_slice(&7u32.to_le_bytes());
+        std::fs::write(&path, data).expect("rewrite corrupt synthetic volume");
+
+        let err = megablast_index_volume(&path, 0).expect_err("reject corrupt offset hash");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("hash entry"));
+    }
+
     #[test]
     fn test_open_seqn_db() {
         let db = BlastDb::open(&test_db_path()).unwrap();
@@ -2802,6 +4247,17 @@ mod tests {
             extract_accession_from_header(&hdr).as_deref(),
             Some("gnl|TRACE_ASSM|ti12345")
         );
+    }
+
+    #[test]
+    fn test_extract_trace_id_from_trace_assm_general_id() {
+        let hdr = [
+            // Seq-id.general Dbtag { db "TRACE_ASSM", tag str "ti12345" }
+            0xaa, 0x80, 0x30, 0x80, 0xa0, 0x80, 0x1a, 0x0a, b'T', b'R', b'A', b'C', b'E', b'_',
+            b'A', b'S', b'S', b'M', 0x00, 0x00, 0xa1, 0x80, 0xa1, 0x80, 0x1a, 0x07, b't', b'i',
+            b'1', b'2', b'3', b'4', b'5', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(extract_trace_id_from_header(&hdr), Some(12345));
     }
 
     #[test]
@@ -3245,6 +4701,86 @@ mod tests {
         std::fs::write(db_path_with_ext(base, "nin"), index).unwrap();
     }
 
+    fn encode_trace_assm_header(trace_id: u32) -> Vec<u8> {
+        let trace_id = format!("ti{trace_id}");
+        let mut hdr = vec![
+            0xaa,
+            0x80,
+            0x30,
+            0x80,
+            0xa0,
+            0x80,
+            0x1a,
+            0x0a,
+            b'T',
+            b'R',
+            b'A',
+            b'C',
+            b'E',
+            b'_',
+            b'A',
+            b'S',
+            b'S',
+            b'M',
+            0x00,
+            0x00,
+            0xa1,
+            0x80,
+            0xa1,
+            0x80,
+            0x1a,
+            trace_id.len() as u8,
+        ];
+        hdr.extend_from_slice(trace_id.as_bytes());
+        hdr.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        hdr
+    }
+
+    fn write_tiny_trace_nucl_db(base: &Path, trace_ids: &[u32]) {
+        let mut headers = Vec::new();
+        let mut hdr_offsets = Vec::with_capacity(trace_ids.len() + 1);
+        hdr_offsets.push(0u32);
+        for trace_id in trace_ids {
+            headers.extend_from_slice(&encode_trace_assm_header(*trace_id));
+            hdr_offsets.push(headers.len() as u32);
+        }
+        std::fs::write(db_path_with_ext(base, "nhr"), headers).unwrap();
+
+        let seq_data = vec![1u8; trace_ids.len()];
+        std::fs::write(db_path_with_ext(base, "nsq"), seq_data).unwrap();
+
+        let n = trace_ids.len() as u32;
+        let mut index = Vec::new();
+        index.extend_from_slice(&4u32.to_be_bytes());
+        index.extend_from_slice(&0u32.to_be_bytes());
+        write_test_string(&mut index, "tiny trace db");
+        write_test_string(&mut index, "May 22, 2026");
+        index.extend_from_slice(&n.to_be_bytes());
+        index.extend_from_slice(&(trace_ids.len() as u64).to_le_bytes());
+        index.extend_from_slice(&1u32.to_be_bytes());
+        for &offset in &hdr_offsets {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 0..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 1..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        index.extend_from_slice(&n.to_be_bytes());
+        std::fs::write(db_path_with_ext(base, "nin"), index).unwrap();
+    }
+
+    fn write_ncbi_binary_u32_list(path: &Path, values: &[u32]) {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0xffff_ffffu32.to_be_bytes());
+        data.extend_from_slice(&(values.len() as u32).to_be_bytes());
+        for &value in values {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+        std::fs::write(path, data).unwrap();
+    }
+
     fn write_tiny_oid_to_taxids(base: &Path, taxids_by_oid: &[&[i32]]) {
         let mut data = Vec::new();
         data.extend_from_slice(&(taxids_by_oid.len() as u64).to_le_bytes());
@@ -3283,6 +4819,26 @@ mod tests {
     }
 
     #[test]
+    fn test_alias_memb_bit_is_parsed_only_not_oid_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write_tiny_accession_nucl_db(&base, &["seq1", "seq2", "seq3", "seq4"]);
+        std::fs::write(
+            tmp.path().join("memb.nal"),
+            "TITLE memb bit parsed only\nDBLIST base\nMEMB_BIT 1\n",
+        )
+        .unwrap();
+
+        let db = BlastDb::open(&tmp.path().join("memb")).unwrap();
+
+        assert_eq!(db.num_oids, 4);
+        assert_eq!(db.stats_num_oids, 4);
+        assert_eq!(db.get_accession(0).as_deref(), Some("seq1"));
+        assert_eq!(db.get_accession(3).as_deref(), Some("seq4"));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 4)]);
+    }
+
+    #[test]
     fn test_alias_gilist_filters_header_gis() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("base");
@@ -3301,6 +4857,67 @@ mod tests {
         assert_eq!(db.get_gi(0), Some(102));
         assert_eq!(db.get_gi(1), Some(104));
         assert_eq!(db.volume_oid_ranges(), vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_binary_gilist_skips_ncbi_count_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write_tiny_gi_nucl_db(&base, &[2, 102, 104]);
+        write_ncbi_binary_u32_list(&tmp.path().join("keep.bgl"), &[102, 104]);
+        std::fs::write(
+            tmp.path().join("masked.nal"),
+            "TITLE binary gi masked\nDBLIST base\nGILIST keep.bgl\n",
+        )
+        .unwrap();
+
+        let db = BlastDb::open(&tmp.path().join("masked")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.get_gi(0), Some(102));
+        assert_eq!(db.get_gi(1), Some(104));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 2)]);
+    }
+
+    #[test]
+    fn test_alias_tilist_filters_trace_assm_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write_tiny_trace_nucl_db(&base, &[111, 222, 333, 444]);
+        std::fs::write(tmp.path().join("keep.til"), "ti222\n444\n").unwrap();
+        std::fs::write(
+            tmp.path().join("trace_masked.nal"),
+            "TITLE trace masked\nDBLIST base\nTILIST keep.til\n",
+        )
+        .unwrap();
+
+        let db = BlastDb::open(&tmp.path().join("trace_masked")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.stats_num_oids, 2);
+        assert_eq!(db.get_accession(0).as_deref(), Some("gnl|TRACE_ASSM|ti222"));
+        assert_eq!(db.get_accession(1).as_deref(), Some("gnl|TRACE_ASSM|ti444"));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_binary_tilist_skips_ncbi_count_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        write_tiny_trace_nucl_db(&base, &[2, 222, 444]);
+        write_ncbi_binary_u32_list(&tmp.path().join("keep.btl"), &[222, 444]);
+        std::fs::write(
+            tmp.path().join("trace_masked.nal"),
+            "TITLE binary trace masked\nDBLIST base\nTILIST keep.btl\n",
+        )
+        .unwrap();
+
+        let db = BlastDb::open(&tmp.path().join("trace_masked")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.get_accession(0).as_deref(), Some("gnl|TRACE_ASSM|ti222"));
+        assert_eq!(db.get_accession(1).as_deref(), Some("gnl|TRACE_ASSM|ti444"));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 2)]);
     }
 
     #[test]
@@ -3379,7 +4996,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_core_nt_refseq_accession_preferred_over_locus_title_if_available() {
         let core_nt_00 = PathBuf::from("/husky/henriksson/for_claude/blast/core_nt/core_nt.00");
         if !db_path_with_ext(&core_nt_00, "nin").exists() {

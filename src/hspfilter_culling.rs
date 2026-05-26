@@ -1958,6 +1958,24 @@ mod tests {
     }
 
     #[test]
+    fn process_hsp_list_splices_removed_middle_and_counts_survivors() {
+        let mut list: Option<Box<LinkedHsp>> = None;
+        s_add_hsp_to_list(&mut list, mk(50, 300, 400, 3)); // no overlap
+        s_add_hsp_to_list(&mut list, mk(50, 10, 90, 2)); // dominated by y
+        s_add_hsp_to_list(&mut list, mk(50, 200, 300, 1)); // no overlap
+        let y = *mk(200, 0, 100, 0);
+
+        let remaining = s_process_hsp_list(&mut list, &y);
+
+        assert_eq!(remaining, 2);
+        let head = list.as_ref().expect("first survivor");
+        assert_eq!(head.subject_id, 1);
+        let tail = head.next.as_ref().expect("second survivor");
+        assert_eq!(tail.subject_id, 3);
+        assert!(tail.next.is_none());
+    }
+
+    #[test]
     fn process_hsp_list_host_skip_only_ignores_first_value_match() {
         let mut list: Option<Box<LinkedHsp>> = None;
         s_add_hsp_to_list(&mut list, mk(100, 0, 100, 1));

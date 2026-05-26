@@ -67,7 +67,7 @@ rust  = "blast_number_2_program"
 other = "BlastNumber2Program"
 
 [[entries]]
-rust  = "bsearch_int4"
+rust  = "b_search_int4"
 other = "BSearchInt4"
 
 [[entries]]
@@ -223,7 +223,7 @@ rust  = "dynamic_sgen_code_node_array_free"
 other = "DynamicSGenCodeNodeArrayFree"
 
 [[entries]]
-rust  = "dynamic_sgen_code_node_array_new"
+rust  = "dynamic_s_gen_code_node_array_new"
 other = "DynamicSGenCodeNodeArrayNew"
 
 [[entries]]
@@ -293,8 +293,23 @@ rust  = "blast_rps_word_finder"
 other = "BlastRPSWordFinder"
 
 [[entries]]
-rust  = "s_blast_aa_word_finder_two_hit"
+# Audit caveat: Rust splits the public wrapper from the implementation body and
+# an owned-payload extension helper; map CCC to the body to avoid a thin-wrapper
+# LOC false positive.
+rust  = "s_blast_rps_word_finder_two_hit_scan"
+other = "s_BlastRPSWordFinder_TwoHit"
+
+[[entries]]
+rust  = "s_blast_aa_word_finder_two_hit_scan"
 other = "s_BlastAaWordFinder_TwoHit"
+
+[[entries]]
+rust  = "s_blast_aa_word_finder_one_hit_scan"
+other = "s_BlastAaWordFinder_OneHit"
+
+[[entries]]
+rust  = "blast_aa_word_finder"
+other = "BlastAaWordFinder"
 
 [[entries]]
 rust  = "s_blast_aa_extend_left"
@@ -639,11 +654,14 @@ rust  = "align_ex"
 other = "ALIGN_EX"
 
 [[entries]]
-rust  = "gapped_align"
+rust  = "blast_semi_gapped_align"
 other = "Blast_SemiGappedAlign"
 
 [[entries]]
-rust  = "gapped_align"
+# Audit caveat: Rust exposes the restricted score-only extension as a
+# two-direction seed wrapper over the translated RESTRICT_SIZE-gated
+# one-direction recurrence, matching the existing Rust semigapped API shape.
+rust  = "s_restricted_gapped_align"
 other = "s_RestrictedGappedAlign"
 
 [[entries]]
@@ -675,7 +693,7 @@ rust  = "mbspace_new"
 other = "MBSpaceNew"
 
 [[entries]]
-rust  = "s_refresh_mbspace"
+rust  = "s_refresh_mb_space"
 other = "s_RefreshMBSpace"
 
 [[entries]]
@@ -683,7 +701,7 @@ rust  = "mbspace_free"
 other = "MBSpaceFree"
 
 [[entries]]
-rust  = "s_get_mbspace"
+rust  = "s_get_mb_space"
 other = "s_GetMBSpace"
 
 [[entries]]
@@ -766,7 +784,7 @@ rust  = "expm1"
 other = "BLAST_Expm1"
 
 [[entries]]
-rust  = "log1p"
+rust  = "blast_log1p"
 other = "BLAST_Log1p"
 
 [[entries]]
@@ -926,7 +944,7 @@ rust  = "compute_h"
 other = "BlastKarlinLtoH"
 
 [[entries]]
-rust  = "compute_k"
+rust  = "blast_karlin_lh_to_k"
 other = "BlastKarlinLHtoK"
 
 [[entries]]
@@ -2054,6 +2072,9 @@ rust  = "s_blast_hsp_list_insert_hsp_in_heap"
 other = "s_BlastHSPListInsertHSPInHeap"
 
 [[entries]]
+# Audit caveat: Rust's `Vec<Hsp>` cannot contain null HSP pointers, so this
+# represents C's compaction routine as a validated no-op over an already compact
+# owned list. Like C, it does not recompute cached `best_evalue`.
 rust  = "blast_hsp_list_purge_null_hsps"
 other = "Blast_HSPListPurgeNullHSPs"
 
@@ -2074,6 +2095,9 @@ rust  = "s_blast_hit_list_purge"
 other = "s_BlastHitListPurge"
 
 [[entries]]
+# Audit caveat: Rust's `Vec<HspList>` cannot contain null HSP-list pointers, so
+# this represents C's pointer-array compaction as a validated no-op. Like C, it
+# leaves cached `low_score` and `worst_evalue` untouched.
 rust  = "blast_hit_list_purge_null_hsp_lists"
 other = "Blast_HitListPurgeNullHSPLists"
 
@@ -2165,7 +2189,10 @@ rust  = "blast_hsp_list_reap_by_evalue"
 other = "Blast_HSPListReapByEvalue"
 
 [[entries]]
-rust  = "blast_hsp_list_purge_hsps_with_common_endpoints"
+# Audit caveat: Rust preserves the two-pass C duplicate-endpoint rule over an
+# owned vector. For BLASTN trim mode it mirrors C's local return count while
+# keeping the trimmed HSP in the compact Rust list.
+rust  = "blast_hsp_list_purge_hsps_with_common_endpoints_with_options"
 other = "Blast_HSPListPurgeHSPsWithCommonEndpoints"
 
 [[entries]]
@@ -2224,6 +2251,14 @@ other = "s_Blast_HSPGetOOFNumIdentitiesAndPositives"
 # returns a borrowed translation plus that pointer offset as an explicit view.
 rust  = "blast_hsp_get_target_translation"
 other = "Blast_HSPGetTargetTranslation"
+
+[[entries]]
+rust  = "blast_hsp_get_adjusted_offsets"
+other = "Blast_HSPGetAdjustedOffsets"
+
+[[entries]]
+rust  = "blast_hsp_get_partial_subject_translation"
+other = "Blast_HSPGetPartialSubjectTranslation"
 
 [[entries]]
 rust  = "blast_hsp_get_query_coverage"
@@ -3531,6 +3566,10 @@ rust  = "s_blast_small_na_lookup_finalize"
 other = "s_BlastSmallNaLookupFinalize"
 
 [[entries]]
+rust  = "s_blast_small_na_lookup_retrieve"
+other = "s_BlastSmallNaRetrieveHits"
+
+[[entries]]
 rust  = "blast_small_na_lookup_table_destruct"
 other = "BlastSmallNaLookupTableDestruct"
 
@@ -3585,6 +3624,10 @@ other = "BlastNaHashLookupTableDestruct"
 [[entries]]
 rust  = "blast_mb_lookup_table_destruct"
 other = "BlastMBLookupTableDestruct"
+
+[[entries]]
+rust  = "blast_mb_lookup_table_new"
+other = "BlastMBLookupTableNew"
 
 [[entries]]
 rust  = "lookup_table_wrap_free"
@@ -3803,10 +3846,6 @@ rust  = "extend_seed_packed_exact"
 other = "s_NuclUngappedExtendExact"
 
 [[entries]]
-rust  = "compute_ungapped_k"
-other = "BlastKarlinLHtoK"
-
-[[entries]]
 rust  = "compute_ungapped_kbp"
 other = "Blast_KarlinBlkUngappedCalc"
 
@@ -3841,15 +3880,15 @@ rust  = "s_ieee754_exp"
 other = "s_IEEE754_Exp"
 
 [[entries]]
-rust  = "erfc"
+rust  = "ncbi_erf_c"
 other = "BLAST_ErfC"
 
 [[entries]]
-rust  = "erfc"
+rust  = "ncbi_erf_c"
 other = "NCBI_ErfC"
 
 [[entries]]
-rust  = "erf"
+rust  = "ncbi_erf"
 other = "NCBI_Erf"
 
 [[entries]]
@@ -3984,6 +4023,10 @@ other = "ResidualsLinearConstraints"
 [[entries]]
 rust  = "score_compare_hsps"
 other = "ScoreCompareHSPs"
+
+[[entries]]
+rust  = "s_query_offset_compare_hsps"
+other = "s_QueryOffsetCompareHSPs"
 
 [[entries]]
 rust  = "s_query_end_compare_hsps"
@@ -4246,6 +4289,10 @@ other = "BlastSetup_ScoreBlkInit"
 [[entries]]
 rust  = "blast_main_set_up"
 other = "BLAST_MainSetUp"
+
+[[entries]]
+rust  = "s_blast_set_up_aux_structures"
+other = "s_BlastSetUpAuxStructures"
 
 [[entries]]
 rust  = "is_search_space_set"
@@ -4601,12 +4648,32 @@ rust  = "s_link_hsp_struct_reset"
 other = "s_LinkHSPStructReset"
 
 [[entries]]
-rust  = "fwd_compare_linked_hsp_sets"
+rust  = "s_sum_hsp_evalue"
+other = "s_SumHSPEvalue"
+
+[[entries]]
+rust  = "s_fwd_compare_linked_hsp_sets"
 other = "s_FwdCompareLinkedHSPSets"
 
 [[entries]]
-rust  = "sum_score_compare_linked_hsp_sets"
+rust  = "s_sum_score_compare_linked_hsp_sets"
 other = "s_SumScoreCompareLinkedHSPSets"
+
+[[entries]]
+rust  = "s_merge_linked_hsp_sets"
+other = "s_MergeLinkedHSPSets"
+
+[[entries]]
+rust  = "s_combine_linked_hsp_sets"
+other = "s_CombineLinkedHSPSets"
+
+[[entries]]
+rust  = "s_linked_hsp_sets_admissible"
+other = "s_LinkedHSPSetsAdmissible"
+
+[[entries]]
+rust  = "s_linked_hsp_set_array_set_up"
+other = "s_LinkedHSPSetArraySetUp"
 
 [[entries]]
 rust  = "s_linked_hsp_set_array_clean_up"
@@ -4658,7 +4725,7 @@ rust  = "sphi_pattern_search_blk_free"
 other = "SPHIPatternSearchBlkFree"
 
 [[entries]]
-rust  = "_phi_get_right_one_bits"
+rust  = "phi_get_right_one_bits"
 other = "_PHIGetRightOneBits"
 
 [[entries]]
@@ -4666,7 +4733,7 @@ rust  = "s_len_of"
 other = "s_LenOf"
 
 [[entries]]
-rust  = "_phi_blast_find_hits_short"
+rust  = "phi_blast_find_hits_short"
 other = "_PHIBlastFindHitsShort"
 
 [[entries]]
@@ -4678,15 +4745,15 @@ rust  = "s_find_hits_short_head"
 other = "s_FindHitsShortHead"
 
 [[entries]]
-rust  = "_phi_pattern_words_left_shift"
+rust  = "phi_pattern_words_left_shift"
 other = "_PHIPatternWordsLeftShift"
 
 [[entries]]
-rust  = "_phi_pattern_words_bitwise_or"
+rust  = "phi_pattern_words_bitwise_or"
 other = "_PHIPatternWordsBitwiseOr"
 
 [[entries]]
-rust  = "_phi_pattern_words_bitwise_and"
+rust  = "phi_pattern_words_bitwise_and"
 other = "_PHIPatternWordsBitwiseAnd"
 
 [[entries]]
@@ -4819,7 +4886,10 @@ rust  = "s_full_pass"
 other = "s_FullPass"
 
 [[entries]]
-rust  = "s_process_hsp_list"
+# Audit caveat: the public Rust entry point is a thin wrapper so callers keep
+# the C name, while the translated linked-list walk lives in this shared body
+# to support the Rust-only host-list self-skip variant.
+rust  = "s_process_hsp_list_impl"
 other = "s_ProcessHSPList"
 
 [[entries]]
@@ -5033,23 +5103,23 @@ rust  = "blast_hsp_collector_info_new"
 other = "BlastHSPCollectorInfoNew"
 
 [[entries]]
-rust  = "spliced_hits::hspcontainer_new"
+rust  = "hsp_container_new"
 other = "HSPContainerNew"
 
 [[entries]]
-rust  = "spliced_hits::hspcontainer_free"
+rust  = "hsp_container_free"
 other = "HSPContainerFree"
 
 [[entries]]
-rust  = "spliced_hits::hspcontainer_dup"
+rust  = "hsp_container_dup"
 other = "HSPContainerDup"
 
 [[entries]]
-rust  = "spliced_hits::hspchain_free"
+rust  = "hsp_chain_free"
 other = "HSPChainFree"
 
 [[entries]]
-rust  = "spliced_hits::hspchain_new"
+rust  = "hsp_chain_new"
 other = "HSPChainNew"
 
 [[entries]]
@@ -5081,7 +5151,7 @@ rust  = "spliced_hits::blast_hspmapper_info_new"
 other = "BlastHSPMapperInfoNew"
 
 [[entries]]
-rust  = "spliced_hits::s_hspchain_list_insert_one_old"
+rust  = "s_hsp_chain_list_insert_one_by_score"
 other = "s_HSPChainListInsertOne_OLD"
 
 [[entries]]
@@ -5089,7 +5159,7 @@ rust  = "spliced_hits::s_test_cutoffs"
 other = "s_TestCutoffs"
 
 [[entries]]
-rust  = "spliced_hits::s_hspchain_list_insert_one"
+rust  = "s_hsp_chain_list_insert_one"
 other = "s_HSPChainListInsertOne"
 
 [[entries]]
@@ -5121,7 +5191,10 @@ rust  = "spliced_hits::s_blast_hspmapper_free"
 other = "s_BlastHSPMapperFree"
 
 [[entries]]
-rust  = "spliced_hits::s_get_overlap_cost"
+# Audit caveat: the public Rust wrapper extracts mapper edit positions from
+# owned `Hsp` metadata, while this body carries the C overlap/containment/edit
+# penalty arithmetic directly.
+rust  = "s_get_overlap_cost_with_edits"
 other = "s_GetOverlapCost"
 
 [[entries]]
@@ -5245,11 +5318,15 @@ rust  = "spliced_hits::s_find_best_pairs"
 other = "s_FindBestPairs"
 
 [[entries]]
+rust  = "spliced_hits::s_compare_pairs"
+other = "s_ComparePairs"
+
+[[entries]]
 # Audit caveat: Rust ports the mapper dispatcher over owned `HspList`s using
 # one-HSP chains and adjacent even/odd query slots for read pairs. C uses
 # `s_FindBestPath`, context segment flags, and raw pointer ownership, so exon
 # path construction remains potentially incomplete/hard to audit here.
-rust  = "spliced_hits::s_blast_hspmapper_spliced_paired_run"
+rust  = "s_blast_hsp_mapper_spliced_paired_run"
 other = "s_BlastHSPMapperSplicedPairedRun"
 
 [[entries]]
@@ -5293,11 +5370,11 @@ rust  = "spliced_hits::s_hspnode_array_copy"
 other = "s_HSPNodeArrayCopy"
 
 [[entries]]
-rust  = "spliced_hits::hsppath_free"
+rust  = "hsp_path_free"
 other = "HSPPathFree"
 
 [[entries]]
-rust  = "spliced_hits::hsppath_new"
+rust  = "hsp_path_new"
 other = "HSPPathNew"
 
 [[entries]]
@@ -6269,12 +6346,20 @@ other = "s_TrimHitList"
 
 # blast_psi.c / blast_psi_priv.c — PSI allocation and lifecycle helpers
 [[entries]]
-rust  = "psi_msa_new"
+rust  = "psi_public_msa_new"
 other = "PSIMsaNew"
 
 [[entries]]
-rust  = "psi_msa_free"
+rust  = "psi_public_msa_free"
 other = "PSIMsaFree"
+
+[[entries]]
+rust  = "psi_msa_new"
+other = "_PSIMsaNew"
+
+[[entries]]
+rust  = "psi_msa_free"
+other = "_PSIMsaFree"
 
 [[entries]]
 rust  = "psi_matrix_new"
@@ -6283,6 +6368,10 @@ other = "PSIMatrixNew"
 [[entries]]
 rust  = "psi_matrix_free"
 other = "PSIMatrixFree"
+
+[[entries]]
+rust  = "_PSIDeallocateMatrix"
+other = "_PSIDeallocateMatrix"
 
 [[entries]]
 rust  = "psi_diagnostics_request_new"
@@ -6315,14 +6404,6 @@ other = "_PSIPackedMsaFree"
 [[entries]]
 rust  = "psi_packed_msa_get_number_of_aligned_seqs"
 other = "_PSIPackedMsaGetNumberOfAlignedSeqs"
-
-[[entries]]
-rust  = "psi_internal_msa_new"
-other = "_PSIMsaNew"
-
-[[entries]]
-rust  = "psi_internal_msa_free"
-other = "_PSIMsaFree"
 
 [[entries]]
 rust  = "psi_internal_pssm_data_free"
@@ -6405,7 +6486,10 @@ rust  = "s_rps_gap_align_data_prepare"
 other = "s_RPSGapAlignDataPrepare"
 
 [[entries]]
-rust  = "s_rps_compute_traceback"
+# Audit caveat: Rust exposes the C orchestration over a callback-driven stream
+# adapter instead of the raw SeqSrc/GapAlign pointer graph; focused tests cover
+# drain, interrupt, RPS orientation update, K scaling, insertion, and sorting.
+rust  = "s_rps_compute_traceback_with_composition"
 other = "s_RPSComputeTraceback"
 
 [[entries]]

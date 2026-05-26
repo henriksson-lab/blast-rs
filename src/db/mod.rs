@@ -4,7 +4,10 @@ mod index;
 pub(crate) mod index_writer;
 pub mod makedb;
 
-pub use index::{BlastDb, DbType, TaxInfo, TaxNameDb};
+pub use index::{
+    megablast_index_exists, megablast_index_volume_paths, BlastDb, DbType, TaxInfo, TaxNameDb,
+};
+pub use makedb::{make_db, make_nucleotide_db, make_protein_db};
 
 pub(crate) fn current_blastdb_date() -> String {
     let days_since_epoch = std::time::SystemTime::now()
@@ -52,5 +55,15 @@ mod tests {
             .bytes()
             .enumerate()
             .all(|(i, b)| matches!(i, 4 | 7) || b.is_ascii_digit()));
+    }
+
+    #[test]
+    fn makedb_helpers_are_reexported_from_db_module() {
+        let _: fn(DbType, &std::path::Path, &std::path::Path, &str) -> std::io::Result<(u32, u64)> =
+            make_db;
+        let _: fn(&std::path::Path, &std::path::Path, &str) -> std::io::Result<(u32, u64)> =
+            make_nucleotide_db;
+        let _: fn(&std::path::Path, &std::path::Path, &str) -> std::io::Result<(u32, u64)> =
+            make_protein_db;
     }
 }

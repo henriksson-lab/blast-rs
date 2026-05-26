@@ -54,6 +54,20 @@ impl QueryInfo {
         }
         (max_length, min_length)
     }
+
+    /// NCBI: `QueryInfo_GetSeqBufLen` (`blast_query_info.c:246`). Length of the
+    /// concatenated query sequence buffer, including the trailing sentinel(s) of
+    /// the last context (2 bytes when it has residues, 1 when empty). Returns 0
+    /// when there are no contexts.
+    pub fn seq_buf_len(&self) -> usize {
+        match self.contexts.last() {
+            Some(c) => {
+                let extra = if c.query_length != 0 { 2 } else { 1 };
+                (c.query_offset + c.query_length).max(0) as usize + extra
+            }
+            None => 0,
+        }
+    }
 }
 
 impl QueryInfo {

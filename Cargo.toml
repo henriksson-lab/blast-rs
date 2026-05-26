@@ -1,6 +1,6 @@
 [package]
 name = "blast-rs"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 license = "MIT OR Unlicense"
 description = "Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool)"
@@ -11,9 +11,7 @@ keywords = ["bioinformatics", "blast", "alignment", "sequence", "genomics"]
 categories = ["science", "command-line-utilities"]
 include = [
     "src/**/*",
-    "tests/**/*",
-    "benches/**/*",
-    "!tests/fixtures/large_db/**",
+    "!src/bin/**",
     "Cargo.toml",
     "Cargo.lock",
     "LICENSE.md",

@@ -1728,6 +1728,21 @@ fn blast_hsp_list_get_evalues_for_linking(
     link_hsp_params: &LinkHSPParameters,
     gapped_calculation: bool,
 ) {
+    // NCBI traceback passes translated-subject linker lengths in the HSP
+    // coordinate system, not the original nucleotide database coordinates.
+    // Keep the Rust linker-local Spouge refresh in that same coordinate view
+    // when callers still carry the raw subject length.
+    let translated_subject_length = if blast_subject_is_translated(program_number) {
+        hsp_list
+            .hsp_array
+            .iter()
+            .map(|hsp| hsp.subject.end.max(hsp.subject.offset))
+            .max()
+            .filter(|&end| end > 0 && end < subject_length)
+            .unwrap_or(subject_length)
+    } else {
+        subject_length
+    };
     for hsp in &mut hsp_list.hsp_array {
         let context = hsp.context.max(0) as usize;
         let Some(context_info) = query_info.contexts.get(context) else {
@@ -1754,10 +1769,22 @@ fn blast_hsp_list_get_evalues_for_linking(
             if let Some(gbp) = sbp.gbp.as_ref() {
                 let mut gbp = gbp.clone();
                 if let Some(db_length) = sbp.link_gbp_db_length {
-                    gbp.db_length = db_length.max(1);
+                    gbp.db_length = if blast_subject_is_translated(program_number) {
+                        // NCBI refreshes translated-subject linker e-values in
+                        // the HSP coordinate view, but keeps the database scale.
+                        // For subject mode with multiple sequences this is the
+                        // translated HSP span multiplied by total-db/raw-subject.
+                        (translated_subject_length as i64)
+                            .saturating_mul(db_length.max(1))
+                            .checked_div(subject_length.max(1) as i64)
+                            .unwrap_or(translated_subject_length as i64)
+                            .max(1)
+                    } else {
+                        db_length.max(1)
+                    };
                 }
                 let subject_stat_length = if blast_subject_is_translated(program_number) {
-                    (subject_length / CODON_LENGTH).max(1)
+                    (translated_subject_length / CODON_LENGTH).max(1)
                 } else {
                     subject_length.max(1)
                 };
@@ -2186,6 +2213,105 @@ mod tests {
     }
 
     #[test]
+    fn test_tblastn_singleton_sum_stats_refresh_uses_c_translated_lengths() {
+        let qi = one_context_query_info(1, 16);
+        let mut kbp = KarlinBlk::default();
+        assert_eq!(
+            crate::stat::blast_karlin_blk_gapped_load_from_tables(
+                Some(&mut kbp),
+                11,
+                1,
+                Some("BLOSUM62"),
+                false,
+            ),
+            0
+        );
+        let gbp = crate::stat::matrix_gumbel_blk("BLOSUM62", 11, 1, 20).unwrap();
+        let sbp = LinkScoreBlock {
+            kbp: vec![kbp.clone()],
+            kbp_gap: vec![kbp],
+            gbp: Some(gbp),
+            link_gbp_db_length: Some(60),
+            recompute_evalues_before_uneven_linking: true,
+        };
+        let params = LinkHSPParameters {
+            gap_prob: crate::stat::BLAST_GAP_PROB_GAPPED,
+            gap_size: 40,
+            overlap_size: 9,
+            gap_decay_rate: crate::stat::BLAST_GAP_DECAY_RATE_GAPPED,
+            cutoff_small_gap: 0,
+            cutoff_big_gap: 0,
+            longest_intron: 1,
+        };
+        let mut hsp_list = LinkBlastHspList {
+            oid: 0,
+            query_index: 0,
+            hsp_array: vec![make_hsp(0, 0, 16, 0, 18, 63, 1)],
+            best_evalue: 1.0,
+        };
+
+        let rc = blast_link_hsps(TBLASTN, &mut hsp_list, &qi, 60, &sbp, &params, true);
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hsp_array.len(), 1);
+        let evalue = hsp_list.hsp_array[0].evalue;
+        assert!(
+            (evalue - 9.28e-09).abs() <= 0.01e-09,
+            "expected C TBLASTN singleton sum-stats e-value, got {evalue}"
+        );
+        assert_eq!(hsp_list.best_evalue, evalue);
+    }
+
+    #[test]
+    fn test_tblastn_sum_stats_refresh_scales_translated_db_for_multiple_subjects() {
+        let qi = one_context_query_info(1, 8);
+        let mut kbp = KarlinBlk::default();
+        assert_eq!(
+            crate::stat::blast_karlin_blk_gapped_load_from_tables(
+                Some(&mut kbp),
+                11,
+                1,
+                Some("BLOSUM62"),
+                false,
+            ),
+            0
+        );
+        let gbp = crate::stat::matrix_gumbel_blk("BLOSUM62", 11, 1, 16).unwrap();
+        let sbp = LinkScoreBlock {
+            kbp: vec![kbp.clone()],
+            kbp_gap: vec![kbp.clone()],
+            gbp: Some(gbp.clone()),
+            link_gbp_db_length: Some(48),
+            recompute_evalues_before_uneven_linking: true,
+        };
+        let params = LinkHSPParameters {
+            gap_prob: crate::stat::BLAST_GAP_PROB_GAPPED,
+            gap_size: 40,
+            overlap_size: 9,
+            gap_decay_rate: crate::stat::BLAST_GAP_DECAY_RATE_GAPPED,
+            cutoff_small_gap: 0,
+            cutoff_big_gap: 0,
+            longest_intron: 1,
+        };
+        let mut hsp_list = LinkBlastHspList {
+            oid: 1,
+            query_index: 0,
+            hsp_array: vec![make_hsp(0, 0, 8, 0, 8, 38, 1)],
+            best_evalue: 1.0,
+        };
+
+        let rc = blast_link_hsps(TBLASTN, &mut hsp_list, &qi, 24, &sbp, &params, true);
+
+        assert_eq!(rc, 0);
+        let mut expected_gbp = gbp;
+        expected_gbp.db_length = 16;
+        let expected = spouge_evalue(38, &kbp, &expected_gbp, 8, 2)
+            / blast_gap_decay_divisor(crate::stat::BLAST_GAP_DECAY_RATE_GAPPED, 1);
+        assert!((hsp_list.hsp_array[0].evalue - expected).abs() <= expected * 1.0e-12);
+        assert_eq!(hsp_list.best_evalue, hsp_list.hsp_array[0].evalue);
+    }
+
+    #[test]
     fn test_sum_score_compare_descending() {
         // Synthetic `BlastLinkedHspSet` records: highest sum_score first.
         let hsp_array = vec![
@@ -2219,6 +2345,102 @@ mod tests {
         let mut order = vec![0usize, 1, 2];
         order.sort_by(|&a, &b| s_sum_score_compare_linked_hsp_sets(&sets, &hsp_array, a, b));
         assert_eq!(order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn linked_hsp_set_forward_compare_orders_by_query_id_query_and_subject() {
+        let hsp_array = vec![
+            make_hsp(0, 20, 30, 50, 60, 10, 1),
+            make_hsp(0, 10, 20, 80, 90, 10, 1),
+            make_hsp(0, 10, 20, 40, 50, 10, 1),
+            make_hsp(0, 5, 15, 10, 20, 10, 1),
+        ];
+        let sets = vec![
+            BlastLinkedHspSet {
+                hsp_idx: 0,
+                queryId: 1,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+            BlastLinkedHspSet {
+                hsp_idx: 1,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+            BlastLinkedHspSet {
+                hsp_idx: 2,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+            BlastLinkedHspSet {
+                hsp_idx: 3,
+                queryId: 1,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+        ];
+        let mut order = vec![0usize, 1, 2, 3];
+
+        order.sort_by(|&a, &b| s_fwd_compare_linked_hsp_sets(&sets, &hsp_array, a, b));
+
+        assert_eq!(order, vec![2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn sum_hsp_evalue_uses_combined_score_counts_and_effective_lengths() {
+        let mut qi = one_context_query_info(1, 100);
+        qi.contexts[0].length_adjustment = 7;
+        qi.contexts[0].eff_searchsp = 123_456;
+        let hsp_array = vec![
+            make_hsp(0, 10, 20, 30, 40, 10, 1),
+            make_hsp(0, 30, 40, 60, 70, 10, 1),
+        ];
+        let sets = vec![
+            BlastLinkedHspSet {
+                hsp_idx: 0,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 11.0,
+            },
+            BlastLinkedHspSet {
+                hsp_idx: 1,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 13.0,
+            },
+        ];
+        let params = LinkHSPParameters {
+            gap_size: 7,
+            overlap_size: 2,
+            gap_decay_rate: 0.5,
+            longest_intron: 30,
+            ..LinkHSPParameters::default()
+        };
+
+        let (evalue, sum_score) =
+            s_sum_hsp_evalue(TBLASTN, &qi, 300, &params, &sets, &hsp_array, 0, 1);
+
+        let expected = uneven_gap_sum_e(
+            10,
+            33,
+            2,
+            24.0,
+            93,
+            93,
+            123_456.0,
+            blast_gap_decay_divisor(0.5, 2),
+        )
+        .unwrap();
+        assert_eq!(sum_score, 24.0);
+        assert_eq!(evalue, expected);
     }
 
     #[test]
@@ -2271,6 +2493,91 @@ mod tests {
         // Passing the same set twice — NCBI rejects.
         assert!(!s_linked_hsp_sets_admissible(
             &sets, &hsp_array, 0, 0, &params, TBLASTN
+        ));
+    }
+
+    #[test]
+    fn linked_hsp_sets_admissible_accepts_ordered_same_strand_sets() {
+        let hsp_array = vec![
+            make_hsp(0, 10, 30, 100, 120, 10, 1),
+            make_hsp(0, 35, 55, 130, 150, 10, 1),
+        ];
+        let sets = vec![
+            BlastLinkedHspSet {
+                hsp_idx: 0,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+            BlastLinkedHspSet {
+                hsp_idx: 1,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+        ];
+        let params = LinkHSPParameters {
+            gap_size: 40,
+            overlap_size: 9,
+            longest_intron: 40,
+            ..LinkHSPParameters::default()
+        };
+
+        assert!(s_linked_hsp_sets_admissible(
+            &sets, &hsp_array, 0, 1, &params, TBLASTN
+        ));
+    }
+
+    #[test]
+    fn linked_hsp_sets_admissible_rejects_wrong_order_and_strand() {
+        let params = LinkHSPParameters {
+            gap_size: 40,
+            overlap_size: 9,
+            longest_intron: 40,
+            ..LinkHSPParameters::default()
+        };
+        let same_query_offset_hsps = vec![
+            make_hsp(0, 10, 30, 100, 120, 10, 1),
+            make_hsp(0, 10, 35, 130, 150, 10, 1),
+        ];
+        let opposite_strand_hsps = vec![
+            make_hsp(0, 10, 30, 100, 120, 10, 1),
+            make_hsp(0, 35, 55, 130, 150, 10, -1),
+        ];
+        let sets = vec![
+            BlastLinkedHspSet {
+                hsp_idx: 0,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+            BlastLinkedHspSet {
+                hsp_idx: 1,
+                queryId: 0,
+                next: None,
+                prev: None,
+                sum_score: 0.0,
+            },
+        ];
+
+        assert!(!s_linked_hsp_sets_admissible(
+            &sets,
+            &same_query_offset_hsps,
+            0,
+            1,
+            &params,
+            TBLASTN
+        ));
+        assert!(!s_linked_hsp_sets_admissible(
+            &sets,
+            &opposite_strand_hsps,
+            0,
+            1,
+            &params,
+            TBLASTN
         ));
     }
 }

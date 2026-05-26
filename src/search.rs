@@ -6329,46 +6329,40 @@ fn render_traceback_candidate(
     let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
     let q_window = &query[tb.query_start..tb.query_end];
     let s_window = &subject[tb.subject_start..tb.subject_end];
-    let single_sub_len = match tb.edit_script.ops.as_slice() {
-        [(GapAlignOpType::Sub, n)] => *n,
-        _ => 0,
-    };
-    let preserve_medium_ungapped_traceback = single_sub_len >= 80
-        && single_sub_len <= 160
-        && q_window.iter().all(|&b| (b & 0x0f) < 4)
-        && s_window.iter().all(|&b| b < 4);
-    if !preserve_medium_ungapped_traceback {
-        let original_tb = tb.clone();
-        let (orig_align_len, orig_num_ident, orig_gap_opens) =
-            original_tb.edit_script.count_identities(q_window, s_window);
-        if blast_hsp_reevaluate_with_ambiguities_gapped(
-            &mut tb,
-            query,
-            subject,
-            reward,
-            penalty,
-            gap_open,
-            gap_extend,
-            cutoff_score.max(1),
-        ) {
-            return None;
-        }
-        let rq_slice = &query[tb.query_start..tb.query_end];
-        let rs_slice = &subject[tb.subject_start..tb.subject_end];
-        let (refined_align_len, refined_num_ident, refined_gap_opens) =
-            tb.edit_script.count_identities(rq_slice, rs_slice);
-        if original_tb.score == tb.score
-            && original_tb.score >= 26
-            && orig_gap_opens == 1
-            && orig_align_len >= 50
-            && orig_align_len <= 70
-            && orig_num_ident * 100 >= orig_align_len * 85
-            && refined_gap_opens == 0
-            && refined_num_ident == refined_align_len
-            && refined_align_len <= 30
-        {
-            tb = original_tb;
-        }
+    // NCBI runs Blast_HSPReevaluateWithAmbiguitiesGapped on every gapped HSP in
+    // traceback (blast_traceback.c:669): the greedy core ignores ambiguities, so
+    // the score is recomputed and the HSP trimmed to its maximal-scoring subrange.
+    // Run it unconditionally — no length-based exceptions.
+    let original_tb = tb.clone();
+    let (orig_align_len, orig_num_ident, orig_gap_opens) =
+        original_tb.edit_script.count_identities(q_window, s_window);
+    if blast_hsp_reevaluate_with_ambiguities_gapped(
+        &mut tb,
+        query,
+        subject,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        cutoff_score.max(1),
+    ) {
+        return None;
+    }
+    let rq_slice = &query[tb.query_start..tb.query_end];
+    let rs_slice = &subject[tb.subject_start..tb.subject_end];
+    let (refined_align_len, refined_num_ident, refined_gap_opens) =
+        tb.edit_script.count_identities(rq_slice, rs_slice);
+    if original_tb.score == tb.score
+        && original_tb.score >= 26
+        && orig_gap_opens == 1
+        && orig_align_len >= 50
+        && orig_align_len <= 70
+        && orig_num_ident * 100 >= orig_align_len * 85
+        && refined_gap_opens == 0
+        && refined_num_ident == refined_align_len
+        && refined_align_len <= 30
+    {
+        tb = original_tb;
     }
     let evalue = kbp.raw_to_evalue(tb.score, search_space);
     if evalue > evalue_threshold {

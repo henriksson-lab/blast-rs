@@ -111,12 +111,12 @@ pub fn s_blast_progress_new(user_data: Option<usize>) -> SBlastProgress {
     }
 }
 
-/// Rust equivalent of NCBI `SBlastProgressFree` (`blast_util.c:1398`).
+/// Rust equivalent of NCBI `SBlastProgressFree` (`blast_util.c:1397`).
 pub fn s_blast_progress_free(_: Option<SBlastProgress>) -> Option<SBlastProgress> {
     None
 }
 
-/// Port of NCBI `SBlastProgressReset` (`blast_util.c:1407`).
+/// Port of NCBI `SBlastProgressReset` (`blast_util.c:1406`).
 pub fn s_blast_progress_reset(progress_info: Option<&mut SBlastProgress>) {
     if let Some(progress_info) = progress_info {
         progress_info.stage = EBlastStage::PrelimSearch;
@@ -458,7 +458,7 @@ pub struct SSeqRange {
     pub right: i32,
 }
 
-/// Port of NCBI `SSeqRangeNew` (`blast_util.c:40`).
+/// Port of NCBI `SSeqRangeNew` (`blast_util.c:47`).
 pub fn s_seq_range_new(start: i32, stop: i32) -> SSeqRange {
     SSeqRange {
         left: start,
@@ -466,7 +466,7 @@ pub fn s_seq_range_new(start: i32, stop: i32) -> SSeqRange {
     }
 }
 
-/// Port of NCBI `SSeqRangeArrayLessThanOrEqual` (`blast_util.c:47`).
+/// Port of NCBI `SSeqRangeArrayLessThanOrEqual` (`blast_util.c:56`).
 pub fn s_seq_range_array_less_than_or_equal(ranges: Option<&[SSeqRange]>, target: i32) -> i32 {
     let Some(ranges) = ranges else {
         return -1;
@@ -569,24 +569,22 @@ pub fn blast_target_translation_new(
         retval.range = Some(vec![0; 2 * NUM_FRAMES]);
         retval.subject_blk = Some(subject_blk.clone());
     } else {
-        let seq = subject_blk
-            .sequence
-            .as_deref()
-            .or_else(|| subject_blk.sequence_start.as_deref())
-            .unwrap_or(&[]);
+        // C passes subject_blk->sequence_start (the sentinel-prefixed buffer) to
+        // both GetReverseNuclSequence and BLAST_GetTranslation (blast_util.c:1300).
+        let seq = subject_blk.sequence_start.as_deref().unwrap_or(&[]);
         if is_ooframe {
-            if let Ok(partial_translation) = blast_get_partial_translation(
-                seq,
-                subject_blk.length.max(0) as usize,
-                1,
-                gen_code_string,
-                false,
-                false,
-                true,
-            ) {
-                subject_blk.oof_sequence = partial_translation.mixed_seq;
-                subject_blk.oof_sequence_allocated = subject_blk.oof_sequence.is_some();
-            }
+            // C: BLAST_GetAllTranslations(sequence_start, eBlastEncodingNcbi4na,
+            //    length, gen_code, NULL, NULL, &oof_sequence) — all 6 frames of
+            //    both strands, interleaved into the mixed-frame sequence
+            //    (blast_util.c:1289). The previous single-strand frame-1
+            //    blast_get_partial_translation call produced a wrong (half-length,
+            //    one-strand) sequence.
+            let length = subject_blk.length.max(0) as usize;
+            let (buffer, frame_offsets) =
+                blast_get_all_translations(seq, length, gen_code_string);
+            subject_blk.oof_sequence =
+                Some(blast_all_translations_mixed_seq(&buffer, &frame_offsets, length));
+            subject_blk.oof_sequence_allocated = true;
         } else {
             let rev = get_reverse_nucl_sequence(seq, subject_blk.length.max(0) as usize);
             for context in 0..NUM_FRAMES {
@@ -1273,7 +1271,7 @@ pub fn blast_get_partial_translation(
     })
 }
 
-/// Port of NCBI `BLAST_GetTranslatedProteinLength` (`blast_util.c:920`).
+/// Port of NCBI `BLAST_GetTranslatedProteinLength` (`blast_util.c:922`).
 pub fn blast_get_translated_protein_length(nucleotide_length: usize, context: u32) -> usize {
     let offset = (context as usize) % CODON_LENGTH;
     if nucleotide_length == 0 || nucleotide_length <= offset {
@@ -1314,6 +1312,36 @@ pub fn blast_context_to_frame(context_number: u32) -> i32 {
         4 => -2,
         5 => -3,
         _ => unreachable!(),
+    }
+}
+
+/// Port of `BLAST_FrameToContext` (`blast_util.c:1211`). Maps a reading frame
+/// to a context index for any program class: translated programs (frame ±1..±3
+/// → 0..5 via `frame-1` / `2-frame`), nucleotide programs (frame ±1 → 0/1), and
+/// protein programs (frame 0 → 0). Unlike [`blast_context_to_frame`] this covers
+/// all three branches, matching the C dispatch.
+pub fn blast_frame_to_context(frame: i32, program: crate::program::ProgramType) -> i32 {
+    use crate::program::{
+        blast_query_is_nucleotide, blast_query_is_translated, blast_subject_is_nucleotide,
+        blast_subject_is_translated,
+    };
+    if blast_query_is_translated(program) || blast_subject_is_translated(program) {
+        debug_assert!((-3..=3).contains(&frame) && frame != 0);
+        if frame > 0 {
+            frame - 1
+        } else {
+            2 - frame
+        }
+    } else if blast_query_is_nucleotide(program) || blast_subject_is_nucleotide(program) {
+        debug_assert!(frame == 1 || frame == -1);
+        if frame == 1 {
+            0
+        } else {
+            1
+        }
+    } else {
+        debug_assert!(frame == 0);
+        0
     }
 }
 
@@ -1435,6 +1463,103 @@ pub fn blast_get_all_translations(
     }
 
     (translation_buffer, frame_offsets)
+}
+
+/// Port of the out-of-frame mixed-sequence construction block of
+/// `BLAST_GetAllTranslations` (`blast_util.c:1112-1126`). Given the 6-frame
+/// concatenated `translation_buffer` and its `frame_offsets` (as produced by
+/// [`blast_get_all_translations`]), builds the OOF mixed-frame sequence used by
+/// out-of-frame gapping: length `2*nucl_length+3`, interleaving the three
+/// frames of each strand base-by-base (`+1,+2,+3` then `-1,-2,-3`), with a
+/// trailing NULLB sentinel. Split out as a separate helper so the common
+/// `blast_get_all_translations` callers (which pass C's `mixed_seq_ptr == NULL`)
+/// keep their `(buffer, frame_offsets)` signature.
+pub fn blast_all_translations_mixed_seq(
+    translation_buffer: &[u8],
+    frame_offsets: &[u32; NUM_FRAMES + 1],
+    nucl_length: usize,
+) -> Vec<u8> {
+    // C: malloc(2*nucl_length+3); the trailing byte is the final NULLB sentinel.
+    let mut mixed_seq = vec![NULLB; 2 * nucl_length + 3];
+    let mut out = 0usize;
+    let mut index = 0usize;
+    while index < NUM_FRAMES {
+        for i in 0..=nucl_length {
+            let context = i % CODON_LENGTH;
+            let offset = i / CODON_LENGTH;
+            mixed_seq[out] = translation_buffer[frame_offsets[index + context] as usize + offset];
+            out += 1;
+        }
+        index += CODON_LENGTH;
+    }
+    // `out` is now 2*(nucl_length+1); mixed_seq[out] stays NULLB (C's `*seq = NULLB`).
+    mixed_seq
+}
+
+/// Port of `BLAST_CreateMixedFrameDNATranslation` (`blast_util.c:931`). Builds
+/// the query-side out-of-frame mixed-frame DNA sequence: for each query, the
+/// three forward (then three reverse) reading frames are interleaved
+/// base-by-base, prefixed by three NULLB sentinels, and written at the
+/// first-frame context's `query_offset`. The result is stored in
+/// `query_blk.oof_sequence`. Used only by out-of-frame (frameshift) gapping in
+/// blastx; returns -1 if the query block has no `sequence`.
+pub fn blast_create_mixed_frame_dna_translation(
+    query_blk: &mut BlastSequenceBlk,
+    query_info: &crate::queryinfo::QueryInfo,
+) -> i16 {
+    let total_length = query_info.seq_buf_len();
+    // C: malloc(total_length+1) — 1 extra byte for the final sentinel.
+    let mut buffer = vec![NULLB; total_length + 1];
+    let contexts = &query_info.contexts;
+    if contexts.is_empty() {
+        return -1;
+    }
+    let last_context = contexts.len() - 1;
+    let sequence = match query_blk.sequence.as_deref() {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    let mut seq = 0usize; // running write cursor; mirrors C's post-incremented `seq`
+    let mut wrote_any = false;
+    let mut index = 0usize;
+    while index <= last_context {
+        // query_length == 0 indicates this context is not searched.
+        if contexts[index].query_length == 0 {
+            index += CODON_LENGTH;
+            continue;
+        }
+        seq = contexts[index].query_offset.max(0) as usize;
+        let mut length = [0i32; CODON_LENGTH];
+        for (i, len) in length.iter_mut().enumerate() {
+            buffer[seq] = NULLB;
+            seq += 1;
+            *len = contexts[index + i].query_length;
+        }
+        let mut i = 0usize;
+        loop {
+            let context = i % CODON_LENGTH;
+            let offset = i / CODON_LENGTH;
+            // Once one frame is past its end, we are done.
+            if offset >= length[context].max(0) as usize {
+                break;
+            }
+            let src = contexts[index + context].query_offset.max(0) as usize + offset;
+            buffer[seq] = sequence[src];
+            seq += 1;
+            i += 1;
+        }
+        wrote_any = true;
+        index += CODON_LENGTH;
+    }
+    // C: if (seq) *seq = NULLB; — trailing sentinel after the last written base.
+    if wrote_any {
+        buffer[seq] = NULLB;
+    }
+
+    query_blk.oof_sequence = Some(buffer);
+    query_blk.oof_sequence_allocated = true;
+    0
 }
 
 /// Standard genetic code (NCBI translation table 1).
@@ -1850,9 +1975,11 @@ mod tests {
         assert!(!target.partial);
         assert_eq!(target.range, None);
         assert!(blk.oof_sequence_allocated);
+        // C BLAST_GetAllTranslations builds a mixed-frame sequence over both
+        // strands: 2*nucl_length+3 bytes (blast_util.c:1115).
         assert_eq!(
             blk.oof_sequence.as_ref().unwrap().len(),
-            blk.length as usize + 1
+            2 * blk.length as usize + 3
         );
     }
 
@@ -2297,6 +2424,80 @@ mod tests {
         }
         // Frame +1 has 2 residues.
         assert_eq!(offsets[1] - offsets[0] - 1, 2);
+    }
+
+    #[test]
+    fn test_blast_frame_to_context_all_branches() {
+        use crate::program::{BLASTN, BLASTP, BLASTX, TBLASTN};
+        // Translated: ±1..±3 → 0..5 (frame-1 / 2-frame).
+        for (frame, ctx) in [(1, 0), (2, 1), (3, 2), (-1, 3), (-2, 4), (-3, 5)] {
+            assert_eq!(blast_frame_to_context(frame, BLASTX), ctx);
+            assert_eq!(blast_frame_to_context(frame, TBLASTN), ctx);
+        }
+        // Nucleotide: +1 → 0, -1 → 1.
+        assert_eq!(blast_frame_to_context(1, BLASTN), 0);
+        assert_eq!(blast_frame_to_context(-1, BLASTN), 1);
+        // Protein: frame 0 → 0.
+        assert_eq!(blast_frame_to_context(0, BLASTP), 0);
+    }
+
+    #[test]
+    fn test_blast_all_translations_mixed_seq_matches_c_layout() {
+        let seq: Vec<u8> = vec![1, 8, 4, 4, 2, 8]; // ATGGCT
+        let nucl_length = seq.len();
+        let (buf, offsets) = blast_get_all_translations(&seq, nucl_length, &STANDARD_GENETIC_CODE);
+        let mixed = blast_all_translations_mixed_seq(&buf, &offsets, nucl_length);
+        // C: malloc(2*nucl_length+3), final byte is the trailing NULLB.
+        assert_eq!(mixed.len(), 2 * nucl_length + 3);
+        assert_eq!(*mixed.last().unwrap(), NULLB);
+        // Reproduce C's interleave directly and compare.
+        let mut expected = vec![NULLB; 2 * nucl_length + 3];
+        let mut out = 0usize;
+        let mut index = 0usize;
+        while index < NUM_FRAMES {
+            for i in 0..=nucl_length {
+                expected[out] =
+                    buf[offsets[index + (i % CODON_LENGTH)] as usize + (i / CODON_LENGTH)];
+                out += 1;
+            }
+            index += CODON_LENGTH;
+        }
+        assert_eq!(mixed, expected);
+    }
+
+    #[test]
+    fn test_blast_create_mixed_frame_dna_translation_interleaves_frames() {
+        use crate::queryinfo::{ContextInfo, QueryInfo};
+        let ctx = |query_offset: i32, query_length: i32| ContextInfo {
+            query_offset,
+            query_length,
+            eff_searchsp: 0,
+            length_adjustment: 0,
+            query_index: 0,
+            frame: 0,
+            is_valid: query_length > 0,
+            segment_flags: 0,
+        };
+        // Three forward-frame contexts at offsets 0/3/6 with lengths 2/2/1.
+        let qinfo = QueryInfo {
+            num_queries: 1,
+            contexts: vec![ctx(0, 2), ctx(3, 2), ctx(6, 1)],
+            max_length: 2,
+            min_length: 1,
+        };
+        // seq_buf_len: last ctx offset 6 + len 1 + 2 = 9.
+        assert_eq!(qinfo.seq_buf_len(), 9);
+
+        let mut blk = BlastSequenceBlk::default();
+        blk.sequence = Some(vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+        assert_eq!(blast_create_mixed_frame_dna_translation(&mut blk, &qinfo), 0);
+        assert!(blk.oof_sequence_allocated);
+        // 3 leading NULLBs, then interleave f0[0],f1[0],f2[0],f0[1],f1[1] (f2
+        // exhausted at offset 1), then a trailing NULLB. Buffer is seq_buf_len+1.
+        assert_eq!(
+            blk.oof_sequence.as_deref(),
+            Some(&[NULLB, NULLB, NULLB, 10, 13, 16, 11, 14, NULLB, NULLB][..])
+        );
     }
 
     #[test]

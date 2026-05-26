@@ -63,6 +63,100 @@ pub const K_PSI_SCALE_FACTOR: f64 = 200.0;
 pub const K_POSIT_SCALING_PERCENT: f64 = 0.05;
 pub const K_POSIT_SCALING_NUM_ITERATIONS: usize = 10;
 
+#[cfg(test)]
+thread_local! {
+    static PSI_TEST_ALLOC_FAILURE: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct PsiTestAllocFailureGuard;
+
+#[cfg(test)]
+impl Drop for PsiTestAllocFailureGuard {
+    fn drop(&mut self) {
+        PSI_TEST_ALLOC_FAILURE.with(|failure| failure.set(None));
+    }
+}
+
+#[cfg(test)]
+fn psi_fail_next_allocation(label: &'static str) -> PsiTestAllocFailureGuard {
+    PSI_TEST_ALLOC_FAILURE.with(|failure| failure.set(Some(label)));
+    PsiTestAllocFailureGuard
+}
+
+#[cfg(test)]
+fn psi_allocation_fails(label: &'static str) -> bool {
+    PSI_TEST_ALLOC_FAILURE.with(|failure| {
+        if failure.get() == Some(label) {
+            failure.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn psi_allocation_fails(_: &'static str) -> bool {
+    false
+}
+
+fn psi_try_vec_with_len<T: Clone>(len: usize, value: T) -> Option<Vec<T>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).ok()?;
+    out.resize(len, value);
+    Some(out)
+}
+
+fn psi_try_row_matrix<T: Clone>(rows: usize, cols: usize, value: T) -> Option<Vec<Vec<T>>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(rows).ok()?;
+    for _ in 0..rows {
+        out.push(psi_try_vec_with_len(cols, value.clone())?);
+    }
+    Some(out)
+}
+
+fn psi_try_option_vec_with_len<T: Clone>(
+    enabled: bool,
+    len: usize,
+    value: T,
+) -> Option<Option<Vec<T>>> {
+    if enabled {
+        psi_try_vec_with_len(len, value).map(Some)
+    } else {
+        Some(None)
+    }
+}
+
+fn psi_try_option_row_matrix<T: Clone>(
+    enabled: bool,
+    rows: usize,
+    cols: usize,
+    value: T,
+) -> Option<Option<Vec<Vec<T>>>> {
+    if enabled {
+        psi_try_row_matrix(rows, cols, value).map(Some)
+    } else {
+        Some(None)
+    }
+}
+
+fn psi_try_vec_from_slice<T: Clone>(slice: &[T]) -> Option<Vec<T>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(slice.len()).ok()?;
+    out.extend_from_slice(slice);
+    Some(out)
+}
+
+fn psi_try_vec_from_iter<T>(len: usize, iter: impl IntoIterator<Item = T>) -> Option<Vec<T>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).ok()?;
+    out.extend(iter);
+    Some(out)
+}
+
 /// Mapping from the 20-element effective alphabet index to NCBIstdaa residue
 /// codes. This is the `charOrder` array from the NCBI C code
 /// (s_fillColumnProbabilities in blast_psi_priv.c).
@@ -263,9 +357,12 @@ pub fn psi_public_msa_new(dimensions: Option<&PSIMsaDimensions>) -> Option<PSIMs
     let dimensions = *dimensions?;
     let rows = dimensions.num_seqs.saturating_add(1) as usize;
     let cols = dimensions.query_length as usize;
+    if psi_allocation_fails("psi_public_msa_new") {
+        return None;
+    }
     Some(PSIMsa {
         dimensions,
-        data: vec![vec![PSIMsaCell::default(); cols]; rows],
+        data: psi_try_row_matrix(rows, cols, PSIMsaCell::default())?,
     })
 }
 
@@ -297,10 +394,13 @@ fn psi_public_msa_has_shape(msa: &PSIMsa) -> bool {
 
 /// Port of NCBI `PSIMatrixNew` (`blast_psi.c:541`).
 pub fn psi_matrix_new(query_length: u32, alphabet_size: u32) -> Option<PSIMatrix> {
+    if psi_allocation_fails("psi_matrix_new") {
+        return None;
+    }
     Some(PSIMatrix {
         ncols: query_length,
         nrows: alphabet_size,
-        pssm: vec![vec![0; alphabet_size as usize]; query_length as usize],
+        pssm: psi_try_row_matrix(query_length as usize, alphabet_size as usize, 0)?,
         lambda: 0.0,
         kappa: 0.0,
         h: 0.0,
@@ -312,6 +412,18 @@ pub fn psi_matrix_new(query_length: u32, alphabet_size: u32) -> Option<PSIMatrix
 
 /// Rust ownership equivalent of NCBI `PSIMatrixFree`.
 pub fn psi_matrix_free(_: Option<PSIMatrix>) -> Option<PSIMatrix> {
+    None
+}
+
+/// C-spelled ownership helper for freeing a row-pointer matrix.
+#[allow(non_snake_case)]
+pub fn _PSIDeallocateMatrix<T>(mut matrix: Option<Vec<Vec<T>>>, ncols: u32) -> Option<Vec<Vec<T>>> {
+    if let Some(matrix) = matrix.as_mut() {
+        for row in matrix.iter_mut().take(ncols as usize) {
+            row.clear();
+        }
+        matrix.clear();
+    }
     None
 }
 
@@ -352,6 +464,93 @@ pub fn s_psi_save_pssm(
     pssm.ung_h = ungapped.h;
 
     PSI_SUCCESS
+}
+
+const PSI_INVALID_STAT: f64 = 0.0;
+
+fn psi_assign_stat_or_standard(
+    dst: &mut f64,
+    pssm_value: f64,
+    standard_value: f64,
+    standard_gate: f64,
+) {
+    if pssm_value != PSI_INVALID_STAT {
+        *dst = pssm_value;
+    } else if standard_gate > 0.0 {
+        *dst = standard_value;
+    }
+}
+
+/// Port of NCBI `PsiBlastSetupScoreBlock` Karlin-block ancillary propagation
+/// (`psiblast_aux_priv.cpp:76`).
+pub fn psi_blast_setup_score_block(
+    score_blk: Option<&mut crate::stat::BlastScoreBlk>,
+    pssm: Option<&PSIMatrix>,
+) -> i32 {
+    let (Some(score_blk), Some(pssm)) = (score_blk, pssm) else {
+        return PSIERR_BADPARAM;
+    };
+    if !score_blk.protein_alphabet
+        || score_blk.kbp_psi.is_empty()
+        || score_blk.kbp_std.is_empty()
+        || score_blk.kbp_gap_psi.is_empty()
+        || score_blk.kbp_gap_std.is_empty()
+    {
+        return PSIERR_BADPARAM;
+    }
+
+    psi_assign_stat_or_standard(
+        &mut score_blk.kbp_psi[0].lambda,
+        pssm.ung_lambda,
+        score_blk.kbp_std[0].lambda,
+        score_blk.kbp_std[0].lambda,
+    );
+    psi_assign_stat_or_standard(
+        &mut score_blk.kbp_psi[0].k,
+        pssm.ung_kappa,
+        score_blk.kbp_std[0].k,
+        score_blk.kbp_std[0].k,
+    );
+    score_blk.kbp_psi[0].log_k = score_blk.kbp_psi[0].k.ln();
+    psi_assign_stat_or_standard(
+        &mut score_blk.kbp_psi[0].h,
+        pssm.ung_h,
+        score_blk.kbp_std[0].h,
+        score_blk.kbp_std[0].k,
+    );
+
+    psi_assign_stat_or_standard(
+        &mut score_blk.kbp_gap_psi[0].lambda,
+        pssm.lambda,
+        score_blk.kbp_gap_std[0].lambda,
+        score_blk.kbp_gap_std[0].lambda,
+    );
+    psi_assign_stat_or_standard(
+        &mut score_blk.kbp_gap_psi[0].k,
+        pssm.kappa,
+        score_blk.kbp_gap_std[0].k,
+        score_blk.kbp_gap_std[0].k,
+    );
+    score_blk.kbp_gap_psi[0].log_k = score_blk.kbp_gap_psi[0].k.ln();
+    psi_assign_stat_or_standard(
+        &mut score_blk.kbp_gap_psi[0].h,
+        pssm.h,
+        score_blk.kbp_gap_std[0].h,
+        score_blk.kbp_gap_std[0].h,
+    );
+
+    score_blk.kbp_gap = score_blk.kbp_gap_psi.clone();
+
+    PSI_SUCCESS
+}
+
+/// C-spelled public alias for [`psi_blast_setup_score_block`].
+#[allow(non_snake_case)]
+pub fn PsiBlastSetupScoreBlock(
+    score_blk: Option<&mut crate::stat::BlastScoreBlk>,
+    pssm: Option<&PSIMatrix>,
+) -> i32 {
+    psi_blast_setup_score_block(score_blk, pssm)
 }
 
 fn psi_create_pssm_cleanup(
@@ -508,6 +707,31 @@ pub fn psi_create_pssm_with_diagnostics(
     PSI_SUCCESS
 }
 
+/// C-spelled public alias for [`psi_create_pssm_with_diagnostics`].
+#[allow(non_snake_case)]
+pub fn PSICreatePssmWithDiagnostics(
+    msap: Option<&PSIMsa>,
+    options: Option<&crate::options::PSIBlastOptions>,
+    sbp: Option<&mut crate::stat::BlastScoreBlk>,
+    request: Option<&PSIDiagnosticsRequest>,
+    pssm: Option<&mut Option<PSIMatrix>>,
+    diagnostics: Option<&mut Option<PSIDiagnosticsResponse>>,
+) -> i32 {
+    psi_create_pssm_with_diagnostics(msap, options, sbp, request, pssm, diagnostics)
+}
+
+/// Port of NCBI `PSICreatePssm` (`blast_psi.c:95`).
+/// naming: Keep the public compatibility wrapper C-spelled.
+#[allow(non_snake_case)]
+pub fn PSICreatePssm(
+    msap: Option<&PSIMsa>,
+    options: Option<&crate::options::PSIBlastOptions>,
+    sbp: Option<&mut crate::stat::BlastScoreBlk>,
+    pssm: Option<&mut Option<PSIMatrix>>,
+) -> i32 {
+    psi_create_pssm_with_diagnostics(msap, options, sbp, None, pssm, None)
+}
+
 /// Port of NCBI `PSIDiagnosticsRequestNew`.
 pub fn psi_diagnostics_request_new() -> PSIDiagnosticsRequest {
     PSIDiagnosticsRequest::default()
@@ -544,20 +768,30 @@ pub fn psi_diagnostics_response_new(
     let wants = wants?;
     let q = query_length as usize;
     let a = alphabet_size as usize;
+    if psi_allocation_fails("psi_diagnostics_response_new") {
+        return None;
+    }
     Some(PSIDiagnosticsResponse {
-        information_content: wants.information_content.then(|| vec![0.0; q]),
-        residue_freqs: wants.residue_frequencies.then(|| vec![vec![0; a]; q]),
-        weighted_residue_freqs: wants
-            .weighted_residue_frequencies
-            .then(|| vec![vec![0.0; a]; q]),
-        frequency_ratios: wants.frequency_ratios.then(|| vec![vec![0.0; a]; q]),
-        gapless_column_weights: wants.gapless_column_weights.then(|| vec![0.0; q]),
-        sigma: wants.sigma.then(|| vec![0.0; q]),
-        interval_sizes: wants.interval_sizes.then(|| vec![0; q]),
-        num_matching_seqs: wants.num_matching_seqs.then(|| vec![0; q]),
+        information_content: psi_try_option_vec_with_len(wants.information_content, q, 0.0)?,
+        residue_freqs: psi_try_option_row_matrix(wants.residue_frequencies, q, a, 0)?,
+        weighted_residue_freqs: psi_try_option_row_matrix(
+            wants.weighted_residue_frequencies,
+            q,
+            a,
+            0.0,
+        )?,
+        frequency_ratios: psi_try_option_row_matrix(wants.frequency_ratios, q, a, 0.0)?,
+        gapless_column_weights: psi_try_option_vec_with_len(wants.gapless_column_weights, q, 0.0)?,
+        sigma: psi_try_option_vec_with_len(wants.sigma, q, 0.0)?,
+        interval_sizes: psi_try_option_vec_with_len(wants.interval_sizes, q, 0)?,
+        num_matching_seqs: psi_try_option_vec_with_len(wants.num_matching_seqs, q, 0)?,
         query_length,
         alphabet_size,
-        independent_observations: wants.independent_observations.then(|| vec![0.0; q]),
+        independent_observations: psi_try_option_vec_with_len(
+            wants.independent_observations,
+            q,
+            0.0,
+        )?,
     })
 }
 
@@ -721,21 +955,28 @@ fn psi_save_cd_diagnostics_sources_are_large_enough(
 /// Port of NCBI `_PSIPackedMsaNew` (`blast_psi_priv.c:129`).
 pub fn psi_packed_msa_new(msa: Option<&PSIMsa>) -> Option<PsiPackedMsa> {
     let msa = msa?;
+    let rows = msa.data.len();
+    if psi_allocation_fails("psi_packed_msa_new") {
+        return None;
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(rows).ok()?;
+    for row in &msa.data {
+        let mut packed_row = Vec::new();
+        packed_row.try_reserve_exact(row.len()).ok()?;
+        packed_row.extend(row.iter().map(|cell| PsiPackedMsaCell {
+            letter: cell.letter,
+            is_aligned: cell.is_aligned,
+        }));
+        data.push(packed_row);
+    }
     Some(PsiPackedMsa {
         dimensions: msa.dimensions,
-        data: msa
-            .data
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| PsiPackedMsaCell {
-                        letter: cell.letter,
-                        is_aligned: cell.is_aligned,
-                    })
-                    .collect()
-            })
-            .collect(),
-        use_sequence: vec![true; msa.dimensions.num_seqs.saturating_add(1) as usize],
+        data,
+        use_sequence: psi_try_vec_with_len(
+            msa.dimensions.num_seqs.saturating_add(1) as usize,
+            true,
+        )?,
     })
 }
 
@@ -993,19 +1234,17 @@ pub fn psi_msa_new(msa: Option<&PsiPackedMsa>, alphabet_size: u32) -> Option<Psi
     };
     let rows = dimensions.num_seqs.saturating_add(1) as usize;
     let cols = dimensions.query_length as usize;
-    let mut cell = vec![
-        vec![
-            PsiMsaCell {
-                extents: SSeqRange {
-                    left: -1,
-                    right: dimensions.query_length as i32,
-                },
-                ..PsiMsaCell::default()
-            };
-            cols
-        ];
-        rows
-    ];
+    if psi_allocation_fails("psi_msa_new") {
+        return None;
+    }
+    let default_cell = PsiMsaCell {
+        extents: SSeqRange {
+            left: -1,
+            right: dimensions.query_length as i32,
+        },
+        ..PsiMsaCell::default()
+    };
+    let mut cell = psi_try_row_matrix(rows, cols, default_cell)?;
     let mut out_row = 0usize;
     for (row_index, row) in msa.data.iter().enumerate() {
         if !msa.use_sequence.get(row_index).copied().unwrap_or(false) {
@@ -1020,18 +1259,21 @@ pub fn psi_msa_new(msa: Option<&PsiPackedMsa>, alphabet_size: u32) -> Option<Psi
             break;
         }
     }
-    let query = msa
-        .data
-        .first()
-        .map(|row| row.iter().take(cols).map(|cell| cell.letter).collect())
-        .unwrap_or_else(|| vec![0; cols]);
+    let query = if let Some(row) = msa.data.first() {
+        let mut query = Vec::new();
+        query.try_reserve_exact(cols).ok()?;
+        query.extend(row.iter().take(cols).map(|cell| cell.letter));
+        query
+    } else {
+        psi_try_vec_with_len(cols, 0)?
+    };
     let mut retval = PsiMsa {
         dimensions,
         cell,
         query,
-        residue_counts: vec![vec![0; alphabet_size as usize]; cols],
+        residue_counts: psi_try_row_matrix(cols, alphabet_size as usize, 0)?,
         alphabet_size,
-        num_matching_seqs: vec![0; cols],
+        num_matching_seqs: psi_try_vec_with_len(cols, 0)?,
     };
     psi_update_position_counts(&mut retval);
     Some(retval)
@@ -1055,6 +1297,28 @@ pub fn psi_msa_free(mut msa: Option<PsiMsa>) -> Option<PsiMsa> {
         msa.alphabet_size = 0;
     }
     None
+}
+
+/// Thin compatibility wrapper around the private MSA allocator.
+pub fn psi_internal_msa_new(msa: Option<&PsiPackedMsa>, alphabet_size: u32) -> Option<PsiMsa> {
+    psi_msa_new(msa, alphabet_size)
+}
+
+/// Thin compatibility wrapper around the private MSA deallocator.
+pub fn psi_internal_msa_free(msa: Option<PsiMsa>) -> Option<PsiMsa> {
+    psi_msa_free(msa)
+}
+
+/// C-spelled alias for the private MSA allocator.
+#[allow(non_snake_case)]
+pub fn _PSIMsaNew(msa: Option<&PsiPackedMsa>, alphabet_size: u32) -> Option<PsiMsa> {
+    psi_internal_msa_new(msa, alphabet_size)
+}
+
+/// C-spelled alias for the private MSA deallocator.
+#[allow(non_snake_case)]
+pub fn _PSIMsaFree(msa: Option<PsiMsa>) -> Option<PsiMsa> {
+    psi_internal_msa_free(msa)
 }
 
 fn psi_update_position_counts(msa: &mut PsiMsa) {
@@ -1222,9 +1486,17 @@ pub fn psi_compute_alignment_blocks(
 }
 
 pub fn psi_get_aligned_sequences_for_position(msa: &PsiMsa, position: u32) -> Vec<u32> {
+    psi_try_get_aligned_sequences_for_position(msa, position).unwrap_or_default()
+}
+
+fn psi_try_get_aligned_sequences_for_position(msa: &PsiMsa, position: u32) -> Option<Vec<u32>> {
     let position = position as usize;
     let rows = msa.dimensions.num_seqs.saturating_add(1) as usize;
     let mut aligned_sequences = Vec::new();
+    if psi_allocation_fails("psi_get_aligned_sequences_for_position") {
+        return None;
+    }
+    aligned_sequences.try_reserve_exact(rows).ok()?;
     for i in 0..rows {
         if msa
             .cell
@@ -1235,7 +1507,7 @@ pub fn psi_get_aligned_sequences_for_position(msa: &PsiMsa, position: u32) -> Ve
             aligned_sequences.push(i as u32);
         }
     }
-    aligned_sequences
+    Some(aligned_sequences)
 }
 
 /// Port of NCBI static `_PSICalculateNormalizedSequenceWeights`.
@@ -1263,13 +1535,13 @@ pub fn psi_calculate_normalized_sequence_weights(
     let mut distinct_residues_found = false;
     let mut sigma = 0u32;
     for i in left..=right {
-        let mut residue_counts_for_column = vec![0u32; msa.alphabet_size as usize];
+        let mut residue_counts_for_column = [0u32; AA_SIZE];
         let mut num_distinct_residues_for_column = 0u32;
         let mut num_local_std_letters = 0usize;
 
         for &seq_idx in aligned_seqs {
             let residue = msa.cell[seq_idx as usize][i].letter as usize;
-            if residue >= residue_counts_for_column.len() {
+            if residue >= msa.alphabet_size as usize {
                 continue;
             }
             if residue_counts_for_column[residue] == 0 {
@@ -1745,27 +2017,33 @@ pub fn psi_internal_pssm_data_new(
     query_length: u32,
     alphabet_size: u32,
 ) -> Option<PsiInternalPssmData> {
+    if psi_allocation_fails("psi_internal_pssm_data_new") {
+        return None;
+    }
     Some(PsiInternalPssmData {
         ncols: query_length,
         nrows: alphabet_size,
-        pssm: vec![vec![0; alphabet_size as usize]; query_length as usize],
-        scaled_pssm: vec![vec![0; alphabet_size as usize]; query_length as usize],
-        freq_ratios: vec![vec![0.0; alphabet_size as usize]; query_length as usize],
-        pseudocounts: vec![0.0; query_length as usize],
+        pssm: psi_try_row_matrix(query_length as usize, alphabet_size as usize, 0)?,
+        scaled_pssm: psi_try_row_matrix(query_length as usize, alphabet_size as usize, 0)?,
+        freq_ratios: psi_try_row_matrix(query_length as usize, alphabet_size as usize, 0.0)?,
+        pseudocounts: psi_try_vec_with_len(query_length as usize, 0.0)?,
     })
 }
 
 /// Port of NCBI `_PSIAlignedBlockNew`.
 pub fn psi_aligned_block_new(query_length: u32) -> Option<PsiAlignedBlock> {
+    if psi_allocation_fails("psi_aligned_block_new") {
+        return None;
+    }
     Some(PsiAlignedBlock {
-        pos_extnt: vec![
+        pos_extnt: psi_try_vec_with_len(
+            query_length as usize,
             SSeqRange {
                 left: -1,
-                right: query_length as i32
-            };
-            query_length as usize
-        ],
-        size: vec![0; query_length as usize],
+                right: query_length as i32,
+            },
+        )?,
+        size: psi_try_vec_with_len(query_length as usize, 0)?,
     })
 }
 
@@ -1777,18 +2055,21 @@ pub fn psi_sequence_weights_new(
     let dimensions = *dimensions?;
     let rows = dimensions.num_seqs.saturating_add(1) as usize;
     let cols = dimensions.query_length as usize;
+    if psi_allocation_fails("psi_sequence_weights_new") {
+        return None;
+    }
     Some(PsiSequenceWeights {
-        match_weights: vec![vec![0.0; alphabet_size]; cols],
+        match_weights: psi_try_row_matrix(cols, alphabet_size, 0.0)?,
         match_weights_size: dimensions.query_length,
-        norm_seq_weights: vec![0.0; rows],
-        row_sigma: vec![0.0; rows],
-        sigma: vec![0.0; cols],
-        std_prob: crate::stat::protein_std_freq_ncbistdaa().to_vec(),
-        gapless_column_weights: vec![0.0; cols],
-        pos_distinct_distrib: vec![vec![0; EFFECTIVE_ALPHABET + 1]; cols + 1],
+        norm_seq_weights: psi_try_vec_with_len(rows, 0.0)?,
+        row_sigma: psi_try_vec_with_len(rows, 0.0)?,
+        sigma: psi_try_vec_with_len(cols, 0.0)?,
+        std_prob: psi_try_vec_from_slice(&crate::stat::protein_std_freq_ncbistdaa())?,
+        gapless_column_weights: psi_try_vec_with_len(cols, 0.0)?,
+        pos_distinct_distrib: psi_try_row_matrix(cols + 1, EFFECTIVE_ALPHABET + 1, 0)?,
         pos_distinct_distrib_size: dimensions.query_length + 1,
-        pos_num_participating: vec![0; cols + 1],
-        independent_observations: vec![0.0; cols + 1],
+        pos_num_participating: psi_try_vec_with_len(cols + 1, 0)?,
+        independent_observations: psi_try_vec_with_len(cols + 1, 0.0)?,
     })
 }
 
@@ -1875,7 +2156,9 @@ pub fn psi_compute_sequence_weights(
         {
             continue;
         }
-        let aligned_seqs = psi_get_aligned_sequences_for_position(msa, pos as u32);
+        let Some(aligned_seqs) = psi_try_get_aligned_sequences_for_position(msa, pos as u32) else {
+            return PSIERR_OUTOFMEM;
+        };
         if aligned_seqs.len() as u32 <= expected_num_matching {
             continue;
         }
@@ -2898,6 +3181,12 @@ static BLOSUM62_FREQ_RATIOS: [[f64; AA_SIZE]; AA_SIZE] = [
 /// The standard 20 amino acid background probabilities from Robinson & Robinson
 /// are placed at their NCBIstdaa positions; all other positions are 0.
 ///
+/// NCBI: functional equivalent of `BLAST_GetStandardAaProbabilities`
+/// (`blast_util.c:1323`), which returns the same Robinson & Robinson background
+/// (via `Blast_ResFreqStdComp`) indexed by NCBIstdaa code. Not a one-to-one port:
+/// this builds the array directly from `matrix::AA_FREQUENCIES` rather than
+/// through a `Blast_ResFreq` object.
+///
 /// The AA_FREQUENCIES in matrix.rs are in alphabetical order
 /// (A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y), corresponding to
 /// [`crate::encoding::NCBISTDAA_STANDARD_RESIDUES`].
@@ -2922,6 +3211,13 @@ pub struct Pssm {
     pub length: usize,
     /// Information content per position
     pub info_content: Vec<f64>,
+    /// PSI frequency-ratio numerator saved by the translated PSSM update path.
+    ///
+    /// NCBI stores this as `sbp->psi_matrix->freq_ratios` and later divides by
+    /// standard probabilities in the position-based composition rescore path.
+    pub start_numerator: Option<Vec<Vec<f64>>>,
+    /// Saved PSI gapped Karlin block copied by `PsiBlastSetupScoreBlock`.
+    pub ancillary_gap_kbp: Option<crate::stat::KarlinBlk>,
 }
 
 impl Pssm {
@@ -2945,7 +3241,32 @@ impl Pssm {
             scores,
             length,
             info_content,
+            start_numerator: None,
+            ancillary_gap_kbp: None,
         }
+    }
+
+    pub fn with_ancillary_gap_kbp(mut self, kbp: crate::stat::KarlinBlk) -> Self {
+        self.ancillary_gap_kbp = Some(kbp);
+        self
+    }
+
+    /// Derive the score-frequency Karlin block available after a lightweight
+    /// PSSM update.
+    ///
+    /// The public C-shaped constructor carries this through
+    /// `PsiBlastAddAncillaryPssmData` and `PsiBlastSetupScoreBlock`. This
+    /// lightweight audit helper intentionally does not save the result as
+    /// `ancillary_gap_kbp` because the available score-frequency block is not
+    /// yet the NCBI final-row ancillary statistic block.
+    pub fn derive_lightweight_score_frequency_gap_kbp(
+        &self,
+        query: &[u8],
+        matrix_name: &str,
+        gap_open: i32,
+        gap_extend: i32,
+    ) -> Option<crate::stat::KarlinBlk> {
+        self.derive_ancillary_gap_kbp(query, matrix_name, gap_open, gap_extend)
     }
 
     /// Score a subject amino acid at a given position.
@@ -2973,9 +3294,13 @@ impl Pssm {
         Some(best_aa)
     }
 
-    /// Update the PSSM from a set of aligned sequences (PSI-BLAST iteration).
+    /// Update the PSSM from a set of aligned sequences.
     ///
-    /// This implements the NCBI PSI-BLAST PSSM computation for BLOSUM62:
+    /// This is a lightweight builder used by the Rust PSI iteration path and
+    /// focused probes. It is not the audited public NCBI constructor path;
+    /// use [`PSICreatePssmWithDiagnostics`] / [`PSICreatePssm`] for the
+    /// C-shaped public constructor surface. This helper applies the same core
+    /// scoring ingredients for BLOSUM62:
     ///   1. Henikoff position-based sequence weighting
     ///   2. Weighted residue frequency computation
     ///   3. Pseudocount blending via BLOSUM62 frequency ratios
@@ -3024,10 +3349,25 @@ impl Pssm {
         matrix_name: &str,
         fixed_pseudocount: Option<f64>,
     ) {
+        let _ = self.try_update_from_alignment_with_matrix_and_pseudocount(
+            aligned_seqs,
+            matrix_name,
+            fixed_pseudocount,
+        );
+    }
+
+    /// Fallible form of [`Pssm::update_from_alignment_with_matrix_and_pseudocount`].
+    pub fn try_update_from_alignment_with_matrix_and_pseudocount(
+        &mut self,
+        aligned_seqs: &[Vec<u8>],
+        matrix_name: &str,
+        fixed_pseudocount: Option<f64>,
+    ) -> i32 {
         if aligned_seqs.is_empty() {
-            return;
+            return PSI_SUCCESS;
         }
 
+        self.ancillary_gap_kbp = None;
         let std_prob = std_prob_ncbistdaa();
         let freq_ratios = crate::matrix::get_matrix_freq_ratios_with_scale(matrix_name)
             .unwrap_or_else(|| crate::matrix::MatrixFreqRatios {
@@ -3035,9 +3375,16 @@ impl Pssm {
                 bit_scale_factor: 2,
             });
         let lambda = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name).lambda;
+        let Some(mut start_numerator) = psi_try_row_matrix(self.length, AA_SIZE, 0.0) else {
+            return PSIERR_OUTOFMEM;
+        };
 
         // Step 1: Compute Henikoff position-based sequence weights
-        let match_weights = compute_sequence_weights_and_match_weights(aligned_seqs, self.length);
+        let Some(match_weights) =
+            try_compute_sequence_weights_and_match_weights(aligned_seqs, self.length)
+        else {
+            return PSIERR_OUTOFMEM;
+        };
 
         // Step 2: Compute effective observations and column-specific pseudocounts
         // Step 3: Blend observed frequencies with pseudocounts using frequency ratios
@@ -3088,18 +3435,267 @@ impl Pssm {
                 // divides by std_prob in the next stage -- we go directly to score)
                 // Score = BLAST_Nint((1/lambda) * ln(q_over_p)).
                 if q_over_p > POS_EPSILON {
+                    start_numerator[pos][r] = q_over_p * std_prob[r];
                     let score = crate::math::blast_nint(q_over_p.ln() / lambda) as i32;
                     self.scores[pos][r] = score;
                 } else {
+                    start_numerator[pos][r] = 0.0;
                     self.scores[pos][r] = crate::stat::BLAST_SCORE_MIN;
                 }
             }
         }
+        self.start_numerator = Some(start_numerator);
 
         // Compute information content
-        self.info_content =
-            compute_information_content(&self.scores, &std_prob, self.length, lambda);
+        let Some(info_content) =
+            try_compute_information_content(&self.scores, &std_prob, self.length, lambda)
+        else {
+            return PSIERR_OUTOFMEM;
+        };
+        self.info_content = info_content;
+        PSI_SUCCESS
     }
+
+    fn derive_ancillary_gap_kbp(
+        &self,
+        query: &[u8],
+        matrix_name: &str,
+        gap_open: i32,
+        gap_extend: i32,
+    ) -> Option<crate::stat::KarlinBlk> {
+        if self.length == 0 || query.len() < self.length || self.scores.len() < self.length {
+            return None;
+        }
+
+        let mut score_blk = crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1)?;
+        if crate::stat::blast_score_blk_protein_matrix_read(&mut score_blk, matrix_name) != 0 {
+            return None;
+        }
+
+        let std_gap = crate::stat::lookup_matrix_params(matrix_name, gap_open, gap_extend)?;
+        score_blk.kbp_std[0] = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
+        score_blk.kbp_psi[0] = score_blk.kbp_std[0].clone();
+        score_blk.kbp_gap_std[0] = crate::stat::KarlinBlk {
+            lambda: std_gap.lambda,
+            k: std_gap.k,
+            log_k: std_gap.k.ln(),
+            h: std_gap.h,
+            round_down: false,
+        };
+        score_blk.kbp_gap_psi[0] = score_blk.kbp_gap_std[0].clone();
+
+        let rows = try_pssm_prefix_rows_for_alignment(self, self.length)?;
+        let std_prob = std_prob_ncbistdaa();
+        if crate::blast_kappa::psi_update_lambda_k(
+            &rows,
+            &query[..self.length],
+            self.length,
+            &std_prob,
+            &mut score_blk,
+        ) != 0
+        {
+            return None;
+        }
+
+        let psi = score_blk.kbp_psi.first()?;
+        let mut gap = score_blk.kbp_gap_psi.first()?.clone();
+        if psi.lambda.is_finite() && psi.lambda > 0.0 {
+            gap.lambda = psi.lambda;
+        }
+        gap.log_k = gap.k.ln();
+        gap.is_valid().then_some(gap)
+    }
+}
+
+/// Rust ownership-boundary counterpart of NCBI `PsiBlastAddAncillaryPssmData`.
+///
+/// The C++ helper stores gap-open/gap-extend on `CPssmWithParameters` after
+/// PSSM construction so later score-block setup can recover gapped PSI
+/// statistics. This module's lightweight [`Pssm`] does not carry that ASN.1
+/// parameter wrapper, so the Rust helper takes the query/matrix/gap inputs
+/// explicitly, derives the available score-frequency gap Karlin block, and
+/// saves it in [`Pssm::ancillary_gap_kbp`] for the live PSI statistic consumer.
+pub fn psi_blast_add_ancillary_pssm_data(
+    pssm: Option<&mut Pssm>,
+    query: Option<&[u8]>,
+    matrix_name: Option<&str>,
+    gap_open: i32,
+    gap_extend: i32,
+) -> i32 {
+    let (Some(pssm), Some(query), Some(matrix_name)) = (pssm, query, matrix_name) else {
+        return PSIERR_BADPARAM;
+    };
+    let Some(kbp) = pssm.derive_ancillary_gap_kbp(query, matrix_name, gap_open, gap_extend) else {
+        return PSIERR_BADPARAM;
+    };
+    pssm.ancillary_gap_kbp = Some(kbp);
+    PSI_SUCCESS
+}
+
+/// C-spelled public alias for [`psi_blast_add_ancillary_pssm_data`].
+#[allow(non_snake_case)]
+pub fn PsiBlastAddAncillaryPssmData(
+    pssm: Option<&mut Pssm>,
+    query: Option<&[u8]>,
+    matrix_name: Option<&str>,
+    gap_open: i32,
+    gap_extend: i32,
+) -> i32 {
+    psi_blast_add_ancillary_pssm_data(pssm, query, matrix_name, gap_open, gap_extend)
+}
+
+/// Score an already materialized PSI-BLAST alignment with the position-based
+/// composition scaling used by NCBI's traceback/CBS redo path.
+pub fn psi_position_composition_rescore(
+    pssm: &Pssm,
+    subject: &[u8],
+    query_start: usize,
+    query_aln: &[u8],
+    subject_aln: &[u8],
+    matrix_name: &str,
+) -> Option<i32> {
+    if pssm.length == 0 || query_aln.len() != subject_aln.len() {
+        return None;
+    }
+    let (subject_prob, subject_true) =
+        crate::composition::blast_read_aa_composition(subject, AA_SIZE);
+    if subject_true == 0 {
+        return None;
+    }
+
+    let ungapped_lambda = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name).lambda;
+    let start_matrix: Vec<Vec<i32>> = pssm.scores.iter().map(|row| row.to_vec()).collect();
+    let start_freq_ratios: Vec<Vec<f64>> = pssm
+        .scores
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&score| {
+                    if score <= crate::stat::BLAST_SCORE_MIN {
+                        0.0
+                    } else {
+                        (score as f64 * ungapped_lambda).exp()
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    let (scaled, _) = crate::blast_kappa::composition_scale_pssm_with_ratio(
+        &start_matrix,
+        &start_freq_ratios,
+        pssm.length,
+        AA_SIZE,
+        &subject_prob,
+        ungapped_lambda,
+        true,
+    )?;
+
+    let mut score = 0i32;
+    let mut query_pos = query_start;
+    for (&q_ascii, &s_ascii) in query_aln.iter().zip(subject_aln.iter()) {
+        if q_ascii == b'-' {
+            continue;
+        }
+        if s_ascii == b'-' {
+            query_pos = query_pos.saturating_add(1);
+            continue;
+        }
+        let s = crate::encoding::aminoacid_to_ncbistdaa_base(s_ascii) as usize;
+        if query_pos >= scaled.len() || s >= AA_SIZE {
+            return None;
+        }
+        score += scaled[query_pos][s];
+        query_pos += 1;
+    }
+    Some(score)
+}
+
+/// Score an already materialized PSI-BLAST alignment with C-shaped
+/// `Blast_MatrixInfo::startFreqRatios` input.
+///
+/// NCBI's position-based CBS path does not reconstruct frequency ratios from
+/// rounded integer PSSM scores. It calls `s_GetPosBasedStartFreqRatios`, using
+/// the saved PSI frequency-ratio numerator (`sbp->psi_matrix->freq_ratios`) and
+/// the query sequence. This helper exposes that narrower input shape for the
+/// PSI traceback/CBS audit.
+pub fn psi_position_composition_rescore_with_start_numerator(
+    query: &[u8],
+    start_numerator: &[Vec<f64>],
+    subject: &[u8],
+    query_start: usize,
+    query_aln: &[u8],
+    subject_aln: &[u8],
+    matrix_name: &str,
+) -> Option<i32> {
+    psi_position_composition_rescore_and_lambda_ratio_with_start_numerator(
+        query,
+        start_numerator,
+        subject,
+        query_start,
+        query_aln,
+        subject_aln,
+        matrix_name,
+    )
+    .map(|(score, _)| score)
+}
+
+/// Score an already materialized PSI-BLAST alignment with position-based
+/// composition scaling and return the PSSM scaling lambda ratio used for
+/// statistic recomputation.
+pub fn psi_position_composition_rescore_and_lambda_ratio_with_start_numerator(
+    query: &[u8],
+    start_numerator: &[Vec<f64>],
+    subject: &[u8],
+    query_start: usize,
+    query_aln: &[u8],
+    subject_aln: &[u8],
+    matrix_name: &str,
+) -> Option<(i32, f64)> {
+    if query.is_empty() || query_aln.len() != subject_aln.len() {
+        return None;
+    }
+    let (subject_prob, subject_true) =
+        crate::composition::blast_read_aa_composition(subject, AA_SIZE);
+    if subject_true == 0 {
+        return None;
+    }
+
+    let ungapped_lambda = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name).lambda;
+    let start_freq_ratios =
+        crate::blast_kappa::get_pos_based_start_freq_ratios(query, matrix_name, start_numerator)
+            .ok()?;
+    let start_matrix =
+        crate::blast_kappa::pos_freq_ratios_to_pssm(&start_freq_ratios, ungapped_lambda).ok()?;
+
+    let (scaled, lambda_ratio) = crate::blast_kappa::composition_scale_pssm_with_ratio(
+        &start_matrix,
+        &start_freq_ratios,
+        query.len(),
+        AA_SIZE,
+        &subject_prob,
+        ungapped_lambda,
+        true,
+    )?;
+
+    let mut score = 0i32;
+    let mut query_pos = query_start;
+    for (&q_ascii, &s_ascii) in query_aln.iter().zip(subject_aln.iter()) {
+        if q_ascii == b'-' {
+            continue;
+        }
+        if s_ascii == b'-' {
+            query_pos = query_pos.saturating_add(1);
+            continue;
+        }
+        let s = crate::encoding::aminoacid_to_ncbistdaa_base(s_ascii) as usize;
+        if query_pos >= scaled.len() || s >= AA_SIZE {
+            return None;
+        }
+        score += scaled[query_pos][s];
+        query_pos += 1;
+    }
+    Some((score, lambda_ratio))
 }
 
 /// Compute Henikoff position-based sequence weights and match weights.
@@ -3109,17 +3705,30 @@ impl Pssm {
 /// the row's aligned extent. The final per-column match weights are then the
 /// normalized sequence weights for rows that contain a standard residue in that
 /// column.
+///
+/// Test-only convenience wrapper over [`try_compute_sequence_weights_and_match_weights`];
+/// production code calls the fallible version directly.
+#[cfg(test)]
 fn compute_sequence_weights_and_match_weights(
     aligned_seqs: &[Vec<u8>],
     query_length: usize,
 ) -> Vec<[f64; AA_SIZE]> {
+    try_compute_sequence_weights_and_match_weights(aligned_seqs, query_length).unwrap_or_default()
+}
+
+fn try_compute_sequence_weights_and_match_weights(
+    aligned_seqs: &[Vec<u8>],
+    query_length: usize,
+) -> Option<Vec<[f64; AA_SIZE]>> {
     let num_seqs = aligned_seqs.len();
-    let mut match_weights = vec![[0.0f64; AA_SIZE]; query_length];
-    let extents: Vec<Option<(usize, usize)>> = aligned_seqs
-        .iter()
-        .map(|seq| aligned_sequence_extent(seq, query_length))
-        .collect();
-    let mut seq_weights = vec![0.0f64; num_seqs];
+    let mut match_weights = psi_try_vec_with_len(query_length, [0.0f64; AA_SIZE])?;
+    let extents = psi_try_vec_from_iter(
+        num_seqs,
+        aligned_seqs
+            .iter()
+            .map(|seq| aligned_sequence_extent(seq, query_length)),
+    )?;
+    let mut seq_weights = psi_try_vec_with_len(num_seqs, 0.0f64)?;
 
     for pos in 0..query_length {
         // Count occurrences of each residue at this position
@@ -3191,7 +3800,7 @@ fn compute_sequence_weights_and_match_weights(
         }
     }
 
-    match_weights
+    Some(match_weights)
 }
 
 fn aligned_sequence_extent(seq: &[u8], query_length: usize) -> Option<(usize, usize)> {
@@ -3455,13 +4064,13 @@ fn compute_column_pseudocounts(
 }
 
 /// Compute information content per position from PSSM scores.
-fn compute_information_content(
+fn try_compute_information_content(
     scores: &[[i32; AA_SIZE]],
     std_prob: &[f64; AA_SIZE],
     query_length: usize,
     lambda: f64,
-) -> Vec<f64> {
-    let mut info = vec![0.0f64; query_length];
+) -> Option<Vec<f64>> {
+    let mut info = psi_try_vec_with_len(query_length, 0.0f64)?;
 
     for pos in 0..query_length {
         let mut sum = 0.0;
@@ -3478,7 +4087,7 @@ fn compute_information_content(
         info[pos] = sum / crate::math::NCBIMATH_LN2;
     }
 
-    info
+    Some(info)
 }
 
 /// Run one iteration of PSI-BLAST.
@@ -3489,6 +4098,7 @@ fn compute_information_content(
 pub struct PsiBlastHit {
     pub subject_id: String,
     pub score: i32,
+    pub bit_score: f64,
     pub evalue: f64,
     /// Start offset in query/PSSM where the best alignment begins.
     pub query_start: usize,
@@ -3516,13 +4126,55 @@ pub fn psi_blast_iteration(
     search_space: f64,
     kbp_lambda: f64,
     kbp_k: f64,
+    gumbel_blk: Option<&crate::stat::GumbelBlk>,
     gap_open: i32,
     gap_extend: i32,
     x_dropoff: i32,
     seed_cutoff: i32,
+    matrix_name: &str,
+    position_comp_adjust: bool,
 ) -> Vec<PsiBlastHit> {
+    try_psi_blast_iteration(
+        pssm,
+        query,
+        subjects,
+        evalue_threshold,
+        search_space,
+        kbp_lambda,
+        kbp_k,
+        gumbel_blk,
+        gap_open,
+        gap_extend,
+        x_dropoff,
+        seed_cutoff,
+        matrix_name,
+        position_comp_adjust,
+    )
+    .unwrap_or_default()
+}
+
+pub fn try_psi_blast_iteration(
+    pssm: &Pssm,
+    query: &[u8],
+    subjects: &[(String, Vec<u8>)], // (id, NCBIstdaa sequence)
+    evalue_threshold: f64,
+    search_space: f64,
+    kbp_lambda: f64,
+    kbp_k: f64,
+    gumbel_blk: Option<&crate::stat::GumbelBlk>,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    seed_cutoff: i32,
+    matrix_name: &str,
+    position_comp_adjust: bool,
+) -> Option<Vec<PsiBlastHit>> {
+    if psi_allocation_fails("psi_blast_iteration_results") {
+        return None;
+    }
     let mut results = Vec::new();
-    let pssm_rows = pssm_rows_for_alignment(pssm);
+    results.try_reserve(subjects.len()).ok()?;
+    let pssm_rows = try_pssm_rows_for_alignment(pssm)?;
     let seed_cutoff = seed_cutoff.max(1);
 
     for (subj_id, subj_seq) in subjects {
@@ -3530,8 +4182,14 @@ pub fn psi_blast_iteration(
             continue;
         }
 
-        let candidates = pssm_ungapped_diagonal_candidates(pssm, subj_seq);
+        let candidates = try_pssm_ungapped_diagonal_candidates(pssm, subj_seq)?;
+        if psi_allocation_fails("psi_blast_iteration_subject_hits") {
+            return None;
+        }
         let mut subject_hits = Vec::new();
+        subject_hits
+            .try_reserve(candidates.len().min(subj_seq.len()))
+            .ok()?;
 
         for candidate in candidates {
             if candidate.score < seed_cutoff {
@@ -3582,11 +4240,60 @@ pub fn psi_blast_iteration(
                     )
                 };
 
-            let evalue = kbp_k * search_space * (-kbp_lambda * score as f64).exp();
-            if evalue <= evalue_threshold {
-                let hit = PsiBlastHit {
-                    subject_id: subj_id.clone(),
+            let score = if position_comp_adjust {
+                pssm.start_numerator
+                    .as_deref()
+                    .and_then(|start_numerator| {
+                        psi_position_composition_rescore_with_start_numerator(
+                            &query[..pssm.length],
+                            start_numerator,
+                            subj_seq,
+                            query_start,
+                            &query_aln,
+                            &subject_aln,
+                            matrix_name,
+                        )
+                    })
+                    .unwrap_or(score)
+            } else {
+                score
+            };
+            let kbp = if position_comp_adjust {
+                pssm.ancillary_gap_kbp
+                    .clone()
+                    .unwrap_or(crate::stat::KarlinBlk {
+                        lambda: kbp_lambda,
+                        k: kbp_k,
+                        log_k: kbp_k.ln(),
+                        h: 0.0,
+                        round_down: false,
+                    })
+            } else {
+                crate::stat::KarlinBlk {
+                    lambda: kbp_lambda,
+                    k: kbp_k,
+                    log_k: kbp_k.ln(),
+                    h: 0.0,
+                    round_down: false,
+                }
+            };
+            let evalue = if let Some(gbp) = gumbel_blk {
+                crate::stat::spouge_evalue(
                     score,
+                    &kbp,
+                    gbp,
+                    pssm.length as i32,
+                    subj_seq.len() as i32,
+                )
+            } else {
+                kbp.k * search_space * (-kbp.lambda * score as f64).exp()
+            };
+            if evalue <= evalue_threshold {
+                let bit_score = (kbp.lambda * score as f64 - kbp.log_k) / crate::math::NCBIMATH_LN2;
+                let hit = PsiBlastHit {
+                    subject_id: psi_try_string_clone(subj_id)?,
+                    score,
+                    bit_score,
                     evalue,
                     query_start,
                     query_end,
@@ -3601,19 +4308,21 @@ pub fn psi_blast_iteration(
                     .iter()
                     .any(|existing| same_pssm_hit(existing, &hit))
                 {
+                    subject_hits.try_reserve(1).ok()?;
                     subject_hits.push(hit);
                 }
             }
         }
 
         subject_hits.sort_by(compare_pssm_hits);
+        results.try_reserve(subject_hits.len()).ok()?;
         results.extend(subject_hits);
     }
 
     // Sort by evalue with NCBI `s_EvalueComp` denormal-region equivalence
     // (values < 1e-180 compare equal) — same helper used by HSP-list sorts.
     results.sort_by(compare_pssm_hits);
-    results
+    Some(results)
 }
 
 fn same_pssm_hit(a: &PsiBlastHit, b: &PsiBlastHit) -> bool {
@@ -3645,13 +4354,27 @@ struct PssmUngappedCandidate {
     seed_subject: usize,
 }
 
+#[cfg(test)]
 fn pssm_ungapped_diagonal_candidates(pssm: &Pssm, subj_seq: &[u8]) -> Vec<PssmUngappedCandidate> {
+    try_pssm_ungapped_diagonal_candidates(pssm, subj_seq).unwrap_or_default()
+}
+
+fn try_pssm_ungapped_diagonal_candidates(
+    pssm: &Pssm,
+    subj_seq: &[u8],
+) -> Option<Vec<PssmUngappedCandidate>> {
+    if psi_allocation_fails("pssm_ungapped_diagonal_candidates") {
+        return None;
+    }
     let mut candidates = Vec::new();
+    candidates
+        .try_reserve(pssm.length.saturating_add(subj_seq.len()))
+        .ok()?;
     for diag_start_q in 0..pssm.length {
-        collect_pssm_diagonal_candidate(pssm, subj_seq, diag_start_q, 0, &mut candidates);
+        collect_pssm_diagonal_candidate(pssm, subj_seq, diag_start_q, 0, &mut candidates)?;
     }
     for diag_start_s in 1..subj_seq.len() {
-        collect_pssm_diagonal_candidate(pssm, subj_seq, 0, diag_start_s, &mut candidates);
+        collect_pssm_diagonal_candidate(pssm, subj_seq, 0, diag_start_s, &mut candidates)?;
     }
     candidates.sort_by(|a, b| {
         b.score
@@ -3659,7 +4382,7 @@ fn pssm_ungapped_diagonal_candidates(pssm: &Pssm, subj_seq: &[u8]) -> Vec<PssmUn
             .then_with(|| a.query_start.cmp(&b.query_start))
             .then_with(|| a.subject_start.cmp(&b.subject_start))
     });
-    candidates
+    Some(candidates)
 }
 
 fn collect_pssm_diagonal_candidate(
@@ -3668,7 +4391,7 @@ fn collect_pssm_diagonal_candidate(
     diag_start_q: usize,
     diag_start_s: usize,
     candidates: &mut Vec<PssmUngappedCandidate>,
-) {
+) -> Option<()> {
     let diag_len = (pssm.length - diag_start_q).min(subj_seq.len() - diag_start_s);
     let mut score = 0i32;
     let mut run_query_start = diag_start_q;
@@ -3681,6 +4404,7 @@ fn collect_pssm_diagonal_candidate(
         score += pssm.score_at(q, subj_seq[s]);
         if score <= 0 {
             if let Some(candidate) = best.take() {
+                candidates.try_reserve(1).ok()?;
                 candidates.push(candidate);
             }
             score = 0;
@@ -3701,12 +4425,36 @@ fn collect_pssm_diagonal_candidate(
         }
     }
     if let Some(candidate) = best {
+        candidates.try_reserve(1).ok()?;
         candidates.push(candidate);
     }
+    Some(())
 }
 
-fn pssm_rows_for_alignment(pssm: &Pssm) -> Vec<Vec<i32>> {
-    pssm.scores.iter().map(|row| row.to_vec()).collect()
+fn try_pssm_rows_for_alignment(pssm: &Pssm) -> Option<Vec<Vec<i32>>> {
+    try_pssm_prefix_rows_for_alignment(pssm, pssm.scores.len())
+}
+
+fn try_pssm_prefix_rows_for_alignment(pssm: &Pssm, row_count: usize) -> Option<Vec<Vec<i32>>> {
+    if psi_allocation_fails("pssm_rows_for_alignment") {
+        return None;
+    }
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(row_count).ok()?;
+    for row in pssm.scores.iter().take(row_count) {
+        rows.push(psi_try_vec_from_slice(row)?);
+    }
+    Some(rows)
+}
+
+fn psi_try_string_clone(src: &str) -> Option<String> {
+    if psi_allocation_fails("psi_blast_iteration_hit_id") {
+        return None;
+    }
+    let mut out = String::new();
+    out.try_reserve(src.len()).ok()?;
+    out.push_str(src);
+    Some(out)
 }
 
 #[cfg(test)]
@@ -3750,7 +4498,8 @@ mod tests {
         ];
 
         let results = psi_blast_iteration(
-            &pssm, &query, &subjects, 1.0, 1000.0, 0.3176, 0.134, 11, 1, 50, 1,
+            &pssm, &query, &subjects, 1.0, 1000.0, 0.3176, 0.134, None, 11, 1, 50, 1, "BLOSUM62",
+            false,
         );
         assert!(!results.is_empty(), "Should find matching subject");
         assert_eq!(results[0].subject_id, "match");
@@ -3767,7 +4516,8 @@ mod tests {
 
         let subjects = vec![("suffix".to_string(), vec![3u8, 4, 5, 6])];
         let results = psi_blast_iteration(
-            &pssm, &query, &subjects, 1.0, 1000.0, 0.3176, 0.134, 11, 1, 50, 1,
+            &pssm, &query, &subjects, 1.0, 1000.0, 0.3176, 0.134, None, 11, 1, 50, 1, "BLOSUM62",
+            false,
         );
 
         assert_eq!(results.len(), 1);
@@ -3785,7 +4535,8 @@ mod tests {
         let subjects = vec![("single".to_string(), query.clone())];
 
         let results = psi_blast_iteration(
-            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 11, 1, 50, 1,
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, None, 11, 1, 50, 1, "BLOSUM62",
+            false,
         );
 
         assert_eq!(results.len(), 1);
@@ -3807,10 +4558,12 @@ mod tests {
         let subjects = vec![("match".to_string(), query.clone())];
 
         let passing = psi_blast_iteration(
-            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 11, 1, 50, 1,
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, None, 11, 1, 50, 1, "BLOSUM62",
+            false,
         );
         let filtered = psi_blast_iteration(
-            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 11, 1, 50, 10_000,
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, None, 11, 1, 50, 10_000,
+            "BLOSUM62", false,
         );
 
         assert_eq!(passing.len(), 1);
@@ -3857,6 +4610,64 @@ mod tests {
     }
 
     #[test]
+    fn psi_blast_iteration_reports_search_scratch_allocation_failure() {
+        let query = vec![crate::encoding::NCBISTDAA_A, crate::encoding::NCBISTDAA_C];
+        let matrix = simple_matrix();
+        let pssm = Pssm::from_sequence(&query, &matrix);
+        let subjects = vec![("self".to_string(), query.clone())];
+        let oversized_pssm = Pssm {
+            scores: Vec::new(),
+            length: usize::MAX,
+            info_content: Vec::new(),
+            start_numerator: None,
+            ancillary_gap_kbp: None,
+        };
+
+        assert!(
+            try_pssm_ungapped_diagonal_candidates(
+                &oversized_pssm,
+                &[crate::encoding::NCBISTDAA_A],
+            )
+            .is_none(),
+            "fallible diagonal-candidate scratch should report real try_reserve capacity failure"
+        );
+
+        {
+            let _failure = psi_fail_next_allocation("pssm_ungapped_diagonal_candidates");
+            assert!(
+                try_psi_blast_iteration(
+                    &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, None, 11, 1, 50, 1,
+                    "BLOSUM62", false,
+                )
+                .is_none(),
+                "fallible PSI search should report diagonal-candidate scratch allocation failure"
+            );
+        }
+
+        let _failure = psi_fail_next_allocation("pssm_ungapped_diagonal_candidates");
+        assert!(
+            psi_blast_iteration(
+                &pssm,
+                &query,
+                &subjects,
+                1.0e20,
+                1.0,
+                0.3176,
+                0.134,
+                None,
+                11,
+                1,
+                50,
+                1,
+                "BLOSUM62",
+                false,
+            )
+            .is_empty(),
+            "legacy non-i32 PSI search API should preserve its Vec return shape on allocation failure"
+        );
+    }
+
+    #[test]
     fn test_psi_blast_iteration_reports_multiple_hsps_per_subject() {
         let query = vec![
             crate::encoding::NCBISTDAA_A,
@@ -3882,7 +4693,8 @@ mod tests {
         let subjects = vec![("two_blocks".to_string(), subject)];
 
         let results = psi_blast_iteration(
-            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, 100, 10, 10, 1,
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, None, 100, 10, 10, 1, "BLOSUM62",
+            false,
         );
         let coords: Vec<(usize, usize, usize, usize)> = results
             .iter()
@@ -3898,6 +4710,622 @@ mod tests {
             coords.contains(&(3, 6, 5, 8)),
             "second local block should be reported: {:?}",
             coords
+        );
+    }
+
+    #[test]
+    fn psi_position_composition_rescore_documents_remaining_traceback_gap() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        let unadjusted: i32 = query
+            .iter()
+            .enumerate()
+            .map(|(pos, &aa)| pssm.score_at(pos, aa))
+            .sum();
+
+        let adjusted = psi_position_composition_rescore(
+            &pssm,
+            &query,
+            0,
+            b"MKKWLFGFLG",
+            b"MKKWLFGFLG",
+            "BLOSUM62",
+        )
+        .expect("position CBS rescore");
+
+        assert!(adjusted < unadjusted);
+        assert_eq!(
+            adjusted, 33,
+            "score-only PSSM composition scaling is closer but still above NCBI's traceback/CBS score 29"
+        );
+    }
+
+    #[test]
+    fn psi_position_composition_rescore_uses_c_start_numerator_shape() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        let start_numerator = pssm
+            .start_numerator
+            .as_deref()
+            .expect("PSI update should save the start numerator");
+        assert_eq!(start_numerator.len(), query.len());
+
+        let adjusted = psi_position_composition_rescore_with_start_numerator(
+            &query,
+            &start_numerator,
+            &query,
+            0,
+            b"MKKWLFGFLG",
+            b"MKKWLFGFLG",
+            "BLOSUM62",
+        )
+        .expect("position CBS rescore from start numerator");
+
+        assert_eq!(
+            adjusted, 29,
+            "saved PSI numerator matches NCBI's score-only traceback/CBS rescore target"
+        );
+        assert!(psi_position_composition_rescore_with_start_numerator(
+            &query,
+            &start_numerator[..query.len() - 1],
+            &query,
+            0,
+            b"MKKWLFGFLG",
+            b"MKKWLFGFLG",
+            "BLOSUM62",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn psi_position_composition_rescore_audits_traceback_window_offsets_and_gaps() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        let start_numerator = pssm
+            .start_numerator
+            .as_deref()
+            .expect("PSI update should save the start numerator");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"AAKWLFGFLGAA");
+
+        let window_score = psi_position_composition_rescore_with_start_numerator(
+            &query,
+            start_numerator,
+            &subject,
+            2,
+            b"KWL-FG",
+            b"KWLTFG",
+            "BLOSUM62",
+        )
+        .expect("nonzero traceback-window rescore");
+        let zero_based_score = psi_position_composition_rescore_with_start_numerator(
+            &query,
+            start_numerator,
+            &subject,
+            0,
+            b"KWL-FG",
+            b"KWLTFG",
+            "BLOSUM62",
+        )
+        .expect("zero-start comparison rescore");
+
+        assert_eq!(window_score, 16, "nonzero traceback-window rescore changed");
+        assert_ne!(
+            window_score, zero_based_score,
+            "traceback-window rescore must consume scores from query_start, not column zero"
+        );
+    }
+
+    #[test]
+    fn psi_blast_iteration_rescores_live_hits_from_saved_start_numerator() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        let subjects = vec![("self".to_string(), query.clone())];
+
+        let hits = psi_blast_iteration(
+            &pssm, &query, &subjects, 1.0e20, 1.0, 0.3176, 0.134, None, 11, 1, 50, 1, "BLOSUM62",
+            true,
+        );
+
+        let full_hit = hits
+            .iter()
+            .find(|hit| hit.query_start == 0 && hit.query_end == query.len())
+            .expect("full-length PSI self hit");
+        assert_eq!(
+            full_hit.score, 29,
+            "live PSI output should consume saved start numerator for traceback/CBS score"
+        );
+    }
+
+    #[test]
+    fn psi_blast_iteration_uses_gumbel_finite_size_evalue_when_available() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        let subjects = vec![("self".to_string(), query.clone())];
+        let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
+            .expect("BLOSUM62 11/1 Gumbel params");
+
+        let hits = psi_blast_iteration(
+            &pssm,
+            &query,
+            &subjects,
+            1.0e20,
+            1.0,
+            0.267,
+            0.041,
+            Some(&gumbel),
+            11,
+            1,
+            50,
+            1,
+            "BLOSUM62",
+            true,
+        );
+
+        let full_hit = hits
+            .iter()
+            .find(|hit| hit.query_start == 0 && hit.query_end == query.len())
+            .expect("full-length PSI self hit");
+        assert!(
+            (full_hit.evalue - 1.8296727491485553e-4).abs() <= 1.0e-16,
+            "PSI live e-value should use Spouge finite-size statistics, got {}",
+            full_hit.evalue
+        );
+    }
+
+    #[test]
+    fn psi_blast_iteration_consumes_saved_ancillary_gap_kbp_for_live_stats() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        pssm = pssm.with_ancillary_gap_kbp(crate::stat::KarlinBlk {
+            lambda: 0.2606712285414885,
+            k: 0.04140657182659004,
+            log_k: 0.04140657182659004_f64.ln(),
+            h: 0.0,
+            round_down: false,
+        });
+        let subjects = vec![("self".to_string(), query.clone())];
+        let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
+            .expect("BLOSUM62 11/1 Gumbel params");
+
+        let hits = psi_blast_iteration(
+            &pssm,
+            &query,
+            &subjects,
+            1.0e20,
+            1.0,
+            0.267,
+            0.041,
+            Some(&gumbel),
+            11,
+            1,
+            50,
+            1,
+            "BLOSUM62",
+            true,
+        );
+
+        let full_hit = hits
+            .iter()
+            .find(|hit| hit.query_start == 0 && hit.query_end == query.len())
+            .expect("full-length PSI self hit");
+        assert_eq!(full_hit.score, 29);
+        assert!(
+            (full_hit.evalue - 2.54e-4).abs() <= 1.0e-16,
+            "PSI live e-value should consume saved ancillary gapped Karlin stats, got {}",
+            full_hit.evalue
+        );
+        assert!(
+            (full_hit.bit_score - 15.5).abs() <= 1.0e-14,
+            "PSI live bit score should consume saved ancillary gapped Karlin stats, got {}",
+            full_hit.bit_score
+        );
+    }
+
+    #[test]
+    fn psi_blast_iteration_ignores_saved_ancillary_gap_kbp_without_position_cbs() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut base_pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        base_pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        let ancillary_pssm = base_pssm
+            .clone()
+            .with_ancillary_gap_kbp(crate::stat::KarlinBlk {
+                lambda: 0.2606712285414885,
+                k: 0.04140657182659004,
+                log_k: 0.04140657182659004_f64.ln(),
+                h: 0.0,
+                round_down: false,
+            });
+        let subjects = vec![("self".to_string(), query.clone())];
+        let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
+            .expect("BLOSUM62 11/1 Gumbel params");
+
+        let base_hits = psi_blast_iteration(
+            &base_pssm,
+            &query,
+            &subjects,
+            1.0e20,
+            1.0,
+            0.267,
+            0.041,
+            Some(&gumbel),
+            11,
+            1,
+            50,
+            1,
+            "BLOSUM62",
+            false,
+        );
+        let ancillary_hits = psi_blast_iteration(
+            &ancillary_pssm,
+            &query,
+            &subjects,
+            1.0e20,
+            1.0,
+            0.267,
+            0.041,
+            Some(&gumbel),
+            11,
+            1,
+            50,
+            1,
+            "BLOSUM62",
+            false,
+        );
+
+        let base = base_hits
+            .iter()
+            .find(|hit| hit.query_start == 0 && hit.query_end == query.len())
+            .expect("base full-length PSI self hit");
+        let ancillary = ancillary_hits
+            .iter()
+            .find(|hit| hit.query_start == 0 && hit.query_end == query.len())
+            .expect("ancillary full-length PSI self hit");
+        assert_eq!(ancillary.score, base.score);
+        assert_eq!(ancillary.evalue, base.evalue);
+        assert_eq!(ancillary.bit_score, base.bit_score);
+    }
+
+    #[test]
+    fn psi_lightweight_update_pins_score_frequency_gap_kbp_producer_input() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+
+        let produced = pssm
+            .derive_lightweight_score_frequency_gap_kbp(&query, "BLOSUM62", 11, 1)
+            .expect("lightweight PSI score-frequency gapped Karlin block");
+
+        assert!(
+            (produced.lambda - 0.3351906985819301).abs() <= 1.0e-12,
+            "lightweight PSI score-frequency lambda changed: {}",
+            produced.lambda
+        );
+        assert!(
+            (produced.lambda - 0.2606712285414885).abs() > 0.07,
+            "score-frequency lambda unexpectedly matches NCBI's final-row ancillary input"
+        );
+        assert!(
+            (produced.k - 0.05086748975512039).abs() <= 1.0e-12,
+            "lightweight PSI score-frequency K changed: {}",
+            produced.k
+        );
+        assert!(
+            (produced.k - 0.04140657182659004).abs() > 0.009,
+            "score-frequency K unexpectedly matches NCBI's final-row ancillary input"
+        );
+    }
+
+    #[test]
+    fn psi_lightweight_update_does_not_save_score_frequency_gap_kbp_as_ancillary() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62)
+            .with_ancillary_gap_kbp(crate::stat::KarlinBlk {
+                lambda: 0.2606712285414885,
+                k: 0.04140657182659004,
+                log_k: 0.04140657182659004_f64.ln(),
+                h: 0.0,
+                round_down: false,
+            });
+
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+
+        assert!(
+            pssm.ancillary_gap_kbp.is_none(),
+            "lightweight PSI update must not persist the score-frequency block as final-row ancillary stats"
+        );
+        let produced = pssm
+            .derive_lightweight_score_frequency_gap_kbp(&query, "BLOSUM62", 11, 1)
+            .expect("lightweight PSI score-frequency gapped Karlin block");
+        assert!(
+            (produced.lambda - 0.3351906985819301).abs() <= 1.0e-12,
+            "score-frequency producer input changed: {}",
+            produced.lambda
+        );
+    }
+
+    #[test]
+    fn psi_blast_add_ancillary_pssm_data_saves_gap_kbp_for_consumer() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+
+        assert_eq!(
+            PsiBlastAddAncillaryPssmData(Some(&mut pssm), Some(&query), Some("BLOSUM62"), 11, 1),
+            PSI_SUCCESS
+        );
+        let saved = pssm
+            .ancillary_gap_kbp
+            .as_ref()
+            .expect("ancillary gap block should be saved");
+        assert!(
+            (saved.lambda - 0.3351906985819301).abs() <= 1.0e-12,
+            "saved score-frequency lambda changed: {}",
+            saved.lambda
+        );
+        assert!(
+            (saved.k - 0.05086748975512039).abs() <= 1.0e-12,
+            "saved score-frequency K changed: {}",
+            saved.k
+        );
+
+        let subjects = vec![("self".to_string(), query.clone())];
+        let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
+            .expect("BLOSUM62 11/1 Gumbel params");
+        let hits = psi_blast_iteration(
+            &pssm,
+            &query,
+            &subjects,
+            1.0e20,
+            1.0,
+            0.267,
+            0.041,
+            Some(&gumbel),
+            11,
+            1,
+            50,
+            1,
+            "BLOSUM62",
+            true,
+        );
+        let full_hit = hits
+            .iter()
+            .find(|hit| hit.query_start == 0 && hit.query_end == query.len())
+            .expect("full-length PSI self hit");
+        assert_eq!(full_hit.score, 29);
+        assert!(
+            (full_hit.evalue - 2.476391643752416e-5).abs() <= 1.0e-18,
+            "PSI live e-value should consume helper-saved score-frequency stats, got {}",
+            full_hit.evalue
+        );
+    }
+
+    #[test]
+    fn psi_blast_add_ancillary_pssm_data_rejects_bad_inputs_without_clobbering_saved_stats() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let original = crate::stat::KarlinBlk {
+            lambda: 0.2606712285414885,
+            k: 0.04140657182659004,
+            log_k: 0.04140657182659004_f64.ln(),
+            h: 0.0,
+            round_down: false,
+        };
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62)
+            .with_ancillary_gap_kbp(original.clone());
+
+        assert_eq!(
+            psi_blast_add_ancillary_pssm_data(
+                Some(&mut pssm),
+                Some(&query),
+                Some("NOT_A_MATRIX"),
+                11,
+                1
+            ),
+            PSIERR_BADPARAM
+        );
+        assert_eq!(
+            pssm.ancillary_gap_kbp.as_ref().map(|kbp| kbp.lambda),
+            Some(original.lambda)
+        );
+        assert_eq!(
+            PsiBlastAddAncillaryPssmData(None, Some(&query), Some("BLOSUM62"), 11, 1),
+            PSIERR_BADPARAM
+        );
+        assert_eq!(
+            PsiBlastAddAncillaryPssmData(Some(&mut pssm), None, Some("BLOSUM62"), 11, 1),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
+    fn psi_final_row_statistic_audit_rejects_position_lambda_ratio_input() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
+        pssm.update_from_alignment_with_matrix_and_pseudocount(
+            &[query.clone()],
+            "BLOSUM62",
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST as f64),
+        );
+        let start_numerator = pssm
+            .start_numerator
+            .as_deref()
+            .expect("PSI update should save the start numerator");
+        let (score, lambda_ratio) =
+            psi_position_composition_rescore_and_lambda_ratio_with_start_numerator(
+                &query,
+                start_numerator,
+                &query,
+                0,
+                b"MKKWLFGFLG",
+                b"MKKWLFGFLG",
+                "BLOSUM62",
+            )
+            .expect("position CBS rescore from start numerator");
+        assert_eq!(score, 29);
+        assert_eq!(
+            lambda_ratio, 0.5,
+            "the local PSSM lambda ratio clamps to the lower bound for this final-row fixture"
+        );
+
+        let base_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041f64.ln(),
+            h: 0.0,
+            round_down: false,
+        };
+        let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
+            .expect("BLOSUM62 11/1 Gumbel params");
+        let current_evalue = crate::stat::spouge_evalue(
+            score,
+            &base_kbp,
+            &gumbel,
+            query.len() as i32,
+            query.len() as i32,
+        );
+        assert!(
+            (current_evalue - 1.8296727491485553e-4).abs() <= 1.0e-16,
+            "current finite-size statistic input changed"
+        );
+
+        let ratio_kbp = crate::stat::KarlinBlk {
+            lambda: base_kbp.lambda * lambda_ratio,
+            ..base_kbp
+        };
+        let ratio_evalue = crate::stat::spouge_evalue(
+            score,
+            &ratio_kbp,
+            &gumbel,
+            query.len() as i32,
+            query.len() as i32,
+        );
+        assert!(
+            (ratio_evalue - 0.2688151385694781).abs() <= 1.0e-15,
+            "blindly applying the local PSSM lambda ratio is not NCBI's final-row statistic input"
+        );
+
+        let current_bits =
+            (base_kbp.lambda * score as f64 - base_kbp.log_k) / crate::math::NCBIMATH_LN2;
+        assert!(
+            (current_bits - 15.779019981647249).abs() <= 1.0e-14,
+            "current bit-score statistic input changed"
+        );
+    }
+
+    #[test]
+    fn psi_final_row_statistic_audit_pins_missing_ancillary_gap_kbp() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
+        let score = 29;
+        let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
+            .expect("BLOSUM62 11/1 Gumbel params");
+
+        let table_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041f64.ln(),
+            h: 0.0,
+            round_down: false,
+        };
+        let table_evalue = crate::stat::spouge_evalue(
+            score,
+            &table_kbp,
+            &gumbel,
+            query.len() as i32,
+            query.len() as i32,
+        );
+        let table_bits =
+            (table_kbp.lambda * score as f64 - table_kbp.log_k) / crate::math::NCBIMATH_LN2;
+        assert!(
+            (table_evalue - 1.8296727491485553e-4).abs() <= 1.0e-16,
+            "current table-backed PSI final-row e-value input changed"
+        );
+        assert!(
+            (table_bits - 15.779019981647249).abs() <= 1.0e-14,
+            "current table-backed PSI final-row bit input changed"
+        );
+
+        // NCBI's final tabular row for this fixture formats as
+        // evalue=2.54e-04 and bitscore=15.5. Solving those values against the
+        // same raw score and Gumbel block gives the gap Karlin block that the
+        // live Rust path is still missing from the PSSM ancillary-data setup
+        // (`PsiBlastAddAncillaryPssmData` -> `PsiBlastSetupScoreBlock`).
+        let ncbi_apparent_gap_kbp = crate::stat::KarlinBlk {
+            lambda: 0.2606712285414885,
+            k: 0.04140657182659004,
+            log_k: 0.04140657182659004f64.ln(),
+            h: 0.0,
+            round_down: false,
+        };
+        let ncbi_apparent_evalue = crate::stat::spouge_evalue(
+            score,
+            &ncbi_apparent_gap_kbp,
+            &gumbel,
+            query.len() as i32,
+            query.len() as i32,
+        );
+        let ncbi_apparent_bits = (ncbi_apparent_gap_kbp.lambda * score as f64
+            - ncbi_apparent_gap_kbp.log_k)
+            / crate::math::NCBIMATH_LN2;
+        assert!(
+            (ncbi_apparent_evalue - 2.54e-4).abs() <= 1.0e-16,
+            "apparent NCBI PSI final-row e-value input changed: {ncbi_apparent_evalue}"
+        );
+        assert!(
+            (ncbi_apparent_bits - 15.5).abs() <= 1.0e-14,
+            "apparent NCBI PSI final-row bit input changed"
+        );
+        assert!(
+            (ncbi_apparent_gap_kbp.lambda - table_kbp.lambda).abs() > 0.006,
+            "the remaining PSI gap is not just e-value formatting precision"
+        );
+        assert!(
+            (ncbi_apparent_gap_kbp.k - table_kbp.k).abs() > 0.0004,
+            "the remaining PSI gap is not just bit-score formatting precision"
         );
     }
 
@@ -4540,6 +5968,87 @@ mod tests {
         assert_eq!(matrix.pssm[0].len(), AA_SIZE);
         assert_eq!(matrix.lambda, 0.0);
         assert!(psi_matrix_free(Some(matrix)).is_none());
+
+        let owned_rows = vec![vec![1_i32, 2], vec![3, 4], vec![5, 6]];
+        assert!(_PSIDeallocateMatrix(Some(owned_rows), 2).is_none());
+        assert!(_PSIDeallocateMatrix::<i32>(None, 2).is_none());
+    }
+
+    #[test]
+    fn translated_psi_row_matrix_builder_reports_try_reserve_failure() {
+        assert!(psi_try_vec_with_len::<u8>(usize::MAX, 0).is_none());
+        assert!(psi_try_row_matrix::<i32>(1, usize::MAX, 0).is_none());
+    }
+
+    #[test]
+    fn translated_psi_sequence_weights_allocator_reports_real_try_reserve_failure() {
+        let dims = PSIMsaDimensions {
+            query_length: 2,
+            num_seqs: 1,
+        };
+        assert!(psi_sequence_weights_new(Some(&dims), usize::MAX).is_none());
+    }
+
+    #[test]
+    fn translated_psi_optional_allocators_preserve_flags_and_report_real_try_reserve_failure() {
+        assert!(psi_try_option_vec_with_len::<u8>(false, usize::MAX, 0)
+            .unwrap()
+            .is_none());
+        assert!(psi_try_option_vec_with_len::<u8>(true, usize::MAX, 0).is_none());
+        assert!(psi_try_option_row_matrix::<u32>(false, 1, usize::MAX, 0)
+            .unwrap()
+            .is_none());
+        assert!(psi_try_option_row_matrix::<u32>(true, 1, usize::MAX, 0).is_none());
+    }
+
+    #[test]
+    fn translated_psi_allocator_failure_hook_covers_vec_backed_constructors() {
+        let dims = PSIMsaDimensions {
+            query_length: 2,
+            num_seqs: 1,
+        };
+        {
+            let _failure = psi_fail_next_allocation("psi_public_msa_new");
+            assert!(psi_public_msa_new(Some(&dims)).is_none());
+        }
+
+        let msa = psi_public_msa_new(Some(&dims)).expect("msa");
+        {
+            let _failure = psi_fail_next_allocation("psi_packed_msa_new");
+            assert!(psi_packed_msa_new(Some(&msa)).is_none());
+        }
+        let packed = psi_packed_msa_new(Some(&msa)).expect("packed");
+        {
+            let _failure = psi_fail_next_allocation("psi_msa_new");
+            assert!(psi_msa_new(Some(&packed), AA_SIZE as u32).is_none());
+        }
+        {
+            let _failure = psi_fail_next_allocation("psi_aligned_block_new");
+            assert!(psi_aligned_block_new(dims.query_length).is_none());
+        }
+        {
+            let _failure = psi_fail_next_allocation("psi_sequence_weights_new");
+            assert!(psi_sequence_weights_new(Some(&dims), AA_SIZE).is_none());
+        }
+        {
+            let _failure = psi_fail_next_allocation("psi_internal_pssm_data_new");
+            assert!(psi_internal_pssm_data_new(dims.query_length, AA_SIZE as u32).is_none());
+        }
+        {
+            let _failure = psi_fail_next_allocation("psi_matrix_new");
+            assert!(psi_matrix_new(dims.query_length, AA_SIZE as u32).is_none());
+        }
+
+        let request = psi_diagnostics_request_new_ex(true);
+        {
+            let _failure = psi_fail_next_allocation("psi_diagnostics_response_new");
+            assert!(psi_diagnostics_response_new(
+                dims.query_length,
+                AA_SIZE as u32,
+                Some(&request)
+            )
+            .is_none());
+        }
     }
 
     #[test]
@@ -4623,6 +6132,152 @@ mod tests {
     }
 
     #[test]
+    fn translated_psi_saved_stats_feed_setup_score_block_contract() {
+        let internal = PsiInternalPssmData {
+            ncols: 1,
+            nrows: AA_SIZE as u32,
+            pssm: vec![vec![0; AA_SIZE]],
+            scaled_pssm: Vec::new(),
+            freq_ratios: Vec::new(),
+            pseudocounts: Vec::new(),
+        };
+        let mut producer = psi_public_test_score_block();
+        producer.kbp_psi[0] = crate::stat::KarlinBlk {
+            lambda: 0.315,
+            k: 0.12,
+            log_k: 0.12_f64.ln(),
+            h: 0.39,
+            round_down: false,
+        };
+        producer.kbp_gap_psi[0] = crate::stat::KarlinBlk {
+            lambda: 0.2606712285414885,
+            k: 0.04140657182659004,
+            log_k: 0.04140657182659004_f64.ln(),
+            h: 0.12,
+            round_down: false,
+        };
+        let mut saved = psi_matrix_new(1, AA_SIZE as u32).expect("saved PSI matrix");
+
+        assert_eq!(
+            s_psi_save_pssm(Some(&internal), Some(&producer), Some(&mut saved)),
+            PSI_SUCCESS
+        );
+
+        let mut consumer = psi_public_test_score_block();
+        consumer.kbp_psi[0] = crate::stat::KarlinBlk::default();
+        consumer.kbp_gap_psi[0] = crate::stat::KarlinBlk::default();
+
+        assert_eq!(
+            psi_blast_setup_score_block(Some(&mut consumer), Some(&saved)),
+            PSI_SUCCESS
+        );
+        assert_eq!(consumer.kbp_psi[0].lambda, producer.kbp_psi[0].lambda);
+        assert_eq!(consumer.kbp_psi[0].k, producer.kbp_psi[0].k);
+        assert_eq!(consumer.kbp_psi[0].h, producer.kbp_psi[0].h);
+        assert_eq!(
+            consumer.kbp_gap_psi[0].lambda,
+            producer.kbp_gap_psi[0].lambda
+        );
+        assert_eq!(consumer.kbp_gap_psi[0].k, producer.kbp_gap_psi[0].k);
+        assert_eq!(consumer.kbp_gap_psi[0].h, producer.kbp_gap_psi[0].h);
+        assert_eq!(consumer.kbp_gap[0].lambda, consumer.kbp_gap_psi[0].lambda);
+        assert_eq!(consumer.kbp_gap[0].k, consumer.kbp_gap_psi[0].k);
+    }
+
+    #[test]
+    fn translated_psi_blast_setup_score_block_copies_ancillary_karlin_blocks() {
+        let mut sbp = psi_public_test_score_block();
+        sbp.kbp_std[0] = crate::stat::KarlinBlk {
+            lambda: 0.318,
+            k: 0.134,
+            log_k: 0.134_f64.ln(),
+            h: 0.401,
+            round_down: false,
+        };
+        sbp.kbp_psi[0] = crate::stat::KarlinBlk::default();
+        sbp.kbp_gap_psi[0] = crate::stat::KarlinBlk::default();
+        let pssm = PSIMatrix {
+            ncols: 1,
+            nrows: AA_SIZE as u32,
+            pssm: vec![vec![0; AA_SIZE]],
+            lambda: 0.2606712285414885,
+            kappa: 0.04140657182659004,
+            h: 0.12,
+            ung_lambda: 0.315,
+            ung_kappa: 0.12,
+            ung_h: 0.39,
+        };
+
+        assert_eq!(
+            psi_blast_setup_score_block(Some(&mut sbp), Some(&pssm)),
+            PSI_SUCCESS
+        );
+
+        assert_eq!(
+            (sbp.kbp_psi[0].lambda, sbp.kbp_psi[0].k, sbp.kbp_psi[0].h),
+            (0.315, 0.12, 0.39)
+        );
+        assert_eq!(
+            (
+                sbp.kbp_gap_psi[0].lambda,
+                sbp.kbp_gap_psi[0].k,
+                sbp.kbp_gap_psi[0].h
+            ),
+            (0.2606712285414885, 0.04140657182659004, 0.12)
+        );
+        assert_eq!(sbp.kbp_gap[0].lambda, sbp.kbp_gap_psi[0].lambda);
+        assert!((sbp.kbp_psi[0].log_k - 0.12_f64.ln()).abs() < 1.0e-12);
+        assert!((sbp.kbp_gap_psi[0].log_k - 0.04140657182659004_f64.ln()).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn translated_psi_blast_setup_score_block_falls_back_to_standard_stats() {
+        let mut sbp = psi_public_test_score_block();
+        sbp.kbp_std[0] = crate::stat::KarlinBlk {
+            lambda: 0.318,
+            k: 0.134,
+            log_k: 0.134_f64.ln(),
+            h: 0.401,
+            round_down: false,
+        };
+        sbp.kbp_psi[0] = crate::stat::KarlinBlk::default();
+        sbp.kbp_gap_psi[0] = crate::stat::KarlinBlk::default();
+        let pssm = psi_matrix_new(1, AA_SIZE as u32).expect("matrix with invalid stats");
+
+        assert_eq!(
+            psi_blast_setup_score_block(Some(&mut sbp), Some(&pssm)),
+            PSI_SUCCESS
+        );
+
+        assert_eq!(sbp.kbp_psi[0].lambda, sbp.kbp_std[0].lambda);
+        assert_eq!(sbp.kbp_psi[0].k, sbp.kbp_std[0].k);
+        assert_eq!(sbp.kbp_psi[0].h, sbp.kbp_std[0].h);
+        assert_eq!(sbp.kbp_gap_psi[0].lambda, sbp.kbp_gap_std[0].lambda);
+        assert_eq!(sbp.kbp_gap_psi[0].k, sbp.kbp_gap_std[0].k);
+        assert_eq!(sbp.kbp_gap_psi[0].h, sbp.kbp_gap_std[0].h);
+        assert_eq!(sbp.kbp_gap[0].k, sbp.kbp_gap_psi[0].k);
+
+        let mut nucleotide_sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("sbp");
+        assert_eq!(
+            psi_blast_setup_score_block(Some(&mut nucleotide_sbp), Some(&pssm)),
+            PSIERR_BADPARAM
+        );
+        assert_eq!(
+            PsiBlastSetupScoreBlock(Some(&mut nucleotide_sbp), Some(&pssm)),
+            PSIERR_BADPARAM
+        );
+        assert_eq!(
+            psi_blast_setup_score_block(None, Some(&pssm)),
+            PSIERR_BADPARAM
+        );
+        assert_eq!(
+            psi_blast_setup_score_block(Some(&mut sbp), None),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
     fn translated_psi_diagnostics_allocators_follow_request_flags() {
         let blank = psi_diagnostics_request_new();
         assert!(!blank.frequency_ratios);
@@ -4675,10 +6330,10 @@ mod tests {
             is_aligned: false,
         };
 
-        let packed = psi_packed_msa_new(Some(&msa)).expect("packed");
+        let mut packed = psi_packed_msa_new(Some(&msa)).expect("packed");
         assert_eq!(packed.use_sequence, vec![true, true]);
         assert_eq!(psi_packed_msa_get_number_of_aligned_seqs(Some(&packed)), 1);
-        let internal = psi_msa_new(Some(&packed), AA_SIZE as u32).expect("internal");
+        let internal = _PSIMsaNew(Some(&packed), AA_SIZE as u32).expect("internal");
         assert_eq!(internal.dimensions.num_seqs, 1);
         assert_eq!(
             internal.query,
@@ -4689,7 +6344,15 @@ mod tests {
             2
         );
         assert_eq!(internal.num_matching_seqs[1], 1);
-        assert!(psi_msa_free(Some(internal)).is_none());
+        assert!(_PSIMsaFree(Some(internal)).is_none());
+
+        packed.use_sequence[1] = false;
+        let internal = psi_internal_msa_new(Some(&packed), AA_SIZE as u32).expect("internal");
+        assert_eq!(internal.dimensions.num_seqs, 0);
+        assert_eq!(internal.cell.len(), 1);
+        assert_eq!(internal.cell[0][0].letter, crate::encoding::NCBISTDAA_A);
+        assert!(psi_internal_msa_free(Some(internal)).is_none());
+        assert!(psi_internal_msa_new(None, AA_SIZE as u32).is_none());
         assert!(psi_packed_msa_free(Some(packed)).is_none());
 
         let block = psi_aligned_block_new(2).expect("block");
@@ -5693,6 +7356,12 @@ mod tests {
             PSI_SUCCESS
         );
 
+        let _failure = psi_fail_next_allocation("psi_get_aligned_sequences_for_position");
+        assert_eq!(
+            psi_compute_sequence_weights(Some(&msa), Some(&blocks), false, Some(&mut weights)),
+            PSIERR_OUTOFMEM
+        );
+
         let mut short_msa = msa.clone();
         short_msa.cell[1].truncate(1);
         assert_eq!(
@@ -6316,6 +7985,20 @@ mod tests {
                 crate::options::K_PSSM_NO_IMPALA_SCALING,
             ),
             PSIERR_BADPARAM
+        );
+
+        let mut missing_matrix_ratios = internal.clone();
+        let mut sbp_without_ratios = sbp.clone();
+        sbp_without_ratios.name = Some("NOT_A_MATRIX".to_string());
+        assert_eq!(
+            psi_create_and_scale_pssm_from_frequency_ratios(
+                Some(&mut missing_matrix_ratios),
+                Some(&query),
+                Some(&probs),
+                Some(&mut sbp_without_ratios),
+                crate::options::K_PSSM_NO_IMPALA_SCALING,
+            ),
+            PSIERR_OUTOFMEM
         );
 
         let mut zero_impala_scale = internal;
@@ -7017,6 +8700,65 @@ mod tests {
     }
 
     #[test]
+    fn psi_create_pssm_with_diagnostics_exposes_c_spelled_public_alias() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = None;
+        let mut diagnostics = None;
+
+        assert_eq!(
+            PSICreatePssmWithDiagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSI_SUCCESS
+        );
+
+        assert_eq!(pssm.expect("pssm").ncols, 3);
+        assert!(
+            diagnostics
+                .expect("diagnostics")
+                .frequency_ratios
+                .expect("frequency ratios")[0][crate::encoding::NCBISTDAA_A as usize]
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn psi_create_pssm_exposes_c_wrapper_and_missing_output_error() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let mut pssm = None;
+
+        assert_eq!(
+            PSICreatePssm(Some(&msa), Some(&options), Some(&mut sbp), Some(&mut pssm)),
+            PSI_SUCCESS
+        );
+        let pssm = pssm.expect("pssm");
+        assert_eq!(pssm.ncols, 3);
+        assert_eq!(pssm.nrows, AA_SIZE as u32);
+
+        let mut sbp = psi_public_test_score_block();
+        assert_eq!(
+            PSICreatePssm(Some(&msa), Some(&options), Some(&mut sbp), None),
+            PSIERR_BADPARAM
+        );
+    }
+
+    #[test]
     fn psi_create_pssm_with_diagnostics_clears_diagnostics_output_without_request() {
         let msa = psi_public_test_msa();
         let options = crate::options::PSIBlastOptions {
@@ -7201,6 +8943,64 @@ mod tests {
                 Some(&mut diagnostics),
             ),
             PSIERR_BADPARAM
+        );
+        assert!(pssm.is_none());
+        assert!(diagnostics.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_cleans_outputs_on_matrix_ratio_allocation_error() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        sbp.name = Some("NOT_A_MATRIX".to_string());
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_OUTOFMEM
+        );
+        assert!(pssm.is_none());
+        assert!(diagnostics.is_none());
+    }
+
+    #[test]
+    fn psi_create_pssm_with_diagnostics_cleans_outputs_on_diagnostics_allocation_error() {
+        let msa = psi_public_test_msa();
+        let options = crate::options::PSIBlastOptions {
+            pseudo_count: 5,
+            ..crate::options::PSIBlastOptions::default()
+        };
+        let mut sbp = psi_public_test_score_block();
+        let request = psi_diagnostics_request_new_ex(true);
+        let mut pssm = Some(psi_matrix_new(1, AA_SIZE as u32).expect("preexisting pssm"));
+        let mut diagnostics =
+            Some(psi_diagnostics_response_new(1, AA_SIZE as u32, Some(&request)).unwrap());
+        let _failure = psi_fail_next_allocation("psi_diagnostics_response_new");
+
+        assert_eq!(
+            psi_create_pssm_with_diagnostics(
+                Some(&msa),
+                Some(&options),
+                Some(&mut sbp),
+                Some(&request),
+                Some(&mut pssm),
+                Some(&mut diagnostics),
+            ),
+            PSIERR_OUTOFMEM
         );
         assert!(pssm.is_none());
         assert!(diagnostics.is_none());

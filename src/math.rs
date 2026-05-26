@@ -999,6 +999,13 @@ mod tests {
     }
 
     #[test]
+    fn test_blast_log1p_named_port_backs_facade() {
+        for x in [-0.199_999_f64, -1e-10, 0.0, 1e-10, 0.199_999, 0.2] {
+            assert_eq!(log1p(x), blast_log1p(x));
+        }
+    }
+
+    #[test]
     fn test_erfc_matches_fdlibm() {
         // Reference values from glibc erfc (fdlibm-equivalent).
         // Match to within 1 ULP.
@@ -1067,6 +1074,29 @@ mod tests {
         assert!((erf_boost(-1.0) + 0.8427007929497148).abs() < 1e-15);
         assert!((erfc_boost(1.0) - 0.15729920705028513).abs() < 1e-15);
         assert!((erfc_boost(-1.0) - 1.8427007929497148).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_ncbi_erf_named_ports_back_facades() {
+        for x in [
+            f64::NEG_INFINITY,
+            -6.5,
+            -1.25,
+            -0.84375,
+            -1e-300,
+            -0.0,
+            0.0,
+            1e-300,
+            0.84375,
+            1.25,
+            6.5,
+            f64::INFINITY,
+        ] {
+            assert_eq!(erf(x).to_bits(), ncbi_erf(x).to_bits());
+            assert_eq!(erfc(x).to_bits(), ncbi_erf_c(x).to_bits());
+        }
+        assert!(ncbi_erf(f64::NAN).is_nan());
+        assert!(ncbi_erf_c(f64::NAN).is_nan());
     }
 
     #[test]

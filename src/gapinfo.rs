@@ -755,6 +755,7 @@ pub fn s_blast_oof_traceback_to_gap_edit_script(
     let mut fwd_ops = fwd_prelim_tback.edit_ops.clone();
     if last_op != GapAlignOpType::Sub {
         let mut keep_len = fwd_ops.len();
+        let mut merged_frame_shift = false;
         for idx in (0..fwd_ops.len()).rev() {
             let new_script = &mut fwd_ops[idx];
             if matches!(
@@ -782,8 +783,12 @@ pub fn s_blast_oof_traceback_to_gap_edit_script(
                 gap_prelim_edit_block_add(&mut tmp_prelim_tback, merged_op, 1);
                 new_script.num -= 1;
                 keep_len = if new_script.num == 0 { idx } else { idx + 1 };
+                merged_frame_shift = true;
                 break;
             }
+        }
+        if !merged_frame_shift {
+            keep_len = 0;
         }
         fwd_ops.truncate(keep_len);
     }
@@ -5370,6 +5375,274 @@ where
     0
 }
 
+/// Query-side native MegaBLAST index lookup key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MegablastIndexQueryKey {
+    pub hash_key: u32,
+    pub query_offset: i32,
+}
+
+/// Minimal source interface for native MegaBLAST indexed offset-list hits.
+pub trait MegablastIndexedOffsetSource {
+    fn hkey_width(&self) -> u32;
+    fn start_oid(&self) -> u32;
+    fn stop_oid(&self) -> u32;
+    fn offset_list_words(&self, hash_key: u32) -> Option<&[u32]>;
+    fn logical_chunk_id_for_subject_chunk(&self, local_oid: u32, chunk: u32) -> Option<u32>;
+    fn chunk_offset_for_encoded_offset(&self, encoded_offset: u32) -> Option<(u32, u32)>;
+    fn chunk_seed_offset_for_encoded_offset(&self, encoded_offset: u32) -> Option<(u32, u32)>;
+    fn min_encoded_offset(&self) -> Option<u32>;
+}
+
+/// Return whether a database OID is covered by a parsed native MegaBLAST index
+/// volume.
+pub fn megablast_index_volume_has_oid(
+    volume: &impl MegablastIndexedOffsetSource,
+    subject_oid: i32,
+) -> bool {
+    let Ok(subject_oid) = u32::try_from(subject_oid) else {
+        return false;
+    };
+    subject_oid >= volume.start_oid() && subject_oid < volume.stop_oid()
+}
+
+/// Build query hash keys for a parsed native MegaBLAST index volume.
+///
+/// The native `.idx` offset lists are keyed by `hkey_width` 2-bit nucleotide
+/// windows. Ambiguous query bytes are skipped, matching the indexed search
+/// precondition before seed extension.
+pub fn megablast_index_query_keys(query: &[u8], hkey_width: u32) -> Vec<MegablastIndexQueryKey> {
+    let right = query.len().saturating_sub(1);
+    let all_query = [crate::util::SSeqRange {
+        left: 0,
+        right: right as i32,
+    }];
+    megablast_index_query_keys_for_locations(query, hkey_width, &all_query)
+}
+
+/// Build native MegaBLAST index query keys for explicit unmasked query ranges.
+///
+/// NCBI's indexed pre-search consumes the same query locations used to build
+/// ordinary nucleotide lookup tables. Ranges are inclusive `SSeqRange`
+/// intervals; seed windows are never allowed to cross a range boundary.
+pub fn megablast_index_query_keys_for_locations(
+    query: &[u8],
+    hkey_width: u32,
+    locations: &[crate::util::SSeqRange],
+) -> Vec<MegablastIndexQueryKey> {
+    let Ok(width) = usize::try_from(hkey_width) else {
+        return Vec::new();
+    };
+    if width == 0 || width > 15 || query.len() < width {
+        return Vec::new();
+    }
+
+    let mut keys = Vec::new();
+    for loc in locations {
+        if loc.left < 0 || loc.right < loc.left {
+            continue;
+        }
+        let from = loc.left as usize;
+        let right = loc.right as usize;
+        let loc_len = right - from + 1;
+        if loc_len < width || from >= query.len() {
+            continue;
+        }
+        let Some(last_start) = right.checked_sub(width - 1) else {
+            continue;
+        };
+        for start in from..=last_start {
+            let Some(word) = query.get(start..start + width) else {
+                break;
+            };
+            let mut hash_key = 0u32;
+            let mut valid = true;
+            for &base in word {
+                if base > 3 {
+                    valid = false;
+                    break;
+                }
+                hash_key = (hash_key << 2) | u32::from(base);
+            }
+            if valid {
+                keys.push(MegablastIndexQueryKey {
+                    hash_key,
+                    query_offset: start as i32,
+                });
+            }
+        }
+    }
+    keys
+}
+
+/// Callback adapter over one or more parsed native MegaBLAST index volumes.
+///
+/// NCBI's indexed search keeps a result object across all index volumes and
+/// answers per-subject `CheckOid`/`GetResults` calls from that holder. This
+/// struct is the parsed Rust boundary for the same shape: query keys are cached
+/// by hash-key width, OID lookup selects the owning volume, and result filling
+/// delegates to the single-volume offset-list adapter.
+pub struct MegablastIndexResultHolder<'a, V: MegablastIndexedOffsetSource> {
+    volumes: Vec<&'a V>,
+    query_keys_by_width: Vec<(u32, Vec<MegablastIndexQueryKey>)>,
+}
+
+impl<'a, V: MegablastIndexedOffsetSource> MegablastIndexResultHolder<'a, V> {
+    pub fn new(query: &[u8], volumes: impl IntoIterator<Item = &'a V>) -> Self {
+        let right = query.len().saturating_sub(1);
+        let locations = [crate::util::SSeqRange {
+            left: 0,
+            right: right as i32,
+        }];
+        Self::with_locations(query, &locations, volumes)
+    }
+
+    pub fn with_locations(
+        query: &[u8],
+        locations: &[crate::util::SSeqRange],
+        volumes: impl IntoIterator<Item = &'a V>,
+    ) -> Self {
+        let volumes: Vec<&'a V> = volumes.into_iter().collect();
+        let mut query_keys_by_width = Vec::new();
+        for volume in &volumes {
+            let width = volume.hkey_width();
+            if !query_keys_by_width
+                .iter()
+                .any(|(known_width, _)| *known_width == width)
+            {
+                query_keys_by_width.push((
+                    width,
+                    megablast_index_query_keys_for_locations(query, width, locations),
+                ));
+            }
+        }
+
+        Self {
+            volumes,
+            query_keys_by_width,
+        }
+    }
+
+    pub fn has_oid(&self, subject_oid: i32) -> bool {
+        self.volume_for_oid(subject_oid).is_some()
+    }
+
+    pub fn fill_init_hitlist(
+        &self,
+        subject_oid: i32,
+        subject_chunk: i32,
+        init_hitlist: &mut crate::extend::InitHitList,
+    ) -> u32 {
+        let Some(volume) = self.volume_for_oid(subject_oid) else {
+            init_hitlist.reset();
+            return 0;
+        };
+        let Some((_, query_keys)) = self
+            .query_keys_by_width
+            .iter()
+            .find(|(width, _)| *width == volume.hkey_width())
+        else {
+            init_hitlist.reset();
+            return 0;
+        };
+        megablast_index_fill_init_hitlist(
+            volume,
+            subject_oid,
+            subject_chunk,
+            query_keys,
+            init_hitlist,
+        )
+    }
+
+    fn volume_for_oid(&self, subject_oid: i32) -> Option<&'a V> {
+        self.volumes
+            .iter()
+            .copied()
+            .find(|volume| megablast_index_volume_has_oid(*volume, subject_oid))
+    }
+}
+
+/// Fill an `InitHitList` from parsed native MegaBLAST offset lists for the
+/// existing `MB_IndexedWordFinder` callback shape.
+///
+/// This is a deliberately narrow adapter over decoded offset-list words. It
+/// maps raw index offsets through the parsed `CSubjectMap` data and saves only
+/// hits belonging to the requested local subject/chunk. Boundary control words
+/// below NCBI `GetMinOffset(stride)` are consumed with their following real
+/// offset so the native list shape matches `CSeedRoots::Add2` at this callback
+/// boundary; full pre-search tracked-seed extension remains above this adapter.
+pub fn megablast_index_fill_init_hitlist(
+    volume: &impl MegablastIndexedOffsetSource,
+    subject_oid: i32,
+    subject_chunk: i32,
+    query_keys: &[MegablastIndexQueryKey],
+    init_hitlist: &mut crate::extend::InitHitList,
+) -> u32 {
+    init_hitlist.reset();
+    let Ok(subject_oid) = u32::try_from(subject_oid) else {
+        return 0;
+    };
+    let Some(local_oid) = subject_oid.checked_sub(volume.start_oid()) else {
+        return 0;
+    };
+    let Ok(subject_chunk) = u32::try_from(subject_chunk) else {
+        return 0;
+    };
+    let Some(target_chunk_id) = volume.logical_chunk_id_for_subject_chunk(local_oid, subject_chunk)
+    else {
+        return 0;
+    };
+    let Some(min_encoded_offset) = volume.min_encoded_offset() else {
+        return 0;
+    };
+
+    let mut saved = 0u32;
+    for query_key in query_keys {
+        let Some(offsets) = volume.offset_list_words(query_key.hash_key) else {
+            continue;
+        };
+        let mut index = 0usize;
+        while index < offsets.len() {
+            let encoded_offset = offsets[index];
+            let real_encoded_offset = if encoded_offset < min_encoded_offset {
+                let Some(&next_offset) = offsets.get(index + 1) else {
+                    break;
+                };
+                index += 2;
+                if next_offset < min_encoded_offset {
+                    continue;
+                }
+                next_offset
+            } else {
+                index += 1;
+                encoded_offset
+            };
+
+            let Some((logical_chunk_id, chunk_offset)) =
+                volume.chunk_seed_offset_for_encoded_offset(real_encoded_offset)
+            else {
+                continue;
+            };
+            if logical_chunk_id == target_chunk_id {
+                if crate::extend::blast_save_initial_hit(
+                    init_hitlist,
+                    query_key.query_offset,
+                    chunk_offset as i32,
+                    None,
+                ) {
+                    saved = saved.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    if saved == 0 {
+        0
+    } else {
+        volume.hkey_width()
+    }
+}
+
 /// blast-rs: Port-shaped equivalent of NCBI `ShortRead_IndexedWordFinder`
 /// (na_ungapped.c:2227) for subjects already known to be indexed; not a direct NCBI C port.
 ///
@@ -6099,6 +6372,40 @@ mod tests {
     }
 
     #[test]
+    fn oof_traceback_to_gap_edit_script_does_not_duplicate_all_gap_right_tail() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Ins1,
+                num: 1,
+            }],
+            last_op: Some(GapAlignOpType::Ins1),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Del,
+                num: 2,
+            }],
+            last_op: Some(GapAlignOpType::Del),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                100,
+                Some(&mut script),
+            ),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![(GapAlignOpType::Sub, 1), (GapAlignOpType::Del, 2)]
+        );
+    }
+
+    #[test]
     fn oof_traceback_to_gap_edit_script_rejects_missing_required_inputs() {
         let rev = GapPrelimEditBlock {
             edit_ops: vec![GapPrelimEditScript {
@@ -6353,6 +6660,193 @@ mod tests {
     }
 
     #[test]
+    fn oof_traceback_to_gap_edit_script_combines_insertion_frameshifts_at_join() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Ins1,
+                num: 1,
+            }],
+            last_op: Some(GapAlignOpType::Ins1),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins2,
+                    num: 1,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Ins2),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                100,
+                Some(&mut script),
+            ),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![
+                (GapAlignOpType::Sub, 1),
+                (GapAlignOpType::Ins, 1),
+                (GapAlignOpType::Sub, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_keeps_gap_between_joined_frameshift_and_substitution() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Ins1,
+                num: 1,
+            }],
+            last_op: Some(GapAlignOpType::Ins1),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins1,
+                    num: 1,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Ins1),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                100,
+                Some(&mut script),
+            ),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![
+                (GapAlignOpType::Sub, 1),
+                (GapAlignOpType::Ins2, 1),
+                (GapAlignOpType::Del, 1),
+                (GapAlignOpType::Sub, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_preserves_gap_skipped_before_right_frameshift_merge() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Del1,
+                num: 1,
+            }],
+            last_op: Some(GapAlignOpType::Del1),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins2,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 1,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Del),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                100,
+                Some(&mut script),
+            ),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![
+                (GapAlignOpType::Sub, 1),
+                (GapAlignOpType::Del, 1),
+                (GapAlignOpType::Ins1, 1),
+                (GapAlignOpType::Sub, 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_keeps_residual_right_frameshift_and_sub_tail() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Del1,
+                num: 1,
+            }],
+            last_op: Some(GapAlignOpType::Del1),
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del2,
+                    num: 2,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Del2),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                100,
+                Some(&mut script),
+            ),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![
+                (GapAlignOpType::Sub, 1),
+                (GapAlignOpType::Del, 1),
+                (GapAlignOpType::Del2, 1),
+                (GapAlignOpType::Sub, 3)
+            ]
+        );
+    }
+
+    #[test]
     fn oof_traceback_to_gap_edit_script_keeps_exact_nucleotide_boundary() {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
@@ -6381,6 +6875,165 @@ mod tests {
         assert_eq!(
             script.expect("script").ops,
             vec![(GapAlignOpType::Del, 1), (GapAlignOpType::Sub, 2)]
+        );
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_truncates_partial_substitution_codon() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: Vec::new(),
+            last_op: None,
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![GapPrelimEditScript {
+                op_type: GapAlignOpType::Sub,
+                num: 3,
+            }],
+            last_op: Some(GapAlignOpType::Sub),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(Some(&rev), Some(&fwd), 4, Some(&mut script),),
+            0
+        );
+
+        assert_eq!(script.expect("script").ops, vec![(GapAlignOpType::Sub, 2)]);
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_truncates_ordinary_insertion_by_codon_span() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: Vec::new(),
+            last_op: None,
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 1,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Sub),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(Some(&rev), Some(&fwd), 7, Some(&mut script),),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![(GapAlignOpType::Sub, 1), (GapAlignOpType::Ins, 2)]
+        );
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_preserves_mixed_frameshifts_and_ordinary_gaps() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: Vec::new(),
+            last_op: None,
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins1,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Del,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins1,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Sub),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(
+                Some(&rev),
+                Some(&fwd),
+                100,
+                Some(&mut script),
+            ),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![
+                (GapAlignOpType::Sub, 2),
+                (GapAlignOpType::Ins1, 1),
+                (GapAlignOpType::Del, 1),
+                (GapAlignOpType::Ins, 1),
+                (GapAlignOpType::Ins1, 1),
+                (GapAlignOpType::Sub, 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn oof_traceback_to_gap_edit_script_lengthens_post_truncation_substitution_after_frameshift() {
+        let rev = GapPrelimEditBlock {
+            edit_ops: Vec::new(),
+            last_op: None,
+        };
+        let fwd = GapPrelimEditBlock {
+            edit_ops: vec![
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 2,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Ins1,
+                    num: 1,
+                },
+                GapPrelimEditScript {
+                    op_type: GapAlignOpType::Sub,
+                    num: 1,
+                },
+            ],
+            last_op: Some(GapAlignOpType::Sub),
+        };
+        let mut script = None;
+
+        assert_eq!(
+            s_blast_oof_traceback_to_gap_edit_script(Some(&rev), Some(&fwd), 8, Some(&mut script),),
+            0
+        );
+
+        assert_eq!(
+            script.expect("script").ops,
+            vec![
+                (GapAlignOpType::Sub, 1),
+                (GapAlignOpType::Ins1, 1),
+                (GapAlignOpType::Sub, 2)
+            ]
         );
     }
 
@@ -10886,6 +11539,234 @@ mod tests {
     }
 
     #[test]
+    fn do_anchored_search_recovers_trailing_flank_and_copies_saved_chain() {
+        let query: Vec<u8> = (0..52).map(|i| (i % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                longest_intron: 40,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let chain = Box::new(crate::spliced_hits::HSPChain {
+            context: 0,
+            oid: 34,
+            score: 35,
+            hsps: Some(Box::new(crate::spliced_hits::HSPContainer {
+                hsp: mapper_saved_hsp(0, 20, 0, 20),
+                next: None,
+            })),
+            count: 1,
+            pair: None,
+            pair_score: None,
+            pair_conf: crate::spliced_hits::PAIR_NONE,
+            adapter: -1,
+            poly_a: 0,
+            next: None,
+        });
+        let mapper_data = crate::spliced_hits::BlastHSPMapperData {
+            query_info: Some(query_info.clone()),
+            saved_chains: vec![Some(chain)],
+            ..Default::default()
+        };
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+
+        let list = do_anchored_search(
+            &query,
+            &subject,
+            query.len() as i32,
+            34,
+            0,
+            12,
+            hit_params.options.longest_intron,
+            Some(&mapper_data),
+            &query_info,
+            &mut jumper,
+            &score_params,
+            &hit_params,
+            JumperAlignParams {
+                max_mismatches: 5,
+                mismatch_window: 10,
+                gap_x_dropoff: 30,
+            },
+            None,
+        )
+        .expect("anchored search should recover the uncovered trailing flank");
+
+        assert_eq!(list.oid, 34);
+        assert!(list
+            .hsps
+            .iter()
+            .any(|hsp| hsp.query_offset == 0 && hsp.query_end == 20));
+        assert!(list
+            .hsps
+            .iter()
+            .any(|hsp| hsp.query_offset <= 20 && hsp.query_end == query.len() as i32));
+    }
+
+    #[test]
+    fn do_anchored_search_does_not_copy_chain_without_recovered_flank() {
+        let query = vec![1; 44];
+        let subject_bases = vec![0; query.len()];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                longest_intron: 16,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let chain = Box::new(crate::spliced_hits::HSPChain {
+            context: 0,
+            oid: 35,
+            score: 35,
+            hsps: Some(Box::new(crate::spliced_hits::HSPContainer {
+                hsp: mapper_saved_hsp(13, 23, 13, 23),
+                next: None,
+            })),
+            count: 1,
+            pair: None,
+            pair_score: None,
+            pair_conf: crate::spliced_hits::PAIR_NONE,
+            adapter: -1,
+            poly_a: 0,
+            next: None,
+        });
+        let mapper_data = crate::spliced_hits::BlastHSPMapperData {
+            query_info: Some(query_info.clone()),
+            saved_chains: vec![Some(chain)],
+            ..Default::default()
+        };
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+
+        assert!(do_anchored_search(
+            &query,
+            &subject,
+            subject_bases.len() as i32,
+            35,
+            0,
+            8,
+            hit_params.options.longest_intron,
+            Some(&mapper_data),
+            &query_info,
+            &mut jumper,
+            &score_params,
+            &hit_params,
+            JumperAlignParams {
+                max_mismatches: 0,
+                mismatch_window: 8,
+                gap_x_dropoff: 30,
+            },
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn do_anchored_search_to_stream_drops_unrecovered_partial_chain() {
+        let query = vec![1; 44];
+        let subject_bases = vec![0; query.len()];
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                longest_intron: 16,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let chain = Box::new(crate::spliced_hits::HSPChain {
+            context: 0,
+            oid: 36,
+            score: 35,
+            hsps: Some(Box::new(crate::spliced_hits::HSPContainer {
+                hsp: mapper_saved_hsp(13, 23, 13, 23),
+                next: None,
+            })),
+            count: 1,
+            pair: None,
+            pair_score: None,
+            pair_conf: crate::spliced_hits::PAIR_NONE,
+            adapter: -1,
+            poly_a: 0,
+            next: None,
+        });
+        let mapper_data = crate::spliced_hits::BlastHSPMapperData {
+            query_info: Some(query_info.clone()),
+            saved_chains: vec![Some(chain)],
+            ..Default::default()
+        };
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+
+        assert_eq!(
+            do_anchored_search_to_stream(
+                &query,
+                &subject,
+                subject_bases.len() as i32,
+                36,
+                0,
+                8,
+                hit_params.options.longest_intron,
+                Some(&mapper_data),
+                &query_info,
+                &mut jumper,
+                &score_params,
+                &hit_params,
+                JumperAlignParams {
+                    max_mismatches: 0,
+                    mismatch_window: 8,
+                    gap_x_dropoff: 30,
+                },
+                Some(&stream),
+            ),
+            0
+        );
+        let (status, written) = crate::hspstream::blast_hsp_stream_read(Some(&stream));
+        assert_eq!(status, crate::hspstream::K_BLAST_HSP_STREAM_EOF);
+        assert!(written.is_none());
+    }
+
+    #[test]
     fn do_anchored_search_recovers_and_copies_multiple_saved_chains_for_oid() {
         let query: Vec<u8> = (0..52).map(|i| (i % 4) as u8).collect();
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
@@ -12170,6 +13051,216 @@ mod tests {
         let (status, written) = crate::hspstream::blast_hsp_stream_read(Some(&stream));
         assert_eq!(status, crate::hspstream::K_BLAST_HSP_STREAM_EOF);
         assert!(written.is_none());
+    }
+
+    struct SyntheticMegablastIndexSource {
+        start_oid: u32,
+        stop_oid: u32,
+        hash_table: Vec<u32>,
+        offsets: Vec<u32>,
+    }
+
+    impl MegablastIndexedOffsetSource for SyntheticMegablastIndexSource {
+        fn hkey_width(&self) -> u32 {
+            2
+        }
+
+        fn start_oid(&self) -> u32 {
+            self.start_oid
+        }
+
+        fn stop_oid(&self) -> u32 {
+            self.stop_oid
+        }
+
+        fn offset_list_words(&self, hash_key: u32) -> Option<&[u32]> {
+            let start = *self.hash_table.get(hash_key as usize)? as usize;
+            let rel_end = self.offsets[start..].iter().position(|&word| word == 0)?;
+            Some(&self.offsets[start..start + rel_end])
+        }
+
+        fn logical_chunk_id_for_subject_chunk(&self, local_oid: u32, chunk: u32) -> Option<u32> {
+            [1u32, 2, 0]
+                .get(local_oid as usize)
+                .copied()
+                .and_then(|first_chunk| first_chunk.checked_add(chunk))
+                .filter(|&logical_chunk_id| (1..=2).contains(&logical_chunk_id))
+        }
+
+        fn chunk_offset_for_encoded_offset(&self, encoded_offset: u32) -> Option<(u32, u32)> {
+            match encoded_offset {
+                64 => Some((1, 64)),
+                80 => Some((2, 64)),
+                _ => None,
+            }
+        }
+
+        fn chunk_seed_offset_for_encoded_offset(&self, encoded_offset: u32) -> Option<(u32, u32)> {
+            match encoded_offset {
+                64 => Some((1, 0)),
+                80 => Some((2, 0)),
+                _ => None,
+            }
+        }
+
+        fn min_encoded_offset(&self) -> Option<u32> {
+            Some(64)
+        }
+    }
+
+    fn synthetic_megablast_index_volume_for_callback() -> SyntheticMegablastIndexSource {
+        let mut hash_table = vec![0u32; (1usize << 4) + 1];
+        hash_table[6] = 1;
+        hash_table[16] = 4;
+        SyntheticMegablastIndexSource {
+            start_oid: 10,
+            stop_oid: 12,
+            hash_table,
+            offsets: vec![0, 3, 64, 0],
+        }
+    }
+
+    #[test]
+    fn megablast_index_adapter_feeds_mb_indexed_callback_shape() {
+        let volume = synthetic_megablast_index_volume_for_callback();
+        let query = vec![1u8, 2, 3, 0];
+        let query_keys = megablast_index_query_keys(&query, volume.hkey_width());
+        let subject_bases: Vec<u8> = (0..120).map(|i| ((i + 1) % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 8,
+            cutoff_score_min: 1,
+            cutoffs: Vec::new(),
+            ungapped_extension: false,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+
+        assert_eq!(
+            mb_indexed_word_finder(
+                &subject,
+                subject_bases.len() as i32,
+                10,
+                0,
+                &query,
+                &query_info,
+                &word_params,
+                &score_params,
+                &mut init_hitlist,
+                |oid| megablast_index_volume_has_oid(&volume, oid),
+                |oid, chunk, list| {
+                    megablast_index_fill_init_hitlist(&volume, oid, chunk, &query_keys, list)
+                },
+                None,
+            ),
+            0
+        );
+
+        assert_eq!(init_hitlist.total(), 1);
+        assert_eq!(init_hitlist.hits[0].query_offset, 0);
+        assert_eq!(init_hitlist.hits[0].subject_offset, 0);
+        assert_eq!(
+            megablast_index_fill_init_hitlist(&volume, 11, 0, &query_keys, &mut init_hitlist),
+            0
+        );
+        assert_eq!(init_hitlist.total(), 0);
+    }
+
+    #[test]
+    fn megablast_index_result_holder_routes_oids_across_volumes() {
+        let mut first = synthetic_megablast_index_volume_for_callback();
+        first.start_oid = 10;
+        first.stop_oid = 12;
+        let mut second = synthetic_megablast_index_volume_for_callback();
+        second.start_oid = 12;
+        second.stop_oid = 14;
+        let query = vec![1u8, 2, 3, 0];
+        let holder = MegablastIndexResultHolder::new(&query, [&first, &second]);
+        let subject_bases: Vec<u8> = (0..120).map(|i| ((i + 1) % 4) as u8).collect();
+        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 8,
+            cutoff_score_min: 1,
+            cutoffs: Vec::new(),
+            ungapped_extension: false,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+
+        assert!(holder.has_oid(10));
+        assert!(holder.has_oid(12));
+        assert!(!holder.has_oid(14));
+        assert_eq!(
+            mb_indexed_word_finder(
+                &subject,
+                subject_bases.len() as i32,
+                12,
+                0,
+                &query,
+                &query_info,
+                &word_params,
+                &score_params,
+                &mut init_hitlist,
+                |oid| holder.has_oid(oid),
+                |oid, chunk, list| holder.fill_init_hitlist(oid, chunk, list),
+                None,
+            ),
+            0
+        );
+
+        assert_eq!(init_hitlist.total(), 1);
+        assert_eq!(init_hitlist.hits[0].query_offset, 0);
+        assert_eq!(init_hitlist.hits[0].subject_offset, 0);
+        assert_eq!(holder.fill_init_hitlist(14, 0, &mut init_hitlist), 0);
+        assert_eq!(init_hitlist.total(), 0);
+    }
+
+    #[test]
+    fn megablast_index_query_keys_honor_unmasked_locations() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 4, 2, 3];
+        let locations = [
+            crate::util::SSeqRange { left: 1, right: 3 },
+            crate::util::SSeqRange { left: 5, right: 8 },
+        ];
+
+        let keys = megablast_index_query_keys_for_locations(&query, 2, &locations);
+
+        assert_eq!(
+            keys,
+            vec![
+                MegablastIndexQueryKey {
+                    hash_key: 0b0110,
+                    query_offset: 1,
+                },
+                MegablastIndexQueryKey {
+                    hash_key: 0b1011,
+                    query_offset: 2,
+                },
+                MegablastIndexQueryKey {
+                    hash_key: 0b1011,
+                    query_offset: 7,
+                },
+            ]
+        );
+        assert!(!keys.iter().any(|key| key.query_offset == 3));
+        assert!(!keys.iter().any(|key| key.query_offset == 5));
+        assert!(!keys.iter().any(|key| key.query_offset == 6));
     }
 
     #[test]

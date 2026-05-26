@@ -669,6 +669,202 @@ pub fn blast_semi_gapped_align(
     score_l + score_r
 }
 
+const RESTRICT_SIZE: usize = 10;
+
+fn restricted_gapped_score_one_dir(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    matrix: &[[i32; 16]; 16],
+    gap_oe: i32,
+    gap_extend: i32,
+    mut x_dropoff: i32,
+    reverse: bool,
+) -> i32 {
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return 0;
+    }
+
+    let num_extra_cells = if gap_extend > 0 {
+        (x_dropoff / gap_extend) as usize + 3
+    } else {
+        n + 3
+    };
+    let mut sa = vec![
+        GapDP {
+            best: MININT,
+            best_gap: MININT
+        };
+        n + num_extra_cells + 10
+    ];
+
+    sa[0] = GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    };
+    let mut score = -gap_oe;
+    let mut b_size = 1usize;
+    while b_size <= n && score >= -x_dropoff {
+        sa[b_size] = GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        };
+        score -= gap_extend;
+        b_size += 1;
+    }
+
+    let mut best_score = 0i32;
+    let mut first_b = 0usize;
+    let mut b_gap = 0usize;
+
+    for ai in 1..=m {
+        let a_letter = if reverse { a[m - ai] } else { a[ai] };
+        let mrow = &matrix[a_letter as usize & 0x0F];
+        let mut sc = MININT;
+        let mut sgr = MININT;
+        let mut last_b = first_b;
+        let allow_row_gap_start = ai % RESTRICT_SIZE == 0;
+
+        #[allow(clippy::mut_range_bound)]
+        for bi in first_b..b_size {
+            let b_idx = if reverse {
+                n.checked_sub(1 + bi).unwrap_or(usize::MAX)
+            } else {
+                bi + 1
+            };
+            let next_sc = if b_idx < b.len() {
+                sa[bi].best + mrow[b[b_idx] as usize & 0x0F]
+            } else {
+                MININT
+            };
+            let allow_col_gap_start = bi == b_gap;
+
+            if allow_col_gap_start {
+                b_gap += RESTRICT_SIZE;
+                let sgc = sa[bi].best_gap;
+                if sc < sgc {
+                    sc = sgc;
+                }
+            }
+            if allow_row_gap_start && sc < sgr {
+                sc = sgr;
+            }
+
+            if best_score - sc > x_dropoff {
+                sa[bi].best = MININT;
+                if bi == first_b {
+                    first_b += 1;
+                }
+            } else {
+                last_b = bi;
+                if sc > best_score {
+                    best_score = sc;
+                }
+
+                if allow_col_gap_start {
+                    let sgc = sa[bi].best_gap - gap_extend;
+                    sa[bi].best_gap = (sc - gap_oe).max(sgc);
+                }
+                if allow_row_gap_start {
+                    sgr = (sc - gap_oe).max(sgr - gap_extend);
+                }
+                sa[bi].best = sc;
+            }
+            sc = next_sc;
+        }
+
+        if first_b >= b_size {
+            break;
+        }
+
+        b_gap = first_b;
+        let remainder = first_b % RESTRICT_SIZE;
+        if remainder > 0 {
+            b_gap += RESTRICT_SIZE - remainder;
+        }
+
+        if last_b + num_extra_cells + 3 >= sa.len() {
+            sa.resize(
+                (last_b + num_extra_cells + 100).max(sa.len() * 2),
+                GapDP {
+                    best: MININT,
+                    best_gap: MININT,
+                },
+            );
+        }
+
+        if last_b < b_size - 1 {
+            b_size = last_b + 1;
+        } else {
+            while sgr >= best_score - x_dropoff && b_size <= n {
+                sa[b_size] = GapDP {
+                    best: sgr,
+                    best_gap: sgr - gap_oe,
+                };
+                sgr -= gap_extend;
+                b_size += 1;
+            }
+        }
+    }
+
+    best_score
+}
+
+/// NCBI: s_RestrictedGappedAlign (`blast_gapalign.c`).
+///
+/// Score-only nucleotide extension with the Cameron/Williams/Cannane restricted
+/// gap rule used by NCBI BLAST: a gap may start only at offsets divisible by
+/// `RESTRICT_SIZE` from the seed.
+#[allow(clippy::too_many_arguments)]
+pub fn s_restricted_gapped_align(
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> i32 {
+    let gap_oe = gap_open + gap_extend;
+    let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
+
+    let score_l = restricted_gapped_score_one_dir(
+        &query[..seed_q + 1],
+        &subject[..seed_s + 1],
+        seed_q + 1,
+        seed_s + 1,
+        &matrix,
+        gap_oe,
+        gap_extend,
+        x_dropoff,
+        true,
+    );
+
+    let score_r = if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
+        restricted_gapped_score_one_dir(
+            &query[seed_q..],
+            &subject[seed_s..],
+            query.len() - seed_q - 1,
+            subject.len() - seed_s - 1,
+            &matrix,
+            gap_oe,
+            gap_extend,
+            x_dropoff,
+            false,
+        )
+    } else {
+        0
+    };
+
+    score_l + score_r
+}
+
 /// Name-aligned wrapper for NCBI `s_BlastDynProgNtGappedAlignment`
 /// (`blast_gapalign.c:2949`) on the packed-subject preliminary score path.
 ///
@@ -3981,6 +4177,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn restricted_gapped_align_enforces_restrict_size_gap_starts() {
+        let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = vec![0u8, 1, 2, 3, 0, 1, 3, 3, 0, 1, 2, 3];
+        let unrestricted = blast_semi_gapped_align(&query, &subject, 5, 5, 1, -3, 5, 2, 12);
+        let restricted = s_restricted_gapped_align(&query, &subject, 5, 5, 1, -3, 5, 2, 12);
+        assert_eq!(unrestricted, 8);
+        assert_eq!(restricted, 2);
+        assert!(
+            restricted <= unrestricted,
+            "restricted gap starts should not improve over semigapped score"
+        );
+    }
+
     fn phi_test_matrix() -> Vec<Vec<i32>> {
         let mut matrix = vec![vec![-3; 256]; 256];
         for i in 0..256 {
@@ -4777,6 +4987,50 @@ mod tests {
     }
 
     #[test]
+    fn out_of_frame_reversed_traceback_uses_same_oof_dp_score() {
+        let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
+        let subject = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFGXX");
+        let scoring = OutOfFrameScoring::default();
+        let mut score_a_offset = 0;
+        let mut score_b_offset = 0;
+        let score_only = s_out_of_frame_gapped_align(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut score_a_offset,
+            &mut score_b_offset,
+            true,
+            None,
+            &scoring,
+            0,
+            true,
+        );
+
+        let mut trace_a_offset = 0;
+        let mut trace_b_offset = 0;
+        let mut block = crate::gapinfo::gap_prelim_edit_block_new();
+        let trace_score = s_out_of_frame_gapped_align(
+            &query,
+            &subject,
+            query.len() as i32,
+            subject.len() as i32,
+            &mut trace_a_offset,
+            &mut trace_b_offset,
+            false,
+            Some(&mut block),
+            &scoring,
+            0,
+            true,
+        );
+
+        assert_eq!(trace_score, score_only);
+        assert_eq!(trace_a_offset, score_a_offset);
+        assert_eq!(trace_b_offset, score_b_offset);
+        assert!(!block.edit_ops.is_empty());
+    }
+
+    #[test]
     fn out_of_frame_traceback_without_edit_block_keeps_score_and_offsets() {
         let query = crate::encoding::encode_ncbistdaa_sequence(b"ACDEFG");
         let subject = crate::encoding::encode_ncbistdaa_sequence(b"XXACDEFG");
@@ -4924,6 +5178,50 @@ mod tests {
             false,
         );
         assert_eq!(extended & SCRIPT_EXTEND_GAP_B, SCRIPT_EXTEND_GAP_B);
+    }
+
+    #[test]
+    fn out_of_frame_traceback_step_column_tie_preference_matches_c() {
+        let run_tie = |gap_tie_prefers_column| {
+            let mut score_array = vec![OofScoreCell {
+                best: 0,
+                best_gap: 10,
+            }];
+            let mut score_row = 10;
+            let mut score_col = 0;
+            let mut other1 = i32::MIN / 4;
+            let mut other2 = i32::MIN / 4;
+            let mut best_score = 30;
+            let mut a_offset = 0;
+            let mut b_offset = 0;
+            let mut first_b_index = 0;
+            let mut last_b_index = 0;
+
+            oof_step_frame_with_script(
+                &mut score_array,
+                0,
+                &mut score_row,
+                &mut score_col,
+                &mut other1,
+                &mut other2,
+                &mut best_score,
+                &mut a_offset,
+                &mut b_offset,
+                1,
+                0,
+                2,
+                1,
+                1,
+                100,
+                &mut first_b_index,
+                &mut last_b_index,
+                SCRIPT_SUB,
+                gap_tie_prefers_column,
+            )
+        };
+
+        assert_eq!(run_tie(false), SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_B);
+        assert_eq!(run_tie(true), SCRIPT_OOF_OPEN_GAP | SCRIPT_GAP_IN_A);
     }
 
     #[test]

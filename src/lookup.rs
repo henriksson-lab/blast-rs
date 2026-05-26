@@ -57,6 +57,224 @@ pub struct OffsetPair {
     pub subject_offset: i32,
 }
 
+/// Seed pair accepted by the conservative RPS two-hit word finder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RpsTwoHitSeed {
+    pub first: OffsetPair,
+    pub second: OffsetPair,
+}
+
+/// Rust-owned result for the represented RPS two-hit word-finder side effects.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RpsWordFinderScan {
+    pub seeds: Vec<RpsTwoHitSeed>,
+    pub total_hits: i32,
+    pub hits_extended: i32,
+    init_hits: Vec<RpsInitHitRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RpsInitHitRecord {
+    q_start: i32,
+    s_start: i32,
+    q_off: i32,
+    s_off: i32,
+    len: i32,
+    score: i32,
+}
+
+/// blast-rs: RPS scan/HSP bridge for the represented ungapped payload path;
+/// not a direct NCBI C port.
+///
+/// The RPS traceback driver receives preliminary HSPs in the swapped
+/// profile/query orientation used by NCBI before `s_BlastHSPListRPSUpdate`
+/// restores the final user-visible coordinates. This helper preserves that
+/// orientation while converting owned RPS word-finder payloads into the local
+/// HSP-list representation.
+pub fn blast_rps_word_finder_scan_to_hsp_list(
+    scan: &RpsWordFinderScan,
+    profile_oid: i32,
+    hsp_max: i32,
+) -> Option<crate::hspstream::HspList> {
+    blast_rps_word_finder_scan_to_hsp_list_with_query_shift(scan, profile_oid, hsp_max, 0)
+}
+
+/// blast-rs: Driver-facing adapter from represented RPS word-finder payloads
+/// into the traceback stream; not a direct NCBI C port.
+///
+/// Full RPS-BLAST database wiring is still outside this module, but this
+/// preserves the boundary the driver needs after RPS ungapped extension: empty
+/// scans are a no-op, and nonempty scans enter the regular HSP stream in the
+/// pre-traceback RPS orientation consumed by `s_RPSComputeTraceback`.
+pub fn blast_rps_word_finder_scan_write_hsp_stream(
+    scan: &RpsWordFinderScan,
+    stream: &crate::hspstream::HspStream,
+    query_index: i32,
+    profile_oid: i32,
+    hsp_max: i32,
+) -> i32 {
+    let Some(hsp_list) = blast_rps_word_finder_scan_to_hsp_list(scan, profile_oid, hsp_max) else {
+        return 0;
+    };
+    stream.blast_hspstream_write(query_index, hsp_list)
+}
+
+/// blast-rs: bounded RPS driver adapter from an owned lookup table and subject
+/// sequence into the traceback stream; not a direct NCBI C port.
+///
+/// The full CLI path still needs native CDD/RPS database loading, but this is
+/// the driver boundary immediately below that reader: run the represented RPS
+/// two-hit ungapped payload scan for one consensus/profile sequence and feed
+/// the resulting preliminary HSPs into the same stream consumed by
+/// `s_RPSComputeTraceback`.
+pub fn blast_rps_subject_scan_write_hsp_stream(
+    lookup: &mut BlastRpsLookupTable,
+    subject: &[u8],
+    stream: &crate::hspstream::HspStream,
+    query_index: i32,
+    profile_oid: i32,
+    window_size: i32,
+    x_dropoff: i32,
+    score_cutoff: i32,
+    hsp_max: i32,
+    init_hitlist: Option<&mut crate::extend::InitHitList>,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> i32 {
+    let scan = s_blast_rps_word_finder_two_hit_with_extension_payloads(
+        lookup,
+        subject,
+        window_size,
+        x_dropoff,
+        score_cutoff,
+        init_hitlist,
+        ungapped_stats,
+    );
+    blast_rps_word_finder_scan_write_hsp_stream(&scan, stream, query_index, profile_oid, hsp_max)
+}
+
+/// blast-rs: SeqSrc-backed RPS driver adapter into the traceback stream; not a
+/// direct NCBI C port.
+///
+/// This is the owned Rust boundary corresponding to the native RPS driver
+/// layer above `s_RPSComputeTraceback`: fetch each profile/consensus sequence
+/// from `BlastSeqSrc` with the same encoding requested by traceback, run the
+/// represented RPS ungapped payload scan, and write nonempty preliminary HSP
+/// lists into the stream keyed by profile OID.
+pub fn blast_rps_seqsrc_scan_write_hsp_stream(
+    lookup: &mut BlastRpsLookupTable,
+    seq_src: Option<&dyn crate::seqsrc::BlastSeqSource>,
+    stream: &crate::hspstream::HspStream,
+    program_number: crate::program::ProgramType,
+    query_index: i32,
+    window_size: i32,
+    x_dropoff: i32,
+    score_cutoff: i32,
+    hsp_max: i32,
+    mut init_hitlist: Option<&mut crate::extend::InitHitList>,
+    mut ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> i32 {
+    let Some(seq_src) = seq_src else {
+        return -1;
+    };
+    let encoding = crate::hspstream::blast_traceback_get_encoding(program_number);
+    let min_subject_len = lookup.wordsize.max(0);
+
+    for oid in seq_src.iter_oids() {
+        let Some(seq_data) = seq_src.get_sequence(&crate::seqsrc::GetSeqArg { oid, encoding })
+        else {
+            continue;
+        };
+        if seq_data.length < min_subject_len || seq_data.sequence.len() < min_subject_len as usize {
+            continue;
+        }
+        let status = blast_rps_subject_scan_write_hsp_stream(
+            lookup,
+            &seq_data.sequence,
+            stream,
+            query_index,
+            oid,
+            window_size,
+            x_dropoff,
+            score_cutoff,
+            hsp_max,
+            init_hitlist.as_deref_mut(),
+            ungapped_stats.as_deref_mut(),
+        );
+        if status != 0 {
+            return status;
+        }
+    }
+    0
+}
+
+/// blast-rs: native owned RPS profile database scan into the traceback stream;
+/// not a direct NCBI C port.
+///
+/// This is the driver boundary after owned profile database assembly: scan one
+/// query sequence against the constructed RPS lookup, split represented
+/// ungapped payloads by profile offsets, localize profile coordinates, and
+/// write per-profile preliminary HSP lists for `s_RPSComputeTraceback`.
+pub fn blast_rps_profile_database_scan_query_write_hsp_stream(
+    profile_db: &mut OwnedRpsProfileDatabase,
+    query: &[u8],
+    stream: &crate::hspstream::HspStream,
+    query_index: i32,
+    window_size: i32,
+    x_dropoff: i32,
+    score_cutoff: i32,
+    hsp_max: i32,
+    init_hitlist: Option<&mut crate::extend::InitHitList>,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> i32 {
+    let scan = s_blast_rps_word_finder_two_hit_with_extension_payloads(
+        &mut profile_db.lookup,
+        query,
+        window_size,
+        x_dropoff,
+        score_cutoff,
+        init_hitlist,
+        ungapped_stats,
+    );
+    if scan.init_hits.is_empty() {
+        return 0;
+    }
+
+    let start_offsets = &profile_db.traceback_info.profile_header.start_offsets;
+    let num_profiles = profile_db.traceback_info.profile_header.num_profiles.max(0) as usize;
+    for profile_index in 0..num_profiles {
+        let profile_start = start_offsets[profile_index];
+        let profile_end = start_offsets[profile_index + 1];
+        let mut profile_scan = RpsWordFinderScan {
+            seeds: Vec::new(),
+            total_hits: scan.total_hits,
+            hits_extended: scan.hits_extended,
+            init_hits: Vec::new(),
+        };
+        for hit in &scan.init_hits {
+            let Some(hit_profile_index) = rps_profile_index_for_offset(start_offsets, hit.q_start)
+            else {
+                continue;
+            };
+            if hit_profile_index != profile_index || hit.q_start + hit.len > profile_end {
+                continue;
+            }
+            profile_scan.init_hits.push(hit.clone());
+        }
+        if let Some(hsp_list) = blast_rps_word_finder_scan_to_hsp_list_with_query_shift(
+            &profile_scan,
+            profile_index as i32,
+            hsp_max,
+            profile_start,
+        ) {
+            let status = stream.blast_hspstream_write(query_index, hsp_list);
+            if status != 0 {
+                return status;
+            }
+        }
+    }
+    0
+}
+
 /// Rust-owned equivalent of C `MapperWordHits`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapperWordHits {
@@ -261,6 +479,38 @@ pub struct BlastRpsInfo {
     pub rps_pssm: Vec<Vec<i32>>,
 }
 
+/// Rust-owned RPS profile database assembly boundary.
+///
+/// NCBI wires this through memory-mapped CDD/RPS files before lookup
+/// construction. Rust keeps the same owned pieces together: traceback profile
+/// metadata, consensus/profile sequences, the lookup construction input, and
+/// the constructed RPS lookup table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnedRpsProfileDatabase {
+    pub traceback_info: crate::hspstream::RpsTracebackInfo,
+    pub consensus_sequences: Vec<Vec<u8>>,
+    pub lookup_info: BlastRpsInfo,
+    pub lookup: BlastRpsLookupTable,
+}
+
+/// File-backed inputs for the represented native RPS profile database boundary.
+///
+/// The `.rps` and optional `.freq` payloads use NCBI's native integer layout.
+/// When `.aux` is supplied, its Karlin K values are wired into traceback
+/// metadata; otherwise `karlin_k` is used as an already-decoded fallback.
+/// Consensus sequences are still explicit because this boundary intentionally
+/// avoids reaching into the ordinary BLAST database readers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeRpsProfileBundle {
+    pub profile_bytes: Vec<u8>,
+    pub freq_ratios_bytes: Option<Vec<u8>>,
+    pub lookup_bytes: Option<Vec<u8>>,
+    pub aux_bytes: Option<Vec<u8>>,
+    pub consensus_sequences: Vec<Vec<u8>>,
+    pub karlin_k: Vec<f64>,
+    pub wordsize: i32,
+}
+
 /// Rust-owned representation of NCBI `BlastRPSLookupTable`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlastRpsLookupTable {
@@ -274,6 +524,11 @@ pub struct BlastRpsLookupTable {
     pub num_buckets: i32,
     pub bucket_array: Vec<RpsBucket>,
 }
+
+const RPS_HITS_PER_CELL: usize = 3;
+const RPS_LOOKUP_HEADER_WORDS: usize = 10;
+const RPS_LOOKUP_BACKBONE_CELL_WORDS: usize = 1 + RPS_HITS_PER_CELL;
+const RPS_LOOKUP_WORDSIZE: i32 = 3;
 
 /// Generic wrapper around different lookup table types.
 pub enum LookupTableWrap {
@@ -2948,6 +3203,502 @@ pub fn rps_lookup_table_new(
     0
 }
 
+fn rps_profile_index_for_offset(start_offsets: &[i32], offset: i32) -> Option<usize> {
+    if offset < 0 || start_offsets.len() < 2 {
+        return None;
+    }
+    let offset = offset as usize;
+    let starts: Vec<usize> = start_offsets
+        .iter()
+        .map(|&value| usize::try_from(value).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let index = starts.partition_point(|&start| start <= offset);
+    if index == 0 {
+        return None;
+    }
+    let profile_index = index - 1;
+    if profile_index + 1 >= starts.len() || offset >= starts[profile_index + 1] {
+        return None;
+    }
+    Some(profile_index)
+}
+
+fn rps_lookup_magic_and_byte_order(
+    bytes: &[u8],
+) -> Option<(i32, crate::hspstream::RpsNativeByteOrder)> {
+    let magic_bytes: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
+    let little = i32::from_le_bytes(magic_bytes);
+    if matches!(
+        little,
+        crate::hspstream::RPS_MAGIC_NUM | crate::hspstream::RPS_MAGIC_NUM_28
+    ) {
+        return Some((little, crate::hspstream::RpsNativeByteOrder::LittleEndian));
+    }
+    let big = i32::from_be_bytes(magic_bytes);
+    if matches!(
+        big,
+        crate::hspstream::RPS_MAGIC_NUM | crate::hspstream::RPS_MAGIC_NUM_28
+    ) {
+        return Some((big, crate::hspstream::RpsNativeByteOrder::BigEndian));
+    }
+    None
+}
+
+fn rps_lookup_native_i32_values(
+    bytes: &[u8],
+    byte_order: crate::hspstream::RpsNativeByteOrder,
+) -> Option<Vec<i32>> {
+    if bytes.len() % std::mem::size_of::<i32>() != 0 {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<i32>())
+            .map(|chunk| {
+                let raw: [u8; 4] = chunk.try_into().expect("chunks_exact width");
+                match byte_order {
+                    crate::hspstream::RpsNativeByteOrder::LittleEndian => i32::from_le_bytes(raw),
+                    crate::hspstream::RpsNativeByteOrder::BigEndian => i32::from_be_bytes(raw),
+                }
+            })
+            .collect(),
+    )
+}
+
+fn rps_alphabet_size_from_magic(magic_number: i32) -> Option<i32> {
+    match magic_number {
+        crate::hspstream::RPS_MAGIC_NUM => Some(26),
+        crate::hspstream::RPS_MAGIC_NUM_28 => Some(28),
+        _ => None,
+    }
+}
+
+/// blast-rs: native `.loo` lookup-table parser for the owned RPS boundary;
+/// not a direct NCBI C port.
+///
+/// NCBI memory maps `BlastRPSLookupFileHeader`, followed by
+/// `(backbone_size + 1)` compact backbone cells and an overflow `Int4` array.
+/// Each compact cell stores profile offsets to the last residue in a word; the
+/// existing Rust scanner applies the same first-residue correction during
+/// lookup-table scans.
+pub fn rps_lookup_info_from_native_lookup_bytes(
+    bytes: &[u8],
+    rps_pssm: Vec<Vec<i32>>,
+) -> Result<BlastRpsInfo, i16> {
+    let (magic_number, byte_order) = rps_lookup_magic_and_byte_order(bytes).ok_or(-1i16)?;
+    let alphabet_size = rps_alphabet_size_from_magic(magic_number).ok_or(-1i16)?;
+    let values = rps_lookup_native_i32_values(bytes, byte_order).ok_or(-1i16)?;
+    if values.len() < RPS_LOOKUP_HEADER_WORDS {
+        return Err(-1);
+    }
+
+    let num_lookup_tables = values[1];
+    let num_hits = values[2];
+    let num_filled_backbone_cells = values[3];
+    let overflow_hits = values[4];
+    let start_of_backbone = values[8];
+    let end_of_overflow = values[9];
+    if num_lookup_tables != 1
+        || num_hits < 0
+        || num_filled_backbone_cells < 0
+        || overflow_hits < 0
+        || start_of_backbone < 0
+        || end_of_overflow < start_of_backbone
+        || start_of_backbone as usize % std::mem::size_of::<i32>() != 0
+        || end_of_overflow as usize % std::mem::size_of::<i32>() != 0
+        || end_of_overflow as usize > bytes.len()
+    {
+        return Err(-1);
+    }
+
+    let charsize = crate::util::ilog2(alphabet_size as i64) + 1;
+    let backbone_bits = RPS_LOOKUP_WORDSIZE.checked_mul(charsize).ok_or(-1i16)?;
+    if !(1..usize::BITS as i32).contains(&backbone_bits) {
+        return Err(-1);
+    }
+    let backbone_size = 1usize << backbone_bits as usize;
+    let backbone_cells = backbone_size.checked_add(1).ok_or(-1i16)?;
+    let backbone_words = backbone_cells
+        .checked_mul(RPS_LOOKUP_BACKBONE_CELL_WORDS)
+        .ok_or(-1i16)?;
+    let backbone_start = start_of_backbone as usize / std::mem::size_of::<i32>();
+    let overflow_start = backbone_start.checked_add(backbone_words).ok_or(-1i16)?;
+    let overflow_end = overflow_start
+        .checked_add(overflow_hits as usize)
+        .ok_or(-1i16)?;
+    if overflow_end > end_of_overflow as usize / std::mem::size_of::<i32>()
+        || overflow_end > values.len()
+    {
+        return Err(-1);
+    }
+
+    let overflow_values = &values[overflow_start..overflow_end];
+    let mut rps_backbone = vec![RpsBackboneCell::default(); backbone_size];
+    let mut observed_hits = 0i32;
+    let mut observed_filled = 0i32;
+    for (index, cell) in rps_backbone.iter_mut().enumerate() {
+        let cell_start = backbone_start + index * RPS_LOOKUP_BACKBONE_CELL_WORDS;
+        let num_used = values[cell_start];
+        if num_used < 0 {
+            return Err(-1);
+        }
+        if num_used == 0 {
+            continue;
+        }
+
+        observed_filled += 1;
+        observed_hits = observed_hits.checked_add(num_used).ok_or(-1i16)?;
+        let entries = &values[cell_start + 1..cell_start + 1 + RPS_HITS_PER_CELL];
+        let mut offset_pairs = Vec::with_capacity(num_used as usize);
+        if num_used as usize <= RPS_HITS_PER_CELL {
+            offset_pairs.extend(entries.iter().take(num_used as usize).map(|&query_offset| {
+                OffsetPair {
+                    query_offset,
+                    subject_offset: 0,
+                }
+            }));
+        } else {
+            if entries[1] < 0 || entries[1] as usize % std::mem::size_of::<i32>() != 0 {
+                return Err(-1);
+            }
+            let overflow_index = entries[1] as usize / std::mem::size_of::<i32>();
+            let overflow_count = num_used as usize - 1;
+            let overflow_limit = overflow_index.checked_add(overflow_count).ok_or(-1i16)?;
+            let overflow_slice = overflow_values
+                .get(overflow_index..overflow_limit)
+                .ok_or(-1i16)?;
+            offset_pairs.push(OffsetPair {
+                query_offset: entries[0],
+                subject_offset: 0,
+            });
+            offset_pairs.extend(overflow_slice.iter().map(|&query_offset| OffsetPair {
+                query_offset,
+                subject_offset: 0,
+            }));
+        }
+        cell.num_used = num_used;
+        cell.offset_pairs = offset_pairs;
+    }
+
+    if observed_hits != num_hits || observed_filled != num_filled_backbone_cells {
+        return Err(-1);
+    }
+
+    Ok(BlastRpsInfo {
+        alphabet_size,
+        wordsize: RPS_LOOKUP_WORDSIZE,
+        rps_backbone,
+        rps_pssm,
+    })
+}
+
+fn blast_rps_word_finder_scan_to_hsp_list_with_query_shift(
+    scan: &RpsWordFinderScan,
+    profile_oid: i32,
+    hsp_max: i32,
+    query_shift: i32,
+) -> Option<crate::hspstream::HspList> {
+    if scan.init_hits.is_empty() {
+        return None;
+    }
+
+    let mut hsp_list = crate::hspstream::blast_hsp_list_new(hsp_max);
+    hsp_list.oid = profile_oid;
+    for hit in &scan.init_hits {
+        let q_start = hit.q_start - query_shift;
+        let q_off = hit.q_off - query_shift;
+        if q_start < 0 || q_off < 0 {
+            continue;
+        }
+        let hsp = crate::hspstream::Hsp {
+            score: hit.score,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: f64::MAX,
+            query_offset: q_start,
+            query_end: q_start + hit.len,
+            query_gapped_start: q_off,
+            subject_offset: hit.s_start,
+            subject_end: hit.s_start + hit.len,
+            subject_gapped_start: hit.s_off,
+            context: 0,
+            query_frame: 0,
+            subject_frame: 0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        };
+        let _ = crate::hspstream::blast_hsp_list_save_hsp(&mut hsp_list, hsp);
+    }
+    if hsp_list.hsps.is_empty() {
+        None
+    } else {
+        Some(hsp_list)
+    }
+}
+
+/// blast-rs: assemble an owned RPS profile database from validated traceback
+/// metadata plus consensus/profile sequences; not a direct NCBI C port.
+///
+/// This is the native boundary below a future CDD/RPS file reader. It validates
+/// the profile offsets/PSSM rows through the traceback preparation path, builds
+/// the RPS lookup backbone from consensus profile words, and constructs the
+/// owned `BlastRpsLookupTable` used by the represented RPS word finder.
+pub fn blast_rps_profile_database_new(
+    traceback_info: crate::hspstream::RpsTracebackInfo,
+    consensus_sequences: Vec<Vec<u8>>,
+    wordsize: i32,
+) -> Result<OwnedRpsProfileDatabase, i16> {
+    if wordsize <= 0 {
+        return Err(-1);
+    }
+    let gap_data = crate::hspstream::s_rps_gap_align_data_prepare(Some(&traceback_info))?;
+    let alphabet_size = gap_data.alphabet_size as i32;
+    validate_rps_consensus_sequences(&traceback_info, &consensus_sequences, alphabet_size)?;
+    let charsize = crate::util::ilog2(alphabet_size as i64) + 1;
+    let backbone_bits = charsize.checked_mul(wordsize).ok_or(-1i16)?;
+    if !(1..usize::BITS as i32).contains(&backbone_bits) {
+        return Err(-1);
+    }
+    let backbone_size = 1usize << backbone_bits as usize;
+    let mut rps_backbone = vec![RpsBackboneCell::default(); backbone_size];
+
+    for (profile_index, consensus) in consensus_sequences.iter().enumerate() {
+        let profile_start = traceback_info.profile_header.start_offsets[profile_index];
+        let profile_end = traceback_info.profile_header.start_offsets[profile_index + 1];
+        if profile_start < 0 || profile_end < profile_start {
+            return Err(-1);
+        }
+        if consensus.len() != (profile_end - profile_start) as usize {
+            return Err(-1);
+        }
+        if consensus
+            .iter()
+            .any(|&residue| residue as i32 >= alphabet_size)
+        {
+            return Err(-1);
+        }
+        let wordsize = wordsize as usize;
+        if consensus.len() < wordsize {
+            continue;
+        }
+        for local_offset in 0..=consensus.len() - wordsize {
+            let index =
+                s_compute_table_index(wordsize as i32, charsize, &consensus[local_offset..]);
+            let Some(cell) = rps_backbone.get_mut(index) else {
+                return Err(-1);
+            };
+            cell.offset_pairs.push(OffsetPair {
+                query_offset: profile_start + local_offset as i32 + wordsize as i32 - 1,
+                subject_offset: 0,
+            });
+            cell.num_used = cell.offset_pairs.len() as i32;
+        }
+    }
+
+    let lookup_info = BlastRpsInfo {
+        alphabet_size,
+        wordsize,
+        rps_backbone,
+        rps_pssm: gap_data.rps_pssm,
+    };
+    let mut lookup = None;
+    if rps_lookup_table_new(Some(&lookup_info), &mut lookup) != 0 {
+        return Err(-1);
+    }
+    Ok(OwnedRpsProfileDatabase {
+        traceback_info,
+        consensus_sequences,
+        lookup_info,
+        lookup: lookup.ok_or(-1i16)?,
+    })
+}
+
+fn validate_rps_consensus_sequences(
+    traceback_info: &crate::hspstream::RpsTracebackInfo,
+    consensus_sequences: &[Vec<u8>],
+    alphabet_size: i32,
+) -> Result<(), i16> {
+    let num_profiles = traceback_info.profile_header.num_profiles.max(0) as usize;
+    if consensus_sequences.len() != num_profiles {
+        return Err(-1);
+    }
+    for (profile_index, consensus) in consensus_sequences.iter().enumerate() {
+        let profile_start = traceback_info.profile_header.start_offsets[profile_index];
+        let profile_end = traceback_info.profile_header.start_offsets[profile_index + 1];
+        if profile_start < 0 || profile_end < profile_start {
+            return Err(-1);
+        }
+        if consensus.len() != (profile_end - profile_start) as usize {
+            return Err(-1);
+        }
+        if consensus
+            .iter()
+            .any(|&residue| residue as i32 >= alphabet_size)
+        {
+            return Err(-1);
+        }
+    }
+    Ok(())
+}
+
+fn blast_rps_profile_database_from_lookup_info(
+    traceback_info: crate::hspstream::RpsTracebackInfo,
+    consensus_sequences: Vec<Vec<u8>>,
+    lookup_info: BlastRpsInfo,
+) -> Result<OwnedRpsProfileDatabase, i16> {
+    let mut lookup = None;
+    if rps_lookup_table_new(Some(&lookup_info), &mut lookup) != 0 {
+        return Err(-1);
+    }
+    Ok(OwnedRpsProfileDatabase {
+        traceback_info,
+        consensus_sequences,
+        lookup_info,
+        lookup: lookup.ok_or(-1i16)?,
+    })
+}
+
+/// blast-rs: load an owned RPS profile database from native `.rps`/`.freq`
+/// payloads plus explicit consensus sequences; not a direct NCBI C port.
+///
+/// This is the first file-backed boundary above `blast_rps_profile_database_new`:
+/// it parses native-endian RPS profile metadata, validates optional frequency
+/// ratios through the existing traceback preparation path, and then builds the
+/// represented RPS lookup table from the supplied consensus profile sequences.
+pub fn blast_rps_profile_database_from_native_bundle(
+    bundle: NativeRpsProfileBundle,
+) -> Result<OwnedRpsProfileDatabase, i16> {
+    let profile_header =
+        crate::hspstream::rps_profile_header_from_native_bytes(&bundle.profile_bytes)?;
+    let num_profiles = profile_header.num_profiles;
+    if num_profiles < 0 {
+        return Err(-1);
+    }
+    let freq_ratios_header = bundle
+        .freq_ratios_bytes
+        .as_deref()
+        .map(crate::hspstream::rps_freq_ratios_header_from_native_bytes)
+        .transpose()?;
+    let karlin_k = if let Some(aux_bytes) = bundle.aux_bytes.as_deref() {
+        let aux_info = crate::hspstream::rps_aux_info_from_bytes(aux_bytes)?;
+        if aux_info.karlin_k.len() < num_profiles as usize {
+            return Err(-1);
+        }
+        if aux_info.profile_lengths.len() >= num_profiles as usize {
+            for profile_index in 0..num_profiles as usize {
+                let start = profile_header.start_offsets[profile_index];
+                let end = profile_header.start_offsets[profile_index + 1];
+                if start < 0
+                    || end < start
+                    || aux_info.profile_lengths[profile_index] != end - start
+                {
+                    return Err(-1);
+                }
+            }
+        }
+        aux_info.karlin_k
+    } else {
+        bundle.karlin_k
+    };
+    let traceback_info = crate::hspstream::RpsTracebackInfo {
+        profile_header,
+        freq_ratios_header,
+        karlin_k,
+    };
+    let Some(lookup_bytes) = bundle.lookup_bytes else {
+        return blast_rps_profile_database_new(
+            traceback_info,
+            bundle.consensus_sequences,
+            bundle.wordsize,
+        );
+    };
+
+    let gap_data = crate::hspstream::s_rps_gap_align_data_prepare(Some(&traceback_info))?;
+    validate_rps_consensus_sequences(
+        &traceback_info,
+        &bundle.consensus_sequences,
+        gap_data.alphabet_size as i32,
+    )?;
+    let lookup_info = rps_lookup_info_from_native_lookup_bytes(&lookup_bytes, gap_data.rps_pssm)?;
+    if lookup_info.wordsize != bundle.wordsize {
+        return Err(-1);
+    }
+    blast_rps_profile_database_from_lookup_info(
+        traceback_info,
+        bundle.consensus_sequences,
+        lookup_info,
+    )
+}
+
+fn rps_sidecar_path(base_path: &std::path::Path, extension: &str) -> std::path::PathBuf {
+    base_path.with_extension(extension)
+}
+
+fn read_optional_rps_sidecar(
+    base_path: &std::path::Path,
+    extension: &str,
+) -> Result<Option<Vec<u8>>, i16> {
+    let path = rps_sidecar_path(base_path, extension);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(-1),
+    }
+}
+
+/// blast-rs: assemble the native RPS profile bundle from database files;
+/// not a direct NCBI C port.
+///
+/// NCBI resolves the RPS database through `CSeqDB::FindVolumePaths`, then maps
+/// sidecar files with the same basename (`.rps`, optional `.freq`, optional
+/// `.loo`, optional `.aux`) and fetches consensus profile sequences through
+/// the protein BLAST database. Rust keeps that boundary reusable: this helper
+/// reads the file payloads and materializes the consensus sequences, while
+/// existing native parsers perform the format validation.
+pub fn native_rps_profile_bundle_from_files<P: AsRef<std::path::Path>>(
+    db_base_path: P,
+    wordsize: i32,
+    karlin_k: Vec<f64>,
+) -> Result<NativeRpsProfileBundle, i16> {
+    let db_base_path = db_base_path.as_ref();
+    let profile_bytes = std::fs::read(rps_sidecar_path(db_base_path, "rps")).map_err(|_| -1i16)?;
+    let freq_ratios_bytes = read_optional_rps_sidecar(db_base_path, "freq")?;
+    let lookup_bytes = read_optional_rps_sidecar(db_base_path, "loo")?;
+    let aux_bytes = read_optional_rps_sidecar(db_base_path, "aux")?;
+
+    let consensus_db = crate::db::BlastDb::open(db_base_path).map_err(|_| -1i16)?;
+    if consensus_db.db_type != crate::db::DbType::Protein {
+        return Err(-1);
+    }
+    let consensus_sequences = (0..consensus_db.num_oids)
+        .map(|oid| consensus_db.get_sequence(oid).to_vec())
+        .collect();
+
+    Ok(NativeRpsProfileBundle {
+        profile_bytes,
+        freq_ratios_bytes,
+        lookup_bytes,
+        aux_bytes,
+        consensus_sequences,
+        karlin_k,
+        wordsize,
+    })
+}
+
+/// blast-rs: convenience constructor for file-backed native RPS profile DBs;
+/// not a direct NCBI C port.
+pub fn blast_rps_profile_database_from_native_files<P: AsRef<std::path::Path>>(
+    db_base_path: P,
+    wordsize: i32,
+    karlin_k: Vec<f64>,
+) -> Result<OwnedRpsProfileDatabase, i16> {
+    let bundle = native_rps_profile_bundle_from_files(db_base_path, wordsize, karlin_k)?;
+    blast_rps_profile_database_from_native_bundle(bundle)
+}
+
 /// Rust ownership equivalent of NCBI `RPSLookupTableDestruct`
 /// (`blast_aalookup.c:212`).
 pub fn rps_lookup_table_destruct(
@@ -3069,6 +3820,316 @@ pub fn blast_rps_word_finder(lookup: &mut BlastRpsLookupTable, subject: &[u8]) -
         .collect();
     hits.sort_by_key(|hit| (hit.subject_offset, hit.query_offset));
     hits
+}
+
+/// NCBI: s_BlastRPSWordFinder_TwoHit (aa_ungapped.c).
+///
+/// Conservative C-shaped wrapper over the represented RPS lookup scan. NCBI's
+/// static helper uses RPS lookup hits to drive ungapped extension and init-hit
+/// list side effects; those RPS extension structures are not represented in
+/// this module today. This wrapper preserves the two-hit gate that decides
+/// which same-diagonal RPS word hits are eligible for that extension: the
+/// second hit must be within `window_size` subject residues and must not
+/// overlap the first word.
+pub fn s_blast_rps_word_finder_two_hit(
+    lookup: &mut BlastRpsLookupTable,
+    subject: &[u8],
+    window_size: i32,
+) -> Vec<RpsTwoHitSeed> {
+    s_blast_rps_word_finder_two_hit_scan(lookup, subject, window_size).seeds
+}
+
+fn s_blast_rps_word_finder_two_hit_scan(
+    lookup: &mut BlastRpsLookupTable,
+    subject: &[u8],
+    window_size: i32,
+) -> RpsWordFinderScan {
+    if lookup.wordsize <= 0 || window_size <= lookup.wordsize {
+        return RpsWordFinderScan::default();
+    }
+
+    let mut hits = blast_rps_word_finder(lookup, subject);
+    let total_hits = hits.len() as i32;
+    hits.retain(|hit| hit.query_offset >= 0 && hit.subject_offset >= 0);
+    if hits.len() < 2 {
+        return RpsWordFinderScan {
+            total_hits,
+            ..RpsWordFinderScan::default()
+        };
+    }
+
+    let mut accepted = Vec::new();
+    for (idx, &second) in hits.iter().enumerate().skip(1) {
+        let mut best_first = None;
+        for &first in hits[..idx].iter().rev() {
+            if first.subject_offset == second.subject_offset {
+                continue;
+            }
+            let first_diag = first.query_offset - first.subject_offset;
+            let second_diag = second.query_offset - second.subject_offset;
+            if first_diag != second_diag {
+                continue;
+            }
+            let distance = second.subject_offset - first.subject_offset;
+            if distance < lookup.wordsize {
+                continue;
+            }
+            if distance >= window_size {
+                break;
+            }
+            best_first = Some(first);
+            break;
+        }
+
+        if let Some(first) = best_first {
+            accepted.push(RpsTwoHitSeed { first, second });
+        }
+    }
+    let hits_extended = accepted.len() as i32;
+    RpsWordFinderScan {
+        seeds: accepted,
+        total_hits,
+        hits_extended,
+        init_hits: Vec::new(),
+    }
+}
+
+fn rps_pssm_score(pssm: &[Vec<i32>], q_off: usize, residue: u8) -> Option<i32> {
+    pssm.get(q_off)
+        .and_then(|row| row.get(residue as usize))
+        .copied()
+}
+
+fn rps_extend_left(
+    pssm: &[Vec<i32>],
+    subject: &[u8],
+    q_start: usize,
+    s_start: usize,
+    x_dropoff: i32,
+) -> (i32, i32) {
+    let mut score = 0i32;
+    let mut best = 0i32;
+    let mut best_d = 0i32;
+    if q_start == 0 || s_start == 0 {
+        return (0, 0);
+    }
+
+    let mut qi = q_start - 1;
+    let mut si = s_start - 1;
+    let mut d = 1i32;
+    loop {
+        let Some(cell_score) = rps_pssm_score(pssm, qi, subject[si]) else {
+            break;
+        };
+        score += cell_score;
+        if score > best {
+            best = score;
+            best_d = d;
+        }
+        if best - score >= x_dropoff {
+            break;
+        }
+        if qi == 0 || si == 0 {
+            break;
+        }
+        qi -= 1;
+        si -= 1;
+        d += 1;
+    }
+    (best, best_d)
+}
+
+fn rps_extend_right(
+    pssm: &[Vec<i32>],
+    subject: &[u8],
+    q_start: usize,
+    s_start: usize,
+    x_dropoff: i32,
+    init_score: i32,
+) -> (i32, i32, i32) {
+    let mut score = init_score;
+    let mut best = init_score;
+    let mut best_d = 0i32;
+    let mut qi = q_start;
+    let mut si = s_start;
+    let mut last_off_delta = 0i32;
+
+    while qi < pssm.len() && si < subject.len() {
+        let Some(cell_score) = rps_pssm_score(pssm, qi, subject[si]) else {
+            break;
+        };
+        score += cell_score;
+        if score > best {
+            best = score;
+            best_d = (qi - q_start + 1) as i32;
+        }
+        if score <= 0 || best - score >= x_dropoff {
+            last_off_delta = (qi - q_start) as i32;
+            break;
+        }
+        qi += 1;
+        si += 1;
+        last_off_delta = (qi - q_start) as i32;
+    }
+
+    (best, best_d, last_off_delta)
+}
+
+fn rps_extend_two_hit_payload(
+    pssm: &[Vec<i32>],
+    subject: &[u8],
+    word_size: usize,
+    x_dropoff: i32,
+    score_cutoff: i32,
+    seed: RpsTwoHitSeed,
+) -> Option<RpsInitHitRecord> {
+    let q_right_off = seed.second.query_offset as usize;
+    let s_right_off = seed.second.subject_offset as usize;
+    let s_left_off = seed.first.subject_offset as usize + word_size;
+
+    let mut wscore = 0i32;
+    let mut best_wscore = 0i32;
+    let mut right_d = 0usize;
+    for k in 0..word_size {
+        let qi = q_right_off + k;
+        let si = s_right_off + k;
+        if si >= subject.len() {
+            break;
+        }
+        let Some(cell_score) = rps_pssm_score(pssm, qi, subject[si]) else {
+            break;
+        };
+        wscore += cell_score;
+        if wscore > best_wscore {
+            best_wscore = wscore;
+            right_d = k + 1;
+        }
+    }
+
+    let ext_q = q_right_off + right_d;
+    let ext_s = s_right_off + right_d;
+    let (left_score, left_d) = rps_extend_left(pssm, subject, ext_q, ext_s, x_dropoff);
+    if left_score < score_cutoff || left_d == 0 {
+        return None;
+    }
+
+    let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
+    let (score, right_d) = if reached_first {
+        let (right_score, right_d, _) =
+            rps_extend_right(pssm, subject, ext_q, ext_s, x_dropoff, left_score);
+        (left_score.max(right_score), right_d)
+    } else {
+        (left_score, 0)
+    };
+    if score < score_cutoff {
+        return None;
+    }
+
+    let q_start = ext_q as i32 - left_d;
+    let s_start = ext_s as i32 - left_d;
+    Some(RpsInitHitRecord {
+        q_start,
+        s_start,
+        q_off: seed.second.query_offset,
+        s_off: seed.second.subject_offset,
+        len: left_d + right_d,
+        score,
+    })
+}
+
+/// blast-rs: side-channel preserving wrapper around
+/// `s_BlastRPSWordFinder_TwoHit` (`aa_ungapped.c`).
+///
+/// The local RPS representation still stops at the two-hit seed gate, before
+/// C's RPS ungapped extension. This wrapper nevertheless preserves the
+/// C-shaped `BlastInitHitList`/`BlastUngappedStats` mutation boundary for the
+/// accepted RPS seed pairs so callers can audit side-channel plumbing without
+/// depending on the future extension implementation.
+pub fn s_blast_rps_word_finder_two_hit_with_side_channels(
+    lookup: &mut BlastRpsLookupTable,
+    subject: &[u8],
+    window_size: i32,
+    init_hitlist: Option<&mut crate::extend::InitHitList>,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> RpsWordFinderScan {
+    let scan = s_blast_rps_word_finder_two_hit_scan(lookup, subject, window_size);
+    let saved_hits = scan.seeds.len() as i32;
+    if let Some(init_hitlist) = init_hitlist {
+        for seed in &scan.seeds {
+            crate::extend::blast_save_initial_hit(
+                init_hitlist,
+                seed.second.query_offset,
+                seed.second.subject_offset,
+                None,
+            );
+        }
+    }
+    crate::diagnostics::blast_ungapped_stats_update(
+        ungapped_stats,
+        scan.total_hits,
+        scan.hits_extended,
+        saved_hits,
+    );
+    scan
+}
+
+/// blast-rs: RPS two-hit side-channel wrapper with represented ungapped
+/// extension payloads.
+///
+/// This keeps the existing conservative RPS seed gate, then uses the owned
+/// RPS PSSM rows to fill `BlastInitHsp::ungapped_data` through
+/// `BlastSaveInitHsp`, matching the payload boundary C reaches after
+/// `s_BlastRPSWordFinder_TwoHit` drives ungapped extension.
+pub fn s_blast_rps_word_finder_two_hit_with_extension_payloads(
+    lookup: &mut BlastRpsLookupTable,
+    subject: &[u8],
+    window_size: i32,
+    x_dropoff: i32,
+    score_cutoff: i32,
+    init_hitlist: Option<&mut crate::extend::InitHitList>,
+    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
+) -> RpsWordFinderScan {
+    let mut scan = s_blast_rps_word_finder_two_hit_scan(lookup, subject, window_size);
+    let word_size = lookup.wordsize.max(0) as usize;
+    if word_size > 0 && !lookup.rps_pssm.is_empty() {
+        scan.init_hits = scan
+            .seeds
+            .iter()
+            .filter_map(|&seed| {
+                rps_extend_two_hit_payload(
+                    &lookup.rps_pssm,
+                    subject,
+                    word_size,
+                    x_dropoff,
+                    score_cutoff,
+                    seed,
+                )
+            })
+            .collect();
+    }
+
+    let saved_hits = scan.init_hits.len() as i32;
+    if let Some(init_hitlist) = init_hitlist {
+        for hit in &scan.init_hits {
+            crate::extend::blast_save_init_hsp(
+                init_hitlist,
+                hit.q_start,
+                hit.s_start,
+                hit.q_off,
+                hit.s_off,
+                hit.len,
+                hit.score,
+            );
+        }
+        crate::extend::blast_init_hit_list_sort_by_score(init_hitlist);
+    }
+    crate::diagnostics::blast_ungapped_stats_update(
+        ungapped_stats,
+        scan.total_hits,
+        scan.hits_extended,
+        saved_hits,
+    );
+    scan
 }
 
 pub const OFFSET_ARRAY_SIZE: i32 = 4096;
@@ -5097,6 +6158,537 @@ mod tests {
     }
 
     #[test]
+    fn rps_profile_database_new_builds_lookup_from_owned_consensus_profiles() {
+        let mut pssm_values = vec![-8; 25 * 26];
+        let mut query = vec![25u8; 24];
+        query[3..6].copy_from_slice(&[1, 2, 3]);
+        query[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in query.iter().enumerate().take(13).skip(3) {
+            let profile_query_offset = 8 + subject_offset as i32;
+            pssm_values[profile_query_offset as usize * 26 + *residue as usize] = 5;
+        }
+        let rps_info = crate::hspstream::RpsTracebackInfo {
+            profile_header: crate::hspstream::RpsProfileHeader {
+                magic_number: crate::hspstream::RPS_MAGIC_NUM,
+                num_profiles: 2,
+                start_offsets: vec![0, 8, 24],
+                pssm_values,
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.1, 0.25],
+        };
+        let consensus_sequences = vec![
+            vec![7, 7, 7, 7, 7, 7, 7, 7],
+            vec![7, 7, 7, 1, 2, 3, 7, 7, 7, 7, 4, 5, 6, 7, 7, 7],
+        ];
+
+        let mut profile_db =
+            blast_rps_profile_database_new(rps_info.clone(), consensus_sequences, 3)
+                .expect("owned RPS profile database");
+
+        assert_eq!(profile_db.lookup.alphabet_size, 26);
+        assert_eq!(profile_db.lookup.wordsize, 3);
+        assert_eq!(profile_db.lookup.backbone_size, 32768);
+        assert!(profile_db.lookup.num_buckets >= 2);
+        let first_word_index = s_compute_table_index(3, 5, &[1, 2, 3]);
+        assert_eq!(
+            profile_db.lookup.rps_backbone[first_word_index].offset_pairs,
+            vec![OffsetPair {
+                query_offset: 13,
+                subject_offset: 0,
+            }]
+        );
+
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+        assert_eq!(
+            blast_rps_profile_database_scan_query_write_hsp_stream(
+                &mut profile_db,
+                &query,
+                &stream,
+                0,
+                40,
+                6,
+                1,
+                4,
+                Some(&mut init_hitlist),
+                Some(&mut stats),
+            ),
+            0
+        );
+        assert_eq!(init_hitlist.total(), 1);
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.init_extends, 1);
+        assert_eq!(stats.good_init_extends, 1);
+
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[32]);
+        let mut results = crate::hspstream::HspResults::new(1);
+        let mut callback_profiles = Vec::new();
+        let status = crate::hspstream::s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &crate::options::HitSavingOptions {
+                hitlist_size: 10,
+                ..Default::default()
+            },
+            Some(&mut results),
+            |hsp_list, _gap_data, profile_index, karlin_k| {
+                callback_profiles.push(profile_index);
+                assert_eq!(profile_index, 1);
+                assert!((karlin_k.expect("RPS K") - 0.30).abs() < 1e-12);
+                assert_eq!(hsp_list.oid, 1);
+                assert_eq!(hsp_list.hsps[0].score, 50);
+                assert_eq!(hsp_list.hsps[0].query_offset, 3);
+                assert_eq!(hsp_list.hsps[0].subject_offset, 3);
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(callback_profiles, vec![1]);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 1);
+        let hsp = &hitlist.hsp_lists[0].hsps[0];
+        assert_eq!(hsp.query_offset, 3);
+        assert_eq!(hsp.query_end, 13);
+        assert_eq!(hsp.subject_offset, 3);
+        assert_eq!(hsp.subject_end, 13);
+    }
+
+    #[test]
+    fn rps_profile_database_from_native_bundle_parses_profile_file_and_scans() {
+        fn native_profile_bytes(
+            magic: i32,
+            num_profiles: i32,
+            start_offsets: &[i32],
+            row_values: &[i32],
+            big_endian: bool,
+        ) -> Vec<u8> {
+            let mut values = Vec::with_capacity(2 + start_offsets.len() + row_values.len());
+            values.push(magic);
+            values.push(num_profiles);
+            values.extend_from_slice(start_offsets);
+            values.extend_from_slice(row_values);
+
+            let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<i32>());
+            for value in values {
+                if big_endian {
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                } else {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            bytes
+        }
+
+        let offsets = [0, 8, 24];
+        let mut pssm_values = vec![-8; offsets[2] as usize * 26];
+        let mut query = vec![25u8; 24];
+        query[3..6].copy_from_slice(&[1, 2, 3]);
+        query[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in query.iter().enumerate().take(13).skip(3) {
+            let profile_query_offset = 8 + subject_offset as i32;
+            pssm_values[profile_query_offset as usize * 26 + *residue as usize] = 5;
+        }
+
+        let bundle = NativeRpsProfileBundle {
+            profile_bytes: native_profile_bytes(
+                crate::hspstream::RPS_MAGIC_NUM,
+                2,
+                &offsets,
+                &pssm_values,
+                true,
+            ),
+            freq_ratios_bytes: None,
+            lookup_bytes: None,
+            aux_bytes: Some(b"BLOSUM62 11 1 0.041 0.14 16 24 100.0 8 0.11 16 0.27\n".to_vec()),
+            consensus_sequences: vec![
+                vec![7, 7, 7, 7, 7, 7, 7, 7],
+                vec![7, 7, 7, 1, 2, 3, 7, 7, 7, 7, 4, 5, 6, 7, 7, 7],
+            ],
+            karlin_k: vec![0.0, 0.0],
+            wordsize: 3,
+        };
+
+        let mut profile_db =
+            blast_rps_profile_database_from_native_bundle(bundle).expect("native RPS bundle");
+        assert_eq!(
+            profile_db.traceback_info.profile_header.start_offsets,
+            offsets
+        );
+        assert_eq!(profile_db.traceback_info.karlin_k, vec![0.11, 0.27]);
+        assert_eq!(profile_db.lookup.rps_pssm.len(), offsets[2] as usize + 1);
+        assert_eq!(profile_db.lookup.rps_pssm[offsets[2] as usize], vec![0; 26]);
+
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+        assert_eq!(
+            blast_rps_profile_database_scan_query_write_hsp_stream(
+                &mut profile_db,
+                &query,
+                &stream,
+                0,
+                40,
+                6,
+                1,
+                4,
+                Some(&mut init_hitlist),
+                Some(&mut stats),
+            ),
+            0
+        );
+        assert_eq!(init_hitlist.total(), 1);
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.good_init_extends, 1);
+    }
+
+    #[test]
+    fn rps_profile_database_from_native_files_wires_consensus_db_sequences() {
+        fn native_values(values: &[i32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let scratch = std::env::temp_dir().join(format!(
+            "blast-rs-rps-files-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("lookup")
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let db_base = scratch.join("rpsdb");
+
+        let profile_ascii = b"GGGACDGGGHIKGGG";
+        let profile_encoded = crate::encoding::encode_ncbistdaa_sequence(profile_ascii);
+        let mut builder = crate::BlastDbBuilder::new(crate::DbType::Protein, "rps consensus");
+        builder.add(crate::SequenceEntry {
+            title: "profile0".to_string(),
+            accession: "profile0".to_string(),
+            sequence: profile_ascii.to_vec(),
+            taxid: None,
+        });
+        builder.write(&db_base).expect("write protein consensus db");
+
+        let offsets = [0, profile_encoded.len() as i32];
+        let mut pssm_values = vec![-8; profile_encoded.len() * 26];
+        for (offset, &residue) in profile_encoded.iter().enumerate() {
+            pssm_values[offset * 26 + residue as usize] = 5;
+        }
+        let mut profile_file_values =
+            vec![crate::hspstream::RPS_MAGIC_NUM, 1, offsets[0], offsets[1]];
+        profile_file_values.extend_from_slice(&pssm_values);
+        std::fs::write(
+            rps_sidecar_path(&db_base, "rps"),
+            native_values(&profile_file_values),
+        )
+        .expect("write rps sidecar");
+        std::fs::write(
+            rps_sidecar_path(&db_base, "aux"),
+            format!(
+                "BLOSUM62 11 1 0.041 0.14 {} {} 100.0 {} 0.21\n",
+                profile_encoded.len(),
+                profile_encoded.len(),
+                profile_encoded.len()
+            ),
+        )
+        .expect("write aux sidecar");
+
+        let profile_db = blast_rps_profile_database_from_native_files(&db_base, 3, vec![0.0])
+            .expect("file-backed native RPS database");
+        assert_eq!(
+            profile_db.consensus_sequences,
+            vec![profile_encoded.clone()]
+        );
+        assert_eq!(profile_db.traceback_info.karlin_k, vec![0.21]);
+
+        let acd_index =
+            s_compute_table_index(3, profile_db.lookup.charsize, &profile_encoded[3..6]);
+        assert_eq!(
+            profile_db.lookup.rps_backbone[acd_index].offset_pairs,
+            vec![OffsetPair {
+                query_offset: 5,
+                subject_offset: 0,
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn rps_profile_database_from_native_bundle_reuses_native_lookup_file() {
+        fn native_values(values: &[i32], big_endian: bool) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| {
+                    if big_endian {
+                        value.to_be_bytes()
+                    } else {
+                        value.to_le_bytes()
+                    }
+                })
+                .collect()
+        }
+
+        fn native_profile_bytes(
+            magic: i32,
+            num_profiles: i32,
+            start_offsets: &[i32],
+            row_values: &[i32],
+            big_endian: bool,
+        ) -> Vec<u8> {
+            let mut values = Vec::with_capacity(2 + start_offsets.len() + row_values.len());
+            values.push(magic);
+            values.push(num_profiles);
+            values.extend_from_slice(start_offsets);
+            values.extend_from_slice(row_values);
+            native_values(&values, big_endian)
+        }
+
+        fn native_lookup_bytes(
+            magic: i32,
+            hits: &[(usize, Vec<i32>)],
+            big_endian: bool,
+        ) -> Vec<u8> {
+            let alphabet_size = if magic == crate::hspstream::RPS_MAGIC_NUM {
+                26
+            } else {
+                28
+            };
+            let charsize = crate::util::ilog2(alphabet_size) + 1;
+            let backbone_size = 1usize << (RPS_LOOKUP_WORDSIZE * charsize) as usize;
+            let start_of_backbone = (RPS_LOOKUP_HEADER_WORDS * std::mem::size_of::<i32>()) as i32;
+            let mut backbone = vec![[0i32; RPS_LOOKUP_BACKBONE_CELL_WORDS]; backbone_size + 1];
+            let mut overflow = Vec::new();
+            let mut total_hits = 0i32;
+            for &(index, ref offsets) in hits {
+                total_hits += offsets.len() as i32;
+                backbone[index][0] = offsets.len() as i32;
+                if offsets.len() <= RPS_HITS_PER_CELL {
+                    for (slot, &offset) in offsets.iter().enumerate() {
+                        backbone[index][slot + 1] = offset;
+                    }
+                } else {
+                    backbone[index][1] = offsets[0];
+                    backbone[index][2] = (overflow.len() * std::mem::size_of::<i32>()) as i32;
+                    overflow.extend_from_slice(&offsets[1..]);
+                }
+            }
+            let end_of_overflow = start_of_backbone
+                + (backbone.len() * RPS_LOOKUP_BACKBONE_CELL_WORDS * std::mem::size_of::<i32>())
+                    as i32
+                + (overflow.len() * std::mem::size_of::<i32>()) as i32;
+            let mut values = vec![
+                magic,
+                1,
+                total_hits,
+                hits.len() as i32,
+                overflow.len() as i32,
+                0,
+                0,
+                0,
+                start_of_backbone,
+                end_of_overflow,
+            ];
+            for cell in backbone {
+                values.extend_from_slice(&cell);
+            }
+            values.extend_from_slice(&overflow);
+            native_values(&values, big_endian)
+        }
+
+        let offsets = [0, 8, 24];
+        let mut pssm_values = vec![-8; offsets[2] as usize * 26];
+        let mut query = vec![25u8; 24];
+        query[3..6].copy_from_slice(&[1, 2, 3]);
+        query[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in query.iter().enumerate().take(13).skip(3) {
+            let profile_query_offset = 8 + subject_offset as i32;
+            pssm_values[profile_query_offset as usize * 26 + *residue as usize] = 5;
+        }
+
+        let first_word_index = s_compute_table_index(3, 5, &[1, 2, 3]);
+        let second_word_index = s_compute_table_index(3, 5, &[4, 5, 6]);
+        let bundle = NativeRpsProfileBundle {
+            profile_bytes: native_profile_bytes(
+                crate::hspstream::RPS_MAGIC_NUM,
+                2,
+                &offsets,
+                &pssm_values,
+                true,
+            ),
+            freq_ratios_bytes: None,
+            lookup_bytes: Some(native_lookup_bytes(
+                crate::hspstream::RPS_MAGIC_NUM,
+                &[(first_word_index, vec![13]), (second_word_index, vec![20])],
+                true,
+            )),
+            aux_bytes: None,
+            consensus_sequences: vec![
+                vec![7, 7, 7, 7, 7, 7, 7, 7],
+                vec![7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7],
+            ],
+            karlin_k: vec![0.1, 0.25],
+            wordsize: 3,
+        };
+
+        let mut profile_db =
+            blast_rps_profile_database_from_native_bundle(bundle).expect("native RPS bundle");
+        assert_eq!(
+            profile_db.lookup.rps_backbone[first_word_index].offset_pairs,
+            vec![OffsetPair {
+                query_offset: 13,
+                subject_offset: 0
+            }]
+        );
+
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+        assert_eq!(
+            blast_rps_profile_database_scan_query_write_hsp_stream(
+                &mut profile_db,
+                &query,
+                &stream,
+                0,
+                40,
+                6,
+                1,
+                4,
+                Some(&mut init_hitlist),
+                Some(&mut stats),
+            ),
+            0
+        );
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.good_init_extends, 1);
+    }
+
+    #[test]
+    fn rps_lookup_info_from_native_lookup_bytes_decodes_overflow_hits() {
+        fn native_values(values: &[i32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let charsize = crate::util::ilog2(26) + 1;
+        let backbone_size = 1usize << (RPS_LOOKUP_WORDSIZE * charsize) as usize;
+        let start_of_backbone = (RPS_LOOKUP_HEADER_WORDS * std::mem::size_of::<i32>()) as i32;
+        let mut backbone = vec![[0i32; RPS_LOOKUP_BACKBONE_CELL_WORDS]; backbone_size + 1];
+        let index = s_compute_table_index(3, 5, &[1, 2, 3]);
+        backbone[index] = [4, 13, 0, 0];
+        let overflow = [17, 20, 23];
+        let end_of_overflow = start_of_backbone
+            + (backbone.len() * RPS_LOOKUP_BACKBONE_CELL_WORDS * std::mem::size_of::<i32>()) as i32
+            + (overflow.len() * std::mem::size_of::<i32>()) as i32;
+        let mut values = vec![
+            crate::hspstream::RPS_MAGIC_NUM,
+            1,
+            4,
+            1,
+            overflow.len() as i32,
+            0,
+            0,
+            0,
+            start_of_backbone,
+            end_of_overflow,
+        ];
+        for cell in backbone {
+            values.extend_from_slice(&cell);
+        }
+        values.extend_from_slice(&overflow);
+
+        let info =
+            rps_lookup_info_from_native_lookup_bytes(&native_values(&values), vec![vec![0; 26]])
+                .expect("native lookup");
+        assert_eq!(
+            info.rps_backbone[index].offset_pairs,
+            vec![
+                OffsetPair {
+                    query_offset: 13,
+                    subject_offset: 0,
+                },
+                OffsetPair {
+                    query_offset: 17,
+                    subject_offset: 0,
+                },
+                OffsetPair {
+                    query_offset: 20,
+                    subject_offset: 0,
+                },
+                OffsetPair {
+                    query_offset: 23,
+                    subject_offset: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rps_profile_database_new_rejects_malformed_owned_inputs() {
+        let rps_info = crate::hspstream::RpsTracebackInfo {
+            profile_header: crate::hspstream::RpsProfileHeader {
+                magic_number: crate::hspstream::RPS_MAGIC_NUM,
+                num_profiles: 1,
+                start_offsets: vec![0, 4],
+                pssm_values: vec![0; 5 * 26],
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.1],
+        };
+
+        assert!(blast_rps_profile_database_new(rps_info.clone(), vec![vec![1, 2, 3]], 3).is_err());
+        assert!(
+            blast_rps_profile_database_new(rps_info.clone(), vec![vec![1, 2, 3, 26]], 3).is_err()
+        );
+        assert!(blast_rps_profile_database_new(rps_info, vec![vec![1, 2, 3, 4]], 0).is_err());
+    }
+
+    #[test]
+    fn rps_profile_database_from_native_bundle_rejects_bad_frequency_metadata() {
+        fn native_values(values: &[i32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let profile_rows = vec![0; 4 * 26];
+        let profile_bytes = {
+            let mut values = vec![crate::hspstream::RPS_MAGIC_NUM, 1, 0, 4];
+            values.extend_from_slice(&profile_rows);
+            native_values(&values)
+        };
+        let bad_freq_bytes = {
+            let mut values = vec![crate::hspstream::RPS_MAGIC_NUM, 1, 0, 3];
+            values.extend_from_slice(&vec![0; 3 * 26]);
+            native_values(&values)
+        };
+
+        let bundle = NativeRpsProfileBundle {
+            profile_bytes,
+            freq_ratios_bytes: Some(bad_freq_bytes),
+            lookup_bytes: None,
+            aux_bytes: None,
+            consensus_sequences: vec![vec![1, 2, 3, 4]],
+            karlin_k: vec![0.1],
+            wordsize: 3,
+        };
+
+        assert!(blast_rps_profile_database_from_native_bundle(bundle).is_err());
+    }
+
+    #[test]
     fn rps_scan_subject_buckets_corrected_offsets() {
         let mut lookup = BlastRpsLookupTable {
             alphabet_size: 28,
@@ -5176,6 +6768,793 @@ mod tests {
                     subject_offset: 5,
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn rps_two_hit_word_finder_keeps_same_diagonal_in_window_pairs() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket {
+                num_alloc: 1,
+                num_used: 0,
+                offset_pairs: vec![],
+            }],
+        };
+        let words = [
+            ([1u8, 2, 3], 9),
+            ([4u8, 5, 6], 16),
+            ([7u8, 8, 9], 24),
+            ([10u8, 11, 12], 65),
+        ];
+        for (word, corrected_query_offset) in words {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut subject = vec![25u8; 64];
+        subject[5..8].copy_from_slice(&[1, 2, 3]);
+        subject[12..15].copy_from_slice(&[4, 5, 6]);
+        subject[20..23].copy_from_slice(&[7, 8, 9]);
+        subject[61..64].copy_from_slice(&[10, 11, 12]);
+
+        let seeds = s_blast_rps_word_finder_two_hit(&mut lookup, &subject, 40);
+        assert_eq!(
+            seeds,
+            vec![
+                RpsTwoHitSeed {
+                    first: OffsetPair {
+                        query_offset: 9,
+                        subject_offset: 5,
+                    },
+                    second: OffsetPair {
+                        query_offset: 16,
+                        subject_offset: 12,
+                    },
+                },
+                RpsTwoHitSeed {
+                    first: OffsetPair {
+                        query_offset: 16,
+                        subject_offset: 12,
+                    },
+                    second: OffsetPair {
+                        query_offset: 24,
+                        subject_offset: 20,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rps_two_hit_word_finder_side_channels_fill_init_list_and_stats() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        for (word, corrected_query_offset) in
+            [([1u8, 2, 3], 9), ([4u8, 5, 6], 16), ([7u8, 8, 9], 24)]
+        {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut subject = vec![25u8; 32];
+        subject[5..8].copy_from_slice(&[1, 2, 3]);
+        subject[12..15].copy_from_slice(&[4, 5, 6]);
+        subject[20..23].copy_from_slice(&[7, 8, 9]);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        let scan = s_blast_rps_word_finder_two_hit_with_side_channels(
+            &mut lookup,
+            &subject,
+            40,
+            Some(&mut init_hitlist),
+            Some(&mut stats),
+        );
+
+        assert_eq!(scan.total_hits, 3);
+        assert_eq!(scan.hits_extended, 2);
+        assert_eq!(scan.seeds.len(), 2);
+        assert_eq!(init_hitlist.total(), 2);
+        assert_eq!(init_hitlist.hits[0].query_offset, 16);
+        assert_eq!(init_hitlist.hits[0].subject_offset, 12);
+        assert_eq!(init_hitlist.hits[1].query_offset, 24);
+        assert_eq!(init_hitlist.hits[1].subject_offset, 20);
+        assert_eq!(stats.lookup_hits, 3);
+        assert_eq!(stats.num_seqs_lookup_hits, 1);
+        assert_eq!(stats.init_extends, 2);
+        assert_eq!(stats.good_init_extends, 2);
+        assert_eq!(stats.num_seqs_passed, 1);
+    }
+
+    #[test]
+    fn rps_two_hit_word_finder_extension_payloads_fill_ungapped_data() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![vec![-8; 28]; 24],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        for (word, corrected_query_offset) in [([1u8, 2, 3], 4), ([4u8, 5, 6], 11)] {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut subject = vec![25u8; 24];
+        subject[3..6].copy_from_slice(&[1, 2, 3]);
+        subject[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in subject.iter().enumerate().take(13).skip(3) {
+            let query_offset = subject_offset + 1;
+            lookup.rps_pssm[query_offset][*residue as usize] = 5;
+        }
+
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        let scan = s_blast_rps_word_finder_two_hit_with_extension_payloads(
+            &mut lookup,
+            &subject,
+            40,
+            6,
+            1,
+            Some(&mut init_hitlist),
+            Some(&mut stats),
+        );
+
+        assert_eq!(scan.total_hits, 2);
+        assert_eq!(scan.hits_extended, 1);
+        assert_eq!(init_hitlist.total(), 1);
+        let init = &init_hitlist.hits[0];
+        assert_eq!(init.query_offset, 11);
+        assert_eq!(init.subject_offset, 10);
+        let data = init.ungapped_data.as_ref().expect("RPS ungapped payload");
+        assert_eq!(data.q_start, 4);
+        assert_eq!(data.s_start, 3);
+        assert_eq!(data.length, 10);
+        assert_eq!(data.score, 50);
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.init_extends, 1);
+        assert_eq!(stats.good_init_extends, 1);
+    }
+
+    #[test]
+    fn rps_word_finder_payloads_convert_to_pre_traceback_hsp_list() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![vec![-8; 28]; 24],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        for (word, corrected_query_offset) in [([1u8, 2, 3], 4), ([4u8, 5, 6], 11)] {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut subject = vec![25u8; 24];
+        subject[3..6].copy_from_slice(&[1, 2, 3]);
+        subject[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in subject.iter().enumerate().take(13).skip(3) {
+            let query_offset = subject_offset + 1;
+            lookup.rps_pssm[query_offset][*residue as usize] = 5;
+        }
+
+        let scan = s_blast_rps_word_finder_two_hit_with_extension_payloads(
+            &mut lookup,
+            &subject,
+            40,
+            6,
+            1,
+            None,
+            None,
+        );
+        let hsp_list = blast_rps_word_finder_scan_to_hsp_list(&scan, 7, 4).expect("RPS HSP list");
+
+        assert_eq!(hsp_list.oid, 7);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        let hsp = &hsp_list.hsps[0];
+        assert_eq!(hsp.score, 50);
+        assert_eq!(hsp.query_offset, 4);
+        assert_eq!(hsp.query_end, 14);
+        assert_eq!(hsp.query_gapped_start, 11);
+        assert_eq!(hsp.subject_offset, 3);
+        assert_eq!(hsp.subject_end, 13);
+        assert_eq!(hsp.subject_gapped_start, 10);
+        assert_eq!(hsp.evalue, f64::MAX);
+        assert!(hsp.edit_script.is_none());
+
+        let mut restored = hsp_list.clone();
+        crate::hspstream::s_blast_hsp_list_rps_update(crate::program::RPS_BLAST, &mut restored);
+        let restored_hsp = &restored.hsps[0];
+        assert_eq!(restored_hsp.query_offset, 3);
+        assert_eq!(restored_hsp.subject_offset, 4);
+        assert_eq!(restored_hsp.query_gapped_start, 10);
+        assert_eq!(restored_hsp.subject_gapped_start, 11);
+    }
+
+    #[test]
+    fn rps_word_finder_payload_cutoff_blocks_hsp_bridge() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![vec![-8; 28]; 24],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        for (word, corrected_query_offset) in [([1u8, 2, 3], 4), ([4u8, 5, 6], 11)] {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut subject = vec![25u8; 24];
+        subject[3..6].copy_from_slice(&[1, 2, 3]);
+        subject[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in subject.iter().enumerate().take(13).skip(3) {
+            let query_offset = subject_offset + 1;
+            lookup.rps_pssm[query_offset][*residue as usize] = 5;
+        }
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        let scan = s_blast_rps_word_finder_two_hit_with_extension_payloads(
+            &mut lookup,
+            &subject,
+            40,
+            6,
+            51,
+            None,
+            Some(&mut stats),
+        );
+
+        assert_eq!(scan.total_hits, 2);
+        assert_eq!(scan.hits_extended, 1);
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.init_extends, 1);
+        assert_eq!(stats.good_init_extends, 0);
+        assert!(blast_rps_word_finder_scan_to_hsp_list(&scan, 7, 4).is_none());
+    }
+
+    #[test]
+    fn rps_word_finder_empty_payload_adapter_leaves_stream_writable() {
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let scan = RpsWordFinderScan::default();
+
+        assert_eq!(
+            blast_rps_word_finder_scan_write_hsp_stream(&scan, &stream, 0, 7, 4),
+            0
+        );
+        assert_eq!(
+            stream.blast_hspstream_write(0, crate::hspstream::HspList::new(7)),
+            0
+        );
+    }
+
+    #[test]
+    fn rps_word_finder_payload_bridge_writes_traceback_stream() {
+        let scan = RpsWordFinderScan {
+            seeds: Vec::new(),
+            total_hits: 4,
+            hits_extended: 2,
+            init_hits: vec![
+                RpsInitHitRecord {
+                    q_start: 6,
+                    s_start: 2,
+                    q_off: 8,
+                    s_off: 4,
+                    len: 4,
+                    score: 45,
+                },
+                RpsInitHitRecord {
+                    q_start: 3,
+                    s_start: 1,
+                    q_off: 5,
+                    s_off: 3,
+                    len: 4,
+                    score: 20,
+                },
+            ],
+        };
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+
+        assert_eq!(
+            blast_rps_word_finder_scan_write_hsp_stream(&scan, &stream, 0, 0, 1),
+            0
+        );
+
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[32]);
+        let rps_info = crate::hspstream::RpsTracebackInfo {
+            profile_header: crate::hspstream::RpsProfileHeader {
+                magic_number: crate::hspstream::RPS_MAGIC_NUM,
+                num_profiles: 1,
+                start_offsets: vec![0, 12],
+                pssm_values: (0..(13 * 26)).collect(),
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.25],
+        };
+        let hit_options = crate::options::HitSavingOptions {
+            hitlist_size: 10,
+            ..Default::default()
+        };
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let status = crate::hspstream::s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &hit_options,
+            Some(&mut results),
+            |hsp_list, _gap_data, profile_index, karlin_k| {
+                assert_eq!(profile_index, 0);
+                assert!((karlin_k.expect("RPS K") - 0.30).abs() < 1e-12);
+                assert_eq!(hsp_list.hsps.len(), 1);
+                let hsp = &hsp_list.hsps[0];
+                assert_eq!(hsp.score, 45);
+                assert_eq!(hsp.query_offset, 6);
+                assert_eq!(hsp.subject_offset, 2);
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        let hsp = &hitlist.hsp_lists[0].hsps[0];
+        assert_eq!(hsp.score, 45);
+        assert_eq!(hsp.query_offset, 2);
+        assert_eq!(hsp.query_end, 6);
+        assert_eq!(hsp.query_gapped_start, 4);
+        assert_eq!(hsp.subject_offset, 6);
+        assert_eq!(hsp.subject_end, 10);
+        assert_eq!(hsp.subject_gapped_start, 8);
+    }
+
+    #[test]
+    fn rps_subject_driver_adapter_scans_payloads_into_traceback_stream() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![vec![-8; 28]; 24],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        for (word, corrected_query_offset) in [([1u8, 2, 3], 4), ([4u8, 5, 6], 11)] {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut subject = vec![25u8; 24];
+        subject[3..6].copy_from_slice(&[1, 2, 3]);
+        subject[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in subject.iter().enumerate().take(13).skip(3) {
+            let query_offset = subject_offset + 1;
+            lookup.rps_pssm[query_offset][*residue as usize] = 5;
+        }
+
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        assert_eq!(
+            blast_rps_subject_scan_write_hsp_stream(
+                &mut lookup,
+                &subject,
+                &stream,
+                0,
+                0,
+                40,
+                6,
+                1,
+                4,
+                Some(&mut init_hitlist),
+                Some(&mut stats),
+            ),
+            0
+        );
+        assert_eq!(init_hitlist.total(), 1);
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.init_extends, 1);
+        assert_eq!(stats.good_init_extends, 1);
+
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[32]);
+        let rps_info = crate::hspstream::RpsTracebackInfo {
+            profile_header: crate::hspstream::RpsProfileHeader {
+                magic_number: crate::hspstream::RPS_MAGIC_NUM,
+                num_profiles: 1,
+                start_offsets: vec![0, 12],
+                pssm_values: (0..(13 * 26)).collect(),
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.25],
+        };
+        let hit_options = crate::options::HitSavingOptions {
+            hitlist_size: 10,
+            ..Default::default()
+        };
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let status = crate::hspstream::s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &hit_options,
+            Some(&mut results),
+            |hsp_list, _gap_data, profile_index, _karlin_k| {
+                assert_eq!(profile_index, 0);
+                assert_eq!(hsp_list.hsps.len(), 1);
+                assert_eq!(hsp_list.hsps[0].score, 50);
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        let hsp = &hitlist.hsp_lists[0].hsps[0];
+        assert_eq!(hsp.query_offset, 3);
+        assert_eq!(hsp.query_end, 13);
+        assert_eq!(hsp.query_gapped_start, 10);
+        assert_eq!(hsp.subject_offset, 4);
+        assert_eq!(hsp.subject_end, 14);
+        assert_eq!(hsp.subject_gapped_start, 11);
+    }
+
+    #[test]
+    fn rps_subject_driver_adapter_no_hit_scan_leaves_traceback_stream_empty() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![vec![-8; 28]; 8],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        let subject = vec![25u8; 16];
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        assert_eq!(
+            blast_rps_subject_scan_write_hsp_stream(
+                &mut lookup,
+                &subject,
+                &stream,
+                0,
+                0,
+                40,
+                6,
+                1,
+                4,
+                Some(&mut init_hitlist),
+                Some(&mut stats),
+            ),
+            0
+        );
+        assert_eq!(init_hitlist.total(), 0);
+        assert_eq!(stats.lookup_hits, 0);
+        assert_eq!(stats.init_extends, 0);
+        assert_eq!(stats.good_init_extends, 0);
+
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[16]);
+        let rps_info = crate::hspstream::RpsTracebackInfo {
+            profile_header: crate::hspstream::RpsProfileHeader {
+                magic_number: crate::hspstream::RPS_MAGIC_NUM,
+                num_profiles: 1,
+                start_offsets: vec![0, 8],
+                pssm_values: (0..(9 * 26)).collect(),
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.25],
+        };
+        let mut results = crate::hspstream::HspResults::new(1);
+        let mut callback_called = false;
+
+        let status = crate::hspstream::s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &crate::options::HitSavingOptions::default(),
+            Some(&mut results),
+            |_hsp_list, _gap_data, _profile_index, _karlin_k| {
+                callback_called = true;
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert!(!callback_called);
+        assert!(results.hitlists[0].is_none());
+    }
+
+    #[test]
+    fn rps_seqsrc_driver_adapter_fetches_profiles_and_skips_missing_sequences() {
+        struct TestRpsSeqSrc {
+            entries: Vec<Option<Vec<u8>>>,
+            encodings: std::sync::Mutex<Vec<crate::seqsrc::SeqEncoding>>,
+        }
+
+        impl crate::seqsrc::BlastSeqSource for TestRpsSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                self.entries.len() as i32
+            }
+
+            fn total_length(&self) -> i64 {
+                self.entries
+                    .iter()
+                    .flatten()
+                    .map(|seq| seq.len() as i64)
+                    .sum()
+            }
+
+            fn max_seq_len(&self) -> i32 {
+                self.entries
+                    .iter()
+                    .flatten()
+                    .map(Vec::len)
+                    .max()
+                    .unwrap_or(0) as i32
+            }
+
+            fn avg_seq_len(&self) -> i32 {
+                if self.entries.is_empty() {
+                    0
+                } else {
+                    (self.total_length() / self.entries.len() as i64) as i32
+                }
+            }
+
+            fn name(&self) -> &str {
+                "rps-test"
+            }
+
+            fn is_protein(&self) -> bool {
+                true
+            }
+
+            fn seq_len(&self, oid: i32) -> i32 {
+                self.entries
+                    .get(oid as usize)
+                    .and_then(|entry| entry.as_ref())
+                    .map_or(0, |seq| seq.len() as i32)
+            }
+
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                self.encodings.lock().unwrap().push(arg.encoding);
+                self.entries
+                    .get(arg.oid as usize)
+                    .and_then(|entry| entry.as_ref())
+                    .map(|seq| crate::seqsrc::SeqData {
+                        sequence: seq.clone(),
+                        length: seq.len() as i32,
+                    })
+            }
+
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(0..self.entries.len() as i32)
+            }
+        }
+
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![vec![-8; 28]; 24],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        for (word, corrected_query_offset) in [([1u8, 2, 3], 4), ([4u8, 5, 6], 11)] {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut valid_profile = vec![25u8; 24];
+        valid_profile[3..6].copy_from_slice(&[1, 2, 3]);
+        valid_profile[10..13].copy_from_slice(&[4, 5, 6]);
+        for (subject_offset, residue) in valid_profile.iter().enumerate().take(13).skip(3) {
+            let query_offset = subject_offset + 1;
+            lookup.rps_pssm[query_offset][*residue as usize] = 5;
+        }
+
+        let seq_src = TestRpsSeqSrc {
+            entries: vec![Some(vec![1, 2]), None, Some(valid_profile)],
+            encodings: std::sync::Mutex::new(Vec::new()),
+        };
+        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+
+        assert_eq!(
+            blast_rps_seqsrc_scan_write_hsp_stream(
+                &mut lookup,
+                Some(&seq_src),
+                &stream,
+                crate::program::RPS_BLAST,
+                0,
+                40,
+                6,
+                1,
+                4,
+                Some(&mut init_hitlist),
+                Some(&mut stats),
+            ),
+            0
+        );
+        assert_eq!(init_hitlist.total(), 1);
+        assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.init_extends, 1);
+        assert_eq!(stats.good_init_extends, 1);
+        assert_eq!(
+            *seq_src.encodings.lock().unwrap(),
+            vec![
+                crate::seqsrc::SeqEncoding::Protein,
+                crate::seqsrc::SeqEncoding::Protein,
+                crate::seqsrc::SeqEncoding::Protein,
+            ]
+        );
+
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[32]);
+        let rps_info = crate::hspstream::RpsTracebackInfo {
+            profile_header: crate::hspstream::RpsProfileHeader {
+                magic_number: crate::hspstream::RPS_MAGIC_NUM,
+                num_profiles: 3,
+                start_offsets: vec![0, 0, 0, 12],
+                pssm_values: (0..(13 * 26)).collect(),
+            },
+            freq_ratios_header: None,
+            karlin_k: vec![0.1, 0.2, 0.3],
+        };
+        let mut results = crate::hspstream::HspResults::new(1);
+        let mut callback_profiles = Vec::new();
+
+        let status = crate::hspstream::s_rps_compute_traceback(
+            crate::program::RPS_BLAST,
+            Some(&stream),
+            Some(&query_info),
+            Some(&rps_info),
+            &crate::options::HitSavingOptions {
+                hitlist_size: 10,
+                ..Default::default()
+            },
+            Some(&mut results),
+            |hsp_list, _gap_data, profile_index, karlin_k| {
+                callback_profiles.push(profile_index);
+                assert_eq!(profile_index, 2);
+                assert!((karlin_k.expect("RPS K") - 0.36).abs() < 1e-12);
+                assert_eq!(hsp_list.oid, 2);
+                assert_eq!(hsp_list.hsps[0].score, 50);
+                0
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(callback_profiles, vec![2]);
+        let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
+        assert_eq!(hitlist.hsp_lists.len(), 1);
+        assert_eq!(hitlist.hsp_lists[0].oid, 2);
+        assert_eq!(hitlist.hsp_lists[0].hsps[0].query_offset, 3);
+        assert_eq!(
+            blast_rps_seqsrc_scan_write_hsp_stream(
+                &mut lookup,
+                None,
+                &stream,
+                crate::program::RPS_BLAST,
+                0,
+                40,
+                6,
+                1,
+                4,
+                None,
+                None,
+            ),
+            -1
         );
     }
 

@@ -104,8 +104,8 @@ pub use api::{
     TranslatedFrame,
 };
 
-// Re-export core types at crate root (matching old API)
-pub use db::BlastDb;
+// Re-export core types and database builders at crate root (matching old API)
+pub use db::{make_db, make_nucleotide_db, make_protein_db, BlastDb, DbType};
 pub use link_hsps::{
     blast_link_hsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
     LinkScoreBlock,
