@@ -380,6 +380,89 @@ fn assert_blastp_subject_outfmt_matches_ncbi(
     );
 }
 
+fn assert_blastx_subject_outfmt_matches_ncbi(
+    query_fasta: &str,
+    subject_fasta: &str,
+    outfmt: &str,
+    rust_extra_args: &[&str],
+    ncbi_extra_args: &[&str],
+) {
+    if !std::path::Path::new("/usr/bin/blastx").exists() {
+        eprintln!("Skipping: /usr/bin/blastx not found");
+        return;
+    }
+    let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("Skipping: set BLAST_RS_CLI_BIN or CARGO_BIN_EXE_blast-cli to run CLI parity");
+        return;
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let rust_out = tmp.path().join("rust.tsv");
+    let ncbi_out = tmp.path().join("ncbi.tsv");
+    std::fs::write(&query, query_fasta).expect("write query FASTA");
+    std::fs::write(&subject, subject_fasta).expect("write subject FASTA");
+
+    let mut rust_cmd = std::process::Command::new(blast_cli);
+    rust_cmd
+        .arg("blastx")
+        .arg("--query")
+        .arg(&query)
+        .arg("--subject")
+        .arg(&subject)
+        .arg("--outfmt")
+        .arg(outfmt)
+        .arg("--num_threads")
+        .arg("1")
+        .arg("--out")
+        .arg(&rust_out);
+    for arg in rust_extra_args {
+        rust_cmd.arg(arg);
+    }
+    let rust_status = rust_cmd
+        .status()
+        .expect("run blast-cli blastx subject parity");
+    assert!(
+        rust_status.success(),
+        "blast-cli blastx exited with {}",
+        rust_status
+    );
+
+    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastx");
+    ncbi_cmd
+        .arg("-query")
+        .arg(&query)
+        .arg("-subject")
+        .arg(&subject)
+        .arg("-outfmt")
+        .arg(outfmt)
+        .arg("-num_threads")
+        .arg("1")
+        .arg("-out")
+        .arg(&ncbi_out);
+    for arg in ncbi_extra_args {
+        ncbi_cmd.arg(arg);
+    }
+    let ncbi_status = ncbi_cmd.status().expect("run NCBI blastx subject parity");
+    assert!(
+        ncbi_status.success(),
+        "NCBI blastx exited with {}",
+        ncbi_status
+    );
+
+    let rust = std::fs::read(&rust_out).expect("read rust output");
+    let ncbi = std::fs::read(&ncbi_out).expect("read ncbi output");
+    assert_eq!(
+        rust, ncbi,
+        "Rust blastx --subject output differs from NCBI\nRust: {:?}\nNCBI: {:?}",
+        rust_out, ncbi_out
+    );
+}
+
 fn assert_blastp_db_outfmt_matches_ncbi(
     query_fasta: &str,
     db_fasta: &str,
@@ -34065,4 +34148,21 @@ fn test_core_nt_alias_primer_taxonomy_outfmt_matches_ncbi() {
         return;
     }
     assert_core_nt_taxonomy_outfmt_matches_ncbi("");
+}
+
+/// blastx parity against NCBI on a clean, gapless full-length hit: a DNA query
+/// whose frame +1 translates exactly to the protein subject.
+///
+/// The alignment matches NCBI exactly (coords, %id, length, bitscore), but the
+/// e-value / effective-search-space currently does NOT (blastp on the same
+/// protein is byte-exact, so the gap is blastx-specific: the length adjustment
+/// for translated nucleotide queries). This is an ACTIVE parity test pinning
+/// that bug — it is expected to fail until blast-rs's blastx statistics match
+/// NCBI. The byte-exact `assert_eq!` covers the e-value column.
+#[test]
+fn blastx_subject_ncbi_parity_exact_full_length_hit() {
+    // frame +1 translation == subject protein MAKELVNRICELLDKQGITPEQAFRELGFSVNTLYRWRKQ
+    let query = ">q1\nATGGCTAAAGAACTGGTTAACCGTATTTGCGAACTGCTGGATAAACAGGGTATTACCCCGGAACAGGCTTTTCGTGAACTGGGTTTTAGCGTTAACACCCTGTATCGTTGGCGTAAACAG\n";
+    let subject = ">s1 test protein\nMAKELVNRICELLDKQGITPEQAFRELGFSVNTLYRWRKQ\n";
+    assert_blastx_subject_outfmt_matches_ncbi(query, subject, "6", &[], &[]);
 }
