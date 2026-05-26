@@ -3693,7 +3693,14 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         &mut query_info,
     );
 
-    let mut results = vec![None; db.num_oids as usize];
+    // Concatenate all six frames into ONE lookup table and scan each subject
+    // once, replacing the per-frame DB rescan. Frames are separated by
+    // PROTEIN_CONCAT_SENTINEL (>= AA_SIZE, so boundary-spanning words are
+    // skipped and ungapped extension stops at the boundary); each hit is
+    // attributed back to its frame via bsearch_context_info, then the unchanged
+    // per-frame gapped + coordinate pipeline runs. blastx uses a single
+    // x_drop_ungapped, so the shared scan is byte-identical to the per-frame one.
+    let mut frame_plans: Vec<(usize, usize, i32, f64)> = Vec::new();
     for ctx in 0..crate::util::NUM_FRAMES {
         let frame = crate::util::blast_context_to_frame(ctx as u32);
         let begin = (frame_offsets[ctx] + 1) as usize;
@@ -3709,55 +3716,77 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             continue;
         }
         let search_space = query_info.contexts[ctx].eff_searchsp.max(1) as f64;
-        // Build lookup table once per frame (not per subject).
-        let lookup_table =
-            crate::protein_lookup::ProteinLookupTable::build(prot, word_size, &matrix, threshold);
+        frame_plans.push((begin, end, frame, search_space));
+    }
+    let frame_lengths: Vec<usize> = frame_plans.iter().map(|&(b, e, _, _)| e - b).collect();
+    let attrib_info = crate::queryinfo::QueryInfo::new_blastp(&frame_lengths);
+    let mut concat: Vec<u8> =
+        vec![crate::protein_lookup::PROTEIN_CONCAT_SENTINEL; attrib_info.seq_buf_len().max(1)];
+    for (fi, &(b, e, _, _)) in frame_plans.iter().enumerate() {
+        let off = attrib_info.contexts[fi].query_offset as usize;
+        concat[off..off + (e - b)].copy_from_slice(&translation_buffer[b..e]);
+    }
+    let concat_lookup = if frame_plans.is_empty() {
+        None
+    } else {
+        Some(crate::protein_lookup::ProteinLookupTable::build(
+            &concat, word_size, &matrix, threshold,
+        ))
+    };
 
-        let blastx_seed_cutoff = protein_prelim_seed_cutoff(
-            gap_trigger_raw,
-            prelim_evalue,
-            &prot_kbp,
-            gumbel_blk.as_ref(),
-            prot.len() as i32,
-            min_subject_length,
-            search_space,
+    let mut results = vec![None; db.num_oids as usize];
+    let mut scratch = ProteinScratch::new();
+    if let Some(concat_lookup) = concat_lookup.as_ref() {
+    for oid in 0..db.num_oids {
+        let subj_raw = db.get_sequence(oid);
+        let subj_len = db.get_seq_len(oid) as usize;
+        if subj_len == 0 {
+            continue;
+        }
+        let subj_aa = &subj_raw[..subj_len];
+        scratch.diag_buf.clear();
+        let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse(
+            &concat, subj_aa, &matrix, concat_lookup, x_drop_ungapped,
+            params.two_hit_window as i32, &mut scratch.diag_buf,
         );
-        let mut scratch = ProteinScratch::new();
-        for oid in 0..db.num_oids {
-            let subj_raw = db.get_sequence(oid);
-            let subj_len = db.get_seq_len(oid) as usize;
-            if subj_len == 0 {
+        if scan_hits.is_empty() {
+            continue;
+        }
+        let mut per_frame: Vec<Vec<crate::protein_lookup::ProteinHit>> =
+            (0..frame_plans.len()).map(|_| Vec::new()).collect();
+        for mut h in scan_hits {
+            let fi = crate::queryinfo::bsearch_context_info(h.query_start as i32, &attrib_info);
+            if fi < 0 || fi as usize >= frame_plans.len() {
                 continue;
             }
-            let subj_aa = &subj_raw[..subj_len];
-
+            let fi = fi as usize;
+            let off = attrib_info.contexts[fi].query_offset as usize;
+            h.query_start -= off;
+            h.query_end = h.query_end.saturating_sub(off);
+            h.gapped_start_q = h.gapped_start_q.saturating_sub(off);
+            per_frame[fi].push(h);
+        }
+        for (fi, &(begin, end, frame, search_space)) in frame_plans.iter().enumerate() {
+            let frame_ungapped = std::mem::take(&mut per_frame[fi]);
+            if frame_ungapped.is_empty() {
+                continue;
+            }
+            let prot: &[u8] = &translation_buffer[begin..end];
+            let blastx_seed_cutoff = protein_prelim_seed_cutoff(
+                gap_trigger_raw, prelim_evalue, &prot_kbp, gumbel_blk.as_ref(),
+                prot.len() as i32, min_subject_length, search_space,
+            );
             let phits = if params.ungapped {
-                // NCBI ungapped mode: keep ALL ungapped HSPs from the scan;
-                // the evalue filter below handles the threshold check.
-                protein_alignment_hits_ungapped_only(
-                    prot,
-                    &subj_aa,
-                    &matrix,
-                    &lookup_table,
-                    x_drop_ungapped,
-                    params.two_hit_window as i32,
-                    1,
-                    &mut scratch,
-                )
+                let mut ug = frame_ungapped;
+                ug.iter_mut().filter(|uh| uh.score >= 1).for_each(|uh| {
+                    uh.qseq = Some(prot[uh.query_start..uh.query_end].iter().map(|&aa| ncbistdaa_to_aminoacid_char(aa)).collect());
+                    uh.sseq = Some(subj_aa[uh.subject_start..uh.subject_end].iter().map(|&aa| ncbistdaa_to_aminoacid_char(aa)).collect());
+                });
+                ug
             } else {
-                protein_alignment_hits(
-                    prot,
-                    &subj_aa,
-                    &matrix,
-                    &lookup_table,
-                    x_drop_ungapped,
-                    params.two_hit_window as i32,
-                    params.gap_open,
-                    params.gap_extend,
-                    x_drop_gapped,
-                    x_drop_final,
-                    blastx_seed_cutoff,
-                    &mut scratch,
+                blast_get_gapped_score(
+                    prot, subj_aa, &matrix, &frame_ungapped, params.gap_open, params.gap_extend,
+                    x_drop_gapped, x_drop_final, blastx_seed_cutoff.max(1), &mut scratch,
                 )
             };
             if phits.is_empty() {
@@ -3924,6 +3953,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 );
             }
         }
+    }
     }
 
     let mut results: Vec<SearchResult> = results.into_iter().flatten().collect();
