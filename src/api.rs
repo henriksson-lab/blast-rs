@@ -2279,153 +2279,30 @@ impl BlastDbBuilder {
 /// Run a blastp search (protein query vs protein database).
 /// blast-rs: Public blastp API pipeline assembled from ported lower-level pieces;
 /// not a direct NCBI C port.
-pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-
-    let query_aa = encode_ncbistdaa_sequence(query);
-    let query_aa_masked = if params.filter_low_complexity {
-        encode_protein_query(
-            query,
-            true,
-            params.seg_window,
-            params.seg_locut,
-            params.seg_hicut,
-        )
-    } else {
-        query_aa.clone()
-    };
-    if crate::composition::blast_read_aa_composition(&query_aa_masked, AA_SIZE).1 == 0 {
-        return Vec::new();
-    }
-
-    let matrix = *get_matrix(params.matrix);
-    let word_size = params.word_size.clamp(2, 6);
-    let threshold = params
-        .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTP));
-
-    let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
-
-    // Convert bit-score x_dropoff values to raw scores.
-    // NCBI uses UNGAPPED KBP for ungapped x_drop, GAPPED KBP for gapped x_drop.
-    // Ungapped path: `ceil()` then Int4 cast (`blast_parameters.c:221`).
-    // Gapped path: plain `(Int4)` cast — truncation toward zero
-    // (`blast_parameters.c:457-463`).
-    let ln2 = crate::math::NCBIMATH_LN2;
-    // NCBI's `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`) populates
-    // `sbp->kbp_std[context]` from the **query's actual amino-acid composition**,
-    // not the ideal Robinson background. For most queries the result is close
-    // to the ideal, but the small drift in lambda/logK shifts `gap_trigger` by
-    // 1 raw score unit — enough to swing boundary hits like seqp's DAA02208
-    // (max ungapped score 40 vs ideal cutoff 41 vs query-specific cutoff 40).
-    let matrix_name = protein_matrix_name(params.matrix);
-    let ungapped_kbp = crate::stat::query_specific_protein_ungapped_kbp_for_matrix(
-        &query_aa,
-        matrix_name,
-        &matrix,
-    );
-    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
-    // NCBI's PRELIMINARY gapped extension uses `gap_x_dropoff` (15 bits for
-    // protein default) — `blast_parameters.c:457-463` truncates with `(Int4)`.
-    // The TRACEBACK phase then re-extends with the larger `gap_x_dropoff_final`
-    // (25 bits). Using `x_drop_final` here makes our preliminary gapped DP
-    // far more permissive than NCBI's, finding gap-rich alignments NCBI rejects
-    // (e.g. NP_777001 score=50 vs NCBI's 46).
-    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda) as i32;
-    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
-
-    // Gap trigger: NCBI `blast_parameters.c:343`:
-    //   (Int4)((gap_trigger * NCBIMATH_LN2 + kbp->logK) / kbp->Lambda)
-    // where `kbp` is the UNGAPPED KBP (per-context, derived from query composition).
-    let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
-        / ungapped_kbp.lambda) as i32;
-
-    let total_subj_len: usize = (0..db.num_oids)
-        .map(|oid| db.get_seq_len(oid) as usize)
-        .sum();
-    let stats_db_len = statistical_db_length(params, total_subj_len as i64);
-    // NCBI uses MIN subject length (not average) for `cutoff_score_max`
-    // calculation when gbp is filled (`blast_setup.c:970`). Compute it here
-    // and reuse for the per-OID seed cutoff.
-    // NCBI's `BlastSeqSrcGetMinSeqLen` returns the DB's `m_MinLen` from
-    // metadata, defaulting to `BLAST_SEQSRC_MINLENGTH = 10` when the
-    // metadata isn't stored (V4 DBs don't store min_seq_len, only
-    // max_seq_len — see `seqdbimpl.cpp:131-136`). Our V4 DB matches:
-    // we don't have a stored min_seq_len, so faithfully default to 10.
-    // (Computing actual min from scan diverges from NCBI: e.g. seqp's
-    // shortest seq is 7 aa but NCBI uses 10, giving different
-    // SpougeEtoS cutoffs.)
-    const BLAST_SEQSRC_MINLENGTH: i32 = 10;
-    let min_subject_length: i32 = BLAST_SEQSRC_MINLENGTH;
-
-    let (_len_adj, search_space) = protein_api_search_space(
-        params,
-        query_aa.len(),
-        stats_db_len,
-        db.num_oids as i32,
-        &prot_kbp,
-    );
-
-    // Build Gumbel block for Spouge FSC e-value (per-subject length correction).
-    // When the user overrides `-searchsp`, NCBI bypasses the per-subject Spouge
-    // calculation and uses the simple Karlin formula `K * S * exp(-Lambda*y)`
-    // so the user-supplied search space drives the e-value directly. We mirror
-    // this by zeroing the Gumbel block, which routes every per-pair evalue
-    // through the `prot_kbp.raw_to_evalue(score, search_space)` branch.
-    let gumbel_blk = if params.effective_search_space > 0 {
-        None
-    } else {
-        protein_gumbel_for_matrix(
-            params.matrix,
-            params.gap_open,
-            params.gap_extend,
-            stats_db_len,
-        )
-    };
-
-    // Build lookup table once per query (not per subject).
-    let lookup_table = crate::protein_lookup::ProteinLookupTable::build(
-        &query_aa_masked,
-        word_size,
-        &matrix,
-        threshold,
-    );
-
-    let max_hsps = params.max_hsps;
-    let evalue_threshold = params.evalue_threshold;
-    let gap_open = params.gap_open;
-    let gap_extend = params.gap_extend;
-    let two_hit_window = params.two_hit_window as i32;
-
-    // Process a single subject OID — extracted so it can be called
-    // either sequentially or in parallel without per-call pool overhead.
-    // `scratch` is a per-thread reusable scratch (see [`ProteinScratch`]).
-    let search_oid = |scratch: &mut ProteinScratch, oid: u32| -> Option<SearchResult> {
-        let subj_raw = db.get_sequence(oid);
-        let subj_len = db.get_seq_len(oid) as usize;
-        if subj_len < word_size {
-            return None;
-        }
-        let subject_accession = db
-            .get_accession(oid)
-            .unwrap_or_else(|| format!("oid_{}", oid));
-
-        // Use length-based slice — no allocation (matches NCBI C approach).
-        // get_sequence() includes trailing sentinel; subj_len excludes it.
-        let subj_aa = &subj_raw[..subj_len];
-
-        scratch.diag_buf.clear();
-        let ungapped_hits = crate::protein_lookup::protein_scan_with_table_reuse(
-            &query_aa,
-            subj_aa,
-            &matrix,
-            &lookup_table,
-            x_drop_ungapped,
-            two_hit_window,
-            &mut scratch.diag_buf,
-        );
+#[allow(clippy::too_many_arguments)]
+fn process_protein_oid(
+    query_aa: &[u8],
+    ungapped_kbp: &crate::stat::KarlinBlk,
+    gap_trigger_raw: i32,
+    search_space: f64,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    prot_kbp: &crate::stat::KarlinBlk,
+    gumbel_blk: &Option<crate::stat::GumbelBlk>,
+    gap_open: i32,
+    gap_extend: i32,
+    x_drop_gapped: i32,
+    x_drop_final: i32,
+    min_subject_length: i32,
+    evalue_threshold: f64,
+    params: &SearchParams,
+    db: &BlastDb,
+    oid: u32,
+    subj_aa: &[u8],
+    subject_accession: String,
+    ungapped_hits: Vec<crate::protein_lookup::ProteinHit>,
+    scratch: &mut ProteinScratch,
+) -> Option<SearchResult> {
+    let subj_len = subj_aa.len();
         if ungapped_hits.is_empty() {
             return None;
         }
@@ -2683,7 +2560,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         // Full matrix optimization (Blast_CompositionMatrixAdj)
                         let (joint_probs, first_std, second_std) =
                             crate::composition::blosum62_workspace();
-                        let mut adj_matrix = matrix;
+                        let mut adj_matrix = *matrix;
                         // NCBI uses ungappedLambda (0.3176 for BLOSUM62) for matrix scaling,
                         // NOT the gapped lambda. See matrixInfo->ungappedLambda.
                         let ungapped_lambda =
@@ -3006,6 +2883,151 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             hsps,
             taxids: vec![],
         })
+}
+
+pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let query_aa = encode_ncbistdaa_sequence(query);
+    let query_aa_masked = if params.filter_low_complexity {
+        encode_protein_query(
+            query,
+            true,
+            params.seg_window,
+            params.seg_locut,
+            params.seg_hicut,
+        )
+    } else {
+        query_aa.clone()
+    };
+    if crate::composition::blast_read_aa_composition(&query_aa_masked, AA_SIZE).1 == 0 {
+        return Vec::new();
+    }
+
+    let matrix = *get_matrix(params.matrix);
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = params
+        .word_threshold
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTP));
+
+    let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
+
+    // Convert bit-score x_dropoff values to raw scores.
+    // NCBI uses UNGAPPED KBP for ungapped x_drop, GAPPED KBP for gapped x_drop.
+    // Ungapped path: `ceil()` then Int4 cast (`blast_parameters.c:221`).
+    // Gapped path: plain `(Int4)` cast — truncation toward zero
+    // (`blast_parameters.c:457-463`).
+    let ln2 = crate::math::NCBIMATH_LN2;
+    // NCBI's `Blast_ScoreBlkKbpUngappedCalc` (`blast_stat.c:2737`) populates
+    // `sbp->kbp_std[context]` from the **query's actual amino-acid composition**,
+    // not the ideal Robinson background. For most queries the result is close
+    // to the ideal, but the small drift in lambda/logK shifts `gap_trigger` by
+    // 1 raw score unit — enough to swing boundary hits like seqp's DAA02208
+    // (max ungapped score 40 vs ideal cutoff 41 vs query-specific cutoff 40).
+    let matrix_name = protein_matrix_name(params.matrix);
+    let ungapped_kbp = crate::stat::query_specific_protein_ungapped_kbp_for_matrix(
+        &query_aa,
+        matrix_name,
+        &matrix,
+    );
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
+    // NCBI's PRELIMINARY gapped extension uses `gap_x_dropoff` (15 bits for
+    // protein default) — `blast_parameters.c:457-463` truncates with `(Int4)`.
+    // The TRACEBACK phase then re-extends with the larger `gap_x_dropoff_final`
+    // (25 bits). Using `x_drop_final` here makes our preliminary gapped DP
+    // far more permissive than NCBI's, finding gap-rich alignments NCBI rejects
+    // (e.g. NP_777001 score=50 vs NCBI's 46).
+    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda) as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
+
+    // Gap trigger: NCBI `blast_parameters.c:343`:
+    //   (Int4)((gap_trigger * NCBIMATH_LN2 + kbp->logK) / kbp->Lambda)
+    // where `kbp` is the UNGAPPED KBP (per-context, derived from query composition).
+    let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
+        / ungapped_kbp.lambda) as i32;
+
+    let total_subj_len: usize = (0..db.num_oids)
+        .map(|oid| db.get_seq_len(oid) as usize)
+        .sum();
+    let stats_db_len = statistical_db_length(params, total_subj_len as i64);
+    // NCBI uses MIN subject length (not average) for `cutoff_score_max`
+    // calculation when gbp is filled (`blast_setup.c:970`). Compute it here
+    // and reuse for the per-OID seed cutoff.
+    // NCBI's `BlastSeqSrcGetMinSeqLen` returns the DB's `m_MinLen` from
+    // metadata, defaulting to `BLAST_SEQSRC_MINLENGTH = 10` when the
+    // metadata isn't stored (V4 DBs don't store min_seq_len, only
+    // max_seq_len — see `seqdbimpl.cpp:131-136`). Our V4 DB matches:
+    // we don't have a stored min_seq_len, so faithfully default to 10.
+    // (Computing actual min from scan diverges from NCBI: e.g. seqp's
+    // shortest seq is 7 aa but NCBI uses 10, giving different
+    // SpougeEtoS cutoffs.)
+    const BLAST_SEQSRC_MINLENGTH: i32 = 10;
+    let min_subject_length: i32 = BLAST_SEQSRC_MINLENGTH;
+
+    let (_len_adj, search_space) = protein_api_search_space(
+        params,
+        query_aa.len(),
+        stats_db_len,
+        db.num_oids as i32,
+        &prot_kbp,
+    );
+
+    // Build Gumbel block for Spouge FSC e-value (per-subject length correction).
+    // When the user overrides `-searchsp`, NCBI bypasses the per-subject Spouge
+    // calculation and uses the simple Karlin formula `K * S * exp(-Lambda*y)`
+    // so the user-supplied search space drives the e-value directly. We mirror
+    // this by zeroing the Gumbel block, which routes every per-pair evalue
+    // through the `prot_kbp.raw_to_evalue(score, search_space)` branch.
+    let gumbel_blk = if params.effective_search_space > 0 {
+        None
+    } else {
+        protein_gumbel_for_matrix(
+            params.matrix,
+            params.gap_open,
+            params.gap_extend,
+            stats_db_len,
+        )
+    };
+
+    // Build lookup table once per query (not per subject).
+    let lookup_table = crate::protein_lookup::ProteinLookupTable::build(
+        &query_aa_masked,
+        word_size,
+        &matrix,
+        threshold,
+    );
+
+    let max_hsps = params.max_hsps;
+    let evalue_threshold = params.evalue_threshold;
+    let gap_open = params.gap_open;
+    let gap_extend = params.gap_extend;
+    let two_hit_window = params.two_hit_window as i32;
+
+    // Process a single subject OID — extracted so it can be called
+    // either sequentially or in parallel without per-call pool overhead.
+    // `scratch` is a per-thread reusable scratch (see [`ProteinScratch`]).
+    let search_oid = |scratch: &mut ProteinScratch, oid: u32| -> Option<SearchResult> {
+        let subj_raw = db.get_sequence(oid);
+        let subj_len = db.get_seq_len(oid) as usize;
+        if subj_len < word_size {
+            return None;
+        }
+        let subject_accession = db
+            .get_accession(oid)
+            .unwrap_or_else(|| format!("oid_{}", oid));
+        let subj_aa = &subj_raw[..subj_len];
+        scratch.diag_buf.clear();
+        let ungapped_hits = crate::protein_lookup::protein_scan_with_table_reuse(
+            &query_aa, subj_aa, &matrix, &lookup_table, x_drop_ungapped, two_hit_window,
+            &mut scratch.diag_buf,
+        );
+        process_protein_oid(
+            &query_aa, &ungapped_kbp, gap_trigger_raw, search_space, &matrix, &prot_kbp,
+            &gumbel_blk, gap_open, gap_extend, x_drop_gapped, x_drop_final, min_subject_length,
+            evalue_threshold, params, db, oid, subj_aa, subject_accession, ungapped_hits, scratch,
+        )
     };
 
     // Run sequentially or in parallel depending on num_threads/pool. Each
