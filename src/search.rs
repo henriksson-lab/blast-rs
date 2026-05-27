@@ -6029,9 +6029,8 @@ pub fn blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
     let disc_word_size = if word_size == 12 { 12 } else { 11 };
-    let prepared = PreparedBlastnQuery::new(query_plus, query_minus, disc_word_size);
     let subject_packed = crate::encoding::pack_ncbi2na_bases(subject);
-    let mut seeds = disc_megablast_seed_hsps(
+    let seeds = disc_megablast_seed_hsps(
         query_plus,
         query_minus,
         &subject_packed,
@@ -6041,6 +6040,53 @@ pub fn blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
         template_type,
         reward,
     );
+    disc_megablast_gapped_from_seeds(
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
+        subject,
+        disc_word_size,
+        template_length,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        prelim_x_dropoff,
+        traceback_x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        seeds,
+    )
+}
+
+/// Disc-megablast gapped tail: everything after seed generation. Extracted so
+/// the concatenated-query scanner can feed pre-collected per-query seeds (in
+/// local coordinates) through the *unmodified* ungapped + gapped pipeline,
+/// keeping output byte-identical with the per-query path.
+/// blast-rs: refactor-extracted helper, not a direct NCBI C port.
+#[allow(clippy::too_many_arguments)]
+fn disc_megablast_gapped_from_seeds(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    disc_word_size: usize,
+    template_length: i32,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    prelim_x_dropoff: i32,
+    traceback_x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    mut seeds: Vec<SearchHsp>,
+) -> Vec<SearchHsp> {
+    let prepared = PreparedBlastnQuery::new(query_plus, query_minus, disc_word_size);
     seeds.sort_by(score_compare_search_hsps);
 
     let mut candidates = Vec::new();
@@ -6080,6 +6126,196 @@ pub fn blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
         template_length.saturating_mul(reward).saturating_mul(2),
         query_plus != query_plus_nomask || query_minus != query_minus_nomask,
     )
+}
+
+/// Collect disc-megablast seeds for ALL queries from ONE concatenated disc-mb
+/// lookup table per strand, scanning the subject once. Seeds are returned in
+/// LOCAL (per-query) coordinates, in the same per-query order a per-query scan
+/// would produce (the concat table's hash chains preserve each query's relative
+/// position order, and the scan visits the subject in ascending order).
+/// blast-rs: concatenated-query disc-megablast seeding; not a direct NCBI C port.
+#[allow(clippy::too_many_arguments)]
+fn concat_disc_megablast_seed_hsps(
+    concat: &ConcatenatedBlastnQuery,
+    per_query_plus: &[&[u8]],
+    per_query_minus: &[&[u8]],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: i32,
+    template_length: i32,
+    template_type: i32,
+    reward: i32,
+) -> Vec<Vec<SearchHsp>> {
+    let n = concat.num_queries();
+    let mut per_query: Vec<Vec<SearchHsp>> = vec![Vec::new(); n];
+    append_concat_disc_seeds(
+        &mut per_query,
+        0,
+        concat,
+        &concat.plus_buf,
+        per_query_plus,
+        subject_packed,
+        subject_len,
+        word_size,
+        template_length,
+        template_type,
+        reward,
+    );
+    append_concat_disc_seeds(
+        &mut per_query,
+        1,
+        concat,
+        &concat.minus_buf,
+        per_query_minus,
+        subject_packed,
+        subject_len,
+        word_size,
+        template_length,
+        template_type,
+        reward,
+    );
+    per_query
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_concat_disc_seeds(
+    per_query_seeds: &mut [Vec<SearchHsp>],
+    context: i32,
+    concat: &ConcatenatedBlastnQuery,
+    concat_buf: &[u8],
+    per_query_strand: &[&[u8]],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: i32,
+    template_length: i32,
+    template_type: i32,
+    reward: i32,
+) {
+    if concat_buf.is_empty() || template_length <= 0 {
+        return;
+    }
+    let mut table = empty_disc_megablast_lookup_table(template_length);
+    let options = crate::options::LookupTableOptions {
+        word_size,
+        mb_template_length: template_length,
+        mb_template_type: template_type,
+        ..crate::options::LookupTableOptions::default()
+    };
+    if crate::lookup::s_fill_disc_mb_table(
+        concat_buf,
+        &[crate::util::SSeqRange {
+            left: 0,
+            right: concat_buf.len() as i32 - 1,
+        }],
+        &mut table,
+        &options,
+    ) != 0
+    {
+        return;
+    }
+
+    let template_len = template_length as usize;
+    for pair in crate::lookup::s_mb_disc_word_scan_subject(
+        &table,
+        subject_packed,
+        subject_len,
+        0,
+        subject_len,
+    ) {
+        let q = pair.query_offset.max(0) as usize;
+        let s = pair.subject_offset.max(0) as usize;
+        // Sentinel windows are never indexed by `s_fill_disc_mb_table`, so a
+        // template at `q` lies entirely within one query's bases; resolve it.
+        let (qi, local_q) = concat.resolve(q);
+        let qlen = per_query_strand[qi].len();
+        if local_q + template_len > qlen || s + template_len > subject_len {
+            continue;
+        }
+        per_query_seeds[qi].push(SearchHsp {
+            query_start: local_q as i32,
+            query_end: (local_q + template_len) as i32,
+            subject_start: s as i32,
+            subject_end: (s + template_len) as i32,
+            score: reward.saturating_mul(template_length),
+            bit_score: 0.0,
+            evalue: 0.0,
+            num_ident: template_length,
+            align_length: template_length,
+            mismatches: 0,
+            gap_opens: 0,
+            context,
+            qseq: None,
+            sseq: None,
+        });
+    }
+}
+
+/// Single-pass concatenated disc-megablast gapped search over one subject.
+/// Builds one disc-mb lookup per strand over the concatenated query, scans the
+/// subject once, attributes seeds per query, then replays each query's seeds
+/// through the unmodified disc-megablast gapped tail. Returns `(query_idx,
+/// hsps)` for queries with at least one gapped HSP.
+#[allow(clippy::too_many_arguments)]
+pub fn blastn_gapped_search_concat_disc_megablast(
+    concat: &ConcatenatedBlastnQuery,
+    per_query_plus: &[&[u8]],
+    per_query_minus: &[&[u8]],
+    per_query_plus_nomask: &[&[u8]],
+    per_query_minus_nomask: &[&[u8]],
+    per_query_stats: &[ConcatQueryStats],
+    subject_decoded: &[u8],
+    word_size: usize,
+    template_length: i32,
+    template_type: i32,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+) -> Vec<(usize, Vec<SearchHsp>)> {
+    let disc_word_size = if word_size == 12 { 12 } else { 11 };
+    let subject_packed = crate::encoding::pack_ncbi2na_bases(subject_decoded);
+    let subject_len = subject_decoded.len();
+    let per_query_seeds = concat_disc_megablast_seed_hsps(
+        concat,
+        per_query_plus,
+        per_query_minus,
+        &subject_packed,
+        subject_len,
+        disc_word_size as i32,
+        template_length,
+        template_type,
+        reward,
+    );
+    let mut results: Vec<(usize, Vec<SearchHsp>)> = Vec::new();
+    for (qi, seeds) in per_query_seeds.into_iter().enumerate() {
+        if seeds.is_empty() {
+            continue;
+        }
+        let stats = &per_query_stats[qi];
+        let hsps = disc_megablast_gapped_from_seeds(
+            per_query_plus[qi],
+            per_query_minus[qi],
+            per_query_plus_nomask[qi],
+            per_query_minus_nomask[qi],
+            subject_decoded,
+            disc_word_size,
+            template_length,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            stats.gapped_x_dropoff,
+            stats.gapped_x_dropoff_final,
+            &stats.kbp,
+            stats.search_space,
+            stats.evalue_threshold,
+            seeds,
+        );
+        if !hsps.is_empty() {
+            results.push((qi, hsps));
+        }
+    }
+    results
 }
 
 fn disc_megablast_seed_hsps(

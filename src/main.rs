@@ -7363,29 +7363,47 @@ fn run_blastn_rust(
             .map(|prepared| prepared.last_hit_scratch())
             .collect();
 
-        // Concatenated single-pass megablast scan: scan each subject ONCE over
-        // all queries instead of rescanning per query. Eligible only for the
-        // contiguous-megablast path without per-query subject re-decoding
-        // (ungapped / DC-megablast / lcase masking all stay on the per-query
-        // path, as do subjects with ambiguities or very long subjects that need
-        // chunked scanning).
-        let concat_eligible = use_contiguous_megablast_lookup
-            && !args.ungapped
+        // Concatenated single-pass scan: scan each subject ONCE over all queries
+        // instead of rescanning per query. Eligible for any contiguous-word
+        // gapped path — both megablast AND regular blastn (the concat candidate
+        // scan re-verifies the full configured word, so the verified hit SET is
+        // invariant to the lookup-word width; the replay uses each query's own
+        // prepared lookup, so the per-diagonal extension is byte-identical to the
+        // per-query path). Still excluded: ungapped, DC-megablast (needs
+        // discontiguous-template verification), and lcase masking (per-query
+        // subject re-decode). Subjects with ambiguities fall through to the
+        // per-query loop at scan time.
+        let contiguous_concat_eligible = !args.ungapped
             && !use_dc_megablast_template
             && !args.lcase_masking
             && encoded_queries.len() >= 2
             && std::env::var_os("BLAST_RS_NO_CONCAT").is_none();
-        let concat_query = if concat_eligible {
+        // DC-megablast uses its own discontiguous-template lookup. The concat
+        // path builds one disc-mb table over the concatenated query, scans the
+        // subject once, attributes seeds per query, then replays each query's
+        // seeds through the unmodified disc-mb gapped tail. Ambiguity subjects
+        // are handled by decoding (the disc path already decodes the subject).
+        let disc_concat_eligible = use_dc_megablast_template
+            && !args.ungapped
+            && !args.lcase_masking
+            && encoded_queries.len() >= 2
+            && std::env::var_os("BLAST_RS_NO_CONCAT").is_none();
+        let any_concat = contiguous_concat_eligible || disc_concat_eligible;
+        let concat_query = if any_concat {
             let plus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect();
             let minus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect();
             Some(blast_rs::search::ConcatenatedBlastnQuery::new(&plus, &minus))
         } else {
             None
         };
-        let concat_lookup = concat_query.as_ref().map(|cq| {
-            blast_rs::search::PreparedConcatenatedBlastn::new_megablast(cq, word_size)
-        });
-        let concat_stats: Vec<blast_rs::search::ConcatQueryStats> = if concat_eligible {
+        let concat_lookup = if contiguous_concat_eligible {
+            concat_query.as_ref().map(|cq| {
+                blast_rs::search::PreparedConcatenatedBlastn::new_megablast(cq, word_size)
+            })
+        } else {
+            None
+        };
+        let concat_stats: Vec<blast_rs::search::ConcatQueryStats> = if any_concat {
             encoded_queries
                 .iter()
                 .map(|eq| blast_rs::search::ConcatQueryStats {
@@ -7400,12 +7418,22 @@ fn run_blastn_rust(
         } else {
             Vec::new()
         };
-        let concat_plus_nomask: Vec<&[u8]> = if concat_eligible {
+        let concat_plus_masked: Vec<&[u8]> = if any_concat {
+            encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect()
+        } else {
+            Vec::new()
+        };
+        let concat_minus_masked: Vec<&[u8]> = if any_concat {
+            encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect()
+        } else {
+            Vec::new()
+        };
+        let concat_plus_nomask: Vec<&[u8]> = if any_concat {
             encoded_queries.iter().map(|eq| &eq.plus_nomask[..]).collect()
         } else {
             Vec::new()
         };
-        let concat_minus_nomask: Vec<&[u8]> = if concat_eligible {
+        let concat_minus_nomask: Vec<&[u8]> = if any_concat {
             encoded_queries.iter().map(|eq| &eq.minus_nomask[..]).collect()
         } else {
             Vec::new()
@@ -7518,6 +7546,63 @@ fn run_blastn_rust(
                                 profile_ambiguity_rerun_ms - oid_ambiguity_rerun_ms_before,
                                 profile_ambiguity_rerun_count - oid_ambiguity_rerun_count_before
                             );
+                        }
+                        continue;
+                    }
+                }
+
+                // DC-megablast concat fast path: one disc-mb scan over all
+                // queries for this subject (decoded, with ambiguity overlay),
+                // byte-identical to the per-query disc-megablast path.
+                if disc_concat_eligible {
+                    if let Some(cq) = concat_query.as_ref() {
+                        let subject_decoded = if let Some(amb) = ambiguity_data {
+                            blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                packed, seq_len, amb,
+                            )
+                        } else {
+                            blast_rs::search::decode_packed_ncbi2na(packed, seq_len)
+                        };
+                        let disc_results =
+                            blast_rs::search::blastn_gapped_search_concat_disc_megablast(
+                                cq,
+                                &concat_plus_masked,
+                                &concat_minus_masked,
+                                &concat_plus_nomask,
+                                &concat_minus_nomask,
+                                &concat_stats,
+                                &subject_decoded,
+                                word_size,
+                                dc_template_length.unwrap(),
+                                dc_template_type.unwrap(),
+                                reward,
+                                penalty,
+                                gapopen,
+                                gapextend,
+                            );
+                        let mut results = Vec::new();
+                        for (qi, mut hsps) in disc_results {
+                            let eq = &encoded_queries[qi];
+                            hsps.retain(|h| h.score >= eq.cutoff_score);
+                            if do_sum_stats && hsps.len() > 1 {
+                                apply_blastn_linked_sum_stats_to_hsps(
+                                    &mut hsps,
+                                    eq.seq_len,
+                                    seq_len as i32,
+                                    &eq.kbp_plus,
+                                    &eq.kbp_minus,
+                                    eq.search_space,
+                                    eq.search_space_minus,
+                                    eq.len_adj_plus,
+                                    eq.len_adj_minus,
+                                );
+                            }
+                            if !hsps.is_empty() {
+                                results.push((qi, oid, hsps));
+                            }
+                        }
+                        if !results.is_empty() {
+                            collected.update_subject_results(results);
                         }
                         continue;
                     }
@@ -7841,6 +7926,79 @@ fn run_blastn_rust(
             })
             .collect();
 
+        // Concatenated single-pass scan (same eligibility/semantics as the
+        // single-threaded branch above). Built once, shared read-only across the
+        // per-OID rayon tasks; each task runs one concat scan over all queries
+        // for its subject instead of rescanning the subject per query.
+        let contiguous_concat_eligible = !args.ungapped
+            && !use_dc_megablast_template
+            && !args.lcase_masking
+            && encoded_queries.len() >= 2
+            && std::env::var_os("BLAST_RS_NO_CONCAT").is_none();
+        // DC-megablast uses its own discontiguous-template lookup. The concat
+        // path builds one disc-mb table over the concatenated query, scans the
+        // subject once, attributes seeds per query, then replays each query's
+        // seeds through the unmodified disc-mb gapped tail. Ambiguity subjects
+        // are handled by decoding (the disc path already decodes the subject).
+        let disc_concat_eligible = use_dc_megablast_template
+            && !args.ungapped
+            && !args.lcase_masking
+            && encoded_queries.len() >= 2
+            && std::env::var_os("BLAST_RS_NO_CONCAT").is_none();
+        let any_concat = contiguous_concat_eligible || disc_concat_eligible;
+        let concat_query = if any_concat {
+            let plus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect();
+            let minus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect();
+            Some(blast_rs::search::ConcatenatedBlastnQuery::new(&plus, &minus))
+        } else {
+            None
+        };
+        let concat_lookup = if contiguous_concat_eligible {
+            concat_query.as_ref().map(|cq| {
+                blast_rs::search::PreparedConcatenatedBlastn::new_megablast(cq, word_size)
+            })
+        } else {
+            None
+        };
+        let concat_stats: Vec<blast_rs::search::ConcatQueryStats> = if any_concat {
+            encoded_queries
+                .iter()
+                .map(|eq| blast_rs::search::ConcatQueryStats {
+                    kbp: eq.kbp_plus.clone(),
+                    search_space: eq.search_space,
+                    evalue_threshold: evalue,
+                    ungapped_x_dropoff: eq.ungapped_x_dropoff,
+                    gapped_x_dropoff: eq.gapped_x_dropoff,
+                    gapped_x_dropoff_final: eq.gapped_x_dropoff_final,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let concat_plus_masked: Vec<&[u8]> = if any_concat {
+            encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect()
+        } else {
+            Vec::new()
+        };
+        let concat_minus_masked: Vec<&[u8]> = if any_concat {
+            encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect()
+        } else {
+            Vec::new()
+        };
+        let concat_plus_nomask: Vec<&[u8]> = if any_concat {
+            encoded_queries.iter().map(|eq| &eq.plus_nomask[..]).collect()
+        } else {
+            Vec::new()
+        };
+        let concat_minus_nomask: Vec<&[u8]> = if any_concat {
+            encoded_queries.iter().map(|eq| &eq.minus_nomask[..]).collect()
+        } else {
+            Vec::new()
+        };
+        let concat_refs = concat_query
+            .as_ref()
+            .zip(concat_lookup.as_ref());
+
         let mut collected =
             BlastnHitListAccumulator::new(encoded_queries.len(), prelim_hitlist_size);
         for (volume_idx, (start_oid, end_oid)) in db.volume_oid_ranges().into_iter().enumerate() {
@@ -7875,6 +8033,131 @@ fn run_blastn_rust(
                                 let seq_len = seq_len as usize;
                                 let ambiguity_data =
                                     db.get_volume_ambiguity_data(volume_idx, local_oid);
+
+                                // Fast path: one concatenated scan over all
+                                // queries for this subject (byte-identical to the
+                                // per-query loop; see single-threaded branch).
+                                // Subjects with ambiguities fall through.
+                                if let Some((cq, cl)) = concat_refs {
+                                    if ambiguity_data.is_none() {
+                                        let mut per_query_combined: Vec<
+                                            Vec<blast_rs::search::SearchHsp>,
+                                        > = vec![Vec::new(); encoded_queries.len()];
+                                        for (chunk_start, chunk_end) in
+                                            blast_db_subject_chunks(seq_len)
+                                        {
+                                            let chunk_packed =
+                                                packed_subject_chunk(packed, chunk_start, chunk_end);
+                                            let chunk_results =
+                                                blast_rs::search::blastn_gapped_search_concat_megablast(
+                                                    cq,
+                                                    cl,
+                                                    &prepared_queries,
+                                                    &concat_plus_nomask,
+                                                    &concat_minus_nomask,
+                                                    &concat_stats,
+                                                    chunk_packed,
+                                                    chunk_end - chunk_start,
+                                                    reward,
+                                                    penalty,
+                                                    gapopen,
+                                                    gapextend,
+                                                );
+                                            for (qi, hsps) in chunk_results {
+                                                per_query_combined[qi]
+                                                    .extend(offset_subject_hsps(hsps, chunk_start));
+                                            }
+                                        }
+                                        let mut results = Vec::new();
+                                        for (qi, mut hsps) in
+                                            per_query_combined.into_iter().enumerate()
+                                        {
+                                            if hsps.is_empty() {
+                                                continue;
+                                            }
+                                            let eq = &encoded_queries[qi];
+                                            hsps.retain(|h| h.score >= eq.cutoff_score);
+                                            if do_sum_stats && hsps.len() > 1 {
+                                                apply_blastn_linked_sum_stats_to_hsps(
+                                                    &mut hsps,
+                                                    eq.seq_len,
+                                                    seq_len as i32,
+                                                    &eq.kbp_plus,
+                                                    &eq.kbp_minus,
+                                                    eq.search_space,
+                                                    eq.search_space_minus,
+                                                    eq.len_adj_plus,
+                                                    eq.len_adj_minus,
+                                                );
+                                            }
+                                            if !hsps.is_empty() {
+                                                results.push((qi, oid, hsps));
+                                            }
+                                        }
+                                        return if results.is_empty() {
+                                            None
+                                        } else {
+                                            Some(results)
+                                        };
+                                    }
+                                }
+
+                                // DC-megablast concat fast path (see single-
+                                // threaded branch). Handles ambiguity by decoding.
+                                if disc_concat_eligible {
+                                    if let Some(cq) = concat_query.as_ref() {
+                                        let subject_decoded = if let Some(amb) = ambiguity_data {
+                                            blast_rs::search::decode_packed_ncbi2na_with_ambiguity(
+                                                packed, seq_len, amb,
+                                            )
+                                        } else {
+                                            blast_rs::search::decode_packed_ncbi2na(packed, seq_len)
+                                        };
+                                        let disc_results = blast_rs::search::blastn_gapped_search_concat_disc_megablast(
+                                            cq,
+                                            &concat_plus_masked,
+                                            &concat_minus_masked,
+                                            &concat_plus_nomask,
+                                            &concat_minus_nomask,
+                                            &concat_stats,
+                                            &subject_decoded,
+                                            word_size,
+                                            dc_template_length.unwrap(),
+                                            dc_template_type.unwrap(),
+                                            reward,
+                                            penalty,
+                                            gapopen,
+                                            gapextend,
+                                        );
+                                        let mut results = Vec::new();
+                                        for (qi, mut hsps) in disc_results {
+                                            let eq = &encoded_queries[qi];
+                                            hsps.retain(|h| h.score >= eq.cutoff_score);
+                                            if do_sum_stats && hsps.len() > 1 {
+                                                apply_blastn_linked_sum_stats_to_hsps(
+                                                    &mut hsps,
+                                                    eq.seq_len,
+                                                    seq_len as i32,
+                                                    &eq.kbp_plus,
+                                                    &eq.kbp_minus,
+                                                    eq.search_space,
+                                                    eq.search_space_minus,
+                                                    eq.len_adj_plus,
+                                                    eq.len_adj_minus,
+                                                );
+                                            }
+                                            if !hsps.is_empty() {
+                                                results.push((qi, oid, hsps));
+                                            }
+                                        }
+                                        return if results.is_empty() {
+                                            None
+                                        } else {
+                                            Some(results)
+                                        };
+                                    }
+                                }
+
                                 let mut results = Vec::new();
                                 for (qi, eq) in encoded_queries.iter().enumerate() {
                                     let kbp = &eq.kbp_plus;
