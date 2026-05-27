@@ -1465,6 +1465,52 @@ pub fn blast_get_all_translations(
     (translation_buffer, frame_offsets)
 }
 
+/// Port of `BLAST_GetAllTranslations` for the `eBlastEncodingNcbi2na` path:
+/// translate all six frames DIRECTLY from the packed NCBI2na subject, exactly
+/// as NCBI's preliminary engine does (`blast_util.c:1067-1091`) — a forward and
+/// a reverse-complement translation table feeding `BLAST_TranslateCompressedSequence`
+/// per frame. This avoids the per-OID decode→BLASTNA→NCBI4na buffers the
+/// `blast_get_all_translations` (ncbi4na) path requires.
+///
+/// Produces a byte-identical `translation_buffer` / `frame_offsets` to the
+/// ncbi4na path for ambiguity-free subjects. Subjects carrying ambiguity codes
+/// MUST stay on the ncbi4na path (`BLAST_TranslateCompressedSequence` cannot
+/// represent ambiguities; NCBI's packed path likewise ignores them).
+pub fn blast_get_all_translations_packed(
+    packed_nucl: &[u8],
+    nucl_length: usize,
+    genetic_code: &[u8; 64],
+) -> (Vec<u8>, [u32; NUM_FRAMES + 1]) {
+    // C: buffer_length = 2*(nucl_length+1)+2;
+    let buffer_length = 2 * (nucl_length + 1) + 2;
+    let mut translation_buffer = vec![0u8; buffer_length];
+    let table_fwd = s_blast_get_translation_table(Some(genetic_code), false)
+        .expect("forward translation table");
+    let table_rc = s_blast_get_translation_table(Some(genetic_code), true)
+        .expect("reverse-complement translation table");
+
+    let mut offset: u32 = 0;
+    let mut frame_offsets = [0u32; NUM_FRAMES + 1];
+    frame_offsets[0] = 0;
+
+    for context in 0..NUM_FRAMES {
+        let frame = blast_context_to_frame(context as u32);
+        let table = if frame > 0 { &table_fwd } else { &table_rc };
+        let length = blast_translate_compressed_sequence(
+            table,
+            nucl_length,
+            Some(packed_nucl),
+            frame,
+            Some(&mut translation_buffer[offset as usize..]),
+        );
+        // C: offset += length + 1;  (1 extra byte for the inter-frame NULLB)
+        offset += (length as u32) + 1;
+        frame_offsets[context + 1] = offset;
+    }
+
+    (translation_buffer, frame_offsets)
+}
+
 /// Port of the out-of-frame mixed-sequence construction block of
 /// `BLAST_GetAllTranslations` (`blast_util.c:1112-1126`). Given the 6-frame
 /// concatenated `translation_buffer` and its `frame_offsets` (as produced by

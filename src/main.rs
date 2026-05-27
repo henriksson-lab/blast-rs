@@ -7326,6 +7326,17 @@ fn run_blastn_rust(
         None
     };
 
+    // NCBI selects the collision-free diagonal hash (`eDiagHash`) when the TOTAL
+    // concatenated query length (all queries, both strands) exceeds 8000
+    // (`kQueryLenForHashTable`). Below that it uses the aliasing diagonal array.
+    // The aliasing array drops repeat word-hits on large subjects, so this
+    // selection is required to match NCBI's recall on big databases.
+    let total_query_len: usize = encoded_queries
+        .iter()
+        .map(|eq| eq.plus_masked.len() + eq.minus_masked.len())
+        .sum();
+    let use_diag_hash = total_query_len > blast_rs::search::QUERY_LEN_FOR_HASH_TABLE;
+
     // Collect hits: (query_idx, oid, hsps)
     #[cfg(not(test))]
     let per_subject_hits: Vec<Vec<(usize, u32, Vec<blast_rs::search::SearchHsp>)>> = if num_threads
@@ -7360,7 +7371,7 @@ fn run_blastn_rust(
             .collect();
         let mut scratch: Vec<_> = prepared_queries
             .iter()
-            .map(|prepared| prepared.last_hit_scratch())
+            .map(|prepared| prepared.last_hit_scratch(use_diag_hash))
             .collect();
 
         // Concatenated single-pass scan: scan each subject ONCE over all queries
@@ -7499,6 +7510,7 @@ fn run_blastn_rust(
                                     penalty,
                                     gapopen,
                                     gapextend,
+                                    use_diag_hash,
                                 );
                             for (qi, hsps) in chunk_results {
                                 per_query_combined[qi]
@@ -8023,7 +8035,7 @@ fn run_blastn_rust(
                             || {
                                 prepared_queries
                                     .iter()
-                                    .map(|prepared| prepared.last_hit_scratch())
+                                    .map(|prepared| prepared.last_hit_scratch(use_diag_hash))
                                     .collect::<Vec<_>>()
                             },
                             |scratch, oid| {
@@ -8062,6 +8074,7 @@ fn run_blastn_rust(
                                                     penalty,
                                                     gapopen,
                                                     gapextend,
+                                                    use_diag_hash,
                                                 );
                                             for (qi, hsps) in chunk_results {
                                                 per_query_combined[qi]
@@ -8458,7 +8471,7 @@ fn run_blastn_rust(
                     || {
                         prepared_queries
                             .iter()
-                            .map(|prepared| prepared.last_hit_scratch())
+                            .map(|prepared| prepared.last_hit_scratch(use_diag_hash))
                             .collect::<Vec<_>>()
                     },
                     |scratch, oid| {

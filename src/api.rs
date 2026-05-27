@@ -2298,7 +2298,6 @@ fn process_protein_oid(
     db: &BlastDb,
     oid: u32,
     subj_aa: &[u8],
-    subject_accession: String,
     ungapped_hits: Vec<crate::protein_lookup::ProteinHit>,
     scratch: &mut ProteinScratch,
 ) -> Option<SearchResult> {
@@ -2410,7 +2409,7 @@ fn process_protein_oid(
             if ungapped_hsps.is_empty() {
                 return None;
             }
-            let accession = subject_accession;
+            let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
             let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
             return Some(SearchResult {
                 subject_oid: oid,
@@ -2464,7 +2463,7 @@ fn process_protein_oid(
             return None;
         }
 
-        let accession = subject_accession;
+        let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
         let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
         let sl = subj_aa.len();
 
@@ -3014,9 +3013,6 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         if subj_len < word_size {
             return None;
         }
-        let subject_accession = db
-            .get_accession(oid)
-            .unwrap_or_else(|| format!("oid_{}", oid));
         let subj_aa = &subj_raw[..subj_len];
         scratch.diag_buf.clear();
         let ungapped_hits = crate::protein_lookup::protein_scan_with_table_reuse(
@@ -3026,7 +3022,7 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         process_protein_oid(
             &query_aa, &ungapped_kbp, gap_trigger_raw, search_space, &matrix, &prot_kbp,
             &gumbel_blk, gap_open, gap_extend, x_drop_gapped, x_drop_final, min_subject_length,
-            evalue_threshold, params, db, oid, subj_aa, subject_accession, ungapped_hits, scratch,
+            evalue_threshold, params, db, oid, subj_aa, ungapped_hits, scratch,
         )
     };
 
@@ -3195,7 +3191,6 @@ pub fn blastp_batch(
             h.gapped_start_q = h.gapped_start_q.saturating_sub(off);
             per_query[qi].push(h);
         }
-        let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
         let mut out = Vec::new();
         for qi in 0..num_queries {
             if per_query[qi].is_empty() {
@@ -3220,7 +3215,6 @@ pub fn blastp_batch(
                 db,
                 oid,
                 subj_aa,
-                accession.clone(),
                 std::mem::take(&mut per_query[qi]),
                 scratch,
             ) {
@@ -3308,14 +3302,15 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         params.word_size,
     );
 
-    let search_oid = |oid: u32| -> Option<SearchResult> {
+    let search_oid = |last_hit_scratch: &mut Vec<crate::search::PackedDiagScratch>,
+                       oid: u32|
+     -> Option<SearchResult> {
         let subject_packed = db.get_sequence(oid);
         let subject_len = db.get_seq_len(oid) as usize;
         if subject_len < params.word_size {
             return None;
         }
 
-        let mut last_hit_scratch = prepared_query.last_hit_scratch();
         let mut hsps = crate::search::blastn_gapped_search_packed_prepared_with_xdrops(
             &prepared_query,
             q_plus_extend,
@@ -3332,7 +3327,7 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
             &kbp,
             search_space,
             params.evalue_threshold,
-            &mut last_hit_scratch,
+            last_hit_scratch,
         );
 
         if hsps.is_empty() {
@@ -3405,36 +3400,18 @@ pub fn blastn_search(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<S
         })
     };
 
-    let mut results: Vec<SearchResult> = if params.thread_pool.is_none() && params.num_threads == 1
-    {
-        (0..db.num_oids).filter_map(search_oid).collect()
-    } else if let Some(pool) = params.thread_pool.as_deref() {
-        use rayon::prelude::*;
-        pool.install(|| {
-            (0..db.num_oids)
-                .into_par_iter()
-                .filter_map(search_oid)
-                .collect()
-        })
-    } else {
-        use rayon::prelude::*;
-        let num_threads = if params.num_threads == 0 {
-            rayon::current_num_threads()
-        } else {
-            params.num_threads
-        };
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .stack_size(64 * 1024 * 1024)
-            .build()
-            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-        pool.install(|| {
-            (0..db.num_oids)
-                .into_par_iter()
-                .filter_map(search_oid)
-                .collect()
-        })
-    };
+    // One reusable diagonal-scratch per worker thread (NCBI reuses `aux_struct->ewp`
+    // across all subjects instead of reallocating per OID); the scan resizes/clears
+    // it per call, so reuse is byte-identical.
+    let mut results: Vec<SearchResult> = map_database_oids_init(
+        db,
+        params,
+        || prepared_query.last_hit_scratch(prepared_query.use_diag_hash()),
+        |scratch, oid| search_oid(scratch, oid),
+    )
+    .into_iter()
+    .flatten()
+    .collect();
 
     apply_api_min_score_filter(&mut results, params.min_score);
     if let Some(culling_limit) = params.culling_limit {
@@ -3922,6 +3899,9 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             continue;
         }
         let subj_aa = &subj_raw[..subj_len];
+        // Defer defline parsing until this subject produces a reported HSP.
+        let mut accession: Option<String> = None;
+        let mut title: Option<String> = None;
         scratch.diag_buf.clear();
         let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse(
             &concat, subj_aa, &matrix, concat_lookup, x_drop_ungapped,
@@ -3967,16 +3947,26 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                     x_drop_gapped, x_drop_final, blastx_seed_cutoff.max(1), &mut scratch,
                 )
             };
-            let accession = db
-                .get_accession(oid)
-                .unwrap_or_else(|| format!("oid_{}", oid));
-            let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
             for hsp in process_blastx_frame_hsps(
                 phits, prot, frame, subj_aa, subj_len, search_space, &matrix, &prot_kbp,
                 &ungapped_kbp, &gumbel_blk, x_drop_final, prelim_evalue,
                 avg_subject_length as i32, translated_sum_stats, params, &mut scratch,
             ) {
-                push_hsp_for_subject(&mut results, oid, &title, &accession, subj_len, &[], hsp);
+                if accession.is_none() {
+                    accession = Some(
+                        db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid)),
+                    );
+                    title = Some(String::from_utf8_lossy(db.get_header(oid)).to_string());
+                }
+                push_hsp_for_subject(
+                    &mut results,
+                    oid,
+                    title.as_deref().unwrap(),
+                    accession.as_deref().unwrap(),
+                    subj_len,
+                    &[],
+                    hsp,
+                );
             }
         }
     }
@@ -4595,27 +4585,36 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
 
     let results = map_database_oids_init(db, params, ProteinScratch::new, |scratch, oid| {
         let mut result: Option<SearchResult> = None;
+        // Defer defline parsing until this subject produces a reported HSP.
+        let mut accession: Option<String> = None;
+        let mut title: Option<String> = None;
         let subject_packed = db.get_sequence(oid);
         let subject_len = db.get_seq_len(oid) as usize;
 
-        // Decode subject to BLASTNA (with ambiguity overlay when the .nsq
-        // ambiguity table is present), then convert per-byte to NCBI4na for
-        // `BLAST_GetAllTranslations`.
-        let subj_blastna: Vec<u8> = match db.get_ambiguity_data(oid) {
-            Some(amb) => crate::search::decode_packed_ncbi2na_with_ambiguity(
+        // Translate the subject's six frames. Ambiguity-free subjects translate
+        // DIRECTLY from packed NCBI2na (NCBI's preliminary path); subjects with
+        // ambiguity data decode to BLASTNA → NCBI4na first so the overlay is
+        // representable. Both produce byte-identical translations.
+        let (translation_buffer, frame_offsets) = match db.get_ambiguity_data(oid) {
+            Some(amb) => {
+                let subj_blastna = crate::search::decode_packed_ncbi2na_with_ambiguity(
+                    subject_packed,
+                    subject_len,
+                    amb,
+                );
+                let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
+                crate::util::blast_get_all_translations(
+                    &subj_ncbi4na,
+                    subj_ncbi4na.len(),
+                    crate::util::lookup_genetic_code(params.db_gencode),
+                )
+            }
+            None => crate::util::blast_get_all_translations_packed(
                 subject_packed,
                 subject_len,
-                amb,
+                crate::util::lookup_genetic_code(params.db_gencode),
             ),
-            None => crate::search::decode_packed_ncbi2na(subject_packed, subject_len),
         };
-        let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
-
-        let (translation_buffer, frame_offsets) = crate::util::blast_get_all_translations(
-            &subj_ncbi4na,
-            subj_ncbi4na.len(),
-            crate::util::lookup_genetic_code(params.db_gencode),
-        );
 
         for ctx in 0..crate::util::NUM_FRAMES {
             let frame = crate::util::blast_context_to_frame(ctx as u32);
@@ -4679,10 +4678,6 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             if phits.is_empty() {
                 continue;
             }
-            let accession = db
-                .get_accession(oid)
-                .unwrap_or_else(|| format!("oid_{}", oid));
-            let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
             for hsp in process_tblastn_frame_hsps(
                 phits, &query_aa, prot, frame, subject_len, subj_prot_len,
                 tblastn_spouge_subject_len, search_space, &matrix, &prot_kbp, &gumbel_blk,
@@ -4692,10 +4687,16 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 match &mut result {
                     Some(existing) => existing.hsps.push(hsp),
                     None => {
+                        let acc = accession.get_or_insert_with(|| {
+                            db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid))
+                        });
+                        let ttl = title.get_or_insert_with(|| {
+                            String::from_utf8_lossy(db.get_header(oid)).to_string()
+                        });
                         result = Some(SearchResult {
                             subject_oid: oid,
-                            subject_title: title.clone(),
-                            subject_accession: accession.clone(),
+                            subject_title: ttl.clone(),
+                            subject_accession: acc.clone(),
                             subject_len,
                             hsps: vec![hsp],
                             taxids: vec![],
@@ -4846,19 +4847,25 @@ pub fn tblastn_batch(db: &BlastDb, queries: &[&[u8]], params: &SearchParams) -> 
             let mut out: Vec<(usize, SearchResult)> = Vec::new();
             let subject_packed = db.get_sequence(oid);
             let subject_len = db.get_seq_len(oid) as usize;
-            let subj_blastna: Vec<u8> = match db.get_ambiguity_data(oid) {
-                Some(amb) => crate::search::decode_packed_ncbi2na_with_ambiguity(
-                    subject_packed, subject_len, amb,
+            let (translation_buffer, frame_offsets) = match db.get_ambiguity_data(oid) {
+                Some(amb) => {
+                    let subj_blastna = crate::search::decode_packed_ncbi2na_with_ambiguity(
+                        subject_packed, subject_len, amb,
+                    );
+                    let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
+                    crate::util::blast_get_all_translations(
+                        &subj_ncbi4na, subj_ncbi4na.len(), db_code,
+                    )
+                }
+                None => crate::util::blast_get_all_translations_packed(
+                    subject_packed, subject_len, db_code,
                 ),
-                None => crate::search::decode_packed_ncbi2na(subject_packed, subject_len),
             };
-            let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
-            let (translation_buffer, frame_offsets) = crate::util::blast_get_all_translations(
-                &subj_ncbi4na, subj_ncbi4na.len(), db_code,
-            );
             let mut per_query_result: Vec<Option<SearchResult>> = vec![None; queries.len()];
-            let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
-            let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+            // Defer defline parsing until a subject actually produces a hit
+            // (NCBI builds deflines only for reported OIDs, not every subject).
+            let mut accession: Option<String> = None;
+            let mut title: Option<String> = None;
             for ctx in 0..crate::util::NUM_FRAMES {
                 let frame = crate::util::blast_context_to_frame(ctx as u32);
                 let begin = (frame_offsets[ctx] + 1) as usize;
@@ -4932,10 +4939,17 @@ pub fn tblastn_batch(db: &BlastDb, queries: &[&[u8]], params: &SearchParams) -> 
                         match &mut per_query_result[qi] {
                             Some(existing) => existing.hsps.push(hsp),
                             None => {
+                                let acc = accession.get_or_insert_with(|| {
+                                    db.get_accession(oid)
+                                        .unwrap_or_else(|| format!("oid_{}", oid))
+                                });
+                                let ttl = title.get_or_insert_with(|| {
+                                    String::from_utf8_lossy(db.get_header(oid)).to_string()
+                                });
                                 per_query_result[qi] = Some(SearchResult {
                                     subject_oid: oid,
-                                    subject_title: title.clone(),
-                                    subject_accession: accession.clone(),
+                                    subject_title: ttl.clone(),
+                                    subject_accession: acc.clone(),
                                     subject_len,
                                     hsps: vec![hsp],
                                     taxids: vec![],
@@ -5318,24 +5332,33 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     for oid in 0..db.num_oids {
         let subject_packed = db.get_sequence(oid);
         let subject_len = db.get_seq_len(oid) as usize;
+        // Defer defline parsing until this subject produces a reported HSP,
+        // and build it at most once per OID (not once per frame-pair).
+        let mut accession: Option<String> = None;
+        let mut title: Option<String> = None;
 
-        // BLASTNA decode (with ambiguity overlay if available), then per-byte
-        // BLASTNA → NCBI4na for `BLAST_GetAllTranslations`.
-        let subj_blastna: Vec<u8> = match db.get_ambiguity_data(oid) {
-            Some(amb) => crate::search::decode_packed_ncbi2na_with_ambiguity(
+        // Translate the subject's six frames. Ambiguity-free subjects translate
+        // directly from packed NCBI2na; ambiguity subjects use the ncbi4na path.
+        let (subj_translation, subj_offsets) = match db.get_ambiguity_data(oid) {
+            Some(amb) => {
+                let subj_blastna = crate::search::decode_packed_ncbi2na_with_ambiguity(
+                    subject_packed,
+                    subject_len,
+                    amb,
+                );
+                let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
+                crate::util::blast_get_all_translations(
+                    &subj_ncbi4na,
+                    subj_ncbi4na.len(),
+                    crate::util::lookup_genetic_code(params.db_gencode),
+                )
+            }
+            None => crate::util::blast_get_all_translations_packed(
                 subject_packed,
                 subject_len,
-                amb,
+                crate::util::lookup_genetic_code(params.db_gencode),
             ),
-            None => crate::search::decode_packed_ncbi2na(subject_packed, subject_len),
         };
-        let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
-
-        let (subj_translation, subj_offsets) = crate::util::blast_get_all_translations(
-            &subj_ncbi4na,
-            subj_ncbi4na.len(),
-            crate::util::lookup_genetic_code(params.db_gencode),
-        );
 
         for q_plan in &query_frames {
             let qframe = q_plan.frame;
@@ -5398,16 +5421,20 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     params,
                 );
                 if !pair_hsps.is_empty() {
-                    let accession = db
-                        .get_accession(oid)
-                        .unwrap_or_else(|| format!("oid_{}", oid));
-                    let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+                    if accession.is_none() {
+                        accession = Some(
+                            db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid)),
+                        );
+                        title = Some(String::from_utf8_lossy(db.get_header(oid)).to_string());
+                    }
+                    let acc = accession.as_deref().unwrap();
+                    let ttl = title.as_deref().unwrap();
                     for hsp in pair_hsps {
                         push_hsp_for_subject(
                             &mut results,
                             oid,
-                            &title,
-                            &accession,
+                            ttl,
+                            acc,
                             subject_len,
                             &[],
                             hsp,
@@ -5680,23 +5707,30 @@ pub fn tblastx_batch(
             let mut out: Vec<(usize, SearchResult)> = Vec::new();
             let subject_packed = db.get_sequence(oid);
             let subject_len = db.get_seq_len(oid) as usize;
-            let subj_blastna: Vec<u8> = match db.get_ambiguity_data(oid) {
-                Some(amb) => crate::search::decode_packed_ncbi2na_with_ambiguity(
+            let (subj_translation, subj_offsets) = match db.get_ambiguity_data(oid) {
+                Some(amb) => {
+                    let subj_blastna = crate::search::decode_packed_ncbi2na_with_ambiguity(
+                        subject_packed,
+                        subject_len,
+                        amb,
+                    );
+                    let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
+                    crate::util::blast_get_all_translations(
+                        &subj_ncbi4na,
+                        subj_ncbi4na.len(),
+                        db_code,
+                    )
+                }
+                None => crate::util::blast_get_all_translations_packed(
                     subject_packed,
                     subject_len,
-                    amb,
+                    db_code,
                 ),
-                None => crate::search::decode_packed_ncbi2na(subject_packed, subject_len),
             };
-            let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
-            let (subj_translation, subj_offsets) = crate::util::blast_get_all_translations(
-                &subj_ncbi4na,
-                subj_ncbi4na.len(),
-                db_code,
-            );
             let mut per_query_result: Vec<Option<SearchResult>> = vec![None; queries.len()];
-            let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
-            let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+            // Defer defline parsing until a subject produces a hit.
+            let mut accession: Option<String> = None;
+            let mut title: Option<String> = None;
 
             for s_ctx in 0..crate::util::NUM_FRAMES {
                 let sframe = crate::util::blast_context_to_frame(s_ctx as u32);
@@ -5791,10 +5825,17 @@ pub fn tblastx_batch(
                         match &mut per_query_result[qi] {
                             Some(existing) => existing.hsps.push(hsp),
                             None => {
+                                let acc = accession.get_or_insert_with(|| {
+                                    db.get_accession(oid)
+                                        .unwrap_or_else(|| format!("oid_{}", oid))
+                                });
+                                let ttl = title.get_or_insert_with(|| {
+                                    String::from_utf8_lossy(db.get_header(oid)).to_string()
+                                });
                                 per_query_result[qi] = Some(SearchResult {
                                     subject_oid: oid,
-                                    subject_title: title.clone(),
-                                    subject_accession: accession.clone(),
+                                    subject_title: ttl.clone(),
+                                    subject_accession: acc.clone(),
                                     subject_len,
                                     hsps: vec![hsp],
                                     taxids: vec![],

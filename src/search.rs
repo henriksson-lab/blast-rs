@@ -123,22 +123,84 @@ struct PackedTracebackSeed {
     traceback_subject: usize,
 }
 
+/// Per-diagonal `last_hit` tracker for the packed nucleotide ungapped scan.
+///
+/// NCBI selects between two containers (`blast_parameters.c`, `kQueryLenForHashTable
+/// = 8000`): a query-length-sized direct array (`eDiagArray`) that *aliases*
+/// distinct diagonals via `diag & diag_mask`, used for short total query lengths;
+/// and a collision-free diagonal *hash* (`eDiagHash`, `na_ungapped.c`) keyed on the
+/// exact diagonal `s_off - q_off`, used when the total concatenated query length
+/// exceeds 8000. On large subjects the array aliases thousands of true diagonals
+/// into one slot and the `last_hit` suppression then drops legitimate repeat
+/// word-hits — so the hash is required to match NCBI's recall there.
+///
+/// Both variants make identical suppression decisions for the array case (same
+/// mask) and for the hash case (exact diagonal, never conflated).
+pub enum DiagStore {
+    /// `eDiagArray`: query-sized, aliasing via `& diag_mask`.
+    Array(Vec<i32>),
+    /// `eDiagHash`: collision-free, keyed on the true diagonal `s - q`.
+    Hash(std::collections::HashMap<i64, i32>),
+}
+
+impl DiagStore {
+    #[inline]
+    fn get(&self, diag_mask: usize, q_start: usize, s_start: usize) -> i32 {
+        match self {
+            DiagStore::Array(v) => {
+                let d = (s_start + (diag_mask + 1) - q_start) & diag_mask;
+                v[d]
+            }
+            DiagStore::Hash(m) => {
+                let d = s_start as i64 - q_start as i64;
+                m.get(&d).copied().unwrap_or(0)
+            }
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, diag_mask: usize, q_start: usize, s_start: usize, val: i32) {
+        match self {
+            DiagStore::Array(v) => {
+                let d = (s_start + (diag_mask + 1) - q_start) & diag_mask;
+                v[d] = val;
+            }
+            DiagStore::Hash(m) => {
+                m.insert(s_start as i64 - q_start as i64, val);
+            }
+        }
+    }
+}
+
+/// NCBI `blast_parameters.c` `kQueryLenForHashTable`: total query lengths above
+/// this select the collision-free diagonal hash (`eDiagHash`).
+pub const QUERY_LEN_FOR_HASH_TABLE: usize = 8000;
+
 pub struct PackedDiagScratch {
-    pub last_hit: Vec<i32>,
+    pub last_hit: DiagStore,
 }
 
 impl PackedDiagScratch {
-    fn new(len: usize) -> Self {
+    fn new(len: usize, use_hash: bool) -> Self {
         Self {
-            last_hit: vec![0; len],
+            last_hit: if use_hash {
+                DiagStore::Hash(std::collections::HashMap::new())
+            } else {
+                DiagStore::Array(vec![0; len])
+            },
         }
     }
 
     fn resize_and_clear(&mut self, len: usize) {
-        if self.last_hit.len() != len {
-            self.last_hit.resize(len, 0);
-        } else {
-            self.last_hit.fill(0);
+        match &mut self.last_hit {
+            DiagStore::Array(v) => {
+                if v.len() != len {
+                    v.resize(len, 0);
+                } else {
+                    v.fill(0);
+                }
+            }
+            DiagStore::Hash(m) => m.clear(),
         }
     }
 }
@@ -467,11 +529,25 @@ impl<'a> PreparedBlastnQuery<'a> {
         self.lookups.is_empty()
     }
 
-    pub fn last_hit_scratch(&self) -> Vec<PackedDiagScratch> {
+    /// `use_hash` selects NCBI's collision-free diagonal hash (`eDiagHash`)
+    /// instead of the aliasing array; the caller passes the result of comparing
+    /// the TOTAL concatenated query length against `kQueryLenForHashTable` (8000).
+    pub fn last_hit_scratch(&self, use_hash: bool) -> Vec<PackedDiagScratch> {
         self.lookups
             .iter()
-            .map(|lookup| PackedDiagScratch::new(lookup.diag_array_len))
+            .map(|lookup| PackedDiagScratch::new(lookup.diag_array_len, use_hash))
             .collect()
+    }
+
+    /// Total query length across this prepared query's contexts (both strands),
+    /// used to decide the diagonal container per NCBI's `kQueryLenForHashTable`.
+    pub fn total_query_len(&self) -> usize {
+        self.lookups.iter().map(|l| l.query.len()).sum()
+    }
+
+    /// NCBI `eDiagHash` selection for a single prepared query.
+    pub fn use_diag_hash(&self) -> bool {
+        self.total_query_len() > QUERY_LEN_FOR_HASH_TABLE
     }
 
     pub fn decoded_last_hit_scratch(&self) -> Vec<Vec<i32>> {
@@ -751,6 +827,7 @@ fn concat_replay_ungapped_for_query(
     reward: i32,
     penalty: i32,
     stats: &ConcatQueryStats,
+    use_hash: bool,
 ) -> Vec<SearchHsp> {
     let nucl_score_table = InitialWordParameters::build_nucl_score_table(reward, penalty);
     // The preliminary ungapped scan relaxes the evalue threshold by 1000x
@@ -769,7 +846,11 @@ fn concat_replay_ungapped_for_query(
         if hits.is_empty() {
             continue;
         }
-        let mut last_hit = vec![0i32; lookup.diag_array_len];
+        let mut last_hit = if use_hash {
+            DiagStore::Hash(std::collections::HashMap::new())
+        } else {
+            DiagStore::Array(vec![0i32; lookup.diag_array_len])
+        };
         let diag_mask = lookup.diag_mask;
         for collected in hits {
             diag_initial_hit_core_packed(
@@ -821,6 +902,7 @@ pub fn blastn_gapped_search_concat_megablast(
     penalty: i32,
     gap_open: i32,
     gap_extend: i32,
+    use_hash: bool,
 ) -> Vec<(usize, Vec<SearchHsp>)> {
     let n = concat.num_queries();
     let word_size = concat_lookup.word_size;
@@ -866,6 +948,7 @@ pub fn blastn_gapped_search_concat_megablast(
             reward,
             penalty,
             stats,
+            use_hash,
         );
         if ungapped.is_empty() {
             continue;
@@ -1401,7 +1484,7 @@ fn extend_packed_lookup_hits(
     lut_word: usize,
     lut: &[i32],
     next: &[i32],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     h: usize,
     base_pos: usize,
@@ -1463,7 +1546,7 @@ fn blast_na_extend_packed_generic(
     lut_word: usize,
     lut: &[i32],
     next: &[i32],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     h: usize,
     base_pos: usize,
@@ -1512,7 +1595,7 @@ fn blast_na_extend_packed_aligned(
     lut_word: usize,
     lut: &[i32],
     next: &[i32],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     h: usize,
     base_pos: usize,
@@ -1563,7 +1646,7 @@ fn small_na_extend_packed_aligned_one_byte(
     lut_word: usize,
     lut: &[i32],
     next: &[i32],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     h: usize,
     base_pos: usize,
@@ -1614,7 +1697,7 @@ fn small_na_extend_packed_generic(
     lut_word: usize,
     lut: &[i32],
     next: &[i32],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     h: usize,
     base_pos: usize,
@@ -1662,7 +1745,7 @@ fn small_na_extend_packed(
     lut_word: usize,
     lut: &[i32],
     next: &[i32],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     h: usize,
     base_pos: usize,
@@ -1929,7 +2012,7 @@ fn diag_initial_hit_core_packed(
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -1943,9 +2026,9 @@ fn diag_initial_hit_core_packed(
     hit: ExactWordHit,
     hsps: &mut Vec<SearchHsp>,
 ) {
-    let real_diag = (hit.subject_start + (diag_mask + 1) - hit.query_start) & diag_mask;
+    let (q0, s0) = (hit.query_start, hit.subject_start);
     let mut s_end_pos = hit.subject_match_end as i32;
-    if (last_hit[real_diag] as usize) > hit.subject_start {
+    if (last_hit.get(diag_mask, q0, s0) as usize) > hit.subject_start {
         return;
     }
 
@@ -1974,13 +2057,13 @@ fn diag_initial_hit_core_packed(
             evalue_threshold,
             context,
         ) else {
-            last_hit[real_diag] = hit.subject_match_end as i32;
+            last_hit.set(diag_mask, q0, s0, hit.subject_match_end as i32);
             return;
         };
         s_end_pos = hsp.subject_end;
         hsps.push(hsp);
     }
-    last_hit[real_diag] = s_end_pos;
+    last_hit.set(diag_mask, q0, s0, s_end_pos);
 }
 
 /// Represented packed-nucleotide path for NCBI
@@ -1999,7 +2082,7 @@ pub fn s_blastn_diag_hash_extend_initial_hit(
     s_off: usize,
     word_size: usize,
     lut_word: usize,
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -2053,7 +2136,7 @@ fn diag_table_extend_initial_hit_packed(
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -2096,7 +2179,7 @@ fn blast_na_extend_direct_packed(
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -2172,7 +2255,7 @@ pub fn blastn_ungapped_search_packed_prepared(
     search_space: f64,
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
-    let mut last_hit_scratch = prepared.last_hit_scratch();
+    let mut last_hit_scratch = prepared.last_hit_scratch(prepared.use_diag_hash());
     blastn_ungapped_search_packed_prepared_with_scratch(
         prepared,
         subject_packed,
@@ -2198,7 +2281,7 @@ pub fn blastn_ungapped_search_packed_prepared_no_dedup(
     search_space: f64,
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
-    let mut last_hit_scratch = prepared.last_hit_scratch();
+    let mut last_hit_scratch = prepared.last_hit_scratch(prepared.use_diag_hash());
     blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
         prepared,
         subject_packed,
@@ -3777,7 +3860,7 @@ fn packed_scan_step4_unrolled(
     lut: &[i32],
     next: &[i32],
     pv: &[u64],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -3946,7 +4029,7 @@ fn s_blast_small_na_scan_subject_7_1_packed(
     lut: &[i32],
     next: &[i32],
     pv: &[u64],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -4155,7 +4238,7 @@ fn packed_scan_byte_oriented_lut8_mod1(
     lut: &[i32],
     next: &[i32],
     pv: &[u64],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -4265,7 +4348,7 @@ fn packed_scan_byte_oriented_lut6_step2(
     lut: &[i32],
     next: &[i32],
     pv: &[u64],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -4367,9 +4450,9 @@ fn packed_scan_byte_oriented_lut6_step2_pair(
     subject_len: usize,
     end: usize,
     lookup0: &NaLookup<'_>,
-    last_hit0: &mut [i32],
+    last_hit0: &mut DiagStore,
     lookup1: &NaLookup<'_>,
-    last_hit1: &mut [i32],
+    last_hit1: &mut DiagStore,
     paired_pv: &[u64],
     word_size: usize,
     reward: i32,
@@ -4561,7 +4644,7 @@ fn packed_scan_step1(
     lut: &[i32],
     next: &[i32],
     pv: &[u64],
-    last_hit: &mut [i32],
+    last_hit: &mut DiagStore,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -5328,19 +5411,97 @@ fn candidate_query_for_context<'a>(
     }
 }
 
+/// Port of NCBI `s_CutOffGapEditScript` (`blast_hits.c:2392`): trim a gapped
+/// alignment's edit script + endpoints so it no longer overlaps a higher-priority
+/// HSP that shares an endpoint. `cut_begin=true` removes the leading overlap (two
+/// HSPs share a start point); `false` removes the trailing overlap (shared end).
+/// The score is intentionally NOT recomputed here — NCBI reevaluates the trimmed
+/// alignment afterward, which blast-rs does in `render_traceback_candidate` via
+/// `blast_hsp_reevaluate_with_ambiguities_gapped`.
+fn cutoff_traceback(tb: &mut TracebackResult, q_cut_abs: usize, s_cut_abs: usize, cut_begin: bool) {
+    use crate::gapinfo::GapAlignOpType::{Decline, Del, Del1, Del2, Ins, Ins1, Ins2, Sub};
+    let q_cut = q_cut_abs as i64 - tb.query_start as i64;
+    let s_cut = s_cut_abs as i64 - tb.subject_start as i64;
+    if q_cut <= 0 || s_cut <= 0 {
+        return;
+    }
+    let mut qid = 0i64;
+    let mut sid = 0i64;
+    let mut found = false;
+    let mut found_index = 0usize;
+    let mut found_opid = 0i32;
+    'outer: for (index, &(op, num)) in tb.edit_script.ops.iter().enumerate() {
+        let mut opid = 0i32;
+        while opid < num {
+            match op {
+                Sub | Decline => {
+                    qid += 1;
+                    sid += 1;
+                    opid += 1;
+                }
+                // gap in query: subject advances by the whole run at once (NCBI)
+                Del | Del1 | Del2 => {
+                    sid += num as i64;
+                    opid = num;
+                }
+                // gap in subject: query advances by the whole run at once
+                Ins | Ins1 | Ins2 => {
+                    qid += num as i64;
+                    opid = num;
+                }
+            }
+            if qid >= q_cut && sid >= s_cut {
+                found = true;
+                found_index = index;
+                found_opid = opid;
+                break 'outer;
+            }
+        }
+    }
+    // NCBI RMH guard: only trim if both cut sites were reached.
+    if !found {
+        return;
+    }
+    let ops = &tb.edit_script.ops;
+    let (op, num) = ops[found_index];
+    if cut_begin {
+        let mut new_ops: Vec<(crate::gapinfo::GapAlignOpType, i32)> = Vec::new();
+        // Partial Sub run: keep the remainder as the new leading op.
+        if found_opid < num {
+            new_ops.push((op, num - found_opid));
+        }
+        new_ops.extend_from_slice(&ops[found_index + 1..]);
+        tb.edit_script.ops = new_ops;
+        tb.query_start += qid as usize;
+        tb.subject_start += sid as usize;
+    } else {
+        let mut new_ops: Vec<(crate::gapinfo::GapAlignOpType, i32)> =
+            ops[..found_index].to_vec();
+        new_ops.push((op, if found_opid < num { found_opid } else { num }));
+        tb.edit_script.ops = new_ops;
+        tb.query_end = tb.query_start + qid as usize;
+        tb.subject_end = tb.subject_start + sid as usize;
+    }
+}
+
 fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
     if candidates.len() <= 1 {
         return;
     }
 
+    // NCBI `s_QueryOffsetCompareHSPs`: among HSPs sharing (context, query.offset,
+    // subject.offset), tie-break by DECREASING score, then INCREASING query range
+    // (shortest query.end first), then increasing subject range. The leader is
+    // therefore the SHORTEST high-scoring HSP, so the longer members satisfy
+    // `query.end > leader.query.end` and get trimmed-and-kept rather than dropped.
     candidates.sort_by(|a, b| {
         a.context
             .cmp(&b.context)
             .then_with(|| a.tb.query_start.cmp(&b.tb.query_start))
             .then_with(|| a.tb.subject_start.cmp(&b.tb.subject_start))
             .then_with(|| b.tb.score.cmp(&a.tb.score))
-            .then_with(|| b.tb.query_end.cmp(&a.tb.query_end))
-            .then_with(|| b.tb.subject_end.cmp(&a.tb.subject_end))
+            .then_with(|| a.tb.query_end.cmp(&b.tb.query_end))
+            .then_with(|| a.tb.subject_end.cmp(&b.tb.subject_end))
     });
     let mut i = 0usize;
     while i < candidates.len() {
@@ -5354,7 +5515,17 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
                 j += 1;
                 continue;
             }
-            candidates.remove(j);
+            // NCBI (`Blast_HSPListPurgeHSPsWithCommonEndpoints`, blastn purge=FALSE):
+            // when the later HSP extends past the leader, TRIM its leading overlap
+            // and keep the remainder; otherwise it is contained → drop it.
+            if candidates[j].tb.query_end > candidates[i].tb.query_end {
+                let q_cut = candidates[i].tb.query_end;
+                let s_cut = candidates[i].tb.subject_end;
+                cutoff_traceback(&mut candidates[j].tb, q_cut, s_cut, true);
+                j += 1;
+            } else {
+                candidates.remove(j);
+            }
         }
         i = j;
     }
@@ -5370,13 +5541,22 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
     });
     let mut i = 0usize;
     while i < candidates.len() {
-        let j = i + 1;
+        let mut j = i + 1;
         while j < candidates.len()
             && candidates[i].context == candidates[j].context
             && candidates[i].tb.query_end == candidates[j].tb.query_end
             && candidates[i].tb.subject_end == candidates[j].tb.subject_end
         {
-            candidates.remove(j);
+            // Shared end point: TRIM the trailing overlap of the HSP that starts
+            // earlier (keep the remainder); otherwise drop the contained HSP.
+            if candidates[j].tb.query_start < candidates[i].tb.query_start {
+                let q_cut = candidates[i].tb.query_start;
+                let s_cut = candidates[i].tb.subject_start;
+                cutoff_traceback(&mut candidates[j].tb, q_cut, s_cut, false);
+                j += 1;
+            } else {
+                candidates.remove(j);
+            }
         }
         i = j;
     }
@@ -6694,7 +6874,15 @@ fn collect_packed_gapped_candidates(
         ) else {
             continue;
         };
-        if kbp.raw_to_evalue(prelim.score, search_space) > evalue_threshold {
+        // NCBI gates preliminary gapped HSPs by the integer `cutoff_score`
+        // (`hit_params->cutoffs[context].cutoff_score`, an e-value-derived score),
+        // NOT by recomputing the e-value. blast-rs's `raw_to_evalue` applies the
+        // matrix `round_down` to the score before computing the e-value, which
+        // makes a recomputed-e-value gate one notch stricter than NCBI's integer
+        // cutoff and drops HSPs whose score equals the cutoff. Compare to the
+        // cutoff score directly to match NCBI.
+        let prelim_cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
+        if prelim.score < prelim_cutoff_score {
             continue;
         }
         let traceback_seed =
@@ -7014,10 +7202,16 @@ fn render_traceback_candidate(
     {
         tb = original_tb;
     }
-    let evalue = kbp.raw_to_evalue(tb.score, search_space);
-    if evalue > evalue_threshold {
+    // Gate by the integer cutoff score (NCBI `cutoff_score`), not by recomputing
+    // the e-value: `raw_to_evalue` applies the matrix `round_down` to the score,
+    // making an e-value comparison one notch stricter than NCBI's score cutoff
+    // and dropping HSPs whose score equals the cutoff. The reported e-value below
+    // is for display only.
+    let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
+    if tb.score < cutoff_score {
         return None;
     }
+    let evalue = kbp.raw_to_evalue(tb.score, search_space);
     let q_slice = &query[tb.query_start..tb.query_end];
     let s_slice = &subject[tb.subject_start..tb.subject_end];
     let (align_len, num_ident, gap_opens) = tb.edit_script.count_identities(q_slice, s_slice);
