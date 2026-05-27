@@ -4269,6 +4269,218 @@ pub fn blastx_batch(db: &BlastDb, queries: &[&[u8]], params: &SearchParams) -> V
 /// Run a tblastn search (protein query vs translated nucleotide database).
 /// blast-rs: Public tblastn API pipeline assembled from ported lower-level pieces;
 /// not a direct NCBI C port.
+/// blast-rs: per-(subject frame) tblastn result body, extracted from `tblastn`
+/// so the cross-query batch driver can reuse it. Returns this query x subject-
+/// frame's HSPs (subject coords frame-oriented to nucleotide); caller accumulates.
+#[allow(clippy::too_many_arguments)]
+fn process_tblastn_frame_hsps(
+    phits: Vec<crate::protein_lookup::ProteinHit>,
+    query_aa: &[u8],
+    prot: &[u8],
+    frame: i32,
+    _subject_len: usize,
+    subj_prot_len: usize,
+    tblastn_spouge_subject_len: usize,
+    search_space: f64,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    prot_kbp: &crate::stat::KarlinBlk,
+    gumbel_blk: &Option<crate::stat::GumbelBlk>,
+    x_drop_final: i32,
+    avg_subject_length: i32,
+    prelim_evalue: f64,
+    translated_sum_stats: bool,
+    params: &SearchParams,
+    scratch: &mut ProteinScratch,
+) -> Vec<Hsp> {
+    let mut out_hsps: Vec<Hsp> = Vec::new();
+            let best_raw_ev = phits
+                .iter()
+                .map(|ph| {
+                    if let Some(ref gbp) = gumbel_blk {
+                        if params.comp_adjust == 0 {
+                            crate::stat::spouge_evalue(
+                                ph.score,
+                                &prot_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                tblastn_spouge_subject_len as i32,
+                            )
+                        } else {
+                            translated_spouge_evalue(
+                                ph.score,
+                                &prot_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                subj_prot_len as i32,
+                                translated_sum_stats,
+                            )
+                        }
+                    } else {
+                        prot_kbp.raw_to_evalue(ph.score, search_space)
+                    }
+                })
+                .fold(i32::MAX as f64, f64::min) /* NCBI s_BlastGetBestEvalue seeds with (double)INT4_MAX */;
+            if best_raw_ev > prelim_evalue {
+                return out_hsps;
+            }
+            let cutoff_s_tblastn = protein_eval_cutoff(
+                prelim_evalue,
+                &prot_kbp,
+                gumbel_blk.as_ref(),
+                query_aa.len() as i32,
+                avg_subject_length as i32,
+                search_space,
+            );
+            let (final_phits, use_adj_matrix, lambda_ratio_opt, comp_adjust_method_id) =
+                if params.ungapped {
+                    (phits, false, None, 0)
+                } else {
+                    apply_compositional_adjustment_per_subject(
+                        &query_aa,
+                        prot,
+                        &matrix,
+                        phits,
+                        params.gap_open,
+                        params.gap_extend,
+                        x_drop_final,
+                        params.comp_adjust,
+                        cutoff_s_tblastn,
+                        prot_kbp.lambda,
+                        scratch,
+                    )
+                };
+            for mut ph in final_phits {
+                if ph.score < cutoff_s_tblastn {
+                    continue;
+                }
+                let bit_score = prot_kbp.raw_to_bit(ph.score);
+                let (e_score_i32, e_lambda) = match ph.scaled_score {
+                    Some(s) if params.comp_adjust > 0 => {
+                        (s, prot_kbp.lambda / COMPO_ADJUST_SCALE_FACTOR)
+                    }
+                    _ => (ph.score, prot_kbp.lambda),
+                };
+                let e_kbp = crate::stat::KarlinBlk {
+                    lambda: e_lambda,
+                    k: prot_kbp.k,
+                    log_k: prot_kbp.log_k,
+                    h: prot_kbp.h,
+                    round_down: prot_kbp.round_down,
+                };
+                let evalue = if let Some(ref gbp) = gumbel_blk {
+                    let base_ev = if params.comp_adjust == 0 {
+                        // NCBI applies sum-stats gap-decay divisor for
+                        // translated programs regardless of comp_adjust
+                        // (`BLAST_GapDecayDivisor` from
+                        // `blast_stat.c:5360`). Without this, single-HSP
+                        // tblastn evalues are ~10% smaller than NCBI's.
+                        translated_spouge_evalue(
+                            e_score_i32,
+                            &e_kbp,
+                            gbp,
+                            query_aa.len() as i32,
+                            tblastn_spouge_subject_len as i32,
+                            translated_sum_stats,
+                        )
+                    } else {
+                        translated_spouge_evalue(
+                            e_score_i32,
+                            &e_kbp,
+                            gbp,
+                            query_aa.len() as i32,
+                            subj_prot_len as i32,
+                            translated_sum_stats,
+                        )
+                    };
+                    if use_adj_matrix {
+                        base_ev
+                    } else if let Some(lr) = lambda_ratio_opt {
+                        let scaled_kbp = crate::stat::KarlinBlk {
+                            lambda: e_kbp.lambda / lr,
+                            k: e_kbp.k,
+                            log_k: e_kbp.log_k,
+                            h: e_kbp.h,
+                            round_down: e_kbp.round_down,
+                        };
+                        if params.comp_adjust == 0 {
+                            crate::stat::spouge_evalue(
+                                e_score_i32,
+                                &scaled_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                tblastn_spouge_subject_len as i32,
+                            )
+                        } else {
+                            translated_spouge_evalue(
+                                e_score_i32,
+                                &scaled_kbp,
+                                gbp,
+                                query_aa.len() as i32,
+                                subj_prot_len as i32,
+                                translated_sum_stats,
+                            )
+                        }
+                    } else {
+                        base_ev
+                    }
+                } else {
+                    let raw_evalue = e_kbp.raw_to_evalue(e_score_i32, search_space);
+                    if use_adj_matrix {
+                        raw_evalue
+                    } else if let Some(lr) = lambda_ratio_opt {
+                        let scaled_lambda = e_kbp.lambda / lr;
+                        search_space * e_kbp.k * (-scaled_lambda * e_score_i32 as f64).exp()
+                    } else {
+                        raw_evalue
+                    }
+                };
+                if evalue > params.evalue_threshold {
+                    continue;
+                }
+                let (subject_start, subject_end) = crate::util::protein_to_oriented_nuc_coords(
+                    ph.subject_start,
+                    ph.subject_end,
+                    frame,
+                );
+                let (q_aln, s_aln) = match (ph.qseq.take(), ph.sseq.take()) {
+                    (Some(qs), Some(ss)) => (qs.into_bytes(), ss.into_bytes()),
+                    _ => (Vec::new(), Vec::new()),
+                };
+                let mut midline: Vec<u8> = Vec::with_capacity(q_aln.len());
+                for (q, s) in q_aln.iter().zip(s_aln.iter()) {
+                    midline.push(if q == s {
+                        *q
+                    } else if *q != b'-' && *s != b'-' {
+                        b'+'
+                    } else {
+                        b' '
+                    });
+                }
+                let hsp = Hsp {
+                    score: ph.score,
+                    bit_score,
+                    evalue,
+                    query_start: ph.query_start,
+                    query_end: ph.query_end,
+                    subject_start,
+                    subject_end,
+                    num_identities: ph.num_ident as usize,
+                    num_gaps: ph.gap_opens as usize,
+                    alignment_length: ph.align_length as usize,
+                    query_aln: q_aln,
+                    midline,
+                    subject_aln: s_aln,
+                    query_frame: 0,
+                    subject_frame: frame,
+                    num_links: 1,
+                    comp_adjust_method: comp_adjust_method_id,
+                };
+                out_hsps.push(hsp);
+            }
+    out_hsps
+}
+
+
 pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchResult> {
     if query.is_empty() {
         return Vec::new();
@@ -4467,192 +4679,16 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             if phits.is_empty() {
                 continue;
             }
-            let best_raw_ev = phits
-                .iter()
-                .map(|ph| {
-                    if let Some(ref gbp) = gumbel_blk {
-                        if params.comp_adjust == 0 {
-                            crate::stat::spouge_evalue(
-                                ph.score,
-                                &prot_kbp,
-                                gbp,
-                                query_aa.len() as i32,
-                                tblastn_spouge_subject_len as i32,
-                            )
-                        } else {
-                            translated_spouge_evalue(
-                                ph.score,
-                                &prot_kbp,
-                                gbp,
-                                query_aa.len() as i32,
-                                subj_prot_len as i32,
-                                translated_sum_stats,
-                            )
-                        }
-                    } else {
-                        prot_kbp.raw_to_evalue(ph.score, search_space)
-                    }
-                })
-                .fold(i32::MAX as f64, f64::min) /* NCBI s_BlastGetBestEvalue seeds with (double)INT4_MAX */;
-            if best_raw_ev > prelim_evalue {
-                continue;
-            }
             let accession = db
                 .get_accession(oid)
                 .unwrap_or_else(|| format!("oid_{}", oid));
             let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
-            let cutoff_s_tblastn = protein_eval_cutoff(
-                prelim_evalue,
-                &prot_kbp,
-                gumbel_blk.as_ref(),
-                query_aa.len() as i32,
-                avg_subject_length as i32,
-                search_space,
-            );
-            let (final_phits, use_adj_matrix, lambda_ratio_opt, comp_adjust_method_id) =
-                if params.ungapped {
-                    (phits, false, None, 0)
-                } else {
-                    apply_compositional_adjustment_per_subject(
-                        &query_aa,
-                        prot,
-                        &matrix,
-                        phits,
-                        params.gap_open,
-                        params.gap_extend,
-                        x_drop_final,
-                        params.comp_adjust,
-                        cutoff_s_tblastn,
-                        prot_kbp.lambda,
-                        scratch,
-                    )
-                };
-            for mut ph in final_phits {
-                if ph.score < cutoff_s_tblastn {
-                    continue;
-                }
-                let bit_score = prot_kbp.raw_to_bit(ph.score);
-                let (e_score_i32, e_lambda) = match ph.scaled_score {
-                    Some(s) if params.comp_adjust > 0 => {
-                        (s, prot_kbp.lambda / COMPO_ADJUST_SCALE_FACTOR)
-                    }
-                    _ => (ph.score, prot_kbp.lambda),
-                };
-                let e_kbp = crate::stat::KarlinBlk {
-                    lambda: e_lambda,
-                    k: prot_kbp.k,
-                    log_k: prot_kbp.log_k,
-                    h: prot_kbp.h,
-                    round_down: prot_kbp.round_down,
-                };
-                let evalue = if let Some(ref gbp) = gumbel_blk {
-                    let base_ev = if params.comp_adjust == 0 {
-                        // NCBI applies sum-stats gap-decay divisor for
-                        // translated programs regardless of comp_adjust
-                        // (`BLAST_GapDecayDivisor` from
-                        // `blast_stat.c:5360`). Without this, single-HSP
-                        // tblastn evalues are ~10% smaller than NCBI's.
-                        translated_spouge_evalue(
-                            e_score_i32,
-                            &e_kbp,
-                            gbp,
-                            query_aa.len() as i32,
-                            tblastn_spouge_subject_len as i32,
-                            translated_sum_stats,
-                        )
-                    } else {
-                        translated_spouge_evalue(
-                            e_score_i32,
-                            &e_kbp,
-                            gbp,
-                            query_aa.len() as i32,
-                            subj_prot_len as i32,
-                            translated_sum_stats,
-                        )
-                    };
-                    if use_adj_matrix {
-                        base_ev
-                    } else if let Some(lr) = lambda_ratio_opt {
-                        let scaled_kbp = crate::stat::KarlinBlk {
-                            lambda: e_kbp.lambda / lr,
-                            k: e_kbp.k,
-                            log_k: e_kbp.log_k,
-                            h: e_kbp.h,
-                            round_down: e_kbp.round_down,
-                        };
-                        if params.comp_adjust == 0 {
-                            crate::stat::spouge_evalue(
-                                e_score_i32,
-                                &scaled_kbp,
-                                gbp,
-                                query_aa.len() as i32,
-                                tblastn_spouge_subject_len as i32,
-                            )
-                        } else {
-                            translated_spouge_evalue(
-                                e_score_i32,
-                                &scaled_kbp,
-                                gbp,
-                                query_aa.len() as i32,
-                                subj_prot_len as i32,
-                                translated_sum_stats,
-                            )
-                        }
-                    } else {
-                        base_ev
-                    }
-                } else {
-                    let raw_evalue = e_kbp.raw_to_evalue(e_score_i32, search_space);
-                    if use_adj_matrix {
-                        raw_evalue
-                    } else if let Some(lr) = lambda_ratio_opt {
-                        let scaled_lambda = e_kbp.lambda / lr;
-                        search_space * e_kbp.k * (-scaled_lambda * e_score_i32 as f64).exp()
-                    } else {
-                        raw_evalue
-                    }
-                };
-                if evalue > params.evalue_threshold {
-                    continue;
-                }
-                let (subject_start, subject_end) = crate::util::protein_to_oriented_nuc_coords(
-                    ph.subject_start,
-                    ph.subject_end,
-                    frame,
-                );
-                let (q_aln, s_aln) = match (ph.qseq.take(), ph.sseq.take()) {
-                    (Some(qs), Some(ss)) => (qs.into_bytes(), ss.into_bytes()),
-                    _ => (Vec::new(), Vec::new()),
-                };
-                let mut midline: Vec<u8> = Vec::with_capacity(q_aln.len());
-                for (q, s) in q_aln.iter().zip(s_aln.iter()) {
-                    midline.push(if q == s {
-                        *q
-                    } else if *q != b'-' && *s != b'-' {
-                        b'+'
-                    } else {
-                        b' '
-                    });
-                }
-                let hsp = Hsp {
-                    score: ph.score,
-                    bit_score,
-                    evalue,
-                    query_start: ph.query_start,
-                    query_end: ph.query_end,
-                    subject_start,
-                    subject_end,
-                    num_identities: ph.num_ident as usize,
-                    num_gaps: ph.gap_opens as usize,
-                    alignment_length: ph.align_length as usize,
-                    query_aln: q_aln,
-                    midline,
-                    subject_aln: s_aln,
-                    query_frame: 0,
-                    subject_frame: frame,
-                    num_links: 1,
-                    comp_adjust_method: comp_adjust_method_id,
-                };
+            for hsp in process_tblastn_frame_hsps(
+                phits, &query_aa, prot, frame, subject_len, subj_prot_len,
+                tblastn_spouge_subject_len, search_space, &matrix, &prot_kbp, &gumbel_blk,
+                x_drop_final, avg_subject_length as i32, prelim_evalue, translated_sum_stats,
+                params, scratch,
+            ) {
                 match &mut result {
                     Some(existing) => existing.hsps.push(hsp),
                     None => {
@@ -4701,6 +4737,386 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         results.truncate(params.max_target_seqs);
     }
     results
+}
+
+/// blast-rs: cross-query tblastn. Concatenates ALL protein queries into ONE
+/// lookup table and translates each database subject ONCE (NCBI's concatenated-
+/// query engine), instead of re-building + re-translating per query. Byte-
+/// identical to looping `tblastn` per query; reuses `process_tblastn_frame_hsps`.
+#[allow(clippy::too_many_arguments)]
+pub fn tblastn_batch(db: &BlastDb, queries: &[&[u8]], params: &SearchParams) -> Vec<Vec<SearchResult>> {
+    if queries.is_empty() {
+        return Vec::new();
+    }
+    let matrix = *get_matrix(params.matrix);
+    let matrix_name = protein_matrix_name(params.matrix);
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = params
+        .word_threshold
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTN));
+    let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
+    let ln2 = crate::math::NCBIMATH_LN2;
+    let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
+    let x_drop_gapped = (params.x_drop_gapped as f64 * ln2 / prot_kbp.lambda) as i32;
+    let x_drop_final = (params.x_drop_final as f64 * ln2 / prot_kbp.lambda) as i32;
+    let gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ungapped_kbp.log_k)
+        / ungapped_kbp.lambda) as i32;
+    let total_subj_len: usize = (0..db.num_oids).map(|oid| db.get_seq_len(oid) as usize).sum();
+    let stats_db_len = statistical_db_length(params, total_subj_len as i64);
+    const BLAST_SEQSRC_MINLENGTH_TBLASTN: i32 = 10;
+    let min_subject_length: i32 = BLAST_SEQSRC_MINLENGTH_TBLASTN / 3;
+    let translated_total_subj_len = (stats_db_len as usize / 3).max(1);
+    let avg_subject_length = (translated_total_subj_len / db.num_oids.max(1) as usize).max(1);
+    let gumbel_blk = if params.effective_search_space > 0 {
+        None
+    } else {
+        protein_gumbel_for_matrix(
+            params.matrix, params.gap_open, params.gap_extend, translated_total_subj_len as i64,
+        )
+    };
+    let translated_sum_stats = translated_sum_stats_enabled(params);
+    let prelim_evalue = composition_prelim_evalue(params);
+    let max_hsps = params.max_hsps;
+    let db_code = crate::util::lookup_genetic_code(params.db_gencode);
+
+    let scoring_options = crate::options::ScoringOptions {
+        reward: 0,
+        penalty: 0,
+        gap_open: params.gap_open,
+        gap_extend: params.gap_extend,
+        gapped_calculation: !params.ungapped,
+        matrix_name: Some(matrix_name.to_string()),
+        is_ooframe: false,
+    };
+    let eff_params = crate::parameters::EffectiveLengthsParameters {
+        options: effective_lengths_options(params),
+        real_db_length: stats_db_len,
+        real_num_seqs: db.num_oids as i32,
+    };
+    let kbp_array = vec![prot_kbp.clone()];
+    let kbp_std_array = vec![ungapped_kbp.clone()];
+
+    struct QPlan {
+        aa: Vec<u8>,
+        query_info: crate::queryinfo::QueryInfo,
+        search_space: f64,
+        seed_cutoff: i32,
+    }
+    let qplans: Vec<QPlan> = queries
+        .iter()
+        .map(|q| {
+            let aa = encode_protein_query(
+                q,
+                params.filter_low_complexity,
+                params.seg_window,
+                params.seg_locut,
+                params.seg_hicut,
+            );
+            let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[aa.len()]);
+            crate::blast_setup::blast_calc_eff_lengths(
+                crate::program::TBLASTN, &scoring_options, &eff_params,
+                &kbp_array, &kbp_std_array, matrix_name, &mut query_info,
+            );
+            let search_space = query_info.contexts.first().map(|c| c.eff_searchsp.max(1) as f64).unwrap_or(1.0);
+            let seed_cutoff = protein_prelim_seed_cutoff(
+                gap_trigger_raw, prelim_evalue, &prot_kbp, gumbel_blk.as_ref(),
+                aa.len() as i32, min_subject_length, search_space,
+            );
+            QPlan { aa, query_info, search_space, seed_cutoff }
+        })
+        .collect();
+
+    // Concatenate the protein queries (one inter-query sentinel) into one lookup.
+    let lengths: Vec<usize> = qplans.iter().map(|p| p.aa.len()).collect();
+    let attrib_info = crate::queryinfo::QueryInfo::new_blastp(&lengths);
+    let mut concat: Vec<u8> =
+        vec![crate::protein_lookup::PROTEIN_CONCAT_SENTINEL; attrib_info.seq_buf_len().max(1)];
+    for (qi, p) in qplans.iter().enumerate() {
+        let off = attrib_info.contexts[qi].query_offset as usize;
+        concat[off..off + p.aa.len()].copy_from_slice(&p.aa);
+    }
+    let lookup =
+        crate::protein_lookup::ProteinLookupTable::build(&concat, word_size, &matrix, threshold);
+
+    // Per OID (parallel): translate subject once, scan 6 frames against the
+    // concatenated-query lookup, attribute each hit to its query, gapped + body.
+    let per_oid: Vec<Vec<(usize, SearchResult)>> =
+        map_database_oids_init(db, params, ProteinScratch::new, |scratch, oid| {
+            let mut out: Vec<(usize, SearchResult)> = Vec::new();
+            let subject_packed = db.get_sequence(oid);
+            let subject_len = db.get_seq_len(oid) as usize;
+            let subj_blastna: Vec<u8> = match db.get_ambiguity_data(oid) {
+                Some(amb) => crate::search::decode_packed_ncbi2na_with_ambiguity(
+                    subject_packed, subject_len, amb,
+                ),
+                None => crate::search::decode_packed_ncbi2na(subject_packed, subject_len),
+            };
+            let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
+            let (translation_buffer, frame_offsets) = crate::util::blast_get_all_translations(
+                &subj_ncbi4na, subj_ncbi4na.len(), db_code,
+            );
+            let mut per_query_result: Vec<Option<SearchResult>> = vec![None; queries.len()];
+            let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
+            let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+            for ctx in 0..crate::util::NUM_FRAMES {
+                let frame = crate::util::blast_context_to_frame(ctx as u32);
+                let begin = (frame_offsets[ctx] + 1) as usize;
+                let end = frame_offsets[ctx + 1] as usize;
+                if begin >= end {
+                    continue;
+                }
+                let prot: &[u8] = &translation_buffer[begin..end];
+                if prot.len() < word_size {
+                    continue;
+                }
+                if crate::composition::blast_read_aa_composition(prot, AA_SIZE).1 == 0 {
+                    continue;
+                }
+                let subj_prot_len = prot.len();
+                let tblastn_spouge_subject_len = if params.comp_adjust == 0 {
+                    (subject_len / 3).max(1)
+                } else {
+                    subj_prot_len
+                };
+                scratch.diag_buf.clear();
+                let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse(
+                    &concat, prot, &matrix, &lookup, x_drop_ungapped,
+                    params.two_hit_window as i32, &mut scratch.diag_buf,
+                );
+                if scan_hits.is_empty() {
+                    continue;
+                }
+                let mut per_query: Vec<Vec<crate::protein_lookup::ProteinHit>> =
+                    (0..queries.len()).map(|_| Vec::new()).collect();
+                for mut h in scan_hits {
+                    let qi = crate::queryinfo::bsearch_context_info(h.query_start as i32, &attrib_info);
+                    if qi < 0 || qi as usize >= queries.len() {
+                        continue;
+                    }
+                    let qi = qi as usize;
+                    let off = attrib_info.contexts[qi].query_offset as usize;
+                    h.query_start -= off;
+                    h.query_end = h.query_end.saturating_sub(off);
+                    h.gapped_start_q = h.gapped_start_q.saturating_sub(off);
+                    per_query[qi].push(h);
+                }
+                for qi in 0..queries.len() {
+                    let ungapped = std::mem::take(&mut per_query[qi]);
+                    if ungapped.is_empty() {
+                        continue;
+                    }
+                    let p = &qplans[qi];
+                    let phits = if params.ungapped {
+                        let mut ug = ungapped;
+                        ug.iter_mut().filter(|uh| uh.score >= 1).for_each(|uh| {
+                            uh.qseq = Some(p.aa[uh.query_start..uh.query_end].iter().map(|&aa| ncbistdaa_to_aminoacid_char(aa)).collect());
+                            uh.sseq = Some(prot[uh.subject_start..uh.subject_end].iter().map(|&aa| ncbistdaa_to_aminoacid_char(aa)).collect());
+                        });
+                        ug
+                    } else {
+                        blast_get_gapped_score(
+                            &p.aa, prot, &matrix, &ungapped, params.gap_open, params.gap_extend,
+                            x_drop_gapped, x_drop_final, p.seed_cutoff, scratch,
+                        )
+                    };
+                    if phits.is_empty() {
+                        continue;
+                    }
+                    for hsp in process_tblastn_frame_hsps(
+                        phits, &p.aa, prot, frame, subject_len, subj_prot_len,
+                        tblastn_spouge_subject_len, p.search_space, &matrix, &prot_kbp, &gumbel_blk,
+                        x_drop_final, avg_subject_length as i32, prelim_evalue, translated_sum_stats,
+                        params, scratch,
+                    ) {
+                        match &mut per_query_result[qi] {
+                            Some(existing) => existing.hsps.push(hsp),
+                            None => {
+                                per_query_result[qi] = Some(SearchResult {
+                                    subject_oid: oid,
+                                    subject_title: title.clone(),
+                                    subject_accession: accession.clone(),
+                                    subject_len,
+                                    hsps: vec![hsp],
+                                    taxids: vec![],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            for (qi, r) in per_query_result.into_iter().enumerate() {
+                if let Some(sr) = r {
+                    out.push((qi, sr));
+                }
+            }
+            out
+        });
+
+    let mut results: Vec<Vec<SearchResult>> = (0..queries.len()).map(|_| Vec::new()).collect();
+    for oid_hits in per_oid {
+        for (qi, sr) in oid_hits {
+            results[qi].push(sr);
+        }
+    }
+    (0..queries.len())
+        .map(|qi| {
+            let mut qres = std::mem::take(&mut results[qi]);
+            for result in &mut qres {
+                prune_translated_hsp_variants(&mut result.hsps);
+            }
+            if translated_sum_stats {
+                apply_tblastn_linked_sum_stats(
+                    &mut qres, &qplans[qi].query_info, &prot_kbp, gumbel_blk.as_ref(),
+                    stats_db_len, params.comp_adjust == 0, params.gap_open, params.gap_extend,
+                    params.max_intron_length,
+                );
+            }
+            for result in &mut qres {
+                result.hsps.sort_by(compare_hsps_by_evalue_then_score);
+            }
+            apply_api_min_score_filter(&mut qres, params.min_score);
+            if let Some(culling_limit) = params.culling_limit {
+                apply_api_culling_limit(&mut qres, culling_limit, crate::program::TBLASTN);
+            }
+            apply_api_max_hsps_limit(&mut qres, max_hsps);
+            qres.sort_by(compare_search_results);
+            if qres.len() > params.max_target_seqs {
+                qres.truncate(params.max_target_seqs);
+            }
+            qres
+        })
+        .collect()
+}
+
+
+/// Convert one (query-frame, subject-frame) batch of ungapped tblastx hits
+/// into reported `Hsp`s. Extracted verbatim from the per-pair body of
+/// `tblastx` so the concatenated-query scanner (`tblastx_batch`) can reuse
+/// the exact same scoring / coordinate / SEG-lowercase logic and stay
+/// byte-identical with the single-query path.
+/// blast-rs: refactor-extracted helper, not a direct NCBI C port.
+#[allow(clippy::too_many_arguments)]
+fn process_tblastx_pair_hsps(
+    ungapped_hits: Vec<crate::protein_lookup::ProteinHit>,
+    q_prot: &[u8],
+    q_prot_unmasked: &[u8],
+    qframe: i32,
+    s_prot: &[u8],
+    sframe: i32,
+    ctx_kbp: &KarlinBlk,
+    gumbel_blk: &Option<crate::stat::GumbelBlk>,
+    search_space: f64,
+    save_cutoff: i32,
+    params: &SearchParams,
+) -> Vec<Hsp> {
+    let mut out = Vec::new();
+    for ph in ungapped_hits {
+        if ph.score < save_cutoff {
+            continue;
+        }
+        // tblastx is ungapped-only (`blast_options.c:869`): gapped
+        // calculation is rejected at option-validation time. NCBI
+        // therefore saves ungapped HSPs and uses `sbp->kbp`
+        // (per-context ungapped Karlin params, computed from this
+        // query frame's amino-acid composition) for bit-score and
+        // e-value. See `blast_hits.c:1928`
+        // (`Blast_HSPListGetBitScores`): `kbp[hsp->context]->Lambda`.
+        let bit_score = ctx_kbp.raw_to_bit(ph.score);
+        let evalue = if let Some(ref gbp) = gumbel_blk {
+            crate::stat::spouge_evalue(
+                ph.score,
+                ctx_kbp,
+                gbp,
+                q_prot.len() as i32,
+                s_prot.len() as i32,
+            )
+        } else {
+            // Save the raw ungapped Karlin e-value. When sum
+            // statistics are enabled, `blast_link_hsps` applies
+            // the gap-decay divisor, including for single HSPs.
+            ctx_kbp.raw_to_evalue(ph.score, search_space)
+        };
+        // Pre-link filter. When sum_stats is enabled, an HSP whose
+        // individual evalue exceeds threshold may still be kept
+        // if it links into a chain whose combined evalue passes.
+        // NCBI handles this by using a per-context cutoff_score
+        // that takes MIN(normal, sum-stats-relaxed)
+        // (`blast_parameters.c:951-976`). We approximate by simply
+        // skipping the per-HSP evalue prefilter when sum_stats is
+        // enabled — the post-link filter still enforces the
+        // user-specified evalue threshold.
+        if !params.sum_stats && evalue > params.evalue_threshold {
+            continue;
+        }
+        let (query_start, query_end) =
+            crate::util::protein_to_oriented_nuc_coords(ph.query_start, ph.query_end, qframe);
+        let (subject_start, subject_end) =
+            crate::util::protein_to_oriented_nuc_coords(ph.subject_start, ph.subject_end, sframe);
+
+        // Mirror NCBI: count identities against the UNMASKED
+        // translated query (`s_Blast_HSPGetNumIdentitiesAndPositives`
+        // reads `query_blk->sequence` which NCBI's soft-mask path
+        // leaves untouched). Our SEG hard-masks the working
+        // buffer for extension, but the report should treat masked
+        // residues that happen to match the subject as identities.
+        let recount_ident: i32 = q_prot_unmasked[ph.query_start..ph.query_end]
+            .iter()
+            .zip(s_prot[ph.subject_start..ph.subject_end].iter())
+            .filter(|(q, s)| q == s)
+            .count() as i32;
+        let mut q_aln =
+            ncbistdaa_to_aminoacid_sequence(&q_prot_unmasked[ph.query_start..ph.query_end]);
+        let s_aln = ncbistdaa_to_aminoacid_sequence(&s_prot[ph.subject_start..ph.subject_end]);
+        let midline: Vec<u8> = q_aln
+            .iter()
+            .zip(s_aln.iter())
+            .map(|(&q, &s)| {
+                if q == s {
+                    q
+                } else if q != b'-' && s != b'-' {
+                    b'+'
+                } else {
+                    b' '
+                }
+            })
+            .collect();
+        // NCBI's tblastx pairwise lowercases query positions where
+        // SEG soft-masked the translated residue (`showalign.cpp`
+        // applies the soft-mask atop the alignment text). Only
+        // lowercase positions where the working buffer was masked
+        // (`prot[idx] == X`) AND the original residue was NOT
+        // already X — otherwise we'd lowercase legitimately X-coded
+        // residues (from N in the underlying nucleotide).
+        for (i, idx) in (ph.query_start..ph.query_end).enumerate() {
+            if i < q_aln.len()
+                && q_prot[idx] == crate::encoding::NCBISTDAA_X
+                && q_prot_unmasked[idx] != crate::encoding::NCBISTDAA_X
+            {
+                q_aln[i] = q_aln[i].to_ascii_lowercase();
+            }
+        }
+        out.push(Hsp {
+            score: ph.score,
+            bit_score,
+            evalue,
+            query_start,
+            query_end,
+            subject_start,
+            subject_end,
+            num_identities: recount_ident as usize,
+            num_gaps: 0,
+            alignment_length: ph.align_length as usize,
+            query_aln: q_aln,
+            midline,
+            subject_aln: s_aln,
+            query_frame: qframe,
+            subject_frame: sframe,
+            num_links: 1,
+            comp_adjust_method: 0,
+        });
+    }
+    out
 }
 
 /// Run a tblastx search (translated nt query vs translated nt database).
@@ -4968,130 +5384,35 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     params.two_hit_window as i32,
                     &mut scan_diag_buf,
                 );
-                for ph in ungapped_hits {
-                    if ph.score < save_cutoff {
-                        continue;
-                    }
-                    // tblastx is ungapped-only (`blast_options.c:869`): gapped
-                    // calculation is rejected at option-validation time. NCBI
-                    // therefore saves ungapped HSPs and uses `sbp->kbp`
-                    // (per-context ungapped Karlin params, computed from this
-                    // query frame's amino-acid composition) for bit-score and
-                    // e-value. See `blast_hits.c:1928`
-                    // (`Blast_HSPListGetBitScores`): `kbp[hsp->context]->Lambda`.
-                    let bit_score = ctx_kbp.raw_to_bit(ph.score);
-                    let evalue = if let Some(ref gbp) = gumbel_blk {
-                        crate::stat::spouge_evalue(
-                            ph.score,
-                            ctx_kbp,
-                            gbp,
-                            q_prot.len() as i32,
-                            s_prot.len() as i32,
-                        )
-                    } else {
-                        // Save the raw ungapped Karlin e-value. When sum
-                        // statistics are enabled, `blast_link_hsps` applies
-                        // the gap-decay divisor, including for single HSPs.
-                        ctx_kbp.raw_to_evalue(ph.score, search_space)
-                    };
-                    // Pre-link filter. When sum_stats is enabled, an HSP whose
-                    // individual evalue exceeds threshold may still be kept
-                    // if it links into a chain whose combined evalue passes.
-                    // NCBI handles this by using a per-context cutoff_score
-                    // that takes MIN(normal, sum-stats-relaxed)
-                    // (`blast_parameters.c:951-976`). We approximate by simply
-                    // skipping the per-HSP evalue prefilter when sum_stats is
-                    // enabled — the post-link filter still enforces the
-                    // user-specified evalue threshold.
-                    if !params.sum_stats && evalue > params.evalue_threshold {
-                        continue;
-                    }
+                let pair_hsps = process_tblastx_pair_hsps(
+                    ungapped_hits,
+                    q_prot,
+                    q_plan.prot_unmasked,
+                    qframe,
+                    s_prot,
+                    sframe,
+                    ctx_kbp,
+                    &gumbel_blk,
+                    search_space,
+                    save_cutoff,
+                    params,
+                );
+                if !pair_hsps.is_empty() {
                     let accession = db
                         .get_accession(oid)
                         .unwrap_or_else(|| format!("oid_{}", oid));
                     let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
-                    let (query_start, query_end) = crate::util::protein_to_oriented_nuc_coords(
-                        ph.query_start,
-                        ph.query_end,
-                        qframe,
-                    );
-                    let (subject_start, subject_end) = crate::util::protein_to_oriented_nuc_coords(
-                        ph.subject_start,
-                        ph.subject_end,
-                        sframe,
-                    );
-
-                    // Mirror NCBI: count identities against the UNMASKED
-                    // translated query (`s_Blast_HSPGetNumIdentitiesAndPositives`
-                    // reads `query_blk->sequence` which NCBI's soft-mask path
-                    // leaves untouched). Our SEG hard-masks the working
-                    // buffer for extension, but the report should treat masked
-                    // residues that happen to match the subject as identities.
-                    let recount_ident: i32 = q_plan.prot_unmasked[ph.query_start..ph.query_end]
-                        .iter()
-                        .zip(s_prot[ph.subject_start..ph.subject_end].iter())
-                        .filter(|(q, s)| q == s)
-                        .count() as i32;
-                    let mut q_aln = ncbistdaa_to_aminoacid_sequence(
-                        &q_plan.prot_unmasked[ph.query_start..ph.query_end],
-                    );
-                    let s_aln =
-                        ncbistdaa_to_aminoacid_sequence(&s_prot[ph.subject_start..ph.subject_end]);
-                    let midline: Vec<u8> = q_aln
-                        .iter()
-                        .zip(s_aln.iter())
-                        .map(|(&q, &s)| {
-                            if q == s {
-                                q
-                            } else if q != b'-' && s != b'-' {
-                                b'+'
-                            } else {
-                                b' '
-                            }
-                        })
-                        .collect();
-                    // NCBI's tblastx pairwise lowercases query positions where
-                    // SEG soft-masked the translated residue (`showalign.cpp`
-                    // applies the soft-mask atop the alignment text). Only
-                    // lowercase positions where the working buffer was masked
-                    // (`prot[idx] == X`) AND the original residue was NOT
-                    // already X — otherwise we'd lowercase legitimately X-coded
-                    // residues (from N in the underlying nucleotide).
-                    for (i, idx) in (ph.query_start..ph.query_end).enumerate() {
-                        if i < q_aln.len()
-                            && q_plan.prot[idx] == crate::encoding::NCBISTDAA_X
-                            && q_plan.prot_unmasked[idx] != crate::encoding::NCBISTDAA_X
-                        {
-                            q_aln[i] = q_aln[i].to_ascii_lowercase();
-                        }
+                    for hsp in pair_hsps {
+                        push_hsp_for_subject(
+                            &mut results,
+                            oid,
+                            &title,
+                            &accession,
+                            subject_len,
+                            &[],
+                            hsp,
+                        );
                     }
-                    push_hsp_for_subject(
-                        &mut results,
-                        oid,
-                        &title,
-                        &accession,
-                        subject_len,
-                        &[],
-                        Hsp {
-                            score: ph.score,
-                            bit_score,
-                            evalue,
-                            query_start,
-                            query_end,
-                            subject_start,
-                            subject_end,
-                            num_identities: recount_ident as usize,
-                            num_gaps: 0,
-                            alignment_length: ph.align_length as usize,
-                            query_aln: q_aln,
-                            midline,
-                            subject_aln: s_aln,
-                            query_frame: qframe,
-                            subject_frame: sframe,
-                            num_links: 1,
-                            comp_adjust_method: 0,
-                        },
-                    );
                 }
             }
         }
@@ -5146,6 +5467,409 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         results.truncate(params.max_target_seqs);
     }
     results
+}
+
+/// Concatenated-query tblastx: translate every query into its 6 frames, SEG +
+/// per-frame Karlin params exactly as the single-query `tblastx`, then merge
+/// ALL query frames (across all queries) into ONE protein lookup table with
+/// inter-context sentinels (NCBI's `BlastQueryInfo` concatenation). Each DB
+/// subject is decoded + 6-frame translated ONCE and scanned once per subject
+/// frame against the single lookup; hits are attributed back to their
+/// (query, frame) via `bsearch_context_info` and the per-context offset. This
+/// removes the per-query database rescan (the multi-query slowdown) while
+/// staying byte-identical with `tblastx` (the per-hit body is shared via
+/// `process_tblastx_pair_hsps`, and the post-search sum-stats + filter tail
+/// is the same as the single-query path, run per query).
+/// blast-rs: multi-query orchestration over ported pieces; not a direct NCBI C port.
+pub fn tblastx_batch(
+    db: &BlastDb,
+    queries: &[&[u8]],
+    params: &SearchParams,
+) -> Vec<Vec<SearchResult>> {
+    if queries.is_empty() {
+        return Vec::new();
+    }
+    let empty = || (0..queries.len()).map(|_| Vec::new()).collect();
+
+    let matrix = *get_matrix(params.matrix);
+    let matrix_name = protein_matrix_name(params.matrix);
+    let word_size = params.word_size.clamp(2, 6);
+    let threshold = params
+        .word_threshold
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTX));
+    let ln2 = crate::math::NCBIMATH_LN2;
+    let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
+    let x_drop_ungapped = (params.x_drop_ungapped as f64 * ln2 / ungapped_kbp.lambda).ceil() as i32;
+    let total_subj_len: usize = (0..db.num_oids).map(|oid| db.get_seq_len(oid) as usize).sum();
+    let stats_db_len = statistical_db_length(params, total_subj_len as i64);
+    // tblastx is ungapped-only; NCBI frees `sbp->gbp`, so e-values use the
+    // simple Karlin path (no Spouge FSC).
+    let gumbel_blk: Option<crate::stat::GumbelBlk> = None;
+    let max_hsps = params.max_hsps;
+    let q_code = crate::util::lookup_genetic_code(params.query_gencode);
+    let db_code = crate::util::lookup_genetic_code(params.db_gencode);
+
+    // tblastx is ungapped-only (`blast_options.c:869`): route alpha/beta through
+    // the ungapped lookup in `BLAST_CalcEffLengths` (gapped_calculation=false).
+    let scoring_options = crate::options::ScoringOptions {
+        reward: 0,
+        penalty: 0,
+        gap_open: params.gap_open,
+        gap_extend: params.gap_extend,
+        gapped_calculation: false,
+        matrix_name: Some(matrix_name.to_string()),
+        is_ooframe: false,
+    };
+    let eff_params = crate::parameters::EffectiveLengthsParameters {
+        options: effective_lengths_options(params),
+        real_db_length: stats_db_len,
+        real_num_seqs: db.num_oids as i32,
+    };
+
+    // One concatenated context per (query, valid frame). `masked` is the SEG'd
+    // working buffer used for the scan/extension; `unmasked` is the original
+    // translation used for identity recount + alignment text (NCBI reads the
+    // untouched `query_blk->sequence`).
+    struct PreCtx {
+        query_idx: usize,
+        frame: i32,
+        masked: Vec<u8>,
+        unmasked: Vec<u8>,
+        kbp: KarlinBlk,
+        gap_trigger_raw: i32,
+        search_space: f64,
+    }
+    let mut pre: Vec<PreCtx> = Vec::new();
+    // Per-query frame stats for the post-search sum-stats linker.
+    let mut per_query_contexts: Vec<Vec<TranslatedContextStats>> =
+        (0..queries.len()).map(|_| Vec::new()).collect();
+
+    for (qi, q) in queries.iter().enumerate() {
+        if q.len() < 3 {
+            continue;
+        }
+        let query_ncbi4na = encode_ncbi4na_sequence(q);
+        let (query_translation, query_offsets) =
+            crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), q_code);
+        let query_translation_unmasked = query_translation.clone();
+        let mut query_translation = query_translation;
+        if params.filter_low_complexity {
+            for ctx in 0..crate::util::NUM_FRAMES {
+                let begin = (query_offsets[ctx] + 1) as usize;
+                let end = query_offsets[ctx + 1] as usize;
+                if begin < end {
+                    apply_seg_ncbistdaa_with_options(
+                        &mut query_translation[begin..end],
+                        params.seg_window,
+                        params.seg_locut,
+                        params.seg_hicut,
+                    );
+                }
+            }
+        }
+
+        let mut query_info_calc =
+            crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&query_offsets);
+        let mut kbp_array = vec![ungapped_kbp.clone(); crate::util::NUM_FRAMES];
+        struct Tmp {
+            ctx: usize,
+            frame: i32,
+            masked: Vec<u8>,
+            unmasked: Vec<u8>,
+            kbp: KarlinBlk,
+            gap_trigger_raw: i32,
+        }
+        let mut tmps: Vec<Tmp> = Vec::new();
+        for q_ctx in 0..crate::util::NUM_FRAMES {
+            let qframe = crate::util::blast_context_to_frame(q_ctx as u32);
+            let q_begin = (query_offsets[q_ctx] + 1) as usize;
+            let q_end = query_offsets[q_ctx + 1] as usize;
+            if q_begin >= q_end {
+                continue;
+            }
+            let q_prot: &[u8] = &query_translation[q_begin..q_end];
+            let q_prot_unmasked: &[u8] = &query_translation_unmasked[q_begin..q_end];
+            if q_prot.len() < word_size {
+                continue;
+            }
+            if crate::composition::blast_read_aa_composition(q_prot, AA_SIZE).1 == 0 {
+                continue;
+            }
+            // Per-frame ungapped Karlin params from this frame's AA composition,
+            // with the translated-search "ideal-Lambda cap" (`blast_stat.c:2796`).
+            let ideal = crate::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name);
+            let mut ctx_kbp = crate::stat::query_specific_protein_ungapped_kbp_for_matrix(
+                q_prot,
+                matrix_name,
+                &matrix,
+            );
+            if ctx_kbp.lambda >= ideal.lambda {
+                ctx_kbp = ideal;
+            }
+            let ctx_gap_trigger_raw = ((crate::stat::BLAST_GAP_TRIGGER_PROT * ln2 + ctx_kbp.log_k)
+                / ctx_kbp.lambda) as i32;
+            kbp_array[q_ctx] = ctx_kbp.clone();
+            tmps.push(Tmp {
+                ctx: q_ctx,
+                frame: qframe,
+                masked: q_prot.to_vec(),
+                unmasked: q_prot_unmasked.to_vec(),
+                kbp: ctx_kbp,
+                gap_trigger_raw: ctx_gap_trigger_raw,
+            });
+        }
+        let kbp_std_array = vec![ungapped_kbp.clone(); crate::util::NUM_FRAMES];
+        crate::blast_setup::blast_calc_eff_lengths(
+            crate::program::TBLASTX,
+            &scoring_options,
+            &eff_params,
+            &kbp_array,
+            &kbp_std_array,
+            matrix_name,
+            &mut query_info_calc,
+        );
+        for t in tmps {
+            let len_adj = query_info_calc.contexts[t.ctx].length_adjustment;
+            let search_space = query_info_calc.contexts[t.ctx].eff_searchsp.max(1) as f64;
+            per_query_contexts[qi].push(TranslatedContextStats {
+                frame: t.frame,
+                query_length: t.masked.len() as i32,
+                eff_searchsp: search_space.max(1.0) as i64,
+                length_adjustment: len_adj,
+                kbp: t.kbp.clone(),
+            });
+            pre.push(PreCtx {
+                query_idx: qi,
+                frame: t.frame,
+                masked: t.masked,
+                unmasked: t.unmasked,
+                kbp: t.kbp,
+                gap_trigger_raw: t.gap_trigger_raw,
+                search_space,
+            });
+        }
+    }
+
+    if pre.is_empty() {
+        return empty();
+    }
+
+    // Concatenate all (query, frame) contexts into one lookup with one
+    // inter-context sentinel each (matching `QueryInfo::new_blastp` layout).
+    let lengths: Vec<usize> = pre.iter().map(|p| p.masked.len()).collect();
+    let attrib_info = crate::queryinfo::QueryInfo::new_blastp(&lengths);
+    let mut concat: Vec<u8> =
+        vec![crate::protein_lookup::PROTEIN_CONCAT_SENTINEL; attrib_info.seq_buf_len().max(1)];
+    let mut ctx_off: Vec<usize> = Vec::with_capacity(pre.len());
+    for (i, p) in pre.iter().enumerate() {
+        let off = attrib_info.contexts[i].query_offset as usize;
+        concat[off..off + p.masked.len()].copy_from_slice(&p.masked);
+        ctx_off.push(off);
+    }
+    let lookup =
+        crate::protein_lookup::ProteinLookupTable::build(&concat, word_size, &matrix, threshold);
+
+    // Per OID (parallel): translate subject once, scan each subject frame once
+    // against the concatenated lookup, attribute hits, run the shared per-pair
+    // body, scatter to the owning query.
+    let per_oid: Vec<Vec<(usize, SearchResult)>> = map_database_oids_init(
+        db,
+        params,
+        Vec::<(i32, bool)>::new,
+        |scan_diag_buf, oid| {
+            let mut out: Vec<(usize, SearchResult)> = Vec::new();
+            let subject_packed = db.get_sequence(oid);
+            let subject_len = db.get_seq_len(oid) as usize;
+            let subj_blastna: Vec<u8> = match db.get_ambiguity_data(oid) {
+                Some(amb) => crate::search::decode_packed_ncbi2na_with_ambiguity(
+                    subject_packed,
+                    subject_len,
+                    amb,
+                ),
+                None => crate::search::decode_packed_ncbi2na(subject_packed, subject_len),
+            };
+            let subj_ncbi4na = crate::encoding::blastna_to_ncbi4na_sequence(&subj_blastna);
+            let (subj_translation, subj_offsets) = crate::util::blast_get_all_translations(
+                &subj_ncbi4na,
+                subj_ncbi4na.len(),
+                db_code,
+            );
+            let mut per_query_result: Vec<Option<SearchResult>> = vec![None; queries.len()];
+            let accession = db.get_accession(oid).unwrap_or_else(|| format!("oid_{}", oid));
+            let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
+
+            for s_ctx in 0..crate::util::NUM_FRAMES {
+                let sframe = crate::util::blast_context_to_frame(s_ctx as u32);
+                let s_begin = (subj_offsets[s_ctx] + 1) as usize;
+                let s_end = subj_offsets[s_ctx + 1] as usize;
+                if s_begin >= s_end {
+                    continue;
+                }
+                let s_prot: &[u8] = &subj_translation[s_begin..s_end];
+                if s_prot.len() < word_size {
+                    continue;
+                }
+                if crate::composition::blast_read_aa_composition(s_prot, AA_SIZE).1 == 0 {
+                    continue;
+                }
+                scan_diag_buf.clear();
+                let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse(
+                    &concat,
+                    s_prot,
+                    &matrix,
+                    &lookup,
+                    x_drop_ungapped,
+                    params.two_hit_window as i32,
+                    scan_diag_buf,
+                );
+                if scan_hits.is_empty() {
+                    continue;
+                }
+                let mut per_ctx: Vec<Vec<crate::protein_lookup::ProteinHit>> =
+                    (0..pre.len()).map(|_| Vec::new()).collect();
+                for mut h in scan_hits {
+                    let ci = crate::queryinfo::bsearch_context_info(
+                        h.query_start as i32,
+                        &attrib_info,
+                    );
+                    if ci < 0 || ci as usize >= pre.len() {
+                        continue;
+                    }
+                    let ci = ci as usize;
+                    let off = ctx_off[ci];
+                    h.query_start -= off;
+                    h.query_end = h.query_end.saturating_sub(off);
+                    h.gapped_start_q = h.gapped_start_q.saturating_sub(off);
+                    per_ctx[ci].push(h);
+                }
+                for ci in 0..pre.len() {
+                    let ungapped = std::mem::take(&mut per_ctx[ci]);
+                    if ungapped.is_empty() {
+                        continue;
+                    }
+                    let p = &pre[ci];
+                    let q_prot: &[u8] = &concat[ctx_off[ci]..ctx_off[ci] + p.masked.len()];
+                    let ctx_kbp = &p.kbp;
+                    let search_space = p.search_space;
+                    // Same cutoffs as single-query tblastx, per (frame, subject-frame).
+                    let tblastx_seed_cutoff = protein_prelim_seed_cutoff(
+                        p.gap_trigger_raw,
+                        crate::stat::CUTOFF_E_TBLASTX,
+                        ctx_kbp,
+                        gumbel_blk.as_ref(),
+                        q_prot.len() as i32,
+                        1,
+                        search_space,
+                    );
+                    let hit_cutoff = protein_eval_cutoff(
+                        params.evalue_threshold,
+                        ctx_kbp,
+                        gumbel_blk.as_ref(),
+                        q_prot.len() as i32,
+                        1,
+                        search_space,
+                    );
+                    let save_cutoff = tblastx_seed_cutoff.min(hit_cutoff);
+                    let hsps = process_tblastx_pair_hsps(
+                        ungapped,
+                        q_prot,
+                        &p.unmasked,
+                        p.frame,
+                        s_prot,
+                        sframe,
+                        ctx_kbp,
+                        &gumbel_blk,
+                        search_space,
+                        save_cutoff,
+                        params,
+                    );
+                    if hsps.is_empty() {
+                        continue;
+                    }
+                    let qi = p.query_idx;
+                    for hsp in hsps {
+                        match &mut per_query_result[qi] {
+                            Some(existing) => existing.hsps.push(hsp),
+                            None => {
+                                per_query_result[qi] = Some(SearchResult {
+                                    subject_oid: oid,
+                                    subject_title: title.clone(),
+                                    subject_accession: accession.clone(),
+                                    subject_len,
+                                    hsps: vec![hsp],
+                                    taxids: vec![],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            for (qi, r) in per_query_result.into_iter().enumerate() {
+                if let Some(sr) = r {
+                    out.push((qi, sr));
+                }
+            }
+            out
+        },
+    );
+
+    // Gather per-query subject lists, then run the single-query post-search tail
+    // (sum-stats linking → re-sort → evalue re-filter → culling → truncate).
+    let mut by_query: Vec<Vec<Option<SearchResult>>> =
+        (0..queries.len()).map(|_| Vec::new()).collect();
+    for oid_hits in per_oid {
+        for (qi, sr) in oid_hits {
+            by_query[qi].push(Some(sr));
+        }
+    }
+    let avg_subj_len_nt = if db.num_oids > 0 {
+        (total_subj_len as i64 / db.num_oids as i64).max(1) as i32
+    } else {
+        1
+    };
+
+    (0..queries.len())
+        .map(|qi| {
+            let mut opt_results = std::mem::take(&mut by_query[qi]);
+            if params.sum_stats {
+                // tblastx linker `cutoff_score_min` is the lowest per-frame
+                // ungapped cutoff (NCBI word-params.cutoff_score_min).
+                let cutoff_score_min = pre
+                    .iter()
+                    .filter(|p| p.query_idx == qi)
+                    .map(|p| p.gap_trigger_raw)
+                    .min()
+                    .unwrap_or(0);
+                apply_tblastx_linked_sum_stats(
+                    &mut opt_results,
+                    &per_query_contexts[qi],
+                    params.max_intron_length,
+                    stats_db_len,
+                    avg_subj_len_nt,
+                    cutoff_score_min,
+                );
+            }
+            let mut qres: Vec<SearchResult> = opt_results.into_iter().flatten().collect();
+            for result in &mut qres {
+                result.hsps.sort_by(compare_hsps_by_evalue_then_score);
+            }
+            let evalue_cutoff = params.evalue_threshold;
+            for result in &mut qres {
+                result.hsps.retain(|hsp| hsp.evalue <= evalue_cutoff);
+            }
+            qres.retain(|r| !r.hsps.is_empty());
+            apply_api_min_score_filter(&mut qres, params.min_score);
+            if let Some(culling_limit) = params.culling_limit {
+                apply_api_culling_limit(&mut qres, culling_limit, crate::program::TBLASTX);
+            }
+            apply_api_max_hsps_limit(&mut qres, max_hsps);
+            qres.sort_by(compare_search_results);
+            if qres.len() > params.max_target_seqs {
+                qres.truncate(params.max_target_seqs);
+            }
+            qres
+        })
+        .collect()
 }
 
 // ── Utility functions ───────────────────────────────────────────────────────

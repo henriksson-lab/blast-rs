@@ -70,6 +70,8 @@ pub use api::{
     blastx,
     blastx_batch,
     blastx_search,
+    tblastn_batch,
+    tblastx_batch,
     // PSSM functions
     build_pssm,
     // Composition

@@ -5861,8 +5861,14 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if db.db_type != DbType::Nucleotide {
             return Err("tblastn requires a nucleotide database".into());
         }
-        for qrec in &queries {
-            let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
+        // Scan the database once over all queries (concatenated into one lookup,
+        // each subject translated once) instead of re-scanning per query.
+        let mut batched_tblastn = {
+            let qseqs: Vec<&[u8]> = queries.iter().map(|q| q.sequence.as_slice()).collect();
+            blast_rs::api::tblastn_batch(&db, &qseqs, &params)
+        };
+        for (qi, qrec) in queries.iter().enumerate() {
+            let results = std::mem::take(&mut batched_tblastn[qi]);
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
@@ -6508,8 +6514,12 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if db.db_type != DbType::Nucleotide {
             return Err("tblastx requires a nucleotide database".into());
         }
-        for qrec in &queries {
-            let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
+        let mut batched_tblastx = {
+            let qseqs: Vec<&[u8]> = queries.iter().map(|q| q.sequence.as_slice()).collect();
+            blast_rs::api::tblastx_batch(&db, &qseqs, &params)
+        };
+        for (qi, qrec) in queries.iter().enumerate() {
+            let results = std::mem::take(&mut batched_tblastx[qi]);
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
