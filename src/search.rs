@@ -6829,12 +6829,57 @@ fn collect_packed_gapped_candidates(
     evalue_threshold: f64,
     search_space: f64,
     kbp: &KarlinBlk,
-    _min_diag_separation: i32,
+    min_diag_separation: i32,
     subject_decoded: &mut Option<Vec<u8>>,
 ) {
-    // NCBI lets weak ungapped seeds enter preliminary gapped extension; some
-    // are rescued into reportable gapped HSPs.
-    for seed in ungapped.iter() {
+    // Port of NCBI `BLAST_GetGappedScore` (blast_gapalign.c:3739): process the
+    // ungapped seeds in score order; before extending a seed, test whether it is
+    // CONTAINED in an already-saved gapped HSP via an interval tree, and skip the
+    // extension if so. Each surviving seed is gapped-extended; if its preliminary
+    // gapped score reaches `cutoff_score` it is saved AND its (gapped) envelope is
+    // added to the tree so later, weaker, redundant seeds are skipped. This
+    // replaces the previous "extend every seed then dedup" approach, matching
+    // NCBI's recall on repeat-rich subjects.
+    let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
+
+    // NCBI `Blast_InitHitListSortByScore` / `score_compare_match`
+    // (blast_extend.c:274): score desc, subject-start asc, length desc,
+    // query-start asc. Higher-scoring seeds are inserted first so they can
+    // contain later, weaker ones.
+    let mut order: Vec<usize> = (0..ungapped.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ha, hb) = (&ungapped[a], &ungapped[b]);
+        hb.score
+            .cmp(&ha.score)
+            .then_with(|| ha.subject_start.cmp(&hb.subject_start))
+            .then_with(|| {
+                (hb.query_end - hb.query_start).cmp(&(ha.query_end - ha.query_start))
+            })
+            .then_with(|| ha.query_start.cmp(&hb.query_start))
+    });
+
+    let q_max = ungapped.iter().map(|h| h.query_end).max().unwrap_or(0) + 1;
+    let s_max = subject_len as i32 + 1;
+    let mut tree = IntervalTree::new(q_max, s_max);
+
+    for &idx in &order {
+        let seed = &ungapped[idx];
+
+        // NCBI `BlastIntervalTreeContainsHSP` on the UNGAPPED seed box (with the
+        // ungapped score). TRUE => an enveloping saved gapped HSP already exists,
+        // so skip this seed's extension entirely. `context` is the query-strand
+        // key (subject is always plus for blastn, so subject_frame=0).
+        if tree.is_contained_with_metadata_and_min_diag_separation(
+            Interval::new(seed.query_start, seed.query_end),
+            Interval::new(seed.subject_start, seed.subject_end),
+            seed.score,
+            seed.context,
+            0,
+            min_diag_separation,
+        ) {
+            continue;
+        }
+
         let traceback_query = if seed.context == 0 {
             query_plus_nomask
         } else {
@@ -6874,17 +6919,24 @@ fn collect_packed_gapped_candidates(
         ) else {
             continue;
         };
-        // NCBI gates preliminary gapped HSPs by the integer `cutoff_score`
-        // (`hit_params->cutoffs[context].cutoff_score`, an e-value-derived score),
-        // NOT by recomputing the e-value. blast-rs's `raw_to_evalue` applies the
-        // matrix `round_down` to the score before computing the e-value, which
-        // makes a recomputed-e-value gate one notch stricter than NCBI's integer
-        // cutoff and drops HSPs whose score equals the cutoff. Compare to the
-        // cutoff score directly to match NCBI.
-        let prelim_cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
-        if prelim.score < prelim_cutoff_score {
+        // NCBI saves the prelim HSP iff `gap_align->score >= cutoff_score`
+        // (an integer e-value-derived score). Compare to the integer cutoff
+        // directly — NOT by recomputing the e-value, since blast-rs's
+        // `raw_to_evalue` applies the matrix `round_down` first, which would make
+        // the gate one notch stricter than NCBI's cutoff.
+        if prelim.score < cutoff_score {
             continue;
         }
+        // Add the saved (gapped) HSP envelope to the tree (NCBI
+        // `BlastIntervalTreeAddHSP` with the post-extension coords + gapped score).
+        tree.insert_with_metadata(
+            Interval::new(prelim.prelim_q_start as i32, prelim.prelim_q_end as i32),
+            Interval::new(prelim.prelim_s_start as i32, prelim.prelim_s_end as i32),
+            prelim.score,
+            seed.context,
+            0,
+        );
+
         let traceback_seed =
             traceback_seed_from_preliminary(traceback_query, subject_decoded, prelim);
 
