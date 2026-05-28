@@ -422,13 +422,17 @@ impl<'a> PreparedBlastnQuery<'a> {
         word_size: usize,
     ) -> Self {
         let mut lookups = Vec::with_capacity(2);
-        if let Some(lookup) = NaLookup::new_contiguous(0, query_plus, word_size) {
+        // Build LUT from masked, store unmasked as `lookup.query` (soft masking).
+        if let Some(lookup) =
+            NaLookup::new_contiguous_with_nomask(0, query_plus, query_plus_nomask, word_size)
+        {
             lookups.push(lookup);
         }
-        if let Some(lookup) = NaLookup::new_contiguous(1, query_minus, word_size) {
+        if let Some(lookup) =
+            NaLookup::new_contiguous_with_nomask(1, query_minus, query_minus_nomask, word_size)
+        {
             lookups.push(lookup);
         }
-        let _ = (query_plus_nomask, query_minus_nomask); // kept for ABI
         let paired_pv = if lookups.len() == 2
             && lookups[0].lut_word == lookups[1].lut_word
             && lookups[0].lut_mask == lookups[1].lut_mask
@@ -483,25 +487,29 @@ impl<'a> PreparedBlastnQuery<'a> {
         let approx_entries = plus_stats.approx_table_entries + minus_stats.approx_table_entries;
         let max_q_off = plus_stats.max_q_off.max(minus_stats.max_q_off);
         let use_small_table = should_use_small_na_lookup(word_size, approx_entries, max_q_off);
-        if let Some(lookup) = NaLookup::new(
+        // Build the LUT from the masked query (skip seeds in masked regions),
+        // but store the unmasked query in `lookup.query` so verification and
+        // extension run against the original bases (soft masking).
+        if let Some(lookup) = NaLookup::new_with_nomask(
             0,
             query_plus,
+            query_plus_nomask,
             word_size,
             approx_entries,
             choose_lut_word_for_table(choose_lut_word, use_small_table),
         ) {
             lookups.push(lookup);
         }
-        if let Some(lookup) = NaLookup::new(
+        if let Some(lookup) = NaLookup::new_with_nomask(
             1,
             query_minus,
+            query_minus_nomask,
             word_size,
             approx_entries,
             choose_lut_word_for_table(choose_lut_word, use_small_table),
         ) {
             lookups.push(lookup);
         }
-        let _ = (query_plus_nomask, query_minus_nomask); // kept for ABI
         let paired_pv = if lookups.len() == 2
             && lookups[0].lut_word == lookups[1].lut_word
             && lookups[0].lut_mask == lookups[1].lut_mask
@@ -978,8 +986,13 @@ pub fn blastn_gapped_search_concat_megablast(
 }
 
 impl<'a> NaLookup<'a> {
-    fn new_contiguous(context: i32, query: &'a [u8], word_size: usize) -> Option<Self> {
-        let stats = lookup_segment_stats(query, word_size);
+    fn new_contiguous_with_nomask(
+        context: i32,
+        query_masked: &'a [u8],
+        query_nomask: &'a [u8],
+        word_size: usize,
+    ) -> Option<Self> {
+        let stats = lookup_segment_stats(query_masked, word_size);
         let approx_entries = stats.approx_table_entries;
         let max_q_off = stats.max_q_off;
         let choose_lut_word = if std::env::var_os("BLAST_RS_FORCE_MB").is_some() {
@@ -989,7 +1002,14 @@ impl<'a> NaLookup<'a> {
         } else {
             choose_contiguous_mb_lut_word
         };
-        Self::new(context, query, word_size, approx_entries, choose_lut_word)
+        Self::new_with_nomask(
+            context,
+            query_masked,
+            query_nomask,
+            word_size,
+            approx_entries,
+            choose_lut_word,
+        )
     }
 
     fn new(
@@ -999,9 +1019,28 @@ impl<'a> NaLookup<'a> {
         approx_entries: usize,
         choose_lut_word: fn(usize, usize) -> usize,
     ) -> Option<Self> {
-        if query.len() < word_size {
+        Self::new_with_nomask(context, query, query, word_size, approx_entries, choose_lut_word)
+    }
+
+    /// Build the lookup table from the MASKED query (`query_masked` — DUST/lcase
+    /// seeds with `N` are skipped) but store the UNMASKED query in `lookup.query`
+    /// for runtime seed verification and extension. This implements NCBI's
+    /// default `-soft_masking true`: masked positions don't seed, but they don't
+    /// block extension or the full-word verification either. Callers without a
+    /// separate nomask pass `query_masked == query_nomask` (hard masking).
+    fn new_with_nomask(
+        context: i32,
+        query_masked: &'a [u8],
+        query_nomask: &'a [u8],
+        word_size: usize,
+        approx_entries: usize,
+        choose_lut_word: fn(usize, usize) -> usize,
+    ) -> Option<Self> {
+        if query_masked.len() < word_size {
             return None;
         }
+        debug_assert_eq!(query_masked.len(), query_nomask.len(),
+            "masked/nomask queries must be same length");
 
         let lut_word = choose_lut_word(word_size, approx_entries);
         let lut_size = 1usize << (2 * lut_word);
@@ -1010,32 +1049,39 @@ impl<'a> NaLookup<'a> {
         let scan_start = choose_na_scan_start(lut_word, scan_step);
 
         let mut lut: Vec<i32> = vec![-1; lut_size];
-        let mut next: Vec<i32> = vec![-1; query.len()];
+        let mut next: Vec<i32> = vec![-1; query_masked.len()];
         let pv_size = lut_size.div_ceil(64);
         let mut pv: Vec<u64> = vec![0; pv_size];
 
         // Match NCBI's lookup admission behavior: indexing depends on the
         // lookup word width, while the remaining full-word verification happens
-        // later during exact-hit extension.
+        // later during exact-hit extension. The mask is read from `query_masked`
+        // so DUST-masked positions don't seed even when soft masking is on.
         let lookup_mask_span = lut_word;
-        let unmasked_run_ends = eligible_lookup_run_ends(query, lookup_mask_span);
+        let unmasked_run_ends = eligible_lookup_run_ends(query_masked, lookup_mask_span);
 
-        for i in (0..=(query.len() - lut_word)).rev() {
+        for i in (0..=(query_masked.len() - lut_word)).rev() {
             if unmasked_run_ends[i] == 0 || i + lookup_mask_span > unmasked_run_ends[i] {
                 continue;
             }
-            let key = word_hash_n(&query[i..i + lut_word], lut_word) as usize;
+            let key = word_hash_n(&query_masked[i..i + lut_word], lut_word) as usize;
             next[i] = lut[key];
             lut[key] = i as i32;
             pv[key >> 6] |= 1u64 << (key & 63);
         }
 
-        let diag_array_len = (query.len() * 2).next_power_of_two().max(256);
+        let diag_array_len = (query_masked.len() * 2).next_power_of_two().max(256);
         let diag_mask = diag_array_len - 1;
 
         Some(NaLookup {
             context,
-            query,
+            // `lookup.query` is the runtime query consumed by full-word
+            // verification (`find_exact_word_hit_packed`) and by `extend_seed_*`.
+            // Both must read the unmasked bases so an alignment can extend
+            // through (or verify across) DUST-masked regions. The LUT itself
+            // was built above from the masked query, which is the only place
+            // masking applies under NCBI's `-soft_masking true`.
+            query: query_nomask,
             lut_word,
             lut_mask,
             scan_start,
@@ -1281,6 +1327,45 @@ pub fn blastn_ungapped_search(
         query_minus,
         query_plus,
         query_minus,
+        subject,
+        word_size,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        true,
+    )
+}
+
+/// Soft-mask-aware ungapped search: `query_plus`/`query_minus` are the DUST/lcase-
+/// masked queries used to build the lookup table (so seeds in masked regions are
+/// skipped — `has_ambiguous_base` filters out windows containing `N`), while
+/// `query_plus_nomask`/`query_minus_nomask` are the unmasked sequences used by
+/// `extend_seed` for the actual extension. This matches NCBI's `-soft_masking true`
+/// (default for `-task blastn`): mask the lookup, extend through masked regions.
+/// Passing the same masked buffer for both arguments collapses this to hard masking.
+/// blast-rs: dedup=true equivalent of `blastn_ungapped_search`, with soft-masking.
+pub fn blastn_ungapped_search_with_nomask(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    blastn_ungapped_search_inner(
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
         subject,
         word_size,
         reward,
@@ -2366,8 +2451,14 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
 ) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
     let nucl_score_table = InitialWordParameters::build_nucl_score_table(reward, penalty);
+    // NCBI BlastInitialWordParametersUpdate: reduced_nucl_cutoff_score = 0.8 * new_cutoff,
+    // where new_cutoff is the ungapped word cutoff MIN(gap_trigger, evalue_cutoff) — NOT the
+    // raw evalue cutoff. On large search spaces evalue_cutoff > gap_trigger, so using the
+    // evalue cutoff alone makes reduced too high and skips the rigorous exact extension for
+    // borderline seeds (approx in [0.8*gap_trigger, 0.8*evalue_cutoff)). On small DBs the
+    // MIN selects the evalue cutoff, so this is byte-identical to the old value there.
     let reduced_nucl_cutoff_score =
-        ((kbp.evalue_to_raw(evalue_threshold, search_space) as f64) * 0.8) as i32;
+        ((ungapped_save_cutoff(kbp, evalue_threshold, search_space) as f64) * 0.8) as i32;
 
     if prepared.is_empty() || subject_len < prepared.word_size {
         return hsps;
@@ -4756,6 +4847,18 @@ struct DecodedUngappedData {
     score: i32,
 }
 
+/// NCBI ungapped-HSP save cutoff for gapped blastn: `MIN(gap_trigger,
+/// gapped-evalue-cutoff)` (`blast_parameters.c:343,369,375`). `gap_trigger` is
+/// 27 bits (`BLAST_GAP_TRIGGER_NUCL`) via the Karlin block. On a large search
+/// space this is gap_trigger (≈28 raw), far below the strict e-value score, so
+/// marginal ungapped seeds survive to gapped extension (which boosts them).
+fn ungapped_save_cutoff(kbp: &KarlinBlk, evalue_threshold: f64, search_space: f64) -> i32 {
+    let gap_trigger = ((crate::stat::BLAST_GAP_TRIGGER_NUCL * crate::math::NCBIMATH_LN2
+        + kbp.log_k)
+        / kbp.lambda) as i32;
+    gap_trigger.min(kbp.evalue_to_raw(evalue_threshold, search_space))
+}
+
 fn build_packed_hsp(
     query: &[u8],
     subject_packed: &[u8],
@@ -4768,10 +4871,20 @@ fn build_packed_hsp(
     if data.score <= 0 || data.q_start + data.length > query.len() {
         return None;
     }
-    let evalue = kbp.raw_to_evalue(data.score, search_space);
-    if evalue > evalue_threshold {
+    // NCBI saves an ungapped HSP (to feed gapped extension) when its score
+    // reaches `cutoffs->cutoff_score` = MIN(gap_trigger, gapped-evalue-cutoff)
+    // (`blast_parameters.c:369,375`), NOT when it already passes the strict
+    // e-value. On a large search space the e-value cutoff far exceeds
+    // gap_trigger (27 bits), so gating the ungapped save on the strict e-value
+    // kills marginal seeds before gapped extension can boost them above the
+    // reportable threshold — losing repeat HSPs. The strict e-value is applied
+    // later (gapped render / the `-ungapped` final cutoff). On a small search
+    // space MIN = evalue cutoff, so this is unchanged there.
+    let save_cutoff = ungapped_save_cutoff(kbp, evalue_threshold, search_space);
+    if data.score < save_cutoff {
         return None;
     }
+    let evalue = kbp.raw_to_evalue(data.score, search_space);
 
     let q_start = data.q_start as i32;
     let q_end = (data.q_start + data.length) as i32;
@@ -4826,11 +4939,12 @@ fn build_decoded_hsp(
     if ungapped.score <= 0 {
         return None;
     }
-
-    let evalue = kbp.raw_to_evalue(ungapped.score, search_space);
-    if evalue > evalue_threshold {
+    // See `build_packed_hsp`: ungapped save cutoff = MIN(gap_trigger, evalue cutoff).
+    if ungapped.score < ungapped_save_cutoff(kbp, evalue_threshold, search_space) {
         return None;
     }
+
+    let evalue = kbp.raw_to_evalue(ungapped.score, search_space);
     let bit_score = kbp.raw_to_bit(ungapped.score);
 
     let q_start = ungapped.q_start as i32;
@@ -6135,10 +6249,19 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
     let prepared = PreparedBlastnQuery::new(query_plus, query_minus, word_size);
-    // First do ungapped search to find seeds (uses masked query)
-    let ungapped = blastn_ungapped_search(
+    // Soft masking: the lookup table is built from the masked queries (`query_plus`
+    // / `query_minus` — seeds in masked regions are skipped), but the ungapped
+    // EXTENSION must use the unmasked queries so the alignment can extend through
+    // DUST-masked low-complexity regions. NCBI's default `-soft_masking true`
+    // produces exactly this behaviour; using the masked buffer for extension
+    // collapses to hard masking and drops most repeat-copy HSPs whose seed lies
+    // outside the mask but whose alignment extends into it (the regular blastn
+    // `-task blastn` recall gap).
+    let ungapped = blastn_ungapped_search_with_nomask(
         query_plus,
         query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
         subject,
         word_size,
         reward,
@@ -7163,19 +7286,16 @@ fn should_preserve_exact_seed_after_large_gap_traceback(
     seed: &SearchHsp,
     tb: &TracebackResult,
 ) -> bool {
-    let preserve_large_gap_seed = seed.score >= 30
-        && seed.gap_opens == 0
-        && seed.num_ident == seed.align_length
-        && seed.align_length >= 30
-        && traceback_has_gap_at_least(tb, 8)
-        && tb.query_start as i32 <= seed.query_start
-        && tb.query_end as i32 >= seed.query_end
-        && tb.subject_start as i32 <= seed.subject_start
-        && tb.subject_end as i32 >= seed.subject_end;
-    if preserve_large_gap_seed {
-        return true;
-    }
-
+    // NCBI emits exactly one HSP per surviving init-seed (the gapped traceback);
+    // it never re-adds the seed's exact ungapped alignment beside a large-gap
+    // traceback. A previous "preserve_large_gap_seed" branch (score>=30, exact,
+    // align>=30, gap>=8, traceback envelops the seed) fabricated such a second
+    // HSP, over-reporting alignments NCBI does not produce — e.g. a score-44
+    // exact HSP nested in a score-93 gapped one on a repeat-rich subject, where
+    // the diagonal separation exceeds min_diag_separation so the interval tree
+    // cannot cull it. That branch matched no fixture and is removed. The
+    // remaining branch handles only the short minus-strand terminal-overhang
+    // case covered by `blastn_short_minus_terminal_overhang_keeps_secondary_hsp`.
     seed.context == 1
         && seed.gap_opens == 0
         && seed.num_ident == seed.align_length

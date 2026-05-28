@@ -4564,34 +4564,42 @@ fn all_hits_sort_by_query_then_evalue(
     hits: &mut [TabularHit],
     query_order: &std::collections::HashMap<String, usize>,
 ) {
-    // Compute the best e-value per (query, subject) so the secondary sort
-    // key positions subjects by their best HSP.
+    // Compute the best e-value AND best (top-HSP) raw score per (query, subject)
+    // so the secondary sort keys position subjects by their best HSP, matching
+    // NCBI `s_EvalueCompareHSPLists` (`blast_hits.c:3099`): best e-value asc,
+    // then top HSP score DESC, then oid desc. Tying e-values (all < 1e-180) must
+    // break on score, NOT on the subject accession string.
     let mut best_evalue: std::collections::HashMap<(String, String), f64> =
+        std::collections::HashMap::new();
+    let mut best_score: std::collections::HashMap<(String, String), i32> =
         std::collections::HashMap::new();
     for hit in hits.iter() {
         let key = (hit.query_id.clone(), hit.subject_id.clone());
         // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds the per-list
         // best-evalue accumulator with `(double)INT4_MAX`; use the same seed
         // here so the running-min has consistent semantics.
-        let entry = best_evalue.entry(key).or_insert(i32::MAX as f64);
+        let entry = best_evalue.entry(key.clone()).or_insert(i32::MAX as f64);
         if blast_rs::api::evalue_comp(hit.evalue, *entry) == std::cmp::Ordering::Less {
             *entry = hit.evalue;
+        }
+        let sentry = best_score.entry(key).or_insert(i32::MIN);
+        if hit.raw_score > *sentry {
+            *sentry = hit.raw_score;
         }
     }
     hits.sort_by(|a, b| {
         let a_rank = query_order.get(&a.query_id).copied().unwrap_or(usize::MAX);
         let b_rank = query_order.get(&b.query_id).copied().unwrap_or(usize::MAX);
-        let a_best = best_evalue
-            .get(&(a.query_id.clone(), a.subject_id.clone()))
-            .copied()
-            .unwrap_or(a.evalue);
-        let b_best = best_evalue
-            .get(&(b.query_id.clone(), b.subject_id.clone()))
-            .copied()
-            .unwrap_or(b.evalue);
+        let a_key = (a.query_id.clone(), a.subject_id.clone());
+        let b_key = (b.query_id.clone(), b.subject_id.clone());
+        let a_best = best_evalue.get(&a_key).copied().unwrap_or(a.evalue);
+        let b_best = best_evalue.get(&b_key).copied().unwrap_or(b.evalue);
+        let a_best_score = best_score.get(&a_key).copied().unwrap_or(a.raw_score);
+        let b_best_score = best_score.get(&b_key).copied().unwrap_or(b.raw_score);
         a_rank
             .cmp(&b_rank)
             .then_with(|| blast_rs::api::evalue_comp(a_best, b_best))
+            .then_with(|| b_best_score.cmp(&a_best_score))
             .then_with(|| a.subject_id.cmp(&b.subject_id))
             .then_with(|| blast_rs::api::evalue_comp(a.evalue, b.evalue))
             .then_with(|| b.raw_score.cmp(&a.raw_score))
@@ -5621,6 +5629,23 @@ fn emit_unsupported_standard_matrix_error(value: &str) -> ! {
     std::process::exit(1);
 }
 
+/// Drop HSPs whose query-frame strand does not match `-strand`. blastx/tblastx
+/// translate the nucleotide query in all six frames; `-strand plus` keeps only
+/// the +1..+3 frames and `-strand minus` only -1..-3 (`both` keeps all). BLAST
+/// computes e-values per query context, so the surviving frames' statistics are
+/// identical whether or not the excluded frames were searched — filtering the
+/// output therefore matches NCBI's strand-restricted search exactly.
+fn filter_results_by_query_strand(results: &mut [blast_rs::api::SearchResult], strand: &str) {
+    let wanted = match strand {
+        "plus" => 1i32,
+        "minus" => -1i32,
+        _ => return,
+    };
+    for result in results.iter_mut() {
+        result.hsps.retain(|hsp| hsp.query_frame.signum() == wanted);
+    }
+}
+
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
@@ -5656,7 +5681,8 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         subject_xml_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
         let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Protein)?;
         for qrec in &queries {
-            let results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
+            let mut results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
+            filter_results_by_query_strand(&mut results, &args.strand);
             all_hits.extend(search_result_hsps_to_tabular_hits(
                 &qrec.id,
                 qrec.sequence.len(),
@@ -5687,7 +5713,8 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             blast_rs::api::blastx_batch(&db, &qseqs, &params)
         };
         for (qi, qrec) in queries.iter().enumerate() {
-            let results = std::mem::take(&mut batched_blastx[qi]);
+            let mut results = std::mem::take(&mut batched_blastx[qi]);
+            filter_results_by_query_strand(&mut results, &args.strand);
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
@@ -6490,7 +6517,8 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         subject_xml_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
         let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
         for qrec in &queries {
-            let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
+            let mut results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
+            filter_results_by_query_strand(&mut results, &args.strand);
             all_hits.extend(search_result_hsps_to_tabular_hits(
                 &qrec.id,
                 qrec.sequence.len(),
@@ -6519,7 +6547,8 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             blast_rs::api::tblastx_batch(&db, &qseqs, &params)
         };
         for (qi, qrec) in queries.iter().enumerate() {
-            let results = std::mem::take(&mut batched_tblastx[qi]);
+            let mut results = std::mem::take(&mut batched_tblastx[qi]);
+            filter_results_by_query_strand(&mut results, &args.strand);
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);

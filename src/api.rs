@@ -2613,50 +2613,18 @@ fn process_protein_oid(
         };
 
         // If we have an adjusted matrix, re-align and recompute scores.
-        // 1-1 with NCBI's `Blast_RedoAlignmentCore_MT` (single-HSP arm,
-        // redo_alignment.c:1430-1530): full SW under the adjusted
-        // matrix → reverse SW for the start → forward-only X-drop
-        // bounded by the SW endpoints. The bounded forward-only X-drop
-        // (vs bidirectional X-drop from the seed) prevents
-        // alignment-end overshoot that produced longer-but-suboptimal
-        // alignments and ~2-bit discrepancies vs NCBI on the
-        // sortase / dinB fixtures.
-        let sw_bounded_blastp = if let Some((Some(ref adj_mat), _)) = adj_result {
-            if phits.len() == 1 {
-                let (sw_score, m_end_sw, q_end_sw) =
-                    crate::smith_waterman::blast_smith_waterman_score_only(
-                        redo_subj_aa,
-                        &query_aa,
-                        adj_mat,
-                        scaled_gap_open,
-                        scaled_gap_extend,
-                        None,
-                    );
-                if sw_score > 0 {
-                    let (_, m_start_sw, q_start_sw) =
-                        crate::smith_waterman::blast_smith_waterman_find_start(
-                            redo_subj_aa,
-                            &query_aa,
-                            adj_mat,
-                            scaled_gap_open,
-                            scaled_gap_extend,
-                            m_end_sw,
-                            q_end_sw,
-                            sw_score,
-                            None,
-                        );
-                    let q_extent = q_end_sw - q_start_sw;
-                    let s_extent = m_end_sw - m_start_sw;
-                    Some((q_start_sw, m_start_sw, q_extent, s_extent, sw_score))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // NCBI uses the SW-bounded forward traceback (`s_SWFindFinalEndsUsingXdrop`)
+        // ONLY in Smith-Waterman traceback mode (`-use_sw_tback`). The DEFAULT
+        // composition-adjusted path (`comp_based_stats` 1/2, no SW) re-aligns
+        // BIDIRECTIONALLY from the seed with the adjusted matrix via
+        // `protein_gapped_align`. Forcing the SW-bounded forward path here
+        // produced a different (suboptimal) co-optimal gap placement than NCBI —
+        // correct score but wrong alignment/identity (e.g. pident 32% vs NCBI's
+        // 68% on HIV env hits), corrupting `pident`/`mismatch`/`nident` and
+        // shifting recall on every default blastp/blastx/tblastn run. blast-rs
+        // does not implement `-use_sw_tback`, so the bidirectional path is always
+        // correct here.
+        let sw_bounded_blastp: Option<(usize, usize, usize, usize, i32)> = None;
         let (final_phits, use_adj_matrix) = if let Some((None, _)) = adj_result {
             (Vec::new(), true)
         } else if let Some((Some(ref adj_mat), _)) = adj_result {
@@ -6112,38 +6080,11 @@ fn apply_compositional_adjustment_per_subject(
         // (redo_alignment.c:1430-1530): full SW under the adjusted matrix
         // → reverse SW for the start → forward-only X-drop within the
         // SW-derived bounds via `s_sw_find_final_ends_using_xdrop`.
-        let sw_bounded = if phits.len() == 1 {
-            let (sw_score, m_end_sw, q_end_sw) =
-                crate::smith_waterman::blast_smith_waterman_score_only(
-                    redo_subj_aa,
-                    query_aa,
-                    adj_mat,
-                    scaled_gap_open,
-                    scaled_gap_extend,
-                    None,
-                );
-            if sw_score > 0 {
-                let (_, m_start_sw, q_start_sw) =
-                    crate::smith_waterman::blast_smith_waterman_find_start(
-                        redo_subj_aa,
-                        query_aa,
-                        adj_mat,
-                        scaled_gap_open,
-                        scaled_gap_extend,
-                        m_end_sw,
-                        q_end_sw,
-                        sw_score,
-                        None,
-                    );
-                let q_extent = q_end_sw - q_start_sw;
-                let s_extent = m_end_sw - m_start_sw;
-                Some((q_start_sw, m_start_sw, q_extent, s_extent, sw_score))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // See the blastp redo above: NCBI's SW-bounded forward traceback applies
+        // only to `-use_sw_tback`; the default composition-adjusted path uses the
+        // bidirectional X-drop redo from the seed. blast-rs has no -use_sw_tback,
+        // so never take the SW-bounded path here.
+        let sw_bounded: Option<(usize, usize, usize, usize, i32)> = None;
         let mut new_phits = Vec::new();
         // In the single-HSP Smith-Waterman redo arm, use the bounded X-drop
         // traceback produced from SW endpoints directly. For multi-HSP redo,

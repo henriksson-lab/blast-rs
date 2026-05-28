@@ -412,20 +412,18 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             }
         }
         "qcovhsp" => {
-            // NCBI's `qcovhsp` is `align_len * 100 / qlen`, NOT
-            // `(qend - qstart + 1) * 100 / qlen`. The two only agree when
-            // the alignment has no gaps in the query. For programs where
-            // qlen and align_len use different units (blastx: qlen is nt,
-            // align_len is aa), NCBI still uses align_len/qlen directly —
-            // which produces the smaller numbers we observed
-            // (6/11/8/11 vs our 18/33/25/33 for blastx). See
-            // `align_format/blast_align_format.cpp::CBlastFormatUtil`.
-            if hit.query_len > 0 {
-                let cov = 100.0 * hit.align_len as f64 / hit.query_len as f64;
-                format_query_coverage(cov)
-            } else {
-                "0".to_string()
-            }
+            // NCBI `Blast_HSPGetQueryCoverage` (blast_hits.c:1034): the coverage
+            // is the QUERY SPAN of the HSP over the query length, NOT align_len:
+            //   pct = 100 * (query.end - query.offset) / query_length
+            //   if (pct < 99) pct += 0.5;   // round half up, but only below 99
+            //   return (int)pct;            // truncate (so 99.x stays 99)
+            // align_len includes subject-gap columns and (for translated
+            // searches) uses different units than query_length, so it is wrong.
+            ncbi_query_coverage(
+                (hit.query_end - hit.query_start + 1).unsigned_abs() as i64,
+                hit.query_len as i64,
+            )
+            .to_string()
         }
         // Taxonomy ID fields — from .nto database file
         "staxid" => hit
@@ -670,6 +668,22 @@ fn format_query_coverage(cov: f64) -> String {
 fn rounded_query_coverage(cov: f64) -> i32 {
     // NCBI-style half-up rounding via `BLAST_Nint`, clamped to 100.
     (crate::math::blast_nint(cov.min(100.0)) as i32).min(100)
+}
+
+/// Port of NCBI `Blast_HSPGetQueryCoverage` (`blast_hits.c:1034`), used for the
+/// `qcovhsp` column. `query_span` is the inclusive query span of the HSP
+/// (`qend - qstart + 1`); `query_len` the full query length. The `< 99`
+/// guard on the `+0.5` plus the integer truncation means high coverage values
+/// (e.g. 99.6%) truncate to 99 rather than rounding to 100.
+fn ncbi_query_coverage(query_span: i64, query_len: i64) -> i32 {
+    if query_len <= 0 {
+        return 0;
+    }
+    let mut pct = 100.0 * query_span as f64 / query_len as f64;
+    if pct < 99.0 {
+        pct += 0.5;
+    }
+    pct as i32
 }
 
 #[cfg(test)]
@@ -981,13 +995,13 @@ mod tests {
     #[test]
     fn test_query_coverage_rounds_half_up() {
         let mut hit = make_hit(None, None);
-        // align_len = 20 over qlen = 32 gives 62.5%, the round-half-up
-        // boundary we want to exercise. Tests the formula
-        // `align_len * 100 / qlen` matches NCBI's behavior.
+        // Query span = qend-qstart+1 = 20 over qlen = 32 gives 62.5%; since
+        // 62.5 < 99 NCBI adds 0.5 (-> 63.0) then truncates to 63. align_len is
+        // set differently to confirm qcovhsp uses the query SPAN, not align_len.
         hit.query_len = 32;
         hit.query_start = 1;
         hit.query_end = 20;
-        hit.align_len = 20;
+        hit.align_len = 25;
         assert_eq!(get_field(&hit, "qcovhsp"), "63");
     }
 

@@ -21184,7 +21184,7 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
     );
     assert_eq!(
         &rust_fields[2..5],
-        &["80.000", "10", "1"],
+        &["90.000", "10", "0"],
         "Rust traceback-window identity fixture changed; re-audit PSI gap placement"
     );
     assert_eq!(
@@ -21194,7 +21194,7 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
     );
     assert_eq!(
         &rust_fields[12..],
-        &["KKWLF-GFLG", "KKWLTFGFLG"],
+        &["KKWL-FGFLG", "KKWLTFGFLG"],
         "Rust traceback-window edit script changed; re-audit PSI gap placement"
     );
 
