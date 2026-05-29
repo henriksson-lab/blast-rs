@@ -7430,9 +7430,17 @@ fn run_blastn_rust(
             && std::env::var_os("BLAST_RS_NO_CONCAT").is_none();
         let any_concat = contiguous_concat_eligible || disc_concat_eligible;
         let concat_query = if any_concat {
-            let plus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect();
-            let minus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect();
-            Some(blast_rs::search::ConcatenatedBlastnQuery::new(&plus, &minus))
+            let plus: Vec<&[u8]> = encoded_queries
+                .iter()
+                .map(|eq| &eq.plus_masked[..])
+                .collect();
+            let minus: Vec<&[u8]> = encoded_queries
+                .iter()
+                .map(|eq| &eq.minus_masked[..])
+                .collect();
+            Some(blast_rs::search::ConcatenatedBlastnQuery::new(
+                &plus, &minus,
+            ))
         } else {
             None
         };
@@ -7459,22 +7467,34 @@ fn run_blastn_rust(
             Vec::new()
         };
         let concat_plus_masked: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.plus_masked[..])
+                .collect()
         } else {
             Vec::new()
         };
         let concat_minus_masked: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.minus_masked[..])
+                .collect()
         } else {
             Vec::new()
         };
         let concat_plus_nomask: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.plus_nomask[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.plus_nomask[..])
+                .collect()
         } else {
             Vec::new()
         };
         let concat_minus_nomask: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.minus_nomask[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.minus_nomask[..])
+                .collect()
         } else {
             Vec::new()
         };
@@ -7988,9 +8008,17 @@ fn run_blastn_rust(
             && std::env::var_os("BLAST_RS_NO_CONCAT").is_none();
         let any_concat = contiguous_concat_eligible || disc_concat_eligible;
         let concat_query = if any_concat {
-            let plus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect();
-            let minus: Vec<&[u8]> = encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect();
-            Some(blast_rs::search::ConcatenatedBlastnQuery::new(&plus, &minus))
+            let plus: Vec<&[u8]> = encoded_queries
+                .iter()
+                .map(|eq| &eq.plus_masked[..])
+                .collect();
+            let minus: Vec<&[u8]> = encoded_queries
+                .iter()
+                .map(|eq| &eq.minus_masked[..])
+                .collect();
+            Some(blast_rs::search::ConcatenatedBlastnQuery::new(
+                &plus, &minus,
+            ))
         } else {
             None
         };
@@ -8017,28 +8045,38 @@ fn run_blastn_rust(
             Vec::new()
         };
         let concat_plus_masked: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.plus_masked[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.plus_masked[..])
+                .collect()
         } else {
             Vec::new()
         };
         let concat_minus_masked: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.minus_masked[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.minus_masked[..])
+                .collect()
         } else {
             Vec::new()
         };
         let concat_plus_nomask: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.plus_nomask[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.plus_nomask[..])
+                .collect()
         } else {
             Vec::new()
         };
         let concat_minus_nomask: Vec<&[u8]> = if any_concat {
-            encoded_queries.iter().map(|eq| &eq.minus_nomask[..]).collect()
+            encoded_queries
+                .iter()
+                .map(|eq| &eq.minus_nomask[..])
+                .collect()
         } else {
             Vec::new()
         };
-        let concat_refs = concat_query
-            .as_ref()
-            .zip(concat_lookup.as_ref());
+        let concat_refs = concat_query.as_ref().zip(concat_lookup.as_ref());
 
         let mut collected =
             BlastnHitListAccumulator::new(encoded_queries.len(), prelim_hitlist_size);
@@ -8883,6 +8921,7 @@ fn run_blastn_rust(
                             .then_with(|| a.sframe.cmp(&b.sframe))
                     } else {
                         score_order
+                            .then_with(|| a.sframe.cmp(&b.sframe))
                             .then_with(|| a_subject_lo.cmp(&b_subject_lo))
                             .then_with(|| {
                                 same_subject_interval_long_query_strand_order(
@@ -8896,7 +8935,6 @@ fn run_blastn_rust(
                                 .unwrap_or(std::cmp::Ordering::Equal)
                             })
                             .then_with(|| hsp_query_order_start(a).cmp(&hsp_query_order_start(b)))
-                            .then_with(|| b.sframe.cmp(&a.sframe))
                             .then_with(|| b_subject_hi.cmp(&a_subject_hi))
                     }
                 });
@@ -9428,7 +9466,13 @@ fn apply_blastn_dust_mask(seq: &mut [u8]) {
                     .join(",")
             );
         }
-        mask.apply(seq, 14);
+        for region in &mask.regions {
+            let start = region.start.max(0) as usize;
+            let end = (region.end as usize).saturating_add(1).min(seq.len());
+            for base in seq.iter_mut().take(end).skip(start) {
+                *base = 14;
+            }
+        }
     }
 }
 
@@ -18927,6 +18971,8 @@ mod tests {
             query_end: 28,
             subject_start: 0,
             subject_end: 28,
+            query_gapped_start: 0,
+            subject_gapped_start: 0,
             score,
             bit_score: score as f64,
             evalue,
@@ -18953,6 +18999,8 @@ mod tests {
             query_end,
             subject_start,
             subject_end,
+            query_gapped_start: query_start,
+            subject_gapped_start: subject_start,
             score,
             bit_score: score as f64,
             evalue,

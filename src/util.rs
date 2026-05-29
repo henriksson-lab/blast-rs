@@ -580,10 +580,12 @@ pub fn blast_target_translation_new(
             //    blast_get_partial_translation call produced a wrong (half-length,
             //    one-strand) sequence.
             let length = subject_blk.length.max(0) as usize;
-            let (buffer, frame_offsets) =
-                blast_get_all_translations(seq, length, gen_code_string);
-            subject_blk.oof_sequence =
-                Some(blast_all_translations_mixed_seq(&buffer, &frame_offsets, length));
+            let (buffer, frame_offsets) = blast_get_all_translations(seq, length, gen_code_string);
+            subject_blk.oof_sequence = Some(blast_all_translations_mixed_seq(
+                &buffer,
+                &frame_offsets,
+                length,
+            ));
             subject_blk.oof_sequence_allocated = true;
         } else {
             let rev = get_reverse_nucl_sequence(seq, subject_blk.length.max(0) as usize);
@@ -2536,7 +2538,10 @@ mod tests {
 
         let mut blk = BlastSequenceBlk::default();
         blk.sequence = Some(vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
-        assert_eq!(blast_create_mixed_frame_dna_translation(&mut blk, &qinfo), 0);
+        assert_eq!(
+            blast_create_mixed_frame_dna_translation(&mut blk, &qinfo),
+            0
+        );
         assert!(blk.oof_sequence_allocated);
         // 3 leading NULLBs, then interleave f0[0],f1[0],f2[0],f0[1],f1[1] (f2
         // exhausted at offset 1), then a trailing NULLB. Buffer is seq_buf_len+1.

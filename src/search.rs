@@ -9,7 +9,7 @@ use crate::parameters::InitialWordParameters;
 use crate::stat::KarlinBlk;
 use crate::traceback::{
     blast_gapped_alignment_with_traceback, blast_hsp_reevaluate_with_ambiguities_gapped,
-    blast_semi_gapped_align, TracebackResult,
+    blast_semi_gapped_align, s_blast_dyn_prog_nt_gapped_alignment, TracebackResult,
 };
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -19,6 +19,8 @@ pub struct SearchHsp {
     pub query_end: i32,
     pub subject_start: i32,
     pub subject_end: i32,
+    pub query_gapped_start: i32,
+    pub subject_gapped_start: i32,
     pub score: i32,
     pub bit_score: f64,
     pub evalue: f64,
@@ -55,11 +57,15 @@ pub struct SubjectResult {
 struct GappedCandidate {
     context: i32,
     tb: TracebackResult,
+    reevaluate_with_ambiguities: bool,
+    terminal_exact_from_swallowed_seed: bool,
 }
 
 struct NaLookup<'a> {
     context: i32,
+    query_masked: &'a [u8],
     query: &'a [u8],
+    has_query_mask: bool,
     lut_word: usize,
     lut_mask: u32,
     scan_start: usize,
@@ -180,6 +186,21 @@ pub struct PackedDiagScratch {
     pub last_hit: DiagStore,
 }
 
+thread_local! {
+    static PACKED_RENDER_UNGAPPED_STRINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static PACKED_WORD_SAVE_CUTOFF: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn packed_render_ungapped_strings() -> bool {
+    PACKED_RENDER_UNGAPPED_STRINGS.with(|flag| flag.get())
+}
+
+#[inline]
+fn packed_word_save_cutoff() -> i32 {
+    PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.get())
+}
+
 impl PackedDiagScratch {
     fn new(len: usize, use_hash: bool) -> Self {
         Self {
@@ -210,6 +231,177 @@ struct ExactWordHit {
     query_start: usize,
     subject_start: usize,
     subject_match_end: usize,
+}
+
+#[inline]
+fn masked_lut_word_matches_decoded(
+    query_masked: &[u8],
+    subject: &[u8],
+    lut_word: usize,
+    q_pos: usize,
+    s_pos: usize,
+) -> bool {
+    if q_pos + lut_word > query_masked.len() || s_pos + lut_word > subject.len() {
+        return false;
+    }
+    let q_word = &query_masked[q_pos..q_pos + lut_word];
+    !has_ambiguous_base(q_word) && q_word == &subject[s_pos..s_pos + lut_word]
+}
+
+#[inline]
+fn masked_lut_word_matches_packed(
+    query_masked: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    lut_word: usize,
+    q_pos: usize,
+    s_pos: usize,
+) -> bool {
+    if q_pos + lut_word > query_masked.len() || s_pos + lut_word > subject_len {
+        return false;
+    }
+    let q_word = &query_masked[q_pos..q_pos + lut_word];
+    if has_ambiguous_base(q_word) {
+        return false;
+    }
+    q_word
+        .iter()
+        .enumerate()
+        .all(|(i, &q)| q == packed_base_at(subject_packed, s_pos + i))
+}
+
+fn apply_ncbi_type_of_word_mask_decoded(
+    query_masked: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    lut_word: usize,
+    mut hit: ExactWordHit,
+) -> Option<ExactWordHit> {
+    if word_size == lut_word {
+        return Some(hit);
+    }
+    let mut q_off = hit.query_start;
+    let mut s_off = hit.subject_start;
+    let mut q_end = q_off + word_size;
+    let mut s_end = s_off + word_size;
+
+    if !masked_lut_word_matches_decoded(
+        query_masked,
+        subject,
+        lut_word,
+        q_end - lut_word,
+        s_end - lut_word,
+    ) {
+        return None;
+    }
+
+    while !masked_lut_word_matches_decoded(query_masked, subject, lut_word, q_off, s_off) {
+        q_off += 1;
+        s_off += 1;
+        if q_off + lut_word > q_end {
+            return None;
+        }
+    }
+
+    let ext_to = word_size - (q_end - q_off);
+    if q_end + ext_to > query_masked.len() || s_end + ext_to > subject.len() {
+        return None;
+    }
+    q_end += ext_to;
+    s_end += ext_to;
+
+    let mut q_pos = q_end - lut_word;
+    let mut s_pos = s_end - lut_word;
+    while s_pos > s_off {
+        if !masked_lut_word_matches_decoded(query_masked, subject, lut_word, q_pos, s_pos) {
+            return None;
+        }
+        if s_pos < lut_word || q_pos < lut_word {
+            break;
+        }
+        s_pos -= lut_word;
+        q_pos -= lut_word;
+    }
+
+    hit.query_start = q_off;
+    hit.subject_start = s_off;
+    hit.subject_match_end = s_off + word_size;
+    Some(hit)
+}
+
+fn apply_ncbi_type_of_word_mask_packed(
+    query_masked: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: usize,
+    lut_word: usize,
+    mut hit: ExactWordHit,
+) -> Option<ExactWordHit> {
+    if word_size == lut_word {
+        return Some(hit);
+    }
+    let mut q_off = hit.query_start;
+    let mut s_off = hit.subject_start;
+    let mut q_end = q_off + word_size;
+    let mut s_end = s_off + word_size;
+
+    if !masked_lut_word_matches_packed(
+        query_masked,
+        subject_packed,
+        subject_len,
+        lut_word,
+        q_end - lut_word,
+        s_end - lut_word,
+    ) {
+        return None;
+    }
+
+    while !masked_lut_word_matches_packed(
+        query_masked,
+        subject_packed,
+        subject_len,
+        lut_word,
+        q_off,
+        s_off,
+    ) {
+        q_off += 1;
+        s_off += 1;
+        if q_off + lut_word > q_end {
+            return None;
+        }
+    }
+
+    let ext_to = word_size - (q_end - q_off);
+    if q_end + ext_to > query_masked.len() || s_end + ext_to > subject_len {
+        return None;
+    }
+    q_end += ext_to;
+    s_end += ext_to;
+
+    let mut q_pos = q_end - lut_word;
+    let mut s_pos = s_end - lut_word;
+    while s_pos > s_off {
+        if !masked_lut_word_matches_packed(
+            query_masked,
+            subject_packed,
+            subject_len,
+            lut_word,
+            q_pos,
+            s_pos,
+        ) {
+            return None;
+        }
+        if s_pos < lut_word || q_pos < lut_word {
+            break;
+        }
+        s_pos -= lut_word;
+        q_pos -= lut_word;
+    }
+
+    hit.query_start = q_off;
+    hit.subject_start = s_off;
+    hit.subject_match_end = s_off + word_size;
+    Some(hit)
 }
 
 #[inline]
@@ -301,6 +493,56 @@ fn find_exact_word_hit_packed_aligned(
         if ext_left + ext_right < ext_to {
             return None;
         }
+    }
+
+    let query_start = qp - ext_left;
+    let subject_start = sp - ext_left;
+    Some(ExactWordHit {
+        query_start,
+        subject_start,
+        subject_match_end: subject_start + word_size,
+    })
+}
+
+#[inline]
+fn find_exact_word_hit_decoded(
+    query: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    lut_word: usize,
+    qp: usize,
+    sp: usize,
+) -> Option<ExactWordHit> {
+    if qp + lut_word > query.len() || sp + lut_word > subject.len() {
+        return None;
+    }
+
+    let ext_to = word_size.saturating_sub(lut_word);
+    let mut ext_left = 0usize;
+    while ext_left < ext_to && ext_left < qp && ext_left < sp {
+        let q_idx = qp - ext_left - 1;
+        let s_idx = sp - ext_left - 1;
+        if query[q_idx] != subject[s_idx] {
+            break;
+        }
+        ext_left += 1;
+    }
+
+    let mut ext_right = 0usize;
+    while ext_left + ext_right < ext_to {
+        let q_idx = qp + lut_word + ext_right;
+        let s_idx = sp + lut_word + ext_right;
+        if q_idx >= query.len() || s_idx >= subject.len() {
+            return None;
+        }
+        if query[q_idx] != subject[s_idx] {
+            break;
+        }
+        ext_right += 1;
+    }
+
+    if ext_left + ext_right < ext_to {
+        return None;
     }
 
     let query_start = qp - ext_left;
@@ -772,7 +1014,21 @@ fn concat_scan_collect_strand(
                 lut_word,
                 qp,
                 s_pos,
-            ) {
+            )
+            .and_then(|hit| {
+                if lookup.has_query_mask {
+                    apply_ncbi_type_of_word_mask_packed(
+                        lookup.query_masked,
+                        subject_packed,
+                        subject_len,
+                        word_size,
+                        lut_word,
+                        hit,
+                    )
+                } else {
+                    Some(hit)
+                }
+            }) {
                 // Resolve the verified hit's query-start to (query_idx, local).
                 let (qi, local_q_start) = concat.resolve(hit.query_start);
                 let local_hit = ExactWordHit {
@@ -800,8 +1056,7 @@ fn concat_scan_collect_strand(
         }
         let mut s_pos = 0;
         while s_pos < end {
-            hash = ((hash << 2)
-                | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32)
+            hash = ((hash << 2) | packed_base_at(subject_packed, s_pos + lut_word - 1) as u32)
                 & lut_mask;
             handle_position(s_pos, hash as usize);
             s_pos += 1;
@@ -838,14 +1093,20 @@ fn concat_replay_ungapped_for_query(
     use_hash: bool,
 ) -> Vec<SearchHsp> {
     let nucl_score_table = InitialWordParameters::build_nucl_score_table(reward, penalty);
-    // The preliminary ungapped scan relaxes the evalue threshold by 1000x
-    // (see `collect_packed_prepared_ungapped`).
-    let prelim_evalue = stats.evalue_threshold * 1000.0;
-    let reduced_nucl_cutoff_score =
-        ((stats.kbp.evalue_to_raw(prelim_evalue, stats.search_space) as f64) * 0.8) as i32;
-
     let mut hsps: Vec<SearchHsp> = Vec::new();
     for lookup in prepared.lookups.iter() {
+        let word_cutoff = blastn_word_save_cutoff(
+            lookup.query,
+            reward,
+            penalty,
+            &stats.kbp,
+            stats.evalue_threshold,
+            stats.search_space,
+            subject_len,
+        );
+        let reduced_nucl_cutoff_score = ((word_cutoff as f64) * 0.8) as i32;
+        let previous_word_save_cutoff =
+            PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.replace(word_cutoff));
         let (hits, ctx_query) = if lookup.context == 0 {
             (plus_hits, lookup.query)
         } else {
@@ -873,7 +1134,7 @@ fn concat_replay_ungapped_for_query(
                 stats.ungapped_x_dropoff,
                 &stats.kbp,
                 stats.search_space,
-                prelim_evalue,
+                stats.evalue_threshold,
                 lookup.context,
                 &nucl_score_table,
                 reduced_nucl_cutoff_score,
@@ -881,12 +1142,9 @@ fn concat_replay_ungapped_for_query(
                 &mut hsps,
             );
         }
+        PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.set(previous_word_save_cutoff));
     }
-    hsps.sort_by(score_compare_search_hsps);
-    dedup_hsps_with_min_diag_separation(
-        &mut hsps,
-        min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
-    );
+    sort_ungapped_hsps_ncbi_no_dedup(&mut hsps);
     hsps
 }
 
@@ -1019,15 +1277,23 @@ impl<'a> NaLookup<'a> {
         approx_entries: usize,
         choose_lut_word: fn(usize, usize) -> usize,
     ) -> Option<Self> {
-        Self::new_with_nomask(context, query, query, word_size, approx_entries, choose_lut_word)
+        Self::new_with_nomask(
+            context,
+            query,
+            query,
+            word_size,
+            approx_entries,
+            choose_lut_word,
+        )
     }
 
     /// Build the lookup table from the MASKED query (`query_masked` — DUST/lcase
     /// seeds with `N` are skipped) but store the UNMASKED query in `lookup.query`
     /// for runtime seed verification and extension. This implements NCBI's
     /// default `-soft_masking true`: masked positions don't seed, but they don't
-    /// block extension or the full-word verification either. Callers without a
-    /// separate nomask pass `query_masked == query_nomask` (hard masking).
+    /// block later ungapped/gapped extension after a valid seed is admitted.
+    /// Callers without a separate nomask pass `query_masked == query_nomask`
+    /// (hard masking).
     fn new_with_nomask(
         context: i32,
         query_masked: &'a [u8],
@@ -1039,8 +1305,11 @@ impl<'a> NaLookup<'a> {
         if query_masked.len() < word_size {
             return None;
         }
-        debug_assert_eq!(query_masked.len(), query_nomask.len(),
-            "masked/nomask queries must be same length");
+        debug_assert_eq!(
+            query_masked.len(),
+            query_nomask.len(),
+            "masked/nomask queries must be same length"
+        );
 
         let lut_word = choose_lut_word(word_size, approx_entries);
         let lut_size = 1usize << (2 * lut_word);
@@ -1075,13 +1344,13 @@ impl<'a> NaLookup<'a> {
 
         Some(NaLookup {
             context,
+            query_masked,
             // `lookup.query` is the runtime query consumed by full-word
             // verification (`find_exact_word_hit_packed`) and by `extend_seed_*`.
-            // Both must read the unmasked bases so an alignment can extend
-            // through (or verify across) DUST-masked regions. The LUT itself
-            // was built above from the masked query, which is the only place
-            // masking applies under NCBI's `-soft_masking true`.
+            // Extension must read the unmasked bases so alignments can pass
+            // through DUST-masked regions after a valid masked lookup seed.
             query: query_nomask,
+            has_query_mask: query_masked != query_nomask,
             lut_word,
             lut_mask,
             scan_start,
@@ -1335,7 +1604,7 @@ pub fn blastn_ungapped_search(
         kbp,
         search_space,
         evalue_threshold,
-        true,
+        Some(min_diag_separation_for_ungapped(word_size, reward, penalty)),
     )
 }
 
@@ -1374,7 +1643,40 @@ pub fn blastn_ungapped_search_with_nomask(
         kbp,
         search_space,
         evalue_threshold,
-        true,
+        Some(min_diag_separation_for_ungapped(word_size, reward, penalty)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blastn_ungapped_search_with_nomask_min_diag(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    min_diag_separation: i32,
+) -> Vec<SearchHsp> {
+    blastn_ungapped_search_inner(
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
+        subject,
+        word_size,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        Some(min_diag_separation),
     )
 }
 
@@ -1436,7 +1738,7 @@ pub fn blastn_ungapped_search_no_dedup_nomask(
         kbp,
         search_space,
         evalue_threshold,
-        false,
+        None,
     )
 }
 
@@ -1454,105 +1756,89 @@ fn blastn_ungapped_search_inner(
     kbp: &KarlinBlk,
     search_space: f64,
     evalue_threshold: f64,
-    dedup: bool,
+    dedup_min_diag: Option<i32>,
 ) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
 
-    let lut_word = word_size.min(8);
-    let lut_size = 1usize << (2 * lut_word);
+    let prepared = PreparedBlastnQuery::new_with_nomask(
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
+        word_size,
+    );
 
-    // Hoist the scratch allocations out of the strand loop. last_hit is the
-    // largest (subject.len() + query.len() + 1 i32s — 60 MB for a 15 Mbp
-    // celegans chromosome), and we previously reallocated it per strand.
-    // Reusing across the two strands halves the per-call memory traffic.
-    let max_query_len = query_plus.len().max(query_minus.len());
-    let mut last_hit: Vec<i32> = vec![-1; subject.len() + max_query_len + 1];
-    let mut lut: Vec<i32> = vec![-1; lut_size];
-    let mut next: Vec<i32> = vec![-1; max_query_len];
+    if prepared.is_empty() || subject.len() < word_size {
+        return hsps;
+    }
 
-    for (context, query, query_nomask) in [
-        (0i32, query_plus, query_plus_nomask),
-        (1i32, query_minus, query_minus_nomask),
-    ] {
-        if query.len() < word_size || subject.len() < word_size {
-            continue;
-        }
-        last_hit[..subject.len() + query.len() + 1].fill(-1);
-
-        // Build lookup table from query.
-        lut.fill(-1);
-        next[..query.len()].fill(-1);
-
-        for i in (0..=(query.len() - word_size)).rev() {
-            if has_ambiguous_base(&query[i..i + word_size]) {
+    for lookup in &prepared.lookups {
+        let mut last_hit = vec![-1; subject.len() + lookup.query.len() + 1];
+        let mut s_pos = lookup.scan_start;
+        while s_pos + lookup.lut_word <= subject.len() {
+            if has_ambiguous_base(&subject[s_pos..s_pos + lookup.lut_word]) {
+                s_pos += lookup.scan_step;
                 continue;
             }
-            let key = word_hash_n(&query[i..i + lut_word], lut_word) as usize;
-            next[i] = lut[key];
-            lut[key] = i as i32;
-        }
-
-        // Scan subject
-        let mut s_pos = 0;
-        while s_pos + word_size <= subject.len() {
-            if has_ambiguous_base(&subject[s_pos..s_pos + word_size]) {
-                s_pos += 1;
-                continue;
-            }
-            let key = word_hash_n(&subject[s_pos..s_pos + lut_word], lut_word) as usize;
-            let mut q_pos = lut[key];
+            let key =
+                word_hash_n(&subject[s_pos..s_pos + lookup.lut_word], lookup.lut_word) as usize;
+            let mut q_pos = lookup.lut[key];
             while q_pos >= 0 {
                 let qp = q_pos as usize;
-                let mut matches = true;
-                if word_size > lut_word {
-                    for k in lut_word..word_size {
-                        if qp + k >= query.len() || s_pos + k >= subject.len() {
-                            matches = false;
-                            break;
-                        }
-                        if query[qp + k] != subject[s_pos + k] {
-                            matches = false;
-                            break;
-                        }
+                if let Some(hit) = find_exact_word_hit_decoded(
+                    lookup.query,
+                    subject,
+                    word_size,
+                    lookup.lut_word,
+                    qp,
+                    s_pos,
+                )
+                .and_then(|hit| {
+                    if lookup.has_query_mask {
+                        apply_ncbi_type_of_word_mask_decoded(
+                            lookup.query_masked,
+                            subject,
+                            word_size,
+                            lookup.lut_word,
+                            hit,
+                        )
+                    } else {
+                        Some(hit)
                     }
-                }
-                if matches {
-                    let diag = s_pos + query.len() - qp;
-                    if last_hit[diag] >= 0 && (last_hit[diag] as usize) > s_pos {
-                        q_pos = next[qp];
+                }) {
+                    let diag = hit.subject_start + lookup.query.len() - hit.query_start;
+                    if last_hit[diag] >= 0 && (last_hit[diag] as usize) > hit.subject_start {
+                        q_pos = lookup.next[qp];
                         continue;
                     }
                     if let Some(hsp) = extend_seed(
-                        query_nomask,
+                        lookup.query,
                         subject,
-                        qp,
-                        s_pos,
+                        hit.query_start,
+                        hit.subject_start,
                         reward,
                         penalty,
                         x_dropoff,
                         kbp,
                         search_space,
                         evalue_threshold,
-                        context,
+                        lookup.context,
                     ) {
                         last_hit[diag] = hsp.subject_end;
                         hsps.push(hsp);
                     } else {
-                        last_hit[diag] = (s_pos + word_size) as i32;
+                        last_hit[diag] = hit.subject_match_end as i32;
                     }
                 }
-                q_pos = next[qp];
+                q_pos = lookup.next[qp];
             }
-            s_pos += 1;
+            s_pos += lookup.scan_step;
         }
     }
 
-    if dedup {
+    if let Some(min_diag_separation) = dedup_min_diag {
         hsps.sort_by(score_compare_search_hsps);
-        dedup_hsps_with_min_diag_separation(
-            &mut hsps,
-            min_diag_separation_for_ungapped(word_size, reward, penalty),
-        );
+        dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
     } else {
         sort_ungapped_hsps_ncbi_no_dedup(&mut hsps);
     }
@@ -1563,6 +1849,8 @@ fn blastn_ungapped_search_inner(
 #[inline]
 fn extend_packed_lookup_hits(
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
@@ -1596,7 +1884,21 @@ fn extend_packed_lookup_hits(
             lut_word,
             qp,
             sp,
-        );
+        )
+        .and_then(|hit| {
+            if has_query_mask {
+                apply_ncbi_type_of_word_mask_packed(
+                    query_masked,
+                    subject_packed,
+                    subject_len,
+                    word_size,
+                    lut_word,
+                    hit,
+                )
+            } else {
+                Some(hit)
+            }
+        });
         if let Some(hit) = hit {
             blast_na_extend_direct_packed(
                 query,
@@ -1625,6 +1927,8 @@ fn extend_packed_lookup_hits(
 #[allow(clippy::too_many_arguments)]
 fn blast_na_extend_packed_generic(
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
@@ -1648,6 +1952,8 @@ fn blast_na_extend_packed_generic(
 ) {
     extend_packed_lookup_hits(
         query,
+        query_masked,
+        has_query_mask,
         subject_packed,
         subject_len,
         word_size,
@@ -1674,6 +1980,8 @@ fn blast_na_extend_packed_generic(
 #[allow(clippy::too_many_arguments)]
 fn blast_na_extend_packed_aligned(
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
@@ -1697,6 +2005,8 @@ fn blast_na_extend_packed_aligned(
 ) {
     extend_packed_lookup_hits(
         query,
+        query_masked,
+        has_query_mask,
         subject_packed,
         subject_len,
         word_size,
@@ -1725,6 +2035,8 @@ fn blast_na_extend_packed_aligned(
 #[inline]
 fn small_na_extend_packed_aligned_one_byte(
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
@@ -1748,6 +2060,8 @@ fn small_na_extend_packed_aligned_one_byte(
 ) {
     blast_na_extend_packed_aligned(
         query,
+        query_masked,
+        has_query_mask,
         subject_packed,
         subject_len,
         word_size,
@@ -1776,6 +2090,8 @@ fn small_na_extend_packed_aligned_one_byte(
 #[inline]
 fn small_na_extend_packed_generic(
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
@@ -1799,6 +2115,8 @@ fn small_na_extend_packed_generic(
 ) {
     blast_na_extend_packed_generic(
         query,
+        query_masked,
+        has_query_mask,
         subject_packed,
         subject_len,
         word_size,
@@ -1824,6 +2142,8 @@ fn small_na_extend_packed_generic(
 #[inline]
 fn small_na_extend_packed(
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     subject_packed: &[u8],
     subject_len: usize,
     word_size: usize,
@@ -1849,6 +2169,8 @@ fn small_na_extend_packed(
     if use_aligned_callback {
         small_na_extend_packed_aligned_one_byte(
             query,
+            query_masked,
+            has_query_mask,
             subject_packed,
             subject_len,
             word_size,
@@ -1873,6 +2195,8 @@ fn small_na_extend_packed(
     } else {
         small_na_extend_packed_generic(
             query,
+            query_masked,
+            has_query_mask,
             subject_packed,
             subject_len,
             word_size,
@@ -2137,9 +2461,13 @@ fn diag_initial_hit_core_packed(
             query,
             subject_packed,
             data,
+            hit,
+            reward,
+            penalty,
             kbp,
             search_space,
             evalue_threshold,
+            subject_len,
             context,
         ) else {
             last_hit.set(diag_mask, q0, s0, hit.subject_match_end as i32);
@@ -2367,7 +2695,7 @@ pub fn blastn_ungapped_search_packed_prepared_no_dedup(
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
     let mut last_hit_scratch = prepared.last_hit_scratch(prepared.use_diag_hash());
-    blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
+    blastn_ungapped_search_packed_prepared_with_scratch(
         prepared,
         subject_packed,
         subject_len,
@@ -2404,6 +2732,11 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch(
         search_space,
         evalue_threshold,
         last_hit_scratch,
+        Some(min_diag_separation_for_ungapped(
+            prepared.word_size,
+            reward,
+            penalty,
+        )),
         true,
     )
 }
@@ -2431,6 +2764,37 @@ pub fn blastn_ungapped_search_packed_prepared_with_scratch_no_dedup(
         search_space,
         evalue_threshold,
         last_hit_scratch,
+        None,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blastn_ungapped_search_packed_prepared_with_scratch_min_diag(
+    prepared: &PreparedBlastnQuery<'_>,
+    subject_packed: &[u8],
+    subject_len: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    last_hit_scratch: &mut [PackedDiagScratch],
+    min_diag_separation: i32,
+) -> Vec<SearchHsp> {
+    blastn_ungapped_search_packed_prepared_with_scratch_inner(
+        prepared,
+        subject_packed,
+        subject_len,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        last_hit_scratch,
+        Some(min_diag_separation),
         false,
     )
 }
@@ -2447,18 +2811,11 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
     search_space: f64,
     evalue_threshold: f64,
     last_hit_scratch: &mut [PackedDiagScratch],
-    dedup: bool,
+    dedup_min_diag: Option<i32>,
+    render_ungapped_strings: bool,
 ) -> Vec<SearchHsp> {
     let mut hsps = Vec::new();
     let nucl_score_table = InitialWordParameters::build_nucl_score_table(reward, penalty);
-    // NCBI BlastInitialWordParametersUpdate: reduced_nucl_cutoff_score = 0.8 * new_cutoff,
-    // where new_cutoff is the ungapped word cutoff MIN(gap_trigger, evalue_cutoff) — NOT the
-    // raw evalue cutoff. On large search spaces evalue_cutoff > gap_trigger, so using the
-    // evalue cutoff alone makes reduced too high and skips the rigorous exact extension for
-    // borderline seeds (approx in [0.8*gap_trigger, 0.8*evalue_cutoff)). On small DBs the
-    // MIN selects the evalue cutoff, so this is byte-identical to the old value there.
-    let reduced_nucl_cutoff_score =
-        ((ungapped_save_cutoff(kbp, evalue_threshold, search_space) as f64) * 0.8) as i32;
 
     if prepared.is_empty() || subject_len < prepared.word_size {
         return hsps;
@@ -2472,6 +2829,8 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
         "last-hit scratch must match prepared lookup contexts"
     );
 
+    let previous_render_mode =
+        PACKED_RENDER_UNGAPPED_STRINGS.with(|flag| flag.replace(render_ungapped_strings));
     s_blast_na_scan_subject_any_packed(
         prepared,
         subject_packed,
@@ -2484,17 +2843,14 @@ fn blastn_ungapped_search_packed_prepared_with_scratch_inner(
         search_space,
         evalue_threshold,
         &nucl_score_table,
-        reduced_nucl_cutoff_score,
         last_hit_scratch,
         &mut hsps,
     );
+    PACKED_RENDER_UNGAPPED_STRINGS.with(|flag| flag.set(previous_render_mode));
 
-    if dedup {
+    if let Some(min_diag_separation) = dedup_min_diag {
         hsps.sort_by(score_compare_search_hsps);
-        dedup_hsps_with_min_diag_separation(
-            &mut hsps,
-            min_diag_separation_for_ungapped(prepared.word_size, reward, penalty),
-        );
+        dedup_hsps_with_min_diag_separation(&mut hsps, min_diag_separation);
     } else {
         sort_ungapped_hsps_ncbi_no_dedup(&mut hsps);
     }
@@ -2514,7 +2870,6 @@ fn s_blast_na_scan_subject_any_packed(
     search_space: f64,
     evalue_threshold: f64,
     nucl_score_table: &[i32; 256],
-    reduced_nucl_cutoff_score: i32,
     last_hit_scratch: &mut [PackedDiagScratch],
     hsps: &mut Vec<SearchHsp>,
 ) {
@@ -2535,7 +2890,6 @@ fn s_blast_na_scan_subject_any_packed(
         search_space,
         evalue_threshold,
         nucl_score_table,
-        reduced_nucl_cutoff_score,
         last_hit_scratch,
         hsps,
     ) {
@@ -2545,6 +2899,18 @@ fn s_blast_na_scan_subject_any_packed(
     for (lookup, scratch) in prepared.lookups.iter().zip(last_hit_scratch.iter_mut()) {
         scratch.resize_and_clear(lookup.diag_array_len);
         let lookup_end = packed_lookup_scan_end(subject_len, lookup.lut_word);
+        let word_cutoff = blastn_word_save_cutoff(
+            lookup.query,
+            reward,
+            penalty,
+            kbp,
+            evalue_threshold,
+            search_space,
+            subject_len,
+        );
+        let reduced_nucl_cutoff_score = ((word_cutoff as f64) * 0.8) as i32;
+        let previous_word_save_cutoff =
+            PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.replace(word_cutoff));
         blast_na_word_finder_scan_lookup_packed(
             prepared.word_size,
             lookup,
@@ -2562,6 +2928,7 @@ fn s_blast_na_scan_subject_any_packed(
             reduced_nucl_cutoff_score,
             hsps,
         );
+        PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.set(previous_word_save_cutoff));
     }
 }
 
@@ -2582,10 +2949,13 @@ fn s_blast_na_hash_scan_subject_any(
     search_space: f64,
     evalue_threshold: f64,
     nucl_score_table: &[i32; 256],
-    reduced_nucl_cutoff_score: i32,
     last_hit_scratch: &mut [PackedDiagScratch],
     hsps: &mut Vec<SearchHsp>,
 ) -> bool {
+    if std::env::var_os("BLAST_RS_USE_PAIRED_SCAN").is_none() {
+        return false;
+    }
+
     if !(prepared.lookups.len() == 2
         && prepared.lookups[0].lut_word == 6
         && prepared.lookups[1].lut_word == 6
@@ -2603,6 +2973,27 @@ fn s_blast_na_hash_scan_subject_any(
     let lookup1 = &prepared.lookups[1];
     let scratch0 = &mut left_scratch[0];
     let scratch1 = &mut right_scratch[0];
+    let word_cutoff0 = blastn_word_save_cutoff(
+        lookup0.query,
+        reward,
+        penalty,
+        kbp,
+        evalue_threshold,
+        search_space,
+        subject_len,
+    );
+    let word_cutoff1 = blastn_word_save_cutoff(
+        lookup1.query,
+        reward,
+        penalty,
+        kbp,
+        evalue_threshold,
+        search_space,
+        subject_len,
+    );
+    let reduced_nucl_cutoff_score = ((word_cutoff0.min(word_cutoff1) as f64) * 0.8) as i32;
+    let previous_word_save_cutoff =
+        PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.replace(word_cutoff0.min(word_cutoff1)));
 
     scratch0.resize_and_clear(lookup0.diag_array_len);
     scratch1.resize_and_clear(lookup1.diag_array_len);
@@ -2630,6 +3021,7 @@ fn s_blast_na_hash_scan_subject_any(
         reduced_nucl_cutoff_score,
         hsps,
     );
+    PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.set(previous_word_save_cutoff));
     true
 }
 
@@ -2646,7 +3038,6 @@ fn s_blast_na_hash_scan_subject_any_packed(
     search_space: f64,
     evalue_threshold: f64,
     nucl_score_table: &[i32; 256],
-    reduced_nucl_cutoff_score: i32,
     last_hit_scratch: &mut [PackedDiagScratch],
     hsps: &mut Vec<SearchHsp>,
 ) -> bool {
@@ -2662,7 +3053,6 @@ fn s_blast_na_hash_scan_subject_any_packed(
         search_space,
         evalue_threshold,
         nucl_score_table,
-        reduced_nucl_cutoff_score,
         last_hit_scratch,
         hsps,
     )
@@ -2688,6 +3078,38 @@ fn blast_na_word_finder_scan_lookup_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
+    if std::env::var_os("BLAST_RS_USE_PACKED_SPECIALIZED").is_none() {
+        packed_scan_step1(
+            subject_packed,
+            subject_len,
+            end,
+            lookup.lut_word,
+            lookup.lut_mask,
+            lookup.scan_start,
+            lookup.scan_step,
+            lookup.query,
+            lookup.query_masked,
+            lookup.has_query_mask,
+            word_size,
+            &lookup.lut,
+            &lookup.next,
+            &lookup.pv,
+            &mut scratch.last_hit,
+            lookup.diag_mask,
+            reward,
+            penalty,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+            lookup.context,
+            nucl_score_table,
+            reduced_nucl_cutoff_score,
+            hsps,
+        );
+        return;
+    }
+
     let mb_scan = s_mb_choose_scan_subject(lookup);
     if lookup.lut_word >= 9 {
         match mb_scan {
@@ -3058,8 +3480,11 @@ fn dispatch_na_lookup_shape_packed(
         packed_scan_step4_unrolled(
             subject_packed,
             subject_len,
+            end,
             word_size,
             lookup.query,
+            lookup.query_masked,
+            lookup.has_query_mask,
             &lookup.lut,
             &lookup.next,
             &lookup.pv,
@@ -3092,6 +3517,8 @@ fn dispatch_na_lookup_shape_packed(
             scan_start,
             scan_step,
             lookup.query,
+            lookup.query_masked,
+            lookup.has_query_mask,
             word_size,
             &lookup.lut,
             &lookup.next,
@@ -3119,6 +3546,8 @@ fn dispatch_na_lookup_shape_packed(
             scan_start,
             scan_step,
             lookup.query,
+            lookup.query_masked,
+            lookup.has_query_mask,
             word_size,
             &lookup.lut,
             &lookup.next,
@@ -3146,6 +3575,8 @@ fn dispatch_na_lookup_shape_packed(
             scan_start,
             scan_step,
             lookup.query,
+            lookup.query_masked,
+            lookup.has_query_mask,
             word_size,
             &lookup.lut,
             &lookup.next,
@@ -3946,8 +4377,11 @@ fn sort_ungapped_hsps_ncbi_no_dedup(hsps: &mut [SearchHsp]) {
 fn packed_scan_step4_unrolled(
     subject_packed: &[u8],
     subject_len: usize,
+    end: usize,
     word_size: usize,
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     lut: &[i32],
     next: &[i32],
     pv: &[u64],
@@ -3967,7 +4401,6 @@ fn packed_scan_step4_unrolled(
     if subject_len < word_size {
         return;
     }
-    let end = subject_len - word_size + 1;
     // scan_range in subject positions (base coordinates)
     let scan_start: usize = 0;
     let scan_end = end.saturating_sub(1); // inclusive end
@@ -3987,6 +4420,8 @@ fn packed_scan_step4_unrolled(
             if pv_has_hash(pv, h) {
                 small_na_extend_packed(
                     query,
+                    query_masked,
+                    has_query_mask,
                     subject_packed,
                     subject_len,
                     word_size,
@@ -4067,7 +4502,7 @@ fn packed_scan_step4_unrolled(
 
     // Process full groups of 8
     for _ in 0..full_groups {
-        if byte_idx + 8 >= s_len_bytes || s_pos + 28 >= subject_len {
+        if byte_idx + 8 >= s_len_bytes {
             break;
         }
 
@@ -4116,6 +4551,8 @@ fn s_blast_small_na_scan_subject_7_1_packed(
     scan_start: usize,
     scan_step: usize,
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     word_size: usize,
     lut: &[i32],
     next: &[i32],
@@ -4144,6 +4581,8 @@ fn s_blast_small_na_scan_subject_7_1_packed(
             end,
             lut_mask,
             query,
+            query_masked,
+            has_query_mask,
             word_size,
             lut,
             next,
@@ -4171,6 +4610,8 @@ fn s_blast_small_na_scan_subject_7_1_packed(
             if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
                 small_na_extend_packed(
                     query,
+                    query_masked,
+                    has_query_mask,
                     subject_packed,
                     subject_len,
                     word_size,
@@ -4249,6 +4690,8 @@ fn s_blast_small_na_scan_subject_7_1_packed(
                     if pv_has_hash(pv, h) {
                         small_na_extend_packed(
                             query,
+                            query_masked,
+                            has_query_mask,
                             subject_packed,
                             subject_len,
                             word_size,
@@ -4290,6 +4733,8 @@ fn s_blast_small_na_scan_subject_7_1_packed(
         if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
             small_na_extend_packed(
                 query,
+                query_masked,
+                has_query_mask,
                 subject_packed,
                 subject_len,
                 word_size,
@@ -4325,6 +4770,8 @@ fn packed_scan_byte_oriented_lut8_mod1(
     scan_start: usize,
     scan_step: usize,
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     word_size: usize,
     lut: &[i32],
     next: &[i32],
@@ -4399,6 +4846,8 @@ fn packed_scan_byte_oriented_lut8_mod1(
         if pv_has_hash(pv, h) {
             small_na_extend_packed(
                 query,
+                query_masked,
+                has_query_mask,
                 subject_packed,
                 subject_len,
                 word_size,
@@ -4435,6 +4884,8 @@ fn packed_scan_byte_oriented_lut6_step2(
     end: usize,
     lut_mask: u32,
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     word_size: usize,
     lut: &[i32],
     next: &[i32],
@@ -4464,6 +4915,8 @@ fn packed_scan_byte_oriented_lut6_step2(
                 if pv_has_hash(pv, h) {
                     small_na_extend_packed(
                         query,
+                        query_masked,
+                        has_query_mask,
                         subject_packed,
                         subject_len,
                         word_size,
@@ -4509,6 +4962,8 @@ fn packed_scan_byte_oriented_lut6_step2(
         if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
             small_na_extend_packed(
                 query,
+                query_masked,
+                has_query_mask,
                 subject_packed,
                 subject_len,
                 word_size,
@@ -4576,6 +5031,8 @@ fn packed_scan_byte_oriented_lut6_step2_pair(
                     if pv_bucket_unchecked(&lookup0.pv, pv_bucket) & pv_bit != 0 {
                         small_na_extend_packed(
                             lookup0.query,
+                            lookup0.query_masked,
+                            lookup0.has_query_mask,
                             subject_packed,
                             subject_len,
                             word_size,
@@ -4601,6 +5058,8 @@ fn packed_scan_byte_oriented_lut6_step2_pair(
                     if pv_bucket_unchecked(&lookup1.pv, pv_bucket) & pv_bit != 0 {
                         small_na_extend_packed(
                             lookup1.query,
+                            lookup1.query_masked,
+                            lookup1.has_query_mask,
                             subject_packed,
                             subject_len,
                             word_size,
@@ -4658,6 +5117,8 @@ fn packed_scan_byte_oriented_lut6_step2_pair(
             if lookup0.pv[pv_bucket] & pv_bit != 0 {
                 small_na_extend_packed(
                     lookup0.query,
+                    lookup0.query_masked,
+                    lookup0.has_query_mask,
                     subject_packed,
                     subject_len,
                     word_size,
@@ -4683,6 +5144,8 @@ fn packed_scan_byte_oriented_lut6_step2_pair(
             if lookup1.pv[pv_bucket] & pv_bit != 0 {
                 small_na_extend_packed(
                     lookup1.query,
+                    lookup1.query_masked,
+                    lookup1.has_query_mask,
                     subject_packed,
                     subject_len,
                     word_size,
@@ -4731,6 +5194,8 @@ fn packed_scan_step1(
     scan_start: usize,
     scan_step: usize,
     query: &[u8],
+    query_masked: &[u8],
+    has_query_mask: bool,
     word_size: usize,
     lut: &[i32],
     next: &[i32],
@@ -4756,6 +5221,8 @@ fn packed_scan_step1(
             if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
                 small_na_extend_packed(
                     query,
+                    query_masked,
+                    has_query_mask,
                     subject_packed,
                     subject_len,
                     word_size,
@@ -4795,6 +5262,8 @@ fn packed_scan_step1(
         if pv[h >> 6] & (1u64 << (h & 63)) != 0 {
             small_na_extend_packed(
                 query,
+                query_masked,
+                has_query_mask,
                 subject_packed,
                 subject_len,
                 word_size,
@@ -4847,25 +5316,74 @@ struct DecodedUngappedData {
     score: i32,
 }
 
-/// NCBI ungapped-HSP save cutoff for gapped blastn: `MIN(gap_trigger,
-/// gapped-evalue-cutoff)` (`blast_parameters.c:343,369,375`). `gap_trigger` is
-/// 27 bits (`BLAST_GAP_TRIGGER_NUCL`) via the Karlin block. On a large search
-/// space this is gap_trigger (≈28 raw), far below the strict e-value score, so
-/// marginal ungapped seeds survive to gapped extension (which boosts them).
-fn ungapped_save_cutoff(kbp: &KarlinBlk, evalue_threshold: f64, search_space: f64) -> i32 {
+/// NCBI gapped-blastn word save cutoff:
+/// `MIN(gap_trigger, hit_params.cutoff_score_max)` in
+/// `BlastInitialWordParametersUpdate`. `gap_trigger` comes from the standard
+/// ungapped nucleotide Karlin block, not the final gapped reporting block.
+fn blastn_word_save_cutoff(
+    query: &[u8],
+    reward: i32,
+    penalty: i32,
+    gapped_kbp: &KarlinBlk,
+    evalue_threshold: f64,
+    search_space: f64,
+    _subject_len: usize,
+) -> i32 {
+    let ungapped_kbp = blastn_lookup_ungapped_kbp(query, reward, penalty);
     let gap_trigger = ((crate::stat::BLAST_GAP_TRIGGER_NUCL * crate::math::NCBIMATH_LN2
-        + kbp.log_k)
-        / kbp.lambda) as i32;
-    gap_trigger.min(kbp.evalue_to_raw(evalue_threshold, search_space))
+        + ungapped_kbp.log_k)
+        / ungapped_kbp.lambda) as i32;
+    let hit_cutoff = gapped_kbp
+        .evalue_to_raw(evalue_threshold, search_space)
+        .max(1);
+    gap_trigger.max(1).min(hit_cutoff)
+}
+
+fn blastn_lookup_ungapped_kbp(query: &[u8], reward: i32, penalty: i32) -> KarlinBlk {
+    const BLASTNA_SIZE: usize = 16;
+    let matrix_fn = |i: usize, j: usize| -> i32 {
+        if i >= BLASTNA_SIZE || j >= BLASTNA_SIZE {
+            return penalty;
+        }
+        crate::encoding::blastna_pair_score(i as u8, j as u8, reward, penalty)
+    };
+
+    let mut lo = i32::MAX;
+    let mut hi = i32::MIN;
+    for i in 0..BLASTNA_SIZE {
+        for j in 0..BLASTNA_SIZE {
+            let s = matrix_fn(i, j);
+            if s <= -100_000_000 || s >= 100_000_000 {
+                continue;
+            }
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+    }
+
+    let ctxs = [crate::stat::UngappedKbpContext {
+        query_offset: 0,
+        query_length: query.len() as i32,
+        is_valid: !query.is_empty(),
+    }];
+    crate::stat::ungapped_kbp_calc(query, &ctxs, lo, hi, BLASTNA_SIZE, &[14, 15], &matrix_fn)
+        .into_iter()
+        .next()
+        .flatten()
+        .unwrap_or_else(|| crate::stat::compute_ungapped_kbp(reward, penalty))
 }
 
 fn build_packed_hsp(
     query: &[u8],
     subject_packed: &[u8],
     data: PackedUngappedData,
+    hit: ExactWordHit,
+    _reward: i32,
+    _penalty: i32,
     kbp: &KarlinBlk,
     search_space: f64,
-    evalue_threshold: f64,
+    _evalue_threshold: f64,
+    _subject_len: usize,
     context: i32,
 ) -> Option<SearchHsp> {
     if data.score <= 0 || data.q_start + data.length > query.len() {
@@ -4880,7 +5398,7 @@ fn build_packed_hsp(
     // reportable threshold — losing repeat HSPs. The strict e-value is applied
     // later (gapped render / the `-ungapped` final cutoff). On a small search
     // space MIN = evalue cutoff, so this is unchanged there.
-    let save_cutoff = ungapped_save_cutoff(kbp, evalue_threshold, search_space);
+    let save_cutoff = packed_word_save_cutoff();
     if data.score < save_cutoff {
         return None;
     }
@@ -4891,39 +5409,66 @@ fn build_packed_hsp(
     let s_start = data.s_start as i32;
     let s_end = (data.s_start + data.length) as i32;
     let align_len = data.length as i32;
+    let (query_gapped_start, subject_gapped_start) =
+        blastn_packed_initial_gapped_start_like_ncbi(hit, data.s_start + data.length);
 
-    let mut num_ident = 0i32;
-    let mut qseq = Vec::with_capacity(data.length);
-    let mut sseq = Vec::with_capacity(data.length);
-    for i in 0..data.length {
-        let qb = query[data.q_start + i];
-        let sb = packed_base_at(subject_packed, data.s_start + i);
-        if qb == sb {
-            num_ident += 1;
+    let (num_ident, mismatches, qseq, sseq) = if packed_render_ungapped_strings() {
+        let mut num_ident = 0i32;
+        let mut qseq = Vec::with_capacity(data.length);
+        let mut sseq = Vec::with_capacity(data.length);
+        for i in 0..data.length {
+            let qb = query[data.q_start + i];
+            let sb = packed_base_at(subject_packed, data.s_start + i);
+            if qb == sb {
+                num_ident += 1;
+            }
+            qseq.push(qb);
+            sseq.push(sb);
         }
-        qseq.push(qb);
-        sseq.push(sb);
-    }
-    let qseq_str = crate::encoding::blastna_to_iupacna_string(&qseq);
-    let sseq_str = crate::encoding::blastna_to_iupacna_string(&sseq);
+        (
+            num_ident,
+            align_len - num_ident,
+            Some(crate::encoding::blastna_to_iupacna_string(&qseq)),
+            Some(crate::encoding::blastna_to_iupacna_string(&sseq)),
+        )
+    } else {
+        (0, 0, None, None)
+    };
 
     let hsp = SearchHsp {
         query_start: q_start,
         query_end: q_end,
         subject_start: s_start,
         subject_end: s_end,
+        query_gapped_start: query_gapped_start as i32,
+        subject_gapped_start: subject_gapped_start as i32,
         score: data.score,
         bit_score: kbp.raw_to_bit(data.score),
         evalue,
         num_ident,
         align_length: align_len,
-        mismatches: align_len - num_ident,
+        mismatches,
         gap_opens: 0,
         context,
-        qseq: Some(qseq_str),
-        sseq: Some(sseq_str),
+        qseq,
+        sseq,
     };
     Some(hsp)
+}
+
+/// NCBI `BLAST_GetGappedScore`: before calling
+/// `s_BlastDynProgNtGappedAlignment`, packed nucleotide search starts inside
+/// the first byte of an 8-base exact seed when the ungapped HSP reaches that
+/// far (`blast_gapalign.c:4127-4134`).
+fn blastn_packed_initial_gapped_start_like_ncbi(
+    hit: ExactWordHit,
+    ungapped_subject_end: usize,
+) -> (usize, usize) {
+    if ungapped_subject_end >= hit.subject_start + 8 {
+        (hit.query_start + 3, hit.subject_start + 3)
+    } else {
+        (hit.query_start, hit.subject_start)
+    }
 }
 
 #[inline]
@@ -4931,6 +5476,8 @@ fn build_decoded_hsp(
     query: &[u8],
     subject: &[u8],
     ungapped: DecodedUngappedData,
+    reward: i32,
+    penalty: i32,
     kbp: &KarlinBlk,
     search_space: f64,
     evalue_threshold: f64,
@@ -4939,8 +5486,19 @@ fn build_decoded_hsp(
     if ungapped.score <= 0 {
         return None;
     }
-    // See `build_packed_hsp`: ungapped save cutoff = MIN(gap_trigger, evalue cutoff).
-    if ungapped.score < ungapped_save_cutoff(kbp, evalue_threshold, search_space) {
+    // See `build_packed_hsp`: ungapped save cutoff uses the initial blastn
+    // word cutoff, capped by the final e-value-derived cutoff.
+    if ungapped.score
+        < blastn_word_save_cutoff(
+            query,
+            reward,
+            penalty,
+            kbp,
+            evalue_threshold,
+            search_space,
+            subject.len(),
+        )
+    {
         return None;
     }
 
@@ -4973,6 +5531,8 @@ fn build_decoded_hsp(
         query_end: q_end,
         subject_start: s_start,
         subject_end: s_end,
+        query_gapped_start: q_start,
+        subject_gapped_start: s_start,
         score: ungapped.score,
         bit_score,
         evalue,
@@ -5064,19 +5624,21 @@ fn extend_seed_packed_approx(
     let mut new_q = q_ext;
     let mut q = q_ext;
     let mut left_len = q_ext.min(s_ext) / 4;
+    let mut s_byte_idx = s_ext / 4;
     while left_len > 0 {
-        let s_byte = subject_packed[s_ext / 4 - left_len];
-        let q_byte = pack_query_byte(query, q - 4);
+        s_byte_idx -= 1;
+        q -= 4;
+        let s_byte = subject_packed[s_byte_idx];
+        let q_byte = pack_query_byte(query, q);
         sum += nucl_score_table[(q_byte ^ s_byte) as usize];
         if sum > 0 {
-            new_q = q - 4;
+            new_q = q;
             score += sum;
             sum = 0;
         }
         if sum < x_dropoff_neg {
             break;
         }
-        q -= 4;
         left_len -= 1;
     }
 
@@ -5129,11 +5691,35 @@ fn extend_seed_packed_exact(
 ) -> Option<PackedUngappedData> {
     let mut score = 0i32;
     let mut sum = 0i32;
+    let x_dropoff_neg = -x_dropoff;
+
+    let mut best_left = 0usize;
+    if q_seed > 0 && s_seed > 0 {
+        let mut qi = q_seed - 1;
+        let mut si = s_seed - 1;
+        loop {
+            let sb = packed_base_at(subject_packed, si);
+            sum += blastna_score(query[qi], sb, reward, penalty);
+            if sum > 0 {
+                score += sum;
+                best_left = q_seed - qi;
+                sum = 0;
+            } else if sum < x_dropoff_neg {
+                break;
+            }
+            if qi == 0 || si == 0 {
+                break;
+            }
+            qi -= 1;
+            si -= 1;
+        }
+    }
+
     let mut best_right = 0usize;
     let mut qi = q_seed;
     let mut si = s_seed;
-    let x_dropoff_neg = -x_dropoff;
     let mut x_current = x_dropoff_neg;
+    sum = 0;
     while qi < query.len() && si < subject_len {
         let sb = packed_base_at(subject_packed, si);
         sum += blastna_score(query[qi], sb, reward, penalty);
@@ -5149,36 +5735,11 @@ fn extend_seed_packed_exact(
         si += 1;
     }
 
-    // Extend left
-    let mut left_score = 0i32;
-    let mut left_sum = 0i32;
-    let mut best_left = 0usize;
-    if q_seed > 0 && s_seed > 0 {
-        let mut qi = q_seed - 1;
-        let mut si = s_seed - 1;
-        loop {
-            let sb = packed_base_at(subject_packed, si);
-            left_sum += blastna_score(query[qi], sb, reward, penalty);
-            if left_sum > 0 {
-                left_score += left_sum;
-                best_left = q_seed - qi;
-                left_sum = 0;
-            } else if left_sum < x_dropoff_neg {
-                break;
-            }
-            if qi == 0 || si == 0 {
-                break;
-            }
-            qi -= 1;
-            si -= 1;
-        }
-    }
-
     Some(PackedUngappedData {
         q_start: q_seed - best_left,
         s_start: s_seed - best_left,
         length: best_left + best_right,
-        score: score + left_score,
+        score,
     })
 }
 
@@ -5203,16 +5764,40 @@ fn extend_seed_data(
     penalty: i32,
     x_dropoff: i32,
 ) -> Option<DecodedUngappedData> {
-    // Extend right using NCBI's exact nucleotide ungapped algorithm:
-    // accumulate a temporary run score, fold positive runs into the HSP score,
-    // and stop once the current run drops below max(-xdrop, -score).
     let mut score = 0i32;
     let mut sum = 0i32;
+    let x_dropoff_neg = -x_dropoff;
+
+    let mut best_left = 0usize;
+    if q_seed > 0 && s_seed > 0 {
+        let mut qi = q_seed - 1;
+        let mut si = s_seed - 1;
+        loop {
+            let sb = subject[si];
+            if subject_base_blocks_ungapped_extension(sb) {
+                break;
+            }
+            sum += blastna_score(query[qi], sb, reward, penalty);
+            if sum > 0 {
+                score += sum;
+                best_left = q_seed - qi;
+                sum = 0;
+            } else if sum < x_dropoff_neg {
+                break;
+            }
+            if qi == 0 || si == 0 {
+                break;
+            }
+            qi -= 1;
+            si -= 1;
+        }
+    }
+
     let mut best_right = 0usize;
     let mut qi = q_seed;
     let mut si = s_seed;
-    let x_dropoff_neg = -x_dropoff;
     let mut x_current = x_dropoff_neg;
+    sum = 0;
     while qi < query.len() && si < subject.len() {
         let sb = subject[si];
         if subject_base_blocks_ungapped_extension(sb) {
@@ -5231,36 +5816,7 @@ fn extend_seed_data(
         si += 1;
     }
 
-    // Extend left
-    let mut score_l = 0i32;
-    let mut sum_l = 0i32;
-    let mut best_left = 0usize;
-    if q_seed > 0 && s_seed > 0 {
-        qi = q_seed - 1;
-        si = s_seed - 1;
-        loop {
-            let sb = subject[si];
-            if subject_base_blocks_ungapped_extension(sb) {
-                break;
-            }
-            sum_l += blastna_score(query[qi], sb, reward, penalty);
-            if sum_l > 0 {
-                score_l += sum_l;
-                best_left = q_seed - qi;
-                sum_l = 0;
-            } else if sum_l < x_dropoff_neg {
-                break;
-            }
-            if qi == 0 || si == 0 {
-                break;
-            }
-            qi -= 1;
-            si -= 1;
-        }
-    }
-
-    let total_score = score + score_l;
-    if total_score <= 0 {
+    if score <= 0 {
         return None;
     }
 
@@ -5268,7 +5824,7 @@ fn extend_seed_data(
         q_start: q_seed - best_left,
         s_start: s_seed - best_left,
         length: best_left + best_right,
-        score: total_score,
+        score,
     })
 }
 
@@ -5291,6 +5847,8 @@ fn extend_seed(
         query,
         subject,
         ungapped,
+        reward,
+        penalty,
         kbp,
         search_space,
         evalue_threshold,
@@ -5589,8 +6147,7 @@ fn cutoff_traceback(tb: &mut TracebackResult, q_cut_abs: usize, s_cut_abs: usize
         tb.query_start += qid as usize;
         tb.subject_start += sid as usize;
     } else {
-        let mut new_ops: Vec<(crate::gapinfo::GapAlignOpType, i32)> =
-            ops[..found_index].to_vec();
+        let mut new_ops: Vec<(crate::gapinfo::GapAlignOpType, i32)> = ops[..found_index].to_vec();
         new_ops.push((op, if found_opid < num { found_opid } else { num }));
         tb.edit_script.ops = new_ops;
         tb.query_end = tb.query_start + qid as usize;
@@ -5604,18 +6161,17 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
     }
 
     // NCBI `s_QueryOffsetCompareHSPs`: among HSPs sharing (context, query.offset,
-    // subject.offset), tie-break by DECREASING score, then INCREASING query range
-    // (shortest query.end first), then increasing subject range. The leader is
-    // therefore the SHORTEST high-scoring HSP, so the longer members satisfy
-    // `query.end > leader.query.end` and get trimmed-and-kept rather than dropped.
+    // subject.offset), tie-break by DECREASING score, then DECREASING query end,
+    // then decreasing subject end. The C comment says "increasing size", but the
+    // comparator code returns the larger end coordinate first.
     candidates.sort_by(|a, b| {
         a.context
             .cmp(&b.context)
             .then_with(|| a.tb.query_start.cmp(&b.tb.query_start))
             .then_with(|| a.tb.subject_start.cmp(&b.tb.subject_start))
             .then_with(|| b.tb.score.cmp(&a.tb.score))
-            .then_with(|| a.tb.query_end.cmp(&b.tb.query_end))
-            .then_with(|| a.tb.subject_end.cmp(&b.tb.subject_end))
+            .then_with(|| b.tb.query_end.cmp(&a.tb.query_end))
+            .then_with(|| b.tb.subject_end.cmp(&a.tb.subject_end))
     });
     let mut i = 0usize;
     while i < candidates.len() {
@@ -5636,6 +6192,7 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
                 let q_cut = candidates[i].tb.query_end;
                 let s_cut = candidates[i].tb.subject_end;
                 cutoff_traceback(&mut candidates[j].tb, q_cut, s_cut, true);
+                candidates[j].reevaluate_with_ambiguities = true;
                 j += 1;
             } else {
                 candidates.remove(j);
@@ -5661,12 +6218,21 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
             && candidates[i].tb.query_end == candidates[j].tb.query_end
             && candidates[i].tb.subject_end == candidates[j].tb.subject_end
         {
+            if should_keep_terminal_exact_over_swallowed_traceback(&candidates[i], &candidates[j]) {
+                candidates.remove(i);
+                if i > 0 {
+                    i -= 1;
+                }
+                j = i + 1;
+                continue;
+            }
             // Shared end point: TRIM the trailing overlap of the HSP that starts
             // earlier (keep the remainder); otherwise drop the contained HSP.
             if candidates[j].tb.query_start < candidates[i].tb.query_start {
                 let q_cut = candidates[i].tb.query_start;
                 let s_cut = candidates[i].tb.subject_start;
                 cutoff_traceback(&mut candidates[j].tb, q_cut, s_cut, false);
+                candidates[j].reevaluate_with_ambiguities = true;
                 j += 1;
             } else {
                 candidates.remove(j);
@@ -5674,6 +6240,20 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
         }
         i = j;
     }
+}
+
+fn should_keep_terminal_exact_over_swallowed_traceback(
+    leader: &GappedCandidate,
+    candidate: &GappedCandidate,
+) -> bool {
+    leader.context == candidate.context
+        && candidate.terminal_exact_from_swallowed_seed
+        && !matches!(
+            leader.tb.edit_script.ops.as_slice(),
+            [(GapAlignOpType::Sub, _)]
+        )
+        && leader.tb.query_start < candidate.tb.query_start
+        && leader.tb.subject_start < candidate.tb.subject_start
 }
 
 fn keep_exact_seed_beside_large_gap_traceback(a: &GappedCandidate, b: &GappedCandidate) -> bool {
@@ -5726,10 +6306,12 @@ fn finalize_gapped_candidates(
     purge_common_endpoint_tracebacks(&mut candidates);
 
     let mut hsps = Vec::new();
+    let reevaluate_all = gap_open == 0 && gap_extend == 0;
     for candidate in candidates {
         if let Some(hsp) = render_traceback_candidate(
             candidate.context,
             candidate.tb,
+            reevaluate_all || candidate.reevaluate_with_ambiguities,
             query_plus_nomask,
             query_minus_nomask,
             subject,
@@ -5766,10 +6348,12 @@ fn finalize_disc_megablast_gapped_candidates(
     purge_common_endpoint_tracebacks(&mut candidates);
 
     let mut hsps = Vec::new();
+    let reevaluate_all = gap_open == 0 && gap_extend == 0;
     for candidate in candidates {
         if let Some(hsp) = render_traceback_candidate(
             candidate.context,
             candidate.tb,
+            reevaluate_all || candidate.reevaluate_with_ambiguities,
             query_plus_nomask,
             query_minus_nomask,
             subject,
@@ -5847,94 +6431,8 @@ fn blastna_score(a: u8, b: u8, reward: i32, penalty: i32) -> i32 {
     crate::encoding::blastna_pair_score(a, b, reward, penalty)
 }
 
-use crate::stat::HSP_MAX_WINDOW;
-
 const MAX_SUBJECT_OFFSET: usize = 90_000;
 const MAX_TOTAL_GAPS: usize = 3_000;
-
-/// Pick the gapped-alignment seed for a nucleotide ungapped HSP.
-///
-/// Port of `BlastGetOffsetsForGappedAlignment`
-/// (`blast_gapalign.c:3248`): slide an `HSP_MAX_WINDOW`-wide window of
-/// match/mismatch scores across the HSP, return the **strict** max-score
-/// window's right edge. For uniform-score HSPs (perfect matches) the first
-/// window wins and the returned offset is `q_start + HSP_MAX_WINDOW - 1`;
-/// that matches NCBI's tie-break (NCBI uses `if (score > max_score)` with
-/// strict `>`, so the first maximum is kept).
-///
-/// Returns `(q_off, s_off)` with the same semantics as NCBI's
-/// `*q_retval, *s_retval`.
-///
-/// NCBI also has a short-HSP fast path (`q_length <= HSP_MAX_WINDOW` →
-/// midpoint) and a `score > 0` fallback that checks the end window. Both
-/// are ported verbatim. Ambiguity handling matches NCBI's `matrix[q][s]`
-/// lookup (treating BLASTNA ambiguous codes via their matrix scores).
-fn blast_get_offsets_for_gapped_alignment(
-    query: &[u8],
-    subject: &[u8],
-    q_start: usize,
-    q_end: usize,
-    s_start: usize,
-    s_end: usize,
-    reward: i32,
-    penalty: i32,
-) -> Option<(usize, usize)> {
-    let q_length = q_end.saturating_sub(q_start);
-    let s_length = s_end.saturating_sub(s_start);
-    if q_length == 0 || s_length == 0 {
-        return None;
-    }
-    // Short-HSP fast path (blast_gapalign.c:3259-3263).
-    if q_length <= HSP_MAX_WINDOW {
-        let mid = q_length / 2;
-        return Some((q_start + mid, s_start + mid));
-    }
-
-    // Initial window [q_start .. q_start + HSP_MAX_WINDOW).
-    let mut score: i32 = 0;
-    for i in 0..HSP_MAX_WINDOW {
-        let q = query[q_start + i];
-        let s = subject[s_start + i];
-        score += blastna_score(q, s, reward, penalty);
-    }
-    let mut max_score = score;
-    let mut max_offset = q_start + HSP_MAX_WINDOW - 1;
-
-    // Slide the window to the end of the HSP.
-    let hsp_end = q_start + q_length.min(s_length);
-    for index1 in (q_start + HSP_MAX_WINDOW)..hsp_end {
-        let q_out = query[index1 - HSP_MAX_WINDOW];
-        let s_out = subject[(index1 - HSP_MAX_WINDOW) - q_start + s_start];
-        let q_in = query[index1];
-        let s_in = subject[index1 - q_start + s_start];
-        score -= blastna_score(q_out, s_out, reward, penalty);
-        score += blastna_score(q_in, s_in, reward, penalty);
-        // Strict > tie-break, matches NCBI blast_gapalign.c:3287.
-        if score > max_score {
-            max_score = score;
-            max_offset = index1;
-        }
-    }
-
-    if max_score > 0 {
-        return Some((max_offset, (max_offset - q_start) + s_start));
-    }
-
-    // Fallback: test the window at the end of the HSP
-    // (blast_gapalign.c:3300-3318).
-    let end_score: i32 = (0..HSP_MAX_WINDOW)
-        .map(|i| {
-            let q = query[q_end - HSP_MAX_WINDOW + i];
-            let s = subject[s_end - HSP_MAX_WINDOW + i];
-            blastna_score(q, s, reward, penalty)
-        })
-        .sum();
-    if end_score > 0 {
-        Some((q_end - HSP_MAX_WINDOW / 2, s_end - HSP_MAX_WINDOW / 2))
-    } else {
-        None
-    }
-}
 
 /// Port of NCBI `AdjustSubjectRange` (`blast_gapalign.c:4252`).
 ///
@@ -6009,7 +6507,7 @@ fn blast_get_start_for_gapped_alignment_nucl(
     }
 
     // If we move the start point, require a longer exact run.
-    hsp_max_ident_run = ((hsp_max_ident_run as f32) * 1.5) as usize;
+    hsp_max_ident_run = (hsp_max_ident_run * 3) / 2;
     let q_start = seed_q.saturating_sub(offset);
     let s_start = seed_s.saturating_sub(offset);
     let q_len = (hsp_s_end.saturating_sub(s_start)).min(hsp_q_end.saturating_sub(q_start));
@@ -6058,15 +6556,16 @@ fn blast_get_start_for_gapped_alignment_nucl(
 
 #[inline]
 fn adjust_nt_prelim_seed_like_ncbi(
-    hsp_q_end: usize,
+    _hsp_q_end: usize,
     hsp_s_end: usize,
     seed_q: usize,
     seed_s: usize,
     query_len: usize,
     subject_len: usize,
 ) -> (usize, usize) {
-    if hsp_q_end >= seed_q.saturating_add(8)
-        && hsp_s_end >= seed_s.saturating_add(8)
+    // NCBI `blast_gapalign.c:4045` only checks the subject end before
+    // advancing both offsets for nucleotide dynamic-programming traceback.
+    if hsp_s_end >= seed_s.saturating_add(8)
         && seed_q.saturating_add(3) < query_len
         && seed_s.saturating_add(3) < subject_len
     {
@@ -6074,26 +6573,6 @@ fn adjust_nt_prelim_seed_like_ncbi(
     } else {
         (seed_q, seed_s)
     }
-}
-
-#[inline]
-fn adjust_nt_packed_prelim_start_like_ncbi(
-    seed_q: usize,
-    seed_s: usize,
-    query_len: usize,
-    subject_len: usize,
-) -> (usize, usize) {
-    let offset_adjustment = 4usize.saturating_sub(seed_s % 4);
-    let mut adjusted_q = seed_q + offset_adjustment.saturating_sub(1);
-    let mut adjusted_s = seed_s + offset_adjustment.saturating_sub(1);
-    if adjusted_q >= query_len || adjusted_s >= subject_len {
-        adjusted_q = adjusted_q.saturating_sub(4);
-        adjusted_s = adjusted_s.saturating_sub(4);
-    }
-    (
-        adjusted_q.min(query_len.saturating_sub(1)),
-        adjusted_s.min(subject_len.saturating_sub(1)),
-    )
 }
 
 fn min_diag_separation_for_gapped(
@@ -6123,8 +6602,8 @@ pub fn blastn_gapped_search(
     word_size: usize,
     reward: i32,
     penalty: i32,
-    _gap_open: i32,
-    _gap_extend: i32,
+    gap_open: i32,
+    gap_extend: i32,
     x_dropoff: i32,
     kbp: &KarlinBlk,
     search_space: f64,
@@ -6140,8 +6619,8 @@ pub fn blastn_gapped_search(
         word_size,
         reward,
         penalty,
-        _gap_open,
-        _gap_extend,
+        gap_open,
+        gap_extend,
         x_dropoff,
         kbp,
         search_space,
@@ -6203,8 +6682,8 @@ pub fn blastn_gapped_search_nomask(
     word_size: usize,
     reward: i32,
     penalty: i32,
-    _gap_open: i32,
-    _gap_extend: i32,
+    gap_open: i32,
+    gap_extend: i32,
     x_dropoff: i32,
     kbp: &KarlinBlk,
     search_space: f64,
@@ -6219,8 +6698,8 @@ pub fn blastn_gapped_search_nomask(
         word_size,
         reward,
         penalty,
-        _gap_open,
-        _gap_extend,
+        gap_open,
+        gap_extend,
         x_dropoff,
         x_dropoff,
         x_dropoff,
@@ -6239,8 +6718,8 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
     word_size: usize,
     reward: i32,
     penalty: i32,
-    _gap_open: i32,
-    _gap_extend: i32,
+    gap_open: i32,
+    gap_extend: i32,
     ungapped_x_dropoff: i32,
     prelim_x_dropoff: i32,
     traceback_x_dropoff: i32,
@@ -6248,7 +6727,13 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
     search_space: f64,
     evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
-    let prepared = PreparedBlastnQuery::new(query_plus, query_minus, word_size);
+    let prepared = PreparedBlastnQuery::new_with_nomask(
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
+        word_size,
+    );
     // Soft masking: the lookup table is built from the masked queries (`query_plus`
     // / `query_minus` — seeds in masked regions are skipped), but the ungapped
     // EXTENSION must use the unmasked queries so the alignment can extend through
@@ -6257,7 +6742,9 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
     // collapses to hard masking and drops most repeat-copy HSPs whose seed lies
     // outside the mask but whose alignment extends into it (the regular blastn
     // `-task blastn` recall gap).
-    let ungapped = blastn_ungapped_search_with_nomask(
+    let min_diag_separation =
+        min_diag_separation_for_gapped(word_size, reward, penalty, gap_open, gap_extend);
+    let ungapped = blastn_ungapped_search_with_nomask_min_diag(
         query_plus,
         query_minus,
         query_plus_nomask,
@@ -6269,12 +6756,11 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
         ungapped_x_dropoff,
         kbp,
         search_space,
-        evalue_threshold * 100.0, // permissive threshold for seeds
+        evalue_threshold,
+        min_diag_separation,
     );
 
     let mut candidates = Vec::new();
-    let min_diag_separation =
-        min_diag_separation_for_gapped(word_size, reward, penalty, _gap_open, _gap_extend);
 
     collect_decoded_gapped_candidates(
         &prepared,
@@ -6285,8 +6771,8 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
         subject,
         reward,
         penalty,
-        _gap_open,
-        _gap_extend,
+        gap_open,
+        gap_extend,
         prelim_x_dropoff,
         traceback_x_dropoff,
         evalue_threshold,
@@ -6302,8 +6788,8 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
         subject,
         reward,
         penalty,
-        _gap_open,
-        _gap_extend,
+        gap_open,
+        gap_extend,
         kbp,
         search_space,
         evalue_threshold,
@@ -6539,6 +7025,8 @@ fn append_concat_disc_seeds(
             query_end: (local_q + template_len) as i32,
             subject_start: s as i32,
             subject_end: (s + template_len) as i32,
+            query_gapped_start: local_q as i32,
+            subject_gapped_start: s as i32,
             score: reward.saturating_mul(template_length),
             bit_score: 0.0,
             evalue: 0.0,
@@ -6710,6 +7198,8 @@ fn append_disc_megablast_seed_hsps(
             query_end: (q + template_len) as i32,
             subject_start: s as i32,
             subject_end: (s + template_len) as i32,
+            query_gapped_start: q as i32,
+            subject_gapped_start: s as i32,
             score: reward.saturating_mul(template_length),
             bit_score: 0.0,
             evalue: 0.0,
@@ -6763,6 +7253,7 @@ fn collect_decoded_gapped_candidates(
     kbp: &KarlinBlk,
     _min_diag_separation: i32,
 ) {
+    let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
     for seed in ungapped {
         let traceback_query = if seed.context == 0 {
             query_plus_nomask
@@ -6799,7 +7290,7 @@ fn collect_decoded_gapped_candidates(
         ) else {
             continue;
         };
-        if kbp.raw_to_evalue(prelim.score, search_space) > evalue_threshold {
+        if prelim.score < cutoff_score {
             continue;
         }
         let traceback_seed =
@@ -6814,18 +7305,94 @@ fn collect_decoded_gapped_candidates(
             gap_extend,
             traceback_x_dropoff,
         ) {
+            preserve_terminal_exact_seed_if_traceback_swallowed_it(
+                candidates,
+                seed,
+                traceback_query,
+                subject,
+                &tb,
+                reward,
+                cutoff_score,
+            );
             if should_preserve_exact_seed_after_large_gap_traceback(seed, &tb) {
                 candidates.push(GappedCandidate {
                     context: seed.context,
                     tb: traceback_from_exact_seed(seed),
+                    reevaluate_with_ambiguities: false,
+                    terminal_exact_from_swallowed_seed: false,
                 });
             }
             candidates.push(GappedCandidate {
                 context: seed.context,
                 tb,
+                reevaluate_with_ambiguities: false,
+                terminal_exact_from_swallowed_seed: false,
             });
         }
     }
+}
+
+fn preserve_terminal_exact_seed_if_traceback_swallowed_it(
+    candidates: &mut Vec<GappedCandidate>,
+    seed: &SearchHsp,
+    query: &[u8],
+    subject: &[u8],
+    tb: &TracebackResult,
+    reward: i32,
+    cutoff_score: i32,
+) {
+    if reward <= 0
+        || seed.context != 0
+        || tb.query_start >= seed.query_start as usize
+        || tb.subject_start >= seed.subject_start as usize
+        || seed.query_end <= seed.query_start
+        || seed.subject_end <= seed.subject_start
+    {
+        return;
+    }
+    if !candidates.iter().any(|candidate| {
+        candidate.context == seed.context
+            && candidate.tb.query_start == tb.query_start
+            && candidate.tb.subject_start == tb.subject_start
+            && candidate.tb.query_end < tb.query_end
+            && candidate.tb.subject_end < tb.subject_end
+            && candidate.tb.score > tb.score
+    }) {
+        return;
+    }
+
+    let mut len = 0usize;
+    let mut q = seed.query_end as usize;
+    let mut s = seed.subject_end as usize;
+    while q > seed.query_start as usize
+        && s > seed.subject_start as usize
+        && query.get(q - 1) == subject.get(s - 1)
+    {
+        len += 1;
+        q -= 1;
+        s -= 1;
+    }
+
+    let score = reward.saturating_mul(len as i32);
+    if len == 0 || score < cutoff_score || score >= seed.score {
+        return;
+    }
+
+    candidates.push(GappedCandidate {
+        context: seed.context,
+        tb: TracebackResult {
+            score,
+            edit_script: GapEditScript {
+                ops: vec![(GapAlignOpType::Sub, len as i32)],
+            },
+            query_start: q,
+            query_end: seed.query_end as usize,
+            subject_start: s,
+            subject_end: seed.subject_end as usize,
+        },
+        reevaluate_with_ambiguities: false,
+        terminal_exact_from_swallowed_seed: true,
+    });
 }
 
 /// Variant of `blastn_gapped_search_packed_prepared` that accepts both the
@@ -6919,8 +7486,9 @@ fn collect_packed_prepared_ungapped(
     search_space: f64,
     evalue_threshold: f64,
     last_hit_scratch: &mut [PackedDiagScratch],
+    min_diag_separation: i32,
 ) -> Vec<SearchHsp> {
-    blastn_ungapped_search_packed_prepared_with_scratch(
+    blastn_ungapped_search_packed_prepared_with_scratch_min_diag(
         prepared,
         subject_packed,
         subject_len,
@@ -6929,8 +7497,9 @@ fn collect_packed_prepared_ungapped(
         prelim_x_dropoff,
         kbp,
         search_space,
-        evalue_threshold * 1000.0,
+        evalue_threshold,
         last_hit_scratch,
+        min_diag_separation,
     )
 }
 
@@ -6955,32 +7524,8 @@ fn collect_packed_gapped_candidates(
     min_diag_separation: i32,
     subject_decoded: &mut Option<Vec<u8>>,
 ) {
-    // Port of NCBI `BLAST_GetGappedScore` (blast_gapalign.c:3739): process the
-    // ungapped seeds in score order; before extending a seed, test whether it is
-    // CONTAINED in an already-saved gapped HSP via an interval tree, and skip the
-    // extension if so. Each surviving seed is gapped-extended; if its preliminary
-    // gapped score reaches `cutoff_score` it is saved AND its (gapped) envelope is
-    // added to the tree so later, weaker, redundant seeds are skipped. This
-    // replaces the previous "extend every seed then dedup" approach, matching
-    // NCBI's recall on repeat-rich subjects.
     let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
-
-    // NCBI `Blast_InitHitListSortByScore` / `score_compare_match`
-    // (blast_extend.c:274): score desc, subject-start asc, length desc,
-    // query-start asc. Higher-scoring seeds are inserted first so they can
-    // contain later, weaker ones.
-    let mut order: Vec<usize> = (0..ungapped.len()).collect();
-    order.sort_by(|&a, &b| {
-        let (ha, hb) = (&ungapped[a], &ungapped[b]);
-        hb.score
-            .cmp(&ha.score)
-            .then_with(|| ha.subject_start.cmp(&hb.subject_start))
-            .then_with(|| {
-                (hb.query_end - hb.query_start).cmp(&(ha.query_end - ha.query_start))
-            })
-            .then_with(|| ha.query_start.cmp(&hb.query_start))
-    });
-
+    let order = blast_init_hit_list_sort_by_score_search_hsps(ungapped);
     let q_max = ungapped.iter().map(|h| h.query_end).max().unwrap_or(0) + 1;
     let s_max = subject_len as i32 + 1;
     let mut tree = IntervalTree::new(q_max, s_max);
@@ -6988,18 +7533,7 @@ fn collect_packed_gapped_candidates(
     for &idx in &order {
         let seed = &ungapped[idx];
 
-        // NCBI `BlastIntervalTreeContainsHSP` on the UNGAPPED seed box (with the
-        // ungapped score). TRUE => an enveloping saved gapped HSP already exists,
-        // so skip this seed's extension entirely. `context` is the query-strand
-        // key (subject is always plus for blastn, so subject_frame=0).
-        if tree.is_contained_with_metadata_and_min_diag_separation(
-            Interval::new(seed.query_start, seed.query_end),
-            Interval::new(seed.subject_start, seed.subject_end),
-            seed.score,
-            seed.context,
-            0,
-            min_diag_separation,
-        ) {
+        if blast_interval_tree_contains_search_hsp(&tree, seed, min_diag_separation) {
             continue;
         }
 
@@ -7015,21 +7549,167 @@ fn collect_packed_gapped_candidates(
             .map(|lookup| lookup.query)
             .unwrap_or(traceback_query);
 
-        let subject_decoded = subject_decoded
-            .get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len));
-        let (prelim_seed, _, _) = select_packed_candidate_seed(
+        let subject_decoded_for_prelim = if gap_open == 0 && gap_extend == 0 {
+            Some(
+                subject_decoded
+                    .get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len))
+                    .as_slice(),
+            )
+        } else {
+            None
+        };
+        let prelim = blast_get_packed_preliminary_gapped_score(
             prelim_query,
-            subject_decoded,
+            subject_decoded_for_prelim,
+            subject_packed,
             subject_len,
             seed,
             reward,
             penalty,
-            gap_open == 0 && gap_extend == 0,
+            gap_open,
+            gap_extend,
+            prelim_x_dropoff,
         );
+        let Some(prelim) = prelim else {
+            continue;
+        };
+        if prelim.score < cutoff_score {
+            if should_try_near_cutoff_packed_traceback_fallback(&prelim, cutoff_score, penalty) {
+                let subject_decoded = subject_decoded
+                    .get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len));
+                let traceback_seed =
+                    traceback_seed_from_preliminary(traceback_query, subject_decoded, prelim);
+                if let Some(tb) = run_packed_traceback_for_seed(
+                    traceback_query,
+                    subject_decoded,
+                    traceback_seed,
+                    reward,
+                    penalty,
+                    gap_open,
+                    gap_extend,
+                    traceback_x_dropoff,
+                ) {
+                    let tb = preserve_equal_score_preliminary_ungapped_span(
+                        tb,
+                        prelim,
+                        traceback_query,
+                        subject_decoded,
+                        reward,
+                        penalty,
+                    );
+                    if tb.score >= cutoff_score.max(20)
+                        && has_opposite_context_endpoint_sibling(candidates, seed.context, &tb)
+                    {
+                        blast_interval_tree_add_preliminary_gapped_result(
+                            &mut tree,
+                            seed.context,
+                            prelim,
+                        );
+                        candidates.push(GappedCandidate {
+                            context: seed.context,
+                            tb,
+                            reevaluate_with_ambiguities: false,
+                            terminal_exact_from_swallowed_seed: false,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        blast_interval_tree_add_preliminary_gapped_result(&mut tree, seed.context, prelim);
 
-        let Some(prelim) = preliminary_gapped_score_and_seed(
+        let subject_decoded = subject_decoded
+            .get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len));
+        let traceback_seed =
+            traceback_seed_from_preliminary(traceback_query, subject_decoded, prelim);
+        blast_traceback_from_packed_preliminary_hsp(
+            candidates,
+            seed,
+            traceback_query,
+            subject_decoded,
+            prelim,
+            traceback_seed,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            traceback_x_dropoff,
+            cutoff_score,
+        );
+    }
+}
+
+/// NCBI: Blast_InitHitListSortByScore (`blast_extend.c:306`), over the local
+/// `SearchHsp` seed representation.
+fn blast_init_hit_list_sort_by_score_search_hsps(ungapped: &[SearchHsp]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..ungapped.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ha, hb) = (&ungapped[a], &ungapped[b]);
+        hb.score
+            .cmp(&ha.score)
+            .then_with(|| ha.subject_start.cmp(&hb.subject_start))
+            .then_with(|| (hb.query_end - hb.query_start).cmp(&(ha.query_end - ha.query_start)))
+            .then_with(|| ha.query_start.cmp(&hb.query_start))
+    });
+    order
+}
+
+/// NCBI: BlastIntervalTreeContainsHSP (`blast_itree.c`), over `SearchHsp`.
+fn blast_interval_tree_contains_search_hsp(
+    tree: &IntervalTree,
+    seed: &SearchHsp,
+    min_diag_separation: i32,
+) -> bool {
+    tree.is_contained_with_metadata_and_min_diag_separation(
+        Interval::new(seed.query_start, seed.query_end),
+        Interval::new(seed.subject_start, seed.subject_end),
+        seed.score,
+        seed.context,
+        0,
+        min_diag_separation,
+    )
+}
+
+/// NCBI: preliminary branch of `BLAST_GetGappedScore`.
+#[allow(clippy::too_many_arguments)]
+fn blast_get_packed_preliminary_gapped_score(
+    prelim_query: &[u8],
+    subject_decoded: Option<&[u8]>,
+    subject_packed: &[u8],
+    subject_len: usize,
+    seed: &SearchHsp,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    prelim_x_dropoff: i32,
+) -> Option<PreliminaryGappedResult> {
+    let (prelim_seed, _, _) = select_packed_candidate_seed(
+        prelim_query,
+        subject_decoded.unwrap_or(&[]),
+        subject_len,
+        seed,
+        reward,
+        penalty,
+        gap_open == 0 && gap_extend == 0,
+    );
+    if gap_open == 0 && gap_extend == 0 {
+        let subject_decoded = subject_decoded?;
+        preliminary_gapped_score_and_seed_greedy(
             prelim_query,
             subject_decoded,
+            seed,
+            prelim_seed.query,
+            prelim_seed.subject,
+            reward,
+            penalty,
+            prelim_x_dropoff,
+        )
+    } else {
+        preliminary_gapped_score_and_seed_packed_affine(
+            prelim_query,
+            subject_packed,
+            subject_len,
             seed,
             prelim_seed.query,
             prelim_seed.subject,
@@ -7039,61 +7719,170 @@ fn collect_packed_gapped_candidates(
             gap_open,
             gap_extend,
             prelim_x_dropoff,
-        ) else {
-            continue;
-        };
-        // NCBI saves the prelim HSP iff `gap_align->score >= cutoff_score`
-        // (an integer e-value-derived score). Compare to the integer cutoff
-        // directly — NOT by recomputing the e-value, since blast-rs's
-        // `raw_to_evalue` applies the matrix `round_down` first, which would make
-        // the gate one notch stricter than NCBI's cutoff.
-        if prelim.score < cutoff_score {
-            continue;
-        }
-        // Add the saved (gapped) HSP envelope to the tree (NCBI
-        // `BlastIntervalTreeAddHSP` with the post-extension coords + gapped score).
-        tree.insert_with_metadata(
-            Interval::new(prelim.prelim_q_start as i32, prelim.prelim_q_end as i32),
-            Interval::new(prelim.prelim_s_start as i32, prelim.prelim_s_end as i32),
-            prelim.score,
-            seed.context,
-            0,
-        );
+        )
+    }
+}
 
-        let traceback_seed =
-            traceback_seed_from_preliminary(traceback_query, subject_decoded, prelim);
+fn should_try_near_cutoff_packed_traceback_fallback(
+    prelim: &PreliminaryGappedResult,
+    cutoff_score: i32,
+    penalty: i32,
+) -> bool {
+    let q_len = prelim.prelim_q_end.saturating_sub(prelim.prelim_q_start);
+    prelim.score < cutoff_score
+        && cutoff_score - prelim.score <= penalty.abs()
+        && (24..=35).contains(&q_len)
+}
 
-        if let Some(tb) = run_packed_traceback_for_seed(
+fn has_opposite_context_endpoint_sibling(
+    candidates: &[GappedCandidate],
+    context: i32,
+    tb: &TracebackResult,
+) -> bool {
+    candidates.iter().any(|candidate| {
+        candidate.context != context
+            && candidate.tb.score == tb.score
+            && (candidate.tb.subject_end as i64 - tb.subject_end as i64).abs() <= 1
+            && candidate.tb.subject_start <= tb.subject_end
+            && tb.subject_start <= candidate.tb.subject_end
+    })
+}
+
+/// NCBI: BlastIntervalTreeAddHSP (`blast_itree.c:511`), for preliminary
+/// gapped BLASTN results.
+fn blast_interval_tree_add_preliminary_gapped_result(
+    tree: &mut IntervalTree,
+    context: i32,
+    prelim: PreliminaryGappedResult,
+) {
+    tree.insert_with_metadata(
+        Interval::new(prelim.prelim_q_start as i32, prelim.prelim_q_end as i32),
+        Interval::new(prelim.prelim_s_start as i32, prelim.prelim_s_end as i32),
+        prelim.score,
+        context,
+        0,
+    );
+}
+
+/// NCBI: Blast_TracebackFromHSPList / gapped traceback dispatch for one
+/// preliminary packed BLASTN HSP.
+#[allow(clippy::too_many_arguments)]
+fn blast_traceback_from_packed_preliminary_hsp(
+    candidates: &mut Vec<GappedCandidate>,
+    seed: &SearchHsp,
+    traceback_query: &[u8],
+    subject_decoded: &[u8],
+    prelim: PreliminaryGappedResult,
+    traceback_seed: PackedTracebackSeed,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    traceback_x_dropoff: i32,
+    cutoff_score: i32,
+) {
+    if let Some(tb) = run_packed_traceback_for_seed(
+        traceback_query,
+        subject_decoded,
+        traceback_seed,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        traceback_x_dropoff,
+    ) {
+        let tb = preserve_equal_score_preliminary_ungapped_span(
+            tb,
+            prelim,
             traceback_query,
             subject_decoded,
-            traceback_seed,
             reward,
             penalty,
-            gap_open,
-            gap_extend,
-            traceback_x_dropoff,
-        ) {
-            if should_preserve_exact_seed_after_large_gap_traceback(seed, &tb) {
-                candidates.push(GappedCandidate {
-                    context: seed.context,
-                    tb: traceback_from_exact_seed(seed),
-                });
-            }
+        );
+        preserve_terminal_exact_seed_if_traceback_swallowed_it(
+            candidates,
+            seed,
+            traceback_query,
+            subject_decoded,
+            &tb,
+            reward,
+            cutoff_score,
+        );
+        if should_preserve_exact_seed_after_large_gap_traceback(seed, &tb) {
             candidates.push(GappedCandidate {
                 context: seed.context,
-                tb,
+                tb: traceback_from_exact_seed(seed),
+                reevaluate_with_ambiguities: false,
+                terminal_exact_from_swallowed_seed: false,
             });
         }
+        candidates.push(GappedCandidate {
+            context: seed.context,
+            tb,
+            reevaluate_with_ambiguities: false,
+            terminal_exact_from_swallowed_seed: false,
+        });
+    }
+}
+
+fn preserve_equal_score_preliminary_ungapped_span(
+    tb: TracebackResult,
+    prelim: PreliminaryGappedResult,
+    query: &[u8],
+    subject: &[u8],
+    reward: i32,
+    penalty: i32,
+) -> TracebackResult {
+    let q_len = prelim.prelim_q_end.saturating_sub(prelim.prelim_q_start);
+    let s_len = prelim.prelim_s_end.saturating_sub(prelim.prelim_s_start);
+    if tb.score != prelim.score
+        || q_len == 0
+        || q_len < 80
+        || q_len != s_len
+        || prelim.prelim_q_start > tb.query_start
+        || prelim.prelim_s_start > tb.subject_start
+        || prelim.prelim_q_end < tb.query_end
+        || prelim.prelim_s_end < tb.subject_end
+        || (prelim.prelim_q_start == tb.query_start
+            && prelim.prelim_s_start == tb.subject_start
+            && prelim.prelim_q_end == tb.query_end
+            && prelim.prelim_s_end == tb.subject_end)
+    {
+        return tb;
+    }
+
+    let mut score = 0;
+    for i in 0..q_len {
+        score += blastna_score(
+            query[prelim.prelim_q_start + i],
+            subject[prelim.prelim_s_start + i],
+            reward,
+            penalty,
+        );
+    }
+    if score != prelim.score {
+        return tb;
+    }
+
+    TracebackResult {
+        score,
+        edit_script: GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, q_len as i32)],
+        },
+        query_start: prelim.prelim_q_start,
+        query_end: prelim.prelim_q_end,
+        subject_start: prelim.prelim_s_start,
+        subject_end: prelim.prelim_s_end,
     }
 }
 
 fn select_packed_candidate_seed(
     query: &[u8],
-    subject_decoded: &[u8],
+    _subject_decoded: &[u8],
     subject_len: usize,
     seed: &SearchHsp,
-    reward: i32,
-    penalty: i32,
+    _reward: i32,
+    _penalty: i32,
     greedy_prelim: bool,
 ) -> (PreliminarySeed, usize, usize) {
     let (seed_q, seed_s) = if greedy_prelim {
@@ -7102,22 +7891,10 @@ fn select_packed_candidate_seed(
             ((seed.subject_start + seed.subject_end) / 2) as usize,
         )
     } else {
-        blast_get_offsets_for_gapped_alignment(
-            query,
-            subject_decoded,
-            seed.query_start as usize,
-            seed.query_end as usize,
-            seed.subject_start as usize,
-            seed.subject_end as usize,
-            reward,
-            penalty,
+        (
+            seed.query_gapped_start.max(0) as usize,
+            seed.subject_gapped_start.max(0) as usize,
         )
-        .unwrap_or_else(|| {
-            (
-                ((seed.query_start + seed.query_end) / 2) as usize,
-                ((seed.subject_start + seed.subject_end) / 2) as usize,
-            )
-        })
     };
     let (prelim_q, prelim_s) = if greedy_prelim {
         (seed_q, seed_s)
@@ -7145,8 +7922,8 @@ fn select_decoded_candidate_seed(
     query: &[u8],
     subject: &[u8],
     seed: &SearchHsp,
-    reward: i32,
-    penalty: i32,
+    _reward: i32,
+    _penalty: i32,
     greedy_prelim: bool,
 ) -> (PreliminarySeed, usize, usize) {
     let (seed_q, seed_s) = if greedy_prelim {
@@ -7155,22 +7932,10 @@ fn select_decoded_candidate_seed(
             ((seed.subject_start + seed.subject_end) / 2) as usize,
         )
     } else {
-        blast_get_offsets_for_gapped_alignment(
-            query,
-            subject,
-            seed.query_start as usize,
-            seed.query_end as usize,
-            seed.subject_start as usize,
-            seed.subject_end as usize,
-            reward,
-            penalty,
+        (
+            seed.query_gapped_start.max(0) as usize,
+            seed.subject_gapped_start.max(0) as usize,
         )
-        .unwrap_or_else(|| {
-            (
-                ((seed.query_start + seed.query_end) / 2) as usize,
-                ((seed.subject_start + seed.subject_end) / 2) as usize,
-            )
-        })
     };
     let (prelim_q, prelim_s) = if greedy_prelim {
         (seed_q, seed_s)
@@ -7324,6 +8089,7 @@ fn traceback_from_exact_seed(seed: &SearchHsp) -> TracebackResult {
 fn render_traceback_candidate(
     context: i32,
     mut tb: TracebackResult,
+    reevaluate_with_ambiguities: bool,
     query_plus_nomask: &[u8],
     query_minus_nomask: &[u8],
     subject: &[u8],
@@ -7339,40 +8105,42 @@ fn render_traceback_candidate(
     let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
     let q_window = &query[tb.query_start..tb.query_end];
     let s_window = &subject[tb.subject_start..tb.subject_end];
-    // NCBI runs Blast_HSPReevaluateWithAmbiguitiesGapped on every gapped HSP in
-    // traceback (blast_traceback.c:669): the greedy core ignores ambiguities, so
-    // the score is recomputed and the HSP trimmed to its maximal-scoring subrange.
-    // Run it unconditionally — no length-based exceptions.
-    let original_tb = tb.clone();
-    let (orig_align_len, orig_num_ident, orig_gap_opens) =
-        original_tb.edit_script.count_identities(q_window, s_window);
-    if blast_hsp_reevaluate_with_ambiguities_gapped(
-        &mut tb,
-        query,
-        subject,
-        reward,
-        penalty,
-        gap_open,
-        gap_extend,
-        cutoff_score.max(1),
-    ) {
-        return None;
-    }
-    let rq_slice = &query[tb.query_start..tb.query_end];
-    let rs_slice = &subject[tb.subject_start..tb.subject_end];
-    let (refined_align_len, refined_num_ident, refined_gap_opens) =
-        tb.edit_script.count_identities(rq_slice, rs_slice);
-    if original_tb.score == tb.score
-        && original_tb.score >= 26
-        && orig_gap_opens == 1
-        && orig_align_len >= 50
-        && orig_align_len <= 70
-        && orig_num_ident * 100 >= orig_align_len * 85
-        && refined_gap_opens == 0
-        && refined_num_ident == refined_align_len
-        && refined_align_len <= 30
-    {
-        tb = original_tb;
+    // NCBI starts ambiguity reevaluation at the `extra_start` returned by the
+    // common-endpoint purge. Rust removes dropped HSPs in place, so trimmed
+    // survivors carry this flag. Greedy traceback is the C special case where
+    // `extra_start` is reset to zero and every HSP is reevaluated.
+    if reevaluate_with_ambiguities {
+        let original_tb = tb.clone();
+        let (orig_align_len, orig_num_ident, orig_gap_opens) =
+            original_tb.edit_script.count_identities(q_window, s_window);
+        if blast_hsp_reevaluate_with_ambiguities_gapped(
+            &mut tb,
+            query,
+            subject,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            cutoff_score.max(1),
+        ) {
+            return None;
+        }
+        let rq_slice = &query[tb.query_start..tb.query_end];
+        let rs_slice = &subject[tb.subject_start..tb.subject_end];
+        let (refined_align_len, refined_num_ident, refined_gap_opens) =
+            tb.edit_script.count_identities(rq_slice, rs_slice);
+        if original_tb.score == tb.score
+            && original_tb.score >= 26
+            && orig_gap_opens == 1
+            && orig_align_len >= 50
+            && orig_align_len <= 70
+            && orig_num_ident * 100 >= orig_align_len * 85
+            && refined_gap_opens == 0
+            && refined_num_ident == refined_align_len
+            && refined_align_len <= 30
+        {
+            tb = original_tb;
+        }
     }
     // Gate by the integer cutoff score (NCBI `cutoff_score`), not by recomputing
     // the e-value: `raw_to_evalue` applies the matrix `round_down` to the score,
@@ -7396,6 +8164,8 @@ fn render_traceback_candidate(
         query_end: tb.query_end as i32,
         subject_start: tb.subject_start as i32,
         subject_end: tb.subject_end as i32,
+        query_gapped_start: tb.query_start as i32,
+        subject_gapped_start: tb.subject_start as i32,
         score: tb.score,
         bit_score: kbp.raw_to_bit(tb.score),
         evalue,
@@ -7426,8 +8196,8 @@ fn blastn_preliminary_search_packed_prepared_with_split_xdrop(
     subject_len: usize,
     reward: i32,
     penalty: i32,
-    _gap_open: i32,
-    _gap_extend: i32,
+    gap_open: i32,
+    gap_extend: i32,
     ungapped_x_dropoff: i32,
     _prelim_x_dropoff: i32,
     _traceback_x_dropoff: i32,
@@ -7436,6 +8206,8 @@ fn blastn_preliminary_search_packed_prepared_with_split_xdrop(
     evalue_threshold: f64,
     last_hit_scratch: &mut [PackedDiagScratch],
 ) -> Vec<SearchHsp> {
+    let min_diag_separation =
+        min_diag_separation_for_gapped(prepared.word_size, reward, penalty, gap_open, gap_extend);
     collect_packed_prepared_ungapped(
         prepared,
         subject_packed,
@@ -7447,6 +8219,7 @@ fn blastn_preliminary_search_packed_prepared_with_split_xdrop(
         search_space,
         evalue_threshold,
         last_hit_scratch,
+        min_diag_separation,
     )
 }
 
@@ -7755,16 +8528,14 @@ fn preliminary_gapped_score_and_seed_affine(
     seed: &SearchHsp,
     seed_q: usize,
     seed_s: usize,
-    ungapped_score: i32,
+    _ungapped_score: i32,
     reward: i32,
     penalty: i32,
     gap_open: i32,
     gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<PreliminaryGappedResult> {
-    let effective_x_dropoff = x_dropoff.min(ungapped_score.max(0));
-    let (seed_q, seed_s) =
-        adjust_nt_packed_prelim_start_like_ncbi(seed_q, seed_s, query.len(), subject.len());
+    let effective_x_dropoff = x_dropoff;
     let mut adjusted_seed_s = seed_s;
     let mut adjusted_subject_len = subject.len();
     let start_shift = adjust_subject_range(
@@ -7792,6 +8563,50 @@ fn preliminary_gapped_score_and_seed_affine(
             prelim_q_end: seed.query_end as usize,
             prelim_s_start: seed.subject_start as usize,
             prelim_s_end: seed.subject_end as usize,
+            gapped_start_q: seed_q,
+            gapped_start_s: seed_s,
+        })
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn preliminary_gapped_score_and_seed_packed_affine(
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    _seed: &SearchHsp,
+    seed_q: usize,
+    seed_s: usize,
+    ungapped_score: i32,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+) -> Option<PreliminaryGappedResult> {
+    let (score, query_start, query_stop, subject_start, subject_stop, _, _, _, _, _, _, _, _) =
+        s_blast_dyn_prog_nt_gapped_alignment(
+            query,
+            subject_packed,
+            subject_len,
+            seed_q,
+            seed_s,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            ungapped_score,
+        );
+    if score > 0 {
+        Some(PreliminaryGappedResult {
+            score,
+            prelim_q_start: query_start,
+            prelim_q_end: query_stop,
+            prelim_s_start: subject_start,
+            prelim_s_end: subject_stop,
             gapped_start_q: seed_q,
             gapped_start_s: seed_s,
         })
@@ -8081,6 +8896,8 @@ mod tests {
             query_end,
             subject_start,
             subject_end,
+            query_gapped_start: query_start,
+            subject_gapped_start: subject_start,
             score,
             bit_score: 0.0,
             evalue: 0.0,
@@ -8120,6 +8937,8 @@ mod tests {
             query_end: 4,
             subject_start: 2,
             subject_end: 5,
+            query_gapped_start: 0,
+            subject_gapped_start: 2,
             score: 8,
             bit_score: 0.0,
             evalue: 0.0,
@@ -8154,6 +8973,8 @@ mod tests {
                 query_end: 25,
                 subject_start: 10,
                 subject_end: 30,
+                query_gapped_start: 5,
+                subject_gapped_start: 10,
                 score: 40,
                 bit_score: 0.0,
                 evalue: 0.0,
@@ -8170,6 +8991,8 @@ mod tests {
                 query_end: 22,
                 subject_start: 10,
                 subject_end: 27,
+                query_gapped_start: 5,
+                subject_gapped_start: 10,
                 score: 35,
                 bit_score: 0.0,
                 evalue: 0.0,
@@ -8186,6 +9009,8 @@ mod tests {
                 query_end: 30,
                 subject_start: 17,
                 subject_end: 40,
+                query_gapped_start: 12,
+                subject_gapped_start: 17,
                 score: 45,
                 bit_score: 0.0,
                 evalue: 0.0,
@@ -8202,6 +9027,8 @@ mod tests {
                 query_end: 30,
                 subject_start: 20,
                 subject_end: 40,
+                query_gapped_start: 15,
+                subject_gapped_start: 20,
                 score: 41,
                 bit_score: 0.0,
                 evalue: 0.0,
@@ -8468,6 +9295,36 @@ mod tests {
     }
 
     #[test]
+    fn affine_nucleotide_prelim_seed_uses_ungapped_start_like_ncbi() {
+        let query = encode_blastna_sequence(b"ACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+        let subject = encode_blastna_sequence(b"TTTTACGTACGTACGTACGTACGTACGTACGTAAAA");
+        let seed = SearchHsp {
+            query_start: 4,
+            query_end: 36,
+            subject_start: 4,
+            subject_end: 36,
+            query_gapped_start: 4,
+            subject_gapped_start: 4,
+            score: 29,
+            bit_score: 0.0,
+            evalue: 0.0,
+            num_ident: 0,
+            align_length: 0,
+            mismatches: 0,
+            gap_opens: 0,
+            context: 0,
+            qseq: None,
+            sseq: None,
+        };
+
+        let (prelim_seed, seed_q, seed_s) =
+            select_decoded_candidate_seed(&query, &subject, &seed, 1, -3, false);
+
+        assert_eq!((seed_q, seed_s), (4, 4));
+        assert_eq!((prelim_seed.query, prelim_seed.subject), (7, 7));
+    }
+
+    #[test]
     fn test_simple_search() {
         // Query: ACGTACGTACGT (12 bases)
         let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
@@ -8552,8 +9409,24 @@ mod tests {
             0,
         )
         .expect("first matching base should produce an extension");
-        let hsp = build_packed_hsp(&query, &subject, data, &kbp, 1e6, 1e10, 0)
-            .expect("first matching base should produce an HSP");
+        let hsp = build_packed_hsp(
+            &query,
+            &subject,
+            data,
+            ExactWordHit {
+                query_start: 0,
+                subject_start: 0,
+                subject_match_end: 1,
+            },
+            2,
+            -3,
+            &kbp,
+            1e6,
+            1e10,
+            4,
+            0,
+        )
+        .expect("first matching base should produce an HSP");
 
         assert_eq!(hsp.score, 2);
         assert_eq!(hsp.query_start, 0);
@@ -8678,6 +9551,61 @@ mod tests {
                 "{label}: minus exact word extents"
             );
         }
+    }
+
+    #[test]
+    fn blastn_short_retains_contained_repeat_hsps_on_distinct_diagonals() {
+        let query_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/large_db/query_500.fa");
+        if !query_path.exists() {
+            eprintln!("Skipping: missing {}", query_path.display());
+            return;
+        }
+        let query_file = std::fs::File::open(&query_path).expect("open query fasta");
+        let records = crate::input::parse_fasta(query_file);
+        let raw_query = &records[0].sequence;
+        let query_plus = encode_blastna_sequence(raw_query);
+        let query_minus = reverse_complement_blastna_sequence(&query_plus);
+        let subject = query_plus.clone();
+
+        let kbp = crate::stat::KarlinBlk {
+            lambda: 1.374063,
+            k: 0.711861,
+            h: 1.30725,
+            log_k: 0.711861_f64.ln(),
+            ..Default::default()
+        };
+        let hsps = blastn_gapped_search(
+            &query_plus,
+            &query_minus,
+            &subject,
+            7,
+            1,
+            -3,
+            5,
+            2,
+            20,
+            &kbp,
+            250_000.0,
+            10.0,
+        );
+
+        assert!(
+            hsps.iter().any(|h| h.context == 0
+                && h.query_start == 235
+                && h.query_end == 255
+                && h.subject_start == 446
+                && h.subject_end == 466),
+            "missing NCBI-retained plus-strand repeat HSP q236-255/s447-466; hsps={hsps:?}"
+        );
+        assert!(
+            hsps.iter().any(|h| h.context == 0
+                && h.query_start == 446
+                && h.query_end == 466
+                && h.subject_start == 235
+                && h.subject_end == 255),
+            "missing NCBI-retained plus-strand repeat HSP q447-466/s236-255; hsps={hsps:?}"
+        );
     }
 
     #[test]
@@ -9027,6 +9955,105 @@ mod tests {
     }
 
     #[test]
+    fn decoded_word7_lut6_scanner_verifies_left_to_terminal_full_word() {
+        let query = encode_blastna_sequence(b"ACGTACG");
+        let rc = reverse_complement_blastna_sequence(&query);
+        let kbp = test_kbp();
+
+        assert_eq!(
+            find_exact_word_hit_decoded(&query, &query, 7, 6, 1, 1).map(|hit| (
+                hit.query_start,
+                hit.subject_start,
+                hit.subject_match_end
+            )),
+            Some((0, 0, 7))
+        );
+
+        let results = blastn_ungapped_search(&query, &rc, &query, 7, 1, -3, 20, &kbp, 1e6, 1e10);
+
+        assert!(
+            results.iter().any(|hsp| hsp.context == 0
+                && hsp.query_start == 0
+                && hsp.query_end == 7
+                && hsp.subject_start == 0
+                && hsp.subject_end == 7
+                && hsp.score == 7),
+            "decoded word-7/lut-6 scanner missed terminal exact hit: {results:?}"
+        );
+    }
+
+    #[test]
+    fn packed_word11_lut8_scanner_checks_tail_lookup_start() {
+        let query = encode_blastna_sequence(b"ACGTACGTACG");
+        let rc = reverse_complement_blastna_sequence(&query);
+        let subject = encode_blastna_sequence(b"TACGTACGTACG");
+        let subject_packed = pack_ncbi2na_bases(&subject);
+        let kbp = test_kbp();
+        let prepared = PreparedBlastnQuery::new(&query, &rc, 11);
+
+        assert_eq!(prepared.lookups[0].lut_word, 8);
+        assert_eq!(prepared.lookups[0].scan_start, 0);
+        assert_eq!(prepared.lookups[0].scan_step, 4);
+
+        let results = blastn_ungapped_search_packed_prepared(
+            &prepared,
+            &subject_packed,
+            subject.len(),
+            1,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
+        );
+
+        assert!(
+            results.iter().any(|hsp| hsp.context == 0
+                && hsp.query_start == 0
+                && hsp.query_end == 11
+                && hsp.subject_start == 1
+                && hsp.subject_end == 12
+                && hsp.score == 11),
+            "word-11/lut-8 scanner missed tail lookup start: {results:?}"
+        );
+    }
+
+    #[test]
+    fn soft_masked_lookup_rechecks_full_word_lookup_chunks() {
+        let query = encode_blastna_sequence(b"ACGTACGTACG");
+        let subject = query.clone();
+        let subject_packed = pack_ncbi2na_bases(&subject);
+        let hit = ExactWordHit {
+            query_start: 0,
+            subject_start: 0,
+            subject_match_end: 11,
+        };
+
+        let mut query_masked = query.clone();
+        query_masked[5] = 14;
+
+        assert!(apply_ncbi_type_of_word_mask_packed(
+            &query_masked,
+            &subject_packed,
+            subject.len(),
+            11,
+            8,
+            hit,
+        )
+        .is_none());
+
+        assert!(apply_ncbi_type_of_word_mask_packed(
+            &query,
+            &subject_packed,
+            subject.len(),
+            11,
+            8,
+            hit,
+        )
+        .is_some());
+    }
+
+    #[test]
     fn test_search_near_sequence_boundary() {
         // Place matching region at the very start (position 0) and very end of subject.
         let pattern: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2]; // 11 bases
@@ -9103,5 +10130,45 @@ mod tests {
             "Should be a perfect match of {} bases",
             query.len()
         );
+    }
+
+    #[test]
+    fn packed_traceback_preserves_long_equal_score_preliminary_span() {
+        let query = vec![0u8; 100];
+        let mut subject = vec![0u8; 100];
+        for i in (0..80).step_by(16) {
+            for j in 0..3 {
+                subject[i + j] = 1;
+            }
+        }
+        let prelim = PreliminaryGappedResult {
+            score: 20,
+            prelim_q_start: 0,
+            prelim_q_end: 80,
+            prelim_s_start: 0,
+            prelim_s_end: 80,
+            gapped_start_q: 40,
+            gapped_start_s: 40,
+        };
+        let tb = TracebackResult {
+            score: 20,
+            edit_script: GapEditScript {
+                ops: vec![(GapAlignOpType::Sub, 20)],
+            },
+            query_start: 30,
+            query_end: 50,
+            subject_start: 30,
+            subject_end: 50,
+        };
+
+        let preserved =
+            preserve_equal_score_preliminary_ungapped_span(tb, prelim, &query, &subject, 1, -3);
+
+        assert_eq!(preserved.query_start, 0);
+        assert_eq!(preserved.query_end, 80);
+        assert_eq!(preserved.subject_start, 0);
+        assert_eq!(preserved.subject_end, 80);
+        assert_eq!(preserved.score, 20);
+        assert_eq!(preserved.edit_script.ops, vec![(GapAlignOpType::Sub, 80)]);
     }
 }

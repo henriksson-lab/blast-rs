@@ -70,8 +70,6 @@ pub use api::{
     blastx,
     blastx_batch,
     blastx_search,
-    tblastn_batch,
-    tblastx_batch,
     // PSSM functions
     build_pssm,
     // Composition
@@ -89,8 +87,10 @@ pub use api::{
     six_frame_translate,
     six_frame_translate_with_code,
     tblastn,
+    tblastn_batch,
     tblastn_search,
     tblastx,
+    tblastx_batch,
     tblastx_search,
     BlastDbBuilder,
     BlastDefLine,

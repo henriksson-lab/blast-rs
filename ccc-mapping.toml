@@ -1197,6 +1197,10 @@ rust  = "blast_init_hit_list_sort_by_score"
 other = "Blast_InitHitListSortByScore"
 
 [[entries]]
+rust  = "blast_init_protein_hits_sort_by_score"
+other = "Blast_InitHitListSortByScore"
+
+[[entries]]
 rust  = "blast_init_hit_list_is_sorted_by_score"
 other = "Blast_InitHitListIsSortedByScore"
 
@@ -1207,6 +1211,14 @@ other = "s_CompareInitHSPsByQueryOffsetScore"
 [[entries]]
 rust  = "protein_gapped_align"
 other = "Blast_SemiGappedAlign"
+
+[[entries]]
+rust  = "s_blast_prot_gapped_alignment"
+other = "s_BlastProtGappedAlignment"
+
+[[entries]]
+rust  = "blast_gapped_alignment_with_traceback"
+other = "BLAST_GappedAlignmentWithTraceback"
 
 [[entries]]
 rust  = "protein_gapped_score_one_dir"
@@ -1537,7 +1549,15 @@ rust  = "blast_interval_tree_add_hsp"
 other = "BlastIntervalTreeAddHSP"
 
 [[entries]]
+rust  = "blast_interval_tree_add_protein_hit"
+other = "BlastIntervalTreeAddHSP"
+
+[[entries]]
 rust  = "blast_interval_tree_contains_hsp"
+other = "BlastIntervalTreeContainsHSP"
+
+[[entries]]
+rust  = "blast_interval_tree_contains_protein_hit"
 other = "BlastIntervalTreeContainsHSP"
 
 [[entries]]
@@ -1985,7 +2005,15 @@ rust  = "blast_hsp_list_sort_by_score"
 other = "Blast_HSPListSortByScore"
 
 [[entries]]
+rust  = "blast_hsp_init_protein_hit"
+other = "Blast_HSPInit"
+
+[[entries]]
 rust  = "blast_hsp_update_with_traceback"
+other = "Blast_HSPUpdateWithTraceback"
+
+[[entries]]
+rust  = "blast_hsp_update_with_traceback_protein_hit"
 other = "Blast_HSPUpdateWithTraceback"
 
 [[entries]]
@@ -2193,6 +2221,10 @@ other = "Blast_HSPListReapByEvalue"
 # owned vector. For BLASTN trim mode it mirrors C's local return count while
 # keeping the trimmed HSP in the compact Rust list.
 rust  = "blast_hsp_list_purge_hsps_with_common_endpoints_with_options"
+other = "Blast_HSPListPurgeHSPsWithCommonEndpoints"
+
+[[entries]]
+rust  = "blast_hsp_list_purge_hsps_with_common_endpoints_protein_hits"
 other = "Blast_HSPListPurgeHSPsWithCommonEndpoints"
 
 [[entries]]
@@ -3171,6 +3203,10 @@ other = "BLAST_GetNumberOfContexts"
 
 [[entries]]
 rust  = "compute_identities"
+other = "Blast_HSPGetNumIdentitiesAndPositives"
+
+[[entries]]
+rust  = "blast_hsp_get_num_identities_and_positives_protein_hit"
 other = "Blast_HSPGetNumIdentitiesAndPositives"
 
 [[entries]]
@@ -5419,6 +5455,10 @@ other = "Blast_GetQueryIndexFromQueryOffset"
 
 [[entries]]
 rust  = "bsearch_context_info"
+other = "BSearchContextInfo"
+
+[[entries]]
+rust  = "context_start_for_offset"
 other = "BSearchContextInfo"
 
 [[entries]]

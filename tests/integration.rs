@@ -25520,7 +25520,14 @@ fn blastx_subject_ncbi_parity_non_default_small_window_size() {
         ">q1\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         ">s1\nAAAAAAAAAAAAAAAAAAAA\n",
         "6 qseqid sseqid length bitscore evalue",
-        &["--seg", "no", "--comp_based_stats", "0", "--window_size", "10"],
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--window_size",
+            "10",
+        ],
         &["-seg", "no", "-comp_based_stats", "0", "-window_size", "10"],
     );
 }
@@ -25533,8 +25540,22 @@ fn blastx_subject_ncbi_parity_non_default_large_window_size() {
         ">q1\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         ">s1\nAAAAAAAAAAAAAAAAAAAA\n",
         "6 qseqid sseqid length bitscore evalue",
-        &["--seg", "no", "--comp_based_stats", "0", "--window_size", "100"],
-        &["-seg", "no", "-comp_based_stats", "0", "-window_size", "100"],
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--window_size",
+            "100",
+        ],
+        &[
+            "-seg",
+            "no",
+            "-comp_based_stats",
+            "0",
+            "-window_size",
+            "100",
+        ],
     );
 }
 
@@ -25548,7 +25569,14 @@ fn tblastn_subject_ncbi_parity_non_default_window_size() {
         ">q1\nAAAAAAAAAAAAAAAAAAAA\n",
         ">s1\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         "6 qseqid sseqid length bitscore evalue",
-        &["--seg", "no", "--comp_based_stats", "0", "--window_size", "10"],
+        &[
+            "--seg",
+            "no",
+            "--comp_based_stats",
+            "0",
+            "--window_size",
+            "10",
+        ],
         &["-seg", "no", "-comp_based_stats", "0", "-window_size", "10"],
     );
 }

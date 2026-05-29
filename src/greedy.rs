@@ -258,6 +258,13 @@ struct GreedyAlignmentExtents {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct GreedyScaledScores {
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct PrelimEditOp {
     op_type: GapAlignOpType,
     num: i32,
@@ -898,57 +905,14 @@ pub fn greedy_align_with_seed(
     penalty: i32,
     x_dropoff: i32,
 ) -> Option<(i32, usize, usize, usize, usize, GapEditScript, usize, usize)> {
-    let scaled_reward = if reward % 2 == 1 { reward * 2 } else { reward };
-    let scaled_penalty = if reward % 2 == 1 {
-        -penalty * 2
-    } else {
-        -penalty
-    };
-    let scaled_xdrop = if reward % 2 == 1 {
-        x_dropoff * 2
-    } else {
-        x_dropoff
-    };
-
-    let initial_max_dist = initial_greedy_max_dist(subject.len());
-    let max_possible_dist = query
-        .len()
-        .saturating_add(subject.len())
-        .max(initial_max_dist);
-
-    let right = greedy_align_one_side_with_growth(
-        &query[q_seed..],
-        &subject[s_seed..],
-        false,
-        scaled_xdrop,
-        scaled_reward,
-        scaled_penalty,
-        initial_max_dist,
-        max_possible_dist,
-    )?;
-    let left = greedy_align_one_side_with_growth(
-        &query[..q_seed],
-        &subject[..s_seed],
-        true,
-        scaled_xdrop,
-        scaled_reward,
-        scaled_penalty,
-        initial_max_dist,
-        max_possible_dist,
-    )?;
+    let scaled = blast_greedy_align_scale_scores(reward, penalty, x_dropoff);
+    let (left, right) =
+        blast_greedy_align_extend_both_sides(query, subject, q_seed, s_seed, scaled)?;
     let extents =
         greedy_alignment_extents_from_extensions(q_seed, s_seed, reward, penalty, &left, &right);
-    let (adjusted_seed_q, adjusted_seed_s) = adjusted_greedy_seed(
-        q_seed,
-        s_seed,
-        extents.query_start,
-        extents.subject_start,
-        extents.query_end,
-        extents.subject_end,
-        left.seed,
-        right.seed,
-    );
-    let merged = greedy_edit_script_from_extensions(&left, &right, query, subject, extents);
+    let (adjusted_seed_q, adjusted_seed_s) =
+        blast_greedy_align_adjust_seed(q_seed, s_seed, extents, left.seed, right.seed);
+    let merged = blast_greedy_align_build_traceback(&left, &right, query, subject, extents);
 
     Some((
         extents.score,
@@ -960,6 +924,95 @@ pub fn greedy_align_with_seed(
         adjusted_seed_q,
         adjusted_seed_s,
     ))
+}
+
+/// NCBI: greedy nucleotide score-scaling setup.
+fn blast_greedy_align_scale_scores(
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+) -> GreedyScaledScores {
+    GreedyScaledScores {
+        reward: if reward % 2 == 1 { reward * 2 } else { reward },
+        penalty: if reward % 2 == 1 {
+            -penalty * 2
+        } else {
+            -penalty
+        },
+        x_dropoff: if reward % 2 == 1 {
+            x_dropoff * 2
+        } else {
+            x_dropoff
+        },
+    }
+}
+
+/// NCBI: right and left `BLAST_GreedyAlign` extension passes.
+fn blast_greedy_align_extend_both_sides(
+    query: &[u8],
+    subject: &[u8],
+    q_seed: usize,
+    s_seed: usize,
+    scaled: GreedyScaledScores,
+) -> Option<(GreedySideAlignment, GreedySideAlignment)> {
+    let initial_max_dist = initial_greedy_max_dist(subject.len());
+    let max_possible_dist = query
+        .len()
+        .saturating_add(subject.len())
+        .max(initial_max_dist);
+
+    let right = greedy_align_one_side_with_growth(
+        &query[q_seed..],
+        &subject[s_seed..],
+        false,
+        scaled.x_dropoff,
+        scaled.reward,
+        scaled.penalty,
+        initial_max_dist,
+        max_possible_dist,
+    )?;
+    let left = greedy_align_one_side_with_growth(
+        &query[..q_seed],
+        &subject[..s_seed],
+        true,
+        scaled.x_dropoff,
+        scaled.reward,
+        scaled.penalty,
+        initial_max_dist,
+        max_possible_dist,
+    )?;
+    Some((left, right))
+}
+
+/// NCBI: seed adjustment after the two greedy extensions are merged.
+fn blast_greedy_align_adjust_seed(
+    q_seed: usize,
+    s_seed: usize,
+    extents: GreedyAlignmentExtents,
+    left_seed: GreedySeed,
+    right_seed: GreedySeed,
+) -> (usize, usize) {
+    adjusted_greedy_seed(
+        q_seed,
+        s_seed,
+        extents.query_start,
+        extents.subject_start,
+        extents.query_end,
+        extents.subject_end,
+        left_seed,
+        right_seed,
+    )
+}
+
+/// NCBI: `GapEditScript` construction from merged greedy extensions.
+fn blast_greedy_align_build_traceback(
+    left: &GreedySideAlignment,
+    right: &GreedySideAlignment,
+    query: &[u8],
+    subject: &[u8],
+    extents: GreedyAlignmentExtents,
+) -> GapEditScript {
+    greedy_edit_script_from_extensions(left, right, query, subject, extents)
 }
 
 // blast-rs: choose a stable seed inside the merged greedy alignment extents.

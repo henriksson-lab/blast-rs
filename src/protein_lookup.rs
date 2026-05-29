@@ -57,6 +57,10 @@ fn score_compare_protein_hits(a: &ProteinHit, b: &ProteinHit) -> std::cmp::Order
         .then_with(|| b.query_end.cmp(&a.query_end))
 }
 
+fn blast_init_protein_hits_sort_by_score(hits: &mut [ProteinHit]) {
+    hits.sort_unstable_by(score_compare_protein_hits);
+}
+
 /// Protein word lookup table.
 ///
 /// Uses a CSR (compressed sparse row) layout for cache-friendly access:
@@ -1534,7 +1538,6 @@ pub struct BlastAaWordFinderScan {
     pub hits: Vec<ProteinHit>,
     pub total_hits: i32,
     pub hits_extended: i32,
-    init_hits: Vec<BlastAaInitHitRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -1545,6 +1548,11 @@ struct BlastAaInitHitRecord {
     s_off: i32,
     len: i32,
     score: i32,
+}
+
+struct BlastAaWordFinderSideChannels<'a> {
+    init_hitlist: Option<&'a mut crate::extend::InitHitList>,
+    ungapped_stats: Option<&'a mut crate::diagnostics::UngappedStats>,
 }
 
 /// NCBI: s_BlastAaExtendLeft (aa_ungapped.c).
@@ -1970,8 +1978,10 @@ pub fn s_blast_aa_word_finder_two_hit(
     window: i32,
     diag_buf: &mut Vec<(i32, bool)>,
 ) -> Vec<ProteinHit> {
-    s_blast_aa_word_finder_two_hit_scan(query, subject, matrix, table, x_dropoff, window, diag_buf)
-        .hits
+    s_blast_aa_word_finder_two_hit_scan(
+        query, subject, matrix, table, x_dropoff, window, diag_buf, None, None,
+    )
+    .hits
 }
 
 fn s_blast_aa_word_finder_two_hit_scan(
@@ -1982,6 +1992,8 @@ fn s_blast_aa_word_finder_two_hit_scan(
     x_dropoff: i32,
     window: i32,
     diag_buf: &mut Vec<(i32, bool)>,
+    context_starts: Option<&[usize]>,
+    mut side_channels: Option<&mut BlastAaWordFinderSideChannels<'_>>,
 ) -> BlastAaWordFinderScan {
     let word_size = table.word_size;
     if query.len() < word_size || subject.len() < word_size {
@@ -2017,7 +2029,6 @@ fn s_blast_aa_word_finder_two_hit_scan(
     let diag_offset = window;
     let mut total_hits = 0i32;
     let mut hits_extended = 0i32;
-    let mut init_hits = Vec::new();
 
     for s_pos in 0..=last_pos {
         if s_pos > 0 {
@@ -2068,6 +2079,13 @@ fn s_blast_aa_word_finder_two_hit_scan(
                 if diff < ws {
                     continue;
                 }
+                if let Some(starts) = context_starts {
+                    let ctx_start = context_start_for_offset(starts, q_pos);
+                    if (diff as usize) > q_pos || q_pos - (diff as usize) < ctx_start {
+                        *diag_ptr.add(diag) = (s_off + diag_offset, false);
+                        continue;
+                    }
+                }
 
                 let s_left_off = (last_hit - diag_offset + ws) as usize; // end of first hit
                 let s_right_off = s_pos;
@@ -2099,8 +2117,20 @@ fn s_blast_aa_word_finder_two_hit_scan(
                                 len: hit.align_length,
                                 score: hit.score,
                             };
+                            if let Some(channels) = side_channels.as_deref_mut() {
+                                if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut() {
+                                    crate::extend::blast_save_init_hsp(
+                                        init_hitlist,
+                                        record.q_start,
+                                        record.s_start,
+                                        record.q_off,
+                                        record.s_off,
+                                        record.len,
+                                        record.score,
+                                    );
+                                }
+                            }
                             hits.push(hit);
-                            init_hits.push(record);
                         }
                     }
                     TwoHitOutcome::NoReach { hit } => {
@@ -2113,8 +2143,20 @@ fn s_blast_aa_word_finder_two_hit_scan(
                                 len: hit.align_length,
                                 score: hit.score,
                             };
+                            if let Some(channels) = side_channels.as_deref_mut() {
+                                if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut() {
+                                    crate::extend::blast_save_init_hsp(
+                                        init_hitlist,
+                                        record.q_start,
+                                        record.s_start,
+                                        record.q_off,
+                                        record.s_off,
+                                        record.len,
+                                        record.score,
+                                    );
+                                }
+                            }
                             hits.push(hit);
-                            init_hits.push(record);
                         }
                         *diag_ptr.add(diag) = (s_off + diag_offset, false);
                     }
@@ -2123,14 +2165,34 @@ fn s_blast_aa_word_finder_two_hit_scan(
         }
     }
 
-    if hits.len() > 1 {
-        hits.sort_unstable_by(score_compare_protein_hits);
-    }
-    BlastAaWordFinderScan {
+    let scan = BlastAaWordFinderScan {
         hits,
         total_hits,
         hits_extended,
-        init_hits,
+    };
+    if let Some(channels) = side_channels {
+        let saved_hits = channels
+            .init_hitlist
+            .as_deref()
+            .map_or(scan.hits.len() as i32, |init_hitlist| {
+                init_hitlist.total() as i32
+            });
+        crate::diagnostics::blast_ungapped_stats_update(
+            channels.ungapped_stats.as_deref_mut(),
+            scan.total_hits,
+            scan.hits_extended,
+            saved_hits,
+        );
+    }
+    scan
+}
+
+#[inline]
+fn context_start_for_offset(context_starts: &[usize], query_offset: usize) -> usize {
+    match context_starts.binary_search(&query_offset) {
+        Ok(i) => context_starts[i],
+        Err(0) => 0,
+        Err(i) => context_starts[i - 1],
     }
 }
 
@@ -2145,7 +2207,8 @@ pub fn s_blast_aa_word_finder_one_hit(
     x_dropoff: i32,
     diag_buf: &mut Vec<(i32, bool)>,
 ) -> Vec<ProteinHit> {
-    s_blast_aa_word_finder_one_hit_scan(query, subject, matrix, table, x_dropoff, diag_buf).hits
+    s_blast_aa_word_finder_one_hit_scan(query, subject, matrix, table, x_dropoff, diag_buf, None)
+        .hits
 }
 
 fn s_blast_aa_word_finder_one_hit_scan(
@@ -2155,6 +2218,7 @@ fn s_blast_aa_word_finder_one_hit_scan(
     table: &ProteinLookupTable,
     x_dropoff: i32,
     diag_buf: &mut Vec<(i32, bool)>,
+    mut side_channels: Option<&mut BlastAaWordFinderSideChannels<'_>>,
 ) -> BlastAaWordFinderScan {
     let word_size = table.word_size;
     if query.len() < word_size || subject.len() < word_size {
@@ -2182,7 +2246,6 @@ fn s_blast_aa_word_finder_one_hit_scan(
     let diag_ptr = diag_buf.as_mut_ptr();
     let mut total_hits = 0i32;
     let mut hits_extended = 0i32;
-    let mut init_hits = Vec::new();
 
     for s_pos in 0..=last_pos {
         if s_pos > 0 {
@@ -2234,22 +2297,45 @@ fn s_blast_aa_word_finder_one_hit_scan(
                         len: hit.align_length,
                         score: hit.score,
                     };
+                    if let Some(channels) = side_channels.as_deref_mut() {
+                        if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut() {
+                            crate::extend::blast_save_init_hsp(
+                                init_hitlist,
+                                record.q_start,
+                                record.s_start,
+                                record.q_off,
+                                record.s_off,
+                                record.len,
+                                record.score,
+                            );
+                        }
+                    }
                     hits.push(hit);
-                    init_hits.push(record);
                 }
             }
         }
     }
 
-    if hits.len() > 1 {
-        hits.sort_unstable_by(score_compare_protein_hits);
-    }
-    BlastAaWordFinderScan {
+    let scan = BlastAaWordFinderScan {
         hits,
         total_hits,
         hits_extended,
-        init_hits,
+    };
+    if let Some(channels) = side_channels {
+        let saved_hits = channels
+            .init_hitlist
+            .as_deref()
+            .map_or(scan.hits.len() as i32, |init_hitlist| {
+                init_hitlist.total() as i32
+            });
+        crate::diagnostics::blast_ungapped_stats_update(
+            channels.ungapped_stats.as_deref_mut(),
+            scan.total_hits,
+            scan.hits_extended,
+            saved_hits,
+        );
     }
+    scan
 }
 
 /// NCBI: BlastAaWordFinder (aa_ungapped.c).
@@ -2265,20 +2351,25 @@ pub fn blast_aa_word_finder(
     window_size: i32,
     diag_buf: &mut Vec<(i32, bool)>,
 ) -> Result<Vec<ProteinHit>, BlastAaWordFinderUnsupported> {
-    if window_size <= 0 {
-        return Ok(s_blast_aa_word_finder_one_hit(
-            query, subject, matrix, table, x_dropoff, diag_buf,
-        ));
-    }
-    Ok(s_blast_aa_word_finder_two_hit(
-        query,
-        subject,
-        matrix,
-        table,
-        x_dropoff,
-        window_size,
-        diag_buf,
-    ))
+    let mut scan = if window_size <= 0 {
+        s_blast_aa_word_finder_one_hit_scan(
+            query, subject, matrix, table, x_dropoff, diag_buf, None,
+        )
+    } else {
+        s_blast_aa_word_finder_two_hit_scan(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            window_size,
+            diag_buf,
+            None,
+            None,
+        )
+    };
+    blast_init_protein_hits_sort_by_score(&mut scan.hits);
+    Ok(scan.hits)
 }
 
 /// blast-rs: side-channel preserving wrapper around `BlastAaWordFinder`
@@ -2299,35 +2390,38 @@ pub fn blast_aa_word_finder_with_side_channels(
     init_hitlist: Option<&mut crate::extend::InitHitList>,
     ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
 ) -> Result<BlastAaWordFinderScan, BlastAaWordFinderUnsupported> {
-    let scan = if window_size <= 0 {
-        s_blast_aa_word_finder_one_hit_scan(query, subject, matrix, table, x_dropoff, diag_buf)
+    let mut side_channels = BlastAaWordFinderSideChannels {
+        init_hitlist,
+        ungapped_stats,
+    };
+    let mut scan = if window_size <= 0 {
+        s_blast_aa_word_finder_one_hit_scan(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            diag_buf,
+            Some(&mut side_channels),
+        )
     } else {
         s_blast_aa_word_finder_two_hit_scan(
-            query, subject, matrix, table, x_dropoff, window_size, diag_buf,
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            window_size,
+            diag_buf,
+            None,
+            Some(&mut side_channels),
         )
     };
+    blast_init_protein_hits_sort_by_score(&mut scan.hits);
 
-    let saved_hits = scan.hits.len() as i32;
-    if let Some(init_hitlist) = init_hitlist {
-        for hit in &scan.init_hits {
-            crate::extend::blast_save_init_hsp(
-                init_hitlist,
-                hit.q_start,
-                hit.s_start,
-                hit.q_off,
-                hit.s_off,
-                hit.len,
-                hit.score,
-            );
-        }
+    if let Some(init_hitlist) = side_channels.init_hitlist {
         crate::extend::blast_init_hit_list_sort_by_score(init_hitlist);
     }
-    crate::diagnostics::blast_ungapped_stats_update(
-        ungapped_stats,
-        scan.total_hits,
-        scan.hits_extended,
-        saved_hits,
-    );
 
     Ok(scan)
 }
@@ -2344,13 +2438,44 @@ pub fn protein_scan_with_table_reuse(
     window: i32,
     diag_buf: &mut Vec<(i32, bool)>,
 ) -> Vec<ProteinHit> {
-    // NCBI `-window_size 0` selects the single-hit algorithm; any positive
-    // window uses the two-hit method with that window. Mirrors the dispatch in
-    // `blast_aa_word_finder`.
+    // Keep the C-shaped dispatch edge visible: NCBI routes callers through
+    // `BlastAaWordFinder`, which then selects the one-hit or two-hit scanner.
+    blast_aa_word_finder(query, subject, matrix, table, x_dropoff, window, diag_buf)
+        .expect("local protein lookup wrapper supports one-hit and two-hit scans")
+}
+
+/// Scan a concatenated query buffer while preserving NCBI's same-context
+/// two-hit diagonal rule. `context_starts` must be sorted query offsets.
+pub fn protein_scan_with_table_reuse_contexts(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    window: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+    context_starts: &[usize],
+) -> Vec<ProteinHit> {
     if window <= 0 {
         s_blast_aa_word_finder_one_hit(query, subject, matrix, table, x_dropoff, diag_buf)
     } else {
-        s_blast_aa_word_finder_two_hit(query, subject, matrix, table, x_dropoff, window, diag_buf)
+        let mut scan = s_blast_aa_word_finder_two_hit_scan(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            window,
+            diag_buf,
+            Some(context_starts),
+            None,
+        )
+        .hits;
+        // This path scans concatenated Rust query buffers and must pass the
+        // same-context guard directly into the two-hit body. NCBI still sorts at
+        // `BlastAaWordFinder` after scanning, so do the equivalent here.
+        blast_init_protein_hits_sort_by_score(&mut scan);
+        scan
     }
 }
 
@@ -3046,8 +3171,9 @@ mod tests {
 
         let direct =
             s_blast_aa_word_finder_two_hit(&query, &subject, &m, &table, 20, 12, &mut direct_diag);
-        let dispatch = blast_aa_word_finder(&query, &subject, &m, &table, 20, 12, &mut dispatch_diag)
-            .expect("non-default window is now supported");
+        let dispatch =
+            blast_aa_word_finder(&query, &subject, &m, &table, 20, 12, &mut dispatch_diag)
+                .expect("non-default window is now supported");
         assert_eq!(dispatch.len(), direct.len());
         for (hit, exp) in dispatch.iter().zip(direct.iter()) {
             assert_eq!(

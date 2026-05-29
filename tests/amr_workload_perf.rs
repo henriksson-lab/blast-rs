@@ -35,7 +35,10 @@ use std::time::Instant;
 const OUTFMT: &str = "6 sseqid qseqid sstart send slen qstart qend qlen sseq qseq";
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn manifest_dir() -> PathBuf {
@@ -65,7 +68,9 @@ fn find_amr_db() -> Option<PathBuf> {
 }
 
 fn find_blast_cli() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("BLAST_RS_CLI_BIN").or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli")) {
+    if let Some(p) =
+        std::env::var_os("BLAST_RS_CLI_BIN").or_else(|| std::env::var_os("CARGO_BIN_EXE_blast-cli"))
+    {
         let p = PathBuf::from(p);
         if p.exists() {
             return Some(p);
@@ -113,7 +118,11 @@ fn run_timed(prog: &Path, args: &[String], reps: usize) -> Measure {
     for _ in 0..reps {
         let start = Instant::now();
         let output = if have_time {
-            Command::new("/usr/bin/time").arg("-v").arg(prog).args(args).output()
+            Command::new("/usr/bin/time")
+                .arg("-v")
+                .arg(prog)
+                .args(args)
+                .output()
         } else {
             Command::new(prog).args(args).output()
         }
@@ -135,7 +144,10 @@ fn run_timed(prog: &Path, args: &[String], reps: usize) -> Measure {
             }
         }
     }
-    Measure { best_secs: best, peak_rss_kb: peak }
+    Measure {
+        best_secs: best,
+        peak_rss_kb: peak,
+    }
 }
 
 fn parse_max_rss_kb(time_stderr: &str) -> Option<u64> {
@@ -187,9 +199,21 @@ fn perf_compare(
     let only_ncbi = ncbi_pairs.len() - shared;
     let only_brs = brs_pairs.len() - shared;
     let union = brs_pairs.len() + ncbi_pairs.len() - shared;
-    let recall = if ncbi_pairs.is_empty() { 1.0 } else { shared as f64 / ncbi_pairs.len() as f64 };
-    let precision = if brs_pairs.is_empty() { 0.0 } else { shared as f64 / brs_pairs.len() as f64 };
-    let jaccard = if union == 0 { 1.0 } else { shared as f64 / union as f64 };
+    let recall = if ncbi_pairs.is_empty() {
+        1.0
+    } else {
+        shared as f64 / ncbi_pairs.len() as f64
+    };
+    let precision = if brs_pairs.is_empty() {
+        0.0
+    } else {
+        shared as f64 / brs_pairs.len() as f64
+    };
+    let jaccard = if union == 0 {
+        1.0
+    } else {
+        shared as f64 / union as f64
+    };
 
     let rss = |m: &Measure| match m.peak_rss_kb {
         Some(kb) => format!("{:8.1} MB", kb as f64 / 1024.0),
@@ -199,11 +223,25 @@ fn perf_compare(
 
     eprintln!("\n[amr_workload_perf] ===== {label} performance (best of {reps}) =====");
     eprintln!("  tool       best_time      peak_rss     hit_pairs");
-    eprintln!("  blast-rs  {:9.3}s   {}   {}", brs.best_secs, rss(&brs), brs_pairs.len());
-    eprintln!("  NCBI      {:9.3}s   {}   {}", ncbi_m.best_secs, rss(&ncbi_m), ncbi_pairs.len());
+    eprintln!(
+        "  blast-rs  {:9.3}s   {}   {}",
+        brs.best_secs,
+        rss(&brs),
+        brs_pairs.len()
+    );
+    eprintln!(
+        "  NCBI      {:9.3}s   {}   {}",
+        ncbi_m.best_secs,
+        rss(&ncbi_m),
+        ncbi_pairs.len()
+    );
     eprintln!(
         "  -> blast-rs is {:.2}x {} than NCBI",
-        if speedup >= 1.0 { speedup } else { 1.0 / speedup },
+        if speedup >= 1.0 {
+            speedup
+        } else {
+            1.0 / speedup
+        },
         if speedup >= 1.0 { "faster" } else { "slower" }
     );
     eprintln!(
@@ -268,7 +306,10 @@ fn blastp_amr_workload_perf_vs_ncbi() {
     let Some(c) = common() else { return };
     let query = query_path("BLAST_RS_PERF_QUERY_PROT", "test_prot.fa");
     if !query.exists() {
-        eprintln!("[amr_workload_perf] SKIP: protein query {} not found", query.display());
+        eprintln!(
+            "[amr_workload_perf] SKIP: protein query {} not found",
+            query.display()
+        );
         return;
     }
     let ncbi = match find_ncbi("blastp") {
@@ -289,32 +330,55 @@ fn blastp_amr_workload_perf_vs_ncbi() {
     // blast-rs (blast-cli blastp) — long-flag interface; no `-task` (blastn-only).
     let brs_args: Vec<String> = vec![
         "blastp".into(),
-        "-q".into(), q.clone(),
-        "-d".into(), d.clone(),
-        "--comp_based_stats".into(), "0".into(),
-        "--seg".into(), "no".into(),
-        "--max_target_seqs".into(), "10000".into(),
-        "--dbsize".into(), "10000".into(),
-        "--evalue".into(), "1e-10".into(),
-        "--word_size".into(), "5".into(),
-        "--num_threads".into(), th.clone(),
-        "--outfmt".into(), OUTFMT.into(),
-        "-o".into(), brs_out.display().to_string(),
+        "-q".into(),
+        q.clone(),
+        "-d".into(),
+        d.clone(),
+        "--comp_based_stats".into(),
+        "0".into(),
+        "--seg".into(),
+        "no".into(),
+        "--max_target_seqs".into(),
+        "10000".into(),
+        "--dbsize".into(),
+        "10000".into(),
+        "--evalue".into(),
+        "1e-10".into(),
+        "--word_size".into(),
+        "5".into(),
+        "--num_threads".into(),
+        th.clone(),
+        "--outfmt".into(),
+        OUTFMT.into(),
+        "-o".into(),
+        brs_out.display().to_string(),
     ];
     // NCBI blastp — matches amrfinder's blastp-fast invocation exactly.
     let ncbi_args: Vec<String> = vec![
-        "-query".into(), q,
-        "-db".into(), d,
-        "-comp_based_stats".into(), "0".into(),
-        "-seg".into(), "no".into(),
-        "-max_target_seqs".into(), "10000".into(),
-        "-dbsize".into(), "10000".into(),
-        "-evalue".into(), "1e-10".into(),
-        "-word_size".into(), "5".into(),
-        "-task".into(), "blastp-fast".into(),
-        "-num_threads".into(), th,
-        "-outfmt".into(), OUTFMT.into(),
-        "-out".into(), ncbi_out.display().to_string(),
+        "-query".into(),
+        q,
+        "-db".into(),
+        d,
+        "-comp_based_stats".into(),
+        "0".into(),
+        "-seg".into(),
+        "no".into(),
+        "-max_target_seqs".into(),
+        "10000".into(),
+        "-dbsize".into(),
+        "10000".into(),
+        "-evalue".into(),
+        "1e-10".into(),
+        "-word_size".into(),
+        "5".into(),
+        "-task".into(),
+        "blastp-fast".into(),
+        "-num_threads".into(),
+        th,
+        "-outfmt".into(),
+        OUTFMT.into(),
+        "-out".into(),
+        ncbi_out.display().to_string(),
     ];
 
     eprintln!(
@@ -325,7 +389,14 @@ fn blastp_amr_workload_perf_vs_ncbi() {
         c.reps
     );
     perf_compare(
-        "blastp", &c.blast_cli, &brs_args, &brs_out, &ncbi, &ncbi_args, &ncbi_out, c.reps,
+        "blastp",
+        &c.blast_cli,
+        &brs_args,
+        &brs_out,
+        &ncbi,
+        &ncbi_args,
+        &ncbi_out,
+        c.reps,
         c.min_recall,
     );
 }
@@ -336,7 +407,10 @@ fn blastx_amr_workload_perf_vs_ncbi() {
     let Some(c) = common() else { return };
     let query = query_path("BLAST_RS_PERF_QUERY_DNA", "test_dna.fa");
     if !query.exists() {
-        eprintln!("[amr_workload_perf] SKIP: nucleotide query {} not found", query.display());
+        eprintln!(
+            "[amr_workload_perf] SKIP: nucleotide query {} not found",
+            query.display()
+        );
         return;
     }
     let ncbi = match find_ncbi("blastx") {
@@ -359,33 +433,57 @@ fn blastx_amr_workload_perf_vs_ncbi() {
     // blast-rs (blast-cli blastx): translated nucleotide query vs AMRProt protein DB.
     let brs_args: Vec<String> = vec![
         "blastx".into(),
-        "-q".into(), q.clone(),
-        "-d".into(), d.clone(),
-        "--comp_based_stats".into(), "0".into(),
-        "--seg".into(), "no".into(),
-        "--max_target_seqs".into(), "10000".into(),
-        "--dbsize".into(), "10000".into(),
-        "--evalue".into(), "1e-10".into(),
-        "--word_size".into(), "5".into(),
-        "--query_gencode".into(), gc.clone(),
-        "--num_threads".into(), th.clone(),
-        "--outfmt".into(), OUTFMT.into(),
-        "-o".into(), brs_out.display().to_string(),
+        "-q".into(),
+        q.clone(),
+        "-d".into(),
+        d.clone(),
+        "--comp_based_stats".into(),
+        "0".into(),
+        "--seg".into(),
+        "no".into(),
+        "--max_target_seqs".into(),
+        "10000".into(),
+        "--dbsize".into(),
+        "10000".into(),
+        "--evalue".into(),
+        "1e-10".into(),
+        "--word_size".into(),
+        "5".into(),
+        "--query_gencode".into(),
+        gc.clone(),
+        "--num_threads".into(),
+        th.clone(),
+        "--outfmt".into(),
+        OUTFMT.into(),
+        "-o".into(),
+        brs_out.display().to_string(),
     ];
     // NCBI blastx — matches amrfinder's blastx invocation (amrfinder-rs src/pipeline.rs).
     let ncbi_args: Vec<String> = vec![
-        "-query".into(), q,
-        "-db".into(), d,
-        "-comp_based_stats".into(), "0".into(),
-        "-seg".into(), "no".into(),
-        "-max_target_seqs".into(), "10000".into(),
-        "-dbsize".into(), "10000".into(),
-        "-evalue".into(), "1e-10".into(),
-        "-word_size".into(), "5".into(),
-        "-query_gencode".into(), gc,
-        "-num_threads".into(), th,
-        "-outfmt".into(), OUTFMT.into(),
-        "-out".into(), ncbi_out.display().to_string(),
+        "-query".into(),
+        q,
+        "-db".into(),
+        d,
+        "-comp_based_stats".into(),
+        "0".into(),
+        "-seg".into(),
+        "no".into(),
+        "-max_target_seqs".into(),
+        "10000".into(),
+        "-dbsize".into(),
+        "10000".into(),
+        "-evalue".into(),
+        "1e-10".into(),
+        "-word_size".into(),
+        "5".into(),
+        "-query_gencode".into(),
+        gc,
+        "-num_threads".into(),
+        th,
+        "-outfmt".into(),
+        OUTFMT.into(),
+        "-out".into(),
+        ncbi_out.display().to_string(),
     ];
 
     eprintln!(
@@ -397,7 +495,14 @@ fn blastx_amr_workload_perf_vs_ncbi() {
         c.reps
     );
     perf_compare(
-        "blastx", &c.blast_cli, &brs_args, &brs_out, &ncbi, &ncbi_args, &ncbi_out, c.reps,
+        "blastx",
+        &c.blast_cli,
+        &brs_args,
+        &brs_out,
+        &ncbi,
+        &ncbi_args,
+        &ncbi_out,
+        c.reps,
         c.min_recall,
     );
 }

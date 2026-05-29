@@ -314,6 +314,20 @@ struct GapDP {
     best_gap: i32,
 }
 
+#[derive(Default)]
+struct AlignExScratch {
+    sa: Vec<GapDP>,
+    scripts: Vec<u8>,
+    row_offsets: Vec<usize>,
+    row_lens: Vec<usize>,
+    row_starts: Vec<usize>,
+}
+
+thread_local! {
+    static ALIGN_EX_SCRATCH: std::cell::RefCell<AlignExScratch> =
+        std::cell::RefCell::new(AlignExScratch::default());
+}
+
 fn script_to_op(s: u8) -> GapAlignOpType {
     match s {
         SCRIPT_GAP_IN_A => GapAlignOpType::Del,
@@ -337,8 +351,38 @@ pub(crate) fn align_ex(
     matrix: &[[i32; 16]; 16],
     gap_open: i32,
     gap_extend: i32,
+    x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
+    ALIGN_EX_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        align_ex_with_scratch(
+            a,
+            b,
+            m,
+            n,
+            matrix,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            reverse,
+            &mut scratch,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn align_ex_with_scratch(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    matrix: &[[i32; 16]; 16],
+    gap_open: i32,
+    gap_extend: i32,
     mut x_dropoff: i32,
     reverse: bool,
+    scratch: &mut AlignExScratch,
 ) -> (i32, usize, usize, Vec<(GapAlignOpType, i32)>) {
     let gap_oe = gap_open + gap_extend;
     if x_dropoff < gap_oe {
@@ -359,13 +403,21 @@ pub(crate) fn align_ex(
     // The score-only paths match that; `align_ex` must too, otherwise any
     // alignment where `b_size` would exceed the initial allocation gets
     // truncated silently.
-    let mut sa = vec![
+    let AlignExScratch {
+        sa,
+        scripts,
+        row_offsets,
+        row_lens,
+        row_starts,
+    } = scratch;
+    sa.clear();
+    sa.resize(
+        n + extra + 10,
         GapDP {
             best: MININT,
-            best_gap: MININT
-        };
-        n + extra + 10
-    ];
+            best_gap: MININT,
+        },
+    );
 
     // Row 0 initialization
     sa[0] = GapDP {
@@ -385,9 +437,22 @@ pub(crate) fn align_ex(
 
     // Traceback storage: compact per-row scripts keyed by `row_starts`, mirroring
     // NCBI's `edit_script[a_index][b_index - edit_start_offset[a_index]]`.
-    let mut scripts: Vec<Vec<u8>> = Vec::with_capacity(m + 1);
-    let mut row_starts: Vec<usize> = Vec::with_capacity(m + 1);
-    scripts.push(vec![SCRIPT_GAP_IN_A; b_size]);
+    //
+    // Store rows in one flat buffer. The older Vec<Vec<u8>> shape allocated once
+    // per DP row, which is much heavier than the C gap_align scratch buffers used
+    // by ALIGN_EX.
+    let row_capacity_hint = (extra + 16).min(n + extra + 10);
+    scripts.clear();
+    scripts.reserve((m + 1).saturating_mul(row_capacity_hint));
+    row_offsets.clear();
+    row_offsets.reserve(m + 1);
+    row_lens.clear();
+    row_lens.reserve(m + 1);
+    row_starts.clear();
+    row_starts.reserve(m + 1);
+    row_offsets.push(0);
+    row_lens.push(b_size);
+    scripts.resize(b_size, SCRIPT_GAP_IN_A);
     row_starts.push(0);
 
     let mut best_score = 0i32;
@@ -400,7 +465,9 @@ pub(crate) fn align_ex(
         let mrow = &matrix[a_letter as usize & 0x0F];
 
         let row_start = first_b;
-        let mut row_script = vec![0u8; (b_size - row_start) + extra + 10];
+        let row_offset = scripts.len();
+        let row_len = (b_size - row_start) + extra + 10;
+        scripts.resize(row_offset + row_len, 0);
         let mut sc = MININT;
         let mut sgr = MININT; // score_gap_row
         let mut last_b = first_b;
@@ -482,13 +549,14 @@ pub(crate) fn align_ex(
             }
             sc = next_sc;
             let script_idx = bi.saturating_sub(row_start);
-            if script_idx < row_script.len() {
-                row_script[script_idx] = script;
+            if script_idx < row_len {
+                scripts[row_offset + script_idx] = script;
             }
         }
 
         if first_b >= b_size {
-            scripts.push(row_script);
+            row_offsets.push(row_offset);
+            row_lens.push(row_len);
             row_starts.push(row_start);
             break;
         }
@@ -504,8 +572,8 @@ pub(crate) fn align_ex(
                 };
                 sgr -= gap_extend;
                 let script_idx = b_size.saturating_sub(row_start);
-                if script_idx < row_script.len() {
-                    row_script[script_idx] = SCRIPT_GAP_IN_A;
+                if script_idx < row_len {
+                    scripts[row_offset + script_idx] = SCRIPT_GAP_IN_A;
                 }
                 b_size += 1;
             }
@@ -517,7 +585,8 @@ pub(crate) fn align_ex(
             };
             b_size += 1;
         }
-        scripts.push(row_script);
+        row_offsets.push(row_offset);
+        row_lens.push(row_len);
         row_starts.push(row_start);
     }
 
@@ -528,7 +597,7 @@ pub(crate) fn align_ex(
     let mut cur_script = SCRIPT_SUB;
 
     while ai > 0 || bi > 0 {
-        if ai >= scripts.len() {
+        if ai >= row_starts.len() {
             break;
         }
         let row_start = row_starts[ai];
@@ -536,10 +605,10 @@ pub(crate) fn align_ex(
             break;
         }
         let script_idx = bi - row_start;
-        if script_idx >= scripts[ai].len() {
+        if script_idx >= row_lens[ai] {
             break;
         }
-        let s = scripts[ai][script_idx];
+        let s = scripts[row_offsets[ai] + script_idx];
 
         cur_script = match cur_script & SCRIPT_OP_MASK {
             SCRIPT_GAP_IN_A => {
