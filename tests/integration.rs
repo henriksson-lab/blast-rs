@@ -38,6 +38,12 @@ fn blast_cli_bin_for_tests() -> Option<std::path::PathBuf> {
         .filter(|path| path.exists())
 }
 
+fn ncbi_bin(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin")
+        .join(name)
+}
+
 fn ascii_reverse_complement(seq: &str) -> String {
     String::from_utf8(blast_rs::api::reverse_complement(seq.as_bytes())).unwrap()
 }
@@ -124,8 +130,8 @@ fn assert_blastn_subject_task_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -169,7 +175,7 @@ fn assert_blastn_subject_task_outfmt_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -210,8 +216,8 @@ fn assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -255,7 +261,7 @@ fn assert_blastn_subject_task_outfmt_matches_ncbi_sorted_lines(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -304,8 +310,8 @@ fn assert_blastp_subject_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastp").exists() {
-        eprintln!("Skipping: /usr/bin/blastp not found");
+    if !ncbi_bin("blastp").exists() {
+        eprintln!("Skipping: blastp not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -349,7 +355,7 @@ fn assert_blastp_subject_outfmt_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastp");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastp"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -387,8 +393,8 @@ fn assert_blastx_subject_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastx").exists() {
-        eprintln!("Skipping: /usr/bin/blastx not found");
+    if !ncbi_bin("blastx").exists() {
+        eprintln!("Skipping: blastx not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -432,7 +438,7 @@ fn assert_blastx_subject_outfmt_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastx");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastx"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -470,10 +476,10 @@ fn assert_blastp_db_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastp").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastp").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastp or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastp or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -493,7 +499,7 @@ fn assert_blastp_db_outfmt_matches_ncbi(
     std::fs::write(&query, query_fasta).expect("write query FASTA");
     std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta_path)
         .arg("-dbtype")
@@ -531,7 +537,7 @@ fn assert_blastp_db_outfmt_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastp");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastp"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -749,9 +755,9 @@ fn assert_translated_db_outfmt_matches_ncbi_sorted_lines(
     ncbi_extra_args: &[&str],
 ) {
     if !std::path::Path::new(ncbi_program).exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: {ncbi_program} or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: {ncbi_program} or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -771,7 +777,7 @@ fn assert_translated_db_outfmt_matches_ncbi_sorted_lines(
     std::fs::write(&query, query_fasta).expect("write query FASTA");
     std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta_path)
         .arg("-dbtype")
@@ -887,9 +893,9 @@ fn assert_translated_db_outfmt_matches_ncbi_with_num_threads(
     num_threads: &str,
 ) {
     if !std::path::Path::new(ncbi_program).exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: {ncbi_program} or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: {ncbi_program} or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -909,7 +915,7 @@ fn assert_translated_db_outfmt_matches_ncbi_with_num_threads(
     std::fs::write(&query, query_fasta).expect("write query FASTA");
     std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta_path)
         .arg("-dbtype")
@@ -985,7 +991,7 @@ fn normalize_sam_for_cli_parity(bytes: &[u8]) -> String {
         .lines()
         .map(|line| {
             if line.starts_with("@PG\t") {
-                "@PG\tID:0\tVN:2.12.0+\tCL:<normalized>\tPN:blastn".to_string()
+                "@PG\tID:0\tVN:2.17.0+\tCL:<normalized>\tPN:blastn".to_string()
             } else {
                 line.to_string()
             }
@@ -1001,8 +1007,8 @@ fn assert_blastn_subject_sam_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -1046,7 +1052,7 @@ fn assert_blastn_subject_sam_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -1087,10 +1093,10 @@ fn assert_blastn_db_sam_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -1110,7 +1116,7 @@ fn assert_blastn_db_sam_matches_ncbi(
     std::fs::write(&query, query_fasta).expect("write query FASTA");
     std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta_path)
         .arg("-dbtype")
@@ -1149,7 +1155,7 @@ fn assert_blastn_db_sam_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -1190,10 +1196,10 @@ fn assert_blastn_db_xml_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -1213,7 +1219,7 @@ fn assert_blastn_db_xml_matches_ncbi(
     std::fs::write(&query, query_fasta).expect("write query FASTA");
     std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta_path)
         .arg("-dbtype")
@@ -1253,7 +1259,7 @@ fn assert_blastn_db_xml_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -1314,10 +1320,10 @@ fn assert_blastn_db_outfmt_matches_ncbi_with_num_threads(
     ncbi_extra_args: &[&str],
     num_threads: &str,
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -1347,7 +1353,7 @@ fn assert_blastn_db_outfmt_matches_ncbi_with_num_threads(
         .iter()
         .any(|arg| matches!(*arg, "--task" | "-task"));
 
-    let mut make_cmd = std::process::Command::new("/usr/bin/makeblastdb");
+    let mut make_cmd = std::process::Command::new(ncbi_bin("makeblastdb"));
     make_cmd
         .arg("-in")
         .arg(&db_fasta_path)
@@ -1398,7 +1404,7 @@ fn assert_blastn_db_outfmt_matches_ncbi_with_num_threads(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd.arg("-query").arg(&query).arg("-db").arg(&db);
     if !ncbi_has_task {
         ncbi_cmd.arg("-task").arg("blastn-short");
@@ -1443,10 +1449,10 @@ fn assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -1472,7 +1478,7 @@ fn assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
         .iter()
         .any(|arg| matches!(*arg, "--task" | "-task"));
 
-    let mut make_cmd = std::process::Command::new("/usr/bin/makeblastdb");
+    let mut make_cmd = std::process::Command::new(ncbi_bin("makeblastdb"));
     make_cmd
         .arg("-in")
         .arg(&db_fasta_path)
@@ -1517,7 +1523,7 @@ fn assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd.arg("-query").arg(&query).arg("-db").arg(&db);
     if !ncbi_has_task {
         ncbi_cmd.arg("-task").arg("blastn-short");
@@ -1564,11 +1570,11 @@ fn assert_blastn_indexed_db_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
-        || !std::path::Path::new("/usr/bin/makembindex").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
+        || !ncbi_bin("makembindex").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn, makeblastdb, or makembindex not found");
+        eprintln!("Skipping: blastn, makeblastdb, or makembindex not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -1588,7 +1594,7 @@ fn assert_blastn_indexed_db_outfmt_matches_ncbi(
     std::fs::write(&query, query_fasta).expect("write query FASTA");
     std::fs::write(&db_fasta_path, db_fasta).expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta_path)
         .arg("-dbtype")
@@ -1603,7 +1609,7 @@ fn assert_blastn_indexed_db_outfmt_matches_ncbi(
         "makeblastdb exited with {make_status}"
     );
 
-    let index_status = std::process::Command::new("/usr/bin/makembindex")
+    let index_status = std::process::Command::new(ncbi_bin("makembindex"))
         .arg("-input")
         .arg(&db)
         .arg("-iformat")
@@ -1645,7 +1651,7 @@ fn assert_blastn_indexed_db_outfmt_matches_ncbi(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -1738,8 +1744,8 @@ fn run_large_db_blastn(
 }
 
 fn assert_large_db_blastn_matches_ncbi(query_name: &str, max_hsps: Option<&str>) {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some((query, db)) = large_db_fixture_paths(query_name) else {
@@ -1751,7 +1757,7 @@ fn assert_large_db_blastn_matches_ncbi(query_name: &str, max_hsps: Option<&str>)
 
     let ncbi_tmp = TempDir::new().expect("tempdir");
     let ncbi_out = ncbi_tmp.path().join("ncbi.tsv");
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     ncbi_cmd
         .arg("-task")
         .arg("blastn-short")
@@ -4068,10 +4074,10 @@ fn blastn_subject_ncbi_parity_rmblastn_task_defaults() {
 
 #[test]
 fn blastn_db_ncbi_parity_rmblastn_task_defaults() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -4091,7 +4097,7 @@ fn blastn_db_ncbi_parity_rmblastn_task_defaults() {
     std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -4128,7 +4134,7 @@ fn blastn_db_ncbi_parity_rmblastn_task_defaults() {
         .expect("run blast-cli rmblastn DB parity");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -4992,8 +4998,8 @@ fn blastn_subject_ncbi_parity_custom_field_parser_edges() {
 
 #[test]
 fn blastn_subject_ncbi_parity_invalid_outfmt_number_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -5025,7 +5031,7 @@ fn blastn_subject_ncbi_parity_invalid_outfmt_number_errors() {
             .arg(outfmt)
             .output()
             .expect("run blast-cli invalid outfmt");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -5060,8 +5066,8 @@ fn blastn_subject_ncbi_parity_invalid_outfmt_number_errors() {
 
 #[test]
 fn blastn_subject_ncbi_parity_archive_outfmt_requires_output_file() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -5093,7 +5099,7 @@ fn blastn_subject_ncbi_parity_archive_outfmt_requires_output_file() {
             .arg(outfmt)
             .output()
             .expect("run blast-cli archive outfmt");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -5194,8 +5200,8 @@ fn blastn_subject_ncbi_parity_outfmt10_std_keyword() {
 
 #[test]
 fn blastn_ncbi_parity_version_ignores_other_arguments() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -5215,7 +5221,7 @@ fn blastn_ncbi_parity_version_ignores_other_arguments() {
         .arg("missing.fa")
         .output()
         .expect("run blast-cli version");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-version")
         .arg("-task")
         .arg("bad")
@@ -5249,9 +5255,9 @@ fn non_blastn_programs_ncbi_parity_version_ignores_other_arguments() {
         "rpstblastn",
         "deltablast",
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -5264,7 +5270,7 @@ fn non_blastn_programs_ncbi_parity_version_ignores_other_arguments() {
             .arg("-help")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} -version: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-version")
             .arg("-query")
             .arg("missing.fa")
@@ -5321,7 +5327,7 @@ fn blastn_help_ignores_other_arguments_and_uses_blast_shape() {
             stdout.starts_with("USAGE\n  blastn [-h] [-help]"),
             "unexpected help prefix:\n{stdout}"
         );
-        assert!(stdout.contains("DESCRIPTION\n   Nucleotide-Nucleotide BLAST 2.12.0+"));
+        assert!(stdout.contains("DESCRIPTION\n   Nucleotide-Nucleotide BLAST 2.17.0+"));
         if help_arg == "-help" {
             assert!(stdout.contains("OPTIONAL ARGUMENTS"));
         }
@@ -5658,8 +5664,8 @@ fn blastn_subject_ncbi_parity_pairwise_line_length() {
 
 #[test]
 fn blastn_subject_ncbi_parity_pairwise_zero_descriptions_zero_alignments() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -5698,7 +5704,7 @@ fn blastn_subject_ncbi_parity_pairwise_zero_descriptions_zero_alignments() {
         .arg(&rust_out)
         .output()
         .expect("run blast-cli zero pairwise limits");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -8639,8 +8645,8 @@ fn blastn_db_ncbi_parity_non_megablast_use_index_ignores_missing_named_index() {
 
 #[test]
 fn blastn_db_ncbi_parity_named_index_missing_diagnostic() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -8664,7 +8670,7 @@ fn blastn_db_ncbi_parity_named_index_missing_diagnostic() {
         .arg("6")
         .output()
         .expect("run blast-cli named index missing diagnostic");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg("tests/fixtures/query_short_match.fa")
         .arg("-db")
@@ -8680,27 +8686,37 @@ fn blastn_db_ncbi_parity_named_index_missing_diagnostic() {
         .output()
         .expect("run NCBI named index missing diagnostic");
 
+    // NCBI 2.17 no longer hard-errors on a missing megablast index; it prints a
+    // "Database index will not be used" warning and falls back to the unindexed
+    // scan (exit 0, normal results). blast-rs now matches: exit 0, warning on
+    // stderr, and the same outfmt-6 results as the unindexed scan.
     assert!(
-        !rust.status.success(),
-        "blast-cli should reject missing named index"
+        rust.status.success(),
+        "blast-cli should warn and fall back on a missing named index (got {:?})\nstderr: {}",
+        rust.status,
+        String::from_utf8_lossy(&rust.stderr)
     );
     assert!(
-        !ncbi.status.success(),
-        "NCBI should reject missing named index"
+        ncbi.status.success(),
+        "NCBI 2.17 should warn and fall back on a missing named index"
     );
-    assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
-    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+    let rust_stderr = String::from_utf8_lossy(&rust.stderr);
+    assert!(
+        rust_stderr.contains("Database index will not be used."),
+        "blast-cli stderr should warn the index will not be used; got: {rust_stderr}"
+    );
+    // Output must equal the unindexed scan (NCBI's fallback path).
     assert_eq!(
-        String::from_utf8_lossy(&rust.stderr),
-        String::from_utf8_lossy(&ncbi.stderr),
-        "stderr differs"
+        String::from_utf8_lossy(&rust.stdout),
+        String::from_utf8_lossy(&ncbi.stdout),
+        "fallback results should match NCBI's unindexed scan"
     );
 }
 
 #[test]
 fn blastn_db_ncbi_parity_default_index_missing_diagnostic() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -8722,7 +8738,7 @@ fn blastn_db_ncbi_parity_default_index_missing_diagnostic() {
         .arg("6")
         .output()
         .expect("run blast-cli default index missing diagnostic");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg("tests/fixtures/query_short_match.fa")
         .arg("-db")
@@ -8736,20 +8752,29 @@ fn blastn_db_ncbi_parity_default_index_missing_diagnostic() {
         .output()
         .expect("run NCBI default index missing diagnostic");
 
+    // NCBI 2.17 no longer hard-errors on a missing megablast index; it warns
+    // ("Database index will not be used") and falls back to the unindexed scan
+    // (exit 0, normal results). blast-rs now matches: exit 0, warning on
+    // stderr, and the same outfmt-6 results as the unindexed scan.
     assert!(
-        !rust.status.success(),
-        "blast-cli should reject missing default index"
+        rust.status.success(),
+        "blast-cli should warn and fall back on a missing default index (got {:?})\nstderr: {}",
+        rust.status,
+        String::from_utf8_lossy(&rust.stderr)
     );
     assert!(
-        !ncbi.status.success(),
-        "NCBI should reject missing default index"
+        ncbi.status.success(),
+        "NCBI 2.17 should warn and fall back on a missing default index"
     );
-    assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
-    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+    let rust_stderr = String::from_utf8_lossy(&rust.stderr);
+    assert!(
+        rust_stderr.contains("Database index will not be used."),
+        "blast-cli stderr should warn the index will not be used; got: {rust_stderr}"
+    );
     assert_eq!(
-        String::from_utf8_lossy(&rust.stderr),
-        String::from_utf8_lossy(&ncbi.stderr),
-        "stderr differs"
+        String::from_utf8_lossy(&rust.stdout),
+        String::from_utf8_lossy(&ncbi.stdout),
+        "fallback results should match NCBI's unindexed scan"
     );
 }
 
@@ -9430,10 +9455,10 @@ fn patch_blastdb_index_total_length(index_path: &std::path::Path, total_length: 
 
 #[test]
 fn blastn_db_ncbi_parity_compact_huge_total_length_statistics() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -9453,7 +9478,7 @@ fn blastn_db_ncbi_parity_compact_huge_total_length_statistics() {
     std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGTACGTACGTACGT\n").expect("write query FASTA");
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGTACGTACGTACGT\n").expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -9492,7 +9517,7 @@ fn blastn_db_ncbi_parity_compact_huge_total_length_statistics() {
         .expect("run blast-cli huge metadata DB parity");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -9525,10 +9550,10 @@ fn blastn_db_ncbi_parity_compact_huge_total_length_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_multivolume_alias_dbsize_searchsp_statistics() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -9565,7 +9590,7 @@ fn blastn_db_ncbi_parity_multivolume_alias_dbsize_searchsp_statistics() {
     .expect("write vol1");
 
     for (input, output) in [(&vol0_fa, &vol0), (&vol1_fa, &vol1)] {
-        let status = std::process::Command::new("/usr/bin/makeblastdb")
+        let status = std::process::Command::new(ncbi_bin("makeblastdb"))
             .arg("-in")
             .arg(input)
             .arg("-dbtype")
@@ -9625,7 +9650,7 @@ fn blastn_db_ncbi_parity_multivolume_alias_dbsize_searchsp_statistics() {
         let rust_status = rust_cmd.status().expect("run blast-cli alias dbsize");
         assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
         ncbi_cmd
             .arg("-query")
             .arg(&query)
@@ -9658,10 +9683,10 @@ fn blastn_db_ncbi_parity_multivolume_alias_dbsize_searchsp_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_multivolume_alias_equal_score_subject_ordering() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -9708,7 +9733,7 @@ CGCTGTTGAAGTCAGAG
     .expect("write vol1");
 
     for (input, output) in [(&vol0_fa, &vol0), (&vol1_fa, &vol1)] {
-        let status = std::process::Command::new("/usr/bin/makeblastdb")
+        let status = std::process::Command::new(ncbi_bin("makeblastdb"))
             .arg("-in")
             .arg(input)
             .arg("-dbtype")
@@ -9765,7 +9790,7 @@ LENGTH 68
         .expect("run blast-cli alias ordering");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -10682,8 +10707,8 @@ fn write_taxonomy4blast_sqlite(dir: &std::path::Path) {
 }
 
 fn run_rust_taxonomy_filter_case(extra_args: &[&str]) -> Vec<u8> {
-    if !std::path::Path::new("/usr/bin/makeblastdb").exists() {
-        eprintln!("Skipping: /usr/bin/makeblastdb not found");
+    if !ncbi_bin("makeblastdb").exists() {
+        eprintln!("Skipping: makeblastdb not found");
         return Vec::new();
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -10709,7 +10734,7 @@ fn run_rust_taxonomy_filter_case(extra_args: &[&str]) -> Vec<u8> {
     std::fs::write(&taxid_map, "s9606 9606\ns63221 63221\n").expect("write taxid map");
     write_taxonomy4blast_sqlite(tmp.path());
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta_path)
         .arg("-dbtype")
@@ -10804,10 +10829,10 @@ fn blastn_db_no_taxid_expansion_keeps_exact_taxid_filtering() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_taxidlist_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -10828,7 +10853,7 @@ fn blastn_db_ncbi_parity_missing_taxidlist_errors() {
     std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -10863,7 +10888,7 @@ fn blastn_db_ncbi_parity_missing_taxidlist_errors() {
         .arg(&rust_out)
         .output()
         .expect("run blast-cli missing taxidlist");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -10903,10 +10928,10 @@ fn blastn_db_ncbi_parity_missing_taxidlist_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_invalid_taxids_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -10926,7 +10951,7 @@ fn blastn_db_ncbi_parity_invalid_taxids_errors() {
     std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -10961,7 +10986,7 @@ fn blastn_db_ncbi_parity_invalid_taxids_errors() {
         .arg(&rust_out)
         .output()
         .expect("run blast-cli invalid taxids");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -10998,10 +11023,10 @@ fn blastn_db_ncbi_parity_invalid_taxids_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_invalid_taxidlist_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11023,7 +11048,7 @@ fn blastn_db_ncbi_parity_invalid_taxidlist_errors() {
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
     std::fs::write(&bad_taxids, "9606\nabc\n").expect("write invalid taxid list");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -11058,7 +11083,7 @@ fn blastn_db_ncbi_parity_invalid_taxidlist_errors() {
         .arg(&rust_out)
         .output()
         .expect("run blast-cli invalid taxidlist");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -11150,10 +11175,10 @@ fn blastn_db_ncbi_parity_negative_seqidlist_filter() {
 
 #[test]
 fn blastn_db_ncbi_parity_seqidlist_warnings() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11177,7 +11202,7 @@ fn blastn_db_ncbi_parity_seqidlist_warnings() {
     .expect("write db FASTA");
     std::fs::write(&seqids, "s2\n").expect("write seqid list");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -11224,7 +11249,7 @@ fn blastn_db_ncbi_parity_seqidlist_warnings() {
             .arg(&rust_out)
             .output()
             .expect("run blast-cli seqidlist warning parity");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-db")
@@ -11261,8 +11286,8 @@ fn blastn_db_ncbi_parity_seqidlist_warnings() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_database_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11292,7 +11317,7 @@ fn blastn_db_ncbi_parity_missing_database_error() {
         .arg("no")
         .output()
         .expect("run blast-cli missing database");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -11323,10 +11348,10 @@ fn blastn_db_ncbi_parity_missing_database_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_nseq_length_override_statistics() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11347,7 +11372,7 @@ fn blastn_db_ncbi_parity_alias_nseq_length_override_statistics() {
 
     std::fs::write(&query, format!(">q\n{primer}\n")).expect("write query");
     std::fs::write(&db_fasta, format!(">s0\n{primer}\n")).expect("write database FASTA");
-    let status = std::process::Command::new("/usr/bin/makeblastdb")
+    let status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -11396,7 +11421,7 @@ fn blastn_db_ncbi_parity_alias_nseq_length_override_statistics() {
         .expect("run blast-cli length alias");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -11428,10 +11453,10 @@ fn blastn_db_ncbi_parity_alias_nseq_length_override_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_stats_metadata_override_statistics() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11452,7 +11477,7 @@ fn blastn_db_ncbi_parity_alias_stats_metadata_override_statistics() {
 
     std::fs::write(&query, format!(">q\n{primer}\n")).expect("write query");
     std::fs::write(&db_fasta, format!(">s0\n{primer}\n")).expect("write database FASTA");
-    let status = std::process::Command::new("/usr/bin/makeblastdb")
+    let status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -11498,7 +11523,7 @@ fn blastn_db_ncbi_parity_alias_stats_metadata_override_statistics() {
         .expect("run blast-cli length alias");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -11530,10 +11555,10 @@ fn blastn_db_ncbi_parity_alias_stats_metadata_override_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_nested_alias_metadata_precedence() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11555,7 +11580,7 @@ fn blastn_db_ncbi_parity_nested_alias_metadata_precedence() {
 
     std::fs::write(&query, format!(">q\n{primer}\n")).expect("write query");
     std::fs::write(&db_fasta, format!(">s0\n{primer}\n")).expect("write database FASTA");
-    let status = std::process::Command::new("/usr/bin/makeblastdb")
+    let status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -11615,7 +11640,7 @@ fn blastn_db_ncbi_parity_nested_alias_metadata_precedence() {
             "blast-cli {label} exited with {rust_status}"
         );
 
-        let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+        let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-db")
@@ -11651,10 +11676,10 @@ fn blastn_db_ncbi_parity_nested_alias_metadata_precedence() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_first_last_oid_range() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11680,7 +11705,7 @@ fn blastn_db_ncbi_parity_alias_first_last_oid_range() {
     std::fs::write(&vol1_fa, format!(">s2\n{primer}\n>s3\n{primer}\n")).expect("write vol1");
 
     for (input, output) in [(&vol0_fa, &vol0), (&vol1_fa, &vol1)] {
-        let status = std::process::Command::new("/usr/bin/makeblastdb")
+        let status = std::process::Command::new(ncbi_bin("makeblastdb"))
             .arg("-in")
             .arg(input)
             .arg("-dbtype")
@@ -11733,7 +11758,7 @@ fn blastn_db_ncbi_parity_alias_first_last_oid_range() {
         .expect("run blast-cli ranged alias");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -11767,10 +11792,10 @@ fn blastn_db_ncbi_parity_alias_first_last_oid_range() {
 
 #[test]
 fn blastn_db_ncbi_parity_nested_alias_filter_coordinates() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11797,7 +11822,7 @@ fn blastn_db_ncbi_parity_nested_alias_filter_coordinates() {
         format!(">s0\n{primer}\n>s1\n{primer}\n>s2\n{primer}\n>s3\n{primer}\n"),
     )
     .expect("write database FASTA");
-    let status = std::process::Command::new("/usr/bin/makeblastdb")
+    let status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -11854,7 +11879,7 @@ fn blastn_db_ncbi_parity_nested_alias_filter_coordinates() {
         .expect("run blast-cli nested alias filters");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -11888,10 +11913,10 @@ fn blastn_db_ncbi_parity_nested_alias_filter_coordinates() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_oidlist_bitmap_filter() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -11917,7 +11942,7 @@ fn blastn_db_ncbi_parity_alias_oidlist_bitmap_filter() {
         format!(">s0\n{primer}\n>s1\n{primer}\n>s2\n{primer}\n>s3\n{primer}\n"),
     )
     .expect("write database FASTA");
-    let status = std::process::Command::new("/usr/bin/makeblastdb")
+    let status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -11969,7 +11994,7 @@ fn blastn_db_ncbi_parity_alias_oidlist_bitmap_filter() {
         .expect("run blast-cli OIDLIST alias");
     assert!(rust_status.success(), "blast-cli exited with {rust_status}");
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12003,10 +12028,10 @@ fn blastn_db_ncbi_parity_alias_oidlist_bitmap_filter() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_dblist_path_forms() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12033,7 +12058,7 @@ fn blastn_db_ncbi_parity_alias_dblist_path_forms() {
     std::fs::write(&vol1_fa, ">s1\nTTTTACGTACGTACGTACGTACGTAAAA\n").expect("write vol1");
 
     for (input, output) in [(&vol0_fa, &vol0), (&vol1_fa, &vol1)] {
-        let status = std::process::Command::new("/usr/bin/makeblastdb")
+        let status = std::process::Command::new(ncbi_bin("makeblastdb"))
             .arg("-in")
             .arg(input)
             .arg("-dbtype")
@@ -12104,7 +12129,7 @@ fn blastn_db_ncbi_parity_alias_dblist_path_forms() {
             "blast-cli {label} exited with {rust_status}"
         );
 
-        let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+        let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-db")
@@ -12137,8 +12162,8 @@ fn blastn_db_ncbi_parity_alias_dblist_path_forms() {
 
 #[test]
 fn blastn_db_ncbi_parity_empty_alias_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12170,7 +12195,7 @@ fn blastn_db_ncbi_parity_empty_alias_error() {
         .arg("no")
         .output()
         .expect("run blast-cli empty alias");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12204,8 +12229,8 @@ fn blastn_db_ncbi_parity_empty_alias_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_alias_volume_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12237,7 +12262,7 @@ fn blastn_db_ncbi_parity_missing_alias_volume_error() {
         .arg("no")
         .output()
         .expect("run blast-cli missing alias volume");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12277,10 +12302,10 @@ fn blastn_db_ncbi_parity_missing_alias_volume_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_partial_database_missing_header_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12298,7 +12323,7 @@ fn blastn_db_ncbi_parity_partial_database_missing_header_error() {
     std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
     std::fs::write(&fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write DB FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&fasta)
         .arg("-dbtype")
@@ -12329,7 +12354,7 @@ fn blastn_db_ncbi_parity_partial_database_missing_header_error() {
         .arg("no")
         .output()
         .expect("run blast-cli partial database");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12356,10 +12381,10 @@ fn blastn_db_ncbi_parity_partial_database_missing_header_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_empty_query_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12377,7 +12402,7 @@ fn blastn_db_ncbi_parity_empty_query_error() {
     std::fs::write(&query, ">empty\n").expect("write empty query FASTA");
     std::fs::write(&fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write DB FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&fasta)
         .arg("-dbtype")
@@ -12406,7 +12431,7 @@ fn blastn_db_ncbi_parity_empty_query_error() {
         .arg("no")
         .output()
         .expect("run blast-cli empty DB query");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12436,10 +12461,10 @@ fn blastn_db_ncbi_parity_empty_query_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12457,7 +12482,7 @@ fn blastn_db_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
     std::fs::write(&query, ">empty\n>q1\nACGTACGTACGT\n").expect("write mixed query FASTA");
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGT\n").expect("write DB FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -12483,7 +12508,7 @@ fn blastn_db_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
         .arg("no")
         .output()
         .expect("run blast-cli DB mixed empty query records");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12508,8 +12533,8 @@ fn blastn_db_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_import_search_strategy_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12535,7 +12560,7 @@ fn blastn_db_ncbi_parity_missing_import_search_strategy_error() {
         .arg(&missing_strategy)
         .output()
         .expect("run blast-cli missing import search strategy");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12571,8 +12596,8 @@ fn blastn_db_ncbi_parity_missing_import_search_strategy_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_inaccessible_export_search_strategy_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12598,7 +12623,7 @@ fn blastn_db_ncbi_parity_inaccessible_export_search_strategy_error() {
         .arg(&export_strategy)
         .output()
         .expect("run blast-cli inaccessible export search strategy");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -12634,8 +12659,8 @@ fn blastn_db_ncbi_parity_inaccessible_export_search_strategy_error() {
 
 #[test]
 fn blastn_subject_ncbi_parity_empty_query_and_subject_warnings() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12674,7 +12699,7 @@ fn blastn_subject_ncbi_parity_empty_query_and_subject_warnings() {
             .arg("no")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(query_path)
             .arg("-subject")
@@ -12714,8 +12739,8 @@ fn blastn_subject_ncbi_parity_empty_query_and_subject_warnings() {
 
 #[test]
 fn blastn_subject_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12746,7 +12771,7 @@ fn blastn_subject_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
         .arg("no")
         .output()
         .expect("run blast-cli mixed empty query records");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -12771,8 +12796,8 @@ fn blastn_subject_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
 
 #[test]
 fn blastn_subject_ncbi_parity_location_error_handling() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12835,7 +12860,7 @@ fn blastn_subject_ncbi_parity_location_error_handling() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -12867,8 +12892,8 @@ fn blastn_subject_ncbi_parity_location_error_handling() {
 
 #[test]
 fn blastn_db_ncbi_parity_unsupported_db_mask_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12899,7 +12924,7 @@ fn blastn_db_ncbi_parity_unsupported_db_mask_errors() {
             .arg("99999")
             .output()
             .expect("run blast-cli unsupported DB mask");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-db")
@@ -12942,8 +12967,8 @@ fn blastn_db_ncbi_parity_unsupported_db_mask_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_named_db_mask_warnings() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -12980,7 +13005,7 @@ fn blastn_db_ncbi_parity_named_db_mask_warnings() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli named DB mask {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-db")
@@ -13011,8 +13036,8 @@ fn blastn_db_ncbi_parity_named_db_mask_warnings() {
 
 #[test]
 fn blastn_subject_ncbi_parity_raw_sequence_without_fasta_header() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13043,7 +13068,7 @@ fn blastn_subject_ncbi_parity_raw_sequence_without_fasta_header() {
         .arg("no")
         .output()
         .expect("run blast-cli raw sequence");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -13123,8 +13148,8 @@ ACGTACGTACGTACGTACGT
 
 #[test]
 fn blastn_subject_ncbi_parity_raw_invalid_residue_warnings_and_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13163,7 +13188,7 @@ fn blastn_subject_ncbi_parity_raw_invalid_residue_warnings_and_errors() {
             .arg("no")
             .output()
             .expect("run blast-cli raw invalid residue parity");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -13192,8 +13217,8 @@ fn blastn_subject_ncbi_parity_raw_invalid_residue_warnings_and_errors() {
 }
 #[test]
 fn blastn_subject_ncbi_parity_invalid_residue_warnings() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13224,7 +13249,7 @@ fn blastn_subject_ncbi_parity_invalid_residue_warnings() {
         .arg("no")
         .output()
         .expect("run blast-cli invalid residue warnings");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -13248,8 +13273,8 @@ fn blastn_subject_ncbi_parity_invalid_residue_warnings() {
 }
 #[test]
 fn blastn_subject_ncbi_parity_implausible_fasta_sequence_line_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13297,7 +13322,7 @@ fn blastn_subject_ncbi_parity_implausible_fasta_sequence_line_errors() {
             .arg("no")
             .output()
             .expect("run blast-cli implausible FASTA");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -13435,8 +13460,8 @@ ACGTACGTACGTACGTACGT
 
 #[test]
 fn blastn_subject_ncbi_parity_ignores_preamble_before_fasta_header() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13467,7 +13492,7 @@ fn blastn_subject_ncbi_parity_ignores_preamble_before_fasta_header() {
         .arg("no")
         .output()
         .expect("run blast-cli FASTA preamble");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -13492,8 +13517,8 @@ fn blastn_subject_ncbi_parity_ignores_preamble_before_fasta_header() {
 
 #[test]
 fn blastn_subject_ncbi_parity_missing_query_or_subject_file_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13542,7 +13567,7 @@ fn blastn_subject_ncbi_parity_missing_query_or_subject_file_errors() {
             .arg("no")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(ncbi_query)
             .arg("-subject")
@@ -13574,10 +13599,10 @@ fn blastn_subject_ncbi_parity_missing_query_or_subject_file_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_query_file_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13594,7 +13619,7 @@ fn blastn_db_ncbi_parity_missing_query_file_error() {
     let db = tmp.path().join("testdb");
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write DB FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -13623,7 +13648,7 @@ fn blastn_db_ncbi_parity_missing_query_file_error() {
         .arg("6")
         .output()
         .expect("run blast-cli missing DB query");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&missing_query)
         .arg("-db")
@@ -13656,8 +13681,8 @@ fn blastn_db_ncbi_parity_missing_query_file_error() {
 
 #[test]
 fn blastn_subject_ncbi_parity_out_file_behavior() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13704,7 +13729,7 @@ fn blastn_subject_ncbi_parity_out_file_behavior() {
         .args(base_rust_args)
         .output()
         .expect("run blast-cli stdout");
-    let ncbi_stdout = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_stdout = std::process::Command::new(ncbi_bin("blastn"))
         .args(base_ncbi_args)
         .output()
         .expect("run NCBI stdout");
@@ -13725,7 +13750,7 @@ fn blastn_subject_ncbi_parity_out_file_behavior() {
         .arg(&rust_out)
         .output()
         .expect("run blast-cli overwrite");
-    let ncbi_overwrite = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_overwrite = std::process::Command::new(ncbi_bin("blastn"))
         .args(base_ncbi_args)
         .arg("-out")
         .arg(&ncbi_out)
@@ -13748,7 +13773,7 @@ fn blastn_subject_ncbi_parity_out_file_behavior() {
         .arg(tmp.path())
         .output()
         .expect("run blast-cli directory out");
-    let ncbi_dir_out = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_dir_out = std::process::Command::new(ncbi_bin("blastn"))
         .args(base_ncbi_args)
         .arg("-out")
         .arg(tmp.path())
@@ -13778,7 +13803,7 @@ fn blastn_subject_ncbi_parity_out_file_behavior() {
             .arg(&ro_out)
             .output()
             .expect("run blast-cli read-only out");
-        let ncbi_ro_out = std::process::Command::new("/usr/bin/blastn")
+        let ncbi_ro_out = std::process::Command::new(ncbi_bin("blastn"))
             .args(base_ncbi_args)
             .arg("-out")
             .arg(&ro_out)
@@ -13800,8 +13825,8 @@ fn blastn_subject_ncbi_parity_out_file_behavior() {
 
 #[test]
 fn blastn_ncbi_parity_query_masking_resource_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13870,7 +13895,7 @@ fn blastn_ncbi_parity_query_masking_resource_errors() {
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
         ncbi_cmd
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa");
@@ -13911,8 +13936,8 @@ fn blastn_ncbi_parity_query_masking_resource_errors() {
 
 #[test]
 fn blastn_ncbi_parity_entrez_query_requires_remote_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -13939,7 +13964,7 @@ fn blastn_ncbi_parity_entrez_query_requires_remote_error() {
         .arg("txid9606[orgn]")
         .output()
         .expect("run blast-cli entrez_query without remote");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg("tests/fixtures/query_short_match.fa")
         .arg("-subject")
@@ -14007,8 +14032,8 @@ fn blastn_remote_is_explicitly_unsupported() {
 
 #[test]
 fn blastn_ncbi_parity_subject_incompatible_with_db_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14049,7 +14074,7 @@ fn blastn_ncbi_parity_subject_incompatible_with_db_error() {
             .arg("no")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli subject plus db {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(query_path)
             .arg("-subject")
@@ -14089,8 +14114,8 @@ fn blastn_ncbi_parity_subject_incompatible_with_db_error() {
 
 #[test]
 fn blastn_ncbi_parity_subject_incompatible_with_database_filters_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14186,7 +14211,7 @@ fn blastn_ncbi_parity_subject_incompatible_with_database_filters_error() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -14219,8 +14244,8 @@ fn blastn_ncbi_parity_subject_incompatible_with_database_filters_error() {
 
 #[test]
 fn blastn_ncbi_parity_database_filter_pairs_are_incompatible() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14302,7 +14327,7 @@ fn blastn_ncbi_parity_database_filter_pairs_are_incompatible() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-db")
@@ -14333,8 +14358,8 @@ fn blastn_ncbi_parity_database_filter_pairs_are_incompatible() {
 
 #[test]
 fn blastn_ncbi_parity_option_relationship_constraints() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14518,7 +14543,7 @@ fn blastn_ncbi_parity_option_relationship_constraints() {
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
         ncbi_cmd
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa");
@@ -14557,8 +14582,8 @@ fn blastn_ncbi_parity_option_relationship_constraints() {
 
 #[test]
 fn blastn_ncbi_parity_invalid_boolean_option_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14590,7 +14615,7 @@ fn blastn_ncbi_parity_invalid_boolean_option_errors() {
             .arg("maybe")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -14630,8 +14655,8 @@ fn blastn_ncbi_parity_invalid_boolean_option_errors() {
 
 #[test]
 fn blastn_ncbi_parity_index_options_are_accepted_when_unused() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14679,7 +14704,7 @@ fn blastn_ncbi_parity_index_options_are_accepted_when_unused() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -14710,8 +14735,8 @@ fn blastn_ncbi_parity_index_options_are_accepted_when_unused() {
 
 #[test]
 fn blastn_ncbi_parity_invalid_dust_option_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14737,7 +14762,7 @@ fn blastn_ncbi_parity_invalid_dust_option_errors() {
             .arg(dust)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid dust {dust}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -14772,8 +14797,8 @@ fn blastn_ncbi_parity_invalid_dust_option_errors() {
 
 #[test]
 fn blastn_ncbi_parity_negative_searchsp_error() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14800,7 +14825,7 @@ fn blastn_ncbi_parity_negative_searchsp_error() {
         .arg("-1")
         .output()
         .expect("run blast-cli negative searchsp");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg("tests/fixtures/query_short_match.fa")
         .arg("-subject")
@@ -14835,8 +14860,8 @@ fn blastn_ncbi_parity_negative_searchsp_error() {
 
 #[test]
 fn blastn_ncbi_parity_invalid_word_size_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14864,7 +14889,7 @@ fn blastn_ncbi_parity_invalid_word_size_errors() {
             .arg(word_size)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid word_size {word_size}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -14904,8 +14929,8 @@ fn blastn_ncbi_parity_invalid_word_size_errors() {
 
 #[test]
 fn blastn_ncbi_parity_nonpositive_evalue_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -14933,7 +14958,7 @@ fn blastn_ncbi_parity_nonpositive_evalue_errors() {
             .arg(evalue)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid evalue {evalue}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -14970,8 +14995,8 @@ fn blastn_ncbi_parity_nonpositive_evalue_errors() {
 
 #[test]
 fn blastn_ncbi_parity_percent_constraint_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15004,7 +15029,7 @@ fn blastn_ncbi_parity_percent_constraint_errors() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15047,8 +15072,8 @@ fn blastn_ncbi_parity_percent_constraint_errors() {
 
 #[test]
 fn blastn_ncbi_parity_missing_option_value_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15076,7 +15101,7 @@ fn blastn_ncbi_parity_missing_option_value_errors() {
             .arg(rust_option)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli missing {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg(ncbi_option)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI missing {ncbi_option}: {err}"));
@@ -15105,8 +15130,8 @@ fn blastn_ncbi_parity_missing_option_value_errors() {
 
 #[test]
 fn blastn_ncbi_parity_choice_constraint_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15147,7 +15172,7 @@ fn blastn_ncbi_parity_choice_constraint_errors() {
             .args(rust_extra_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15178,8 +15203,8 @@ fn blastn_ncbi_parity_choice_constraint_errors() {
 
 #[test]
 fn blastn_ncbi_parity_no_arg_switch_stray_value_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15215,7 +15240,7 @@ fn blastn_ncbi_parity_no_arg_switch_stray_value_errors() {
             .arg("false")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15330,8 +15355,8 @@ fn blastn_no_taxid_expansion_rejects_ncbi_2_17_incompatible_options() {
 
 #[test]
 fn blastn_ncbi_parity_hsp_pruning_constraint_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15363,7 +15388,7 @@ fn blastn_ncbi_parity_hsp_pruning_constraint_errors() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15406,8 +15431,8 @@ fn blastn_ncbi_parity_hsp_pruning_constraint_errors() {
 
 #[test]
 fn blastn_ncbi_parity_remaining_integer_constraint_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15452,7 +15477,7 @@ fn blastn_ncbi_parity_remaining_integer_constraint_errors() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15495,8 +15520,8 @@ fn blastn_ncbi_parity_remaining_integer_constraint_errors() {
 
 #[test]
 fn blastn_ncbi_parity_nonfinite_float_conversion_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15535,7 +15560,7 @@ fn blastn_ncbi_parity_nonfinite_float_conversion_errors() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15578,8 +15603,8 @@ fn blastn_ncbi_parity_nonfinite_float_conversion_errors() {
 
 #[test]
 fn blastn_ncbi_parity_invalid_float_string_conversion_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15622,7 +15647,7 @@ fn blastn_ncbi_parity_invalid_float_string_conversion_errors() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15665,8 +15690,8 @@ fn blastn_ncbi_parity_invalid_float_string_conversion_errors() {
 
 #[test]
 fn blastn_ncbi_parity_empty_numeric_conversion_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15725,7 +15750,7 @@ fn blastn_ncbi_parity_empty_numeric_conversion_errors() {
             .arg("")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli empty {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15765,8 +15790,8 @@ fn blastn_ncbi_parity_empty_numeric_conversion_errors() {
 
 #[test]
 fn blastn_ncbi_parity_invalid_integer_string_conversion_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15821,7 +15846,7 @@ fn blastn_ncbi_parity_invalid_integer_string_conversion_errors() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option} {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15864,8 +15889,8 @@ fn blastn_ncbi_parity_invalid_integer_string_conversion_errors() {
 
 #[test]
 fn blastn_ncbi_parity_integer_option_range_conversion_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -15915,7 +15940,7 @@ fn blastn_ncbi_parity_integer_option_range_conversion_errors() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli range {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -15976,8 +16001,8 @@ fn blastn_ncbi_parity_bare_exponent_float_values() {
 
 #[test]
 fn blastn_ncbi_parity_negative_gap_cost_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -16005,7 +16030,7 @@ fn blastn_ncbi_parity_negative_gap_cost_errors() {
             .arg("-1")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli invalid {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg("tests/fixtures/query_short_match.fa")
             .arg("-subject")
@@ -16045,10 +16070,10 @@ fn blastn_ncbi_parity_negative_gap_cost_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_existing_gilist_without_isam_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -16068,7 +16093,7 @@ fn blastn_db_ncbi_parity_existing_gilist_without_isam_errors() {
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
     std::fs::write(&gi_list, "1\n").expect("write GI list");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -16103,7 +16128,7 @@ fn blastn_db_ncbi_parity_existing_gilist_without_isam_errors() {
             .arg(&gi_list)
             .output()
             .expect("run blast-cli existing GI list");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-db")
@@ -16146,10 +16171,10 @@ fn blastn_db_ncbi_parity_existing_gilist_without_isam_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_id_list_errors() {
-    if !std::path::Path::new("/usr/bin/blastn").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastn").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastn or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -16167,7 +16192,7 @@ fn blastn_db_ncbi_parity_missing_id_list_errors() {
     std::fs::write(&query, ">q1\nACGTACGTACGTACGTACGT\n").expect("write query FASTA");
     std::fs::write(&db_fasta, ">s1\nACGTACGTACGTACGTACGT\n").expect("write db FASTA");
 
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -16217,7 +16242,7 @@ fn blastn_db_ncbi_parity_missing_id_list_errors() {
             .arg(&rust_out)
             .output()
             .expect("run blast-cli missing ID list");
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .arg("-query")
             .arg(&query)
             .arg("-db")
@@ -16900,8 +16925,8 @@ fn blastp_subject_ncbi_parity_custom_seg_options_mask_low_complexity_query() {
 
 #[test]
 fn blastp_ncbi_parity_invalid_seg_option_error() {
-    if !std::path::Path::new("/usr/bin/blastp").exists() {
-        eprintln!("Skipping: /usr/bin/blastp not found");
+    if !ncbi_bin("blastp").exists() {
+        eprintln!("Skipping: blastp not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -16927,7 +16952,7 @@ fn blastp_ncbi_parity_invalid_seg_option_error() {
         .arg("6")
         .output()
         .expect("run blast-cli invalid SEG");
-    let ncbi = std::process::Command::new("/usr/bin/blastp")
+    let ncbi = std::process::Command::new(ncbi_bin("blastp"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -16955,8 +16980,8 @@ fn blastp_ncbi_parity_invalid_seg_option_error() {
 
 #[test]
 fn blastn_ncbi_parity_seg_is_unknown_argument() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -16982,7 +17007,7 @@ fn blastn_ncbi_parity_seg_is_unknown_argument() {
         .arg("6")
         .output()
         .expect("run blast-cli blastn SEG");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -17007,8 +17032,8 @@ fn blastn_ncbi_parity_seg_is_unknown_argument() {
 
 #[test]
 fn blastn_ncbi_parity_protein_options_are_unknown_arguments() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -17036,7 +17061,7 @@ fn blastn_ncbi_parity_protein_options_are_unknown_arguments() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli blastn {rust_args:?}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/blastn")
+        let ncbi = std::process::Command::new(ncbi_bin("blastn"))
             .args(&ncbi_args)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI blastn {ncbi_args:?}: {err}"));
@@ -17068,8 +17093,8 @@ fn blastn_ncbi_parity_protein_options_are_unknown_arguments() {
 
 #[test]
 fn blastp_ncbi_parity_dust_is_unknown_argument() {
-    if !std::path::Path::new("/usr/bin/blastp").exists() {
-        eprintln!("Skipping: /usr/bin/blastp not found");
+    if !ncbi_bin("blastp").exists() {
+        eprintln!("Skipping: blastp not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -17095,7 +17120,7 @@ fn blastp_ncbi_parity_dust_is_unknown_argument() {
         .arg("6")
         .output()
         .expect("run blast-cli blastp DUST");
-    let ncbi = std::process::Command::new("/usr/bin/blastp")
+    let ncbi = std::process::Command::new(ncbi_bin("blastp"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -17123,8 +17148,8 @@ fn blastp_ncbi_parity_dust_is_unknown_argument() {
 
 #[test]
 fn blastx_ncbi_parity_dust_is_unknown_argument() {
-    if !std::path::Path::new("/usr/bin/blastx").exists() {
-        eprintln!("Skipping: /usr/bin/blastx not found");
+    if !ncbi_bin("blastx").exists() {
+        eprintln!("Skipping: blastx not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -17150,7 +17175,7 @@ fn blastx_ncbi_parity_dust_is_unknown_argument() {
         .arg("6")
         .output()
         .expect("run blast-cli blastx DUST");
-    let ncbi = std::process::Command::new("/usr/bin/blastx")
+    let ncbi = std::process::Command::new(ncbi_bin("blastx"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -17178,8 +17203,8 @@ fn blastx_ncbi_parity_dust_is_unknown_argument() {
 
 #[test]
 fn tblastn_ncbi_parity_dust_is_unknown_argument() {
-    if !std::path::Path::new("/usr/bin/tblastn").exists() {
-        eprintln!("Skipping: /usr/bin/tblastn not found");
+    if !ncbi_bin("tblastn").exists() {
+        eprintln!("Skipping: tblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -17205,7 +17230,7 @@ fn tblastn_ncbi_parity_dust_is_unknown_argument() {
         .arg("6")
         .output()
         .expect("run blast-cli tblastn DUST");
-    let ncbi = std::process::Command::new("/usr/bin/tblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("tblastn"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -17233,8 +17258,8 @@ fn tblastn_ncbi_parity_dust_is_unknown_argument() {
 
 #[test]
 fn tblastx_ncbi_parity_dust_is_unknown_argument() {
-    if !std::path::Path::new("/usr/bin/tblastx").exists() {
-        eprintln!("Skipping: /usr/bin/tblastx not found");
+    if !ncbi_bin("tblastx").exists() {
+        eprintln!("Skipping: tblastx not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -17269,7 +17294,7 @@ fn tblastx_ncbi_parity_dust_is_unknown_argument() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli tblastx {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/tblastx")
+        let ncbi = std::process::Command::new(ncbi_bin("tblastx"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -17328,9 +17353,9 @@ fn non_blastn_sam_outfmt_rejection_matches_ncbi() {
             ">s\nATGAAATTTCTTATTCTTCTTTTC\n",
         ),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
 
@@ -17352,7 +17377,7 @@ fn non_blastn_sam_outfmt_rejection_matches_ncbi() {
             .arg("no")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} SAM rejection: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -17385,8 +17410,8 @@ fn non_blastn_sam_outfmt_rejection_matches_ncbi() {
 
 #[test]
 fn blastn_ncbi_parity_no_greedy_rejects_zero_gap_costs() {
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
     let Some(blast_cli) = std::env::var_os("BLAST_RS_CLI_BIN")
@@ -17410,7 +17435,7 @@ fn blastn_ncbi_parity_no_greedy_rejects_zero_gap_costs() {
         .arg("--no_greedy")
         .output()
         .expect("run blast-cli -no_greedy zero gaps");
-    let ncbi = std::process::Command::new("/usr/bin/blastn")
+    let ncbi = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg("tests/fixtures/query_short_match.fa")
         .arg("-subject")
@@ -17442,9 +17467,9 @@ fn protein_programs_ncbi_parity_nucleotide_filtering_options_are_unknown_argumen
     };
 
     for program in ["blastp", "blastx", "tblastn", "tblastx"] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
 
@@ -17465,7 +17490,7 @@ fn protein_programs_ncbi_parity_nucleotide_filtering_options_are_unknown_argumen
                 .unwrap_or_else(|err| {
                     panic!("run blast-cli {program} {rust_option} {value}: {err}")
                 });
-            let ncbi = std::process::Command::new(&ncbi_bin)
+            let ncbi = std::process::Command::new(&ncbi_bin_path)
                 .arg(ncbi_option)
                 .arg(value)
                 .output()
@@ -17505,9 +17530,9 @@ fn protein_programs_ncbi_parity_gap_trigger_is_unknown_argument() {
     };
 
     for program in ["blastp", "blastx", "tblastn", "tblastx"] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
 
@@ -17517,7 +17542,7 @@ fn protein_programs_ncbi_parity_gap_trigger_is_unknown_argument() {
             .arg("22")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} gap_trigger: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-gap_trigger")
             .arg("22")
             .output()
@@ -17561,9 +17586,9 @@ fn translated_programs_ncbi_parity_invalid_gencode_errors_before_required_query(
         ("tblastx", "-query_gencode"),
         ("tblastx", "-db_gencode"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -17572,7 +17597,7 @@ fn translated_programs_ncbi_parity_invalid_gencode_errors_before_required_query(
             .arg("99")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} {option}: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg(option)
             .arg("99")
             .output()
@@ -17611,9 +17636,9 @@ fn protein_programs_ncbi_parity_invalid_threshold_errors_before_required_query()
     };
 
     for program in ["blastp", "blastx", "tblastn", "tblastx"] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -17622,7 +17647,7 @@ fn protein_programs_ncbi_parity_invalid_threshold_errors_before_required_query()
             .arg("-1")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} -threshold -1: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-threshold")
             .arg("-1")
             .output()
@@ -17692,9 +17717,9 @@ fn non_blastn_programs_ncbi_parity_reject_sam_outfmt() {
             "tests/fixtures/protein_subject.fa",
         ),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -17707,7 +17732,7 @@ fn non_blastn_programs_ncbi_parity_reject_sam_outfmt() {
             .arg("17")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} outfmt 17: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-subject")
@@ -17741,7 +17766,7 @@ fn non_blastn_programs_ncbi_parity_reject_sam_outfmt() {
         );
     }
 
-    if std::path::Path::new("/usr/bin/rpstblastn").exists() {
+    if ncbi_bin("rpstblastn").exists() {
         let rust = std::process::Command::new(&blast_cli)
             .arg("rpstblastn")
             .arg("-query")
@@ -17752,7 +17777,7 @@ fn non_blastn_programs_ncbi_parity_reject_sam_outfmt() {
             .arg("17")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli rpstblastn outfmt 17: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+        let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
             .arg("-query")
             .arg("tests/fixtures/tblastx_nuc_query.fa")
             .arg("-db")
@@ -17855,8 +17880,8 @@ fn installed_programs_document_archive_outfmt_11_temporary_boundary() {
 
 #[test]
 fn deltablast_db_ncbi_parity_supported_outfmts_reach_missing_database() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -17875,7 +17900,7 @@ fn deltablast_db_ncbi_parity_supported_outfmts_reach_missing_database() {
             .arg(outfmt)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli deltablast outfmt {outfmt}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/deltablast")
+        let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
             .arg("-query")
             .arg("tests/fixtures/protein_query.fa")
             .arg("-db")
@@ -17912,8 +17937,8 @@ fn deltablast_db_ncbi_parity_supported_outfmts_reach_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_supported_outfmts_reach_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -17932,7 +17957,7 @@ fn rpstblastn_db_ncbi_parity_supported_outfmts_reach_missing_database() {
             .arg(outfmt)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli rpstblastn outfmt {outfmt}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+        let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
             .arg("-query")
             .arg("tests/fixtures/tblastx_nuc_query.fa")
             .arg("-db")
@@ -18014,8 +18039,8 @@ fn rpsblast_db_local_supported_outfmts_reach_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_num_threads_two_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18035,7 +18060,7 @@ fn rpstblastn_db_ncbi_parity_num_threads_two_reaches_missing_database() {
         .arg("2")
         .output()
         .expect("run blast-cli rpstblastn num_threads 2");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18073,8 +18098,8 @@ fn rpstblastn_db_ncbi_parity_num_threads_two_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_ncbi_parity_rejects_unsupported_database_filters() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18118,7 +18143,7 @@ fn rpstblastn_ncbi_parity_rejects_unsupported_database_filters() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli rpstblastn {rust_args:?}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+        let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
             .args(&ncbi_args)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI rpstblastn {ncbi_args:?}: {err}"));
@@ -18150,8 +18175,8 @@ fn rpstblastn_ncbi_parity_rejects_unsupported_database_filters() {
 
 #[test]
 fn rpstblastn_ncbi_parity_rejects_subject_mode_options() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18177,7 +18202,7 @@ fn rpstblastn_ncbi_parity_rejects_subject_mode_options() {
             .unwrap_or_else(|err| {
                 panic!("run blast-cli rpstblastn subject-mode {rust_args:?}: {err}")
             });
-        let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+        let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
             .arg("-query")
             .arg("tests/fixtures/tblastx_nuc_query.fa")
             .args(&ncbi_args)
@@ -18213,8 +18238,8 @@ fn rpstblastn_ncbi_parity_rejects_subject_mode_options() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_use_sw_tback_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18233,7 +18258,7 @@ fn rpstblastn_db_ncbi_parity_use_sw_tback_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn use_sw_tback");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18270,8 +18295,8 @@ fn rpstblastn_db_ncbi_parity_use_sw_tback_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_strand_minus_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18291,7 +18316,7 @@ fn rpstblastn_db_ncbi_parity_strand_minus_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn strand minus");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18329,8 +18354,8 @@ fn rpstblastn_db_ncbi_parity_strand_minus_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_strand_both_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18350,7 +18375,7 @@ fn rpstblastn_db_ncbi_parity_strand_both_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn strand both");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18388,8 +18413,8 @@ fn rpstblastn_db_ncbi_parity_strand_both_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_query_loc_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18409,7 +18434,7 @@ fn rpstblastn_db_ncbi_parity_query_loc_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn query_loc");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18447,8 +18472,8 @@ fn rpstblastn_db_ncbi_parity_query_loc_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_query_gencode_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18468,7 +18493,7 @@ fn rpstblastn_db_ncbi_parity_query_gencode_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn query_gencode");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18506,8 +18531,8 @@ fn rpstblastn_db_ncbi_parity_query_gencode_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_comp_based_stats_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18527,7 +18552,7 @@ fn rpstblastn_db_ncbi_parity_comp_based_stats_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn comp_based_stats");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18565,8 +18590,8 @@ fn rpstblastn_db_ncbi_parity_comp_based_stats_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_seg_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18586,7 +18611,7 @@ fn rpstblastn_db_ncbi_parity_seg_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn seg");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18621,8 +18646,8 @@ fn rpstblastn_db_ncbi_parity_seg_reaches_missing_database() {
 
 #[test]
 fn rpstblastn_db_ncbi_parity_parse_deflines_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/rpstblastn").exists() {
-        eprintln!("Skipping: /usr/bin/rpstblastn not found");
+    if !ncbi_bin("rpstblastn").exists() {
+        eprintln!("Skipping: rpstblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18641,7 +18666,7 @@ fn rpstblastn_db_ncbi_parity_parse_deflines_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli rpstblastn parse_deflines");
-    let ncbi = std::process::Command::new("/usr/bin/rpstblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("rpstblastn"))
         .arg("-query")
         .arg("tests/fixtures/tblastx_nuc_query.fa")
         .arg("-db")
@@ -18678,8 +18703,8 @@ fn rpstblastn_db_ncbi_parity_parse_deflines_reaches_missing_database() {
 
 #[test]
 fn psiblast_db_ncbi_parity_query_loc_reaches_missing_database() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -18699,7 +18724,7 @@ fn psiblast_db_ncbi_parity_query_loc_reaches_missing_database() {
         .arg("6")
         .output()
         .expect("run blast-cli psiblast query_loc");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg("tests/fixtures/psi_query.fa")
         .arg("-db")
@@ -18764,9 +18789,9 @@ fn db_ncbi_parity_plain_unimplemented_outfmts_reach_missing_database() {
         ),
         ("deltablast", "tests/fixtures/protein_query.fa", "protein"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         for outfmt in ["12", "13", "14", "15", "16", "18"] {
@@ -18782,7 +18807,7 @@ fn db_ncbi_parity_plain_unimplemented_outfmts_reach_missing_database() {
                 .unwrap_or_else(|err| {
                     panic!("run blast-cli {program} missing DB outfmt {outfmt}: {err}")
                 });
-            let ncbi = std::process::Command::new(&ncbi_bin)
+            let ncbi = std::process::Command::new(&ncbi_bin_path)
                 .arg("-query")
                 .arg(query)
                 .arg("-db")
@@ -18837,9 +18862,9 @@ fn installed_programs_ncbi_parity_missing_db_or_subject_diagnostic() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -18850,7 +18875,7 @@ fn installed_programs_ncbi_parity_missing_db_or_subject_diagnostic() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} without db/subject: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-outfmt")
@@ -18932,9 +18957,9 @@ fn installed_programs_ncbi_parity_subject_and_db_are_incompatible() {
             "tests/fixtures/protein_subject.fa",
         ),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -18949,7 +18974,7 @@ fn installed_programs_ncbi_parity_subject_and_db_are_incompatible() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with subject and db: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-subject")
@@ -19003,9 +19028,9 @@ fn installed_programs_ncbi_parity_subject_loc_and_db_are_incompatible() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19020,7 +19045,7 @@ fn installed_programs_ncbi_parity_subject_loc_and_db_are_incompatible() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with subject_loc and db: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-subject_loc")
@@ -19101,9 +19126,9 @@ fn subject_mode_programs_ncbi_parity_subject_and_gilist_are_incompatible() {
             "tests/fixtures/protein_subject.fa",
         ),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19118,7 +19143,7 @@ fn subject_mode_programs_ncbi_parity_subject_and_gilist_are_incompatible() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with subject and gilist: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-subject")
@@ -19172,9 +19197,9 @@ fn installed_programs_ncbi_parity_gilist_and_seqidlist_are_incompatible() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19193,7 +19218,7 @@ fn installed_programs_ncbi_parity_gilist_and_seqidlist_are_incompatible() {
             .unwrap_or_else(|err| {
                 panic!("run blast-cli {program} with gilist and seqidlist: {err}")
             });
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19249,9 +19274,9 @@ fn installed_programs_ncbi_parity_num_descriptions_and_max_target_seqs_are_incom
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19270,7 +19295,7 @@ fn installed_programs_ncbi_parity_num_descriptions_and_max_target_seqs_are_incom
             .unwrap_or_else(|err| {
                 panic!("run blast-cli {program} with num_descriptions and max_target_seqs: {err}")
             });
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19328,9 +19353,9 @@ fn installed_programs_ncbi_parity_entrez_query_requires_remote() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19345,7 +19370,7 @@ fn installed_programs_ncbi_parity_entrez_query_requires_remote() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with entrez_query: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19399,9 +19424,9 @@ fn installed_programs_ncbi_parity_mt_mode_validation_order() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19416,7 +19441,7 @@ fn installed_programs_ncbi_parity_mt_mode_validation_order() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with mt_mode: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19466,9 +19491,9 @@ fn installed_programs_ncbi_parity_remote_and_num_threads_are_incompatible() {
         ("psiblast", "tests/fixtures/psi_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19486,7 +19511,7 @@ fn installed_programs_ncbi_parity_remote_and_num_threads_are_incompatible() {
             .unwrap_or_else(|err| {
                 panic!("run blast-cli {program} with remote and num_threads: {err}")
             });
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19541,9 +19566,9 @@ fn installed_programs_ncbi_parity_qcov_hsp_perc_range_error() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19558,7 +19583,7 @@ fn installed_programs_ncbi_parity_qcov_hsp_perc_range_error() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with bad qcov_hsp_perc: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19611,9 +19636,9 @@ fn protein_programs_ncbi_parity_perc_identity_is_unknown_argument() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19626,7 +19651,7 @@ fn protein_programs_ncbi_parity_perc_identity_is_unknown_argument() {
             .arg("90")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with perc_identity: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19678,9 +19703,9 @@ fn installed_programs_ncbi_parity_max_hsps_range_error() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19695,7 +19720,7 @@ fn installed_programs_ncbi_parity_max_hsps_range_error() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with bad max_hsps: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19749,9 +19774,9 @@ fn installed_programs_ncbi_parity_soft_masking_bool_conversion_error() {
         ("rpstblastn", "tests/fixtures/tblastx_nuc_query.fa"),
         ("deltablast", "tests/fixtures/protein_query.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19766,7 +19791,7 @@ fn installed_programs_ncbi_parity_soft_masking_bool_conversion_error() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with bad soft_masking: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg(query)
             .arg("-db")
@@ -19819,9 +19844,9 @@ fn installed_programs_ncbi_parity_omitted_query_with_subject_is_empty_query() {
         ("psiblast", "tests/fixtures/psi_subject.fa"),
         ("deltablast", "tests/fixtures/protein_subject.fa"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19832,7 +19857,7 @@ fn installed_programs_ncbi_parity_omitted_query_with_subject_is_empty_query() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} without query: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-subject")
             .arg(subject)
             .arg("-outfmt")
@@ -19881,9 +19906,9 @@ fn installed_programs_ncbi_parity_omitted_query_missing_subject_precedes_empty_q
         "psiblast",
         "deltablast",
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19896,7 +19921,7 @@ fn installed_programs_ncbi_parity_omitted_query_missing_subject_precedes_empty_q
             .unwrap_or_else(|err| {
                 panic!("run blast-cli {program} without query against missing subject: {err}")
             });
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-subject")
             .arg("missing_subject.fa")
             .arg("-outfmt")
@@ -19947,9 +19972,9 @@ fn installed_programs_ncbi_parity_missing_subject_precedes_missing_query_in_subj
         "psiblast",
         "deltablast",
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -19962,7 +19987,7 @@ fn installed_programs_ncbi_parity_missing_subject_precedes_missing_query_in_subj
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} with missing files: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg("missing_query.fa")
             .arg("-subject")
@@ -20012,9 +20037,9 @@ fn protein_programs_ncbi_parity_missing_query_precedes_missing_db() {
         "psiblast",
         "deltablast",
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -20027,7 +20052,7 @@ fn protein_programs_ncbi_parity_missing_query_precedes_missing_db() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} missing query and DB: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .arg("missing_query.fa")
             .arg("-db")
@@ -20101,9 +20126,9 @@ fn protein_programs_ncbi_parity_output_file_precedes_missing_db_or_empty_query()
             "tests/fixtures/protein_subject.fa",
         ),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         for (rust_source_args, ncbi_source_args) in [
@@ -20125,7 +20150,7 @@ fn protein_programs_ncbi_parity_output_file_precedes_missing_db_or_empty_query()
                 .unwrap_or_else(|err| {
                     panic!("run blast-cli {program} with inaccessible out: {err}")
                 });
-            let ncbi = std::process::Command::new(&ncbi_bin)
+            let ncbi = std::process::Command::new(&ncbi_bin_path)
                 .args(&ncbi_source_args)
                 .arg("-out")
                 .arg("/no/such/dir/out.txt")
@@ -20177,9 +20202,9 @@ fn installed_programs_ncbi_parity_omitted_query_missing_db_precedes_empty_query(
         "rpstblastn",
         "deltablast",
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -20192,7 +20217,7 @@ fn installed_programs_ncbi_parity_omitted_query_missing_db_precedes_empty_query(
             .unwrap_or_else(|err| {
                 panic!("run blast-cli {program} without query against missing DB: {err}")
             });
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-db")
             .arg("missing")
             .arg("-outfmt")
@@ -20238,9 +20263,9 @@ fn blastn_blastp_ncbi_parity_omitted_query_rust_db_directory_is_not_ncbi_db() {
         ("blastn", "tests/fixtures/seqn"),
         ("blastp", "tests/fixtures/seqp"),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -20253,7 +20278,7 @@ fn blastn_blastp_ncbi_parity_omitted_query_rust_db_directory_is_not_ncbi_db() {
             .unwrap_or_else(|err| {
                 panic!("run blast-cli {program} without query against Rust fixture DB: {err}")
             });
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-db")
             .arg(db)
             .arg("-outfmt")
@@ -20304,9 +20329,9 @@ fn non_blastn_programs_ncbi_parity_short_help_uses_program_usage() {
         "rpstblastn",
         "deltablast",
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -20318,7 +20343,7 @@ fn non_blastn_programs_ncbi_parity_short_help_uses_program_usage() {
             .arg("bad")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} -h: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-h")
             .arg("-query")
             .arg("missing.fa")
@@ -20392,8 +20417,8 @@ fn non_blastn_programs_help_line_is_short_help_only() {
 
 #[test]
 fn psiblast_subject_ncbi_parity_tabular_and_csv() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -20415,7 +20440,7 @@ fn psiblast_subject_ncbi_parity_tabular_and_csv() {
             .arg(outfmt)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {outfmt}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg("-query")
             .arg("tests/fixtures/psi_query.fa")
             .arg("-subject")
@@ -20438,8 +20463,8 @@ fn psiblast_subject_ncbi_parity_tabular_and_csv() {
 
 #[test]
 fn psiblast_ncbi_parity_domain_inclusion_is_unknown_argument() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -20453,7 +20478,7 @@ fn psiblast_ncbi_parity_domain_inclusion_is_unknown_argument() {
         .arg("0.01")
         .output()
         .expect("run blast-cli psiblast domain inclusion");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-domain_inclusion_ethresh")
         .arg("0.01")
         .output()
@@ -20472,8 +20497,8 @@ fn psiblast_ncbi_parity_domain_inclusion_is_unknown_argument() {
 
 #[test]
 fn psiblast_ncbi_parity_restart_input_constraint_order() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -20578,7 +20603,7 @@ fn psiblast_ncbi_parity_restart_input_constraint_order() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {rust_args:?}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .args(&ncbi_args)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI psiblast {ncbi_args:?}: {err}"));
@@ -20600,8 +20625,8 @@ fn psiblast_ncbi_parity_restart_input_constraint_order() {
 
 #[test]
 fn psiblast_ncbi_parity_psi_numeric_constraints() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -20625,7 +20650,7 @@ fn psiblast_ncbi_parity_psi_numeric_constraints() {
         .arg("-1")
         .output()
         .expect("run blast-cli psiblast negative iterations");
-    let ncbi_rejected = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi_rejected = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -20659,7 +20684,7 @@ fn psiblast_ncbi_parity_psi_numeric_constraints() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -20699,7 +20724,7 @@ fn psiblast_ncbi_parity_psi_numeric_constraints() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast msa_master_idx {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg("-in_msa")
             .arg(&restart_msa)
             .arg("-subject")
@@ -20734,8 +20759,8 @@ fn psiblast_ncbi_parity_psi_numeric_constraints() {
 
 #[test]
 fn psiblast_ncbi_parity_pseudocount_zero_single_round_output() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -20763,7 +20788,7 @@ fn psiblast_ncbi_parity_pseudocount_zero_single_round_output() {
         .arg("0")
         .output()
         .expect("run blast-cli psiblast pseudocount 0");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -20807,8 +20832,8 @@ fn psiblast_ncbi_parity_pseudocount_zero_single_round_output() {
 
 #[test]
 fn psiblast_ncbi_audit_num_iterations_zero_direct_stdout_stat_gap() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -20834,7 +20859,7 @@ fn psiblast_ncbi_audit_num_iterations_zero_direct_stdout_stat_gap() {
         .arg("0")
         .output()
         .expect("run blast-cli psiblast num_iterations 0");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -20902,8 +20927,8 @@ fn psiblast_ncbi_audit_num_iterations_zero_direct_stdout_stat_gap() {
 
 #[test]
 fn psiblast_ncbi_parity_num_iterations_zero_output_shape() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -20933,7 +20958,7 @@ fn psiblast_ncbi_parity_num_iterations_zero_output_shape() {
         .arg(&rust_out)
         .output()
         .expect("run blast-cli psiblast num_iterations 0");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -20993,10 +21018,10 @@ fn psiblast_ncbi_parity_num_iterations_zero_output_shape() {
 
 #[test]
 fn psiblast_db_ncbi_parity_num_iterations_zero_stat_fixture() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("psiblast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21010,7 +21035,7 @@ fn psiblast_db_ncbi_parity_num_iterations_zero_stat_fixture() {
     let db = tmp.path().join("psidb");
     std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
     std::fs::write(&db_fasta, ">s\nMKKWLFGFLG\n").expect("write DB FASTA");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -21039,7 +21064,7 @@ fn psiblast_db_ncbi_parity_num_iterations_zero_stat_fixture() {
         .arg("0")
         .output()
         .expect("run blast-cli psiblast DB num_iterations 0");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -21099,8 +21124,8 @@ fn psiblast_db_ncbi_parity_num_iterations_zero_stat_fixture() {
 
 #[test]
 fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21132,7 +21157,7 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
         .arg("1000")
         .output()
         .expect("run blast-cli psiblast traceback-window audit");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -21212,8 +21237,8 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
 
 #[test]
 fn psiblast_ncbi_parity_gap_trigger_negative_one_iteration_output() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21239,7 +21264,7 @@ fn psiblast_ncbi_parity_gap_trigger_negative_one_iteration_output() {
         .arg("-1")
         .output()
         .expect("run blast-cli psiblast gap_trigger -1");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -21263,8 +21288,8 @@ fn psiblast_ncbi_parity_gap_trigger_negative_one_iteration_output() {
 
 #[test]
 fn psiblast_ncbi_parity_pseudocount_negative_one_iteration_output() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21290,7 +21315,7 @@ fn psiblast_ncbi_parity_pseudocount_negative_one_iteration_output() {
         .arg("-1")
         .output()
         .expect("run blast-cli psiblast pseudocount -1");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -21345,8 +21370,8 @@ fn psiblast_ncbi_parity_pseudocount_negative_one_iteration_output() {
 
 #[test]
 fn psiblast_ncbi_parity_inclusion_ethresh_zero_iteration_output() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21372,7 +21397,7 @@ fn psiblast_ncbi_parity_inclusion_ethresh_zero_iteration_output() {
         .arg("0")
         .output()
         .expect("run blast-cli psiblast inclusion_ethresh 0");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -21427,10 +21452,10 @@ fn psiblast_ncbi_parity_inclusion_ethresh_zero_iteration_output() {
 
 #[test]
 fn psiblast_db_ncbi_parity_psi_numeric_option_stat_fixtures() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("psiblast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21444,7 +21469,7 @@ fn psiblast_db_ncbi_parity_psi_numeric_option_stat_fixtures() {
     let db = tmp.path().join("psidb");
     std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
     std::fs::write(&db_fasta, ">s\nMKKWLFGFLG\n").expect("write DB FASTA");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -21482,7 +21507,7 @@ fn psiblast_db_ncbi_parity_psi_numeric_option_stat_fixtures() {
             .arg(value)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {rust_option} {value}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg("-query")
             .arg(&query)
             .arg("-db")
@@ -21540,8 +21565,8 @@ fn psiblast_db_ncbi_parity_psi_numeric_option_stat_fixtures() {
 
 #[test]
 fn psiblast_subject_ncbi_parity_restart_msa_master_selection() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21729,7 +21754,7 @@ MKFLIFALILFATVALAPKSSSHEI
             .output()
             .expect("run blast-cli psiblast restart MSA");
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
         ncbi_cmd
             .arg("-in_msa")
             .arg(&msa_path)
@@ -21760,10 +21785,10 @@ MKFLIFALILFATVALAPKSSSHEI
 
 #[test]
 fn psiblast_db_ncbi_parity_restart_msa_master_selection() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("psiblast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -21936,7 +21961,7 @@ MKFLIFALILFATVALAPKSSSHEI
         std::fs::write(&msa_path, msa).expect("write restart MSA");
         std::fs::write(&db_fasta, ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n").expect("write DB FASTA");
 
-        let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
             .arg("-in")
             .arg(&db_fasta)
             .arg("-dbtype")
@@ -21973,7 +21998,7 @@ MKFLIFALILFATVALAPKSSSHEI
             .status()
             .expect("run blast-cli psiblast restart MSA DB");
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
         ncbi_cmd
             .arg("-in_msa")
             .arg(&msa_path)
@@ -22010,8 +22035,8 @@ MKFLIFALILFATVALAPKSSSHEI
 
 #[test]
 fn psiblast_ncbi_parity_missing_restart_msa_file_error() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22034,7 +22059,7 @@ fn psiblast_ncbi_parity_missing_restart_msa_file_error() {
         .arg("6")
         .output()
         .expect("run blast-cli psiblast missing restart MSA");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-in_msa")
         .arg(&missing_msa)
         .arg("-subject")
@@ -22063,10 +22088,10 @@ fn psiblast_ncbi_parity_missing_restart_msa_file_error() {
 
 #[test]
 fn psiblast_ncbi_parity_bad_restart_msa_master_errors() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("psiblast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22318,7 +22343,7 @@ MKF
         std::fs::write(&subject, ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n").expect("write subject");
         std::fs::write(&db_fasta, ">s\nMKFLIFALILFATVALAPKSSSHEIHH\n").expect("write DB FASTA");
 
-        let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+        let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
             .arg("-in")
             .arg(&db_fasta)
             .arg("-dbtype")
@@ -22346,7 +22371,7 @@ MKF
                 .output()
                 .expect("run blast-cli psiblast bad restart MSA");
 
-            let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+            let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
             ncbi_cmd.arg("-in_msa").arg(&msa_path);
             if search_source == "subject" {
                 ncbi_cmd.arg("-subject").arg(&subject);
@@ -22365,9 +22390,35 @@ MKF
             assert!(!ncbi.status.success(), "NCBI should reject bad restart MSA");
             assert_eq!(rust.status.code(), ncbi.status.code(), "status differs");
             assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
+            // Normalize the volatile `T0 "<source path>", line N:` segment of the
+            // NCBI C++ exception trace: the 2.17 binary reports its build-time
+            // absolute source path and the exact throwing-file line number, which
+            // differ from rs's normalized location but are not behavioral.
+            let normalize_trace = |s: &str| -> String {
+                s.lines()
+                    .map(|line| {
+                        let trimmed = line.trim_start();
+                        if trimmed.starts_with("T0 \"") {
+                            // Drop everything between `T0 "` and the next `:` that
+                            // follows the line-number, keeping the trailing message.
+                            if let Some(colon) = trimmed.find("line ") {
+                                if let Some(after) = trimmed[colon..].find(':') {
+                                    return format!(
+                                        "    T0 \"<src>\", <line>{}",
+                                        &trimmed[colon + after..]
+                                    );
+                                }
+                            }
+                            return "    T0 \"<src>\", <line>".to_string();
+                        }
+                        line.to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             assert_eq!(
-                String::from_utf8_lossy(&rust.stderr),
-                String::from_utf8_lossy(&ncbi.stderr),
+                normalize_trace(&String::from_utf8_lossy(&rust.stderr)),
+                normalize_trace(&String::from_utf8_lossy(&ncbi.stderr)),
                 "stderr differs for {search_source}"
             );
         }
@@ -22376,8 +22427,8 @@ MKF
 
 #[test]
 fn psiblast_ncbi_parity_bad_restart_msa_embedded_defline_marker() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22409,7 +22460,7 @@ MK>F
         .arg("6")
         .output()
         .expect("run blast-cli psiblast bad restart MSA defline marker");
-    let ncbi = std::process::Command::new("/usr/bin/psiblast")
+    let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-in_msa")
         .arg(&msa_path)
         .arg("-subject")
@@ -22445,8 +22496,8 @@ MK>F
 
 #[test]
 fn psiblast_ncbi_parity_save_pssm_flags_require_output_path() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22488,7 +22539,7 @@ fn psiblast_ncbi_parity_save_pssm_flags_require_output_path() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {label}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -22519,10 +22570,10 @@ fn psiblast_ncbi_parity_save_pssm_flags_require_output_path() {
 
 #[test]
 fn psiblast_ncbi_parity_pssm_output_paths_without_save_flags_do_not_write() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("psiblast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22538,7 +22589,7 @@ fn psiblast_ncbi_parity_pssm_output_paths_without_save_flags_do_not_write() {
     std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
     std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
     std::fs::write(&db_fasta, ">s\nMKKWLFGFLG\n").expect("write DB FASTA");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -22576,7 +22627,7 @@ fn psiblast_ncbi_parity_pssm_output_paths_without_save_flags_do_not_write() {
             .output()
             .expect("run blast-cli psiblast PSSM output paths");
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
         ncbi_cmd.arg("-query").arg(&query);
         if search_source == "subject" {
             ncbi_cmd.arg("-subject").arg(&subject);
@@ -22650,7 +22701,7 @@ fn psiblast_ncbi_parity_pssm_output_paths_without_save_flags_do_not_write() {
                 .output()
                 .expect("run blast-cli psiblast single PSSM output path");
 
-            let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+            let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
             ncbi_cmd.arg("-query").arg(&query);
             if search_source == "subject" {
                 ncbi_cmd.arg("-subject").arg(&subject);
@@ -22696,10 +22747,10 @@ fn pssm_round_output_path(base: &std::path::Path, round: usize) -> std::path::Pa
 
 #[test]
 fn psiblast_ncbi_parity_save_each_single_round_writes_no_pssm_artifacts() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("psiblast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22713,7 +22764,7 @@ fn psiblast_ncbi_parity_save_each_single_round_writes_no_pssm_artifacts() {
     let db = tmp.path().join("testdb");
     std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
     std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&subject)
         .arg("-dbtype")
@@ -22754,7 +22805,7 @@ fn psiblast_ncbi_parity_save_each_single_round_writes_no_pssm_artifacts() {
             .output()
             .expect("run blast-cli psiblast save-each single round");
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
         ncbi_cmd.arg("-query").arg(&query);
         if search_source == "subject" {
             ncbi_cmd.arg("-subject").arg(&subject);
@@ -22797,10 +22848,10 @@ fn psiblast_ncbi_parity_save_each_single_round_writes_no_pssm_artifacts() {
 
 #[test]
 fn psiblast_ncbi_parity_save_last_writes_pssm_artifacts() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("psiblast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/psiblast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22816,7 +22867,7 @@ fn psiblast_ncbi_parity_save_last_writes_pssm_artifacts() {
     std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
     std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
     std::fs::write(&db_fasta, ">s\nMKKWLFGFLG\n").expect("write DB FASTA");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -22855,7 +22906,7 @@ fn psiblast_ncbi_parity_save_last_writes_pssm_artifacts() {
             .output()
             .expect("run blast-cli psiblast save last PSSM");
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
         ncbi_cmd.arg("-query").arg(&query);
         if search_source == "subject" {
             ncbi_cmd.arg("-subject").arg(&subject);
@@ -22922,7 +22973,7 @@ fn psiblast_ncbi_parity_save_last_writes_pssm_artifacts() {
                 .output()
                 .expect("run blast-cli psiblast save last single PSSM output");
 
-            let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+            let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
             ncbi_cmd.arg("-query").arg(&query);
             if search_source == "subject" {
                 ncbi_cmd.arg("-subject").arg(&subject);
@@ -22968,8 +23019,8 @@ fn psiblast_ncbi_parity_save_last_writes_pssm_artifacts() {
 
 #[test]
 fn deltablast_ncbi_parity_rejects_psiblast_restart_options() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -22998,7 +23049,7 @@ fn deltablast_ncbi_parity_rejects_psiblast_restart_options() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli deltablast {rust_args:?}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/deltablast")
+        let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
             .args(&ncbi_args)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI deltablast {ncbi_args:?}: {err}"));
@@ -23027,8 +23078,8 @@ fn deltablast_ncbi_parity_rejects_psiblast_restart_options() {
 
 #[test]
 fn deltablast_ncbi_parity_accepts_delta_only_options_before_database_check() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23048,7 +23099,7 @@ fn deltablast_ncbi_parity_accepts_delta_only_options_before_database_check() {
             .args(&rust_args)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli deltablast {rust_args:?}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/deltablast")
+        let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
             .args(&ncbi_args)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI deltablast {ncbi_args:?}: {err}"));
@@ -23077,10 +23128,10 @@ fn deltablast_ncbi_parity_accepts_delta_only_options_before_database_check() {
 
 #[test]
 fn deltablast_ncbi_parity_existing_search_db_reaches_missing_rpsdb() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("deltablast").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/deltablast or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: deltablast or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23095,7 +23146,7 @@ fn deltablast_ncbi_parity_existing_search_db_reaches_missing_rpsdb() {
     let rpsdb = tmp.path().join("missing_cdd");
     std::fs::write(&query, ">q\nMKKWLFGFLG\n").expect("write query");
     std::fs::write(&subject, ">s\nMKKWLFGFLG\n").expect("write subject");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&subject)
         .arg("-dbtype")
@@ -23121,7 +23172,7 @@ fn deltablast_ncbi_parity_existing_search_db_reaches_missing_rpsdb() {
         .arg("6")
         .output()
         .expect("run blast-cli deltablast missing rpsdb");
-    let ncbi = std::process::Command::new("/usr/bin/deltablast")
+    let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -23149,8 +23200,8 @@ fn deltablast_ncbi_parity_existing_search_db_reaches_missing_rpsdb() {
 
 #[test]
 fn deltablast_ncbi_parity_pairwise_subject_reaches_missing_rpsdb_with_preamble() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23181,7 +23232,7 @@ fn deltablast_ncbi_parity_pairwise_subject_reaches_missing_rpsdb_with_preamble()
             .unwrap_or_else(|err| {
                 panic!("run blast-cli deltablast pairwise subject {rust_extra:?}: {err}")
             });
-        let ncbi = std::process::Command::new("/usr/bin/deltablast")
+        let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
             .arg("-query")
             .arg("tests/fixtures/protein_query.fa")
             .arg("-subject")
@@ -23217,8 +23268,8 @@ fn deltablast_ncbi_parity_pairwise_subject_reaches_missing_rpsdb_with_preamble()
 
 #[test]
 fn deltablast_ncbi_parity_domain_inclusion_reaches_missing_rpsdb() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23240,7 +23291,7 @@ fn deltablast_ncbi_parity_domain_inclusion_reaches_missing_rpsdb() {
         .arg("6")
         .output()
         .expect("run blast-cli deltablast domain inclusion");
-    let ncbi = std::process::Command::new("/usr/bin/deltablast")
+    let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
         .arg("-query")
         .arg("tests/fixtures/protein_query.fa")
         .arg("-subject")
@@ -23273,8 +23324,8 @@ fn deltablast_ncbi_parity_domain_inclusion_reaches_missing_rpsdb() {
 
 #[test]
 fn deltablast_ncbi_parity_inclusion_ethresh_reaches_missing_rpsdb() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23296,7 +23347,7 @@ fn deltablast_ncbi_parity_inclusion_ethresh_reaches_missing_rpsdb() {
         .arg("6")
         .output()
         .expect("run blast-cli deltablast inclusion_ethresh");
-    let ncbi = std::process::Command::new("/usr/bin/deltablast")
+    let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
         .arg("-query")
         .arg("tests/fixtures/protein_query.fa")
         .arg("-subject")
@@ -23329,8 +23380,8 @@ fn deltablast_ncbi_parity_inclusion_ethresh_reaches_missing_rpsdb() {
 
 #[test]
 fn deltablast_ncbi_parity_location_errors_precede_missing_rpsdb() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23354,7 +23405,7 @@ fn deltablast_ncbi_parity_location_errors_precede_missing_rpsdb() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli deltablast invalid {rust_loc_arg}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/deltablast")
+        let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
             .arg("-query")
             .arg("tests/fixtures/protein_query.fa")
             .arg("-subject")
@@ -23430,9 +23481,9 @@ fn protein_programs_ncbi_parity_location_error_precedence() {
             "tests/fixtures/protein_subject.fa",
         ),
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
 
@@ -23548,7 +23599,7 @@ fn protein_programs_ncbi_parity_location_error_precedence() {
                 .args(&rust_args)
                 .output()
                 .unwrap_or_else(|err| panic!("run blast-cli {program} {label}: {err}"));
-            let ncbi = std::process::Command::new(&ncbi_bin)
+            let ncbi = std::process::Command::new(&ncbi_bin_path)
                 .args(&ncbi_args)
                 .output()
                 .unwrap_or_else(|err| panic!("run NCBI {program} {label}: {err}"));
@@ -23578,8 +23629,8 @@ fn protein_programs_ncbi_parity_location_error_precedence() {
 
 #[test]
 fn deltablast_ncbi_parity_input_file_errors_precede_missing_rpsdb() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23650,7 +23701,7 @@ fn deltablast_ncbi_parity_input_file_errors_precede_missing_rpsdb() {
             .arg("6")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli deltablast {rust_args:?}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/deltablast")
+        let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
             .args(&ncbi_args)
             .arg("-outfmt")
             .arg("6")
@@ -23677,8 +23728,8 @@ fn deltablast_ncbi_parity_input_file_errors_precede_missing_rpsdb() {
 
 #[test]
 fn deltablast_ncbi_parity_show_domain_hits_rejects_value() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23694,7 +23745,7 @@ fn deltablast_ncbi_parity_show_domain_hits_rejects_value() {
         .arg("true")
         .output()
         .expect("run blast-cli deltablast show_domain_hits true");
-    let ncbi = std::process::Command::new("/usr/bin/deltablast")
+    let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
         .arg("-query")
         .arg("tests/fixtures/protein_query.fa")
         .arg("-show_domain_hits")
@@ -23715,8 +23766,8 @@ fn deltablast_ncbi_parity_show_domain_hits_rejects_value() {
 
 #[test]
 fn deltablast_ncbi_parity_show_domain_hits_rejects_subject() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23735,7 +23786,7 @@ fn deltablast_ncbi_parity_show_domain_hits_rejects_subject() {
         .arg("6")
         .output()
         .expect("run blast-cli deltablast show_domain_hits subject");
-    let ncbi = std::process::Command::new("/usr/bin/deltablast")
+    let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
         .arg("-query")
         .arg("tests/fixtures/protein_query.fa")
         .arg("-subject")
@@ -23770,8 +23821,8 @@ fn assert_psiblast_subject_outfmt_matches_ncbi(
     rust_extra: &[&str],
     ncbi_extra: &[&str],
 ) {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23799,7 +23850,7 @@ fn assert_psiblast_subject_outfmt_matches_ncbi(
         .output()
         .unwrap_or_else(|err| panic!("run blast-cli psiblast {outfmt}: {err}"));
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
     ncbi_cmd
         .arg("-query")
         .arg(&query)
@@ -23824,8 +23875,8 @@ fn assert_psiblast_subject_outfmt_matches_ncbi(
 
 #[test]
 fn psiblast_subject_ncbi_parity_custom_field_parser_edges() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23865,7 +23916,7 @@ fn psiblast_subject_ncbi_parity_custom_field_parser_edges() {
             .arg("no")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {outfmt}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg("-query")
             .arg("tests/fixtures/psi_query.fa")
             .arg("-subject")
@@ -23890,8 +23941,8 @@ fn psiblast_subject_ncbi_parity_custom_field_parser_edges() {
 
 #[test]
 fn psiblast_subject_ncbi_parity_parse_deflines_tabular_and_csv() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -23932,7 +23983,7 @@ fn psiblast_subject_ncbi_parity_parse_deflines_tabular_and_csv() {
             .arg("--parse_deflines")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {outfmt}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg("-query")
             .arg(&query)
             .arg("-subject")
@@ -23960,8 +24011,8 @@ fn psiblast_subject_ncbi_parity_parse_deflines_tabular_and_csv() {
 
 #[test]
 fn psiblast_subject_ncbi_parity_commented_tabular() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -24005,7 +24056,7 @@ fn psiblast_subject_ncbi_parity_commented_tabular() {
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {outfmt}: {err}"));
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
         ncbi_cmd
             .arg("-query")
             .arg(&query)
@@ -24031,8 +24082,8 @@ fn psiblast_subject_ncbi_parity_commented_tabular() {
 
 #[test]
 fn psiblast_subject_ncbi_parity_xml() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -24075,7 +24126,7 @@ fn psiblast_subject_ncbi_parity_xml() {
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast XML: {err}"));
 
-        let mut ncbi_cmd = std::process::Command::new("/usr/bin/psiblast");
+        let mut ncbi_cmd = std::process::Command::new(ncbi_bin("psiblast"));
         ncbi_cmd
             .arg("-query")
             .arg(&query)
@@ -24140,9 +24191,9 @@ fn protein_programs_ncbi_parity_threshold_conversion_errors_before_required_quer
     };
 
     for program in ["blastp", "blastx", "tblastn", "tblastx"] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -24151,7 +24202,7 @@ fn protein_programs_ncbi_parity_threshold_conversion_errors_before_required_quer
             .arg("abc")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} -threshold abc: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-threshold")
             .arg("abc")
             .output()
@@ -24190,9 +24241,9 @@ fn protein_programs_ncbi_parity_word_size_minimum_is_two() {
     };
 
     for program in ["blastp", "blastx", "tblastn", "tblastx"] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -24201,7 +24252,7 @@ fn protein_programs_ncbi_parity_word_size_minimum_is_two() {
             .arg("1")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} -word_size 1: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-word_size")
             .arg("1")
             .output()
@@ -24248,9 +24299,9 @@ fn installed_programs_ncbi_parity_missing_query_value_errors() {
         "rpstblastn",
         "deltablast",
     ] {
-        let ncbi_bin = format!("/usr/bin/{program}");
-        if !std::path::Path::new(&ncbi_bin).exists() {
-            eprintln!("Skipping: {ncbi_bin} not found");
+        let ncbi_bin_path = ncbi_bin(program);
+        if !ncbi_bin_path.exists() {
+            eprintln!("Skipping: {} not found", ncbi_bin_path.display());
             continue;
         }
         let rust = std::process::Command::new(&blast_cli)
@@ -24258,7 +24309,7 @@ fn installed_programs_ncbi_parity_missing_query_value_errors() {
             .arg("--query")
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli {program} missing query value: {err}"));
-        let ncbi = std::process::Command::new(&ncbi_bin)
+        let ncbi = std::process::Command::new(&ncbi_bin_path)
             .arg("-query")
             .output()
             .unwrap_or_else(|err| panic!("run NCBI {program} missing query value: {err}"));
@@ -24290,8 +24341,8 @@ fn installed_programs_ncbi_parity_missing_query_value_errors() {
 
 #[test]
 fn psiblast_ncbi_parity_missing_psi_option_value_errors() {
-    if !std::path::Path::new("/usr/bin/psiblast").exists() {
-        eprintln!("Skipping: /usr/bin/psiblast not found");
+    if !ncbi_bin("psiblast").exists() {
+        eprintln!("Skipping: psiblast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -24316,7 +24367,7 @@ fn psiblast_ncbi_parity_missing_psi_option_value_errors() {
             .arg(rust_option)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli psiblast {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/psiblast")
+        let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
             .arg(ncbi_option)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI psiblast {ncbi_option}: {err}"));
@@ -24348,8 +24399,8 @@ fn psiblast_ncbi_parity_missing_psi_option_value_errors() {
 
 #[test]
 fn deltablast_ncbi_parity_missing_delta_option_value_errors() {
-    if !std::path::Path::new("/usr/bin/deltablast").exists() {
-        eprintln!("Skipping: /usr/bin/deltablast not found");
+    if !ncbi_bin("deltablast").exists() {
+        eprintln!("Skipping: deltablast not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -24367,7 +24418,7 @@ fn deltablast_ncbi_parity_missing_delta_option_value_errors() {
             .arg(rust_option)
             .output()
             .unwrap_or_else(|err| panic!("run blast-cli deltablast {rust_option}: {err}"));
-        let ncbi = std::process::Command::new("/usr/bin/deltablast")
+        let ncbi = std::process::Command::new(ncbi_bin("deltablast"))
             .arg(ncbi_option)
             .output()
             .unwrap_or_else(|err| panic!("run NCBI deltablast {ncbi_option}: {err}"));
@@ -24399,8 +24450,8 @@ fn deltablast_ncbi_parity_missing_delta_option_value_errors() {
 
 #[test]
 fn tblastn_ncbi_parity_missing_in_pssm_value_error() {
-    if !std::path::Path::new("/usr/bin/tblastn").exists() {
-        eprintln!("Skipping: /usr/bin/tblastn not found");
+    if !ncbi_bin("tblastn").exists() {
+        eprintln!("Skipping: tblastn not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -24413,7 +24464,7 @@ fn tblastn_ncbi_parity_missing_in_pssm_value_error() {
         .arg("--in_pssm")
         .output()
         .expect("run blast-cli tblastn missing in_pssm value");
-    let ncbi = std::process::Command::new("/usr/bin/tblastn")
+    let ncbi = std::process::Command::new(ncbi_bin("tblastn"))
         .arg("-in_pssm")
         .output()
         .expect("run NCBI tblastn missing in_pssm value");
@@ -24444,8 +24495,8 @@ fn tblastn_ncbi_parity_missing_in_pssm_value_error() {
 
 #[test]
 fn blastp_ncbi_parity_unsupported_matrix_error() {
-    if !std::path::Path::new("/usr/bin/blastp").exists() {
-        eprintln!("Skipping: /usr/bin/blastp not found");
+    if !ncbi_bin("blastp").exists() {
+        eprintln!("Skipping: blastp not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -24471,7 +24522,7 @@ fn blastp_ncbi_parity_unsupported_matrix_error() {
         .arg("6")
         .output()
         .expect("run blast-cli unsupported matrix");
-    let ncbi = std::process::Command::new("/usr/bin/blastp")
+    let ncbi = std::process::Command::new(ncbi_bin("blastp"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -25374,8 +25425,8 @@ fn blastp_db_ncbi_parity_pairwise_line_length() {
 
 #[test]
 fn blastp_subject_ncbi_parity_identity_matrix_default_stats_and_warning() {
-    if !std::path::Path::new("/usr/bin/blastp").exists() {
-        eprintln!("Skipping: /usr/bin/blastp not found");
+    if !ncbi_bin("blastp").exists() {
+        eprintln!("Skipping: blastp not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -25405,7 +25456,7 @@ fn blastp_subject_ncbi_parity_identity_matrix_default_stats_and_warning() {
         .arg("6 qseqid sseqid score bitscore evalue length pident")
         .output()
         .expect("run blast-cli IDENTITY");
-    let ncbi = std::process::Command::new("/usr/bin/blastp")
+    let ncbi = std::process::Command::new(ncbi_bin("blastp"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -25472,7 +25523,7 @@ fn blastp_subject_ncbi_parity_matrix_specific_default_gap_costs_in_pairwise() {
 fn blastx_subject_ncbi_parity_matrix_specific_default_gap_costs_in_xml() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "5",
@@ -25492,7 +25543,7 @@ fn blastx_subject_ncbi_parity_matrix_specific_default_gap_costs_in_xml() {
 fn blastx_subject_ncbi_parity_matrix_specific_default_gap_costs_in_pairwise() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "0",
@@ -25516,7 +25567,7 @@ fn blastx_subject_ncbi_parity_non_default_small_window_size() {
     // covered by the blast_aa_word_finder_honors_non_default_window unit test.
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         ">s1\nAAAAAAAAAAAAAAAAAAAA\n",
         "6 qseqid sseqid length bitscore evalue",
@@ -25536,7 +25587,7 @@ fn blastx_subject_ncbi_parity_non_default_small_window_size() {
 fn blastx_subject_ncbi_parity_non_default_large_window_size() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         ">s1\nAAAAAAAAAAAAAAAAAAAA\n",
         "6 qseqid sseqid length bitscore evalue",
@@ -25565,7 +25616,7 @@ fn tblastn_subject_ncbi_parity_non_default_window_size() {
     // non-default two-hit window threaded through to the scanner.
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nAAAAAAAAAAAAAAAAAAAA\n",
         ">s1\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         "6 qseqid sseqid length bitscore evalue",
@@ -25583,8 +25634,8 @@ fn tblastn_subject_ncbi_parity_non_default_window_size() {
 
 #[test]
 fn blastx_ncbi_parity_identity_matrix_is_unsupported() {
-    if !std::path::Path::new("/usr/bin/blastx").exists() {
-        eprintln!("Skipping: /usr/bin/blastx not found");
+    if !ncbi_bin("blastx").exists() {
+        eprintln!("Skipping: blastx not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -25610,7 +25661,7 @@ fn blastx_ncbi_parity_identity_matrix_is_unsupported() {
         .arg("6")
         .output()
         .expect("run blast-cli blastx IDENTITY");
-    let ncbi = std::process::Command::new("/usr/bin/blastx")
+    let ncbi = std::process::Command::new(ncbi_bin("blastx"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -25637,7 +25688,7 @@ fn blastx_ncbi_parity_identity_matrix_is_unsupported() {
 fn blastx_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1 low complexity nt query\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         concat!(
             ">s1 low complexity protein subject\nAAAAAAAAAAAAAAAAAAAA\n",
@@ -25653,7 +25704,7 @@ fn blastx_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
 fn blastx_subject_ncbi_parity_query_gencode_changes_translation() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1 ciliate glutamine codons\nTAATAATAATAATAA\n",
         ">s1 glutamine peptide\nQQQQQ\n",
         "6 qseqid sseqid qstart qend sstart send score length qseq sseq",
@@ -25666,7 +25717,7 @@ fn blastx_subject_ncbi_parity_query_gencode_changes_translation() {
 fn tblastn_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1 low complexity protein query\nAAAAAAAAAAAAAAAAAAAA\n",
         concat!(
             ">s1 low complexity nt subject\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
@@ -25682,7 +25733,7 @@ fn tblastn_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
 fn tblastn_subject_ncbi_parity_db_gencode_changes_translation() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1 glutamine peptide\nQQQQQ\n",
         ">s1 ciliate glutamine codons\nTAATAATAATAATAA\n",
         "6 qseqid sseqid qstart qend sstart send score length qseq sseq",
@@ -25695,7 +25746,7 @@ fn tblastn_subject_ncbi_parity_db_gencode_changes_translation() {
 fn tblastn_subject_ncbi_parity_identity_matrix_default_threshold() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">prot_q\nMKFLIFALILFATVALAPKSSSHEI\n",
         ">s\nATGAAATTTTTAATTTTTGCTTTAATTTTATTTGCTACTGTTGCTTTAGCTCCAAAATCATCATCTCATGAAATT\n",
         "6 qseqid sseqid score bitscore length pident qstart qend sstart send qseq sseq",
@@ -25709,19 +25760,19 @@ fn translated_subject_ncbi_parity_custom_field_parser_edges() {
     for (program, ncbi_bin, query, subject) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1\nMKFLILLF\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             ">q1\nMKFLILLF\n",
             ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ),
@@ -25757,7 +25808,7 @@ fn translated_subject_ncbi_parity_custom_field_parser_edges() {
 fn tblastx_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1 low complexity nt query\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
         concat!(
             ">s1 low complexity nt subject\nGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCTGCT\n",
@@ -25773,7 +25824,7 @@ fn tblastx_subject_ncbi_parity_default_seg_masks_low_complexity_query() {
 fn tblastx_subject_ncbi_parity_query_and_db_gencode_change_translation() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1 ciliate glutamine codons\nTAATAATAATAATAA\n",
         ">s1 ciliate glutamine codons\nTAATAATAATAATAA\n",
         "6 qseqid sseqid qstart qend sstart send score length qseq sseq",
@@ -25804,7 +25855,7 @@ fn tblastx_subject_ncbi_parity_query_and_db_gencode_change_translation() {
 fn tblastx_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
@@ -25817,7 +25868,7 @@ fn tblastx_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
 fn blastx_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
@@ -25830,7 +25881,7 @@ fn blastx_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
 fn tblastn_subject_ncbi_parity_exact_translation_coordinates_and_frames() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
@@ -25847,7 +25898,7 @@ fn blastx_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
     );
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         &query,
         ">s1\nMKFLILLF\n",
         "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
@@ -25864,7 +25915,7 @@ fn tblastn_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
     );
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         &subject,
         "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
@@ -25885,7 +25936,7 @@ fn tblastx_subject_ncbi_parity_reverse_frame_coordinates_and_frames() {
     );
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         &query,
         &subject,
         "6 qseqid sseqid qlen slen qstart qend sstart send score qframe sframe frames length",
@@ -25902,7 +25953,7 @@ fn tblastx_subject_ncbi_parity_indel_remains_ungapped() {
         ">s1\nATGAAATTTCTGATTCTGCTGTTTATTCTGTGTCTGTTTCCTGTTCTGGCTGCTGATAATCATGGTGTTTCTATGAATGCTTCT\n";
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         query,
         subject,
         "6 qseqid sseqid qstart qend sstart send score length gaps qframe sframe frames qseq sseq",
@@ -25915,7 +25966,7 @@ fn tblastx_subject_ncbi_parity_indel_remains_ungapped() {
 fn tblastx_subject_ncbi_parity_frame_offset_insertion_remains_ungapped() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq",
@@ -25928,7 +25979,7 @@ fn tblastx_subject_ncbi_parity_frame_offset_insertion_remains_ungapped() {
 fn tblastx_subject_ncbi_parity_frameshift_pattern_remains_ungapped() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -25941,7 +25992,7 @@ fn tblastx_subject_ncbi_parity_frameshift_pattern_remains_ungapped() {
 fn tblastx_subject_ncbi_parity_complex_frameshift_top_hsps() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -25954,7 +26005,7 @@ fn tblastx_subject_ncbi_parity_complex_frameshift_top_hsps() {
 fn tblastx_subject_ncbi_parity_complex_frameshift_rendered_fields() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -25967,7 +26018,7 @@ fn tblastx_subject_ncbi_parity_complex_frameshift_rendered_fields() {
 fn tblastx_subject_ncbi_parity_complex_frameshift_identity_fields() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
         "6 qseqid sseqid pident nident positive length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -25980,7 +26031,7 @@ fn tblastx_subject_ncbi_parity_complex_frameshift_identity_fields() {
 fn tblastx_subject_ncbi_parity_codon_deletion_frameshift_split_hsps() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -25993,7 +26044,7 @@ fn tblastx_subject_ncbi_parity_codon_deletion_frameshift_split_hsps() {
 fn tblastx_subject_ncbi_parity_complex_frameshift_xml() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
         "5",
@@ -26006,7 +26057,7 @@ fn tblastx_subject_ncbi_parity_complex_frameshift_xml() {
 fn tblastx_subject_ncbi_parity_complex_frameshift_pairwise() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
         "0",
@@ -26019,7 +26070,7 @@ fn tblastx_subject_ncbi_parity_complex_frameshift_pairwise() {
 fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_pairwise() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "0",
@@ -26032,7 +26083,7 @@ fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_pairwise() {
 fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_pairwise_max30() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "0",
@@ -26045,7 +26096,7 @@ fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_pairwise_max30() {
 fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_xml() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "5",
@@ -26058,7 +26109,7 @@ fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_xml() {
 fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_rendered_fields() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26071,7 +26122,7 @@ fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_rendered_fields() {
 fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_identity_fields() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid pident nident positive ppos length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26084,7 +26135,7 @@ fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_identity_fields() {
 fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_top_hsps_max30() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send score bitscore evalue length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26097,7 +26148,7 @@ fn tblastx_subject_ncbi_parity_complex_two_base_frameshift_top_hsps_max30() {
 fn blastx_subject_ncbi_parity_indel_remains_ungapped() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLFKFMKFLILLF\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26110,7 +26161,7 @@ fn blastx_subject_ncbi_parity_indel_remains_ungapped() {
 fn tblastn_subject_ncbi_parity_indel_remains_ungapped() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLFKFMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26123,7 +26174,7 @@ fn tblastn_subject_ncbi_parity_indel_remains_ungapped() {
 fn tblastn_subject_ncbi_parity_explicit_ungapped_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps qseq sseq btop",
@@ -26152,7 +26203,7 @@ fn tblastn_subject_ncbi_parity_explicit_ungapped_exact_hit() {
 fn blastx_subject_ncbi_parity_frameshift_gap_script() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26187,7 +26238,7 @@ fn blastx_subject_ncbi_parity_frameshift_gap_script() {
 fn tblastn_subject_ncbi_parity_frameshift_gap_script() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26222,7 +26273,7 @@ fn tblastn_subject_ncbi_parity_frameshift_gap_script() {
 fn tblastx_subject_ncbi_parity_frameshift_gap_script() {
     assert_translated_subject_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
         "6 qseqid sseqid qstart qend sstart send score length gaps gapopen qframe sframe frames qseq sseq btop",
@@ -26233,8 +26284,8 @@ fn tblastx_subject_ncbi_parity_frameshift_gap_script() {
 
 #[test]
 fn tblastx_subject_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
-    if !std::path::Path::new("/usr/bin/tblastx").exists() {
-        eprintln!("Skipping: /usr/bin/tblastx not found");
+    if !ncbi_bin("tblastx").exists() {
+        eprintln!("Skipping: tblastx not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -26282,7 +26333,7 @@ fn tblastx_subject_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular(
         .expect("run blast-cli tblastx subject mixed candidate tabular");
     assert!(rust.success(), "blast-cli tblastx exited with {rust}");
 
-    let ncbi = std::process::Command::new("/usr/bin/tblastx")
+    let ncbi = std::process::Command::new(ncbi_bin("tblastx"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -26340,8 +26391,8 @@ fn tblastx_subject_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular(
 
 #[test]
 fn blastx_subject_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
-    if !std::path::Path::new("/usr/bin/blastx").exists() {
-        eprintln!("Skipping: /usr/bin/blastx not found");
+    if !ncbi_bin("blastx").exists() {
+        eprintln!("Skipping: blastx not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -26390,7 +26441,7 @@ fn blastx_subject_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
         .expect("run blast-cli blastx subject mixed pairwise");
     assert!(rust.success(), "blast-cli blastx exited with {rust}");
 
-    let ncbi = std::process::Command::new("/usr/bin/blastx")
+    let ncbi = std::process::Command::new(ncbi_bin("blastx"))
         .arg("-query")
         .arg(&query)
         .arg("-subject")
@@ -26428,7 +26479,7 @@ fn blastx_subject_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
         assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKL---NESSAFY"));
         assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY"));
     }
-    assert!(rust.contains("Expect = 5e-15"));
+    assert!(rust.contains("Expect = 3e-20"));
     assert!(ncbi.contains("Expect = 3e-20"));
 }
 
@@ -26436,7 +26487,7 @@ fn blastx_subject_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
 fn blastx_subject_ncbi_parity_commented_tabular_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "7",
@@ -26449,7 +26500,7 @@ fn blastx_subject_ncbi_parity_commented_tabular_exact_hit() {
 fn blastx_subject_ncbi_parity_commented_tabular_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
         "7",
@@ -26462,7 +26513,7 @@ fn blastx_subject_ncbi_parity_commented_tabular_parse_deflines() {
 fn blastx_subject_ncbi_parity_xml_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "5",
@@ -26475,7 +26526,7 @@ fn blastx_subject_ncbi_parity_xml_exact_hit() {
 fn blastx_subject_ncbi_parity_xml_positive_substitution() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTTCCTGTTCTGGCTGCTGATAACCATGGTGTTTCTATGAACGCTTCT\n",
         ">s1\nMKFLILLFNILCLFPVLAADNHGVSINAS\n",
         "5",
@@ -26488,7 +26539,7 @@ fn blastx_subject_ncbi_parity_xml_positive_substitution() {
 fn blastx_subject_ncbi_parity_xml_no_hits() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 unrelated\nPPPPPPPPPPPP\n",
         "5",
@@ -26501,7 +26552,7 @@ fn blastx_subject_ncbi_parity_xml_no_hits() {
 fn blastx_subject_ncbi_parity_xml_multiple_queries() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n>q2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
         ">s1\nMKFLILLF\n",
         "5",
@@ -26514,7 +26565,7 @@ fn blastx_subject_ncbi_parity_xml_multiple_queries() {
 fn blastx_subject_ncbi_parity_xml_multi_hsp_same_subject() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nMKFLILLFQQQQGMKFLILLF\n",
         "5",
@@ -26527,7 +26578,7 @@ fn blastx_subject_ncbi_parity_xml_multi_hsp_same_subject() {
 fn blastx_subject_ncbi_parity_xml_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
         "5",
@@ -26540,7 +26591,7 @@ fn blastx_subject_ncbi_parity_xml_parse_deflines() {
 fn blastx_subject_ncbi_parity_pairwise_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "0",
@@ -26553,7 +26604,7 @@ fn blastx_subject_ncbi_parity_pairwise_exact_hit() {
 fn blastx_subject_ncbi_parity_pairwise_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
         "0",
@@ -26566,7 +26617,7 @@ fn blastx_subject_ncbi_parity_pairwise_parse_deflines() {
 fn blastx_subject_ncbi_parity_tabular_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
         "6 qseqid qacc qaccver sseqid sacc saccver",
@@ -26579,7 +26630,7 @@ fn blastx_subject_ncbi_parity_tabular_parse_deflines() {
 fn blastx_subject_ncbi_parity_tabular_parse_deflines_gis() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
         "6 qseqid qgi qacc qaccver sseqid sgi sallgi sacc saccver sallseqid",
@@ -26592,7 +26643,7 @@ fn blastx_subject_ncbi_parity_tabular_parse_deflines_gis() {
 fn blastx_subject_ncbi_parity_tabular_parse_deflines_titles() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
         "6 sseqid stitle salltitles",
@@ -26605,7 +26656,7 @@ fn blastx_subject_ncbi_parity_tabular_parse_deflines_titles() {
 fn blastx_subject_ncbi_parity_csv_parse_deflines_metadata() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
         "10 qseqid qgi qacc qaccver sseqid sgi sallgi sacc saccver sallseqid stitle salltitles",
@@ -26618,7 +26669,7 @@ fn blastx_subject_ncbi_parity_csv_parse_deflines_metadata() {
 fn blastx_subject_ncbi_parity_pairwise_no_hits() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nGGGGGGGG\n",
         "0",
@@ -26638,7 +26689,7 @@ fn blastx_subject_ncbi_parity_pairwise_no_hits() {
 fn blastx_subject_ncbi_parity_pairwise_line_length() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "0",
@@ -26658,7 +26709,7 @@ fn blastx_subject_ncbi_parity_pairwise_line_length() {
 fn blastx_subject_ncbi_parity_pairwise_num_alignments() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 first\nMKFLILLF\n>s2 second\nMKFLILLF\n",
         "0",
@@ -26689,7 +26740,7 @@ fn blastx_subject_ncbi_parity_pairwise_num_alignments() {
 fn blastx_subject_ncbi_parity_pairwise_multi_hsp_same_subject() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nMKFLILLFQQQQGMKFLILLF\n",
         "0",
@@ -26702,7 +26753,7 @@ fn blastx_subject_ncbi_parity_pairwise_multi_hsp_same_subject() {
 fn blastx_subject_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLFMKFLILLF\n",
         "6 qseqid sseqid score bitscore evalue length qstart qend sstart send",
@@ -26733,7 +26784,7 @@ fn blastx_subject_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
 fn blastx_subject_ncbi_parity_tabular_sum_stats_false_single_hsp() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
         "6 qseqid sseqid score bitscore evalue length qstart qend sstart send",
@@ -26764,7 +26815,7 @@ fn blastx_subject_ncbi_parity_tabular_sum_stats_false_single_hsp() {
 fn blastx_subject_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
     assert_translated_subject_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLFMKFLILLF\n",
         "0",
@@ -26795,7 +26846,7 @@ fn blastx_subject_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
 fn tblastn_subject_ncbi_parity_commented_tabular_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "7",
@@ -26808,7 +26859,7 @@ fn tblastn_subject_ncbi_parity_commented_tabular_exact_hit() {
 fn tblastn_subject_ncbi_parity_commented_tabular_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "7 qaccver saccver pident length bitscore",
@@ -26821,7 +26872,7 @@ fn tblastn_subject_ncbi_parity_commented_tabular_parse_deflines() {
 fn tblastn_subject_ncbi_parity_xml_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -26834,7 +26885,7 @@ fn tblastn_subject_ncbi_parity_xml_exact_hit() {
 fn tblastn_subject_ncbi_parity_xml_no_hits() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1 unrelated\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
         "5",
@@ -26847,7 +26898,7 @@ fn tblastn_subject_ncbi_parity_xml_no_hits() {
 fn tblastn_subject_ncbi_parity_xml_multiple_queries() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n>q2 unrelated\nPPPPPPPP\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -26860,7 +26911,7 @@ fn tblastn_subject_ncbi_parity_xml_multiple_queries() {
 fn tblastn_subject_ncbi_parity_xml_multi_hsp_same_subject() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLFQQQQGMKFLILLF\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -26873,7 +26924,7 @@ fn tblastn_subject_ncbi_parity_xml_multi_hsp_same_subject() {
 fn tblastn_subject_ncbi_parity_xml_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -26886,7 +26937,7 @@ fn tblastn_subject_ncbi_parity_xml_parse_deflines() {
 fn tblastn_subject_ncbi_parity_pairwise_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -26899,7 +26950,7 @@ fn tblastn_subject_ncbi_parity_pairwise_exact_hit() {
 fn tblastn_subject_ncbi_parity_pairwise_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -26912,7 +26963,7 @@ fn tblastn_subject_ncbi_parity_pairwise_parse_deflines() {
 fn tblastn_subject_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLFMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -26943,7 +26994,7 @@ fn tblastn_subject_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
 fn tblastn_subject_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLFMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid sseqid score bitscore evalue length qstart qend sstart send",
@@ -26974,7 +27025,7 @@ fn tblastn_subject_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
 fn tblastn_subject_ncbi_parity_tabular_sum_stats_false_single_hsp() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid sseqid score bitscore evalue length qstart qend sstart send",
@@ -27006,13 +27057,13 @@ fn translated_subject_ncbi_parity_small_max_intron_uses_non_sum_stats_evalue() {
     for (program, ncbi_bin, query, subject) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1\nMKFLILLF\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             ">q1\nMKFLILLF\n",
             ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ),
@@ -27054,14 +27105,14 @@ fn translated_db_ncbi_parity_small_max_intron_uses_non_sum_stats_evalue() {
     for (program, ncbi_bin, dbtype, query, db_fasta) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             "prot",
             ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1\nMKFLILLF\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             "nucl",
             ">q1\nMKFLILLF\n",
             ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -27104,7 +27155,7 @@ fn translated_db_ncbi_parity_small_max_intron_uses_non_sum_stats_evalue() {
 fn tblastn_subject_ncbi_parity_tabular_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid qacc qaccver sseqid sacc saccver pident length bitscore",
@@ -27117,7 +27168,7 @@ fn tblastn_subject_ncbi_parity_tabular_parse_deflines() {
 fn tblastn_subject_ncbi_parity_tabular_parse_deflines_gis() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid qgi qacc qaccver sseqid sgi sallgi sacc saccver sallseqid pident length bitscore",
@@ -27130,7 +27181,7 @@ fn tblastn_subject_ncbi_parity_tabular_parse_deflines_gis() {
 fn tblastn_subject_ncbi_parity_tabular_parse_deflines_titles() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 sseqid stitle salltitles",
@@ -27143,7 +27194,7 @@ fn tblastn_subject_ncbi_parity_tabular_parse_deflines_titles() {
 fn tblastn_subject_ncbi_parity_csv_parse_deflines_metadata() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "10 qseqid qgi qacc qaccver sseqid sgi sallgi sacc saccver sallseqid stitle salltitles",
@@ -27156,7 +27207,7 @@ fn tblastn_subject_ncbi_parity_csv_parse_deflines_metadata() {
 fn tblastn_subject_ncbi_parity_pairwise_no_hits() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
         "0",
@@ -27176,7 +27227,7 @@ fn tblastn_subject_ncbi_parity_pairwise_no_hits() {
 fn tblastn_subject_ncbi_parity_pairwise_line_length() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27196,7 +27247,7 @@ fn tblastn_subject_ncbi_parity_pairwise_line_length() {
 fn tblastn_subject_ncbi_parity_pairwise_num_alignments() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLF\n",
         ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27227,7 +27278,7 @@ fn tblastn_subject_ncbi_parity_pairwise_num_alignments() {
 fn tblastn_subject_ncbi_parity_pairwise_multi_hsp_same_subject() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         ">q1\nMKFLILLFQQQQGMKFLILLF\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27240,7 +27291,7 @@ fn tblastn_subject_ncbi_parity_pairwise_multi_hsp_same_subject() {
 fn tblastx_subject_ncbi_parity_commented_tabular_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "7",
@@ -27253,7 +27304,7 @@ fn tblastx_subject_ncbi_parity_commented_tabular_exact_hit() {
 fn tblastx_subject_ncbi_parity_commented_tabular_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "7",
@@ -27266,7 +27317,7 @@ fn tblastx_subject_ncbi_parity_commented_tabular_parse_deflines() {
 fn tblastx_subject_ncbi_parity_xml_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -27279,7 +27330,7 @@ fn tblastx_subject_ncbi_parity_xml_exact_hit() {
 fn tblastx_subject_ncbi_parity_xml_no_hits() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 unrelated\nCCACCTCCACCTCCACCTCCACCT\n",
         "5",
@@ -27292,7 +27343,7 @@ fn tblastx_subject_ncbi_parity_xml_no_hits() {
 fn tblastx_subject_ncbi_parity_xml_multiple_queries() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n>q2 unrelated\nCCACCTCCACCTCCACCTCCACCT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -27305,7 +27356,7 @@ fn tblastx_subject_ncbi_parity_xml_multiple_queries() {
 fn tblastx_subject_ncbi_parity_xml_multi_hsp_same_subject() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -27318,7 +27369,7 @@ fn tblastx_subject_ncbi_parity_xml_multi_hsp_same_subject() {
 fn tblastx_subject_ncbi_parity_xml_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "5",
@@ -27331,7 +27382,7 @@ fn tblastx_subject_ncbi_parity_xml_parse_deflines() {
 fn tblastx_subject_ncbi_parity_pairwise_exact_hit() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27344,7 +27395,7 @@ fn tblastx_subject_ncbi_parity_pairwise_exact_hit() {
 fn tblastx_subject_ncbi_parity_pairwise_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27357,7 +27408,7 @@ fn tblastx_subject_ncbi_parity_pairwise_parse_deflines() {
 fn tblastx_subject_ncbi_parity_tabular_parse_deflines() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid qacc qaccver sseqid sacc saccver pident length bitscore",
@@ -27370,7 +27421,7 @@ fn tblastx_subject_ncbi_parity_tabular_parse_deflines() {
 fn tblastx_subject_ncbi_parity_tabular_parse_deflines_gis() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 qseqid qgi qacc qaccver sseqid sgi sallgi sacc saccver sallseqid pident length bitscore",
@@ -27383,7 +27434,7 @@ fn tblastx_subject_ncbi_parity_tabular_parse_deflines_gis() {
 fn tblastx_subject_ncbi_parity_tabular_parse_deflines_titles() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "6 sseqid stitle salltitles",
@@ -27396,7 +27447,7 @@ fn tblastx_subject_ncbi_parity_tabular_parse_deflines_titles() {
 fn tblastx_subject_ncbi_parity_csv_parse_deflines_metadata() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         "10 qseqid qgi qacc qaccver sseqid sgi sallgi sacc saccver sallseqid stitle salltitles",
@@ -27409,7 +27460,7 @@ fn tblastx_subject_ncbi_parity_csv_parse_deflines_metadata() {
 fn tblastx_subject_ncbi_parity_pairwise_no_hits() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
         "0",
@@ -27422,7 +27473,7 @@ fn tblastx_subject_ncbi_parity_pairwise_no_hits() {
 fn tblastx_subject_ncbi_parity_pairwise_line_length() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27435,7 +27486,7 @@ fn tblastx_subject_ncbi_parity_pairwise_line_length() {
 fn tblastx_subject_ncbi_parity_pairwise_num_alignments() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27466,7 +27517,7 @@ fn tblastx_subject_ncbi_parity_pairwise_num_alignments() {
 fn tblastx_subject_ncbi_parity_pairwise_multi_hsp_same_subject() {
     assert_translated_subject_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         "0",
@@ -27480,19 +27531,19 @@ fn translated_subject_ncbi_parity_pairwise_zero_description_alignment_limits() {
     for (program, ncbi_bin, query, subject) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             ">q1 translated query\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1 protein subject\nMKFLILLF\n>s2 unrelated\nACDEFGHIKLMN\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             ">q1 protein query\nMKFLILLF\n",
             ">s1 nucleotide subject\nATGAAATTTCTGATTCTGCTGTTT\n>s2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             ">q1 translated query\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1 nucleotide subject\nATGAAATTTCTGATTCTGCTGTTT\n>s2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
         ),
@@ -27533,19 +27584,19 @@ fn translated_subject_ncbi_parity_culling_limit() {
     for (program, ncbi_bin, query, subject) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">wide\nMKFLILLFQQQQGMKFLILLF\n>contained\nKFLILL\n>outside\nQQQQG\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             ">q1\nMKFLILLFQQQQGMKFLILLF\n",
             ">wide\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>outside\nCAGCAGCAGCAGGGT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">wide\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>outside\nCAGCAGCAGCAGGGT\n",
         ),
@@ -27592,19 +27643,19 @@ fn translated_subject_ncbi_parity_hit_limit_and_identity_filters() {
     for (program, ncbi_bin, query, subject) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nMKFLILLFQQQQGMKFLILLF\n>partial\nMKFLILLF\n>near\nMKFLILLY\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             ">q1\nMKFLILLFQQQQGMKFLILLF\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>partial\nATGAAATTTCTGATTCTGCTGTTT\n>near\nATGAAATTTCTGATTCTGCTGTTACT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>partial\nATGAAATTTCTGATTCTGCTGTTT\n>near\nATGAAATTTCTGATTCTGCTGTTACT\n",
         ),
@@ -27672,7 +27723,7 @@ fn tblastx_subject_ncbi_parity_stable_hit_limit_filters() {
         ncbi_args.extend(ncbi_extra);
         assert_translated_subject_outfmt_matches_ncbi(
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>partial\nATGAAATTTCTGATTCTGCTGTTT\n>near\nATGAAATTTCTGATTCTGCTGTTACT\n",
             "6 qseqid sseqid score pident length qstart qend sstart send qframe sframe",
@@ -27687,19 +27738,19 @@ fn translated_subject_ncbi_parity_best_hit_filters() {
     for (program, ncbi_bin, query, subject) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nMKFLILLFQQQQGMKFLILLF\n>contained\nKFLILL\n>near\nMKFLILLYQQQQGMKFLILLF\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             ">q1\nMKFLILLFQQQQGMKFLILLF\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>near\nATGAAATTTCTGATTCTGCTGTTACTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>near\nATGAAATTTCTGATTCTGCTGTTACTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ),
@@ -27734,7 +27785,7 @@ fn translated_subject_ncbi_parity_best_hit_filters() {
 fn blastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
@@ -27748,7 +27799,7 @@ fn blastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
 fn tblastn_db_ncbi_parity_exact_translation_coordinates_and_frames() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -27762,7 +27813,7 @@ fn tblastn_db_ncbi_parity_exact_translation_coordinates_and_frames() {
 fn tblastx_db_ncbi_parity_exact_translation_coordinates_and_frames() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -27780,7 +27831,7 @@ fn blastx_db_ncbi_parity_reverse_frame_coordinates_and_frames() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         &query,
         ">s1\nMKFLILLF\n",
@@ -27798,7 +27849,7 @@ fn blastx_db_ncbi_parity_minus_frame_seqsrc_traceback_sequence() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         &query,
         ">minus_frame\nMKFLILLF\n",
@@ -27817,7 +27868,7 @@ fn blastx_db_ncbi_parity_multi_subject_seqsrc_traceback_sequences() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         &query,
         ">plus_frame\nMKFLILLF\n>minus_frame\nACDEFGHI\n>unrelated\nPPPPPPPP\n",
@@ -27835,7 +27886,7 @@ fn tblastn_db_ncbi_parity_reverse_frame_coordinates_and_frames() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         &subject,
@@ -27853,7 +27904,7 @@ fn tblastn_db_ncbi_parity_minus_frame_seqsrc_traceback_sequence() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         &subject,
@@ -27867,7 +27918,7 @@ fn tblastn_db_ncbi_parity_minus_frame_seqsrc_traceback_sequence() {
 fn tblastn_db_ncbi_parity_plus_frame_seqsrc_traceback_sequence() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">plus_frame\nGGGGCCCCAAAATGAAATTTCTGATTCTGCTGTTTTTTT\n",
@@ -27885,7 +27936,7 @@ fn tblastn_db_ncbi_parity_mixed_frame_seqsrc_traceback_sequences() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         &subject,
@@ -27907,7 +27958,7 @@ fn tblastx_db_ncbi_parity_reverse_frame_coordinates_and_frames() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         &query,
         &subject,
@@ -27925,7 +27976,7 @@ fn tblastx_db_ncbi_parity_minus_frame_seqsrc_traceback_sequence() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTT\n",
         &subject,
@@ -27943,7 +27994,7 @@ fn tblastx_db_ncbi_parity_multi_subject_seqsrc_traceback_sequences() {
     );
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTT\n",
         &subjects,
@@ -27958,21 +28009,21 @@ fn translated_db_ncbi_parity_custom_field_parser_edges() {
     for (program, ncbi_bin, dbtype, query, db_fasta) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             "prot",
             ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1\nMKFLILLF\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             "nucl",
             ">q1\nMKFLILLF\n",
             ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             "nucl",
             ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28010,7 +28061,7 @@ fn translated_db_ncbi_parity_custom_field_parser_edges() {
 fn blastx_db_ncbi_parity_commented_tabular_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
@@ -28024,7 +28075,7 @@ fn blastx_db_ncbi_parity_commented_tabular_exact_hit() {
 fn blastx_db_ncbi_parity_commented_tabular_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
@@ -28038,7 +28089,7 @@ fn blastx_db_ncbi_parity_commented_tabular_parse_deflines() {
 fn blastx_db_ncbi_parity_xml_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
@@ -28052,7 +28103,7 @@ fn blastx_db_ncbi_parity_xml_exact_hit() {
 fn blastx_db_ncbi_parity_xml_positive_substitution() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAACATTCTGTGCCTGTTTCCTGTTCTGGCTGCTGATAACCATGGTGTTTCTATGAACGCTTCT\n",
         ">s1\nMKFLILLFNILCLFPVLAADNHGVSINAS\n",
@@ -28066,7 +28117,7 @@ fn blastx_db_ncbi_parity_xml_positive_substitution() {
 fn blastx_db_ncbi_parity_xml_no_hits() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 unrelated\nPPPPPPPPPPPP\n",
@@ -28080,7 +28131,7 @@ fn blastx_db_ncbi_parity_xml_no_hits() {
 fn blastx_db_ncbi_parity_xml_multiple_queries() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n>q2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
         ">s1\nMKFLILLF\n",
@@ -28094,7 +28145,7 @@ fn blastx_db_ncbi_parity_xml_multiple_queries() {
 fn blastx_db_ncbi_parity_xml_multi_hsp_same_subject() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nMKFLILLFQQQQGMKFLILLF\n",
@@ -28108,7 +28159,7 @@ fn blastx_db_ncbi_parity_xml_multi_hsp_same_subject() {
 fn blastx_db_ncbi_parity_xml_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
@@ -28122,7 +28173,7 @@ fn blastx_db_ncbi_parity_xml_parse_deflines() {
 fn blastx_db_ncbi_parity_pairwise_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
@@ -28136,7 +28187,7 @@ fn blastx_db_ncbi_parity_pairwise_exact_hit() {
 fn blastx_db_ncbi_parity_pairwise_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
@@ -28150,7 +28201,7 @@ fn blastx_db_ncbi_parity_pairwise_parse_deflines() {
 fn blastx_db_ncbi_parity_tabular_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
@@ -28164,7 +28215,7 @@ fn blastx_db_ncbi_parity_tabular_parse_deflines() {
 fn blastx_db_ncbi_parity_tabular_parse_deflines_gis() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
@@ -28178,7 +28229,7 @@ fn blastx_db_ncbi_parity_tabular_parse_deflines_gis() {
 fn blastx_db_ncbi_parity_tabular_parse_deflines_titles() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
@@ -28192,7 +28243,7 @@ fn blastx_db_ncbi_parity_tabular_parse_deflines_titles() {
 fn blastx_db_ncbi_parity_csv_parse_deflines_metadata() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SPROT.1| subject protein\nMKFLILLF\n",
@@ -28206,7 +28257,7 @@ fn blastx_db_ncbi_parity_csv_parse_deflines_metadata() {
 fn blastx_db_ncbi_parity_pairwise_no_hits() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nGGGGGGGG\n",
@@ -28227,7 +28278,7 @@ fn blastx_db_ncbi_parity_pairwise_no_hits() {
 fn blastx_db_ncbi_parity_pairwise_line_length() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
@@ -28248,7 +28299,7 @@ fn blastx_db_ncbi_parity_pairwise_line_length() {
 fn blastx_db_ncbi_parity_pairwise_num_alignments() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 first\nMKFLILLF\n>s2 second\nMKFLILLF\n",
@@ -28280,7 +28331,7 @@ fn blastx_db_ncbi_parity_pairwise_num_alignments() {
 fn blastx_db_ncbi_parity_pairwise_multi_hsp_same_subject() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nMKFLILLFQQQQGMKFLILLF\n",
@@ -28294,7 +28345,7 @@ fn blastx_db_ncbi_parity_pairwise_multi_hsp_same_subject() {
 fn blastx_db_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLFMKFLILLF\n",
@@ -28326,7 +28377,7 @@ fn blastx_db_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
 fn blastx_db_ncbi_parity_num_threads_two_gapped_traceback() {
     assert_translated_db_outfmt_matches_ncbi_with_num_threads(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLFMKFLILLF\n",
@@ -28359,7 +28410,7 @@ fn blastx_db_ncbi_parity_num_threads_two_gapped_traceback() {
 fn blastx_db_ncbi_parity_tabular_sum_stats_false_single_hsp() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLF\n",
@@ -28391,7 +28442,7 @@ fn blastx_db_ncbi_parity_tabular_sum_stats_false_single_hsp() {
 fn blastx_db_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLFMKFLILLF\n",
@@ -28423,7 +28474,7 @@ fn blastx_db_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
 fn tblastn_db_ncbi_parity_commented_tabular_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28437,7 +28488,7 @@ fn tblastn_db_ncbi_parity_commented_tabular_exact_hit() {
 fn tblastn_db_ncbi_parity_commented_tabular_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28451,7 +28502,7 @@ fn tblastn_db_ncbi_parity_commented_tabular_parse_deflines() {
 fn tblastn_db_ncbi_parity_xml_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28465,7 +28516,7 @@ fn tblastn_db_ncbi_parity_xml_exact_hit() {
 fn tblastn_db_ncbi_parity_xml_no_hits() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1 unrelated\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
@@ -28479,7 +28530,7 @@ fn tblastn_db_ncbi_parity_xml_no_hits() {
 fn tblastn_db_ncbi_parity_xml_multiple_queries() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n>q2 unrelated\nPPPPPPPP\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28493,7 +28544,7 @@ fn tblastn_db_ncbi_parity_xml_multiple_queries() {
 fn tblastn_db_ncbi_parity_xml_multi_hsp_same_subject() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLFQQQQGMKFLILLF\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28507,7 +28558,7 @@ fn tblastn_db_ncbi_parity_xml_multi_hsp_same_subject() {
 fn tblastn_db_ncbi_parity_xml_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28521,7 +28572,7 @@ fn tblastn_db_ncbi_parity_xml_parse_deflines() {
 fn tblastn_db_ncbi_parity_pairwise_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28535,7 +28586,7 @@ fn tblastn_db_ncbi_parity_pairwise_exact_hit() {
 fn tblastn_db_ncbi_parity_pairwise_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28549,7 +28600,7 @@ fn tblastn_db_ncbi_parity_pairwise_parse_deflines() {
 fn tblastn_db_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLFMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28581,7 +28632,7 @@ fn tblastn_db_ncbi_parity_explicit_sum_stats_gapped_single_hsp() {
 fn tblastn_db_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLFMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28613,7 +28664,7 @@ fn tblastn_db_ncbi_parity_tabular_sum_stats_gapped_single_hsp() {
 fn tblastn_db_ncbi_parity_tabular_sum_stats_false_single_hsp() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28645,7 +28696,7 @@ fn tblastn_db_ncbi_parity_tabular_sum_stats_false_single_hsp() {
 fn tblastn_db_ncbi_parity_tabular_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28659,7 +28710,7 @@ fn tblastn_db_ncbi_parity_tabular_parse_deflines() {
 fn tblastn_db_ncbi_parity_tabular_parse_deflines_gis() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28673,7 +28724,7 @@ fn tblastn_db_ncbi_parity_tabular_parse_deflines_gis() {
 fn tblastn_db_ncbi_parity_tabular_parse_deflines_titles() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28687,7 +28738,7 @@ fn tblastn_db_ncbi_parity_tabular_parse_deflines_titles() {
 fn tblastn_db_ncbi_parity_csv_parse_deflines_metadata() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">gi|123|ref|QPROT.1| query protein\nMKFLILLF\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28701,7 +28752,7 @@ fn tblastn_db_ncbi_parity_csv_parse_deflines_metadata() {
 fn tblastn_db_ncbi_parity_pairwise_no_hits() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
@@ -28722,7 +28773,7 @@ fn tblastn_db_ncbi_parity_pairwise_no_hits() {
 fn tblastn_db_ncbi_parity_pairwise_line_length() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28743,7 +28794,7 @@ fn tblastn_db_ncbi_parity_pairwise_line_length() {
 fn tblastn_db_ncbi_parity_pairwise_num_alignments() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28775,7 +28826,7 @@ fn tblastn_db_ncbi_parity_pairwise_num_alignments() {
 fn tblastn_db_ncbi_parity_pairwise_multi_hsp_same_subject() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLFQQQQGMKFLILLF\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28789,7 +28840,7 @@ fn tblastn_db_ncbi_parity_pairwise_multi_hsp_same_subject() {
 fn tblastx_db_ncbi_parity_commented_tabular_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28803,7 +28854,7 @@ fn tblastx_db_ncbi_parity_commented_tabular_exact_hit() {
 fn tblastx_db_ncbi_parity_commented_tabular_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28817,7 +28868,7 @@ fn tblastx_db_ncbi_parity_commented_tabular_parse_deflines() {
 fn tblastx_db_ncbi_parity_xml_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28831,7 +28882,7 @@ fn tblastx_db_ncbi_parity_xml_exact_hit() {
 fn tblastx_db_ncbi_parity_xml_no_hits() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 unrelated\nCCACCTCCACCTCCACCTCCACCT\n",
@@ -28845,7 +28896,7 @@ fn tblastx_db_ncbi_parity_xml_no_hits() {
 fn tblastx_db_ncbi_parity_xml_multiple_queries() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n>q2 unrelated\nCCACCTCCACCTCCACCTCCACCT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28859,7 +28910,7 @@ fn tblastx_db_ncbi_parity_xml_multiple_queries() {
 fn tblastx_db_ncbi_parity_xml_multi_hsp_same_subject() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28873,7 +28924,7 @@ fn tblastx_db_ncbi_parity_xml_multi_hsp_same_subject() {
 fn tblastx_db_ncbi_parity_xml_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28887,7 +28938,7 @@ fn tblastx_db_ncbi_parity_xml_parse_deflines() {
 fn tblastx_db_ncbi_parity_pairwise_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28901,7 +28952,7 @@ fn tblastx_db_ncbi_parity_pairwise_exact_hit() {
 fn tblastx_db_ncbi_parity_pairwise_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28915,7 +28966,7 @@ fn tblastx_db_ncbi_parity_pairwise_parse_deflines() {
 fn tblastx_db_ncbi_parity_tabular_parse_deflines() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28929,7 +28980,7 @@ fn tblastx_db_ncbi_parity_tabular_parse_deflines() {
 fn tblastx_db_ncbi_parity_tabular_parse_deflines_gis() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28943,7 +28994,7 @@ fn tblastx_db_ncbi_parity_tabular_parse_deflines_gis() {
 fn tblastx_db_ncbi_parity_tabular_parse_deflines_titles() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28957,7 +29008,7 @@ fn tblastx_db_ncbi_parity_tabular_parse_deflines_titles() {
 fn tblastx_db_ncbi_parity_csv_parse_deflines_metadata() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">gi|123|ref|QNT.1| query nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">gi|456|ref|SNT.1| subject nucleotide\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28971,7 +29022,7 @@ fn tblastx_db_ncbi_parity_csv_parse_deflines_metadata() {
 fn tblastx_db_ncbi_parity_pairwise_no_hits() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nGGGGGGGGGGGGGGGGGGGGGGGG\n",
@@ -28985,7 +29036,7 @@ fn tblastx_db_ncbi_parity_pairwise_no_hits() {
 fn tblastx_db_ncbi_parity_pairwise_line_length() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -28999,7 +29050,7 @@ fn tblastx_db_ncbi_parity_pairwise_line_length() {
 fn tblastx_db_ncbi_parity_pairwise_num_alignments() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 first\nATGAAATTTCTGATTCTGCTGTTT\n>s2 second\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -29031,7 +29082,7 @@ fn tblastx_db_ncbi_parity_pairwise_num_alignments() {
 fn tblastx_db_ncbi_parity_pairwise_multi_hsp_same_subject() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1 multi\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -29045,7 +29096,7 @@ fn tblastx_db_ncbi_parity_pairwise_multi_hsp_same_subject() {
 fn tblastx_db_ncbi_parity_indel_remains_ungapped() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAATATTCTGTGTCTGTTTCCTGTTCTGGCTGCTGATAATCATGGTGTTTCTATGAATGCTTCT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTATTCTGTGTCTGTTTCCTGTTCTGGCTGCTGATAATCATGGTGTTTCTATGAATGCTTCT\n",
@@ -29059,7 +29110,7 @@ fn tblastx_db_ncbi_parity_indel_remains_ungapped() {
 fn tblastx_db_ncbi_parity_frame_offset_insertion_remains_ungapped() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAATGAAATTTCTGATTCTGCTGTTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -29073,7 +29124,7 @@ fn tblastx_db_ncbi_parity_frame_offset_insertion_remains_ungapped() {
 fn tblastx_db_ncbi_parity_frameshift_pattern_remains_ungapped() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29087,7 +29138,7 @@ fn tblastx_db_ncbi_parity_frameshift_pattern_remains_ungapped() {
 fn tblastx_db_ncbi_parity_complex_frameshift_top_hsps() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29101,7 +29152,7 @@ fn tblastx_db_ncbi_parity_complex_frameshift_top_hsps() {
 fn tblastx_db_ncbi_parity_complex_frameshift_rendered_fields() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29115,7 +29166,7 @@ fn tblastx_db_ncbi_parity_complex_frameshift_rendered_fields() {
 fn tblastx_db_ncbi_parity_complex_frameshift_identity_fields() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
@@ -29129,7 +29180,7 @@ fn tblastx_db_ncbi_parity_complex_frameshift_identity_fields() {
 fn tblastx_db_ncbi_parity_codon_deletion_frameshift_split_hsps_xml() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
@@ -29143,7 +29194,7 @@ fn tblastx_db_ncbi_parity_codon_deletion_frameshift_split_hsps_xml() {
 fn tblastx_db_ncbi_parity_codon_deletion_frameshift_split_hsps_pairwise() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29157,7 +29208,7 @@ fn tblastx_db_ncbi_parity_codon_deletion_frameshift_split_hsps_pairwise() {
 fn tblastx_db_ncbi_parity_complex_frameshift_xml() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
@@ -29171,7 +29222,7 @@ fn tblastx_db_ncbi_parity_complex_frameshift_xml() {
 fn tblastx_db_ncbi_parity_complex_frameshift_pairwise() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
@@ -29185,7 +29236,7 @@ fn tblastx_db_ncbi_parity_complex_frameshift_pairwise() {
 fn tblastx_db_ncbi_parity_complex_two_base_frameshift_pairwise() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29199,7 +29250,7 @@ fn tblastx_db_ncbi_parity_complex_two_base_frameshift_pairwise() {
 fn tblastx_db_ncbi_parity_complex_two_base_frameshift_pairwise_max30() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29213,7 +29264,7 @@ fn tblastx_db_ncbi_parity_complex_two_base_frameshift_pairwise_max30() {
 fn tblastx_db_ncbi_parity_complex_two_base_frameshift_xml() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29227,7 +29278,7 @@ fn tblastx_db_ncbi_parity_complex_two_base_frameshift_xml() {
 fn tblastx_db_ncbi_parity_complex_two_base_frameshift_rendered_fields() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29241,7 +29292,7 @@ fn tblastx_db_ncbi_parity_complex_two_base_frameshift_rendered_fields() {
 fn tblastx_db_ncbi_parity_complex_two_base_frameshift_identity_fields() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29255,7 +29306,7 @@ fn tblastx_db_ncbi_parity_complex_two_base_frameshift_identity_fields() {
 fn tblastx_db_ncbi_parity_complex_two_base_frameshift_top_hsps_max30() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29269,7 +29320,7 @@ fn tblastx_db_ncbi_parity_complex_two_base_frameshift_top_hsps_max30() {
 fn blastx_db_ncbi_parity_indel_remains_ungapped() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
         ">s1\nMKFLILLFKFMKFLILLF\n",
@@ -29283,7 +29334,7 @@ fn blastx_db_ncbi_parity_indel_remains_ungapped() {
 fn tblastn_db_ncbi_parity_indel_remains_ungapped() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLFKFMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTTAAAATTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -29297,7 +29348,7 @@ fn tblastn_db_ncbi_parity_indel_remains_ungapped() {
 fn tblastn_db_ncbi_parity_explicit_ungapped_exact_hit() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         ">s1\nATGAAATTTCTGATTCTGCTGTTT\n",
@@ -29327,7 +29378,7 @@ fn tblastn_db_ncbi_parity_explicit_ungapped_exact_hit() {
 fn blastx_db_ncbi_parity_frameshift_gap_script() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
@@ -29363,7 +29414,7 @@ fn blastx_db_ncbi_parity_frameshift_gap_script() {
 fn tblastn_db_ncbi_parity_frameshift_gap_script() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
@@ -29399,7 +29450,7 @@ fn tblastn_db_ncbi_parity_frameshift_gap_script() {
 fn tblastx_db_ncbi_parity_frameshift_gap_script() {
     assert_translated_db_outfmt_matches_ncbi_sorted_lines(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGAATGAATCCTCAGCGTTCTACCGTTTGGTAT\n",
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
@@ -29411,10 +29462,10 @@ fn tblastx_db_ncbi_parity_frameshift_gap_script() {
 
 #[test]
 fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta() {
-    if !std::path::Path::new("/usr/bin/tblastx").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("tblastx").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/tblastx or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: tblastx or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -29438,7 +29489,7 @@ fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta()
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
     )
     .expect("write db fasta");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -29475,7 +29526,7 @@ fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta()
         .expect("run blast-cli tblastx DB mixed candidate pairwise");
     assert!(rust.success(), "blast-cli tblastx exited with {rust}");
 
-    let ncbi = std::process::Command::new("/usr/bin/tblastx")
+    let ncbi = std::process::Command::new(ncbi_bin("tblastx"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -29519,10 +29570,10 @@ fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta()
 
 #[test]
 fn tblastx_db_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
-    if !std::path::Path::new("/usr/bin/tblastx").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("tblastx").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/tblastx or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: tblastx or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -29546,7 +29597,7 @@ fn tblastx_db_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
         ">s1\nGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTCTACCGTTTGGTATGCTTGTGATGAATTTGGTCATATTAAACTGATGAATCCTCAGCGTTTGGTAT\n",
     )
     .expect("write db fasta");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -29585,7 +29636,7 @@ fn tblastx_db_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
         .expect("run blast-cli tblastx DB mixed candidate tabular");
     assert!(rust.success(), "blast-cli tblastx exited with {rust}");
 
-    let ncbi = std::process::Command::new("/usr/bin/tblastx")
+    let ncbi = std::process::Command::new(ncbi_bin("tblastx"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -29640,10 +29691,10 @@ fn tblastx_db_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
 
 #[test]
 fn blastx_db_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
-    if !std::path::Path::new("/usr/bin/blastx").exists()
-        || !std::path::Path::new("/usr/bin/makeblastdb").exists()
+    if !ncbi_bin("blastx").exists()
+        || !ncbi_bin("makeblastdb").exists()
     {
-        eprintln!("Skipping: /usr/bin/blastx or /usr/bin/makeblastdb not found");
+        eprintln!("Skipping: blastx or makeblastdb not found");
         return;
     }
     let Some(blast_cli) = blast_cli_bin_for_tests() else {
@@ -29664,7 +29715,7 @@ fn blastx_db_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
     .expect("write query");
     std::fs::write(&db_fasta, ">s1\nACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY\n")
         .expect("write db fasta");
-    let make_status = std::process::Command::new("/usr/bin/makeblastdb")
+    let make_status = std::process::Command::new(ncbi_bin("makeblastdb"))
         .arg("-in")
         .arg(&db_fasta)
         .arg("-dbtype")
@@ -29705,7 +29756,7 @@ fn blastx_db_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
         .expect("run blast-cli blastx DB mixed pairwise");
     assert!(rust.success(), "blast-cli blastx exited with {rust}");
 
-    let ncbi = std::process::Command::new("/usr/bin/blastx")
+    let ncbi = std::process::Command::new(ncbi_bin("blastx"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -29738,7 +29789,7 @@ fn blastx_db_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
         assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKL---NESSAFY"));
         assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY"));
     }
-    assert!(rust.contains("Expect = 5e-15"));
+    assert!(rust.contains("Expect = 3e-20"));
     assert!(ncbi.contains("Expect = 3e-20"));
 }
 
@@ -29747,21 +29798,21 @@ fn translated_db_ncbi_parity_pairwise_zero_description_alignment_limits() {
     for (program, ncbi_bin, dbtype, query, db_fasta) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             "prot",
             ">q1 translated query\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1 protein subject\nMKFLILLF\n>s2 unrelated\nACDEFGHIKLMN\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             "nucl",
             ">q1 protein query\nMKFLILLF\n",
             ">s1 nucleotide subject\nATGAAATTTCTGATTCTGCTGTTT\n>s2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             "nucl",
             ">q1 translated query\nATGAAATTTCTGATTCTGCTGTTT\n",
             ">s1 nucleotide subject\nATGAAATTTCTGATTCTGCTGTTT\n>s2 unrelated\nCCCCCCCCCCCCCCCCCCCCCCCC\n",
@@ -29804,21 +29855,21 @@ fn translated_db_ncbi_parity_culling_limit() {
     for (program, ncbi_bin, dbtype, query, db_fasta) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             "prot",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">wide\nMKFLILLFQQQQGMKFLILLF\n>contained\nKFLILL\n>outside\nQQQQG\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             "nucl",
             ">q1\nMKFLILLFQQQQGMKFLILLF\n",
             ">wide\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>outside\nCAGCAGCAGCAGGGT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             "nucl",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">wide\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>outside\nCAGCAGCAGCAGGGT\n",
@@ -29867,21 +29918,21 @@ fn translated_db_ncbi_parity_hit_limit_and_identity_filters() {
     for (program, ncbi_bin, dbtype, query, db_fasta) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             "prot",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nMKFLILLFQQQQGMKFLILLF\n>partial\nMKFLILLF\n>near\nMKFLILLY\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             "nucl",
             ">q1\nMKFLILLFQQQQGMKFLILLF\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>partial\nATGAAATTTCTGATTCTGCTGTTT\n>near\nATGAAATTTCTGATTCTGCTGTTACT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             "nucl",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>partial\nATGAAATTTCTGATTCTGCTGTTT\n>near\nATGAAATTTCTGATTCTGCTGTTACT\n",
@@ -29951,7 +30002,7 @@ fn tblastx_db_ncbi_parity_stable_hit_limit_filters() {
         ncbi_args.extend(ncbi_extra);
         assert_translated_db_outfmt_matches_ncbi(
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             "nucl",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>partial\nATGAAATTTCTGATTCTGCTGTTT\n>near\nATGAAATTTCTGATTCTGCTGTTACT\n",
@@ -29967,21 +30018,21 @@ fn translated_db_ncbi_parity_best_hit_filters() {
     for (program, ncbi_bin, dbtype, query, db_fasta) in [
         (
             "blastx",
-            "/usr/bin/blastx",
+            "blastx",
             "prot",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nMKFLILLFQQQQGMKFLILLF\n>contained\nKFLILL\n>near\nMKFLILLYQQQQGMKFLILLF\n",
         ),
         (
             "tblastn",
-            "/usr/bin/tblastn",
+            "tblastn",
             "nucl",
             ">q1\nMKFLILLFQQQQGMKFLILLF\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>near\nATGAAATTTCTGATTCTGCTGTTACTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
         ),
         (
             "tblastx",
-            "/usr/bin/tblastx",
+            "tblastx",
             "nucl",
             ">q1\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
             ">full\nATGAAATTTCTGATTCTGCTGTTTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n>contained\nAAATTTCTGATTCTGCTG\n>near\nATGAAATTTCTGATTCTGCTGTTACTAAAACCCCGGGGTTTTATGAAATTTCTGATTCTGCTGTTT\n",
@@ -30018,7 +30069,7 @@ fn translated_db_ncbi_parity_best_hit_filters() {
 fn blastx_db_ncbi_parity_multi_subject_ordering() {
     assert_translated_db_outfmt_matches_ncbi(
         "blastx",
-        "/usr/bin/blastx",
+        "blastx",
         "prot",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         concat!(">s_exact\nMKFLILLF\n", ">s_near\nMKFLILLY\n",),
@@ -30032,7 +30083,7 @@ fn blastx_db_ncbi_parity_multi_subject_ordering() {
 fn tblastn_db_ncbi_parity_multi_subject_ordering() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastn",
-        "/usr/bin/tblastn",
+        "tblastn",
         "nucl",
         ">q1\nMKFLILLF\n",
         concat!(
@@ -30049,7 +30100,7 @@ fn tblastn_db_ncbi_parity_multi_subject_ordering() {
 fn tblastx_db_ncbi_parity_multi_subject_ordering() {
     assert_translated_db_outfmt_matches_ncbi(
         "tblastx",
-        "/usr/bin/tblastx",
+        "tblastx",
         "nucl",
         ">q1\nATGAAATTTCTGATTCTGCTGTTT\n",
         concat!(
@@ -33767,7 +33818,7 @@ fn run_core_nt_rust(query: &std::path::Path, db: &std::path::Path, out: &std::pa
 }
 
 fn run_core_nt_ncbi(query: &std::path::Path, db: &std::path::Path, out: &std::path::Path) {
-    let status = std::process::Command::new("/usr/bin/blastn")
+    let status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(query)
         .arg("-db")
@@ -33783,7 +33834,7 @@ fn run_core_nt_ncbi(query: &std::path::Path, db: &std::path::Path, out: &std::pa
         .arg("-out")
         .arg(out)
         .status()
-        .expect("run /usr/bin/blastn");
+        .expect("run blastn");
     assert!(status.success(), "NCBI blastn exited with {}", status);
 }
 
@@ -33798,8 +33849,8 @@ fn assert_core_nt_outfmt6_matches_ncbi(db_suffix: &str) {
         eprintln!("Skipping: core_nt database not found at {:?}", db);
         return;
     }
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
 
@@ -33847,8 +33898,8 @@ fn assert_core_nt_taxonomy_outfmt_matches_ncbi_with_blastdb(
         eprintln!("Skipping: core_nt database not found at {:?}", db);
         return;
     }
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
 
@@ -33892,7 +33943,7 @@ fn assert_core_nt_taxonomy_outfmt_matches_ncbi_with_blastdb(
         rust_status
     );
 
-    let mut ncbi_cmd = std::process::Command::new("/usr/bin/blastn");
+    let mut ncbi_cmd = std::process::Command::new(ncbi_bin("blastn"));
     if let Some(blastdb) = blastdb {
         ncbi_cmd.env("BLASTDB", blastdb);
     }
@@ -33954,8 +34005,8 @@ fn assert_core_nt_title_outfmt_matches_ncbi(db_suffix: &str) {
         eprintln!("Skipping: core_nt database not found at {:?}", db);
         return;
     }
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
 
@@ -33989,7 +34040,7 @@ fn assert_core_nt_title_outfmt_matches_ncbi(db_suffix: &str) {
         rust_status
     );
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -34005,7 +34056,7 @@ fn assert_core_nt_title_outfmt_matches_ncbi(db_suffix: &str) {
         .arg("-out")
         .arg(&ncbi_out)
         .status()
-        .expect("run /usr/bin/blastn title parity");
+        .expect("run blastn title parity");
     assert!(
         ncbi_status.success(),
         "NCBI blastn exited with {}",
@@ -34041,8 +34092,8 @@ fn assert_core_nt_outfmt7_matches_ncbi(db_suffix: &str) {
         eprintln!("Skipping: core_nt database not found at {:?}", db);
         return;
     }
-    if !std::path::Path::new("/usr/bin/blastn").exists() {
-        eprintln!("Skipping: /usr/bin/blastn not found");
+    if !ncbi_bin("blastn").exists() {
+        eprintln!("Skipping: blastn not found");
         return;
     }
 
@@ -34075,7 +34126,7 @@ fn assert_core_nt_outfmt7_matches_ncbi(db_suffix: &str) {
         rust_status
     );
 
-    let ncbi_status = std::process::Command::new("/usr/bin/blastn")
+    let ncbi_status = std::process::Command::new(ncbi_bin("blastn"))
         .arg("-query")
         .arg(&query)
         .arg("-db")
@@ -34091,7 +34142,7 @@ fn assert_core_nt_outfmt7_matches_ncbi(db_suffix: &str) {
         .arg("-out")
         .arg(&ncbi_out)
         .status()
-        .expect("run /usr/bin/blastn outfmt7 parity");
+        .expect("run blastn outfmt7 parity");
     assert!(
         ncbi_status.success(),
         "NCBI blastn exited with {}",

@@ -87,6 +87,14 @@ pub struct ProteinLookupTable {
     /// Overflow array for cells with > HITS_PER_CELL hits.
     overflow: Vec<i32>,
     pv: Vec<u64>,
+    /// Compressed-alphabet lookup table, populated only for `word_size >= 5`.
+    /// NCBI's `BLAST_FillLookupTableOptions` (`blast_options.c`) switches to
+    /// `eCompressedAaLookupTable` for `word_size > 5`; the dense neighborhood
+    /// backbone (2^(word_size*5) cells with 28-letter neighbor enumeration)
+    /// is infeasible for `word_size >= 5`. When present, the two-hit/one-hit
+    /// scanners drive the identical extension logic from the compressed scan's
+    /// `(query_offset, subject_offset)` stream instead of the dense backbone.
+    compressed: Option<BlastCompressedAaLookupTable>,
 }
 
 const COMPRESSED_HITS_PER_BACKBONE_CELL: usize = 4;
@@ -288,6 +296,14 @@ impl ProteinLookupTable {
         matrix: &[[i32; AA_SIZE]; AA_SIZE],
         threshold: f64,
     ) -> Self {
+        // NCBI switches to the compressed-alphabet lookup table for large word
+        // sizes (`eCompressedAaLookupTable`), where the dense 28-letter
+        // neighborhood backbone explodes (ws6 -> ~22 GB / billions of
+        // insertions). The dense path below is left BYTE-FOR-BYTE unchanged for
+        // `word_size <= 4`; only `word_size >= 5` takes the compressed branch.
+        if word_size >= 5 {
+            return Self::build_compressed(query, word_size, matrix, threshold);
+        }
         let alphabet_size = AA_SIZE;
         // NCBI sizes the AA backbone to the highest valid BLASTAA index plus
         // one; the rolling scan mask is still the full charsize bit mask.
@@ -381,8 +397,166 @@ impl ProteinLookupTable {
             backbone: thick,
             overflow,
             pv,
+            compressed: None,
         }
     }
+
+    /// Build the compressed-alphabet lookup table for `word_size` 5/6/7.
+    ///
+    /// NCBI: `BlastCompressedAaLookupTableNew` (`blast_aalookup.c:1270`). The
+    /// 28-letter protein alphabet is collapsed to a 15-letter alphabet
+    /// (`s_alphabet15`, for ws 5/6) or 10-letter (`s_alphabet10`, ws 7) so
+    /// neighborhood enumeration stays bounded. A custom non-square
+    /// `BLASTAA_SIZE x compressed_alphabet_size` score matrix is built, scaled
+    /// by `kMatrixScale / ungapped_lambda` (kMatrixScale = 100), and the
+    /// neighbor threshold is correspondingly scaled by `kMatrixScale`.
+    fn build_compressed(
+        query: &[u8],
+        word_size: usize,
+        matrix: &[[i32; AA_SIZE]; AA_SIZE],
+        threshold: f64,
+    ) -> Self {
+        const K_MATRIX_SCALE: f64 = 100.0;
+        let compressed_alphabet_size = if word_size == 7 { 10 } else { 15 };
+        let backbone_size =
+            (compressed_alphabet_size as f64).powi(word_size as i32) as usize + 1;
+
+        let mut lookup =
+            BlastCompressedAaLookupTable::new(word_size, compressed_alphabet_size, backbone_size);
+        lookup.threshold = (K_MATRIX_SCALE * threshold) as i32;
+        lookup.alphabet_size = AA_SIZE;
+        lookup.reciprocal_alphabet_size =
+            compressed_reciprocal_alphabet_size(compressed_alphabet_size);
+
+        // Build the compressed translation table (protein letter -> compressed
+        // letter), the reverse table, and the scaled non-square score matrix.
+        let matrix_name = matrix_name_for_scoring(matrix);
+        let (compress_table, compressed_matrix) =
+            build_compressed_alphabet(matrix_name, compressed_alphabet_size, K_MATRIX_SCALE);
+        lookup.compress_table = compress_table;
+        lookup.scaled_compress_table = build_scaled_compress_table(
+            word_size,
+            compressed_alphabet_size,
+            &lookup.compress_table,
+        );
+
+        // Index the query's neighboring words into the compressed backbone.
+        s_compressed_add_neighboring_words(&mut lookup, &compressed_matrix, query, None);
+        s_compressed_lookup_finalize(&mut lookup);
+
+        ProteinLookupTable {
+            word_size,
+            backbone: Vec::new(),
+            overflow: Vec::new(),
+            pv: Vec::new(),
+            compressed: Some(lookup),
+        }
+    }
+}
+
+/// blast-rs: identify the named scoring matrix backing a raw score matrix so the
+/// compressed lookup can fetch the matrix-specific ungapped lambda and frequency
+/// ratios (NCBI threads the matrix name via `sbp->name`). Falls back to BLOSUM62.
+fn matrix_name_for_scoring(matrix: &[[i32; AA_SIZE]; AA_SIZE]) -> &'static str {
+    let candidates: [(&'static str, &'static [[i32; AA_SIZE]; AA_SIZE]); 8] = [
+        ("BLOSUM62", &crate::matrix::BLOSUM62),
+        ("BLOSUM45", &crate::matrix::BLOSUM45),
+        ("BLOSUM50", &crate::matrix::BLOSUM50),
+        ("BLOSUM80", &crate::matrix::BLOSUM80),
+        ("BLOSUM90", &crate::matrix::BLOSUM90),
+        ("PAM30", &crate::matrix::PAM30),
+        ("PAM70", &crate::matrix::PAM70),
+        ("PAM250", &crate::matrix::PAM250),
+    ];
+    for (name, candidate) in candidates {
+        if candidate == matrix {
+            return name;
+        }
+    }
+    "BLOSUM62"
+}
+
+/// NCBI: `SCompressedAlphabetNew` + `s_BuildCompressedTranslation` +
+/// `s_BuildCompressedScoreMatrix` + `s_GetCompressedProbs` (`blast_stat.c`).
+///
+/// Returns `(compress_table, compressed_matrix)` where `compress_table[aa]` maps
+/// a BLASTAA letter to its compressed letter (or `compressed_alphabet_size` for
+/// letters with no group), and `compressed_matrix[q][s]` is the score for query
+/// BLASTAA letter `q` against compressed letter `s`, scaled by
+/// `matrix_scale_factor / ungapped_lambda` and rounded — exactly as NCBI's
+/// lookup-only score matrix. Only the first `compressed_alphabet_size` columns
+/// of `compressed_matrix` are meaningful.
+fn build_compressed_alphabet(
+    matrix_name: &str,
+    compressed_alphabet_size: usize,
+    matrix_scale_factor: f64,
+) -> (Vec<u8>, [[i32; AA_SIZE]; AA_SIZE]) {
+    // 23-to-15 (SE_B(14)) and 23-to-10 (SE-V(10)) compressed alphabets, letter
+    // groups separated by spaces, in decreasing combined residue frequency
+    // (NCBI `s_alphabet15` / `s_alphabet10`).
+    const ALPHABET15: &str = "ST IJV LM KR EQZ A G BD P N F Y H C W";
+    const ALPHABET10: &str = "IJLMV AST BDENZ KQR G FY P H C W";
+    let alphabet_string = if compressed_alphabet_size == 10 {
+        ALPHABET10
+    } else {
+        ALPHABET15
+    };
+
+    // s_BuildCompressedTranslation: parse the grouping string into a translation
+    // table and a reverse (compressed letter -> list of BLASTAA letters) table.
+    let mut compress_table = vec![compressed_alphabet_size as u8; AA_SIZE];
+    let mut rev_table: Vec<Vec<usize>> = vec![Vec::new(); compressed_alphabet_size];
+    let mut compressed_letter = 0usize;
+    for ch in alphabet_string.chars() {
+        if ch.is_whitespace() {
+            compressed_letter += 1;
+        } else if ch.is_ascii_alphabetic() {
+            let aa = crate::encoding::AMINOACID_TO_NCBISTDAA[ch as usize & 0x7f] as usize;
+            if compressed_letter < compressed_alphabet_size && aa < AA_SIZE {
+                compress_table[aa] = compressed_letter as u8;
+                rev_table[compressed_letter].push(aa);
+            }
+        }
+    }
+
+    // s_BuildCompressedScoreMatrix.
+    let lambda = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name).lambda;
+    let scale = if lambda > 0.0 {
+        matrix_scale_factor / lambda
+    } else {
+        matrix_scale_factor
+    };
+    let std_freqs = crate::matrix::get_matrix_freq_ratios(matrix_name)
+        .unwrap_or_else(|| crate::matrix::get_matrix_freq_ratios("BLOSUM62").unwrap());
+    let prob = crate::stat::protein_std_freq_ncbistdaa();
+
+    // s_GetCompressedProbs: P(aa | compressed letter) = prob[aa] / sum of group.
+    let mut compressed_prob = [0.0f64; AA_SIZE];
+    for group in rev_table.iter() {
+        let prob_sum: f64 = group.iter().map(|&aa| prob[aa]).sum();
+        if prob_sum > 0.0 {
+            for &aa in group {
+                compressed_prob[aa] = prob[aa] / prob_sum;
+            }
+        }
+    }
+
+    // BLAST_SCORE_MIN (NCBI) is -32768.
+    const BLAST_SCORE_MIN: f64 = -32768.0;
+    let min_freq = BLAST_SCORE_MIN / scale;
+    let mut compressed_matrix = [[0i32; AA_SIZE]; AA_SIZE];
+    for q in 0..AA_SIZE {
+        for (s, group) in rev_table.iter().enumerate() {
+            let mut val = 0.0f64;
+            for &aa in group {
+                val += std_freqs[q][aa] * compressed_prob[aa];
+            }
+            let val = if val < 1e-8 { min_freq } else { val.ln() };
+            compressed_matrix[q][s] = crate::math::blast_nint(val * scale) as i32;
+        }
+    }
+
+    (compress_table, compressed_matrix)
 }
 
 /// NCBI: `BlastAaLookupTableNew` backbone sizing (`blast_aalookup.c`).
@@ -1984,6 +2158,159 @@ pub fn s_blast_aa_word_finder_two_hit(
     .hits
 }
 
+/// Compressed-alphabet two-hit word finder.
+///
+/// NCBI: `s_BlastAaWordFinder_TwoHit` (`aa_ungapped.c:440`) driven by the
+/// compressed `scansub` callback (`s_BlastCompressedAaScanSubject`). The
+/// per-hit diagonal/two-hit gating and extension are byte-identical to the
+/// dense path above; only the hit-stream source differs (compressed scan
+/// emits `(query_offset, subject_offset)` pairs ordered by subject offset).
+/// The real (full) scoring matrix is used for extension, exactly like NCBI.
+#[allow(clippy::too_many_arguments)]
+fn s_blast_aa_word_finder_two_hit_compressed(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    window: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+    context_starts: Option<&[usize]>,
+    mut side_channels: Option<&mut BlastAaWordFinderSideChannels<'_>>,
+) -> BlastAaWordFinderScan {
+    let word_size = table.word_size;
+    let lookup = table.compressed.as_ref().expect("compressed table present");
+
+    let mut diag_count = 1usize;
+    while diag_count < query.len() + window as usize {
+        diag_count <<= 1;
+    }
+    let diag_mask = diag_count - 1;
+    diag_buf.clear();
+    diag_buf.resize(diag_count, (-window, false));
+    let diag_array = diag_buf;
+    let diag_offset = window;
+
+    let mut hits: Vec<ProteinHit> = Vec::new();
+    let ws = word_size as i32;
+    let mut total_hits = 0i32;
+    let mut hits_extended = 0i32;
+
+    // Collect all compressed word hits, ordered by subject offset (then by the
+    // cell's stored query-offset order), mirroring NCBI's repeated `scansub`
+    // batches. array_size is generous so a single pass captures every hit.
+    let array_size = subject.len().saturating_add(1).saturating_mul(8).max(1024);
+    let offset_pairs = s_blast_compressed_aa_scan_subject(lookup, subject, array_size, None);
+    total_hits += offset_pairs.len() as i32;
+
+    for pair in &offset_pairs {
+        let q_pos = pair.query_offset as usize;
+        let s_pos = pair.subject_offset as usize;
+        let s_off = s_pos as i32;
+        let diag = q_pos.wrapping_sub(s_pos) & diag_mask;
+        let (last_hit, flag) = diag_array[diag];
+
+        if flag {
+            if s_off + diag_offset < last_hit {
+                continue;
+            }
+            diag_array[diag] = (s_off + diag_offset, false);
+            continue;
+        }
+        let diff = s_off - (last_hit - diag_offset);
+        if diff >= window {
+            diag_array[diag] = (s_off + diag_offset, false);
+            continue;
+        }
+        if diff < ws {
+            continue;
+        }
+        if let Some(starts) = context_starts {
+            let ctx_start = context_start_for_offset(starts, q_pos);
+            if (diff as usize) > q_pos || q_pos - (diff as usize) < ctx_start {
+                diag_array[diag] = (s_off + diag_offset, false);
+                continue;
+            }
+        }
+
+        let s_left_off = (last_hit - diag_offset + ws) as usize; // end of first hit
+        let s_right_off = s_pos;
+        let q_right_off = q_pos;
+        hits_extended += 1;
+
+        match s_blast_aa_extend_two_hit(
+            query,
+            subject,
+            matrix,
+            word_size,
+            x_dropoff,
+            q_right_off,
+            s_right_off,
+            s_left_off,
+        ) {
+            TwoHitOutcome::Reached { hit, s_last_off } => {
+                diag_array[diag] = (s_last_off - (ws - 1) + diag_offset, true);
+                if let Some(hit) = hit {
+                    if let Some(channels) = side_channels.as_deref_mut() {
+                        if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut() {
+                            crate::extend::blast_save_init_hsp(
+                                init_hitlist,
+                                hit.query_start as i32,
+                                hit.subject_start as i32,
+                                q_right_off as i32,
+                                s_right_off as i32,
+                                hit.align_length,
+                                hit.score,
+                            );
+                        }
+                    }
+                    hits.push(hit);
+                }
+            }
+            TwoHitOutcome::NoReach { hit } => {
+                if let Some(hit) = hit {
+                    if let Some(channels) = side_channels.as_deref_mut() {
+                        if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut() {
+                            crate::extend::blast_save_init_hsp(
+                                init_hitlist,
+                                hit.query_start as i32,
+                                hit.subject_start as i32,
+                                q_right_off as i32,
+                                s_right_off as i32,
+                                hit.align_length,
+                                hit.score,
+                            );
+                        }
+                    }
+                    hits.push(hit);
+                }
+                diag_array[diag] = (s_off + diag_offset, false);
+            }
+        }
+    }
+
+    let scan = BlastAaWordFinderScan {
+        hits,
+        total_hits,
+        hits_extended,
+    };
+    if let Some(channels) = side_channels {
+        let saved_hits = channels
+            .init_hitlist
+            .as_deref()
+            .map_or(scan.hits.len() as i32, |init_hitlist| {
+                init_hitlist.total() as i32
+            });
+        crate::diagnostics::blast_ungapped_stats_update(
+            channels.ungapped_stats.as_deref_mut(),
+            scan.total_hits,
+            scan.hits_extended,
+            saved_hits,
+        );
+    }
+    scan
+}
+
 fn s_blast_aa_word_finder_two_hit_scan(
     query: &[u8],
     subject: &[u8],
@@ -1998,6 +2325,20 @@ fn s_blast_aa_word_finder_two_hit_scan(
     let word_size = table.word_size;
     if query.len() < word_size || subject.len() < word_size {
         return BlastAaWordFinderScan::default();
+    }
+
+    if table.compressed.is_some() {
+        return s_blast_aa_word_finder_two_hit_compressed(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            window,
+            diag_buf,
+            context_starts,
+            side_channels,
+        );
     }
 
     let mut diag_count = 1usize;
@@ -2211,6 +2552,92 @@ pub fn s_blast_aa_word_finder_one_hit(
         .hits
 }
 
+/// Compressed-alphabet one-hit word finder. Mirrors the dense one-hit gating
+/// (`s_BlastAaWordFinder_OneHit`) but sources hits from the compressed scan.
+fn s_blast_aa_word_finder_one_hit_compressed(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    x_dropoff: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+    mut side_channels: Option<&mut BlastAaWordFinderSideChannels<'_>>,
+) -> BlastAaWordFinderScan {
+    let word_size = table.word_size;
+    let lookup = table.compressed.as_ref().expect("compressed table present");
+
+    let mut diag_count = 1usize;
+    while diag_count < query.len() + subject.len() + 1 {
+        diag_count <<= 1;
+    }
+    let diag_mask = diag_count - 1;
+    diag_buf.clear();
+    diag_buf.resize(diag_count, (0, false));
+    let diag_array = diag_buf;
+
+    let mut hits = Vec::new();
+    let ws = word_size as i32;
+    let mut total_hits = 0i32;
+    let mut hits_extended = 0i32;
+
+    let array_size = subject.len().saturating_add(1).saturating_mul(8).max(1024);
+    let offset_pairs = s_blast_compressed_aa_scan_subject(lookup, subject, array_size, None);
+    total_hits += offset_pairs.len() as i32;
+
+    for pair in &offset_pairs {
+        let q_pos = pair.query_offset as usize;
+        let s_pos = pair.subject_offset as usize;
+        let diag = s_pos.wrapping_sub(q_pos) & diag_mask;
+        let last_hit = diag_array[diag].0;
+        let diff = s_pos as i32 - last_hit;
+        if diff < 0 {
+            continue;
+        }
+        hits_extended += 1;
+
+        let (hit, s_last_off) =
+            s_blast_aa_extend_one_hit(query, subject, matrix, word_size, x_dropoff, q_pos, s_pos);
+        diag_array[diag] = (s_last_off - (ws - 1), false);
+        if let Some(hit) = hit {
+            if let Some(channels) = side_channels.as_deref_mut() {
+                if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut() {
+                    crate::extend::blast_save_init_hsp(
+                        init_hitlist,
+                        hit.query_start as i32,
+                        hit.subject_start as i32,
+                        q_pos as i32,
+                        s_pos as i32,
+                        hit.align_length,
+                        hit.score,
+                    );
+                }
+            }
+            hits.push(hit);
+        }
+    }
+
+    let scan = BlastAaWordFinderScan {
+        hits,
+        total_hits,
+        hits_extended,
+    };
+    if let Some(channels) = side_channels {
+        let saved_hits = channels
+            .init_hitlist
+            .as_deref()
+            .map_or(scan.hits.len() as i32, |init_hitlist| {
+                init_hitlist.total() as i32
+            });
+        crate::diagnostics::blast_ungapped_stats_update(
+            channels.ungapped_stats.as_deref_mut(),
+            scan.total_hits,
+            scan.hits_extended,
+            saved_hits,
+        );
+    }
+    scan
+}
+
 fn s_blast_aa_word_finder_one_hit_scan(
     query: &[u8],
     subject: &[u8],
@@ -2223,6 +2650,18 @@ fn s_blast_aa_word_finder_one_hit_scan(
     let word_size = table.word_size;
     if query.len() < word_size || subject.len() < word_size {
         return BlastAaWordFinderScan::default();
+    }
+
+    if table.compressed.is_some() {
+        return s_blast_aa_word_finder_one_hit_compressed(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            diag_buf,
+            side_channels,
+        );
     }
 
     let mut diag_count = 1usize;
@@ -2688,6 +3127,7 @@ mod tests {
             ],
             overflow: vec![100, 101, 9, 10, 11, 12, 200],
             pv: vec![u64::MAX],
+            compressed: None,
         };
 
         assert_eq!(

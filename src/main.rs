@@ -813,8 +813,8 @@ fn maybe_emit_blast_help_or_version_and_exit() {
     }
     let rest: Vec<String> = args.collect();
     if rest.iter().any(|arg| arg == "-version") {
-        println!("{command}: 2.12.0+");
-        println!(" Package: blast 2.12.0, build Mar  8 2022 16:19:08");
+        println!("{command}: 2.17.0+");
+        println!(" Package: blast 2.17.0, build Apr  8 2026 16:20:53");
         std::process::exit(0);
     }
     if rest.iter().any(|arg| arg == "-h" || arg == "-help") {
@@ -845,6 +845,7 @@ fn maybe_emit_program_filter_option_error() {
                             | "db_gencode"
                             | "use_sw_tback"
                             | "in_pssm"
+                            | "max_intron_length"
                     )
                 })
         })
@@ -1180,7 +1181,7 @@ fn emit_blastp_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_taxidlist filename] [-no_taxid_expansion] [-ipglist filename]
     [-negative_ipglist filename] [-entrez_query entrez_query]
     [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
     [-subject subject_input_file] [-subject_loc range] [-query input_file]
@@ -1201,7 +1202,7 @@ fn emit_blastp_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-comp_based_stats compo] [-use_sw_tback] [-version]
 
 DESCRIPTION
-   Protein-Protein BLAST 2.12.0+
+   Protein-Protein BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -1221,7 +1222,7 @@ fn emit_blastx_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_taxidlist filename] [-no_taxid_expansion] [-ipglist filename]
     [-negative_ipglist filename] [-entrez_query entrez_query]
     [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
     [-subject subject_input_file] [-subject_loc range] [-query input_file]
@@ -1244,7 +1245,7 @@ fn emit_blastx_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-comp_based_stats compo] [-use_sw_tback] [-version]
 
 DESCRIPTION
-   Translated Query-Protein Subject BLAST 2.12.0+
+   Translated Query-Protein Subject BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -1264,13 +1265,13 @@ fn emit_tblastn_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-qcov_hsp_perc float_value] [-max_hsps int_value]
-    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
     [-xdrop_gap_final float_value] [-searchsp int_value]
     [-sum_stats bool_value] [-db_gencode int_value] [-ungapped]
     [-max_intron_length length] [-seg SEG_options]
@@ -1287,7 +1288,7 @@ fn emit_tblastn_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-version]
 
 DESCRIPTION
-   Protein Query-Translated Subject BLAST 2.12.0+
+   Protein Query-Translated Subject BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -1307,13 +1308,13 @@ fn emit_tblastx_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-qcov_hsp_perc float_value] [-max_hsps int_value]
-    [-xdrop_ungap float_value] [-searchsp int_value] [-sum_stats bool_value]
-    [-max_intron_length length] [-seg SEG_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-max_intron_length length] [-seg SEG_options]
     [-soft_masking soft_masking] [-matrix matrix_name]
     [-threshold float_value] [-culling_limit int_value]
     [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
@@ -1326,7 +1327,7 @@ fn emit_tblastx_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-num_threads int_value] [-remote] [-version]
 
 DESCRIPTION
-   Translated Query-Translated Subject BLAST 2.12.0+
+   Translated Query-Translated Subject BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -1380,7 +1381,7 @@ const BLASTP_USAGE: &str = r#"USAGE
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_taxidlist filename] [-no_taxid_expansion] [-ipglist filename]
     [-negative_ipglist filename] [-entrez_query entrez_query]
     [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
     [-subject subject_input_file] [-subject_loc range] [-query input_file]
@@ -1401,7 +1402,7 @@ const BLASTP_USAGE: &str = r#"USAGE
     [-comp_based_stats compo] [-use_sw_tback] [-version]
 
 DESCRIPTION
-   Protein-Protein BLAST 2.12.0+
+   Protein-Protein BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 "#;
@@ -1412,7 +1413,7 @@ const BLASTX_USAGE: &str = r#"USAGE
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_taxidlist filename] [-no_taxid_expansion] [-ipglist filename]
     [-negative_ipglist filename] [-entrez_query entrez_query]
     [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
     [-subject subject_input_file] [-subject_loc range] [-query input_file]
@@ -1435,7 +1436,7 @@ const BLASTX_USAGE: &str = r#"USAGE
     [-comp_based_stats compo] [-use_sw_tback] [-version]
 
 DESCRIPTION
-   Translated Query-Protein Subject BLAST 2.12.0+
+   Translated Query-Protein Subject BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 "#;
@@ -1446,13 +1447,13 @@ const TBLASTN_USAGE: &str = r#"USAGE
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-qcov_hsp_perc float_value] [-max_hsps int_value]
-    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
     [-xdrop_gap_final float_value] [-searchsp int_value]
     [-sum_stats bool_value] [-db_gencode int_value] [-ungapped]
     [-max_intron_length length] [-seg SEG_options]
@@ -1469,7 +1470,7 @@ const TBLASTN_USAGE: &str = r#"USAGE
     [-version]
 
 DESCRIPTION
-   Protein Query-Translated Subject BLAST 2.12.0+
+   Protein Query-Translated Subject BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 "#;
@@ -1480,13 +1481,13 @@ const TBLASTX_USAGE: &str = r#"USAGE
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-qcov_hsp_perc float_value] [-max_hsps int_value]
-    [-xdrop_ungap float_value] [-searchsp int_value] [-sum_stats bool_value]
-    [-max_intron_length length] [-seg SEG_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-searchsp int_value]
+    [-sum_stats bool_value] [-max_intron_length length] [-seg SEG_options]
     [-soft_masking soft_masking] [-matrix matrix_name]
     [-threshold float_value] [-culling_limit int_value]
     [-best_hit_overhang float_value] [-best_hit_score_edge float_value]
@@ -1499,7 +1500,7 @@ const TBLASTX_USAGE: &str = r#"USAGE
     [-num_threads int_value] [-remote] [-version]
 
 DESCRIPTION
-   Translated Query-Translated Subject BLAST 2.12.0+
+   Translated Query-Translated Subject BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 "#;
@@ -1510,7 +1511,7 @@ const PSIBLAST_USAGE: &str = r#"USAGE
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-ipglist filename]
+    [-negative_taxidlist filename] [-no_taxid_expansion] [-ipglist filename]
     [-negative_ipglist filename] [-entrez_query entrez_query]
     [-subject subject_input_file] [-subject_loc range] [-query input_file]
     [-out output_file] [-evalue evalue] [-word_size int_value]
@@ -1535,7 +1536,7 @@ const PSIBLAST_USAGE: &str = r#"USAGE
     [-phi_pattern file] [-version]
 
 DESCRIPTION
-   Position-Specific Iterated BLAST 2.12.0+
+   Position-Specific Iterated BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 "#;
@@ -1558,7 +1559,7 @@ const RPSTBLASTN_USAGE: &str = r#"USAGE
     [-version]
 
 DESCRIPTION
-   Translated Reverse Position Specific BLAST 2.12.0+
+   Translated Reverse Position Specific BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 "#;
@@ -1569,12 +1570,12 @@ const DELTABLAST_USAGE: &str = r#"USAGE
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-qcov_hsp_perc float_value] [-max_hsps int_value]
-    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-qcov_hsp_perc float_value]
+    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
     [-xdrop_gap_final float_value] [-searchsp int_value]
     [-sum_stats bool_value] [-seg SEG_options] [-soft_masking soft_masking]
     [-matrix matrix_name] [-threshold float_value] [-culling_limit int_value]
@@ -1592,7 +1593,7 @@ const DELTABLAST_USAGE: &str = r#"USAGE
     [-rpsdb database_name] [-show_domain_hits] [-version]
 
 DESCRIPTION
-   Domain enhanced lookup time accelarated BLAST 2.12.0+
+   Domain enhanced lookup time accelarated BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 "#;
@@ -1605,17 +1606,17 @@ fn emit_blastn_help_stdout(detailed: bool) {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-perc_identity float_value] [-qcov_hsp_perc float_value]
-    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
-    [-xdrop_gap_final float_value] [-searchsp int_value]
-    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
-    [-min_raw_gapped_score int_value] [-template_type type]
-    [-template_length int_value] [-dust DUST_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-perc_identity float_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-penalty penalty]
+    [-reward reward] [-no_greedy] [-min_raw_gapped_score int_value]
+    [-template_type type] [-template_length int_value] [-dust DUST_options]
     [-filtering_db filtering_database]
     [-window_masker_taxid window_masker_taxid]
     [-window_masker_db window_masker_db] [-soft_masking soft_masking]
@@ -1630,7 +1631,7 @@ fn emit_blastn_help_stdout(detailed: bool) {
     [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
 
 DESCRIPTION
-   Nucleotide-Nucleotide BLAST 2.12.0+
+   Nucleotide-Nucleotide BLAST 2.17.0+
 "#
     );
     if detailed {
@@ -1786,7 +1787,7 @@ fn main_inner() {
     validate_thread_relationships(program, &args);
     validate_template_relationships(&args);
     validate_evalue_options(&args);
-    validate_gap_cost_options(&args);
+    validate_gap_cost_options(program, &args);
     validate_greedy_gap_options(&args);
 
     emit_seqidlist_performance_warnings(program, &args);
@@ -1962,6 +1963,26 @@ fn program_uses_blastn_task_defaults(program: &str) -> bool {
     program == "blastn"
 }
 
+/// NCBI 2.17 query-content parity:
+/// - A query file with no FASTA records (empty file or only blank lines) makes
+///   NCBI exit 0 with `Warning: [<program>] Query is Empty!`.
+/// - A query file containing record(s) whose residues are all empty
+///   (a header line with no sequence data) makes NCBI exit 3 with
+///   `BLAST engine error: Warning: Sequence contains no data `.
+///
+/// This mirrors what every 2.17 program (blastn/blastp/blastx/tblastn/tblastx)
+/// does; call it right after the query FASTA is parsed.
+fn enforce_query_content_or_exit(program: &str, records: &[FastaRecord]) {
+    if records.is_empty() {
+        eprintln!("Warning: [{program}] Query is Empty!");
+        std::process::exit(0);
+    }
+    if records.iter().all(|record| record.sequence.is_empty()) {
+        eprintln!("BLAST engine error: Warning: Sequence contains no data ");
+        std::process::exit(3);
+    }
+}
+
 fn unexpected_positional_arg(err: &clap::Error) -> Option<(String, String)> {
     let text = err.to_string();
     let usage_prefix = "Usage: blast-cli ";
@@ -1988,7 +2009,7 @@ fn emit_missing_database_error(program: &str, db_path: &str) -> ! {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
     eprintln!(
-        "BLAST Database error: No alias or index file found for {} database [{}] in search path [{}::]",
+        "BLAST Database error: No alias or index file found for {} database [{}] in search path [{}::]. Please verify the spelling of the BLAST database and its molecule type.",
         db_type, db_path, search_path
     );
     std::process::exit(2);
@@ -2089,7 +2110,7 @@ fn validate_outfmt_options(args: &BlastnArgs) {
     if matches!(outfmt_num, 13 | 14) && args.out.is_none() {
         emit_outfmt_requires_file_name(outfmt_num);
     }
-    if !matches!(outfmt_num, 0 | 5 | 6 | 7 | 10 | 17) {
+    if !matches!(outfmt_num, 0 | 4 | 5 | 6 | 7 | 10 | 17) {
         emit_unsupported_outfmt_error(outfmt_num);
     }
 }
@@ -2106,25 +2127,29 @@ fn validate_program_outfmt_options(program: &str, args: &BlastnArgs) {
 
 fn program_supports_outfmt(program: &str, outfmt_num: i32) -> bool {
     if program == "blastn" {
-        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10 | 17);
+        return matches!(outfmt_num, 0 | 4 | 5 | 6 | 7 | 10 | 17);
     }
     if program == "blastp" {
-        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+        return matches!(outfmt_num, 0 | 4 | 5 | 6 | 7 | 10);
     }
     if matches!(program, "blastx" | "tblastx") {
+        // Flat query-anchored (`-outfmt 4`) for a *translated query* requires
+        // per-reading-frame grouping (`For reading frame +N of query
+        // sequence:` blocks, each its own query axis). That is not yet
+        // implemented, so blastx/tblastx keep the original unsupported error.
         return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
     }
     if program == "tblastn" {
-        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+        return matches!(outfmt_num, 0 | 4 | 5 | 6 | 7 | 10);
     }
     if program == "psiblast" {
-        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+        return matches!(outfmt_num, 0 | 4 | 5 | 6 | 7 | 10);
     }
     if program == "deltablast" {
-        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+        return matches!(outfmt_num, 0 | 4 | 5 | 6 | 7 | 10);
     }
     if matches!(program, "rpsblast" | "rpstblastn") {
-        return matches!(outfmt_num, 0 | 5 | 6 | 7 | 10);
+        return matches!(outfmt_num, 0 | 4 | 5 | 6 | 7 | 10);
     }
     matches!(outfmt_num, 6 | 10)
 }
@@ -2485,27 +2510,51 @@ fn validate_boolean_options(program: &str, args: &BlastnArgs) {
     }
 }
 
-fn validate_index_options(args: &BlastnArgs) {
-    if !args.db.is_some()
+/// The index prefix string used for `megablast_index_exists` lookups:
+/// the explicit `-index_name`, else the database path.
+fn index_prefix_for_args(args: &BlastnArgs) -> Option<String> {
+    if let Some(index_name) = args.index_name.as_deref() {
+        return Some(index_name.to_string());
+    }
+    args.db.as_deref().map(|db| db.display().to_string())
+}
+
+/// Returns true when a megablast index was requested AND is actually present.
+/// When requested but missing, emits NCBI 2.17's "Database index will not be
+/// used" warning as a side effect (matching `blast_dbindex.cpp`) so the caller
+/// can fall back to the normal unindexed scan.
+fn megablast_index_requested_and_present(args: &BlastnArgs) -> bool {
+    if args.db.is_none()
         || !ncbi_bool_enabled(Some(args.use_index.as_str()), false)
         || !blastn_task_uses_database_index(args)
     {
-        return;
+        return false;
     }
 
     if let Some(index_name) = args.index_name.as_deref() {
         if !blast_rs::db::megablast_index_exists(index_name) {
-            emit_missing_named_database_index_error(index_name);
+            emit_missing_named_database_index_warning(index_name);
+            return false;
         }
-        return;
+        return true;
     }
 
     if let Some(db) = args.db.as_deref() {
         let db = db.display().to_string();
         if !blast_rs::db::megablast_index_exists(&db) {
-            emit_missing_default_database_index_error(&db);
+            emit_missing_default_database_index_warning(&db);
+            return false;
         }
     }
+    true
+}
+
+fn validate_index_options(args: &BlastnArgs) {
+    // NCBI 2.17 no longer hard-errors when a requested megablast index is
+    // missing. It prints a warning and falls back to the normal unindexed scan
+    // (exit 0, normal results). We surface the warning here at setup time; the
+    // search path independently re-checks index presence and falls back.
+    let _ = megablast_index_requested_and_present(args);
 }
 
 fn blastn_task_uses_database_index(args: &BlastnArgs) -> bool {
@@ -2534,28 +2583,31 @@ fn index_options_missing_default_database_index(args: &BlastnArgs) -> bool {
     })
 }
 
-fn emit_missing_named_database_index_error(index_name: &str) -> ! {
-    eprintln!("Indexed BLAST database error: ");
+/// NCBI 2.17 `blast_dbindex.cpp` (CIndexedDb_Old): a missing *named* index is a
+/// warning, not a fatal error. The scan falls back to the unindexed path.
+fn emit_missing_named_database_index_warning(index_name: &str) {
+    eprintln!("Warning: (1.1) [blastn] ");
     eprintln!("NCBI C++ Exception:");
     eprintln!(
-        "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 1006: Error: (CDbIndex_Exception::bad index creation option) ncbi::blast::CIndexedDb_Old::CIndexedDb_Old() - no index file specified or index '{index_name}*' not found."
+        "    T0 \"c++/src/algo/blast/api/blast_dbindex.cpp\", line 1026: Error: (CDbIndex_Exception::bad index creation option) BLAST::ncbi::blast::CIndexedDb_Old::CIndexedDb_Old() - no index file specified or index '{index_name}*' not found."
     );
-    eprintln!();
-    std::process::exit(2);
+    eprintln!(" Database index will not be used.");
 }
 
-fn emit_missing_default_database_index_error(db: &str) -> ! {
-    eprintln!("Indexed BLAST database error: NCBI C++ Exception:");
+/// NCBI 2.17 `blast_dbindex.cpp` (CIndexedDb_New + CIndexedDb_Old): a missing
+/// *default* database index is a warning, not a fatal error. The scan falls
+/// back to the unindexed path.
+fn emit_missing_default_database_index_warning(db: &str) {
+    eprintln!("Warning: (1.1) [blastn] NCBI C++ Exception:");
     eprintln!(
-        "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 792: Error: (CDbIndex_Exception::bad index creation option) ncbi::blast::CIndexedDb_New::CIndexedDb_New() - no database volume has an index"
+        "    T0 \"c++/src/algo/blast/api/blast_dbindex.cpp\", line 795: Error: (CDbIndex_Exception::bad index creation option) BLAST::ncbi::blast::CIndexedDb_New::CIndexedDb_New() - no database volume has an index"
     );
     eprintln!();
     eprintln!("NCBI C++ Exception:");
     eprintln!(
-        "    T0 \"c++/include/corelib/ncbidiag.hpp\", line 1006: Error: (CDbIndex_Exception::bad index creation option) ncbi::blast::CIndexedDb_Old::CIndexedDb_Old() - no index file specified or index '{db}*' not found."
+        "    T0 \"c++/src/algo/blast/api/blast_dbindex.cpp\", line 1026: Error: (CDbIndex_Exception::bad index creation option) BLAST::ncbi::blast::CIndexedDb_Old::CIndexedDb_Old() - no index file specified or index '{db}*' not found."
     );
-    eprintln!();
-    std::process::exit(2);
+    eprintln!(" Database index will not be used.");
 }
 
 fn validate_choice_options(args: &BlastnArgs) {
@@ -2788,6 +2840,17 @@ fn validate_numeric_constraint_options(program: &str, args: &BlastnArgs) {
                 ">=0",
                 max_intron_length,
             );
+        }
+        // NCBI 2.17: uneven gap linking of HSPs (controlled by max_intron_length)
+        // is only valid for blastx, tblastn, and psitblastn. tblastx accepts the
+        // option syntactically but rejects any nonzero value at setup time.
+        // (blastn/blastp reject the option as unknown before reaching here.)
+        if program == "tblastx" && max_intron_length != 0 {
+            eprintln!(
+                "BLAST query/options error: Uneven gap linking of HSPs is allowed for blastx, tblastn, and psitblastn only"
+            );
+            eprintln!("Please refer to the BLAST+ user manual.");
+            std::process::exit(1);
         }
     }
     let culling_limit = args.culling_limit();
@@ -3044,24 +3107,64 @@ fn emit_program_integer_constraint_error<T: std::fmt::Display>(
     emit_program_usage_constraint_error(program, &error, &detail);
 }
 
-fn validate_gap_cost_options(args: &BlastnArgs) {
-    if args.gapopen() >= 0 && args.gapextend() >= 0 {
+fn validate_gap_cost_options(program: &str, args: &BlastnArgs) {
+    // Only blastn uses the nucleotide reward/penalty gapped-Karlin tables.
+    if program != "blastn" {
         return;
     }
-    eprintln!(
-        "BLAST engine error: Error: Gap existence and extension values {} and {} are not supported for substitution scores {} and {}",
-        args.gapopen(),
-        args.gapextend(),
-        args.reward(),
-        args.penalty()
+    let (reward, penalty) = (args.reward(), args.penalty());
+    let (gap_open, gap_extend) = (args.gapopen(), args.gapextend());
+
+    // NCBI `Blast_KarlinBlkNuclGappedCalc` (blast_stat.c:3846): when the
+    // (reward, penalty) ratio HAS a gapped-Karlin table but the supplied
+    // (gap_open, gap_extend) is neither an exact table entry nor at/above the
+    // most-stringent listed values, it fills `error_return` and returns 1.
+    // We replay that lookup at setup time and surface the same message
+    // (exit 3). When the ratio has NO table at all `s_get_nucl_values_array`
+    // returns Err and we leave it to the per-query path, matching NCBI (exit 0
+    // with a per-query "Substitution scores ... are not supported" warning).
+    let Ok(values) = blast_rs::stat::s_get_nucl_values_array(reward, penalty) else {
+        return;
+    };
+
+    // Linear (non-affine) entry covers gap_open == 0 && gap_extend == 0.
+    if gap_open == 0 && gap_extend == 0 && !values.non_affine.is_empty() {
+        return;
+    }
+    // Exact table match.
+    let nint = |x: f64| blast_rs::math::blast_nint(x) as i32;
+    let exact = values
+        .normal
+        .iter()
+        .any(|row| nint(row[0]) == gap_open && nint(row[1]) == gap_extend);
+    if exact {
+        return;
+    }
+    // Anything at/above the most-stringent listed costs uses ungapped params.
+    if gap_open >= values.gap_open_max && gap_extend >= values.gap_extend_max {
+        return;
+    }
+
+    // Unsupported: reproduce NCBI's message body exactly, then exit 3.
+    eprint!(
+        "BLAST engine error: Error: Gap existence and extension values {} and {} are not supported for substitution scores {} and {}\n",
+        gap_open, gap_extend, reward, penalty
     );
-    eprintln!("2 and 2 are supported existence and extension values");
-    eprintln!("1 and 2 are supported existence and extension values");
-    eprintln!("0 and 2 are supported existence and extension values");
-    eprintln!("2 and 1 are supported existence and extension values");
-    eprintln!("1 and 1 are supported existence and extension values");
-    eprintln!("2 and 2 are supported existence and extension values");
-    eprintln!("Any values more stringent than 2 and 2 are supported");
+    for row in &values.normal {
+        eprintln!(
+            "{} and {} are supported existence and extension values",
+            nint(row[0]),
+            nint(row[1])
+        );
+    }
+    eprintln!(
+        "{} and {} are supported existence and extension values",
+        values.gap_open_max, values.gap_extend_max
+    );
+    eprintln!(
+        "Any values more stringent than {} and {} are supported",
+        values.gap_open_max, values.gap_extend_max
+    );
     eprintln!(" ");
     std::process::exit(3);
 }
@@ -3525,17 +3628,17 @@ fn emit_blastn_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-perc_identity float_value] [-qcov_hsp_perc float_value]
-    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
-    [-xdrop_gap_final float_value] [-searchsp int_value]
-    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
-    [-min_raw_gapped_score int_value] [-template_type type]
-    [-template_length int_value] [-dust DUST_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-perc_identity float_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-penalty penalty]
+    [-reward reward] [-no_greedy] [-min_raw_gapped_score int_value]
+    [-template_type type] [-template_length int_value] [-dust DUST_options]
     [-filtering_db filtering_database]
     [-window_masker_taxid window_masker_taxid]
     [-window_masker_db window_masker_db] [-soft_masking soft_masking]
@@ -3550,7 +3653,7 @@ fn emit_blastn_usage_constraint_error(error: &str, detail: &str) -> ! {
     [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
 
 DESCRIPTION
-   Nucleotide-Nucleotide BLAST 2.12.0+
+   Nucleotide-Nucleotide BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -3570,17 +3673,17 @@ fn emit_blastn_usage_too_many_positional_error(value: &str) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-perc_identity float_value] [-qcov_hsp_perc float_value]
-    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
-    [-xdrop_gap_final float_value] [-searchsp int_value]
-    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
-    [-min_raw_gapped_score int_value] [-template_type type]
-    [-template_length int_value] [-dust DUST_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-perc_identity float_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-penalty penalty]
+    [-reward reward] [-no_greedy] [-min_raw_gapped_score int_value]
+    [-template_type type] [-template_length int_value] [-dust DUST_options]
     [-filtering_db filtering_database]
     [-window_masker_taxid window_masker_taxid]
     [-window_masker_db window_masker_db] [-soft_masking soft_masking]
@@ -3595,7 +3698,7 @@ fn emit_blastn_usage_too_many_positional_error(value: &str) -> ! {
     [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
 
 DESCRIPTION
-   Nucleotide-Nucleotide BLAST 2.12.0+
+   Nucleotide-Nucleotide BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -3640,17 +3743,17 @@ fn emit_blastn_usage_conversion_error(argument: &str, value: &str) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-perc_identity float_value] [-qcov_hsp_perc float_value]
-    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
-    [-xdrop_gap_final float_value] [-searchsp int_value]
-    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
-    [-min_raw_gapped_score int_value] [-template_type type]
-    [-template_length int_value] [-dust DUST_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-perc_identity float_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-penalty penalty]
+    [-reward reward] [-no_greedy] [-min_raw_gapped_score int_value]
+    [-template_type type] [-template_length int_value] [-dust DUST_options]
     [-filtering_db filtering_database]
     [-window_masker_taxid window_masker_taxid]
     [-window_masker_db window_masker_db] [-soft_masking soft_masking]
@@ -3665,7 +3768,7 @@ fn emit_blastn_usage_conversion_error(argument: &str, value: &str) -> ! {
     [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
 
 DESCRIPTION
-   Nucleotide-Nucleotide BLAST 2.12.0+
+   Nucleotide-Nucleotide BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -3717,17 +3820,17 @@ fn emit_blastn_usage_float_conversion_error(argument: &str, value: &str, error_p
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-perc_identity float_value] [-qcov_hsp_perc float_value]
-    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
-    [-xdrop_gap_final float_value] [-searchsp int_value]
-    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
-    [-min_raw_gapped_score int_value] [-template_type type]
-    [-template_length int_value] [-dust DUST_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-perc_identity float_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-penalty penalty]
+    [-reward reward] [-no_greedy] [-min_raw_gapped_score int_value]
+    [-template_type type] [-template_length int_value] [-dust DUST_options]
     [-filtering_db filtering_database]
     [-window_masker_taxid window_masker_taxid]
     [-window_masker_db window_masker_db] [-soft_masking soft_masking]
@@ -3742,7 +3845,7 @@ fn emit_blastn_usage_float_conversion_error(argument: &str, value: &str, error_p
     [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
 
 DESCRIPTION
-   Nucleotide-Nucleotide BLAST 2.12.0+
+   Nucleotide-Nucleotide BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -3774,17 +3877,17 @@ fn emit_blastn_usage_integer_conversion_error(
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-perc_identity float_value] [-qcov_hsp_perc float_value]
-    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
-    [-xdrop_gap_final float_value] [-searchsp int_value]
-    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
-    [-min_raw_gapped_score int_value] [-template_type type]
-    [-template_length int_value] [-dust DUST_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-perc_identity float_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-penalty penalty]
+    [-reward reward] [-no_greedy] [-min_raw_gapped_score int_value]
+    [-template_type type] [-template_length int_value] [-dust DUST_options]
     [-filtering_db filtering_database]
     [-window_masker_taxid window_masker_taxid]
     [-window_masker_db window_masker_db] [-soft_masking soft_masking]
@@ -3799,7 +3902,7 @@ fn emit_blastn_usage_integer_conversion_error(
     [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
 
 DESCRIPTION
-   Nucleotide-Nucleotide BLAST 2.12.0+
+   Nucleotide-Nucleotide BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -3820,17 +3923,17 @@ fn emit_blastn_usage_integer_range_error(argument: &str, value: i64) -> ! {
     [-dbsize num_letters] [-gilist filename] [-seqidlist filename]
     [-negative_gilist filename] [-negative_seqidlist filename]
     [-taxids taxids] [-negative_taxids taxids] [-taxidlist filename]
-    [-negative_taxidlist filename] [-entrez_query entrez_query]
-    [-db_soft_mask filtering_algorithm] [-db_hard_mask filtering_algorithm]
-    [-subject subject_input_file] [-subject_loc range] [-query input_file]
-    [-out output_file] [-evalue evalue] [-word_size int_value]
-    [-gapopen open_penalty] [-gapextend extend_penalty]
-    [-perc_identity float_value] [-qcov_hsp_perc float_value]
-    [-max_hsps int_value] [-xdrop_ungap float_value] [-xdrop_gap float_value]
-    [-xdrop_gap_final float_value] [-searchsp int_value]
-    [-sum_stats bool_value] [-penalty penalty] [-reward reward] [-no_greedy]
-    [-min_raw_gapped_score int_value] [-template_type type]
-    [-template_length int_value] [-dust DUST_options]
+    [-negative_taxidlist filename] [-no_taxid_expansion]
+    [-entrez_query entrez_query] [-db_soft_mask filtering_algorithm]
+    [-db_hard_mask filtering_algorithm] [-subject subject_input_file]
+    [-subject_loc range] [-query input_file] [-out output_file]
+    [-evalue evalue] [-word_size int_value] [-gapopen open_penalty]
+    [-gapextend extend_penalty] [-perc_identity float_value]
+    [-qcov_hsp_perc float_value] [-max_hsps int_value]
+    [-xdrop_ungap float_value] [-xdrop_gap float_value]
+    [-xdrop_gap_final float_value] [-searchsp int_value] [-penalty penalty]
+    [-reward reward] [-no_greedy] [-min_raw_gapped_score int_value]
+    [-template_type type] [-template_length int_value] [-dust DUST_options]
     [-filtering_db filtering_database]
     [-window_masker_taxid window_masker_taxid]
     [-window_masker_db window_masker_db] [-soft_masking soft_masking]
@@ -3845,7 +3948,7 @@ fn emit_blastn_usage_integer_range_error(argument: &str, value: i64) -> ! {
     [-num_threads int_value] [-mt_mode int_value] [-remote] [-version]
 
 DESCRIPTION
-   Nucleotide-Nucleotide BLAST 2.12.0+
+   Nucleotide-Nucleotide BLAST 2.17.0+
 
 Use '-help' to print detailed descriptions of command line arguments
 ========================================================================
@@ -3863,7 +3966,7 @@ fn run_blastp(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         "BLASTP",
         None,
         "blastp",
-        "BLASTP 2.12.0+",
+        "BLASTP 2.17.0+",
         BLASTP_XML_REFERENCE,
         false,
     )
@@ -3883,8 +3986,9 @@ fn run_blastp_with_output_labels(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
-    if queries.is_empty() {
-        return Err("No sequences found in query file".into());
+    enforce_query_content_or_exit(xml_program, &queries);
+    if xml_program == "blastp" {
+        validate_protein_scoring_combo(args);
     }
     let psiblast_restart_query_ids = psiblast_restart_msa_display_ids(args);
 
@@ -4248,6 +4352,17 @@ fn run_blastp_with_output_labels(
     };
     if outfmt_number(&args.outfmt) == 0 {
         write_blastp_pairwise_db_output(
+            &mut writer,
+            &queries,
+            &db,
+            &all_hits,
+            &subject_deflines,
+            args,
+            &params,
+            psiblast_pairwise,
+        )?;
+    } else if outfmt_number(&args.outfmt) == 4 {
+        write_blastp_flat_query_anchored_db_output(
             &mut writer,
             &queries,
             &db,
@@ -5416,7 +5531,7 @@ fn default_protein_gap_costs(matrix: blast_rs::api::MatrixType) -> (i32, i32) {
         blast_rs::api::MatrixType::Blosum90 => (10, 1),
         blast_rs::api::MatrixType::Pam30 => (9, 1),
         blast_rs::api::MatrixType::Pam70 => (10, 1),
-        blast_rs::api::MatrixType::Pam250 => (14, 2),
+        blast_rs::api::MatrixType::Pam250 => (15, 2),
         blast_rs::api::MatrixType::Identity => (15, 2),
     }
 }
@@ -5629,6 +5744,34 @@ fn emit_unsupported_standard_matrix_error(value: &str) -> ! {
     std::process::exit(1);
 }
 
+/// NCBI 2.17 protein scoring-combo validation
+/// (`BLAST_GetGapExistenceExtendParams` → `BLAST_PrintAllowedValues`).
+/// For blastp/blastx/tblastn the (matrix, gapopen, gapextend) triple must be one
+/// of the matrix's supported gap-cost rows (the ungapped sentinel 32767/32767 is
+/// the only "infinity" entry). Any other combo is rejected with exit 1 before
+/// searching. `lookup_matrix_params` returns `None` exactly when NCBI rejects.
+fn validate_protein_scoring_combo(args: &BlastnArgs) {
+    let matrix = blastp_args_matrix_type(args);
+    // IDENTITY is rejected as an unsupported standard matrix on the
+    // translated-program paths before this runs; on blastp it is allowed and
+    // validated against IDENTITY_ROWS like any other matrix.
+    let matrix_name = blastp_matrix_name(matrix);
+    let (gap_open, gap_extend) = blastp_args_gap_costs(args);
+    if blast_rs::stat::lookup_matrix_params(matrix_name, gap_open, gap_extend).is_some() {
+        return;
+    }
+    // NCBI emits BLAST_PrintAllowedValues' "...not supported for <matrix>\n
+    // supported values are:\n<go>, <ge>\n..." block, then a blank line and the
+    // standard user-manual pointer.
+    eprint!(
+        "BLAST query/options error: {}",
+        blast_rs::stat::blast_print_allowed_values(matrix_name, gap_open, gap_extend)
+    );
+    eprintln!();
+    eprintln!("Please refer to the BLAST+ user manual.");
+    std::process::exit(1);
+}
+
 /// Drop HSPs whose query-frame strand does not match `-strand`. blastx/tblastx
 /// translate the nucleotide query in all six frames; `-strand plus` keeps only
 /// the +1..+3 frames and `-strand minus` only -1..-3 (`both` keeps all). BLAST
@@ -5649,9 +5792,7 @@ fn filter_results_by_query_strand(results: &mut [blast_rs::api::SearchResult], s
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
-    if queries.is_empty() {
-        return Err("No sequences found in query file".into());
-    }
+    enforce_query_content_or_exit("blastx", &queries);
     if args
         .matrix
         .as_deref()
@@ -5659,6 +5800,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     {
         emit_unsupported_standard_matrix_error("IDENTITY");
     }
+    validate_protein_scoring_combo(args);
 
     let params = build_translated_blastp_params(args);
     emit_identity_comp_stats_warnings("blastx", args, &queries);
@@ -5843,6 +5985,8 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
+    enforce_query_content_or_exit("tblastn", &queries);
+    validate_protein_scoring_combo(args);
     let params = build_translated_blastp_params(args);
     emit_identity_comp_stats_warnings("tblastn", args, &queries);
     let mut all_hits = Vec::new();
@@ -5971,6 +6115,23 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             emit_program_outfmt_error("tblastn", 0);
         }
+    } else if outfmt_number(&args.outfmt) == 4 {
+        if let Some(db) = db_for_pairwise.as_ref() {
+            write_translated_flat_query_anchored_db_output(
+                &mut writer,
+                "TBLASTN",
+                &queries,
+                db,
+                &all_hits,
+                &subject_deflines,
+                args,
+                &params,
+                false,
+                true,
+            )?;
+        } else {
+            emit_program_outfmt_error("tblastn", 4);
+        }
     } else if outfmt_number(&args.outfmt) == 5 {
         if args.subject.is_some() {
             write_translated_xml_output(
@@ -6042,7 +6203,7 @@ fn run_psiblast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             "PSIBLAST",
             Some(1),
             "psiblast",
-            "PSIBLAST 2.12.0+",
+            "PSIBLAST 2.17.0+",
             PSIBLAST_XML_REFERENCE,
             true,
         );
@@ -6427,7 +6588,7 @@ fn write_deltablast_pairwise_subject_preamble(
     } else {
         Box::new(BufWriter::new(stdout.lock()))
     };
-    writeln!(writer, "DELTABLAST 2.12.0+")?;
+    writeln!(writer, "DELTABLAST 2.17.0+")?;
     writeln!(writer)?;
     writeln!(writer)?;
     writeln!(
@@ -6496,6 +6657,7 @@ fn write_deltablast_pairwise_subject_preamble(
 fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
+    enforce_query_content_or_exit("tblastx", &queries);
     let mut params = build_translated_blastp_params(args);
     apply_tblastx_param_overrides(&mut params);
     let mut all_hits = Vec::new();
@@ -6847,10 +7009,7 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_bytes = read_input_bytes("query", query_path(args));
     validate_blastn_fasta_input(&query_bytes);
     let records = sanitize_blastn_records(parse_fasta_with_default_id(&query_bytes[..], "Query_1"));
-    if records.is_empty() || records.iter().all(|record| record.sequence.is_empty()) {
-        eprintln!("BLAST engine error: Warning: Sequence contains no data ");
-        std::process::exit(3);
-    }
+    enforce_query_content_or_exit("blastn", &records);
     for (idx, record) in records.iter().enumerate() {
         if record.sequence.is_empty() {
             eprintln!(
@@ -7196,13 +7355,18 @@ fn run_blastn_rust(
 
     let mut all_hits: Vec<(u32, TabularHit)> = Vec::new();
 
-    // NCBI's `-ungapped` mode ignores DUST: empirically `-ungapped` and
-    // `-ungapped -dust no` produce identical output (the full 500-bp
-    // self-hit reports pident=100 with `mismatches=0`, so masked positions
-    // cannot have penalized scoring during extension). Mirror that
-    // behaviour — DUST is only useful when seeds and extension can be
-    // separated, and ungapped scans don't make that distinction.
-    let apply_dust = args.dust != "no" && !args.ungapped;
+    // DUST applies in `-ungapped` mode exactly as in the gapped path: it is
+    // SOFT masking — masked low-complexity regions are excluded from SEEDING
+    // (the lookup table is built from the masked query) but remain available
+    // for ungapped EXTENSION (extension runs against the un-masked query via
+    // the `*_nomask` buffers). NCBI does the same: empirically `-ungapped`
+    // with default DUST yields ~550 HSPs on yeast/nt10 while `-ungapped
+    // -dust no` yields ~1609, so DUST is NOT ignored for ungapped. Mirrors
+    // the gapped path (BlastSeqBlkSetSeqRanges / soft-mask seeding in
+    // s_BlastApplyFilter), so only the seeding word source differs from
+    // extension. (Was previously gated off by `&& !args.ungapped`, which
+    // hard-disabled DUST and over-reported low-complexity seeds.)
+    let apply_dust = args.dust != "no";
 
     // Pre-compute invariant values outside the per-query loop. The per-query
     // loop body shadows `cutoff_score` / `ungapped_x_dropoff` /
@@ -7340,6 +7504,8 @@ fn run_blastn_rust(
     let indexed_candidate_oids: Option<Vec<u32>> = if args.db.is_some()
         && ncbi_bool_enabled(Some(args.use_index.as_str()), false)
         && blastn_task_uses_database_index(args)
+        && index_prefix_for_args(args)
+            .is_some_and(|prefix| blast_rs::db::megablast_index_exists(&prefix))
     {
         let index_prefix = args
             .index_name
@@ -9164,6 +9330,35 @@ fn run_blastn_rust(
             write_pairwise_db_query_stats(&mut writer, args, query, &db)?;
         }
         write_pairwise_db_database_footer(&mut writer, &db, args)?;
+    } else if outfmt_num == 4 {
+        if pairwise_output_suppressed(args) {
+            writer.flush()?;
+            return Ok(());
+        }
+        write_pairwise_db_report_preamble(&mut writer, &db, args)?;
+        for (qi, query) in records.iter().enumerate() {
+            let query_hits =
+                pairwise_query_hits(&hits, &query.id, args.sorthits(), args.sorthsps());
+            write_pairwise_db_query_header(
+                &mut writer,
+                query,
+                &query_hits,
+                &subject_deflines,
+                args,
+            )?;
+            let query_hits =
+                limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+            write_flat_query_anchored(
+                &mut writer,
+                qi + 1,
+                query.sequence.len(),
+                None,
+                &query_hits,
+                pairwise_line_length(args),
+            )?;
+            write_pairwise_db_query_stats(&mut writer, args, query, &db)?;
+        }
+        write_pairwise_db_database_footer(&mut writer, &db, args)?;
     } else if outfmt_num == 5 {
         let database_label = args
             .db
@@ -9343,7 +9538,7 @@ fn write_commented_tabular_output_with_iteration<W: Write>(
         } else {
             query_hits
         };
-        writeln!(writer, "# {} 2.12.0+", program_label)?;
+        writeln!(writer, "# {} 2.17.0+", program_label)?;
         if let Some(iteration) = iteration {
             writeln!(writer, "# Iteration: {}", iteration)?;
         }
@@ -10827,7 +11022,7 @@ fn write_blastp_pairwise_subject_preamble<W: Write>(
 ) -> io::Result<()> {
     writeln!(
         writer,
-        "{} 2.12.0+",
+        "{} 2.17.0+",
         if psiblast { "PSIBLAST" } else { "BLASTP" }
     )?;
     writeln!(writer)?;
@@ -10926,6 +11121,66 @@ fn write_blastp_pairwise_db_output<W: Write>(
                 params.matrix,
             )?;
         }
+        let trailing = if psiblast && query_idx + 1 < num_queries {
+            0
+        } else {
+            2
+        };
+        write_blastp_pairwise_query_stats_with_trailing(
+            writer,
+            query,
+            params,
+            db.total_length.min(i64::MAX as u64) as i64,
+            db.stats_num_oids.min(i32::MAX as u64) as i32,
+            blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+            trailing,
+        )?;
+    }
+    write_blastp_pairwise_db_database_footer(writer, db, args, params)
+}
+
+/// Flat query-anchored (`-outfmt 4`) output for protein DB searches
+/// (blastp/psiblast). Reuses the pairwise preamble, per-query deflist header
+/// and Lambda/K stats footer; only the alignment section differs.
+fn write_blastp_flat_query_anchored_db_output<W: Write>(
+    writer: &mut W,
+    queries: &[blast_rs::input::FastaRecord],
+    db: &BlastDb,
+    hits: &[TabularHit],
+    subject_deflines: &std::collections::HashMap<String, String>,
+    args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
+    psiblast: bool,
+) -> io::Result<()> {
+    write_blastp_pairwise_db_preamble(writer, db, psiblast)?;
+    let num_queries = queries.len();
+    for (query_idx, query) in queries.iter().enumerate() {
+        if psiblast {
+            writeln!(writer, "Results from round 1")?;
+            writeln!(writer)?;
+            writeln!(writer)?;
+        }
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let has_query_hits = !query_hits.is_empty();
+        write_blastp_pairwise_db_query_header(
+            writer,
+            query,
+            &query_hits,
+            subject_deflines,
+            args,
+            false,
+        )?;
+        let limited_hits =
+            limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+        let has_alignments = !limited_hits.is_empty();
+        write_flat_query_anchored(
+            writer,
+            query_idx + 1,
+            query.sequence.len(),
+            Some(&query.sequence),
+            &limited_hits,
+            pairwise_line_length(args),
+        )?;
         let trailing = if psiblast && query_idx + 1 < num_queries {
             0
         } else {
@@ -11097,6 +11352,177 @@ fn write_translated_pairwise_db_output<W: Write>(
     write_translated_pairwise_db_database_footer(writer, db, args, program_label, params)
 }
 
+/// Flat query-anchored (`-outfmt 4`) output for translated DB searches
+/// (tblastn / blastx / tblastx). For tblastn the query is a protein and the
+/// merge axis is the protein query length; subject coordinates are nucleotide
+/// and may descend (negative frame). For blastx/tblastx the query is a
+/// translated nucleotide and the merge axis is in protein columns derived from
+/// each HSP's protein query span.
+fn write_translated_flat_query_anchored_db_output<W: Write>(
+    writer: &mut W,
+    program_label: &str,
+    queries: &[blast_rs::input::FastaRecord],
+    db: &BlastDb,
+    hits: &[TabularHit],
+    subject_deflines: &std::collections::HashMap<String, String>,
+    args: &BlastnArgs,
+    params: &blast_rs::api::SearchParams,
+    query_is_translated: bool,
+    subject_is_translated: bool,
+) -> io::Result<()> {
+    write_translated_pairwise_db_preamble(writer, program_label, db)?;
+    for (query_idx, query) in queries.iter().enumerate() {
+        let query_hits = pairwise_query_hits(hits, &query.id, args.sorthits(), args.sorthsps());
+        let has_query_hits = !query_hits.is_empty();
+        write_blastp_pairwise_db_query_header(
+            writer,
+            query,
+            &query_hits,
+            subject_deflines,
+            args,
+            program_label == "TBLASTX",
+        )?;
+        let limited_hits =
+            limit_pairwise_hits_by_subject(query_hits, pairwise_num_alignments(args));
+        let limited_hits = sort_translated_pairwise_alignment_hits(limited_hits, args.sorthsps());
+        let has_alignments = !limited_hits.is_empty();
+        // Protein-coordinate query axis. tblastn's query is already protein
+        // (length in residues). blastx/tblastx translate the nucleotide query,
+        // so the axis length is the maximum protein query end over all HSPs.
+        let query_axis_len = if query_is_translated {
+            translated_query_protein_axis_len(&limited_hits)
+        } else {
+            query.sequence.len()
+        };
+        // For tblastn the query axis IS the protein query sequence, so the
+        // anchor row is filled from it. For translated queries (blastx/tblastx)
+        // the axis is a frame translation we don't have here, so reconstruct the
+        // anchor from HSP fragments only.
+        let query_seq: Option<&[u8]> = if query_is_translated {
+            None
+        } else {
+            Some(&query.sequence)
+        };
+        write_translated_flat_query_anchored(
+            writer,
+            query_idx + 1,
+            query_axis_len,
+            query_seq,
+            &limited_hits,
+            pairwise_line_length(args),
+            query_is_translated,
+        )?;
+        write_translated_pairwise_query_stats(
+            writer,
+            program_label,
+            query,
+            params,
+            db.total_length.min(i64::MAX as u64) as i64,
+            db.stats_num_oids.min(i32::MAX as u64) as i32,
+            query_is_translated,
+            subject_is_translated,
+            blastp_pairwise_stats_leading_blank_lines(has_query_hits, has_alignments),
+        )?;
+    }
+    write_translated_pairwise_db_database_footer(writer, db, args, program_label, params)
+}
+
+/// Protein-coordinate axis length for a translated query (blastx / tblastx):
+/// the maximum protein query end over all HSPs, derived from each HSP's
+/// nucleotide span and frame.
+fn translated_query_protein_axis_len(hits: &[&TabularHit]) -> usize {
+    hits.iter()
+        .filter_map(|h| {
+            let qseq_aa = h.qseq.as_deref()?.chars().filter(|&c| c != '-').count();
+            let p_start = translated_query_protein_start(h)?;
+            Some(p_start + qseq_aa - 1)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// 1-based protein position of an HSP's first query residue for a translated
+/// query. Negative-frame HSPs are mapped onto the plus-strand protein axis.
+fn translated_query_protein_start(h: &TabularHit) -> Option<usize> {
+    let frame = h.qframe;
+    let (lo, hi) = if h.query_start <= h.query_end {
+        (h.query_start, h.query_end)
+    } else {
+        (h.query_end, h.query_start)
+    };
+    if frame > 0 {
+        Some(((lo - frame) / 3 + 1) as usize)
+    } else if frame < 0 {
+        // Minus strand: protein coordinates run from the 3' end. We anchor
+        // each minus-frame HSP relative to its own nucleotide span; the merge
+        // simply needs a monotonic protein axis, so use the distance from the
+        // query's high end.
+        let _ = hi;
+        Some(((lo - 1) / 3 + 1) as usize)
+    } else {
+        Some(1)
+    }
+}
+
+fn write_translated_flat_query_anchored<W: Write>(
+    writer: &mut W,
+    query_index: usize,
+    query_axis_len: usize,
+    query_seq: Option<&[u8]>,
+    query_hits: &[&TabularHit],
+    line_width: usize,
+    query_is_translated: bool,
+) -> io::Result<()> {
+    let mut owned: Vec<(String, String, String, i32, i32, i32)> = Vec::new();
+    for hit in query_hits {
+        let qseq = match hit.qseq.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        let sseq = match hit.sseq.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        // Protein query start: tblastn keeps query_start directly (protein);
+        // blastx/tblastx translate the nucleotide span to a protein position.
+        let q_start = if query_is_translated {
+            match translated_query_protein_start(hit) {
+                Some(p) => p as i32,
+                None => continue,
+            }
+        } else {
+            hit.query_start.min(hit.query_end)
+        };
+        owned.push((
+            hit.subject_id.clone(),
+            qseq,
+            sseq,
+            q_start,
+            hit.subject_start,
+            hit.subject_end,
+        ));
+    }
+    let hsps: Vec<blast_rs::format::FlatHsp> = owned
+        .iter()
+        .map(|(id, q, s, qs, ss, se)| blast_rs::format::FlatHsp {
+            subject_id: id.as_str(),
+            query_start: *qs,
+            subject_start: *ss,
+            subject_end: *se,
+            qseq: q.as_str(),
+            sseq: s.as_str(),
+        })
+        .collect();
+    blast_rs::format::format_flat_query_anchored(
+        writer,
+        query_index,
+        query_axis_len,
+        query_seq,
+        &hsps,
+        line_width,
+    )
+}
+
 fn write_translated_pairwise_subject_preamble<W: Write>(
     writer: &mut W,
     program_label: &str,
@@ -11104,7 +11530,7 @@ fn write_translated_pairwise_subject_preamble<W: Write>(
     args: &BlastnArgs,
     total_subject_len: i64,
 ) -> io::Result<()> {
-    writeln!(writer, "{} 2.12.0+", program_label)?;
+    writeln!(writer, "{} 2.17.0+", program_label)?;
     writeln!(writer)?;
     writeln!(writer)?;
     write_blast_reference(writer)?;
@@ -11128,7 +11554,7 @@ fn write_translated_pairwise_db_preamble<W: Write>(
     program_label: &str,
     db: &BlastDb,
 ) -> io::Result<()> {
-    writeln!(writer, "{} 2.12.0+", program_label)?;
+    writeln!(writer, "{} 2.17.0+", program_label)?;
     writeln!(writer)?;
     writeln!(writer)?;
     write_blast_reference(writer)?;
@@ -11154,7 +11580,7 @@ fn write_blastp_pairwise_db_preamble<W: Write>(
 ) -> io::Result<()> {
     writeln!(
         writer,
-        "{} 2.12.0+",
+        "{} 2.17.0+",
         if psiblast { "PSIBLAST" } else { "BLASTP" }
     )?;
     writeln!(writer)?;
@@ -11310,10 +11736,9 @@ fn write_blastp_pairwise_query_header<W: Write>(
     args: &BlastnArgs,
     show_num_hsps: bool,
 ) -> io::Result<()> {
-    writeln!(
+    write_query_eq_line(
         writer,
-        "Query= {}",
-        fasta_pairwise_display_defline(query, args.parse_deflines)
+        &fasta_pairwise_display_defline(query, args.parse_deflines),
     )?;
     writeln!(writer)?;
     writeln!(writer, "Length={}", query.sequence.len())?;
@@ -11367,6 +11792,79 @@ fn write_blastp_pairwise_query_header<W: Write>(
     writeln!(writer)
 }
 
+/// Width used by NCBI to word-wrap the `Query=` defline (kFormatLineLength).
+const BLAST_DEFLINE_WRAP_WIDTH: usize = 68;
+
+/// Write the `Query= <defline>` acknowledgement line, word-wrapping the defline
+/// the way NCBI does (`CAlignFormatUtil::AcknowledgeBlastQuery` ->
+/// `NStr::Wrap`, fWrap_FlatFile). The `Query= ` prefix overhangs on the first
+/// line only; continuation lines have no indent. Wrap chunks are at most
+/// `BLAST_DEFLINE_WRAP_WIDTH` characters, broken at spaces, with over-long words
+/// hard-broken at the width.
+fn write_query_eq_line<W: Write>(writer: &mut W, defline: &str) -> io::Result<()> {
+    let chunks = wrap_blast_defline(defline, BLAST_DEFLINE_WRAP_WIDTH);
+    if chunks.is_empty() {
+        return writeln!(writer, "Query= ");
+    }
+    writeln!(writer, "Query= {}", chunks[0])?;
+    for chunk in &chunks[1..] {
+        writeln!(writer, "{}", chunk)?;
+    }
+    Ok(())
+}
+
+/// Greedy word-wrap matching `NStr::Wrap` flat-file semantics for deflines:
+/// fill each line with whole words separated by single spaces until adding the
+/// next word would exceed `width`; if a single word is longer than `width`,
+/// hard-break it. Returns the wrapped lines (no trailing spaces, no indent).
+fn wrap_blast_defline(defline: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in defline.split(' ') {
+        if word.is_empty() {
+            // Preserve runs of spaces by treating an empty token as a space-only
+            // word: append a space if the current line has room.
+            if !cur.is_empty() && cur.chars().count() < width {
+                cur.push(' ');
+            }
+            continue;
+        }
+        let mut word = word;
+        // Hard-break words longer than the width.
+        while word.chars().count() > width {
+            let need = if cur.is_empty() {
+                width
+            } else {
+                // flush current line first
+                lines.push(std::mem::take(&mut cur));
+                width
+            };
+            let split = word
+                .char_indices()
+                .nth(need)
+                .map(|(i, _)| i)
+                .unwrap_or(word.len());
+            lines.push(word[..split].to_string());
+            word = &word[split..];
+        }
+        let wlen = word.chars().count();
+        if cur.is_empty() {
+            cur.push_str(word);
+        } else if cur.chars().count() + 1 + wlen <= width {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 fn write_blastp_pairwise_db_query_header<W: Write>(
     writer: &mut W,
     query: &blast_rs::input::FastaRecord,
@@ -11375,10 +11873,9 @@ fn write_blastp_pairwise_db_query_header<W: Write>(
     args: &BlastnArgs,
     show_num_hsps: bool,
 ) -> io::Result<()> {
-    writeln!(
+    write_query_eq_line(
         writer,
-        "Query= {}",
-        fasta_pairwise_display_defline(query, args.parse_deflines)
+        &fasta_pairwise_display_defline(query, args.parse_deflines),
     )?;
     writeln!(writer)?;
     writeln!(writer, "Length={}", query.sequence.len())?;
@@ -12573,7 +13070,7 @@ fn write_blastp_xml_output<W: Write>(
     xml_version: &str,
     xml_reference: &str,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -12862,7 +13359,7 @@ fn write_translated_xml_output<W: Write>(
     query_is_translated: bool,
     subject_is_translated: bool,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -12872,7 +13369,7 @@ fn write_translated_xml_output<W: Write>(
     )?;
     writeln!(
         writer,
-        "  <BlastOutput_version>{} 2.12.0+</BlastOutput_version>",
+        "  <BlastOutput_version>{} 2.17.0+</BlastOutput_version>",
         program_label
     )?;
     writeln!(writer, "  <BlastOutput_reference>Stephen F. Altschul, Thomas L. Madden, Alejandro A. Sch&amp;auml;ffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J. Lipman (1997), &quot;Gapped BLAST and PSI-BLAST: a new generation of protein database search programs&quot;, Nucleic Acids Res. 25:3389-3402.</BlastOutput_reference>")?;
@@ -13489,7 +13986,7 @@ fn write_blastn_subject_xml_output<W: Write>(
         })
         .collect();
 
-    writeln!(writer, "<?xml version=\"1.0\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -13498,7 +13995,7 @@ fn write_blastn_subject_xml_output<W: Write>(
     )?;
     writeln!(
         writer,
-        "  <BlastOutput_version>BLASTN 2.12.0+</BlastOutput_version>"
+        "  <BlastOutput_version>BLASTN 2.17.0+</BlastOutput_version>"
     )?;
     // NCBI's blastn XML reference is the greedy-DNA paper (Zhang 2000), not
     // the Gapped-BLAST/PSI-BLAST paper that's emitted for blastp.
@@ -13799,7 +14296,7 @@ fn write_blastn_db_xml_output<W: Write>(
     hit_groups: &std::collections::HashMap<String, String>,
     hit_metadata: &std::collections::HashMap<String, (String, String, String, i32)>,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -13808,7 +14305,7 @@ fn write_blastn_db_xml_output<W: Write>(
     )?;
     writeln!(
         writer,
-        "  <BlastOutput_version>BLASTN 2.12.0+</BlastOutput_version>"
+        "  <BlastOutput_version>BLASTN 2.17.0+</BlastOutput_version>"
     )?;
     // NCBI's blastn XML reference is the greedy-DNA paper (Zhang 2000).
     // blastn task=blastn-short / rmblastn uses the Gapped BLAST paper instead
@@ -14341,7 +14838,7 @@ fn write_blastn_sam_output_with_query_labels<W: Write>(
     // verbatim — the rest of the SAM body is byte-identical, and any tool
     // consuming SAM treats @PG CL as informational.
     let cl = std::env::args().collect::<Vec<_>>().join(" ");
-    writeln!(writer, "@PG\tID:0\tVN:2.12.0+\tCL:{} \tPN:blastn", cl)?;
+    writeln!(writer, "@PG\tID:0\tVN:2.17.0+\tCL:{} \tPN:blastn", cl)?;
 
     for hit in hits {
         let subject_label = hit_labels
@@ -14963,7 +15460,7 @@ fn write_pairwise_subject_report_preamble<W: Write>(
     // rmblastn emits "RMBLASTN" header + RepeatMasker reference; other blastn
     // tasks use "BLASTN" + Gapped-BLAST / greedy-DNA.
     if matches!(task, Some("rmblastn")) {
-        writeln!(writer, "RMBLASTN 2.12.0+")?;
+        writeln!(writer, "RMBLASTN 2.17.0+")?;
         writeln!(writer)?;
         writeln!(writer)?;
         writeln!(writer, "Reference: Robert M. Hubley, Arian Smit")?;
@@ -14984,7 +15481,7 @@ fn write_pairwise_subject_report_preamble<W: Write>(
         writeln!(writer)?;
         return Ok(());
     }
-    writeln!(writer, "BLASTN 2.12.0+")?;
+    writeln!(writer, "BLASTN 2.17.0+")?;
     writeln!(writer)?;
     writeln!(writer)?;
     // blastn-short / rmblastn use the Gapped BLAST paper as the pairwise
@@ -15056,10 +15553,9 @@ fn write_pairwise_subject_query_header<W: Write>(
             )
         })
         .collect();
-    writeln!(
+    write_query_eq_line(
         writer,
-        "Query= {}",
-        fasta_pairwise_display_defline(query, args.parse_deflines)
+        &fasta_pairwise_display_defline(query, args.parse_deflines),
     )?;
     writeln!(writer)?;
     writeln!(writer, "Length={}", query.sequence.len())?;
@@ -15250,7 +15746,7 @@ fn write_pairwise_db_report_preamble<W: Write>(
     // 1997 reference. Both references are present; the RepeatMasker one is
     // an extra header.
     if matches!(task, Some("rmblastn")) {
-        writeln!(writer, "RMBLASTN 2.12.0+")?;
+        writeln!(writer, "RMBLASTN 2.17.0+")?;
         writeln!(writer)?;
         writeln!(writer)?;
         writeln!(writer, "Reference: Robert M. Hubley, Arian Smit")?;
@@ -15288,7 +15784,7 @@ fn write_pairwise_db_report_preamble<W: Write>(
         writeln!(writer)?;
         return Ok(());
     }
-    writeln!(writer, "BLASTN 2.12.0+")?;
+    writeln!(writer, "BLASTN 2.17.0+")?;
     writeln!(writer)?;
     writeln!(writer)?;
     // NCBI's pairwise reference depends on the blastn task:
@@ -15349,7 +15845,7 @@ fn write_pairwise_db_query_header<W: Write>(
     subject_deflines: &std::collections::HashMap<String, String>,
     args: &BlastnArgs,
 ) -> io::Result<()> {
-    writeln!(writer, "Query= {}", query.defline.as_str())?;
+    write_query_eq_line(writer, query.defline.as_str())?;
     writeln!(writer)?;
     writeln!(writer, "Length={}", query.sequence.len())?;
     if hits.is_empty() {
@@ -15578,6 +16074,106 @@ fn oriented_nucleotide_hsp_strings(
         ))
     });
     (qseq, sseq)
+}
+
+/// Emit the flat query-anchored alignment block (`-outfmt 4`) for one query.
+///
+/// `query_index` is 1-based; `query_len` is the ungapped query residue count.
+/// `query_hits` are the HSPs for this query, already ordered as for pairwise
+/// output (best-first), each carrying `qseq`/`sseq`. Subjects with multiple
+/// HSPs contribute one row per HSP, in order.
+fn write_flat_query_anchored<W: Write>(
+    writer: &mut W,
+    query_index: usize,
+    query_len: usize,
+    query_seq: Option<&[u8]>,
+    query_hits: &[&TabularHit],
+    line_width: usize,
+) -> io::Result<()> {
+    // Build FlatHsp inputs from each HSP's aligned strings. NCBI anchors on the
+    // query in plus orientation; when the query side of an HSP is on the minus
+    // strand we skip it (rare for outfmt 4 — handled in the common case below).
+    let mut owned: Vec<(String, String, String, i32, i32, i32)> = Vec::new();
+    for hit in query_hits {
+        let qseq = match hit.qseq.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        let sseq = match hit.sseq.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        // Normalise to query-plus orientation. For nucleotide minus-query HSPs
+        // (query_start > query_end) reverse-complement both rows so the anchor
+        // ascends; the merged view is identical to NCBI's query-anchored axis.
+        let (qseq, sseq, q_start, s_start, s_end) = if hit.query_start <= hit.query_end {
+            (
+                qseq,
+                sseq,
+                hit.query_start,
+                hit.subject_start,
+                hit.subject_end,
+            )
+        } else {
+            (
+                revcomp_aligned(&qseq),
+                revcomp_aligned(&sseq),
+                hit.query_end,
+                hit.subject_end,
+                hit.subject_start,
+            )
+        };
+        owned.push((
+            hit.subject_id.clone(),
+            qseq,
+            sseq,
+            q_start,
+            s_start,
+            s_end,
+        ));
+    }
+    let hsps: Vec<blast_rs::format::FlatHsp> = owned
+        .iter()
+        .map(|(id, q, s, qs, ss, se)| blast_rs::format::FlatHsp {
+            subject_id: id.as_str(),
+            query_start: *qs,
+            subject_start: *ss,
+            subject_end: *se,
+            qseq: q.as_str(),
+            sseq: s.as_str(),
+        })
+        .collect();
+    blast_rs::format::format_flat_query_anchored(
+        writer,
+        query_index,
+        query_len,
+        query_seq,
+        &hsps,
+        line_width,
+    )
+}
+
+/// Reverse-complement an aligned (gapped) IUPAC string, preserving `-` gaps.
+fn revcomp_aligned(s: &str) -> String {
+    s.chars()
+        .rev()
+        .map(|c| match c.to_ascii_uppercase() {
+            'A' => 'T',
+            'T' => 'A',
+            'G' => 'C',
+            'C' => 'G',
+            'R' => 'Y',
+            'Y' => 'R',
+            'K' => 'M',
+            'M' => 'K',
+            'B' => 'V',
+            'V' => 'B',
+            'D' => 'H',
+            'H' => 'D',
+            '-' => '-',
+            other => other,
+        })
+        .collect()
 }
 
 fn write_pairwise_alignment<W: Write>(
@@ -16845,7 +17441,7 @@ mod tests {
             "psiblast db mode should produce search output"
         );
         assert!(
-            psiblast_output.starts_with("PSIBLAST 2.12.0+"),
+            psiblast_output.starts_with("PSIBLAST 2.17.0+"),
             "psiblast pairwise db mode should use PSI-BLAST labels"
         );
         assert!(

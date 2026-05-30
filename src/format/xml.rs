@@ -89,7 +89,7 @@ pub fn write_xml_header<W: Write>(
     version: &str,
     db: &str,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -234,7 +234,7 @@ mod tests {
 
         // Verify XML declaration
         assert!(
-            output.starts_with("<?xml version=\"1.0\"?>"),
+            output.starts_with("<?xml version=\"1.0\" encoding=\"US-ASCII\"?>"),
             "should start with XML declaration"
         );
         // Verify matching open/close tags for key elements
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn test_xml_header_reference_matches_ncbi_order() {
         let mut buf = Vec::new();
-        write_xml_header(&mut buf, "blastn", "2.12.0+", "testdb").unwrap();
+        write_xml_header(&mut buf, "blastn", "2.17.0+", "testdb").unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("<BlastOutput_reference>Stephen F. Altschul"));

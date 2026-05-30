@@ -21,7 +21,7 @@
 //!   BLAST_RS_PERF_DB=<path to AMRProt.fa>            (overrides DB discovery)
 //!   BLAST_RS_PERF_QUERY_PROT=<protein FASTA>         (default: <amr_dir>/tests/golden/test_prot.fa)
 //!   BLAST_RS_PERF_QUERY_DNA=<nucleotide FASTA>       (default: <amr_dir>/tests/golden/test_dna.fa)
-//!   NCBI_BLASTP / NCBI_BLASTX=<path>                 (default: /usr/bin/<tool>, then PATH)
+//!   NCBI_BLASTP / NCBI_BLASTX=<path>                 (default: in-repo 2.17 bin, then PATH)
 //!   BLAST_RS_PERF_REPS=<n>                (default: 3; set 1 for a quick blastx check)
 //!   BLAST_RS_PERF_THREADS=<n>             (default: 4)
 //!   BLAST_RS_PERF_GENCODE=<n>             (default: 11, amrfinder's translation table)
@@ -81,16 +81,18 @@ fn find_blast_cli() -> Option<PathBuf> {
 }
 
 /// Find an NCBI tool (`blastp`, `blastx`, ...): env override `NCBI_<TOOL>`, then
-/// `/usr/bin/<tool>`, then a PATH lookup.
+/// the in-repo 2.17 binary, then a PATH lookup.
 fn find_ncbi(tool: &str) -> Option<PathBuf> {
     let env_key = format!("NCBI_{}", tool.to_uppercase());
     if let Ok(p) = std::env::var(&env_key) {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);
     }
-    let usr = PathBuf::from(format!("/usr/bin/{tool}"));
-    if usr.exists() {
-        return Some(usr);
+    let repo_bin = manifest_dir()
+        .join("ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin")
+        .join(tool);
+    if repo_bin.exists() {
+        return Some(repo_bin);
     }
     let out = Command::new("which").arg(tool).output().ok()?;
     if out.status.success() {

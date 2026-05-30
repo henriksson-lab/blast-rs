@@ -809,7 +809,16 @@ fn apply_blastx_linked_sum_stats(
         for (hsp, key) in result.hsps.iter_mut().zip(original_keys) {
             if let Some(stats) = linked_stats.get_mut(&key) {
                 if let Some((evalue, num)) = stats.pop() {
-                    hsp.evalue = evalue;
+                    // Only adopt the linker's e-value for HSPs that actually
+                    // joined a linked set (num > 1). NCBI's
+                    // `s_BlastUnevenGapLinkHSPs` leaves singleton e-values at
+                    // the per-HSP value from `Blast_HSPListGetEvalues`
+                    // (`link_hsps.c:1791`); the Rust linker port recomputes
+                    // them with linker-local subject lengths and would
+                    // otherwise overwrite the correct per-frame Spouge value.
+                    if num > 1 {
+                        hsp.evalue = evalue;
+                    }
                     hsp.num_links = num.max(1);
                 }
             }
@@ -948,7 +957,20 @@ fn apply_tblastn_linked_sum_stats(
         for (hsp, key) in result.hsps.iter_mut().zip(original_keys) {
             if let Some(stats) = linked_stats.get_mut(&key) {
                 if let Some((evalue, num)) = stats.pop() {
-                    hsp.evalue = evalue;
+                    // NCBI's `s_BlastUnevenGapLinkHSPs` only rewrites the
+                    // e-value of HSPs that are actually combined into a
+                    // linked set (`s_CombineLinkedHSPSets`, `link_hsps.c`).
+                    // Genuine singletons (num == 1) keep the per-HSP Spouge
+                    // e-value already assigned by `Blast_HSPListGetEvalues`
+                    // in `process_tblastn_frame_hsps`. The Rust linker port
+                    // re-derives e-values for every HSP (including singletons)
+                    // with a subject length that has been divided by
+                    // CODON_LENGTH an extra time, which is wrong for the
+                    // singleton path; only trust the linker output once the
+                    // HSP has truly linked.
+                    if num > 1 {
+                        hsp.evalue = evalue;
+                    }
                     hsp.num_links = num.max(1);
                 }
             }
@@ -4899,8 +4921,18 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 continue;
             }
             let subj_prot_len = prot.len();
+            // NCBI's tblastn final per-HSP Spouge e-value (`BLAST_LinkHsps`
+            // -> `Blast_HSPListGetEvalues`, `link_hsps.c:1791`) is computed
+            // with `subject_length / CODON_LENGTH`. For a translated subject
+            // the `subject_length` handed to `BLAST_LinkHsps`
+            // (`blast_engine.c:870`) is ALREADY the per-frame PROTEIN length
+            // (`subject->length`, set at `blast_engine.c:811`), so the linker
+            // divides it by CODON_LENGTH a SECOND time. Mirror that double
+            // division here: `n_ = per_frame_protein_len / 3`. (blastx, with
+            // an untranslated protein subject, takes no extra division —
+            // `Blast_SubjectIsTranslated` is false there.)
             let tblastn_spouge_subject_len = if params.comp_adjust == 0 {
-                (subject_len / 3).max(1)
+                (subj_prot_len / 3).max(1)
             } else {
                 subj_prot_len
             };
@@ -5200,8 +5232,14 @@ pub fn tblastn_batch(
                     continue;
                 }
                 let subj_prot_len = prot.len();
+                // See the comment on the same binding in `tblastn`: NCBI's
+                // final tblastn Spouge e-value divides the per-frame protein
+                // subject length by CODON_LENGTH a second time
+                // (`BLAST_LinkHsps` -> `Blast_HSPListGetEvalues`,
+                // `link_hsps.c:1791`, fed the per-frame protein
+                // `subject->length` from `blast_engine.c:870`).
                 let tblastn_spouge_subject_len = if params.comp_adjust == 0 {
-                    (subject_len / 3).max(1)
+                    (subj_prot_len / 3).max(1)
                 } else {
                     subj_prot_len
                 };

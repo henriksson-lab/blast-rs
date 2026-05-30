@@ -1,8 +1,10 @@
+pub mod flat_query_anchored;
 mod pairwise;
 pub mod sam;
 mod tabular;
 pub mod xml;
 
+pub use flat_query_anchored::{format_flat_query_anchored, FlatHsp};
 pub use pairwise::{
     format_pairwise_alignment, format_pairwise_alignment_full,
     format_pairwise_alignment_with_header, format_pairwise_alignment_with_line_width,

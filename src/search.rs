@@ -6342,13 +6342,18 @@ fn finalize_disc_megablast_gapped_candidates(
     kbp: &KarlinBlk,
     search_space: f64,
     evalue_threshold: f64,
-    min_score: i32,
     prune_right_shift_artifacts: bool,
 ) -> Vec<SearchHsp> {
     purge_common_endpoint_tracebacks(&mut candidates);
 
     let mut hsps = Vec::new();
     let reevaluate_all = gap_open == 0 && gap_extend == 0;
+    // The two-hit initial-word filter (`retain_disc_megablast_two_hit_seeds`)
+    // removes the isolated single-seed alignments NCBI never extends, so the only
+    // remaining gate is NCBI's e-value cutoff (already enforced inside
+    // `render_traceback_candidate`). A previous extra floor of
+    // `template_length*reward*2` was stricter than NCBI and dropped valid HSPs
+    // (yeast/nt20 q6 score 63, q18 score 51).
     for candidate in candidates {
         if let Some(hsp) = render_traceback_candidate(
             candidate.context,
@@ -6365,9 +6370,7 @@ fn finalize_disc_megablast_gapped_candidates(
             search_space,
             evalue_threshold,
         ) {
-            if hsp.score >= min_score {
-                hsps.push(hsp);
-            }
+            hsps.push(hsp);
         }
     }
     purge_common_endpoint_hsps(&mut hsps);
@@ -6850,6 +6853,62 @@ pub fn blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
     )
 }
 
+/// NCBI `BLAST_WINDOW_SIZE_DISC` (`blast_options.h`): the two-hit window used
+/// by dc-megablast initial-word extension.
+const DISC_MEGABLAST_WINDOW_SIZE: i32 = 40;
+
+/// Two-hit initial-word filter for dc-megablast, mirroring NCBI
+/// `s_BlastnDiagTableExtendInitialHit` (`na_ungapped.c`) with
+/// `window_size = BLAST_WINDOW_SIZE_DISC` and `scan_range = 0` (so the
+/// off-diagonal `Delta` loop is empty). For each diagonal NCBI keeps a
+/// `last_hit` (the right end `s_off + word_length` of the previous accepted
+/// hit) and a `hit_saved` flag. A seed is *extended* (kept) only when it is the
+/// SECOND hit of a pair falling within `window_size` of the previous hit on the
+/// same diagonal; an isolated first hit is held (dropped). Seeds must be
+/// supplied in subject-scan order (ascending `subject_start`) per context, which
+/// is how the disc scanner emits them.
+fn retain_disc_megablast_two_hit_seeds(seeds: &mut Vec<SearchHsp>, template_length: i32) {
+    if seeds.is_empty() {
+        return;
+    }
+    let word_length = template_length;
+    let window_size = DISC_MEGABLAST_WINDOW_SIZE;
+    // Per (context, diagonal) state: (last_hit, hit_saved).
+    use std::collections::HashMap;
+    let mut state: HashMap<(i32, i32), (i32, bool)> = HashMap::new();
+    let mut keep = Vec::with_capacity(seeds.len());
+    for seed in seeds.iter() {
+        let s_off = seed.subject_start;
+        let q_off = seed.query_start;
+        let diag = s_off - q_off;
+        let s_off_pos = s_off;
+        let s_end_pos = s_off + word_length;
+        let entry = state.entry((seed.context, diag)).or_insert((0, false));
+        let (last_hit, hit_saved) = *entry;
+
+        // hit within the already-explored area is rejected, no state change.
+        if s_off_pos < last_hit {
+            keep.push(false);
+            continue;
+        }
+
+        let hit_ready = if hit_saved || s_end_pos > last_hit + window_size {
+            // First hit of a potential pair (or isolated). With scan_range == 0
+            // there are no off-diagonal partners, so an isolated single word is
+            // held rather than extended.
+            false
+        } else {
+            // Second hit within the window on this diagonal: trigger extension.
+            true
+        };
+
+        *entry = (s_end_pos, hit_ready);
+        keep.push(hit_ready);
+    }
+    let mut iter = keep.into_iter();
+    seeds.retain(|_| iter.next().unwrap_or(false));
+}
+
 /// Disc-megablast gapped tail: everything after seed generation. Extracted so
 /// the concatenated-query scanner can feed pre-collected per-query seeds (in
 /// local coordinates) through the *unmodified* ungapped + gapped pipeline,
@@ -6876,6 +6935,15 @@ fn disc_megablast_gapped_from_seeds(
     mut seeds: Vec<SearchHsp>,
 ) -> Vec<SearchHsp> {
     let prepared = PreparedBlastnQuery::new(query_plus, query_minus, disc_word_size);
+    // NCBI dc-megablast sets a non-zero window (`BLAST_WINDOW_SIZE_DISC = 40`,
+    // `disc_nucl_options.cpp` `SetMBInitialWordOptionsDefaults`), which switches
+    // the nucleotide initial-word extender to TWO-HIT mode
+    // (`s_BlastnDiagTableExtendInitialHit`, `na_ungapped.c`): an isolated single
+    // discontiguous seed on a diagonal is NOT extended; extension is only
+    // triggered when a second seed lands on the same diagonal within the window.
+    // Without this filter rs over-reports isolated single-seed alignments that
+    // NCBI never extends (e.g. yeast/nt20 q6/NC_001145.3 34 bp 94% hit).
+    retain_disc_megablast_two_hit_seeds(&mut seeds, template_length);
     seeds.sort_by(score_compare_search_hsps);
 
     let mut candidates = Vec::new();
@@ -6912,7 +6980,6 @@ fn disc_megablast_gapped_from_seeds(
         kbp,
         search_space,
         evalue_threshold,
-        template_length.saturating_mul(reward).saturating_mul(2),
         query_plus != query_plus_nomask || query_minus != query_minus_nomask,
     )
 }

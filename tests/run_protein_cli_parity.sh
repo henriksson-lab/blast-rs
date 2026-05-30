@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUST_BIN="${BLAST_RS_CLI_BIN:-$ROOT_DIR/target/debug/blast-cli}"
+NCBI_BIN_DIR="$ROOT_DIR/ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin"
 
 need_bin() {
     if [[ ! -x "$1" ]]; then
@@ -12,10 +13,10 @@ need_bin() {
 }
 
 need_bin "$RUST_BIN"
-need_bin /usr/bin/blastp
-need_bin /usr/bin/blastx
-need_bin /usr/bin/tblastn
-need_bin /usr/bin/tblastx
+need_bin "$NCBI_BIN_DIR/blastp"
+need_bin "$NCBI_BIN_DIR/blastx"
+need_bin "$NCBI_BIN_DIR/tblastn"
+need_bin "$NCBI_BIN_DIR/tblastx"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -55,7 +56,7 @@ run_case() {
     echo "ok  $label"
 }
 
-run_case blastp /usr/bin/blastp "$tmpdir/protein_query.fa" "$tmpdir/protein_subject.fa" blastp_low_complexity
-run_case blastx /usr/bin/blastx "$tmpdir/nt_query.fa" "$tmpdir/protein_subject.fa" blastx_low_complexity
-run_case tblastn /usr/bin/tblastn "$tmpdir/protein_query.fa" "$tmpdir/nt_subject.fa" tblastn_low_complexity
-run_case tblastx /usr/bin/tblastx "$tmpdir/nt_query.fa" "$tmpdir/nt_subject.fa" tblastx_low_complexity
+run_case blastp "$NCBI_BIN_DIR/blastp" "$tmpdir/protein_query.fa" "$tmpdir/protein_subject.fa" blastp_low_complexity
+run_case blastx "$NCBI_BIN_DIR/blastx" "$tmpdir/nt_query.fa" "$tmpdir/protein_subject.fa" blastx_low_complexity
+run_case tblastn "$NCBI_BIN_DIR/tblastn" "$tmpdir/protein_query.fa" "$tmpdir/nt_subject.fa" tblastn_low_complexity
+run_case tblastx "$NCBI_BIN_DIR/tblastx" "$tmpdir/nt_query.fa" "$tmpdir/nt_subject.fa" tblastx_low_complexity
