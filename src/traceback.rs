@@ -1267,6 +1267,239 @@ fn gapped_score_one_dir(
     best_score
 }
 
+/// Extent-returning variant of `gapped_score_one_dir` for the 16x16 nucleotide
+/// matrix. Identical DP to `gapped_score_one_dir` (the faithful `ALIGN_EX`
+/// score-only core, blast_gapalign.c `s_BlastAlignPackedNucl`), but additionally
+/// tracks the offsets `(a_off, b_off)` of the maximum-scoring cell so the caller
+/// can recover the gapped alignment extent — mirroring how the packed-subject
+/// path (`gapped_score_one_dir_packed_subject`) and the generic-matrix path
+/// (`gapped_score_one_dir_generic`) return `b_offset`/`a_offset` to
+/// `s_BlastDynProgNtGappedAlignment`.
+#[allow(clippy::too_many_arguments)]
+fn gapped_score_one_dir_ex(
+    a: &[u8],
+    b: &[u8],
+    m: usize,
+    n: usize,
+    matrix: &[[i32; 16]; 16],
+    gap_oe: i32,
+    gap_extend: i32,
+    mut x_dropoff: i32,
+    reverse: bool,
+) -> (i32, usize, usize) {
+    if x_dropoff < gap_oe {
+        x_dropoff = gap_oe;
+    }
+    if m == 0 || n == 0 {
+        return (0, 0, 0);
+    }
+
+    let num_extra_cells = if gap_extend > 0 {
+        (x_dropoff / gap_extend) as usize + 3
+    } else {
+        n + 3
+    };
+    let mut sa = vec![
+        GapDP {
+            best: MININT,
+            best_gap: MININT
+        };
+        n + num_extra_cells + 10
+    ];
+
+    sa[0] = GapDP {
+        best: 0,
+        best_gap: -gap_oe,
+    };
+    let mut score = -gap_oe;
+    let mut b_size = 1usize;
+    while b_size <= n && score >= -x_dropoff {
+        sa[b_size] = GapDP {
+            best: score,
+            best_gap: score - gap_oe,
+        };
+        score -= gap_extend;
+        b_size += 1;
+    }
+
+    let mut best_score = 0i32;
+    let mut first_b = 0usize;
+    let mut a_off = 0usize;
+    let mut b_off = 0usize;
+
+    for ai in 1..=m {
+        let a_letter = if reverse { a[m - ai] } else { a[ai] };
+        let mrow = &matrix[a_letter as usize & 0x0F];
+        let mut sc = MININT;
+        let mut sgr = MININT;
+        let mut last_b = first_b;
+
+        #[allow(clippy::mut_range_bound)]
+        for bi in first_b..b_size {
+            let b_idx = if reverse {
+                n.checked_sub(1 + bi).unwrap_or(usize::MAX)
+            } else {
+                bi + 1
+            };
+
+            let sgc = sa[bi].best_gap;
+            let next_sc = if b_idx < b.len() {
+                sa[bi].best + mrow[b[b_idx] as usize & 0x0F]
+            } else {
+                MININT
+            };
+
+            if sc < sgc {
+                sc = sgc;
+            }
+            if sc < sgr {
+                sc = sgr;
+            }
+
+            if best_score - sc > x_dropoff {
+                if first_b == bi {
+                    first_b += 1;
+                } else {
+                    sa[bi].best = MININT;
+                }
+            } else {
+                last_b = bi;
+                if sc > best_score {
+                    best_score = sc;
+                    a_off = ai;
+                    b_off = bi;
+                }
+                if sgc - gap_extend < sc - gap_oe {
+                    sa[bi].best_gap = sc - gap_oe;
+                } else {
+                    sa[bi].best_gap = sgc - gap_extend;
+                }
+                if sgr - gap_extend < sc - gap_oe {
+                    sgr = sc - gap_oe;
+                } else {
+                    sgr -= gap_extend;
+                }
+                sa[bi].best = sc;
+            }
+            sc = next_sc;
+        }
+
+        if first_b >= b_size {
+            break;
+        }
+
+        if last_b + num_extra_cells + 3 >= sa.len() {
+            sa.resize(
+                (last_b + num_extra_cells + 100).max(sa.len() * 2),
+                GapDP {
+                    best: MININT,
+                    best_gap: MININT,
+                },
+            );
+        }
+
+        if last_b < b_size - 1 {
+            b_size = last_b + 1;
+        } else {
+            while sgr >= best_score - x_dropoff && b_size <= n {
+                sa[b_size] = GapDP {
+                    best: sgr,
+                    best_gap: sgr - gap_oe,
+                };
+                sgr -= gap_extend;
+                b_size += 1;
+            }
+        }
+        if b_size <= n && b_size < sa.len() {
+            sa[b_size] = GapDP {
+                best: MININT,
+                best_gap: MININT,
+            };
+            b_size += 1;
+        }
+    }
+
+    (best_score, a_off, b_off)
+}
+
+/// Decoded-subject analog of `s_blast_dyn_prog_nt_gapped_alignment`
+/// (NCBI `s_BlastDynProgNtGappedAlignment`, blast_gapalign.c:3006), returning
+/// the gapped alignment score together with its query/subject extent. Unlike the
+/// packed variant it operates on a one-base-per-byte subject, so the packed
+/// 4-byte `offset_adjustment` (which exists only because `s_BlastAlignPackedNucl`
+/// requires byte-aligned subject offsets) is NOT applied; the seed coordinates
+/// are used directly. The X-drop clamp to `ungapped_score` and the
+/// left/right two-directional extension match the C exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn s_blast_dyn_prog_nt_gapped_alignment_decoded_extents(
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    x_dropoff: i32,
+    ungapped_score: i32,
+) -> (i32, usize, usize, usize, usize) {
+    let mut effective_x_dropoff = x_dropoff;
+    if ungapped_score < effective_x_dropoff {
+        effective_x_dropoff = ungapped_score;
+    }
+
+    let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
+    let gap_oe = gap_open + gap_extend;
+
+    // Left extension (reverse). `gapped_score_one_dir_ex` returns
+    // (score, a_off, b_off) where `a` is the query and `b` the subject, so
+    // a_off is the query-direction offset (1-based `ai`) and b_off the
+    // subject-direction offset (0-based `bi`) of the best cell — mirroring the
+    // `private_q_start`/`private_s_start` outputs of `s_BlastAlignPackedNucl`.
+    let q_len_left = seed_q + 1;
+    let s_len_left = seed_s + 1;
+    let (score_left, private_q_start, private_s_start) = gapped_score_one_dir_ex(
+        &query[..q_len_left],
+        &subject[..s_len_left],
+        q_len_left,
+        s_len_left,
+        &matrix,
+        gap_oe,
+        gap_extend,
+        effective_x_dropoff,
+        true,
+    );
+    let query_start = q_len_left.saturating_sub(private_q_start);
+    let subject_start = s_len_left.saturating_sub(private_s_start);
+
+    // Right extension (forward), score + extent.
+    let (score_right, query_stop, subject_stop) =
+        if seed_q < query.len() - 1 && seed_s < subject.len() - 1 {
+            let (sr, q_stop, s_stop) = gapped_score_one_dir_ex(
+                &query[seed_q..],
+                &subject[seed_s..],
+                query.len() - seed_q - 1,
+                subject.len() - seed_s - 1,
+                &matrix,
+                gap_oe,
+                gap_extend,
+                effective_x_dropoff,
+                false,
+            );
+            (sr, seed_q + q_stop, seed_s + s_stop)
+        } else {
+            (0, seed_q, seed_s)
+        };
+
+    (
+        score_left + score_right,
+        query_start,
+        query_stop,
+        subject_start,
+        subject_stop,
+    )
+}
+
 fn generic_matrix_score(matrix: &[Vec<i32>], a: u8, b: u8) -> i32 {
     matrix
         .get(a as usize)

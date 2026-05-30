@@ -9,7 +9,8 @@ use crate::parameters::InitialWordParameters;
 use crate::stat::KarlinBlk;
 use crate::traceback::{
     blast_gapped_alignment_with_traceback, blast_hsp_reevaluate_with_ambiguities_gapped,
-    blast_semi_gapped_align, s_blast_dyn_prog_nt_gapped_alignment, TracebackResult,
+    s_blast_dyn_prog_nt_gapped_alignment,
+    s_blast_dyn_prog_nt_gapped_alignment_decoded_extents, TracebackResult,
 };
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -6812,6 +6813,9 @@ pub fn blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
 ) -> Vec<SearchHsp> {
     let disc_word_size = if word_size == 12 { 12 } else { 11 };
     let subject_packed = crate::encoding::pack_ncbi2na_bases(subject);
+    // NCBI ungapped X-dropoff (`blast_parameters.c`): `ceil(20 * ln2 / lambda)`,
+    // the standard nucleotide ungapped extension dropoff used for the disc word.
+    let ungapped_x_dropoff = (20.0 * crate::math::NCBIMATH_LN2 / kbp.lambda).ceil() as i32;
     let seeds = disc_megablast_seed_hsps(
         query_plus,
         query_minus,
@@ -6821,6 +6825,11 @@ pub fn blastn_gapped_search_disc_megablast_nomask_with_split_xdrop(
         template_length,
         template_type,
         reward,
+        penalty,
+        ungapped_x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
     );
     disc_megablast_gapped_from_seeds(
         query_plus,
@@ -6857,6 +6866,12 @@ const DISC_MEGABLAST_WINDOW_SIZE: i32 = 40;
 /// same diagonal; an isolated first hit is held (dropped). Seeds must be
 /// supplied in subject-scan order (ascending `subject_start`) per context, which
 /// is how the disc scanner emits them.
+///
+/// Superseded by `disc_extend_save_initial_hit`, which folds this two-hit filter
+/// together with the ungapped extension + save (so the diagonal `last_hit`
+/// advances to the ungapped end, matching `na_ungapped.c:772`). Kept for
+/// reference / standalone testing.
+#[allow(dead_code)]
 fn retain_disc_megablast_two_hit_seeds(seeds: &mut Vec<SearchHsp>, template_length: i32) {
     if seeds.is_empty() {
         return;
@@ -6912,7 +6927,10 @@ fn disc_megablast_gapped_from_seeds(
     query_minus_nomask: &[u8],
     subject: &[u8],
     disc_word_size: usize,
-    template_length: i32,
+    // Two-hit filtering + ungapped extension now happen during seeding
+    // (`disc_extend_save_initial_hit`), so the gapped tail no longer needs the
+    // template length.
+    _template_length: i32,
     reward: i32,
     penalty: i32,
     gap_open: i32,
@@ -6925,15 +6943,11 @@ fn disc_megablast_gapped_from_seeds(
     mut seeds: Vec<SearchHsp>,
 ) -> Vec<SearchHsp> {
     let prepared = PreparedBlastnQuery::new(query_plus, query_minus, disc_word_size);
-    // NCBI dc-megablast sets a non-zero window (`BLAST_WINDOW_SIZE_DISC = 40`,
-    // `disc_nucl_options.cpp` `SetMBInitialWordOptionsDefaults`), which switches
-    // the nucleotide initial-word extender to TWO-HIT mode
-    // (`s_BlastnDiagTableExtendInitialHit`, `na_ungapped.c`): an isolated single
-    // discontiguous seed on a diagonal is NOT extended; extension is only
-    // triggered when a second seed lands on the same diagonal within the window.
-    // Without this filter rs over-reports isolated single-seed alignments that
-    // NCBI never extends (e.g. yeast/nt20 q6/NC_001145.3 34 bp 94% hit).
-    retain_disc_megablast_two_hit_seeds(&mut seeds, template_length);
+    // The incoming `seeds` are already the surviving ungapped-extended initial
+    // hits: the disc seeding pass folds NCBI's two-hit window
+    // (`BLAST_WINDOW_SIZE_DISC = 40`) AND the `s_NuclUngappedExtend` + save flow
+    // (`s_BlastnDiagTableExtendInitialHit`, `na_ungapped.c:632`) into one pass, so
+    // each seed already carries the FULL ungapped extent and real ungapped score.
     seeds.sort_by(score_compare_search_hsps);
 
     let mut candidates = Vec::new();
@@ -6973,6 +6987,138 @@ fn disc_megablast_gapped_from_seeds(
     )
 }
 
+/// Per-(context, diagonal) initial-word state for the discontiguous two-hit
+/// extender, mirroring NCBI `DiagStruct` (`last_hit`, `flag`) plus the companion
+/// `hit_len_array` entry (`na_ungapped.c` `s_BlastnDiagTableExtendInitialHit`).
+#[derive(Clone, Copy, Default)]
+struct DiscDiagState {
+    last_hit: i32,
+    hit_saved: bool,
+    /// Companion `hit_len_array` entry (`na_ungapped.c:786`). Only read by the
+    /// off-diagonal `Delta` loop, which is empty for disc-mb (`scan_range == 0`),
+    /// so it is maintained for faithfulness but never consulted.
+    #[allow(dead_code)]
+    hit_len: i32,
+}
+
+/// Precomputed per-query ungapped-extension inputs for disc-megablast seeding.
+struct DiscExtendCtx<'a> {
+    nucl_score_table: &'a [i32; 256],
+    reward: i32,
+    penalty: i32,
+    ungapped_x_dropoff: i32,
+    reduced_nucl_cutoff_score: i32,
+    word_save_cutoff: i32,
+    kbp: &'a KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+}
+
+/// Faithful port of NCBI `s_BlastnDiagTableExtendInitialHit` (`na_ungapped.c:632`)
+/// for the discontiguous-megablast case: two-hit window (`window_size =
+/// BLAST_WINDOW_SIZE_DISC`, `scan_range = 0` so the off-diagonal `Delta` loop is
+/// empty and `off_found` is always FALSE), then `s_NuclUngappedExtend`
+/// (`extend_seed_packed`, template_length >= 11), saving the initial hit with the
+/// FULL ungapped extent only when `ungapped_data->score >= cutoffs->cutoff_score`
+/// (`na_ungapped.c:747-771`). The diagonal `last_hit` is advanced to the ungapped
+/// right end (`s_end_pos = ungapped_data->length + ungapped_data->s_start`,
+/// `na_ungapped.c:772`), NOT the template end — so genuine repeat-copy seeds keep
+/// their full extent and are not spuriously contained by the interval tree.
+#[allow(clippy::too_many_arguments)]
+fn disc_extend_save_initial_hit(
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    q_off: usize,
+    s_off: usize,
+    template_length: i32,
+    context: i32,
+    diag_state: &mut std::collections::HashMap<i32, DiscDiagState>,
+    ctx: &DiscExtendCtx<'_>,
+    seeds: &mut Vec<SearchHsp>,
+) {
+    let word_length = template_length;
+    let window_size = DISC_MEGABLAST_WINDOW_SIZE;
+    let diag = s_off as i32 - q_off as i32;
+    let s_off_pos = s_off as i32;
+    let s_end_template = s_off as i32 + word_length;
+    let entry = diag_state.entry(diag).or_default();
+    let last_hit = entry.last_hit;
+    let hit_saved = entry.hit_saved;
+
+    // `na_ungapped.c:673`: hit within the explored area is rejected.
+    if s_off_pos < last_hit {
+        return;
+    }
+
+    // `na_ungapped.c:675-718`: two-hit window. With scan_range == 0 the off-
+    // diagonal `Delta` loop never runs, so a lone first hit (word_type == 1) is
+    // held (hit_ready = 0); extension is triggered only by the second hit within
+    // `window_size` on the same diagonal.
+    let mut hit_ready = !(hit_saved || s_end_template > last_hit + window_size);
+
+    let mut s_end_pos = s_end_template;
+    if hit_ready {
+        // `na_ungapped.c:730-776`: ungapped extension + conditional save.
+        // For disc, word_length == template_length (>= 11), so this is the
+        // `s_NuclUngappedExtend` branch (`extend_seed_packed`), not the exact one.
+        let hit = ExactWordHit {
+            query_start: q_off,
+            subject_start: s_off,
+            subject_match_end: s_off + word_length as usize,
+        };
+        let extended = extend_seed_packed(
+            query,
+            subject_packed,
+            subject_len,
+            hit.query_start,
+            hit.subject_start,
+            hit.subject_match_end,
+            ctx.reward,
+            ctx.penalty,
+            ctx.ungapped_x_dropoff,
+            word_length as usize,
+            ctx.nucl_score_table,
+            ctx.reduced_nucl_cutoff_score,
+        );
+        let mut saved = false;
+        if let Some(data) = extended {
+            // `na_ungapped.c:753`: off_found is FALSE (scan_range==0), so save
+            // gates purely on `ungapped_data->score >= cutoffs->cutoff_score`.
+            if data.score >= ctx.word_save_cutoff {
+                let ungapped_end = data.s_start + data.length;
+                if let Some(hsp) = build_packed_hsp(
+                    query,
+                    subject_packed,
+                    data,
+                    hit,
+                    ctx.reward,
+                    ctx.penalty,
+                    ctx.kbp,
+                    ctx.search_space,
+                    ctx.evalue_threshold,
+                    subject_len,
+                    context,
+                ) {
+                    // `na_ungapped.c:772`: advance the diagonal to the ungapped end.
+                    s_end_pos = ungapped_end as i32;
+                    seeds.push(hsp);
+                    saved = true;
+                }
+            }
+        }
+        if !saved {
+            hit_ready = false;
+        }
+    }
+
+    // `na_ungapped.c:783-787`: update diagonal state.
+    let entry = diag_state.entry(diag).or_default();
+    entry.last_hit = s_end_pos;
+    entry.hit_saved = hit_ready;
+    entry.hit_len = if hit_ready { 0 } else { s_end_pos - s_off_pos };
+}
+
 /// Collect disc-megablast seeds for ALL queries from ONE concatenated disc-mb
 /// lookup table per strand, scanning the subject once. Seeds are returned in
 /// LOCAL (per-query) coordinates, in the same per-query order a per-query scan
@@ -6984,14 +7130,17 @@ fn concat_disc_megablast_seed_hsps(
     concat: &ConcatenatedBlastnQuery,
     per_query_plus: &[&[u8]],
     per_query_minus: &[&[u8]],
+    per_query_stats: &[ConcatQueryStats],
     subject_packed: &[u8],
     subject_len: usize,
     word_size: i32,
     template_length: i32,
     template_type: i32,
     reward: i32,
+    penalty: i32,
 ) -> Vec<Vec<SearchHsp>> {
     let n = concat.num_queries();
+    let nucl_score_table = InitialWordParameters::build_nucl_score_table(reward, penalty);
     let mut per_query: Vec<Vec<SearchHsp>> = vec![Vec::new(); n];
     append_concat_disc_seeds(
         &mut per_query,
@@ -6999,12 +7148,15 @@ fn concat_disc_megablast_seed_hsps(
         concat,
         &concat.plus_buf,
         per_query_plus,
+        per_query_stats,
+        &nucl_score_table,
         subject_packed,
         subject_len,
         word_size,
         template_length,
         template_type,
         reward,
+        penalty,
     );
     append_concat_disc_seeds(
         &mut per_query,
@@ -7012,12 +7164,15 @@ fn concat_disc_megablast_seed_hsps(
         concat,
         &concat.minus_buf,
         per_query_minus,
+        per_query_stats,
+        &nucl_score_table,
         subject_packed,
         subject_len,
         word_size,
         template_length,
         template_type,
         reward,
+        penalty,
     );
     per_query
 }
@@ -7029,12 +7184,15 @@ fn append_concat_disc_seeds(
     concat: &ConcatenatedBlastnQuery,
     concat_buf: &[u8],
     per_query_strand: &[&[u8]],
+    per_query_stats: &[ConcatQueryStats],
+    nucl_score_table: &[i32; 256],
     subject_packed: &[u8],
     subject_len: usize,
     word_size: i32,
     template_length: i32,
     template_type: i32,
     reward: i32,
+    penalty: i32,
 ) {
     if concat_buf.is_empty() || template_length <= 0 {
         return;
@@ -7059,6 +7217,31 @@ fn append_concat_disc_seeds(
         return;
     }
 
+    // Per-query word-save cutoffs (NCBI `word_params->cutoffs + context`), and
+    // per-(query, diagonal) two-hit state. Each query's seeds carry distinct
+    // local diagonals, so keeping the diag-table per query matches NCBI's single
+    // concatenated diag table (whose diagonals never alias across contexts here).
+    let n = per_query_strand.len();
+    let mut word_save_cutoffs = vec![0i32; n];
+    let mut reduced_cutoffs = vec![0i32; n];
+    for qi in 0..n {
+        let q = per_query_strand[qi];
+        let stats = &per_query_stats[qi];
+        let cutoff = blastn_word_save_cutoff(
+            q,
+            reward,
+            penalty,
+            &stats.kbp,
+            stats.evalue_threshold,
+            stats.search_space,
+            subject_len,
+        );
+        word_save_cutoffs[qi] = cutoff;
+        reduced_cutoffs[qi] = ((cutoff as f64) * 0.8) as i32;
+    }
+    let mut diag_state: Vec<std::collections::HashMap<i32, DiscDiagState>> =
+        vec![std::collections::HashMap::new(); n];
+
     let template_len = template_length as usize;
     for pair in crate::lookup::s_mb_disc_word_scan_subject(
         &table,
@@ -7076,24 +7259,35 @@ fn append_concat_disc_seeds(
         if local_q + template_len > qlen || s + template_len > subject_len {
             continue;
         }
-        per_query_seeds[qi].push(SearchHsp {
-            query_start: local_q as i32,
-            query_end: (local_q + template_len) as i32,
-            subject_start: s as i32,
-            subject_end: (s + template_len) as i32,
-            query_gapped_start: local_q as i32,
-            subject_gapped_start: s as i32,
-            score: reward.saturating_mul(template_length),
-            bit_score: 0.0,
-            evalue: 0.0,
-            num_ident: template_length,
-            align_length: template_length,
-            mismatches: 0,
-            gap_opens: 0,
+        let stats = &per_query_stats[qi];
+        let ungapped_x_dropoff =
+            (20.0 * crate::math::NCBIMATH_LN2 / stats.kbp.lambda).ceil() as i32;
+        let ctx = DiscExtendCtx {
+            nucl_score_table,
+            reward,
+            penalty,
+            ungapped_x_dropoff,
+            reduced_nucl_cutoff_score: reduced_cutoffs[qi],
+            word_save_cutoff: word_save_cutoffs[qi],
+            kbp: &stats.kbp,
+            search_space: stats.search_space,
+            evalue_threshold: stats.evalue_threshold,
+        };
+        let previous_word_save_cutoff =
+            PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.replace(word_save_cutoffs[qi]));
+        disc_extend_save_initial_hit(
+            per_query_strand[qi],
+            subject_packed,
+            subject_len,
+            local_q,
+            s,
+            template_length,
             context,
-            qseq: None,
-            sseq: None,
-        });
+            &mut diag_state[qi],
+            &ctx,
+            &mut per_query_seeds[qi],
+        );
+        PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.set(previous_word_save_cutoff));
     }
 }
 
@@ -7126,12 +7320,14 @@ pub fn blastn_gapped_search_concat_disc_megablast(
         concat,
         per_query_plus,
         per_query_minus,
+        per_query_stats,
         &subject_packed,
         subject_len,
         disc_word_size as i32,
         template_length,
         template_type,
         reward,
+        penalty,
     );
     let mut results: Vec<(usize, Vec<SearchHsp>)> = Vec::new();
     for (qi, seeds) in per_query_seeds.into_iter().enumerate() {
@@ -7165,6 +7361,7 @@ pub fn blastn_gapped_search_concat_disc_megablast(
     results
 }
 
+#[allow(clippy::too_many_arguments)]
 fn disc_megablast_seed_hsps(
     query_plus: &[u8],
     query_minus: &[u8],
@@ -7174,30 +7371,57 @@ fn disc_megablast_seed_hsps(
     template_length: i32,
     template_type: i32,
     reward: i32,
+    penalty: i32,
+    ungapped_x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
 ) -> Vec<SearchHsp> {
+    let nucl_score_table = InitialWordParameters::build_nucl_score_table(reward, penalty);
     let mut seeds = Vec::new();
-    append_disc_megablast_seed_hsps(
-        &mut seeds,
-        0,
-        query_plus,
-        subject_packed,
-        subject_len,
-        word_size,
-        template_length,
-        template_type,
-        reward,
-    );
-    append_disc_megablast_seed_hsps(
-        &mut seeds,
-        1,
-        query_minus,
-        subject_packed,
-        subject_len,
-        word_size,
-        template_length,
-        template_type,
-        reward,
-    );
+    // NCBI computes `cutoffs` per context (`word_params->cutoffs + context`); for
+    // a single subject the per-strand query halves share the same standard
+    // ungapped Karlin block, so the word-save cutoff is computed per strand.
+    for (context, query) in [(0i32, query_plus), (1i32, query_minus)] {
+        if query.is_empty() {
+            continue;
+        }
+        let word_save_cutoff = blastn_word_save_cutoff(
+            query,
+            reward,
+            penalty,
+            kbp,
+            evalue_threshold,
+            search_space,
+            subject_len,
+        );
+        let reduced_nucl_cutoff_score = ((word_save_cutoff as f64) * 0.8) as i32;
+        let previous_word_save_cutoff =
+            PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.replace(word_save_cutoff));
+        let ctx = DiscExtendCtx {
+            nucl_score_table: &nucl_score_table,
+            reward,
+            penalty,
+            ungapped_x_dropoff,
+            reduced_nucl_cutoff_score,
+            word_save_cutoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+        };
+        append_disc_megablast_seed_hsps(
+            &mut seeds,
+            context,
+            query,
+            subject_packed,
+            subject_len,
+            word_size,
+            template_length,
+            template_type,
+            &ctx,
+        );
+        PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.set(previous_word_save_cutoff));
+    }
     seeds
 }
 
@@ -7211,7 +7435,7 @@ fn append_disc_megablast_seed_hsps(
     word_size: i32,
     template_length: i32,
     template_type: i32,
-    reward: i32,
+    ctx: &DiscExtendCtx<'_>,
 ) {
     if query.is_empty() || template_length <= 0 {
         return;
@@ -7237,6 +7461,11 @@ fn append_disc_megablast_seed_hsps(
     }
 
     let template_len = template_length as usize;
+    // Per-diagonal two-hit + ungapped-extension state for this context, mirroring
+    // NCBI's `diag_table` (`s_BlastnDiagTableExtendInitialHit`). The scanner emits
+    // matches in ascending subject order, which the two-hit logic requires.
+    let mut diag_state: std::collections::HashMap<i32, DiscDiagState> =
+        std::collections::HashMap::new();
     for pair in crate::lookup::s_mb_disc_word_scan_subject(
         &table,
         subject_packed,
@@ -7249,24 +7478,18 @@ fn append_disc_megablast_seed_hsps(
         if q + template_len > query.len() || s + template_len > subject_len {
             continue;
         }
-        seeds.push(SearchHsp {
-            query_start: q as i32,
-            query_end: (q + template_len) as i32,
-            subject_start: s as i32,
-            subject_end: (s + template_len) as i32,
-            query_gapped_start: q as i32,
-            subject_gapped_start: s as i32,
-            score: reward.saturating_mul(template_length),
-            bit_score: 0.0,
-            evalue: 0.0,
-            num_ident: template_length,
-            align_length: template_length,
-            mismatches: 0,
-            gap_opens: 0,
+        disc_extend_save_initial_hit(
+            query,
+            subject_packed,
+            subject_len,
+            q,
+            s,
+            template_length,
             context,
-            qseq: None,
-            sseq: None,
-        });
+            &mut diag_state,
+            ctx,
+            seeds,
+        );
     }
 }
 
@@ -7290,6 +7513,15 @@ fn empty_disc_megablast_lookup_table(template_length: i32) -> crate::lookup::MbL
     }
 }
 
+/// One surviving preliminary gapped HSP carried from the
+/// `BLAST_GetGappedScore` phase into the `Blast_TracebackFromHSPList` phase.
+struct DecodedPrelimHsp {
+    seed_index: usize,
+    context: i32,
+    prelim: PreliminaryGappedResult,
+    traceback_seed: PackedTracebackSeed,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_decoded_gapped_candidates(
     prepared: &PreparedBlastnQuery<'_>,
@@ -7307,10 +7539,45 @@ fn collect_decoded_gapped_candidates(
     evalue_threshold: f64,
     search_space: f64,
     kbp: &KarlinBlk,
-    _min_diag_separation: i32,
+    min_diag_separation: i32,
 ) {
+    // Faithful two-phase port of NCBI for the decoded-subject path
+    // (discontiguous-megablast / -task blastn). NCBI splits this work between
+    // two functions, each driving its OWN interval tree:
+    //
+    //   Phase 1 — `BLAST_GetGappedScore` (blast_gapalign.c:3739):
+    //     seeds sorted by ungapped score (`Blast_InitHitListSortByScore`);
+    //     `BlastIntervalTreeContainsHSP` (3993) rejection BEFORE gapping;
+    //     preliminary gapped score+extent (`s_BlastDynProgNtGappedAlignment`,
+    //     here the decoded analog); `BlastIntervalTreeAddHSP` (4176) of the
+    //     PRELIM extent for surviving HSPs.
+    //
+    //   Phase 2 — `Blast_TracebackFromHSPList` (blast_traceback.c:259):
+    //     a FRESH interval tree; prelim HSPs sorted by PRELIM GAPPED score
+    //     (`Blast_HSPListSortByScore`); for each, `BlastIntervalTreeContainsHSP`
+    //     (blast_traceback.c:404) on the PRELIM extent BEFORE traceback → skip
+    //     if contained; otherwise compute traceback and `BlastIntervalTreeAddHSP`
+    //     (612) the POST-traceback extent. This second tree is what suppresses a
+    //     lower-scoring seed whose prelim extent is contained in a higher-scoring
+    //     traceback that has already been computed — without it the disc path
+    //     emitted two fragments where NCBI emits one.
     let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
-    for seed in ungapped {
+
+    // ---- Phase 1: BLAST_GetGappedScore ----
+    let order = blast_init_hit_list_sort_by_score_search_hsps(ungapped);
+    let q_max = ungapped.iter().map(|h| h.query_end).max().unwrap_or(0) + 1;
+    let s_max = subject.len() as i32 + 1;
+    let mut prelim_tree = IntervalTree::new(q_max, s_max);
+    let mut prelim_hsps: Vec<DecodedPrelimHsp> = Vec::new();
+
+    for &idx in &order {
+        let seed = &ungapped[idx];
+
+        // blast_gapalign.c:3993 — BlastIntervalTreeContainsHSP before gapping.
+        if blast_interval_tree_contains_search_hsp(&prelim_tree, seed, min_diag_separation) {
+            continue;
+        }
+
         let traceback_query = if seed.context == 0 {
             query_plus_nomask
         } else {
@@ -7349,42 +7616,101 @@ fn collect_decoded_gapped_candidates(
         if prelim.score < cutoff_score {
             continue;
         }
+
+        // blast_gapalign.c:4176 — BlastIntervalTreeAddHSP of the prelim extent.
+        blast_interval_tree_add_preliminary_gapped_result(&mut prelim_tree, seed.context, prelim);
+
         let traceback_seed =
             traceback_seed_from_preliminary_decoded(traceback_query, subject, prelim);
-        if let Some(tb) = run_decoded_traceback_for_seed(
+        prelim_hsps.push(DecodedPrelimHsp {
+            seed_index: idx,
+            context: seed.context,
+            prelim,
+            traceback_seed,
+        });
+    }
+
+    // ---- Phase 2: Blast_TracebackFromHSPList ----
+    // Sort prelim HSPs by gapped score (`Blast_HSPListSortByScore`,
+    // blast_hits.c): decreasing score, then increasing context, then by
+    // offsets — the same ordering NCBI imposes before walking the HSP array.
+    prelim_hsps.sort_by(|a, b| {
+        b.prelim
+            .score
+            .cmp(&a.prelim.score)
+            .then_with(|| a.context.cmp(&b.context))
+            .then_with(|| a.prelim.prelim_q_start.cmp(&b.prelim.prelim_q_start))
+            .then_with(|| a.prelim.prelim_s_start.cmp(&b.prelim.prelim_s_start))
+    });
+
+    let mut tb_tree = IntervalTree::new(q_max, s_max);
+    for ph in &prelim_hsps {
+        let seed = &ungapped[ph.seed_index];
+
+        // blast_traceback.c:404 — BlastIntervalTreeContainsHSP on the PRELIM
+        // extent, BEFORE computing the traceback alignment.
+        if tb_tree.is_contained_with_metadata_and_min_diag_separation(
+            Interval::new(ph.prelim.prelim_q_start as i32, ph.prelim.prelim_q_end as i32),
+            Interval::new(ph.prelim.prelim_s_start as i32, ph.prelim.prelim_s_end as i32),
+            ph.prelim.score,
+            ph.context,
+            0,
+            min_diag_separation,
+        ) {
+            continue;
+        }
+
+        let traceback_query = if ph.context == 0 {
+            query_plus_nomask
+        } else {
+            query_minus_nomask
+        };
+        let Some(tb) = run_decoded_traceback_for_seed(
             traceback_query,
             subject,
-            traceback_seed,
+            ph.traceback_seed,
             reward,
             penalty,
             gap_open,
             gap_extend,
             traceback_x_dropoff,
-        ) {
-            preserve_terminal_exact_seed_if_traceback_swallowed_it(
-                candidates,
-                seed,
-                traceback_query,
-                subject,
-                &tb,
-                reward,
-                cutoff_score,
-            );
-            if should_preserve_exact_seed_after_large_gap_traceback(seed, &tb) {
-                candidates.push(GappedCandidate {
-                    context: seed.context,
-                    tb: traceback_from_exact_seed(seed),
-                    reevaluate_with_ambiguities: false,
-                    terminal_exact_from_swallowed_seed: false,
-                });
-            }
+        ) else {
+            continue;
+        };
+
+        // blast_traceback.c:612 — BlastIntervalTreeAddHSP of the POST-traceback
+        // extent. Subsequent (lower-scoring) prelim HSPs are tested against it.
+        tb_tree.insert_with_metadata(
+            Interval::new(tb.query_start as i32, tb.query_end as i32),
+            Interval::new(tb.subject_start as i32, tb.subject_end as i32),
+            tb.score,
+            ph.context,
+            0,
+        );
+
+        preserve_terminal_exact_seed_if_traceback_swallowed_it(
+            candidates,
+            seed,
+            traceback_query,
+            subject,
+            &tb,
+            reward,
+            cutoff_score,
+        );
+        if should_preserve_exact_seed_after_large_gap_traceback(seed, &tb) {
             candidates.push(GappedCandidate {
-                context: seed.context,
-                tb,
+                context: ph.context,
+                tb: traceback_from_exact_seed(seed),
                 reevaluate_with_ambiguities: false,
                 terminal_exact_from_swallowed_seed: false,
             });
         }
+        candidates.push(GappedCandidate {
+            context: ph.context,
+            tb,
+            reevaluate_with_ambiguities: false,
+            terminal_exact_from_swallowed_seed: false,
+        });
     }
 }
 
@@ -8581,44 +8907,43 @@ fn preliminary_gapped_score_and_seed_greedy(
 fn preliminary_gapped_score_and_seed_affine(
     query: &[u8],
     subject: &[u8],
-    seed: &SearchHsp,
+    _seed: &SearchHsp,
     seed_q: usize,
     seed_s: usize,
-    _ungapped_score: i32,
+    ungapped_score: i32,
     reward: i32,
     penalty: i32,
     gap_open: i32,
     gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<PreliminaryGappedResult> {
-    let effective_x_dropoff = x_dropoff;
-    let mut adjusted_seed_s = seed_s;
-    let mut adjusted_subject_len = subject.len();
-    let start_shift = adjust_subject_range(
-        &mut adjusted_seed_s,
-        &mut adjusted_subject_len,
-        seed_q + 1,
-        query.len(),
-    );
-    let adjusted_subject = &subject[start_shift..start_shift + adjusted_subject_len];
-    let score = blast_semi_gapped_align(
-        query,
-        adjusted_subject,
-        seed_q,
-        adjusted_seed_s,
-        reward,
-        penalty,
-        gap_open,
-        gap_extend,
-        effective_x_dropoff,
-    );
+    // Faithful decoded-subject port of NCBI `s_BlastDynProgNtGappedAlignment`
+    // (blast_gapalign.c:3006): the prelim affine score AND its gapped extent.
+    // Previously this returned only the score (`blast_semi_gapped_align`) and
+    // populated the extent from the *ungapped* seed span, so the interval-tree
+    // bookkeeping that NCBI runs on the gapped extent was impossible. Returning
+    // the gapped extent here lets `collect_decoded_gapped_candidates` add the
+    // prelim HSP to the interval tree exactly as the packed path does.
+    let (score, query_start, query_stop, subject_start, subject_stop) =
+        s_blast_dyn_prog_nt_gapped_alignment_decoded_extents(
+            query,
+            subject,
+            seed_q,
+            seed_s,
+            reward,
+            penalty,
+            gap_open,
+            gap_extend,
+            x_dropoff,
+            ungapped_score,
+        );
     if score > 0 {
         Some(PreliminaryGappedResult {
             score,
-            prelim_q_start: seed.query_start as usize,
-            prelim_q_end: seed.query_end as usize,
-            prelim_s_start: seed.subject_start as usize,
-            prelim_s_end: seed.subject_end as usize,
+            prelim_q_start: query_start,
+            prelim_q_end: query_stop,
+            prelim_s_start: subject_start,
+            prelim_s_end: subject_stop,
             gapped_start_q: seed_q,
             gapped_start_s: seed_s,
         })
