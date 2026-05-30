@@ -1379,18 +1379,78 @@ fn kappa_seg_mask_subject_for_redo_into(subject: &[u8], buf: &mut Vec<u8>) {
     }
 }
 
+/// blast-rs: Kappa redo stage-2 near-identical predicate adapter; not a direct
+/// NCBI C port.
+///
+/// NCBI's `s_SequenceGetProteinRange` (blast_kappa.c:1629-1637) skips SEG
+/// masking of the subject only when BOTH the cheap stage-1 density test
+/// (`s_preliminaryTestNearIdentical`) AND the expensive stage-2 fraction-
+/// identical test (`s_TestNearIdentical`, true identity > 0.95) pass:
+/// `if (shouldTestIdentical && !s_TestNearIdentical(...)) { SEG the subject; }`.
+/// Stage-1 alone passes for ~94% paralogs, so omitting stage-2 wrongly skips
+/// SEG and over-scores the composition redo by ~20 bits. This wraps the faithful
+/// stage-2 port `blast_kappa::test_near_identical` for the production path,
+/// building the `BlastCompo*` views from the HSP coordinates (query/subject
+/// `*_end` are one-past, matching `BlastCompoAlignment::query_end/match_end`).
+fn kappa_redo_stage2_near_identical(
+    ph: &crate::protein_lookup::ProteinHit,
+    query: &[u8],
+    subject: &[u8],
+) -> bool {
+    // 8-mer rolling hashes over the full query (MAX_SHIFT/word_size = 8 inside
+    // s_FindNumIdentical / s_TestNearIdentical).
+    const WORD_SIZE: usize = 8;
+    if query.len() < WORD_SIZE {
+        // Too short for the k-mer sweep; treat as "not near-identical" so SEG
+        // is applied (conservative, matches NCBI which still runs the extend
+        // tests but cannot satisfy the >0.95 fraction on a tiny range).
+        return false;
+    }
+    let query_words: Vec<u64> = (0..=query.len() - WORD_SIZE)
+        .map(|i| crate::blast_kappa::s_get_hash(&query[i..i + WORD_SIZE], WORD_SIZE))
+        .collect();
+    let query_data = crate::blast_kappa::BlastCompoSequenceData {
+        buffer: query.to_vec(),
+        data_offset: 0,
+        length: query.len() as i32,
+    };
+    let seq_data = crate::blast_kappa::BlastCompoSequenceData {
+        buffer: subject.to_vec(),
+        data_offset: 0,
+        length: subject.len() as i32,
+    };
+    let align = crate::blast_kappa::BlastCompoAlignment::new(
+        ph.score,
+        crate::compo_mode_condition::MatrixAdjustRule::DontAdjust,
+        0,
+        ph.query_start as i32,
+        ph.query_end as i32, // one-past
+        ph.subject_start as i32,
+        ph.subject_end as i32, // one-past
+        0,
+        None,
+    );
+    crate::blast_kappa::test_near_identical(&seq_data, 0, &query_data, 0, &query_words, &align)
+}
+
 /// blast-rs: Selects subject sequence for kappa redo alignment; not a direct
 /// NCBI C port.
 fn kappa_redo_subject_sequence<'a>(
-    query_len: usize,
+    query: &[u8],
     subject: &'a [u8],
     phits: &[crate::protein_lookup::ProteinHit],
     gapped_lambda: f64,
     mask_buf: &'a mut Vec<u8>,
 ) -> &'a [u8] {
+    // NCBI gates SEG-skipping on BOTH stages: the cheap stage-1 density test
+    // AND the expensive stage-2 true-fraction-identical test (> 0.95). Only
+    // skip SEG when BOTH pass; otherwise SEG the subject for the redo.
     let near_identical = phits
         .first()
-        .map(|ph| kappa_redo_near_identical(ph, query_len, subject.len(), gapped_lambda))
+        .map(|ph| {
+            kappa_redo_near_identical(ph, query.len(), subject.len(), gapped_lambda)
+                && kappa_redo_stage2_near_identical(ph, query, subject)
+        })
         .unwrap_or(false);
     if near_identical {
         subject
@@ -2624,7 +2684,7 @@ fn process_protein_oid(
     let comp_mode = params.comp_adjust;
     let redo_subj_aa: &[u8] = if comp_mode > 0 {
         kappa_redo_subject_sequence(
-            query_aa.len(),
+            query_aa,
             subj_aa,
             &phits,
             prot_kbp.lambda,
@@ -2683,7 +2743,7 @@ fn process_protein_oid(
                 MatrixAdjustRule::ScaleOldMatrix => {
                     // Port of NCBI Blast_CompositionBasedStats: rescale matrix
                     // using composition-specific lambda ratio, then re-align.
-                    let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda / comp_scale;
+                    let ungapped_lambda = crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62").lambda / comp_scale;
                     // Build the frequency ratio matrix from the standard BLOSUM62
                     // joint probs (used as freq_ratios in s_ScaleSquareMatrix).
                     // For non-position-based, startFreqRatios is initialized from
@@ -2712,7 +2772,7 @@ fn process_protein_oid(
                     let mut adj_matrix = *matrix;
                     // NCBI uses ungappedLambda (0.3176 for BLOSUM62) for matrix scaling,
                     // NOT the gapped lambda. See matrixInfo->ungappedLambda.
-                    let ungapped_lambda = crate::stat::protein_ungapped_kbp().lambda / comp_scale;
+                    let ungapped_lambda = crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62").lambda / comp_scale;
                     let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
                     let start_matrix = crate::composition::blast_int4_matrix_from_freq(
                         ungapped_lambda,
@@ -2829,20 +2889,31 @@ fn process_protein_oid(
             };
             if let Some(gr) = gr_opt {
                 let q_slice = &query_aa[gr.query_start..gr.query_end];
-                let s_slice = &redo_subj_aa[gr.subject_start..gr.subject_end];
+                // NCBI masks the subject ONLY for scoring/edit-script (the
+                // composition-adjusted `gr.score` is correct and must NOT
+                // change). The DISPLAYED sequence and identities are rebuilt
+                // from the UNMASKED subject (blast_kappa.c: sseq rebuilt from
+                // the real DB residues during traceback, num_ident recomputed
+                // from those). Render from `subj_aa` (unmasked), not the
+                // SEG-masked `redo_subj_aa`, so `sseq` shows the real residues
+                // and `pident`/`mismatch`/`nident` reflect them.
+                let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
                 let (qs, ss) =
                     gr.edit_script
                         .render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
+                let (align_length, num_ident, gap_opens) =
+                    gr.edit_script.count_identities(q_slice, s_slice);
+                let mismatches = (align_length - num_ident - gap_opens).max(0);
                 new_phits.push(crate::protein_lookup::ProteinHit {
                     query_start: gr.query_start,
                     query_end: gr.query_end,
                     subject_start: gr.subject_start,
                     subject_end: gr.subject_end,
                     score: crate::math::blast_nint(gr.score as f64 / comp_scale) as i32,
-                    num_ident: gr.num_ident,
-                    align_length: gr.align_length,
-                    mismatches: gr.mismatches,
-                    gap_opens: gr.gap_opens,
+                    num_ident,
+                    align_length,
+                    mismatches,
+                    gap_opens,
                     qseq: Some(qs),
                     sseq: Some(ss),
                     scaled_score: Some(gr.score),
@@ -3021,10 +3092,10 @@ pub fn blastp(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     }
 
     let matrix = *get_matrix(params.matrix);
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTP));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTP, params.word_size));
 
     let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
 
@@ -3217,10 +3288,10 @@ pub fn blastp_batch(
 
     let matrix = *get_matrix(params.matrix);
     let matrix_name = protein_matrix_name(params.matrix);
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTP));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTP, params.word_size));
     let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
     let x_drop_gapped = raw_gapped_xdrop_bits(params.x_drop_gapped, &prot_kbp);
     let x_drop_final = raw_gapped_xdrop_bits(params.x_drop_final, &prot_kbp);
@@ -3963,10 +4034,10 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     let translated_sum_stats = translated_sum_stats_enabled(params);
     let prelim_evalue = composition_prelim_evalue(params);
 
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTX));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTX, params.word_size));
     let max_hsps = params.max_hsps;
 
     // Build a 6-context QueryInfo from the translation offsets and call
@@ -4256,10 +4327,10 @@ pub fn blastx_batch(
     };
     let translated_sum_stats = translated_sum_stats_enabled(params);
     let prelim_evalue = composition_prelim_evalue(params);
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTX));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::BLASTX, params.word_size));
     let max_hsps = params.max_hsps;
     let code = crate::util::lookup_genetic_code(params.query_gencode);
 
@@ -4779,10 +4850,10 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     }
     let matrix = *get_matrix(params.matrix);
     let matrix_name = protein_matrix_name(params.matrix);
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTN));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTN, params.word_size));
 
     let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
     // tblastn intentionally keeps the table ungapped kbp here.
@@ -5069,10 +5140,10 @@ pub fn tblastn_batch(
     }
     let matrix = *get_matrix(params.matrix);
     let matrix_name = protein_matrix_name(params.matrix);
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTN));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTN, params.word_size));
     let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
     let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
     let x_drop_ungapped = raw_ungapped_xdrop_bits(params.x_drop_ungapped, &ungapped_kbp);
@@ -5581,10 +5652,10 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     }
     let matrix = *get_matrix(params.matrix);
     let matrix_name = protein_matrix_name(params.matrix);
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTX));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTX, params.word_size));
 
     let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
     let x_drop_ungapped = raw_ungapped_xdrop_bits(params.x_drop_ungapped, &ungapped_kbp);
@@ -5923,10 +5994,10 @@ pub fn tblastx_batch(
 
     let matrix = *get_matrix(params.matrix);
     let matrix_name = protein_matrix_name(params.matrix);
-    let word_size = params.word_size.clamp(2, 6);
+    let word_size = params.word_size.clamp(2, 7);
     let threshold = params
         .word_threshold
-        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTX));
+        .unwrap_or_else(|| suggested_word_threshold(params.matrix, crate::program::TBLASTX, params.word_size));
     let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
     let x_drop_ungapped = raw_ungapped_xdrop_bits(params.x_drop_ungapped, &ungapped_kbp);
     let total_subj_len: usize = (0..db.num_oids)
@@ -6352,7 +6423,7 @@ fn protein_composition_adjustment(
         MatrixAdjustRule::DontAdjust => None,
         MatrixAdjustRule::ScaleOldMatrix => {
             let ungapped_lambda =
-                crate::stat::protein_ungapped_kbp().lambda / COMPO_ADJUST_SCALE_FACTOR;
+                crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62").lambda / COMPO_ADJUST_SCALE_FACTOR;
             let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
             let start_matrix =
                 crate::composition::blast_int4_matrix_from_freq(ungapped_lambda, &freq_ratios);
@@ -6372,7 +6443,7 @@ fn protein_composition_adjustment(
             let (joint_probs, first_std, second_std) = crate::composition::blosum62_workspace();
             let mut adj_matrix = *matrix;
             let ungapped_lambda =
-                crate::stat::protein_ungapped_kbp().lambda / COMPO_ADJUST_SCALE_FACTOR;
+                crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62").lambda / COMPO_ADJUST_SCALE_FACTOR;
             let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
             let start_matrix =
                 crate::composition::blast_int4_matrix_from_freq(ungapped_lambda, &freq_ratios);
@@ -6457,7 +6528,7 @@ fn apply_compositional_adjustment_per_subject(
     let scaled_x_drop_final = crate::math::blast_nint(x_drop_final as f64 * comp_scale) as i32;
 
     let redo_subj_aa: &[u8] = kappa_redo_subject_sequence(
-        query_aa.len(),
+        query_aa,
         subj_aa,
         &phits,
         gapped_lambda,
@@ -6560,22 +6631,31 @@ fn apply_compositional_adjustment_per_subject(
                 };
                 if let Some(gr) = gr_opt {
                     let q_slice = &query_aa[gr.query_start..gr.query_end];
-                    let s_slice = &redo_subj_aa[gr.subject_start..gr.subject_end];
+                    // As in the blastp redo above: NCBI masks the subject only
+                    // for scoring/edit-script; the DISPLAYED residues and
+                    // identities are rebuilt from the UNMASKED subject. Render
+                    // from `subj_aa`, not the SEG-masked `redo_subj_aa`, and
+                    // recompute num_ident/mismatches/align_length over the real
+                    // residues so `sseq`/`pident` match NCBI.
+                    let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
                     let (qs, ss) = gr.edit_script.render_alignment(
                         q_slice,
                         s_slice,
                         ncbistdaa_to_aminoacid_char,
                     );
+                    let (align_length, num_ident, gap_opens) =
+                        gr.edit_script.count_identities(q_slice, s_slice);
+                    let mismatches = (align_length - num_ident - gap_opens).max(0);
                     new_phits.push(crate::protein_lookup::ProteinHit {
                         query_start: gr.query_start,
                         query_end: gr.query_end,
                         subject_start: gr.subject_start,
                         subject_end: gr.subject_end,
                         score: crate::math::blast_nint(gr.score as f64 / comp_scale) as i32,
-                        num_ident: gr.num_ident,
-                        align_length: gr.align_length,
-                        mismatches: gr.mismatches,
-                        gap_opens: gr.gap_opens,
+                        num_ident,
+                        align_length,
+                        mismatches,
+                        gap_opens,
                         qseq: Some(qs),
                         sseq: Some(ss),
                         scaled_score: Some(gr.score),
@@ -7459,7 +7539,33 @@ fn protein_matrix_name(matrix: MatrixType) -> &'static str {
 }
 
 /// blast-rs: Public API default word-threshold selector; not a direct NCBI C port.
-fn suggested_word_threshold(matrix: MatrixType, program: crate::program::ProgramType) -> f64 {
+///
+/// Mirrors NCBI's CLI word-threshold override in `CBlastAppArgs::SetWordSize`
+/// (blast_args.cpp:288-299): when the QUERY is protein (`m_QueryIsProtein`,
+/// i.e. blastp / tblastn) AND word_size > 4, NCBI switches to the compressed
+/// AA lookup table and OVERRIDES the threshold purely by word size
+/// (matrix-independent), as a flat assignment WITHOUT the translated `+1/+2`
+/// adjustment:
+///   ws == 5 → 19.3, ws == 6 → 21.0, ws >= 7 → 20.25.
+/// For nucleotide-query translated programs (blastx / tblastx, where
+/// `m_QueryIsProtein` is false) NCBI applies NO such override, so the historical
+/// matrix-based value plus the translated adjustment is kept. Word sizes <= 4
+/// (including the default ws3) keep the historical matrix-based logic on every
+/// program — that path is byte-for-byte unchanged.
+fn suggested_word_threshold(
+    matrix: MatrixType,
+    program: crate::program::ProgramType,
+    word_size: usize,
+) -> f64 {
+    // NCBI CLI override: protein query + word_size > 4 → matrix-independent,
+    // flat threshold (no translated adjustment applied afterwards).
+    if crate::program::blast_query_is_protein(program) && word_size > 4 {
+        return match word_size {
+            5 => 19.3,
+            6 => 21.0,
+            _ => 20.25, // word_size >= 7
+        };
+    }
     let mut threshold = match matrix {
         MatrixType::Blosum45 => 14.0,
         MatrixType::Blosum62 => 11.0,

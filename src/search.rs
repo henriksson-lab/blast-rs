@@ -5868,7 +5868,20 @@ fn dedup_hsps_with_min_diag_separation(hsps: &mut Vec<SearchHsp>, min_diag_separ
     }
     purge_common_endpoint_hsps(hsps);
     hsps.sort_by(score_compare_search_hsps);
+    interval_tree_containment_dedup(hsps, min_diag_separation);
+}
 
+/// Port of NCBI's interval-tree containment purge for gapped HSP lists
+/// (`BlastIntervalTreeContainsHSP` in `blast_itree.c`, driven from
+/// `BLAST_LinkHsps`/`Blast_HSPListReapByPrelimEvalue` path). After HSPs are
+/// sorted best-score-first, each HSP is dropped only if it is genuinely
+/// CONTAINED (both query AND subject ranges) within an already-kept,
+/// higher-scoring HSP on the same context. Distinct tandem-repeat HSPs that
+/// merely share one endpoint corner are NOT contained and are retained.
+fn interval_tree_containment_dedup(hsps: &mut Vec<SearchHsp>, min_diag_separation: i32) {
+    if hsps.len() <= 1 {
+        return;
+    }
     let q_max = hsps.iter().map(|h| h.query_end).max().unwrap_or(0) + 1;
     let s_max = hsps.iter().map(|h| h.subject_end).max().unwrap_or(0) + 1;
     let mut trees: std::collections::HashMap<i32, IntervalTree> = std::collections::HashMap::new();
@@ -6342,7 +6355,6 @@ fn finalize_disc_megablast_gapped_candidates(
     kbp: &KarlinBlk,
     search_space: f64,
     evalue_threshold: f64,
-    prune_right_shift_artifacts: bool,
 ) -> Vec<SearchHsp> {
     purge_common_endpoint_tracebacks(&mut candidates);
 
@@ -6373,43 +6385,21 @@ fn finalize_disc_megablast_gapped_candidates(
             hsps.push(hsp);
         }
     }
+    // NCBI's only nucleotide HSP de-duplication here is
+    // `Blast_HSPListPurgeHSPsWithCommonEndpoints` (blast_hits.c): an HSP is
+    // removed only when it shares BOTH endpoints (query AND subject start, or
+    // query AND subject end) with a higher-scoring HSP -- which is exactly what
+    // `purge_common_endpoint_hsps` enforces. A former blast-rs-only heuristic,
+    // `prune_disc_megablast_right_shift_artifacts`, additionally dropped an HSP
+    // `i` whenever another kept HSP `j` shared `i`'s query_start, ran further on
+    // the query (`query_end_i < query_end_j`) and less far on the subject
+    // (`subject_end_i > subject_end_j`) with a higher score. On tandem repeats
+    // that anti-correlated relationship holds between adjacent legitimate repeat
+    // copies, so NCBI-found HSPs were deleted (52 missed on celegans/nt3). It has
+    // no NCBI counterpart and is removed; NCBI keeps those distinct repeat copies.
     purge_common_endpoint_hsps(&mut hsps);
-    if prune_right_shift_artifacts {
-        prune_disc_megablast_right_shift_artifacts(&mut hsps);
-    }
     hsps.sort_by(score_compare_search_hsps);
     hsps
-}
-
-fn prune_disc_megablast_right_shift_artifacts(hsps: &mut Vec<SearchHsp>) {
-    if hsps.len() <= 1 {
-        return;
-    }
-
-    let mut drop = vec![false; hsps.len()];
-    for i in 0..hsps.len() {
-        for j in 0..hsps.len() {
-            if i == j {
-                continue;
-            }
-            if hsps[i].context == hsps[j].context
-                && hsps[i].query_start == hsps[j].query_start
-                && hsps[i].query_end < hsps[j].query_end
-                && hsps[i].subject_end > hsps[j].subject_end
-                && hsps[i].score < hsps[j].score
-            {
-                drop[i] = true;
-                break;
-            }
-        }
-    }
-
-    let mut idx = 0usize;
-    hsps.retain(|_| {
-        let keep = !drop[idx];
-        idx += 1;
-        keep
-    });
 }
 
 fn min_diag_separation_for_ungapped(word_size: usize, reward: i32, penalty: i32) -> i32 {
@@ -6980,7 +6970,6 @@ fn disc_megablast_gapped_from_seeds(
         kbp,
         search_space,
         evalue_threshold,
-        query_plus != query_plus_nomask || query_minus != query_minus_nomask,
     )
 }
 
@@ -9689,25 +9678,6 @@ mod tests {
             blastn_gapped_search(&query, &rc, &subject, 7, 2, -3, 5, 2, 20, &kbp, 1e6, 1e10);
         assert!(!results.is_empty(), "Gapped search should find hit");
         assert_eq!(results[0].gap_opens, 0, "Perfect match should have no gaps");
-    }
-
-    #[test]
-    fn disc_megablast_prune_drops_right_shift_artifact_only() {
-        let mut hsps = vec![
-            test_search_hsp(0, 54, 4, 58, 108),
-            test_search_hsp(17, 54, 3, 40, 74),
-            test_search_hsp(0, 37, 22, 59, 74),
-        ];
-
-        prune_disc_megablast_right_shift_artifacts(&mut hsps);
-
-        assert_eq!(hsps.len(), 2);
-        assert!(hsps
-            .iter()
-            .any(|hsp| hsp.query_start == 0 && hsp.query_end == 54));
-        assert!(hsps
-            .iter()
-            .any(|hsp| hsp.query_start == 17 && hsp.query_end == 54));
     }
 
     #[test]

@@ -656,7 +656,11 @@ fn real_data_blastp_caa85678_cbs2_documents_score_drift_without_coordinate_gap()
     assert_eq!(ncbi_coords, rs_coords);
     assert_eq!(ncbi_full.len(), 13);
     assert_eq!(rs_full.len(), 13);
-    assert_eq!(diff_counts(&ncbi_full, &rs_full), (4, 4));
+    // Now EXACT. Was (4,4) → (1,1) (stage-2 near-identical SEG gate) → (0,0)
+    // on 2026-05-30 by feeding the composition-adjusted matrix build NCBI's
+    // computed ideal lambda (kbp_ideal->Lambda) instead of the rounded table
+    // constant 0.3176 (fixed the last 1-bit AAA19999.1 drift).
+    assert_eq!(diff_counts(&ncbi_full, &rs_full), (0, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,13 +1105,13 @@ fn real_data_blastn_outfmt4_matches_ncbi() {
 }
 
 /// blastp `-word_size 6` used to HANG (the dense 28-letter neighborhood table
-/// explodes for word_size>=5). Fixed 2026-05-29 by routing word_size>=5 through
-/// NCBI's compressed-alphabet lookup (protein_lookup.rs). Now completes with full
-/// recall vs NCBI; a residual over-report remains (weak hits the compressed
-/// seeding keeps — same family as the protein score-floor over-report at ws3).
+/// explodes for word_size>=5). Fixed 2026-05-29: word_size>=5 routes through
+/// NCBI's compressed-alphabet lookup (protein_lookup.rs), and the neighbor-word
+/// threshold now uses NCBI's per-word-size value (ws6=21, api.rs) instead of the
+/// matrix default 11. Result: EXACT parity with NCBI 2.17.
 #[test]
 #[ignore = "requires local NCBI 2.17 binaries and /tmp/bench real-data fixtures"]
-fn real_data_blastp_word_size_6_completes_with_full_recall() {
+fn real_data_blastp_word_size_6_parity() {
     let Some(ncbi) = ncbi_tool("blastp") else {
         return;
     };
@@ -1139,11 +1143,9 @@ fn real_data_blastp_word_size_6_completes_with_full_recall() {
         &rs,
         &["blastp"].into_iter().chain(common).collect::<Vec<_>>(),
     ));
-    let (only_ncbi, only_rs) = diff_counts(&ncbi_set, &rs_set);
-    assert_eq!(only_ncbi, 0, "blastp -word_size 6 must recall every NCBI HSP");
-    // Residual over-report (weak hits from the lossy compressed seeding).
-    assert!(
-        only_rs > 0,
-        "over-report gone ({only_rs}) — tighten this test toward exact parity"
+    assert_eq!(
+        diff_counts(&ncbi_set, &rs_set),
+        (0, 0),
+        "blastp -word_size 6 must be exact vs NCBI"
     );
 }

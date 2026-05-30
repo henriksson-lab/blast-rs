@@ -118,13 +118,29 @@ impl Default for CompressedOverflowCell {
     }
 }
 
+/// Backbone cell for the compressed-alphabet lookup table.
+///
+/// NCBI `CompressedLookupBackboneCell` (`blast_aalookup.h:221-231`) is a 24-byte
+/// struct: `Int4 num_used; Int4 query_offset; union { Int4 query_offsets[4];
+/// struct { Int4 query_offsets[2]; CompressedOverflowCell* head; } overflow_list;
+/// } payload;`. The two union arms share the same 16-byte `payload`, selected by
+/// `num_used`:
+///   * arm A (`num_used <= 5`): `payload` holds up to 4 inline query offsets
+///     (`payload.query_offsets[0..4]`, for entries 2..5);
+///   * arm B (`num_used > 5`): `payload[0..2]` hold `overflow_list.query_offsets`
+///     and `payload[2..4]` hold the 8-byte `head` pointer.
+///
+/// blast-rs mirrors this with a single 16-byte `payload: [i32; 4]`, packing the
+/// overflow-cell index (instead of a raw pointer) into `payload[2..4]` for arm B.
+/// This collapses the previous 48-byte representation to NCBI's 24 bytes, halving
+/// the per-query backbone calloc/zero cost (~11.39M cells per query).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressedLookupBackboneCell {
     pub num_used: i32,
     pub query_offset: i32,
-    pub payload_query_offsets: [i32; COMPRESSED_HITS_PER_BACKBONE_CELL],
-    pub overflow_query_offsets: [i32; COMPRESSED_HITS_PER_BACKBONE_CELL - 2],
-    pub overflow_head: Option<usize>,
+    /// The 16-byte union payload; interpretation selected by `num_used`
+    /// exactly as NCBI's `union payload` (see struct docs).
+    pub payload: [i32; COMPRESSED_HITS_PER_BACKBONE_CELL],
 }
 
 impl Default for CompressedLookupBackboneCell {
@@ -132,10 +148,62 @@ impl Default for CompressedLookupBackboneCell {
         Self {
             num_used: 0,
             query_offset: 0,
-            payload_query_offsets: [0; COMPRESSED_HITS_PER_BACKBONE_CELL],
-            overflow_query_offsets: [0; COMPRESSED_HITS_PER_BACKBONE_CELL - 2],
-            overflow_head: None,
+            payload: [0; COMPRESSED_HITS_PER_BACKBONE_CELL],
         }
+    }
+}
+
+impl CompressedLookupBackboneCell {
+    /// Arm A: the inline query offsets (`payload.query_offsets`, NCBI
+    /// `blast_aalookup.h:227`). Valid when `num_used <= 5`; entry slot `i`
+    /// (0-based) holds the offset for the `(i+2)`-th hit.
+    #[inline]
+    fn inline_offsets(&self) -> &[i32; COMPRESSED_HITS_PER_BACKBONE_CELL] {
+        &self.payload
+    }
+
+    #[inline]
+    fn inline_offsets_mut(&mut self) -> &mut [i32; COMPRESSED_HITS_PER_BACKBONE_CELL] {
+        &mut self.payload
+    }
+
+    /// Arm B: the two query offsets spilled to the backbone when the overflow
+    /// list is created (NCBI `overflow_list.query_offsets`, `blast_aalookup.h:213`).
+    #[inline]
+    fn overflow_offsets(&self) -> [i32; COMPRESSED_HITS_PER_BACKBONE_CELL - 2] {
+        [self.payload[0], self.payload[1]]
+    }
+
+    #[inline]
+    fn set_overflow_offsets(&mut self, a: i32, b: i32) {
+        self.payload[0] = a;
+        self.payload[1] = b;
+    }
+
+    /// Arm B: the overflow-list head index, packed into the 8 bytes that hold
+    /// the `CompressedOverflowCell* head` pointer in NCBI (`blast_aalookup.h:217`).
+    /// We store `index + 1` so that all-zero payload (the calloc'd state) reads
+    /// back as `None`, matching NCBI's NULL head.
+    #[inline]
+    fn overflow_head(&self) -> Option<usize> {
+        let lo = self.payload[2] as u32 as u64;
+        let hi = self.payload[3] as u32 as u64;
+        let packed = lo | (hi << 32);
+        if packed == 0 {
+            None
+        } else {
+            Some((packed - 1) as usize)
+        }
+    }
+
+    #[inline]
+    fn set_overflow_head(&mut self, head: Option<usize>) {
+        let packed: u64 = match head {
+            None => 0,
+            Some(idx) => (idx as u64) + 1,
+        };
+        self.payload[2] = packed as u32 as i32;
+        self.payload[3] = (packed >> 32) as u32 as i32;
     }
 }
 
@@ -927,16 +995,23 @@ pub fn s_compressed_lookup_add_word_hit(
         return -1;
     }
 
+    // NCBI: s_CompressedLookupAddWordHit (blast_aalookup.c:790-847).
     let num_entries = lookup.backbone[index].num_used;
     match num_entries {
+        // C: case 0 — backbone_cell->query_offset = query_offset; (:792)
         0 => {
             lookup.backbone[index].query_offset = query_offset;
         }
+        // C: case 1..4 — payload.query_offsets[num_entries-1] = query_offset; (:798)
         1..=4 => {
-            lookup.backbone[index].payload_query_offsets[(num_entries - 1) as usize] = query_offset;
+            lookup.backbone[index].inline_offsets_mut()[(num_entries - 1) as usize] = query_offset;
         }
+        // C: case 5 — spill last two inline offsets + new offset into a fresh
+        // overflow cell; move first two inline offsets into the overflow arm. (:800-822)
         5 => {
-            let payload = lookup.backbone[index].payload_query_offsets;
+            let payload = *lookup.backbone[index].inline_offsets();
+            let tmp_offset_0 = payload[0];
+            let tmp_offset_1 = payload[1];
             let Some(new_cell) = s_compressed_list_get_new_cell(lookup) else {
                 return -1;
             };
@@ -944,22 +1019,23 @@ pub fn s_compressed_lookup_add_word_hit(
             lookup.overflow_cells[new_cell].query_offsets[0] = payload[2];
             lookup.overflow_cells[new_cell].query_offsets[1] = payload[3];
             lookup.overflow_cells[new_cell].query_offsets[2] = query_offset;
-            lookup.backbone[index].overflow_query_offsets[0] = payload[0];
-            lookup.backbone[index].overflow_query_offsets[1] = payload[1];
-            lookup.backbone[index].overflow_head = Some(new_cell);
+            lookup.backbone[index].set_overflow_offsets(tmp_offset_0, tmp_offset_1);
+            lookup.backbone[index].set_overflow_head(Some(new_cell));
         }
+        // C: default — continue existing overflow list, allocating a new head
+        // cell whenever the current one is full. (:825-845)
         _ => {
             let cell_offset = ((num_entries - 3) & COMPRESSED_HITS_CELL_MASK) as usize;
             if cell_offset == 0 {
-                let old_head = lookup.backbone[index].overflow_head;
+                let old_head = lookup.backbone[index].overflow_head();
                 let Some(new_cell) = s_compressed_list_get_new_cell(lookup) else {
                     return -1;
                 };
                 lookup.overflow_cells[new_cell].next = old_head;
-                lookup.backbone[index].overflow_head = Some(new_cell);
+                lookup.backbone[index].set_overflow_head(Some(new_cell));
             }
 
-            let Some(head) = lookup.backbone[index].overflow_head else {
+            let Some(head) = lookup.backbone[index].overflow_head() else {
                 return -1;
             };
             lookup.overflow_cells[head].query_offsets[cell_offset] = query_offset;
@@ -1300,62 +1376,107 @@ pub fn s_compressed_lookup_finalize(lookup: &mut BlastCompressedAaLookupTable) -
     0
 }
 
-/// blast-rs: Owned materialization of the packed compressed-lookup payloads.
-/// This reconstructs the logical query-offset list from the backbone cell,
-/// inline slots, and overflow cells that NCBI stores as a linked cell chain.
-fn compressed_cell_query_offsets(
+thread_local! {
+    /// FIX C: per-thread reusable scan buffer for the compressed word finders.
+    /// Mirrors NCBI's single `offset_pairs` array, allocated once per worker and
+    /// reused (capacity retained) across every subject (`blast_engine.c:1039`).
+    static COMPRESSED_SCAN_BUF: std::cell::Cell<Vec<crate::lookup::OffsetPair>> =
+        const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// blast-rs: inline-read helper for FIX B. Mirrors the offset-copy block of
+/// NCBI's `s_BlastCompressedAaScanSubject` (`blast_aascan.c:345-396`), pushing
+/// `(query_offset, s_off)` pairs for one backbone cell directly into `out`
+/// without an intermediate per-cell `Vec`. Returns the number of hits pushed.
+#[inline]
+fn compressed_push_cell_hits(
     lookup: &BlastCompressedAaLookupTable,
     cell: &CompressedLookupBackboneCell,
-) -> Vec<i32> {
+    s_off: i32,
+    out: &mut Vec<crate::lookup::OffsetPair>,
+) -> usize {
     let numhits = cell.num_used.max(0) as usize;
     if numhits == 0 {
-        return Vec::new();
+        return 0;
     }
 
-    let mut offsets = Vec::with_capacity(numhits);
-    offsets.push(cell.query_offset);
+    // C: dest[0] = backbone_cell->query_offset (:348-349)
+    out.push(crate::lookup::OffsetPair {
+        query_offset: cell.query_offset,
+        subject_offset: s_off,
+    });
+
     if numhits <= COMPRESSED_HITS_PER_BACKBONE_CELL + 1 {
-        offsets.extend_from_slice(&cell.payload_query_offsets[..numhits - 1]);
-        return offsets;
+        // C: hits all live in the backbone (:351-357)
+        for &q in &cell.inline_offsets()[..numhits - 1] {
+            out.push(crate::lookup::OffsetPair {
+                query_offset: q,
+                subject_offset: s_off,
+            });
+        }
+        return numhits;
     }
 
-    offsets.extend_from_slice(&cell.overflow_query_offsets);
-    let mut current = cell.overflow_head;
+    // C: hits are in the backbone cell and in the overflow list (:359-395)
+    let overflow = cell.overflow_offsets();
+    out.push(crate::lookup::OffsetPair {
+        query_offset: overflow[0],
+        subject_offset: s_off,
+    });
+    out.push(crate::lookup::OffsetPair {
+        query_offset: overflow[1],
+        subject_offset: s_off,
+    });
+
     let first_cell_entries = ((numhits as i32 - 3) & COMPRESSED_HITS_CELL_MASK).max(0) as usize;
+    let mut current = cell.overflow_head();
     if let Some(head) = current {
-        offsets.extend_from_slice(&lookup.overflow_cells[head].query_offsets[..first_cell_entries]);
+        for &q in &lookup.overflow_cells[head].query_offsets[..first_cell_entries] {
+            out.push(crate::lookup::OffsetPair {
+                query_offset: q,
+                subject_offset: s_off,
+            });
+        }
         if first_cell_entries != 0 {
             current = lookup.overflow_cells[head].next;
         }
     }
-
     while let Some(cell_index) = current {
-        offsets.extend_from_slice(&lookup.overflow_cells[cell_index].query_offsets);
+        for &q in &lookup.overflow_cells[cell_index].query_offsets {
+            out.push(crate::lookup::OffsetPair {
+                query_offset: q,
+                subject_offset: s_off,
+            });
+        }
         current = lookup.overflow_cells[cell_index].next;
     }
-    offsets.truncate(numhits);
-    offsets
+    numhits
 }
 
 /// NCBI: s_BlastCompressedAaScanSubject (blast_aalookup.c).
 /// Scan a subject sequence with a compressed amino-acid lookup table, matching
 /// `s_BlastCompressedAaScanSubject`'s PV test and offset-pair copy behavior.
+/// Hits are appended into the caller-owned `hits` buffer (FIX C: the buffer is
+/// reused across subjects — NCBI reuses one `offset_pairs` array sized once in
+/// `blast_engine.c:1039-1040`). Returns the number of pairs written.
 ///
 /// Audit caveat: C uses a reciprocal-multiply rolling index over
 /// `scaled_compress_table`; Rust mirrors that rolling index, with slice bounds
 /// checks and a rebuilt scaled table if callers changed `compress_table`.
-pub fn s_blast_compressed_aa_scan_subject(
+pub fn s_blast_compressed_aa_scan_subject_into(
     lookup: &BlastCompressedAaLookupTable,
     subject: &[u8],
     array_size: usize,
     scan_range: Option<(usize, usize)>,
-) -> Vec<crate::lookup::OffsetPair> {
+    hits: &mut Vec<crate::lookup::OffsetPair>,
+) -> usize {
+    hits.clear();
     if lookup.word_length == 0
         || lookup.compressed_alphabet_size == 0
         || subject.len() < lookup.word_length
         || array_size == 0
     {
-        return Vec::new();
+        return 0;
     }
 
     let start = scan_range.map(|range| range.0).unwrap_or(0);
@@ -1364,7 +1485,7 @@ pub fn s_blast_compressed_aa_scan_subject(
         .unwrap_or(subject.len() - lookup.word_length)
         .min(subject.len() - lookup.word_length);
     if start > end {
-        return Vec::new();
+        return 0;
     }
 
     let scale = compressed_scale(lookup.word_length, lookup.compressed_alphabet_size);
@@ -1398,7 +1519,6 @@ pub fn s_blast_compressed_aa_scan_subject(
         compressed_reciprocal_alphabet_size(lookup.compressed_alphabet_size)
     };
     let prefix_width = lookup.word_length - 1;
-    let mut hits = Vec::new();
     let mut subject_offset = start;
 
     'prime: while subject_offset <= end {
@@ -1441,32 +1561,19 @@ pub fn s_blast_compressed_aa_scan_subject(
                 subject_offset += 1;
                 continue;
             }
-            let query_offsets = compressed_cell_query_offsets(lookup, cell);
-            let available = array_size.saturating_sub(hits.len());
-            if query_offsets.len() > available {
-                hits.extend(
-                    query_offsets
-                        .into_iter()
-                        .take(available)
-                        .map(|query_offset| crate::lookup::OffsetPair {
-                            query_offset,
-                            subject_offset: subject_offset as i32,
-                        }),
-                );
-                return hits;
+            // C: copy hits only if `numhits <= array_size - totalhits`; on
+            // overflow set s_range[1] and return without partial copy
+            // (blast_aascan.c:340-405). FIX B: read offsets inline into `hits`,
+            // no per-cell Vec.
+            let numhits = cell.num_used.max(0) as usize;
+            if numhits > array_size.saturating_sub(hits.len()) {
+                return hits.len();
             }
-            hits.extend(
-                query_offsets
-                    .into_iter()
-                    .map(|query_offset| crate::lookup::OffsetPair {
-                        query_offset,
-                        subject_offset: subject_offset as i32,
-                    }),
-            );
+            compressed_push_cell_hits(lookup, cell, subject_offset as i32, hits);
             subject_offset += 1;
         }
     }
-    hits
+    hits.len()
 }
 
 /// Bits per residue for hashing (ceil(log2(alphabet_size))).
@@ -2199,11 +2306,16 @@ fn s_blast_aa_word_finder_two_hit_compressed(
     // Collect all compressed word hits, ordered by subject offset (then by the
     // cell's stored query-offset order), mirroring NCBI's repeated `scansub`
     // batches. array_size is generous so a single pass captures every hit.
+    // FIX C: scan into a per-thread reused buffer (NCBI reuses one
+    // `offset_pairs` array across all subjects, sized once in
+    // `blast_engine.c:1039-1040`); rayon gives each worker its own thread, so a
+    // thread-local exactly mirrors that per-thread ownership.
     let array_size = subject.len().saturating_add(1).saturating_mul(8).max(1024);
-    let offset_pairs = s_blast_compressed_aa_scan_subject(lookup, subject, array_size, None);
-    total_hits += offset_pairs.len() as i32;
+    let mut scan_buf = COMPRESSED_SCAN_BUF.take();
+    s_blast_compressed_aa_scan_subject_into(lookup, subject, array_size, None, &mut scan_buf);
+    total_hits += scan_buf.len() as i32;
 
-    for pair in &offset_pairs {
+    for pair in &scan_buf {
         let q_pos = pair.query_offset as usize;
         let s_pos = pair.subject_offset as usize;
         let s_off = s_pos as i32;
@@ -2288,6 +2400,9 @@ fn s_blast_aa_word_finder_two_hit_compressed(
             }
         }
     }
+    // FIX C: return the (now-populated, retained-capacity) buffer to the
+    // thread-local for the next subject.
+    COMPRESSED_SCAN_BUF.set(scan_buf);
 
     let scan = BlastAaWordFinderScan {
         hits,
@@ -2580,11 +2695,13 @@ fn s_blast_aa_word_finder_one_hit_compressed(
     let mut total_hits = 0i32;
     let mut hits_extended = 0i32;
 
+    // FIX C: reuse the per-thread scan buffer (see two-hit path above).
     let array_size = subject.len().saturating_add(1).saturating_mul(8).max(1024);
-    let offset_pairs = s_blast_compressed_aa_scan_subject(lookup, subject, array_size, None);
-    total_hits += offset_pairs.len() as i32;
+    let mut scan_buf = COMPRESSED_SCAN_BUF.take();
+    s_blast_compressed_aa_scan_subject_into(lookup, subject, array_size, None, &mut scan_buf);
+    total_hits += scan_buf.len() as i32;
 
-    for pair in &offset_pairs {
+    for pair in &scan_buf {
         let q_pos = pair.query_offset as usize;
         let s_pos = pair.subject_offset as usize;
         let diag = s_pos.wrapping_sub(q_pos) & diag_mask;
@@ -2615,6 +2732,8 @@ fn s_blast_aa_word_finder_one_hit_compressed(
             hits.push(hit);
         }
     }
+    // FIX C: return the buffer to the thread-local for the next subject.
+    COMPRESSED_SCAN_BUF.set(scan_buf);
 
     let scan = BlastAaWordFinderScan {
         hits,
@@ -3185,8 +3304,8 @@ mod tests {
         let cell = lookup.backbone[0];
         assert_eq!(cell.num_used, 8);
         assert_eq!(cell.query_offset, 10);
-        assert_eq!(cell.overflow_query_offsets, [11, 12]);
-        let head = cell.overflow_head.expect("overflow head");
+        assert_eq!(cell.overflow_offsets(), [11, 12]);
+        let head = cell.overflow_head().expect("overflow head");
         assert_eq!(lookup.overflow_cells[head].query_offsets, [17, 0, 0, 0]);
         let next = lookup.overflow_cells[head]
             .next
@@ -3294,7 +3413,8 @@ mod tests {
         );
         assert_eq!(s_compressed_lookup_finalize(&mut lookup), 0);
 
-        let hits = s_blast_compressed_aa_scan_subject(&lookup, &[9, 1, 2, 3, 4, 5, 8], 8, None);
+        let mut hits = Vec::new();
+        s_blast_compressed_aa_scan_subject_into(&lookup, &[9, 1, 2, 3, 4, 5, 8], 8, None, &mut hits);
         assert_eq!(
             hits,
             vec![
@@ -3311,7 +3431,11 @@ mod tests {
     }
 
     #[test]
-    fn compressed_scan_subject_fills_capacity_before_pausing() {
+    fn compressed_scan_subject_pauses_when_cell_exceeds_capacity() {
+        // NCBI s_BlastCompressedAaScanSubject (blast_aascan.c:340-405) copies a
+        // cell's hits only when they all fit; on overflow it sets the resume
+        // cursor and returns WITHOUT a partial copy. With a 2-hit cell and
+        // array_size=1, no hits are emitted.
         let index = 1 + 15 * 2 + 225 * 3 + 3_375 * 4 + 50_625 * 5;
         let mut lookup = BlastCompressedAaLookupTable::new(5, 15, index + 1);
         for query_offset in [11, 17] {
@@ -3322,14 +3446,11 @@ mod tests {
         }
         assert_eq!(s_compressed_lookup_finalize(&mut lookup), 0);
 
-        let hits = s_blast_compressed_aa_scan_subject(&lookup, &[9, 1, 2, 3, 4, 5, 8], 1, None);
-        assert_eq!(
-            hits,
-            vec![crate::lookup::OffsetPair {
-                query_offset: 11,
-                subject_offset: 1,
-            }]
-        );
+        let mut hits = Vec::new();
+        let n =
+            s_blast_compressed_aa_scan_subject_into(&lookup, &[9, 1, 2, 3, 4, 5, 8], 1, None, &mut hits);
+        assert_eq!(n, 0);
+        assert!(hits.is_empty());
     }
 
     #[test]
