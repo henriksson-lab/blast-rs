@@ -9,7 +9,7 @@ use blast_rs::input::{parse_fasta_with_default_id, FastaRecord};
 use blast_rs::BlastDbBuilder;
 use clap::{Parser, Subcommand};
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1870,7 +1870,7 @@ fn main_inner() {
 
 fn validate_subject_file_before_query_file(args: &BlastnArgs) {
     if let Some(subject_path) = args.subject.as_ref() {
-        if !subject_path.is_file() {
+        if !input_path_is_readable(subject_path) {
             emit_input_file_not_accessible_error("subject", subject_path);
         }
     }
@@ -1892,6 +1892,9 @@ fn validate_subject_location_before_output(
     let Some(subject_path) = args.subject.as_ref() else {
         return Ok(());
     };
+    if is_stdin_input_path(subject_path) {
+        return Ok(());
+    }
     let subjects =
         parse_fasta_with_default_id(open_input_file("subject", subject_path), "Subject_1");
     for subject in subjects {
@@ -1902,7 +1905,7 @@ fn validate_subject_location_before_output(
 
 fn validate_output_file_access_before_search(args: &BlastnArgs) {
     if let Some(query_path) = args.query.as_ref() {
-        if !query_path.is_file() {
+        if !input_path_is_readable(query_path) {
             return;
         }
     }
@@ -1923,7 +1926,10 @@ fn validate_query_location_before_omitted_query(
         return Ok(());
     };
     if let Some(query_path) = args.query.as_ref() {
-        if !query_path.is_file() {
+        if !input_path_is_readable(query_path) {
+            return Ok(());
+        }
+        if is_stdin_input_path(query_path) {
             return Ok(());
         }
         let queries = parse_fasta_with_default_id(open_input_file("query", query_path), "Query_1");
@@ -1953,7 +1959,7 @@ fn maybe_emit_omitted_query_and_exit(program: &str, args: &BlastnArgs) {
         return;
     }
     if let Some(subject_path) = args.subject.as_ref() {
-        if !subject_path.is_file() {
+        if !input_path_is_readable(subject_path) {
             emit_input_file_not_accessible_error("subject", subject_path);
         }
     }
@@ -2088,11 +2094,31 @@ fn emit_input_file_not_accessible_error(argument: &str, path: &Path) -> ! {
     std::process::exit(1);
 }
 
-fn open_input_file(argument: &str, path: &PathBuf) -> File {
-    File::open(path).unwrap_or_else(|_| emit_input_file_not_accessible_error(argument, path))
+fn is_stdin_input_path(path: &Path) -> bool {
+    path == Path::new("-")
 }
 
-fn read_input_bytes(argument: &str, path: &PathBuf) -> Vec<u8> {
+fn input_path_is_readable(path: &Path) -> bool {
+    is_stdin_input_path(path) || File::open(path).is_ok()
+}
+
+fn open_input_file(argument: &str, path: &Path) -> Box<dyn Read> {
+    if is_stdin_input_path(path) {
+        return Box::new(io::stdin());
+    }
+    Box::new(
+        File::open(path).unwrap_or_else(|_| emit_input_file_not_accessible_error(argument, path)),
+    )
+}
+
+fn read_input_bytes(argument: &str, path: &Path) -> Vec<u8> {
+    if is_stdin_input_path(path) {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .read_to_end(&mut bytes)
+            .unwrap_or_else(|_| emit_input_file_not_accessible_error(argument, path));
+        return bytes;
+    }
     fs::read(path).unwrap_or_else(|_| emit_input_file_not_accessible_error(argument, path))
 }
 
@@ -4315,6 +4341,10 @@ fn run_blastp_with_output_labels(
                         subject_gi: subject_ids.gi.clone(),
                         subject_acc: subject_ids.acc.clone(),
                         subject_accver: subject_ids.accver.clone(),
+                        subject_all_seqids: None,
+                        subject_all_gis: None,
+                        subject_all_accs: None,
+                        subject_all_titles: None,
                         subject_title: String::new(),
                         pct_identity: hsp.percent_identity(),
                         align_len: hsp.alignment_length as i32,
@@ -4521,6 +4551,7 @@ fn run_blastp_with_output_labels(
                 let subject_gi = db.get_gi(sr.subject_oid).map(|gi| gi.to_string());
                 let subject_seqid = db.get_blast_seqid_chain(sr.subject_oid);
                 let subject_acc = db.get_bare_accession(sr.subject_oid);
+                let subject_all = db_tabular_all_subject_fields(&db, sr.subject_oid);
                 all_hits.push(TabularHit {
                     query_id: query_ids.id.clone(),
                     query_gi: query_ids.gi.clone(),
@@ -4531,6 +4562,10 @@ fn run_blastp_with_output_labels(
                     subject_gi,
                     subject_acc,
                     subject_accver: None,
+                    subject_all_seqids: subject_all.seqids.clone(),
+                    subject_all_gis: subject_all.gis.clone(),
+                    subject_all_accs: subject_all.accs.clone(),
+                    subject_all_titles: subject_all.titles.clone(),
                     subject_title: subject_title.clone(),
                     pct_identity: hsp.percent_identity(),
                     align_len: hsp.alignment_length as i32,
@@ -4750,6 +4785,10 @@ fn search_result_hsps_to_tabular_hits(
                 subject_gi: None,
                 subject_acc: None,
                 subject_accver: None,
+                subject_all_seqids: None,
+                subject_all_gis: None,
+                subject_all_accs: None,
+                subject_all_titles: None,
                 subject_title: String::new(),
                 pct_identity: hsp.percent_identity(),
                 align_len: hsp.alignment_length as i32,
@@ -4811,8 +4850,10 @@ fn search_result_hsps_to_db_tabular_hits(
     // re-set `result.subject_accession` to the bare accession before this
     // map is built, but the OID we keep here is from the (still-live)
     // results, so we re-iterate and stash by accession.
-    let mut subject_seqids: std::collections::HashMap<String, (Option<String>, Option<String>)> =
-        std::collections::HashMap::new();
+    let mut subject_seqids: std::collections::HashMap<
+        String,
+        (Option<String>, Option<String>, DbTabularAllSubjectFields),
+    > = std::collections::HashMap::new();
     for result in &results {
         subject_seqids
             .entry(result.subject_accession.clone())
@@ -4820,6 +4861,7 @@ fn search_result_hsps_to_db_tabular_hits(
                 (
                     db.get_blast_seqid_chain(result.subject_oid),
                     db.get_gi(result.subject_oid).map(|gi| gi.to_string()),
+                    db_tabular_all_subject_fields(db, result.subject_oid),
                 )
             });
     }
@@ -4829,13 +4871,17 @@ fn search_result_hsps_to_db_tabular_hits(
         if let Some(title) = subject_titles.get(&hit.subject_id) {
             hit.subject_title = title.clone();
         }
-        if let Some((seqid, gi)) = subject_seqids.get(&hit.subject_id) {
+        if let Some((seqid, gi, all_fields)) = subject_seqids.get(&hit.subject_id) {
             if hit.subject_seqid.is_none() {
                 hit.subject_seqid = seqid.clone();
             }
             if hit.subject_gi.is_none() {
                 hit.subject_gi = gi.clone();
             }
+            hit.subject_all_seqids = all_fields.seqids.clone();
+            hit.subject_all_gis = all_fields.gis.clone();
+            hit.subject_all_accs = all_fields.accs.clone();
+            hit.subject_all_titles = all_fields.titles.clone();
         }
     }
     hits
@@ -6778,12 +6824,12 @@ fn run_deltablast(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(test))]
 fn validate_deltablast_query_and_subject_files(args: &BlastnArgs) {
     if let Some(query_path) = args.query.as_ref() {
-        if !query_path.is_file() {
+        if !input_path_is_readable(query_path) {
             emit_input_file_not_accessible_error("query", query_path);
         }
     }
     if let Some(subject_path) = args.subject.as_ref() {
-        if !subject_path.is_file() {
+        if !input_path_is_readable(subject_path) {
             emit_input_file_not_accessible_error("subject", subject_path);
         }
     }
@@ -6795,15 +6841,21 @@ fn validate_deltablast_query_and_subject_locations(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if args.query_loc.is_some() {
         let query_path = query_path(args);
-        let queries = parse_fasta_with_default_id(open_input_file("query", query_path), "Query_1");
-        for query in queries {
-            let _ = query_loc_bounds(args, query.sequence.len())?;
+        if !is_stdin_input_path(query_path) {
+            let queries =
+                parse_fasta_with_default_id(open_input_file("query", query_path), "Query_1");
+            for query in queries {
+                let _ = query_loc_bounds(args, query.sequence.len())?;
+            }
         }
     }
     if args.subject_loc.is_some() {
         let Some(subject_path) = args.subject.as_ref() else {
             return Ok(());
         };
+        if is_stdin_input_path(subject_path) {
+            return Ok(());
+        }
         let subjects =
             parse_fasta_with_default_id(open_input_file("subject", subject_path), "Subject_1");
         for subject in subjects {
@@ -9215,6 +9267,7 @@ fn run_blastn_rust(
 
                 let subject_gi = db.get_gi(oid).map(|gi| gi.to_string());
                 let subject_seqid = db.get_blast_seqid_chain(oid);
+                let subject_all = db_tabular_all_subject_fields(&db, oid);
                 all_hits.push((
                     oid,
                     TabularHit {
@@ -9227,6 +9280,10 @@ fn run_blastn_rust(
                         subject_gi,
                         subject_acc: None,
                         subject_accver: None,
+                        subject_all_seqids: subject_all.seqids,
+                        subject_all_gis: subject_all.gis,
+                        subject_all_accs: subject_all.accs,
+                        subject_all_titles: subject_all.titles,
                         subject_title: String::new(),
                         pct_identity: if hsp.align_length > 0 {
                             100.0 * hsp.num_ident as f64 / hsp.align_length as f64
@@ -9435,6 +9492,11 @@ fn run_blastn_rust(
         if let Some(title) = extract_header_title(db.get_header(*oid)) {
             hit.subject_title = title;
         }
+        let subject_all = db_tabular_all_subject_fields(&db, *oid);
+        hit.subject_all_seqids = subject_all.seqids;
+        hit.subject_all_gis = subject_all.gis;
+        hit.subject_all_accs = subject_all.accs;
+        hit.subject_all_titles = subject_all.titles;
     }
     // NCBI's SAM RNAME column uses the bare accession (e.g. `BP722512.1`).
     // The `BL_ORD_ID:N` placeholder applies only when the DB has no real
@@ -10103,6 +10165,36 @@ struct FastaDisplayIds {
     accver: Option<String>,
 }
 
+#[derive(Clone, Default)]
+struct DbTabularAllSubjectFields {
+    seqids: Option<String>,
+    gis: Option<String>,
+    accs: Option<String>,
+    titles: Option<String>,
+}
+
+fn join_nonempty(
+    values: impl IntoIterator<Item = Option<String>>,
+    delimiter: &str,
+) -> Option<String> {
+    let values: Vec<String> = values
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .collect();
+    (!values.is_empty()).then(|| values.join(delimiter))
+}
+
+fn db_tabular_all_subject_fields(db: &BlastDb, oid: u32) -> DbTabularAllSubjectFields {
+    let deflines = db.get_deflines(oid);
+    DbTabularAllSubjectFields {
+        seqids: join_nonempty(deflines.iter().map(|d| d.seqid.clone()), ";"),
+        gis: join_nonempty(deflines.iter().map(|d| d.gi.clone()), ";"),
+        accs: join_nonempty(deflines.iter().map(|d| d.acc.clone()), ";"),
+        titles: join_nonempty(deflines.iter().map(|d| d.title.clone()), "<>"),
+    }
+}
+
 fn fasta_record_ids(
     record: &blast_rs::input::FastaRecord,
     parse_deflines: bool,
@@ -10412,6 +10504,10 @@ fn run_blastn_subject(
                     subject_gi: subject_ids.gi.clone(),
                     subject_acc: subject_ids.acc.clone(),
                     subject_accver: subject_ids.accver.clone(),
+                    subject_all_seqids: None,
+                    subject_all_gis: None,
+                    subject_all_accs: None,
+                    subject_all_titles: None,
                     subject_title: String::new(),
                     pct_identity: if hsp.align_length > 0 {
                         100.0 * hsp.num_ident as f64 / hsp.align_length as f64
@@ -19585,6 +19681,10 @@ mod tests {
             subject_gi: None,
             subject_acc: None,
             subject_accver: None,
+            subject_all_seqids: None,
+            subject_all_gis: None,
+            subject_all_accs: None,
+            subject_all_titles: None,
             subject_title: String::new(),
             pct_identity: 100.0,
             align_len,

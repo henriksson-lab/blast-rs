@@ -44,6 +44,186 @@ fn ncbi_bin(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+fn run_blastn_subject_cli(args: &[&str], stdin: Option<&[u8]>) -> std::process::Output {
+    let Some(blast_cli) = blast_cli_bin_for_tests() else {
+        panic!("build blast-cli first or set BLAST_RS_CLI_BIN");
+    };
+    let mut cmd = std::process::Command::new(blast_cli);
+    cmd.arg("blastn").args(args);
+    if stdin.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = cmd.spawn().expect("spawn blast-cli blastn");
+    if let Some(input) = stdin {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("child stdin")
+            .write_all(input)
+            .expect("write child stdin");
+    }
+    child.wait_with_output().expect("wait for blast-cli blastn")
+}
+
+#[test]
+fn blastn_cli_reads_query_from_stdin_marker() {
+    let query = std::fs::read("tests/fixtures/query_short_match.fa").expect("read query fixture");
+    let baseline = run_blastn_subject_cli(
+        &[
+            "--query",
+            "tests/fixtures/query_short_match.fa",
+            "--subject",
+            "tests/fixtures/subject_test.fa",
+            "--outfmt",
+            "6",
+        ],
+        None,
+    );
+    let stdin_run = run_blastn_subject_cli(
+        &[
+            "--query",
+            "-",
+            "--subject",
+            "tests/fixtures/subject_test.fa",
+            "--outfmt",
+            "6",
+        ],
+        Some(&query),
+    );
+
+    assert!(
+        baseline.status.success(),
+        "baseline stderr: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    assert!(
+        stdin_run.status.success(),
+        "stdin stderr: {}",
+        String::from_utf8_lossy(&stdin_run.stderr)
+    );
+    assert_eq!(stdin_run.stdout, baseline.stdout);
+}
+
+#[test]
+fn blastn_cli_reads_subject_from_stdin_marker() {
+    let subject = std::fs::read("tests/fixtures/subject_test.fa").expect("read subject fixture");
+    let baseline = run_blastn_subject_cli(
+        &[
+            "--query",
+            "tests/fixtures/query_short_match.fa",
+            "--subject",
+            "tests/fixtures/subject_test.fa",
+            "--outfmt",
+            "6",
+        ],
+        None,
+    );
+    let stdin_run = run_blastn_subject_cli(
+        &[
+            "--query",
+            "tests/fixtures/query_short_match.fa",
+            "--subject",
+            "-",
+            "--outfmt",
+            "6",
+        ],
+        Some(&subject),
+    );
+
+    assert!(
+        baseline.status.success(),
+        "baseline stderr: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    assert!(
+        stdin_run.status.success(),
+        "stdin stderr: {}",
+        String::from_utf8_lossy(&stdin_run.stderr)
+    );
+    assert_eq!(stdin_run.stdout, baseline.stdout);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn blastn_cli_reads_query_from_proc_self_fd_path() {
+    let query = std::fs::read("tests/fixtures/query_short_match.fa").expect("read query fixture");
+    let baseline = run_blastn_subject_cli(
+        &[
+            "--query",
+            "tests/fixtures/query_short_match.fa",
+            "--subject",
+            "tests/fixtures/subject_test.fa",
+            "--outfmt",
+            "6",
+        ],
+        None,
+    );
+    let proc_fd_run = run_blastn_subject_cli(
+        &[
+            "--query",
+            "/proc/self/fd/0",
+            "--subject",
+            "tests/fixtures/subject_test.fa",
+            "--outfmt",
+            "6",
+        ],
+        Some(&query),
+    );
+
+    assert!(
+        baseline.status.success(),
+        "baseline stderr: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    assert!(
+        proc_fd_run.status.success(),
+        "proc-fd stderr: {}",
+        String::from_utf8_lossy(&proc_fd_run.stderr)
+    );
+    assert_eq!(proc_fd_run.stdout, baseline.stdout);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn blastn_cli_reads_subject_from_proc_self_fd_path() {
+    let subject = std::fs::read("tests/fixtures/subject_test.fa").expect("read subject fixture");
+    let baseline = run_blastn_subject_cli(
+        &[
+            "--query",
+            "tests/fixtures/query_short_match.fa",
+            "--subject",
+            "tests/fixtures/subject_test.fa",
+            "--outfmt",
+            "6",
+        ],
+        None,
+    );
+    let proc_fd_run = run_blastn_subject_cli(
+        &[
+            "--query",
+            "tests/fixtures/query_short_match.fa",
+            "--subject",
+            "/proc/self/fd/0",
+            "--outfmt",
+            "6",
+        ],
+        Some(&subject),
+    );
+
+    assert!(
+        baseline.status.success(),
+        "baseline stderr: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    assert!(
+        proc_fd_run.status.success(),
+        "proc-fd stderr: {}",
+        String::from_utf8_lossy(&proc_fd_run.stderr)
+    );
+    assert_eq!(proc_fd_run.stdout, baseline.stdout);
+}
+
 fn ascii_reverse_complement(seq: &str) -> String {
     String::from_utf8(blast_rs::api::reverse_complement(seq.as_bytes())).unwrap()
 }

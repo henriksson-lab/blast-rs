@@ -93,6 +93,10 @@ pub struct TabularHit {
     pub subject_gi: Option<String>,
     pub subject_acc: Option<String>,
     pub subject_accver: Option<String>,
+    pub subject_all_seqids: Option<String>,
+    pub subject_all_gis: Option<String>,
+    pub subject_all_accs: Option<String>,
+    pub subject_all_titles: Option<String>,
     pub subject_title: String,
     pub pct_identity: f64,
     pub align_len: i32,
@@ -295,12 +299,18 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             .unwrap_or(&hit.query_id)
             .clone(),
         "qgi" => hit.query_gi.as_deref().unwrap_or("0").to_string(),
-        "sseqid" | "sallseqid" => hit
+        "sseqid" => hit
             .subject_seqid
             .as_deref()
             .unwrap_or(hit.subject_id.as_str())
             .to_string(),
-        "sacc" | "sallacc" => {
+        "sallseqid" => hit
+            .subject_all_seqids
+            .as_deref()
+            .or(hit.subject_seqid.as_deref())
+            .unwrap_or(hit.subject_id.as_str())
+            .to_string(),
+        "sacc" => {
             // NCBI's `-outfmt 6 sacc` returns the bare accession when one
             // is available from the ASN.1 Seq-id with a separate `version`
             // field (Refseq, GenBank, etc.). For DBs whose IDs are parsed
@@ -317,19 +327,33 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
                 hit.subject_id.clone()
             }
         }
+        "sallacc" => hit
+            .subject_all_accs
+            .clone()
+            .unwrap_or_else(|| get_field_with_qcovs(hit, "sacc", qcovs)),
         "saccver" => hit
             .subject_accver
             .as_ref()
             .unwrap_or(&hit.subject_id)
             .clone(),
-        "sgi" | "sallgi" => hit.subject_gi.as_deref().unwrap_or("0").to_string(),
-        "stitle" | "salltitles" => {
+        "sgi" => hit.subject_gi.as_deref().unwrap_or("0").to_string(),
+        "sallgi" => hit
+            .subject_all_gis
+            .as_deref()
+            .or(hit.subject_gi.as_deref())
+            .unwrap_or("0")
+            .to_string(),
+        "stitle" => {
             if hit.subject_title.is_empty() {
                 "N/A".to_string()
             } else {
                 hit.subject_title.clone()
             }
         }
+        "salltitles" => hit
+            .subject_all_titles
+            .clone()
+            .unwrap_or_else(|| get_field_with_qcovs(hit, "stitle", qcovs)),
         "pident" => format!("{:.3}", hit.pct_identity),
         "length" => hit.align_len.to_string(),
         "mismatch" => {
@@ -684,6 +708,10 @@ mod tests {
             subject_gi: None,
             subject_acc: None,
             subject_accver: None,
+            subject_all_seqids: None,
+            subject_all_gis: None,
+            subject_all_accs: None,
+            subject_all_titles: None,
             subject_title: "s1 synthetic title".to_string(),
             pct_identity: 95.0,
             align_len: 50,
@@ -737,6 +765,26 @@ mod tests {
         hit.subject_title.clear();
         assert_eq!(get_field(&hit, "stitle"), "N/A");
         assert_eq!(get_field(&hit, "salltitles"), "N/A");
+    }
+
+    #[test]
+    fn test_subject_all_fields_override_singular_fields() {
+        let mut hit = make_hit(None, None);
+        hit.subject_seqid = Some("gi|1|ref|A.1|".to_string());
+        hit.subject_gi = Some("1".to_string());
+        hit.subject_acc = Some("A".to_string());
+        hit.subject_all_seqids = Some("gi|1|ref|A.1|;gi|2|gb|B.2|".to_string());
+        hit.subject_all_gis = Some("1;2".to_string());
+        hit.subject_all_accs = Some("A;B".to_string());
+        hit.subject_all_titles = Some("first title<>second title".to_string());
+
+        assert_eq!(get_field(&hit, "sseqid"), "gi|1|ref|A.1|");
+        assert_eq!(get_field(&hit, "sallseqid"), "gi|1|ref|A.1|;gi|2|gb|B.2|");
+        assert_eq!(get_field(&hit, "sgi"), "1");
+        assert_eq!(get_field(&hit, "sallgi"), "1;2");
+        assert_eq!(get_field(&hit, "sacc"), "A");
+        assert_eq!(get_field(&hit, "sallacc"), "A;B");
+        assert_eq!(get_field(&hit, "salltitles"), "first title<>second title");
     }
 
     #[test]

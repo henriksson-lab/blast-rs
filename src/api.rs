@@ -2732,6 +2732,7 @@ fn process_protein_oid(
         .unwrap_or_else(|| format!("oid_{}", oid));
     let title = String::from_utf8_lossy(db.get_header(oid)).to_string();
     let sl = subj_aa.len();
+    let matrix_name = protein_matrix_name(params.matrix);
 
     // Composition-based e-value adjustment (NCBI comp_based_stats).
     // Verbatim port of Blast_AdjustScores + s_AdjustEvaluesForComposition.
@@ -2798,13 +2799,12 @@ fn process_protein_oid(
                     // Port of NCBI Blast_CompositionBasedStats: rescale matrix
                     // using composition-specific lambda ratio, then re-align.
                     let ungapped_lambda =
-                        crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62").lambda
+                        crate::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name).lambda
                             / comp_scale;
-                    // Build the frequency ratio matrix from the standard BLOSUM62
-                    // joint probs (used as freq_ratios in s_ScaleSquareMatrix).
-                    // For non-position-based, startFreqRatios is initialized from
-                    // the standard matrix frequency ratios.
-                    let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+                    let Some(freq_ratios) = crate::matrix::get_matrix_freq_ratios(matrix_name)
+                    else {
+                        return None;
+                    };
                     let start_matrix = crate::composition::blast_int4_matrix_from_freq(
                         ungapped_lambda,
                         &freq_ratios,
@@ -2829,9 +2829,12 @@ fn process_protein_oid(
                     // NCBI uses ungappedLambda (0.3176 for BLOSUM62) for matrix scaling,
                     // NOT the gapped lambda. See matrixInfo->ungappedLambda.
                     let ungapped_lambda =
-                        crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62").lambda
+                        crate::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name).lambda
                             / comp_scale;
-                    let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+                    let Some(freq_ratios) = crate::matrix::get_matrix_freq_ratios(matrix_name)
+                    else {
+                        return None;
+                    };
                     let start_matrix = crate::composition::blast_int4_matrix_from_freq(
                         ungapped_lambda,
                         &freq_ratios,
@@ -3948,6 +3951,7 @@ fn process_blastx_frame_hsps(
     scratch: &mut ProteinScratch,
 ) -> Vec<Hsp> {
     let mut out_hsps: Vec<Hsp> = Vec::new();
+    let matrix_name = protein_matrix_name(params.matrix);
     if phits.is_empty() {
         return out_hsps;
     }
@@ -3989,6 +3993,7 @@ fn process_blastx_frame_hsps(
             prot,
             &subj_aa,
             &matrix,
+            matrix_name,
             phits,
             params.gap_open,
             params.gap_extend,
@@ -4866,6 +4871,7 @@ fn process_tblastn_frame_hsps(
     scratch: &mut ProteinScratch,
 ) -> Vec<Hsp> {
     let mut out_hsps: Vec<Hsp> = Vec::new();
+    let matrix_name = protein_matrix_name(params.matrix);
     let best_raw_ev = phits
                 .iter()
                 .map(|ph| {
@@ -4912,6 +4918,7 @@ fn process_tblastn_frame_hsps(
             &query_aa,
             prot,
             &matrix,
+            matrix_name,
             phits,
             params.gap_open,
             params.gap_extend,
@@ -6660,6 +6667,7 @@ fn protein_composition_adjustment(
     query_aa: &[u8],
     subj_aa: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    matrix_name: &str,
     comp_mode: u8,
 ) -> ProteinCompositionAdjustment {
     if comp_mode == 0 {
@@ -6689,10 +6697,10 @@ fn protein_composition_adjustment(
     match rule {
         MatrixAdjustRule::DontAdjust => None,
         MatrixAdjustRule::ScaleOldMatrix => {
-            let ungapped_lambda = crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62")
+            let ungapped_lambda = crate::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name)
                 .lambda
                 / COMPO_ADJUST_SCALE_FACTOR;
-            let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+            let freq_ratios = crate::matrix::get_matrix_freq_ratios(matrix_name)?;
             let start_matrix =
                 crate::composition::blast_int4_matrix_from_freq(ungapped_lambda, &freq_ratios);
             crate::composition::composition_scale_matrix(
@@ -6710,10 +6718,10 @@ fn protein_composition_adjustment(
         | MatrixAdjustRule::RelEntropyOldMatrixOldContext => {
             let (joint_probs, first_std, second_std) = crate::composition::blosum62_workspace();
             let mut adj_matrix = *matrix;
-            let ungapped_lambda = crate::stat::protein_ideal_ungapped_kbp_for_matrix("BLOSUM62")
+            let ungapped_lambda = crate::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name)
                 .lambda
                 / COMPO_ADJUST_SCALE_FACTOR;
-            let freq_ratios = crate::matrix::get_blosum62_freq_ratios();
+            let freq_ratios = crate::matrix::get_matrix_freq_ratios(matrix_name)?;
             let start_matrix =
                 crate::composition::blast_int4_matrix_from_freq(ungapped_lambda, &freq_ratios);
             let status = crate::composition::blast_composition_matrix_adj(
@@ -6774,6 +6782,7 @@ fn apply_compositional_adjustment_per_subject(
     query_aa: &[u8],
     subj_aa: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    matrix_name: &str,
     phits: Vec<crate::protein_lookup::ProteinHit>,
     gap_open: i32,
     gap_extend: i32,
@@ -6835,7 +6844,8 @@ fn apply_compositional_adjustment_per_subject(
             }
         }
     };
-    let adj_result = protein_composition_adjustment(query_aa, redo_subj_aa, matrix, comp_mode);
+    let adj_result =
+        protein_composition_adjustment(query_aa, redo_subj_aa, matrix, matrix_name, comp_mode);
     if let Some((_, _, method_id)) = adj_result.as_ref() {
         comp_adjust_method_id = *method_id;
     }

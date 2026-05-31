@@ -1001,6 +1001,14 @@ pub struct BlastDb {
     tax_lookup_oid_offset: u32,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlastDbDefline {
+    pub title: Option<String>,
+    pub seqid: Option<String>,
+    pub gi: Option<String>,
+    pub acc: Option<String>,
+}
+
 /// A single physical volume of a BLAST database.
 struct BlastDbVolume {
     db_type: DbType,
@@ -1503,12 +1511,10 @@ fn offset_slice_logical_oids(slice: &mut BlastDbVolumeSlice, offset: u64) {
 }
 
 fn alias_has_filters(alias: &crate::db::alias::AliasFile) -> bool {
-    // MEMB_BIT is intentionally absent here. NCBI applies it while filtering
-    // ASN.1 deflines by their `memberships` field; it is not an OID predicate
-    // like OIDLIST/GILIST/TILIST/SEQIDLIST/TAXIDLIST.
     alias.first_oid.is_some()
         || alias.last_oid.is_some()
         || alias.oidlist.is_some()
+        || alias.memb_bit.is_some()
         || alias.gilist.is_some()
         || alias.tilist.is_some()
         || alias.silist.is_some()
@@ -1684,6 +1690,55 @@ fn seqid_list_matches_header(seqids: &HashSet<String>, hdr: &[u8]) -> bool {
     candidates.iter().any(|id| seqids.contains(id))
 }
 
+fn defline_memberships_contains(hdr: &[u8], memb_bit: u32) -> bool {
+    let mut i = 0usize;
+    while i < hdr.len() {
+        if hdr[i] != 0xa3 {
+            i += 1;
+            continue;
+        }
+
+        let Some((mut j, field_end, after_field)) = asn1_value_bounds(hdr, i, 0xa3, 2048) else {
+            i += 1;
+            continue;
+        };
+
+        while j < field_end {
+            if !matches!(hdr[j], 0x30 | 0x31) {
+                j += 1;
+                continue;
+            }
+            let Some((mut k, set_end, _after_set)) =
+                asn1_value_bounds(hdr, j, hdr[j], field_end.saturating_sub(j))
+            else {
+                j += 1;
+                continue;
+            };
+
+            while k < set_end {
+                if hdr[k] == 0x02 {
+                    if let Some((len, len_len)) = read_ber_len(hdr, k + 1) {
+                        let start = k + 1 + len_len;
+                        let end = start.saturating_add(len);
+                        if end <= set_end {
+                            if extract_integer_value_bytes(hdr, start, end) == Some(memb_bit) {
+                                return true;
+                            }
+                            k = end;
+                            continue;
+                        }
+                    }
+                }
+                k += 1;
+            }
+            break;
+        }
+
+        i = after_field.max(i + 1);
+    }
+    false
+}
+
 fn apply_alias_filters(
     mut slices: Vec<BlastDbVolumeSlice>,
     alias: &crate::db::alias::AliasFile,
@@ -1691,6 +1746,7 @@ fn apply_alias_filters(
     if alias.first_oid.is_none()
         && alias.last_oid.is_none()
         && alias.oidlist.is_none()
+        && alias.memb_bit.is_none()
         && alias.gilist.is_none()
         && alias.tilist.is_none()
         && alias.silist.is_none()
@@ -1752,6 +1808,15 @@ fn apply_alias_filters(
                     .as_ref()
                     .map(|bits| bits.get(logical_oid as usize).copied().unwrap_or(false))
                     .unwrap_or(true);
+                let keep_memb_bit = alias
+                    .memb_bit
+                    .map(|memb_bit| {
+                        defline_memberships_contains(
+                            slice.volume.get_header(run.physical_start + offset),
+                            memb_bit,
+                        )
+                    })
+                    .unwrap_or(true);
                 let keep_gi = gi_list
                     .as_ref()
                     .map(|gis| {
@@ -1793,7 +1858,13 @@ fn apply_alias_filters(
                         )
                     })
                     .unwrap_or(true);
-                if keep_range && keep_bitmap && keep_gi && keep_trace_id && keep_taxid && keep_seqid
+                if keep_range
+                    && keep_bitmap
+                    && keep_memb_bit
+                    && keep_gi
+                    && keep_trace_id
+                    && keep_taxid
+                    && keep_seqid
                 {
                     if active_start.is_none() {
                         active_start = Some(run.physical_start + offset);
@@ -2066,14 +2137,6 @@ impl BlastDb {
     }
 
     fn open_alias(base_path: &Path, alias: crate::db::alias::AliasFile) -> io::Result<Self> {
-        if let Some(memb_bit) = alias.memb_bit {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "Alias MEMB_BIT {memb_bit} requires ASN.1 defline membership filtering, which is not yet implemented"
-                ),
-            ));
-        }
         let mut alias_stack = vec![base_path.to_path_buf()];
         let data = Self::open_alias_volumes(base_path, &alias, &mut alias_stack)?;
 
@@ -2581,6 +2644,33 @@ impl BlastDb {
         }
     }
 
+    /// Extract each ASN.1 `Blast-def-line` independently. Singular metadata
+    /// helpers intentionally return NCBI's first/best subject id; tabular
+    /// `sall*` fields need the whole defline set without cross-defline scans.
+    pub fn get_deflines(&self, oid: u32) -> Vec<BlastDbDefline> {
+        blast_defline_slices(self.get_header(oid))
+            .into_iter()
+            .filter_map(|hdr| {
+                let title = extract_title_from_header(hdr);
+                let seqid = extract_blast_seqid_chain_from_asn(hdr)
+                    .or_else(|| extract_accession_from_header(hdr));
+                let gi = extract_gi_from_header(hdr).map(|gi| gi.to_string());
+                let acc = extract_textseq_bare_accession_from_asn(hdr)
+                    .or_else(|| extract_accession_from_header(hdr));
+                if title.is_some() || seqid.is_some() || gi.is_some() || acc.is_some() {
+                    Some(BlastDbDefline {
+                        title,
+                        seqid,
+                        gi,
+                        acc,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Get the taxid(s) for a given OID. Returns empty vec if no taxonomy data.
     pub fn get_taxids(&self, oid: u32) -> Vec<i32> {
         if let Some(tax_lookup) = &self.tax_lookup {
@@ -2742,6 +2832,36 @@ fn find_matching_eoc(buf: &[u8], start: usize, fallback_limit: usize) -> Option<
     }
 
     None
+}
+
+fn blast_defline_slices(hdr: &[u8]) -> Vec<&[u8]> {
+    let Some((mut pos, outer_end, _after_outer)) = hdr
+        .first()
+        .filter(|&&tag| tag == 0x30)
+        .and_then(|_| asn1_value_bounds(hdr, 0, 0x30, hdr.len()))
+    else {
+        return vec![hdr];
+    };
+
+    let mut slices = Vec::new();
+    while pos < outer_end {
+        if hdr[pos] == 0x30 {
+            if let Some((start, end, after)) = asn1_value_bounds(hdr, pos, 0x30, hdr.len() - pos) {
+                if end <= outer_end {
+                    slices.push(&hdr[start..end]);
+                    pos = after.max(pos + 1);
+                    continue;
+                }
+            }
+        }
+        pos += 1;
+    }
+
+    if slices.is_empty() {
+        vec![hdr]
+    } else {
+        slices
+    }
 }
 
 fn extract_visible_string(buf: &[u8], start: usize, end: usize) -> Option<String> {
@@ -4586,6 +4706,42 @@ mod tests {
     }
 
     #[test]
+    fn test_blast_defline_slices_keep_multi_defline_metadata_separate() {
+        fn append_defline_record(dst: &mut Vec<u8>, title: &str, oid: i32) {
+            let encoded = crate::db::defline::encode_defline_asn1(title, oid);
+            let (start, end, _) = asn1_value_bounds(&encoded, 0, 0x30, encoded.len()).unwrap();
+            dst.extend_from_slice(&encoded[start..end]);
+        }
+
+        let mut hdr = vec![0x30, 0x80];
+        append_defline_record(&mut hdr, "gi|101|ref|AAA00001.1| first title", 0);
+        append_defline_record(&mut hdr, "gi|202|gb|BBB00002.2| second title", 0);
+        hdr.extend_from_slice(&[0x00, 0x00]);
+
+        let parsed: Vec<BlastDbDefline> = blast_defline_slices(&hdr)
+            .into_iter()
+            .map(|slice| BlastDbDefline {
+                title: extract_title_from_header(slice),
+                seqid: extract_blast_seqid_chain_from_asn(slice),
+                gi: extract_gi_from_header(slice).map(|gi| gi.to_string()),
+                acc: extract_textseq_bare_accession_from_asn(slice),
+            })
+            .collect();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].seqid.as_deref(), Some("gi|101|ref|AAA00001.1|"));
+        assert_eq!(parsed[1].seqid.as_deref(), Some("gi|202|gb|BBB00002.2|"));
+        assert_eq!(parsed[0].gi.as_deref(), Some("101"));
+        assert_eq!(parsed[1].gi.as_deref(), Some("202"));
+        assert_eq!(parsed[0].acc.as_deref(), Some("AAA00001"));
+        assert_eq!(parsed[1].acc.as_deref(), Some("BBB00002"));
+        assert_eq!(
+            parsed[1].title.as_deref(),
+            Some("gi|202|gb|BBB00002.2| second title")
+        );
+    }
+
+    #[test]
     fn test_open_multi_volume_alias() {
         let seqn = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seqn/seqn");
         let pombe = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pombe/pombe");
@@ -4735,6 +4891,61 @@ mod tests {
         std::fs::write(db_path_with_ext(base, "nin"), index).unwrap();
     }
 
+    fn encode_defline_asn1_with_memberships(title: &str, oid: i32, memberships: &[u32]) -> Vec<u8> {
+        let mut hdr = crate::db::defline::encode_defline_asn1(title, oid);
+        let insert_at = hdr.len().saturating_sub(4);
+        let mut membership_field = vec![0xa3, 0x80, 0x30, 0x80];
+        for &membership in memberships {
+            let bytes = membership.to_be_bytes();
+            let first_nonzero = bytes.iter().position(|&b| b != 0).unwrap_or(3);
+            membership_field.push(0x02);
+            membership_field.push((4 - first_nonzero) as u8);
+            membership_field.extend_from_slice(&bytes[first_nonzero..]);
+        }
+        membership_field.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        hdr.splice(insert_at..insert_at, membership_field);
+        hdr
+    }
+
+    fn write_tiny_membership_nucl_db(base: &Path, memberships_by_oid: &[&[u32]]) {
+        let mut headers = Vec::new();
+        let mut hdr_offsets = Vec::with_capacity(memberships_by_oid.len() + 1);
+        hdr_offsets.push(0u32);
+        for (oid, memberships) in memberships_by_oid.iter().enumerate() {
+            headers.extend_from_slice(&encode_defline_asn1_with_memberships(
+                &format!("seq{} synthetic record", oid + 1),
+                oid as i32,
+                memberships,
+            ));
+            hdr_offsets.push(headers.len() as u32);
+        }
+        std::fs::write(db_path_with_ext(base, "nhr"), headers).unwrap();
+
+        let seq_data = vec![1u8; memberships_by_oid.len()];
+        std::fs::write(db_path_with_ext(base, "nsq"), seq_data).unwrap();
+
+        let n = memberships_by_oid.len() as u32;
+        let mut index = Vec::new();
+        index.extend_from_slice(&4u32.to_be_bytes());
+        index.extend_from_slice(&0u32.to_be_bytes());
+        write_test_string(&mut index, "tiny membership db");
+        write_test_string(&mut index, "May 31, 2026");
+        index.extend_from_slice(&n.to_be_bytes());
+        index.extend_from_slice(&(memberships_by_oid.len() as u64).to_le_bytes());
+        index.extend_from_slice(&1u32.to_be_bytes());
+        for &offset in &hdr_offsets {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 0..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        for offset in 1..=n {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+        index.extend_from_slice(&n.to_be_bytes());
+        std::fs::write(db_path_with_ext(base, "nin"), index).unwrap();
+    }
+
     fn encode_trace_assm_header(trace_id: u32) -> Vec<u8> {
         let trace_id = format!("ti{trace_id}");
         let mut hdr = vec![
@@ -4853,25 +5064,23 @@ mod tests {
     }
 
     #[test]
-    fn test_alias_memb_bit_fails_instead_of_searching_unfiltered_db() {
+    fn test_alias_memb_bit_filters_defline_memberships() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("base");
-        write_tiny_accession_nucl_db(&base, &["seq1", "seq2", "seq3", "seq4"]);
+        write_tiny_membership_nucl_db(&base, &[&[1], &[2], &[1, 3], &[]]);
         std::fs::write(
             tmp.path().join("memb.nal"),
-            "TITLE memb bit parsed only\nDBLIST base\nMEMB_BIT 1\n",
+            "TITLE memb bit filtered\nDBLIST base\nMEMB_BIT 1\n",
         )
         .unwrap();
 
-        let err = match BlastDb::open(&tmp.path().join("memb")) {
-            Ok(_) => panic!("MEMB_BIT alias should not open unfiltered"),
-            Err(err) => err,
-        };
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        assert!(
-            err.to_string().contains("MEMB_BIT"),
-            "unexpected error: {err}"
-        );
+        let db = BlastDb::open(&tmp.path().join("memb")).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert_eq!(db.stats_num_oids, 2);
+        assert_eq!(db.get_accession(0).as_deref(), Some("seq1"));
+        assert_eq!(db.get_accession(1).as_deref(), Some("seq3"));
+        assert_eq!(db.volume_oid_ranges(), vec![(0, 1), (1, 2)]);
     }
 
     #[test]
