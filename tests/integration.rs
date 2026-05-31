@@ -476,9 +476,7 @@ fn assert_blastp_db_outfmt_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !ncbi_bin("blastp").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastp").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastp or makeblastdb not found");
         return;
     }
@@ -754,9 +752,7 @@ fn assert_translated_db_outfmt_matches_ncbi_sorted_lines(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !std::path::Path::new(ncbi_program).exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !std::path::Path::new(ncbi_program).exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: {ncbi_program} or makeblastdb not found");
         return;
     }
@@ -892,9 +888,7 @@ fn assert_translated_db_outfmt_matches_ncbi_with_num_threads(
     ncbi_extra_args: &[&str],
     num_threads: &str,
 ) {
-    if !std::path::Path::new(ncbi_program).exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !std::path::Path::new(ncbi_program).exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: {ncbi_program} or makeblastdb not found");
         return;
     }
@@ -1093,9 +1087,7 @@ fn assert_blastn_db_sam_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -1196,9 +1188,7 @@ fn assert_blastn_db_xml_matches_ncbi(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -1320,9 +1310,7 @@ fn assert_blastn_db_outfmt_matches_ncbi_with_num_threads(
     ncbi_extra_args: &[&str],
     num_threads: &str,
 ) {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -1449,9 +1437,7 @@ fn assert_blastn_db_outfmt_matches_ncbi_sorted_lines(
     rust_extra_args: &[&str],
     ncbi_extra_args: &[&str],
 ) {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -4074,9 +4060,7 @@ fn blastn_subject_ncbi_parity_rmblastn_task_defaults() {
 
 #[test]
 fn blastn_db_ncbi_parity_rmblastn_task_defaults() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -9455,9 +9439,7 @@ fn patch_blastdb_index_total_length(index_path: &std::path::Path, total_length: 
 
 #[test]
 fn blastn_db_ncbi_parity_compact_huge_total_length_statistics() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -9550,9 +9532,7 @@ fn blastn_db_ncbi_parity_compact_huge_total_length_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_multivolume_alias_dbsize_searchsp_statistics() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -9683,9 +9663,7 @@ fn blastn_db_ncbi_parity_multivolume_alias_dbsize_searchsp_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_multivolume_alias_equal_score_subject_ordering() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -10829,9 +10807,7 @@ fn blastn_db_no_taxid_expansion_keeps_exact_taxid_filtering() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_taxidlist_errors() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -10928,9 +10904,7 @@ fn blastn_db_ncbi_parity_missing_taxidlist_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_invalid_taxids_errors() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11023,9 +10997,7 @@ fn blastn_db_ncbi_parity_invalid_taxids_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_invalid_taxidlist_errors() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11175,9 +11147,7 @@ fn blastn_db_ncbi_parity_negative_seqidlist_filter() {
 
 #[test]
 fn blastn_db_ncbi_parity_seqidlist_warnings() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11348,9 +11318,7 @@ fn blastn_db_ncbi_parity_missing_database_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_nseq_length_override_statistics() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11453,9 +11421,7 @@ fn blastn_db_ncbi_parity_alias_nseq_length_override_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_stats_metadata_override_statistics() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11555,9 +11521,7 @@ fn blastn_db_ncbi_parity_alias_stats_metadata_override_statistics() {
 
 #[test]
 fn blastn_db_ncbi_parity_nested_alias_metadata_precedence() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11676,9 +11640,7 @@ fn blastn_db_ncbi_parity_nested_alias_metadata_precedence() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_first_last_oid_range() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11792,9 +11754,7 @@ fn blastn_db_ncbi_parity_alias_first_last_oid_range() {
 
 #[test]
 fn blastn_db_ncbi_parity_nested_alias_filter_coordinates() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -11913,9 +11873,7 @@ fn blastn_db_ncbi_parity_nested_alias_filter_coordinates() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_oidlist_bitmap_filter() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -12028,9 +11986,7 @@ fn blastn_db_ncbi_parity_alias_oidlist_bitmap_filter() {
 
 #[test]
 fn blastn_db_ncbi_parity_alias_dblist_path_forms() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -12302,9 +12258,7 @@ fn blastn_db_ncbi_parity_missing_alias_volume_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_partial_database_missing_header_error() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -12381,9 +12335,7 @@ fn blastn_db_ncbi_parity_partial_database_missing_header_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_empty_query_error() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -12461,9 +12413,7 @@ fn blastn_db_ncbi_parity_empty_query_error() {
 
 #[test]
 fn blastn_db_ncbi_parity_mixed_empty_query_records_warn_and_continue() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -13599,9 +13549,7 @@ fn blastn_subject_ncbi_parity_missing_query_or_subject_file_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_query_file_error() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -16070,9 +16018,7 @@ fn blastn_ncbi_parity_negative_gap_cost_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_existing_gilist_without_isam_errors() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -16171,9 +16117,7 @@ fn blastn_db_ncbi_parity_existing_gilist_without_isam_errors() {
 
 #[test]
 fn blastn_db_ncbi_parity_missing_id_list_errors() {
-    if !ncbi_bin("blastn").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastn").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastn or makeblastdb not found");
         return;
     }
@@ -21018,9 +20962,7 @@ fn psiblast_ncbi_parity_num_iterations_zero_output_shape() {
 
 #[test]
 fn psiblast_db_ncbi_parity_num_iterations_zero_stat_fixture() {
-    if !ncbi_bin("psiblast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("psiblast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
@@ -21452,9 +21394,7 @@ fn psiblast_ncbi_parity_inclusion_ethresh_zero_iteration_output() {
 
 #[test]
 fn psiblast_db_ncbi_parity_psi_numeric_option_stat_fixtures() {
-    if !ncbi_bin("psiblast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("psiblast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
@@ -21785,9 +21725,7 @@ MKFLIFALILFATVALAPKSSSHEI
 
 #[test]
 fn psiblast_db_ncbi_parity_restart_msa_master_selection() {
-    if !ncbi_bin("psiblast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("psiblast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
@@ -22088,9 +22026,7 @@ fn psiblast_ncbi_parity_missing_restart_msa_file_error() {
 
 #[test]
 fn psiblast_ncbi_parity_bad_restart_msa_master_errors() {
-    if !ncbi_bin("psiblast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("psiblast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
@@ -22570,9 +22506,7 @@ fn psiblast_ncbi_parity_save_pssm_flags_require_output_path() {
 
 #[test]
 fn psiblast_ncbi_parity_pssm_output_paths_without_save_flags_do_not_write() {
-    if !ncbi_bin("psiblast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("psiblast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
@@ -22747,9 +22681,7 @@ fn pssm_round_output_path(base: &std::path::Path, round: usize) -> std::path::Pa
 
 #[test]
 fn psiblast_ncbi_parity_save_each_single_round_writes_no_pssm_artifacts() {
-    if !ncbi_bin("psiblast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("psiblast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
@@ -22848,9 +22780,7 @@ fn psiblast_ncbi_parity_save_each_single_round_writes_no_pssm_artifacts() {
 
 #[test]
 fn psiblast_ncbi_parity_save_last_writes_pssm_artifacts() {
-    if !ncbi_bin("psiblast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("psiblast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: psiblast or makeblastdb not found");
         return;
     }
@@ -23128,9 +23058,7 @@ fn deltablast_ncbi_parity_accepts_delta_only_options_before_database_check() {
 
 #[test]
 fn deltablast_ncbi_parity_existing_search_db_reaches_missing_rpsdb() {
-    if !ncbi_bin("deltablast").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("deltablast").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: deltablast or makeblastdb not found");
         return;
     }
@@ -29462,9 +29390,7 @@ fn tblastx_db_ncbi_parity_frameshift_gap_script() {
 
 #[test]
 fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta() {
-    if !ncbi_bin("tblastx").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("tblastx").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: tblastx or makeblastdb not found");
         return;
     }
@@ -29570,9 +29496,7 @@ fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta()
 
 #[test]
 fn tblastx_db_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
-    if !ncbi_bin("tblastx").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("tblastx").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: tblastx or makeblastdb not found");
         return;
     }
@@ -29691,9 +29615,7 @@ fn tblastx_db_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
 
 #[test]
 fn blastx_db_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
-    if !ncbi_bin("blastx").exists()
-        || !ncbi_bin("makeblastdb").exists()
-    {
+    if !ncbi_bin("blastx").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastx or makeblastdb not found");
         return;
     }

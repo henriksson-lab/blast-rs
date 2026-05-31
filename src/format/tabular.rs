@@ -49,10 +49,12 @@ fn apply_column_token<'a>(token: &'a str, columns: &mut Vec<&'a str>) {
     }
 }
 
-// blast-rs: local normalization for permissive custom-column handling. It is
-// intentionally native glue around NCBI field names rather than a ported C API.
+fn is_known_column_token(token: &str) -> bool {
+    let token = token.strip_prefix('-').unwrap_or(token);
+    token == "std" || field_display_name(token) != "unknown field"
+}
+
 fn normalize_column_tokens(cols: &mut Vec<&str>) {
-    cols.retain(|col| field_display_name(col) != "unknown field");
     let mut seen = std::collections::HashSet::new();
     cols.retain(|col| seen.insert(*col));
     if cols.is_empty() {
@@ -61,14 +63,19 @@ fn normalize_column_tokens(cols: &mut Vec<&str>) {
 }
 
 pub fn expanded_column_tokens(columns: &str) -> Vec<&str> {
+    expanded_column_tokens_checked(columns)
+        .unwrap_or_else(|_| DEFAULT_TABULAR_COLUMNS.split_whitespace().collect())
+}
+
+fn expanded_column_tokens_checked(columns: &str) -> std::io::Result<Vec<&str>> {
     let mut cols = Vec::new();
     for col in columns.split_whitespace() {
-        if !col.starts_with("delim=") {
+        if !col.starts_with("delim=") && is_known_column_token(col) {
             apply_column_token(col, &mut cols);
         }
     }
     normalize_column_tokens(&mut cols);
-    cols
+    Ok(cols)
 }
 
 /// A single alignment hit for tabular output.
@@ -95,6 +102,10 @@ pub struct TabularHit {
     pub query_end: i32,
     pub subject_start: i32,
     pub subject_end: i32,
+    /// True only when the subject coordinates/sequence are a plain nucleotide
+    /// sequence, as in blastn-style output. Translated subject programs report
+    /// protein-frame alignments and NCBI prints N/A for nucleotide-only fields.
+    pub subject_is_plain_nucleotide: bool,
     pub evalue: f64,
     pub bit_score: f64,
     pub query_len: i32,
@@ -385,21 +396,10 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
             }
         }
         "qcovus" => {
-            // NCBI emits `qcovus` only for blastn (subject = non-translated
-            // nucleotide). For blastp / blastx / tblastn / tblastx the column
-            // reads `N/A` because per-unique-subject coverage isn't computed
-            // for translated or protein subjects. Same alphabet heuristic as
-            // sstrand.
-            let is_blastn_like = match hit.sseq.as_deref() {
-                Some(s) if !s.is_empty() => s.bytes().all(|b| {
-                    matches!(
-                        b.to_ascii_uppercase(),
-                        b'A' | b'C' | b'G' | b'T' | b'N' | b'-' | b'U'
-                    )
-                }),
-                _ => false,
-            };
-            if !is_blastn_like {
+            // NCBI emits `qcovus` only for blastn-style plain nucleotide
+            // subjects. Protein alignments can spell words like ACGT, so this
+            // must not be inferred from the rendered sequence alphabet.
+            if !hit.subject_is_plain_nucleotide {
                 "N/A".to_string()
             } else if let Some(qcovs) = qcovs {
                 qcovs.to_string()
@@ -486,26 +486,9 @@ fn get_field_with_qcovs(hit: &TabularHit, column: &str, qcovs: Option<i32>) -> S
         "sseq" => hit.sseq.as_deref().unwrap_or("N/A").to_ascii_uppercase(),
         "btop" => format_btop(hit),
         "sstrand" => {
-            // NCBI emits `N/A` for sstrand whenever the subject is NOT a
-            // plain (non-translated) nucleotide sequence — i.e., blastp,
-            // blastx, psiblast (subject = protein) AND tblastn / tblastx
-            // (subject is nt but reported in translated-protein frame, not
-            // strand). Only blastn / megablast / blastn-short / rmblastn /
-            // dc-megablast emit plus/minus. Detect blastn by qframe and
-            // sframe both being 1 (we normalize non-translated to 1/1) AND
-            // qseq being absent or short-alphabet (we don't have program
-            // info here, but `subject_taxids` doesn't help — use the
-            // sseq alphabet as a proxy).
-            let is_blastn_like = match hit.sseq.as_deref() {
-                Some(s) if !s.is_empty() => s.bytes().all(|b| {
-                    matches!(
-                        b.to_ascii_uppercase(),
-                        b'A' | b'C' | b'G' | b'T' | b'N' | b'-' | b'U'
-                    )
-                }),
-                _ => false,
-            };
-            if !is_blastn_like {
+            // Same applicability as qcovus: only plain nucleotide subject
+            // coordinates carry plus/minus strand in NCBI tabular output.
+            if !hit.subject_is_plain_nucleotide {
                 "N/A".to_string()
             } else if hit.subject_start <= hit.subject_end {
                 "plus".to_string()
@@ -633,7 +616,7 @@ pub fn format_tabular_custom_with_delimiter<W: Write>(
                 };
                 delimiter_seen = true;
             }
-        } else {
+        } else if is_known_column_token(col) {
             apply_column_token(col, &mut cols);
         }
     }
@@ -710,6 +693,7 @@ mod tests {
             query_end: 50,
             subject_start: 10,
             subject_end: 59,
+            subject_is_plain_nucleotide: true,
             evalue: 1e-20,
             bit_score: 80.0,
             query_len: 100,
@@ -812,19 +796,8 @@ mod tests {
         let hits = vec![hit];
 
         let mut buf = Vec::new();
-        format_tabular_custom(&mut buf, &hits, "qseqid bogus sseqid qseqid length length").unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1\ts1\t50");
-
-        let mut buf = Vec::new();
-        format_tabular_custom(&mut buf, &hits, "bogus").unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        let fields: Vec<&str> = output.trim().split('\t').collect();
-        assert_eq!(
-            fields.len(),
-            DEFAULT_TABULAR_COLUMNS.split_whitespace().count()
-        );
-        assert_eq!(fields[0], "q1");
-        assert_eq!(fields[1], "s1");
+        format_tabular_custom(&mut buf, &hits, "qseqid bogus sseqid").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1\ts1");
 
         let mut buf = Vec::new();
         format_tabular_custom(&mut buf, &hits, "std qlen").unwrap();
@@ -848,6 +821,15 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_columns_deduplicate_known_fields() {
+        let hit = make_hit(None, None);
+        let hits = vec![hit];
+        let mut buf = Vec::new();
+        format_tabular_custom(&mut buf, &hits, "qseqid sseqid qseqid length length").unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "q1\ts1\t50");
+    }
+
+    #[test]
     fn test_raw_score_field() {
         let hit = make_hit(None, None);
         assert_eq!(get_field(&hit, "score"), "120");
@@ -859,6 +841,20 @@ mod tests {
         assert_eq!(get_field(&hit, "qframe"), "1");
         assert_eq!(get_field(&hit, "sframe"), "0");
         assert_eq!(get_field(&hit, "frames"), "1/0");
+    }
+
+    #[test]
+    fn qcovus_and_sstrand_use_subject_molecule_type_not_letters() {
+        let mut protein_like_hit = make_hit(Some("ACGT"), Some("ACGT"));
+        protein_like_hit.subject_is_plain_nucleotide = false;
+
+        assert_eq!(get_field(&protein_like_hit, "qcovus"), "N/A");
+        assert_eq!(get_field(&protein_like_hit, "sstrand"), "N/A");
+
+        let mut nucleotide_hit = protein_like_hit.clone();
+        nucleotide_hit.subject_is_plain_nucleotide = true;
+        assert_eq!(get_field(&nucleotide_hit, "qcovus"), "50");
+        assert_eq!(get_field(&nucleotide_hit, "sstrand"), "plus");
     }
 
     #[test]

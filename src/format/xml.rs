@@ -89,7 +89,7 @@ pub fn write_xml_header<W: Write>(
     version: &str,
     db: &str,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -234,7 +234,7 @@ mod tests {
 
         // Verify XML declaration
         assert!(
-            output.starts_with("<?xml version=\"1.0\" encoding=\"US-ASCII\"?>"),
+            output.starts_with("<?xml version=\"1.0\"?>"),
             "should start with XML declaration"
         );
         // Verify matching open/close tags for key elements

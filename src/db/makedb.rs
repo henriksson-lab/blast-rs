@@ -30,7 +30,7 @@ fn parse_fasta_sequences(
     let mut current_header = String::new();
     let mut current_seq = Vec::new();
 
-    for line in fasta_data.lines() {
+    for (line_idx, line) in fasta_data.lines().enumerate() {
         if let Some(hdr) = line.strip_prefix('>') {
             if !current_header.is_empty() || !current_seq.is_empty() {
                 sequences.push((current_header, current_seq));
@@ -38,9 +38,21 @@ fn parse_fasta_sequences(
             current_header = hdr.to_string();
             current_seq = Vec::new();
         } else {
-            for &b in line.trim().as_bytes() {
-                if b.is_ascii_alphabetic() || (allow_protein_stop && b == b'*') {
-                    current_seq.push(b);
+            for (col_idx, &b) in line.as_bytes().iter().enumerate() {
+                if b.is_ascii_whitespace() {
+                    continue;
+                }
+                if valid_fasta_residue(b, allow_protein_stop) {
+                    current_seq.push(b.to_ascii_uppercase());
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "FASTA sequence contains invalid residue byte 0x{b:02x} at line {}, column {}",
+                            line_idx + 1,
+                            col_idx + 1
+                        ),
+                    ));
                 }
             }
         }
@@ -50,6 +62,32 @@ fn parse_fasta_sequences(
     }
 
     Ok(sequences)
+}
+
+fn valid_fasta_residue(b: u8, allow_protein_stop: bool) -> bool {
+    let upper = b.to_ascii_uppercase();
+    if allow_protein_stop {
+        upper.is_ascii_uppercase() || b == b'*'
+    } else {
+        matches!(
+            upper,
+            b'A' | b'C'
+                | b'G'
+                | b'T'
+                | b'U'
+                | b'R'
+                | b'Y'
+                | b'S'
+                | b'W'
+                | b'K'
+                | b'M'
+                | b'B'
+                | b'D'
+                | b'H'
+                | b'V'
+                | b'N'
+        )
+    }
 }
 
 /// Create a BLAST v4 nucleotide database from a FASTA file.
@@ -487,13 +525,53 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn test_make_db_rejects_invalid_nucleotide_residue() {
+        let dir = std::env::temp_dir().join("blast_makedb_invalid_nucl");
+        std::fs::create_dir_all(&dir).ok();
+        let fasta = dir.join("bad.fa");
+        std::fs::write(&fasta, ">bad\nACG1T\n").unwrap();
+        let db_base = dir.join("bad_db");
+        let err = make_nucleotide_db(&fasta, &db_base, "Bad DB")
+            .expect_err("invalid nucleotide residue should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("invalid residue"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_make_db_rejects_invalid_protein_residue() {
+        let dir = std::env::temp_dir().join("blast_makedb_invalid_prot");
+        std::fs::create_dir_all(&dir).ok();
+        let fasta = dir.join("bad.fa");
+        std::fs::write(&fasta, ">bad\nACD?EF\n").unwrap();
+        let db_base = dir.join("bad_db");
+        let err = make_protein_db(&fasta, &db_base, "Bad DB").expect_err("invalid protein residue");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("invalid residue"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn is_blastdb_date(date: &str) -> bool {
-        date.len() == 10
-            && date.as_bytes()[4] == b'-'
-            && date.as_bytes()[7] == b'-'
-            && date
-                .bytes()
-                .enumerate()
-                .all(|(i, b)| matches!(i, 4 | 7) || b.is_ascii_digit())
+        date.len() == 22
+            && matches!(
+                &date[..3],
+                "Jan"
+                    | "Feb"
+                    | "Mar"
+                    | "Apr"
+                    | "May"
+                    | "Jun"
+                    | "Jul"
+                    | "Aug"
+                    | "Sep"
+                    | "Oct"
+                    | "Nov"
+                    | "Dec"
+            )
+            && &date[6..8] == ", "
+            && &date[12..14] == "  "
+            && &date[19..20] == " "
+            && matches!(&date[20..], "AM" | "PM")
     }
 }

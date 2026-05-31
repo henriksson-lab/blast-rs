@@ -169,11 +169,7 @@ pub fn format_flat_query_anchored<W: Write>(
         .map(|h| (h.query_start - 1) as usize)
         .min()
         .unwrap_or(0);
-    let q_hi = hsps
-        .iter()
-        .map(|h| query_end_pos(h))
-        .max()
-        .unwrap_or(0);
+    let q_hi = hsps.iter().map(|h| query_end_pos(h)).max().unwrap_or(0);
     for q in q_lo..=q_hi.min(query_len.saturating_sub(1)) {
         for c in insert_base[q]..(insert_base[q] + max_insert[q]) {
             query_row[c] = b'-';
@@ -189,9 +185,9 @@ pub fn format_flat_query_anchored<W: Write>(
     // Subject rows.
     struct Row {
         id: String,
-        seq: Vec<u8>,       // total_cols, ' ' for blank
-        first_col: usize,   // first non-blank column
-        last_col: usize,    // last non-blank column
+        seq: Vec<u8>,     // total_cols, ' ' for blank
+        first_col: usize, // first non-blank column
+        last_col: usize,  // last non-blank column
         // For each merged column index, the 1-based subject coordinate of the
         // residue placed there (only meaningful where a residue/gap-with-coord
         // exists). We track coords via a parallel walk instead.
@@ -202,7 +198,11 @@ pub fn format_flat_query_anchored<W: Write>(
 
     let mut rows: Vec<Row> = Vec::with_capacity(hsps.len());
     for hsp in hsps.iter() {
-        let dir: i32 = if hsp.subject_end >= hsp.subject_start { 1 } else { -1 };
+        let dir: i32 = if hsp.subject_end >= hsp.subject_start {
+            1
+        } else {
+            -1
+        };
         let mut seq = vec![b' '; total_cols];
         let mut coord_at = vec![0i32; total_cols];
 
@@ -318,7 +318,7 @@ pub fn format_flat_query_anchored<W: Write>(
     }
 
     let id_pad = max_id_len + 2; // k_IdStartMargin
-    // start field width = maxStartLen + k_StartSequenceMargin(2)
+                                 // start field width = maxStartLen + k_StartSequenceMargin(2)
 
     // --- 5. Emit blocks.
     // NCBI's merge view only displays the columns actually covered by some
@@ -358,8 +358,13 @@ pub fn format_flat_query_anchored<W: Write>(
                 continue; // row does not intersect this block
             }
             // subject start = coord of first residue-bearing column in block
-            let start_coord = (cstart..cend).find(|&c| r.coord_at[c] != 0).map(|c| r.coord_at[c]);
-            let end_coord = (cstart..cend).rev().find(|&c| r.coord_at[c] != 0).map(|c| r.coord_at[c]);
+            let start_coord = (cstart..cend)
+                .find(|&c| r.coord_at[c] != 0)
+                .map(|c| r.coord_at[c]);
+            let end_coord = (cstart..cend)
+                .rev()
+                .find(|&c| r.coord_at[c] != 0)
+                .map(|c| r.coord_at[c]);
             let _ = r.dir;
             write_row(
                 writer,

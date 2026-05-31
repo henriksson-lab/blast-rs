@@ -1728,20 +1728,17 @@ fn blast_hsp_list_get_evalues_for_linking(
     link_hsp_params: &LinkHSPParameters,
     gapped_calculation: bool,
 ) {
-    // NCBI traceback passes translated-subject linker lengths in the HSP
-    // coordinate system, not the original nucleotide database coordinates.
-    // Keep the Rust linker-local Spouge refresh in that same coordinate view
-    // when callers still carry the raw subject length.
-    let translated_subject_length = if blast_subject_is_translated(program_number) {
-        hsp_list
-            .hsp_array
-            .iter()
-            .map(|hsp| hsp.subject.end.max(hsp.subject.offset))
-            .max()
-            .filter(|&end| end > 0 && end < subject_length)
-            .unwrap_or(subject_length)
+    // NCBI `Blast_HSPListGetEvalues` (blast_hits.c:1811) is called from
+    // `BLAST_LinkHsps` (link_hsps.c:1791-1797) with the subject length already
+    // reduced for translated programs (`subject_length / CODON_LENGTH`) and the
+    // Gumbel block carrying its original (unscaled) db_length. The Spouge
+    // routine then forms `db_scale_factor = gbp->db_length / n_` where
+    // `n_` is exactly that reduced subject length. We mirror this verbatim:
+    // do NOT derive a per-list translated length or rescale db_length.
+    let subject_stat_length = if blast_subject_is_translated(program_number) {
+        (subject_length / CODON_LENGTH).max(1)
     } else {
-        subject_length
+        subject_length.max(1)
     };
     for hsp in &mut hsp_list.hsp_array {
         let context = hsp.context.max(0) as usize;
@@ -1768,26 +1765,12 @@ fn blast_hsp_list_get_evalues_for_linking(
         if gapped_calculation {
             if let Some(gbp) = sbp.gbp.as_ref() {
                 let mut gbp = gbp.clone();
+                // Keep the Gumbel block's db_length UNSCALED (NCBI passes the
+                // original gbp through; only `n_` is reduced for translated
+                // programs). `link_gbp_db_length` is the unscaled DB length.
                 if let Some(db_length) = sbp.link_gbp_db_length {
-                    gbp.db_length = if blast_subject_is_translated(program_number) {
-                        // NCBI refreshes translated-subject linker e-values in
-                        // the HSP coordinate view, but keeps the database scale.
-                        // For subject mode with multiple sequences this is the
-                        // translated HSP span multiplied by total-db/raw-subject.
-                        (translated_subject_length as i64)
-                            .saturating_mul(db_length.max(1))
-                            .checked_div(subject_length.max(1) as i64)
-                            .unwrap_or(translated_subject_length as i64)
-                            .max(1)
-                    } else {
-                        db_length.max(1)
-                    };
+                    gbp.db_length = db_length.max(1);
                 }
-                let subject_stat_length = if blast_subject_is_translated(program_number) {
-                    (translated_subject_length / CODON_LENGTH).max(1)
-                } else {
-                    subject_length.max(1)
-                };
                 hsp.evalue = spouge_evalue(hsp.score, kbp, &gbp, query_length, subject_stat_length)
                     / blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
                 continue;
@@ -1796,7 +1779,7 @@ fn blast_hsp_list_get_evalues_for_linking(
         let searchsp = if context_info.eff_searchsp > 0 {
             context_info.eff_searchsp as f64
         } else {
-            query_length as f64 * subject_length.max(1) as f64
+            query_length as f64 * subject_stat_length as f64
         };
         hsp.evalue = kbp.raw_to_evalue(hsp.score, searchsp)
             / blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
@@ -2255,15 +2238,23 @@ mod tests {
         assert_eq!(rc, 0);
         assert_eq!(hsp_list.hsp_array.len(), 1);
         let evalue = hsp_list.hsp_array[0].evalue;
+        // Faithful NCBI path (`Blast_HSPListGetEvalues`, `link_hsps.c:1791`):
+        //   n_ = subject_length / CODON_LENGTH = 60 / 3 = 20
+        //   gbp.db_length = link_gbp_db_length (unscaled) = 60
+        // (No derived translated-subject length, no db_length rescaling.)
+        let mut gbp = sbp.gbp.clone().unwrap();
+        gbp.db_length = 60; // link_gbp_db_length, used unscaled
+        let expected = spouge_evalue(63, &sbp.kbp_gap[0], &gbp, 16, 60 / CODON_LENGTH)
+            / blast_gap_decay_divisor(crate::stat::BLAST_GAP_DECAY_RATE_GAPPED, 1);
         assert!(
-            (evalue - 9.28e-09).abs() <= 0.01e-09,
-            "expected C TBLASTN singleton sum-stats e-value, got {evalue}"
+            (evalue - expected).abs() <= expected * 1.0e-12,
+            "expected faithful TBLASTN singleton sum-stats e-value {expected}, got {evalue}"
         );
         assert_eq!(hsp_list.best_evalue, evalue);
     }
 
     #[test]
-    fn test_tblastn_sum_stats_refresh_scales_translated_db_for_multiple_subjects() {
+    fn test_tblastn_sum_stats_refresh_uses_unscaled_db_and_translated_subject() {
         let qi = one_context_query_info(1, 8);
         let mut kbp = KarlinBlk::default();
         assert_eq!(
@@ -2303,9 +2294,12 @@ mod tests {
         let rc = blast_link_hsps(TBLASTN, &mut hsp_list, &qi, 24, &sbp, &params, true);
 
         assert_eq!(rc, 0);
+        // Faithful NCBI path: db_length is used UNSCALED (= link_gbp_db_length
+        // = 48) and the translated subject length is `subject_length /
+        // CODON_LENGTH = 24 / 3 = 8`. No derived/rescaled lengths.
         let mut expected_gbp = gbp;
-        expected_gbp.db_length = 16;
-        let expected = spouge_evalue(38, &kbp, &expected_gbp, 8, 2)
+        expected_gbp.db_length = 48;
+        let expected = spouge_evalue(38, &kbp, &expected_gbp, 8, 24 / CODON_LENGTH)
             / blast_gap_decay_divisor(crate::stat::BLAST_GAP_DECAY_RATE_GAPPED, 1);
         assert!((hsp_list.hsp_array[0].evalue - expected).abs() <= expected * 1.0e-12);
         assert_eq!(hsp_list.best_evalue, hsp_list.hsp_array[0].evalue);

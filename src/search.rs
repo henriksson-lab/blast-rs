@@ -2,6 +2,7 @@
 //! This module implements the complete blastn search pipeline in Rust.
 
 use crate::encoding::{blastna_to_iupacna_char, ncbi4na_to_blastna_base};
+#[cfg(test)]
 use crate::gapinfo::{GapAlignOpType, GapEditScript};
 use crate::greedy::{greedy_align, greedy_align_with_seed};
 use crate::itree::{Interval, IntervalTree};
@@ -9,8 +10,8 @@ use crate::parameters::InitialWordParameters;
 use crate::stat::KarlinBlk;
 use crate::traceback::{
     blast_gapped_alignment_with_traceback, blast_hsp_reevaluate_with_ambiguities_gapped,
-    s_blast_dyn_prog_nt_gapped_alignment,
-    s_blast_dyn_prog_nt_gapped_alignment_decoded_extents, TracebackResult,
+    s_blast_dyn_prog_nt_gapped_alignment, s_blast_dyn_prog_nt_gapped_alignment_decoded_extents,
+    TracebackResult,
 };
 
 /// Result of a single HSP (High-Scoring Pair).
@@ -59,7 +60,6 @@ struct GappedCandidate {
     context: i32,
     tb: TracebackResult,
     reevaluate_with_ambiguities: bool,
-    terminal_exact_from_swallowed_seed: bool,
 }
 
 struct NaLookup<'a> {
@@ -152,14 +152,24 @@ pub enum DiagStore {
 
 impl DiagStore {
     #[inline]
+    fn diag_index(diag_mask: usize, q_start: usize, s_start: usize) -> usize {
+        (s_start + (diag_mask + 1) - q_start) & diag_mask
+    }
+
+    #[inline]
+    fn diag_key(q_start: usize, s_start: usize) -> i64 {
+        s_start as i64 - q_start as i64
+    }
+
+    #[inline]
     fn get(&self, diag_mask: usize, q_start: usize, s_start: usize) -> i32 {
         match self {
             DiagStore::Array(v) => {
-                let d = (s_start + (diag_mask + 1) - q_start) & diag_mask;
+                let d = Self::diag_index(diag_mask, q_start, s_start);
                 v[d]
             }
             DiagStore::Hash(m) => {
-                let d = s_start as i64 - q_start as i64;
+                let d = Self::diag_key(q_start, s_start);
                 m.get(&d).copied().unwrap_or(0)
             }
         }
@@ -169,11 +179,72 @@ impl DiagStore {
     fn set(&mut self, diag_mask: usize, q_start: usize, s_start: usize, val: i32) {
         match self {
             DiagStore::Array(v) => {
-                let d = (s_start + (diag_mask + 1) - q_start) & diag_mask;
+                let d = Self::diag_index(diag_mask, q_start, s_start);
                 v[d] = val;
             }
             DiagStore::Hash(m) => {
-                m.insert(s_start as i64 - q_start as i64, val);
+                m.insert(Self::diag_key(q_start, s_start), val);
+            }
+        }
+    }
+}
+
+/// Companion per-diagonal `flag`/`hit_len` store for the contiguous two-hit
+/// extender (`-window_size N>0`). Mirrors NCBI `DiagStruct.flag` and
+/// `BLAST_DiagTable.hit_len_array` (`na_ungapped.c:632`). Kept separate from
+/// `DiagStore` so the default `window_size == 0` path — which never constructs or
+/// touches this — stays byte-identical. The `hit_len` array is only consulted by
+/// the off-diagonal `Delta` loop, which is empty for contiguous blastn/megablast
+/// (`scan_range == 0`), so it is maintained for faithfulness but never read.
+enum TwoHitDiagStore {
+    Array { flag: Vec<bool>, hit_len: Vec<i32> },
+    Hash(std::collections::HashMap<i64, (bool, i32)>),
+}
+
+impl TwoHitDiagStore {
+    fn new_like(store: &DiagStore) -> Self {
+        match store {
+            DiagStore::Array(v) => TwoHitDiagStore::Array {
+                flag: vec![false; v.len()],
+                hit_len: vec![0; v.len()],
+            },
+            DiagStore::Hash(_) => TwoHitDiagStore::Hash(std::collections::HashMap::new()),
+        }
+    }
+
+    #[inline]
+    fn get_flag(&self, diag_mask: usize, q_start: usize, s_start: usize) -> bool {
+        match self {
+            TwoHitDiagStore::Array { flag, .. } => {
+                flag[DiagStore::diag_index(diag_mask, q_start, s_start)]
+            }
+            TwoHitDiagStore::Hash(m) => m
+                .get(&DiagStore::diag_key(q_start, s_start))
+                .map(|(f, _)| *f)
+                .unwrap_or(false),
+        }
+    }
+
+    #[inline]
+    fn set(
+        &mut self,
+        diag_mask: usize,
+        q_start: usize,
+        s_start: usize,
+        flag_val: bool,
+        hit_len_val: i32,
+    ) {
+        match self {
+            TwoHitDiagStore::Array { flag, hit_len } => {
+                let d = DiagStore::diag_index(diag_mask, q_start, s_start);
+                flag[d] = flag_val;
+                hit_len[d] = hit_len_val;
+            }
+            TwoHitDiagStore::Hash(m) => {
+                m.insert(
+                    DiagStore::diag_key(q_start, s_start),
+                    (flag_val, hit_len_val),
+                );
             }
         }
     }
@@ -190,6 +261,52 @@ pub struct PackedDiagScratch {
 thread_local! {
     static PACKED_RENDER_UNGAPPED_STRINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     static PACKED_WORD_SAVE_CUTOFF: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    /// User `-window_size` for contiguous blastn/megablast. 0 (default) selects the
+    /// one-hit path (`two_hits == FALSE`, byte-identical to the previous behavior);
+    /// `> 0` enables NCBI's two-hit initial-word gate in
+    /// `diag_initial_hit_core_packed` (`s_BlastnDiagTableExtendInitialHit`,
+    /// na_ungapped.c:632). Set by the API layer for the duration of a search.
+    static BLASTN_WINDOW_SIZE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// Set the contiguous-blastn two-hit `-window_size` for the current thread/scan.
+/// Returns the previous value so callers can restore it. The API layer should set
+/// this (from `BlastInitialWordOptions.window_size`) around a blastn/megablast
+/// search; the default 0 keeps the one-hit path byte-identical.
+pub fn set_blastn_window_size(window_size: i32) -> i32 {
+    BLASTN_WINDOW_SIZE.with(|w| w.replace(window_size.max(0)))
+}
+
+#[inline]
+fn blastn_window_size() -> i32 {
+    BLASTN_WINDOW_SIZE.with(|w| w.get())
+}
+
+thread_local! {
+    /// Per-scan companion `flag`/`hit_len` store for the contiguous two-hit
+    /// extender. Lives only while `-window_size > 0`; sized to match the active
+    /// `last_hit` `DiagStore` at scan entry. Holds `None` on the default one-hit
+    /// path so nothing is allocated.
+    static BLASTN_TWO_HIT_STORE: std::cell::RefCell<Option<TwoHitDiagStore>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Initialize the per-scan two-hit companion store to match `last_hit`, when the
+/// two-hit window is active. No-op (and frees any prior store) for window 0.
+fn init_blastn_two_hit_store(last_hit: &DiagStore) {
+    BLASTN_TWO_HIT_STORE.with(|cell| {
+        *cell.borrow_mut() = if blastn_window_size() > 0 {
+            Some(TwoHitDiagStore::new_like(last_hit))
+        } else {
+            None
+        };
+    });
+}
+
+/// Free the per-scan two-hit companion store (e.g. after a search completes).
+/// Optional: `init_blastn_two_hit_store` already resets it at each scan entry.
+pub fn clear_blastn_two_hit_store() {
+    BLASTN_TWO_HIT_STORE.with(|cell| *cell.borrow_mut() = None);
 }
 
 #[inline]
@@ -1114,6 +1231,7 @@ fn concat_replay_ungapped_for_query(
             (minus_hits, lookup.query)
         };
         if hits.is_empty() {
+            PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.set(previous_word_save_cutoff));
             continue;
         }
         let mut last_hit = if use_hash {
@@ -1121,6 +1239,8 @@ fn concat_replay_ungapped_for_query(
         } else {
             DiagStore::Array(vec![0i32; lookup.diag_array_len])
         };
+        let window_size = blastn_window_size();
+        let mut two_hit = (window_size > 0).then(|| TwoHitDiagStore::new_like(&last_hit));
         let diag_mask = lookup.diag_mask;
         for collected in hits {
             diag_initial_hit_core_packed(
@@ -1129,6 +1249,8 @@ fn concat_replay_ungapped_for_query(
                 subject_len,
                 prepared.word_size,
                 &mut last_hit,
+                two_hit.as_mut(),
+                window_size,
                 diag_mask,
                 reward,
                 penalty,
@@ -1901,25 +2023,31 @@ fn extend_packed_lookup_hits(
             }
         });
         if let Some(hit) = hit {
-            blast_na_extend_direct_packed(
-                query,
-                subject_packed,
-                subject_len,
-                word_size,
-                last_hit,
-                diag_mask,
-                reward,
-                penalty,
-                x_dropoff,
-                kbp,
-                search_space,
-                evalue_threshold,
-                context,
-                nucl_score_table,
-                reduced_nucl_cutoff_score,
-                hit,
-                hsps,
-            );
+            let window_size = blastn_window_size();
+            BLASTN_TWO_HIT_STORE.with(|cell| {
+                let mut store = cell.borrow_mut();
+                blast_na_extend_direct_packed(
+                    query,
+                    subject_packed,
+                    subject_len,
+                    word_size,
+                    last_hit,
+                    store.as_mut(),
+                    window_size,
+                    diag_mask,
+                    reward,
+                    penalty,
+                    x_dropoff,
+                    kbp,
+                    search_space,
+                    evalue_threshold,
+                    context,
+                    nucl_score_table,
+                    reduced_nucl_cutoff_score,
+                    hit,
+                    hsps,
+                );
+            });
         }
         q_pos = next[qp];
     }
@@ -2423,6 +2551,8 @@ fn diag_initial_hit_core_packed(
     subject_len: usize,
     word_size: usize,
     last_hit: &mut DiagStore,
+    two_hit: Option<&mut TwoHitDiagStore>,
+    window_size: i32,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -2436,13 +2566,120 @@ fn diag_initial_hit_core_packed(
     hit: ExactWordHit,
     hsps: &mut Vec<SearchHsp>,
 ) {
+    // NCBI `s_BlastnDiagTableExtendInitialHit` (na_ungapped.c:632). The exact word
+    // has already been extended to `word_size`, so `s_end` is the word end.
     let (q0, s0) = (hit.query_start, hit.subject_start);
-    let mut s_end_pos = hit.subject_match_end as i32;
-    if (last_hit.get(diag_mask, q0, s0) as usize) > hit.subject_start {
+    let s_off_pos = hit.subject_start as i32;
+    let s_end_word = hit.subject_match_end as i32;
+    let mut s_end_pos = s_end_word;
+
+    let two_hits = window_size > 0;
+    if !two_hits {
+        // Default window=0 path — unchanged, byte-identical.
+        if (last_hit.get(diag_mask, q0, s0) as usize) > hit.subject_start {
+            return;
+        }
+        if let Some(hsp) = extend_and_build_packed(
+            query,
+            subject_packed,
+            subject_len,
+            word_size,
+            reward,
+            penalty,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+            context,
+            nucl_score_table,
+            reduced_nucl_cutoff_score,
+            hit,
+        ) {
+            s_end_pos = hsp.subject_end;
+            hsps.push(hsp);
+        }
+        last_hit.set(diag_mask, q0, s0, s_end_pos);
         return;
     }
 
-    let extended = extend_seed_packed(
+    // Two-hit path (`-window_size N>0`). `scan_range == 0` for contiguous
+    // blastn/megablast, so the off-diagonal `Delta` loop is empty and `off_found`
+    // is always FALSE (na_ungapped.c:684-718).
+    let two_hit = two_hit.expect("two-hit store required when window_size > 0");
+    let stored_last = last_hit.get(diag_mask, q0, s0);
+    let hit_saved = two_hit.get_flag(diag_mask, q0, s0);
+    let last = if !hit_saved && stored_last == 0 {
+        -window_size
+    } else {
+        stored_last
+    };
+
+    // na_ungapped.c:672 — a hit within the explored area is rejected.
+    if s_off_pos < last {
+        return;
+    }
+
+    // na_ungapped.c:675 — `two_hits && (hit_saved || s_end_pos > last_hit + window)`.
+    // With scan_range == 0, that branch holds a lone first hit
+    // (`hit_ready = 0`, na_ungapped.c:719). A later same-diagonal hit inside
+    // the window falls through and is ready to extend.
+    let mut hit_ready = true;
+    if hit_saved || s_end_word > last + window_size {
+        hit_ready = false;
+    }
+
+    if hit_ready {
+        if let Some(hsp) = extend_and_build_packed(
+            query,
+            subject_packed,
+            subject_len,
+            word_size,
+            reward,
+            penalty,
+            x_dropoff,
+            kbp,
+            search_space,
+            evalue_threshold,
+            context,
+            nucl_score_table,
+            reduced_nucl_cutoff_score,
+            hit,
+        ) {
+            // na_ungapped.c:772 — advance the diagonal to the ungapped right end.
+            s_end_pos = hsp.subject_end;
+            hsps.push(hsp);
+        } else {
+            // na_ungapped.c:775 — extension failed the cutoff: hit_ready = 0.
+            hit_ready = false;
+        }
+    }
+
+    // na_ungapped.c:783-787 — update diagonal state.
+    last_hit.set(diag_mask, q0, s0, s_end_pos);
+    let hit_len = if hit_ready { 0 } else { s_end_pos - s_off_pos };
+    two_hit.set(diag_mask, q0, s0, hit_ready, hit_len);
+}
+
+/// Ungapped extension + HSP build for one packed nucleotide word hit
+/// (`s_NuclUngappedExtend` + `BLAST_SaveInitialHit` gate, na_ungapped.c:730-771).
+#[allow(clippy::too_many_arguments)]
+fn extend_and_build_packed(
+    query: &[u8],
+    subject_packed: &[u8],
+    subject_len: usize,
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    context: i32,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hit: ExactWordHit,
+) -> Option<SearchHsp> {
+    let data = extend_seed_packed(
         query,
         subject_packed,
         subject_len,
@@ -2455,29 +2692,20 @@ fn diag_initial_hit_core_packed(
         word_size,
         nucl_score_table,
         reduced_nucl_cutoff_score,
-    );
-
-    if let Some(data) = extended {
-        let Some(hsp) = build_packed_hsp(
-            query,
-            subject_packed,
-            data,
-            hit,
-            reward,
-            penalty,
-            kbp,
-            search_space,
-            evalue_threshold,
-            subject_len,
-            context,
-        ) else {
-            last_hit.set(diag_mask, q0, s0, hit.subject_match_end as i32);
-            return;
-        };
-        s_end_pos = hsp.subject_end;
-        hsps.push(hsp);
-    }
-    last_hit.set(diag_mask, q0, s0, s_end_pos);
+    )?;
+    build_packed_hsp(
+        query,
+        subject_packed,
+        data,
+        hit,
+        reward,
+        penalty,
+        kbp,
+        search_space,
+        evalue_threshold,
+        subject_len,
+        context,
+    )
 }
 
 /// Represented packed-nucleotide path for NCBI
@@ -2528,6 +2756,8 @@ pub fn s_blastn_diag_hash_extend_initial_hit(
         subject_len,
         word_size,
         last_hit,
+        None,
+        0,
         diag_mask,
         reward,
         penalty,
@@ -2551,6 +2781,8 @@ fn diag_table_extend_initial_hit_packed(
     subject_len: usize,
     word_size: usize,
     last_hit: &mut DiagStore,
+    two_hit: Option<&mut TwoHitDiagStore>,
+    window_size: i32,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -2570,6 +2802,8 @@ fn diag_table_extend_initial_hit_packed(
         subject_len,
         word_size,
         last_hit,
+        two_hit,
+        window_size,
         diag_mask,
         reward,
         penalty,
@@ -2594,6 +2828,8 @@ fn blast_na_extend_direct_packed(
     subject_len: usize,
     word_size: usize,
     last_hit: &mut DiagStore,
+    two_hit: Option<&mut TwoHitDiagStore>,
+    window_size: i32,
     diag_mask: usize,
     reward: i32,
     penalty: i32,
@@ -2613,6 +2849,8 @@ fn blast_na_extend_direct_packed(
         subject_len,
         word_size,
         last_hit,
+        two_hit,
+        window_size,
         diag_mask,
         reward,
         penalty,
@@ -3079,6 +3317,11 @@ fn blast_na_word_finder_scan_lookup_packed(
     reduced_nucl_cutoff_score: i32,
     hsps: &mut Vec<SearchHsp>,
 ) {
+    // NCBI `s_BlastnDiagTableExtendInitialHit` (na_ungapped.c:632) keeps a per-scan
+    // `flag`/`hit_len` companion to the diagonal `last_hit` table for the two-hit
+    // word gate (`-window_size > 0`). Allocate it once per subject scan, matching
+    // the active `last_hit` `DiagStore`; this is a no-op for the default window 0.
+    init_blastn_two_hit_store(&scratch.last_hit);
     if std::env::var_os("BLAST_RS_USE_PACKED_SPECIALIZED").is_none() {
         packed_scan_step1(
             subject_packed,
@@ -5774,10 +6017,12 @@ fn extend_seed_data(
         let mut qi = q_seed - 1;
         let mut si = s_seed - 1;
         loop {
+            // NCBI `s_NuclUngappedExtendExact` (na_ungapped.c:150) scores every
+            // base through the score matrix and relies on `sum < X` to terminate;
+            // it stops only at a true sentinel. `blastna_score` returns a large
+            // negative value for the NUCL_SENTINEL (0xF) so the X-drop fires, while
+            // ambiguity bases (4..=14) are scored normally instead of blocking.
             let sb = subject[si];
-            if subject_base_blocks_ungapped_extension(sb) {
-                break;
-            }
             sum += blastna_score(query[qi], sb, reward, penalty);
             if sum > 0 {
                 score += sum;
@@ -5801,9 +6046,6 @@ fn extend_seed_data(
     sum = 0;
     while qi < query.len() && si < subject.len() {
         let sb = subject[si];
-        if subject_base_blocks_ungapped_extension(sb) {
-            break;
-        }
         sum += blastna_score(query[qi], sb, reward, penalty);
         if sum > 0 {
             score += sum;
@@ -5861,12 +6103,6 @@ fn dedup_hsps_with_min_diag_separation(hsps: &mut Vec<SearchHsp>, min_diag_separ
     if hsps.len() <= 1 {
         return;
     }
-    if min_diag_separation == 6 {
-        prune_megablast_shift_artifacts(hsps);
-        if hsps.len() <= 1 {
-            return;
-        }
-    }
     purge_common_endpoint_hsps(hsps);
     hsps.sort_by(score_compare_search_hsps);
     interval_tree_containment_dedup(hsps, min_diag_separation);
@@ -5915,119 +6151,6 @@ fn interval_tree_containment_dedup(hsps: &mut Vec<SearchHsp>, min_diag_separatio
         k
     });
     hsps.sort_by(score_compare_search_hsps);
-}
-
-// blast-rs: compatibility pruning for packed megablast shift duplicates seen
-// after Rust-side exact extension. This is not a direct NCBI helper.
-fn prune_megablast_shift_artifacts(hsps: &mut Vec<SearchHsp>) {
-    let mut drop = vec![false; hsps.len()];
-    let flanks = hsps
-        .iter()
-        .map(mismatch_flank_lengths)
-        .collect::<Vec<Option<(i32, i32)>>>();
-
-    for i in 0..hsps.len() {
-        let Some((i_before, i_after)) = flanks[i] else {
-            continue;
-        };
-        if hsps[i].gap_opens != 0 || hsps[i].mismatches == 0 {
-            continue;
-        }
-        for j in 0..hsps.len() {
-            if i == j || hsps[j].gap_opens != 0 || hsps[j].mismatches != hsps[i].mismatches {
-                continue;
-            }
-            let Some((j_before, j_after)) = flanks[j] else {
-                continue;
-            };
-            if same_full_subject_shift(&hsps[i], &hsps[j])
-                && query_starts_differ_by_packed_byte(&hsps[i], &hsps[j])
-                && i_before > i_after
-                && j_before <= i_before
-                && hsps[j].query_start > hsps[i].query_start
-            {
-                drop[i] = true;
-                break;
-            }
-            if same_right_anchored_shift(&hsps[i], &hsps[j])
-                && !reaches_subject_max_for_context(&hsps[i], hsps)
-                && i_before > 12
-                && j_before == i_before - 4
-                && j_after == i_after
-            {
-                drop[i] = true;
-                break;
-            }
-            if same_left_anchored_shift(&hsps[i], &hsps[j])
-                && i_after > 16
-                && j_after == i_after - 4
-                && j_before == i_before
-            {
-                drop[i] = true;
-                break;
-            }
-        }
-    }
-
-    let mut idx = 0usize;
-    hsps.retain(|_| {
-        let keep = !drop[idx];
-        idx += 1;
-        keep
-    });
-}
-
-fn mismatch_flank_lengths(hsp: &SearchHsp) -> Option<(i32, i32)> {
-    if hsp.gap_opens != 0 || hsp.mismatches == 0 {
-        return None;
-    }
-    let qseq = hsp.qseq.as_deref()?;
-    let sseq = hsp.sseq.as_deref()?;
-    let pairs = qseq.bytes().zip(sseq.bytes()).collect::<Vec<_>>();
-    let first = pairs.iter().position(|&(q, s)| q != s)?;
-    let last = pairs.iter().rposition(|&(q, s)| q != s)?;
-    Some((first as i32, (pairs.len() - last - 1) as i32))
-}
-
-fn same_full_subject_shift(a: &SearchHsp, b: &SearchHsp) -> bool {
-    a.context == b.context
-        && a.subject_start == b.subject_start
-        && a.subject_end == b.subject_end
-        && a.score == b.score
-        && a.align_length == b.align_length
-        && a.mismatches == b.mismatches
-}
-
-fn same_right_anchored_shift(a: &SearchHsp, b: &SearchHsp) -> bool {
-    a.context == b.context
-        && a.query_end == b.query_end
-        && a.subject_start == b.subject_start
-        && a.subject_end > b.subject_end
-        && a.query_start < b.query_start
-        && a.align_length == b.align_length + 4
-        && a.score == b.score + 4
-}
-
-fn same_left_anchored_shift(a: &SearchHsp, b: &SearchHsp) -> bool {
-    a.context == b.context
-        && a.query_start == b.query_start
-        && a.subject_end == b.subject_end
-        && a.subject_start < b.subject_start
-        && a.query_end > b.query_end
-        && a.align_length == b.align_length + 4
-        && a.score == b.score + 4
-}
-
-fn reaches_subject_max_for_context(hsp: &SearchHsp, hsps: &[SearchHsp]) -> bool {
-    hsps.iter()
-        .filter(|other| other.context == hsp.context && other.subject_start == hsp.subject_start)
-        .map(|other| other.subject_end)
-        .max()
-        == Some(hsp.subject_end)
-}
-
-fn query_starts_differ_by_packed_byte(a: &SearchHsp, b: &SearchHsp) -> bool {
-    (a.query_start - b.query_start).abs() == 4
 }
 
 fn purge_common_endpoint_hsps(hsps: &mut Vec<SearchHsp>) {
@@ -6169,15 +6292,26 @@ fn cutoff_traceback(tb: &mut TracebackResult, q_cut_abs: usize, s_cut_abs: usize
     }
 }
 
+/// Faithful port of NCBI `Blast_HSPListPurgeHSPsWithCommonEndpoints`
+/// (`blast_hits.c:2455`) for the blastn path (`purge=FALSE`). For HSPs sharing
+/// (context, query.start, subject.start): if the trailing HSP extends past the
+/// leader on the query (`query.end > leader.query.end`) it is TRIMMED at the
+/// leader's end (cut_begin=TRUE) and kept; otherwise it is DROPPED. The leader is
+/// never modified or removed. In C, a trimmed HSP is shifted to the tail outside
+/// the returned active count; it does not participate in the second pass, and is
+/// reevaluated afterward from `extra_start`. Dropped HSPs are freed. A symmetric
+/// second pass operates on shared (query.end, subject.end), trimming with
+/// cut_begin=FALSE when the trailing HSP starts before the leader
+/// (`query.start < leader.query_start`), else dropping.
 fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
     if candidates.len() <= 1 {
         return;
     }
 
-    // NCBI `s_QueryOffsetCompareHSPs`: among HSPs sharing (context, query.offset,
-    // subject.offset), tie-break by DECREASING score, then DECREASING query end,
-    // then decreasing subject end. The C comment says "increasing size", but the
-    // comparator code returns the larger end coordinate first.
+    // First pass: shared (context, query.start, subject.start).
+    // NCBI `s_QueryOffsetCompareHSPs`: among HSPs sharing the start corner,
+    // tie-break by DECREASING score, then DECREASING query end, then decreasing
+    // subject end so the longest/best HSP becomes the group leader.
     candidates.sort_by(|a, b| {
         a.context
             .cmp(&b.context)
@@ -6187,35 +6321,34 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
             .then_with(|| b.tb.query_end.cmp(&a.tb.query_end))
             .then_with(|| b.tb.subject_end.cmp(&a.tb.subject_end))
     });
+    let mut active: Vec<GappedCandidate> = std::mem::take(candidates);
+    let mut extras: Vec<GappedCandidate> = Vec::new();
     let mut i = 0usize;
-    while i < candidates.len() {
-        let mut j = i + 1;
-        while j < candidates.len()
-            && candidates[i].context == candidates[j].context
-            && candidates[i].tb.query_start == candidates[j].tb.query_start
-            && candidates[i].tb.subject_start == candidates[j].tb.subject_start
+    while i < active.len() {
+        // Repeatedly compare the leader at `i` against the element at `i+1`.
+        // Matching trailing HSPs are removed from the active range; trimmed ones
+        // are stashed in `extras` to stay out of the second pass. The C loop
+        // keeps `j == 1`, so we always look at `i+1`.
+        while i + 1 < active.len()
+            && active[i].context == active[i + 1].context
+            && active[i].tb.query_start == active[i + 1].tb.query_start
+            && active[i].tb.subject_start == active[i + 1].tb.subject_start
         {
-            if keep_exact_seed_beside_large_gap_traceback(&candidates[i], &candidates[j]) {
-                j += 1;
-                continue;
+            let mut trailing = active.remove(i + 1);
+            if trailing.tb.query_end > active[i].tb.query_end {
+                let q_cut = active[i].tb.query_end;
+                let s_cut = active[i].tb.subject_end;
+                cutoff_traceback(&mut trailing.tb, q_cut, s_cut, true);
+                trailing.reevaluate_with_ambiguities = true;
+                extras.push(trailing);
             }
-            // NCBI (`Blast_HSPListPurgeHSPsWithCommonEndpoints`, blastn purge=FALSE):
-            // when the later HSP extends past the leader, TRIM its leading overlap
-            // and keep the remainder; otherwise it is contained → drop it.
-            if candidates[j].tb.query_end > candidates[i].tb.query_end {
-                let q_cut = candidates[i].tb.query_end;
-                let s_cut = candidates[i].tb.subject_end;
-                cutoff_traceback(&mut candidates[j].tb, q_cut, s_cut, true);
-                candidates[j].reevaluate_with_ambiguities = true;
-                j += 1;
-            } else {
-                candidates.remove(j);
-            }
+            // else: DROP (freed in C).
         }
-        i = j;
+        i += 1;
     }
 
-    candidates.sort_by(|a, b| {
+    // Second pass: shared (context, query.end, subject.end).
+    active.sort_by(|a, b| {
         a.context
             .cmp(&b.context)
             .then_with(|| a.tb.query_end.cmp(&b.tb.query_end))
@@ -6225,82 +6358,27 @@ fn purge_common_endpoint_tracebacks(candidates: &mut Vec<GappedCandidate>) {
             .then_with(|| b.tb.subject_start.cmp(&a.tb.subject_start))
     });
     let mut i = 0usize;
-    while i < candidates.len() {
-        let mut j = i + 1;
-        while j < candidates.len()
-            && candidates[i].context == candidates[j].context
-            && candidates[i].tb.query_end == candidates[j].tb.query_end
-            && candidates[i].tb.subject_end == candidates[j].tb.subject_end
+    while i < active.len() {
+        while i + 1 < active.len()
+            && active[i].context == active[i + 1].context
+            && active[i].tb.query_end == active[i + 1].tb.query_end
+            && active[i].tb.subject_end == active[i + 1].tb.subject_end
         {
-            if should_keep_terminal_exact_over_swallowed_traceback(&candidates[i], &candidates[j]) {
-                candidates.remove(i);
-                if i > 0 {
-                    i -= 1;
-                }
-                j = i + 1;
-                continue;
+            let mut trailing = active.remove(i + 1);
+            if trailing.tb.query_start < active[i].tb.query_start {
+                let q_cut = active[i].tb.query_start;
+                let s_cut = active[i].tb.subject_start;
+                cutoff_traceback(&mut trailing.tb, q_cut, s_cut, false);
+                trailing.reevaluate_with_ambiguities = true;
+                extras.push(trailing);
             }
-            // Shared end point: TRIM the trailing overlap of the HSP that starts
-            // earlier (keep the remainder); otherwise drop the contained HSP.
-            if candidates[j].tb.query_start < candidates[i].tb.query_start {
-                let q_cut = candidates[i].tb.query_start;
-                let s_cut = candidates[i].tb.subject_start;
-                cutoff_traceback(&mut candidates[j].tb, q_cut, s_cut, false);
-                candidates[j].reevaluate_with_ambiguities = true;
-                j += 1;
-            } else {
-                candidates.remove(j);
-            }
+            // else: DROP.
         }
-        i = j;
+        i += 1;
     }
-}
+    active.append(&mut extras);
 
-fn should_keep_terminal_exact_over_swallowed_traceback(
-    leader: &GappedCandidate,
-    candidate: &GappedCandidate,
-) -> bool {
-    leader.context == candidate.context
-        && candidate.terminal_exact_from_swallowed_seed
-        && !matches!(
-            leader.tb.edit_script.ops.as_slice(),
-            [(GapAlignOpType::Sub, _)]
-        )
-        && leader.tb.query_start < candidate.tb.query_start
-        && leader.tb.subject_start < candidate.tb.subject_start
-}
-
-fn keep_exact_seed_beside_large_gap_traceback(a: &GappedCandidate, b: &GappedCandidate) -> bool {
-    (traceback_is_exact_ungapped(&a.tb) && traceback_has_gap_at_least(&b.tb, 8))
-        || (traceback_is_exact_ungapped(&b.tb) && traceback_has_gap_at_least(&a.tb, 8))
-        || (a.context == b.context
-            && traceback_is_short_exact_ungapped(&a.tb)
-            && traceback_has_gap_at_least(&b.tb, 4))
-        || (a.context == b.context
-            && traceback_is_short_exact_ungapped(&b.tb)
-            && traceback_has_gap_at_least(&a.tb, 4))
-}
-
-fn traceback_is_exact_ungapped(tb: &TracebackResult) -> bool {
-    matches!(tb.edit_script.ops.as_slice(), [(GapAlignOpType::Sub, n)] if *n >= 30)
-}
-
-fn traceback_is_short_exact_ungapped(tb: &TracebackResult) -> bool {
-    matches!(tb.edit_script.ops.as_slice(), [(GapAlignOpType::Sub, n)] if (7..=12).contains(n))
-}
-
-fn traceback_has_gap_at_least(tb: &TracebackResult, min_gap: i32) -> bool {
-    tb.edit_script.ops.iter().any(|(op, n)| {
-        matches!(
-            op,
-            GapAlignOpType::Del
-                | GapAlignOpType::Del1
-                | GapAlignOpType::Del2
-                | GapAlignOpType::Ins
-                | GapAlignOpType::Ins1
-                | GapAlignOpType::Ins2
-        ) && *n >= min_gap
-    })
+    *candidates = active;
 }
 
 fn finalize_gapped_candidates(
@@ -6414,11 +6492,6 @@ fn min_diag_separation_for_ungapped(word_size: usize, reward: i32, penalty: i32)
 #[inline(always)]
 fn has_ambiguous_base(word: &[u8]) -> bool {
     word.iter().any(|&b| b >= 4)
-}
-
-#[inline(always)]
-fn subject_base_blocks_ungapped_extension(b: u8) -> bool {
-    b >= 4
 }
 
 fn blastna_score(a: u8, b: u8, reward: i32, penalty: i32) -> i32 {
@@ -6990,7 +7063,7 @@ fn disc_megablast_gapped_from_seeds(
 /// Per-(context, diagonal) initial-word state for the discontiguous two-hit
 /// extender, mirroring NCBI `DiagStruct` (`last_hit`, `flag`) plus the companion
 /// `hit_len_array` entry (`na_ungapped.c` `s_BlastnDiagTableExtendInitialHit`).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct DiscDiagState {
     last_hit: i32,
     hit_saved: bool,
@@ -6999,6 +7072,16 @@ struct DiscDiagState {
     /// so it is maintained for faithfulness but never consulted.
     #[allow(dead_code)]
     hit_len: i32,
+}
+
+impl Default for DiscDiagState {
+    fn default() -> Self {
+        Self {
+            last_hit: -DISC_MEGABLAST_WINDOW_SIZE,
+            hit_saved: false,
+            hit_len: 0,
+        }
+    }
 }
 
 /// Precomputed per-query ungapped-extension inputs for disc-megablast seeding.
@@ -7516,7 +7599,6 @@ fn empty_disc_megablast_lookup_table(template_length: i32) -> crate::lookup::MbL
 /// One surviving preliminary gapped HSP carried from the
 /// `BLAST_GetGappedScore` phase into the `Blast_TracebackFromHSPList` phase.
 struct DecodedPrelimHsp {
-    seed_index: usize,
     context: i32,
     prelim: PreliminaryGappedResult,
     traceback_seed: PackedTracebackSeed,
@@ -7623,7 +7705,6 @@ fn collect_decoded_gapped_candidates(
         let traceback_seed =
             traceback_seed_from_preliminary_decoded(traceback_query, subject, prelim);
         prelim_hsps.push(DecodedPrelimHsp {
-            seed_index: idx,
             context: seed.context,
             prelim,
             traceback_seed,
@@ -7645,13 +7726,17 @@ fn collect_decoded_gapped_candidates(
 
     let mut tb_tree = IntervalTree::new(q_max, s_max);
     for ph in &prelim_hsps {
-        let seed = &ungapped[ph.seed_index];
-
         // blast_traceback.c:404 — BlastIntervalTreeContainsHSP on the PRELIM
         // extent, BEFORE computing the traceback alignment.
         if tb_tree.is_contained_with_metadata_and_min_diag_separation(
-            Interval::new(ph.prelim.prelim_q_start as i32, ph.prelim.prelim_q_end as i32),
-            Interval::new(ph.prelim.prelim_s_start as i32, ph.prelim.prelim_s_end as i32),
+            Interval::new(
+                ph.prelim.prelim_q_start as i32,
+                ph.prelim.prelim_q_end as i32,
+            ),
+            Interval::new(
+                ph.prelim.prelim_s_start as i32,
+                ph.prelim.prelim_s_end as i32,
+            ),
             ph.prelim.score,
             ph.context,
             0,
@@ -7688,93 +7773,12 @@ fn collect_decoded_gapped_candidates(
             0,
         );
 
-        preserve_terminal_exact_seed_if_traceback_swallowed_it(
-            candidates,
-            seed,
-            traceback_query,
-            subject,
-            &tb,
-            reward,
-            cutoff_score,
-        );
-        if should_preserve_exact_seed_after_large_gap_traceback(seed, &tb) {
-            candidates.push(GappedCandidate {
-                context: ph.context,
-                tb: traceback_from_exact_seed(seed),
-                reevaluate_with_ambiguities: false,
-                terminal_exact_from_swallowed_seed: false,
-            });
-        }
         candidates.push(GappedCandidate {
             context: ph.context,
             tb,
             reevaluate_with_ambiguities: false,
-            terminal_exact_from_swallowed_seed: false,
         });
     }
-}
-
-fn preserve_terminal_exact_seed_if_traceback_swallowed_it(
-    candidates: &mut Vec<GappedCandidate>,
-    seed: &SearchHsp,
-    query: &[u8],
-    subject: &[u8],
-    tb: &TracebackResult,
-    reward: i32,
-    cutoff_score: i32,
-) {
-    if reward <= 0
-        || seed.context != 0
-        || tb.query_start >= seed.query_start as usize
-        || tb.subject_start >= seed.subject_start as usize
-        || seed.query_end <= seed.query_start
-        || seed.subject_end <= seed.subject_start
-    {
-        return;
-    }
-    if !candidates.iter().any(|candidate| {
-        candidate.context == seed.context
-            && candidate.tb.query_start == tb.query_start
-            && candidate.tb.subject_start == tb.subject_start
-            && candidate.tb.query_end < tb.query_end
-            && candidate.tb.subject_end < tb.subject_end
-            && candidate.tb.score > tb.score
-    }) {
-        return;
-    }
-
-    let mut len = 0usize;
-    let mut q = seed.query_end as usize;
-    let mut s = seed.subject_end as usize;
-    while q > seed.query_start as usize
-        && s > seed.subject_start as usize
-        && query.get(q - 1) == subject.get(s - 1)
-    {
-        len += 1;
-        q -= 1;
-        s -= 1;
-    }
-
-    let score = reward.saturating_mul(len as i32);
-    if len == 0 || score < cutoff_score || score >= seed.score {
-        return;
-    }
-
-    candidates.push(GappedCandidate {
-        context: seed.context,
-        tb: TracebackResult {
-            score,
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, len as i32)],
-            },
-            query_start: q,
-            query_end: seed.query_end as usize,
-            subject_start: s,
-            subject_end: seed.subject_end as usize,
-        },
-        reevaluate_with_ambiguities: false,
-        terminal_exact_from_swallowed_seed: true,
-    });
 }
 
 /// Variant of `blastn_gapped_search_packed_prepared` that accepts both the
@@ -7956,46 +7960,6 @@ fn collect_packed_gapped_candidates(
             continue;
         };
         if prelim.score < cutoff_score {
-            if should_try_near_cutoff_packed_traceback_fallback(&prelim, cutoff_score, penalty) {
-                let subject_decoded = subject_decoded
-                    .get_or_insert_with(|| decode_packed_ncbi2na(subject_packed, subject_len));
-                let traceback_seed =
-                    traceback_seed_from_preliminary(traceback_query, subject_decoded, prelim);
-                if let Some(tb) = run_packed_traceback_for_seed(
-                    traceback_query,
-                    subject_decoded,
-                    traceback_seed,
-                    reward,
-                    penalty,
-                    gap_open,
-                    gap_extend,
-                    traceback_x_dropoff,
-                ) {
-                    let tb = preserve_equal_score_preliminary_ungapped_span(
-                        tb,
-                        prelim,
-                        traceback_query,
-                        subject_decoded,
-                        reward,
-                        penalty,
-                    );
-                    if tb.score >= cutoff_score.max(20)
-                        && has_opposite_context_endpoint_sibling(candidates, seed.context, &tb)
-                    {
-                        blast_interval_tree_add_preliminary_gapped_result(
-                            &mut tree,
-                            seed.context,
-                            prelim,
-                        );
-                        candidates.push(GappedCandidate {
-                            context: seed.context,
-                            tb,
-                            reevaluate_with_ambiguities: false,
-                            terminal_exact_from_swallowed_seed: false,
-                        });
-                    }
-                }
-            }
             continue;
         }
         blast_interval_tree_add_preliminary_gapped_result(&mut tree, seed.context, prelim);
@@ -8105,31 +8069,6 @@ fn blast_get_packed_preliminary_gapped_score(
     }
 }
 
-fn should_try_near_cutoff_packed_traceback_fallback(
-    prelim: &PreliminaryGappedResult,
-    cutoff_score: i32,
-    penalty: i32,
-) -> bool {
-    let q_len = prelim.prelim_q_end.saturating_sub(prelim.prelim_q_start);
-    prelim.score < cutoff_score
-        && cutoff_score - prelim.score <= penalty.abs()
-        && (24..=35).contains(&q_len)
-}
-
-fn has_opposite_context_endpoint_sibling(
-    candidates: &[GappedCandidate],
-    context: i32,
-    tb: &TracebackResult,
-) -> bool {
-    candidates.iter().any(|candidate| {
-        candidate.context != context
-            && candidate.tb.score == tb.score
-            && (candidate.tb.subject_end as i64 - tb.subject_end as i64).abs() <= 1
-            && candidate.tb.subject_start <= tb.subject_end
-            && tb.subject_start <= candidate.tb.subject_end
-    })
-}
-
 /// NCBI: BlastIntervalTreeAddHSP (`blast_itree.c:511`), for preliminary
 /// gapped BLASTN results.
 fn blast_interval_tree_add_preliminary_gapped_result(
@@ -8154,14 +8093,14 @@ fn blast_traceback_from_packed_preliminary_hsp(
     seed: &SearchHsp,
     traceback_query: &[u8],
     subject_decoded: &[u8],
-    prelim: PreliminaryGappedResult,
+    _prelim: PreliminaryGappedResult,
     traceback_seed: PackedTracebackSeed,
     reward: i32,
     penalty: i32,
     gap_open: i32,
     gap_extend: i32,
     traceback_x_dropoff: i32,
-    cutoff_score: i32,
+    _cutoff_score: i32,
 ) {
     if let Some(tb) = run_packed_traceback_for_seed(
         traceback_query,
@@ -8173,88 +8112,11 @@ fn blast_traceback_from_packed_preliminary_hsp(
         gap_extend,
         traceback_x_dropoff,
     ) {
-        let tb = preserve_equal_score_preliminary_ungapped_span(
-            tb,
-            prelim,
-            traceback_query,
-            subject_decoded,
-            reward,
-            penalty,
-        );
-        preserve_terminal_exact_seed_if_traceback_swallowed_it(
-            candidates,
-            seed,
-            traceback_query,
-            subject_decoded,
-            &tb,
-            reward,
-            cutoff_score,
-        );
-        if should_preserve_exact_seed_after_large_gap_traceback(seed, &tb) {
-            candidates.push(GappedCandidate {
-                context: seed.context,
-                tb: traceback_from_exact_seed(seed),
-                reevaluate_with_ambiguities: false,
-                terminal_exact_from_swallowed_seed: false,
-            });
-        }
         candidates.push(GappedCandidate {
             context: seed.context,
             tb,
             reevaluate_with_ambiguities: false,
-            terminal_exact_from_swallowed_seed: false,
         });
-    }
-}
-
-fn preserve_equal_score_preliminary_ungapped_span(
-    tb: TracebackResult,
-    prelim: PreliminaryGappedResult,
-    query: &[u8],
-    subject: &[u8],
-    reward: i32,
-    penalty: i32,
-) -> TracebackResult {
-    let q_len = prelim.prelim_q_end.saturating_sub(prelim.prelim_q_start);
-    let s_len = prelim.prelim_s_end.saturating_sub(prelim.prelim_s_start);
-    if tb.score != prelim.score
-        || q_len == 0
-        || q_len < 80
-        || q_len != s_len
-        || prelim.prelim_q_start > tb.query_start
-        || prelim.prelim_s_start > tb.subject_start
-        || prelim.prelim_q_end < tb.query_end
-        || prelim.prelim_s_end < tb.subject_end
-        || (prelim.prelim_q_start == tb.query_start
-            && prelim.prelim_s_start == tb.subject_start
-            && prelim.prelim_q_end == tb.query_end
-            && prelim.prelim_s_end == tb.subject_end)
-    {
-        return tb;
-    }
-
-    let mut score = 0;
-    for i in 0..q_len {
-        score += blastna_score(
-            query[prelim.prelim_q_start + i],
-            subject[prelim.prelim_s_start + i],
-            reward,
-            penalty,
-        );
-    }
-    if score != prelim.score {
-        return tb;
-    }
-
-    TracebackResult {
-        score,
-        edit_script: GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, q_len as i32)],
-        },
-        query_start: prelim.prelim_q_start,
-        query_end: prelim.prelim_q_end,
-        subject_start: prelim.prelim_s_start,
-        subject_end: prelim.prelim_s_end,
     }
 }
 
@@ -8429,45 +8291,6 @@ fn run_packed_traceback_for_seed(
     )
 }
 
-fn should_preserve_exact_seed_after_large_gap_traceback(
-    seed: &SearchHsp,
-    tb: &TracebackResult,
-) -> bool {
-    // NCBI emits exactly one HSP per surviving init-seed (the gapped traceback);
-    // it never re-adds the seed's exact ungapped alignment beside a large-gap
-    // traceback. A previous "preserve_large_gap_seed" branch (score>=30, exact,
-    // align>=30, gap>=8, traceback envelops the seed) fabricated such a second
-    // HSP, over-reporting alignments NCBI does not produce — e.g. a score-44
-    // exact HSP nested in a score-93 gapped one on a repeat-rich subject, where
-    // the diagonal separation exceeds min_diag_separation so the interval tree
-    // cannot cull it. That branch matched no fixture and is removed. The
-    // remaining branch handles only the short minus-strand terminal-overhang
-    // case covered by `blastn_short_minus_terminal_overhang_keeps_secondary_hsp`.
-    seed.context == 1
-        && seed.gap_opens == 0
-        && seed.num_ident == seed.align_length
-        && seed.align_length >= 7
-        && seed.align_length <= 12
-        && traceback_has_gap_at_least(tb, 4)
-        && seed.query_start == tb.query_start as i32
-        && seed.query_end < tb.query_end as i32
-        && seed.subject_start == tb.subject_start as i32
-        && seed.subject_end < tb.subject_end as i32
-}
-
-fn traceback_from_exact_seed(seed: &SearchHsp) -> TracebackResult {
-    TracebackResult {
-        score: seed.score,
-        edit_script: GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, seed.align_length)],
-        },
-        query_start: seed.query_start as usize,
-        query_end: seed.query_end as usize,
-        subject_start: seed.subject_start as usize,
-        subject_end: seed.subject_end as usize,
-    }
-}
-
 fn render_traceback_candidate(
     context: i32,
     mut tb: TracebackResult,
@@ -8485,16 +8308,11 @@ fn render_traceback_candidate(
 ) -> Option<SearchHsp> {
     let query = candidate_query_for_context(context, query_plus_nomask, query_minus_nomask);
     let cutoff_score = kbp.evalue_to_raw(evalue_threshold, search_space);
-    let q_window = &query[tb.query_start..tb.query_end];
-    let s_window = &subject[tb.subject_start..tb.subject_end];
     // NCBI starts ambiguity reevaluation at the `extra_start` returned by the
     // common-endpoint purge. Rust removes dropped HSPs in place, so trimmed
     // survivors carry this flag. Greedy traceback is the C special case where
     // `extra_start` is reset to zero and every HSP is reevaluated.
     if reevaluate_with_ambiguities {
-        let original_tb = tb.clone();
-        let (orig_align_len, orig_num_ident, orig_gap_opens) =
-            original_tb.edit_script.count_identities(q_window, s_window);
         if blast_hsp_reevaluate_with_ambiguities_gapped(
             &mut tb,
             query,
@@ -8506,22 +8324,6 @@ fn render_traceback_candidate(
             cutoff_score.max(1),
         ) {
             return None;
-        }
-        let rq_slice = &query[tb.query_start..tb.query_end];
-        let rs_slice = &subject[tb.subject_start..tb.subject_end];
-        let (refined_align_len, refined_num_ident, refined_gap_opens) =
-            tb.edit_script.count_identities(rq_slice, rs_slice);
-        if original_tb.score == tb.score
-            && original_tb.score >= 26
-            && orig_gap_opens == 1
-            && orig_align_len >= 50
-            && orig_align_len <= 70
-            && orig_num_ident * 100 >= orig_align_len * 85
-            && refined_gap_opens == 0
-            && refined_num_ident == refined_align_len
-            && refined_align_len <= 30
-        {
-            tb = original_tb;
         }
     }
     // Gate by the integer cutoff score (NCBI `cutoff_score`), not by recomputing
@@ -9432,7 +9234,60 @@ mod tests {
     }
 
     #[test]
-    fn blastn_short_minus_terminal_overhang_keeps_secondary_hsp() {
+    fn test_purge_common_endpoint_tracebacks_keeps_first_pass_extras_out_of_second_pass() {
+        fn candidate(score: i32, q_start: usize, q_end: usize) -> GappedCandidate {
+            GappedCandidate {
+                context: 0,
+                tb: TracebackResult {
+                    score,
+                    edit_script: GapEditScript {
+                        ops: vec![(GapAlignOpType::Sub, (q_end - q_start) as i32)],
+                    },
+                    query_start: q_start,
+                    query_end: q_end,
+                    subject_start: q_start,
+                    subject_end: q_end,
+                },
+                reevaluate_with_ambiguities: false,
+            }
+        }
+
+        let mut candidates = vec![
+            candidate(90, 0, 8),
+            candidate(95, 2, 8),
+            candidate(100, 0, 4),
+        ];
+
+        purge_common_endpoint_tracebacks(&mut candidates);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.tb.score,
+                    candidate.tb.query_start,
+                    candidate.tb.subject_start,
+                    candidate.tb.query_end,
+                    candidate.tb.subject_end,
+                    candidate.reevaluate_with_ambiguities,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (100, 0, 0, 4, 4, false),
+                (95, 2, 2, 8, 8, false),
+                (90, 4, 4, 8, 8, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn blastn_short_minus_terminal_overhang_purges_common_endpoint_hsp() {
+        // Faithful `Blast_HSPListPurgeHSPsWithCommonEndpoints` (blast_hits.c:2455):
+        // the short minus-strand overhang HSP shares both endpoints with the larger
+        // minus-strand alignment, so it is purged (not preserved). The native
+        // `keep_exact_seed_beside_large_gap_traceback` exception that used to retain
+        // it was removed (audit item H4). Only the primary score-26 context-1 HSP
+        // (query 4-30, subject 0-26) survives on the minus strand.
         let query_plus = encode_blastna_sequence(b"TTTTACGTACGTGACTTACCGTACGTACGTAAAA");
         let query_minus = reverse_complement_blastna_sequence(&query_plus);
         let subject = encode_blastna_sequence(b"ACGTACGTACGGTAAGTCACGTACGT");
@@ -9459,14 +9314,24 @@ mod tests {
             (query_plus.len() * subject.len()) as f64,
             1000.0,
         );
+        // Primary minus-strand alignment is retained.
         assert!(
             hsps.iter().any(|hsp| hsp.context == 1
+                && hsp.query_start == 4
+                && hsp.query_end == 30
+                && hsp.subject_start == 0
+                && hsp.subject_end == 26
+                && hsp.score == 26),
+            "missing primary minus-strand HSP: {hsps:?}"
+        );
+        // The short common-endpoint overhang HSP is purged faithfully.
+        assert!(
+            !hsps.iter().any(|hsp| hsp.context == 1
                 && hsp.query_start == 3
                 && hsp.query_end == 11
                 && hsp.subject_start == 3
-                && hsp.subject_end == 11
-                && hsp.score == 8),
-            "missing NCBI secondary minus-strand HSP: {hsps:?}"
+                && hsp.subject_end == 11),
+            "short common-endpoint minus-strand HSP should be purged: {hsps:?}"
         );
     }
 
@@ -10381,6 +10246,92 @@ mod tests {
     }
 
     #[test]
+    fn blastn_window_size_two_hit_gate_holds_isolated_first_hit() {
+        // NCBI `s_BlastnDiagTableExtendInitialHit` (na_ungapped.c:632): with
+        // `-window_size > 0` (`two_hits == TRUE`), a lone first word hit on a
+        // diagonal is HELD (hit_ready = 0) and never extended; with the default
+        // window 0 (`two_hits == FALSE`) it is extended immediately.
+        let query = encode_blastna_sequence(b"ACGACGTTGCA");
+        let rc = reverse_complement_blastna_sequence(&query);
+        // A single isolated copy of the only query word, padded so it has no
+        // diagonal partner inside the window.
+        let subject = encode_blastna_sequence(b"TTTTTTTTTTTTACGACGTTGCATTTTTTTTTTT");
+        let subject_packed = pack_ncbi2na_bases(&subject);
+        let kbp = test_kbp();
+        let prepared = PreparedBlastnQuery::new(&query, &rc, 11);
+
+        let prev = set_blastn_window_size(0);
+        let one_hit = blastn_ungapped_search_packed_prepared(
+            &prepared,
+            &subject_packed,
+            subject.len(),
+            1,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
+        );
+        assert!(
+            !one_hit.is_empty(),
+            "window 0 (one-hit) should extend the isolated hit: {one_hit:?}"
+        );
+
+        set_blastn_window_size(40);
+        let two_hit = blastn_ungapped_search_packed_prepared(
+            &prepared,
+            &subject_packed,
+            subject.len(),
+            1,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
+        );
+        set_blastn_window_size(prev);
+        assert!(
+            two_hit.is_empty(),
+            "window 40 (two-hit) should HOLD the isolated first hit (no extension): {two_hit:?}"
+        );
+    }
+
+    #[test]
+    fn blastn_window_size_default_zero_is_unchanged() {
+        // Guard: the thread-local default (window 0) must leave the packed scan
+        // byte-identical to the historical one-hit behavior.
+        let query = encode_blastna_sequence(b"ACGTACGTACG");
+        let rc = reverse_complement_blastna_sequence(&query);
+        let subject = encode_blastna_sequence(b"TACGTACGTACG");
+        let subject_packed = pack_ncbi2na_bases(&subject);
+        let kbp = test_kbp();
+        let prepared = PreparedBlastnQuery::new(&query, &rc, 11);
+
+        let prev = set_blastn_window_size(0);
+        let results = blastn_ungapped_search_packed_prepared(
+            &prepared,
+            &subject_packed,
+            subject.len(),
+            1,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
+        );
+        set_blastn_window_size(prev);
+        assert!(
+            results.iter().any(|hsp| hsp.context == 0
+                && hsp.query_start == 0
+                && hsp.query_end == 11
+                && hsp.subject_start == 1
+                && hsp.subject_end == 12
+                && hsp.score == 11),
+            "window 0 default must match historical one-hit output: {results:?}"
+        );
+    }
+
+    #[test]
     fn soft_masked_lookup_rechecks_full_word_lookup_chunks() {
         let query = encode_blastna_sequence(b"ACGTACGTACG");
         let subject = query.clone();
@@ -10495,42 +10446,10 @@ mod tests {
     }
 
     #[test]
-    fn packed_traceback_preserves_long_equal_score_preliminary_span() {
-        let query = vec![0u8; 100];
-        let mut subject = vec![0u8; 100];
-        for i in (0..80).step_by(16) {
-            for j in 0..3 {
-                subject[i + j] = 1;
-            }
-        }
-        let prelim = PreliminaryGappedResult {
-            score: 20,
-            prelim_q_start: 0,
-            prelim_q_end: 80,
-            prelim_s_start: 0,
-            prelim_s_end: 80,
-            gapped_start_q: 40,
-            gapped_start_s: 40,
-        };
-        let tb = TracebackResult {
-            score: 20,
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, 20)],
-            },
-            query_start: 30,
-            query_end: 50,
-            subject_start: 30,
-            subject_end: 50,
-        };
-
-        let preserved =
-            preserve_equal_score_preliminary_ungapped_span(tb, prelim, &query, &subject, 1, -3);
-
-        assert_eq!(preserved.query_start, 0);
-        assert_eq!(preserved.query_end, 80);
-        assert_eq!(preserved.subject_start, 0);
-        assert_eq!(preserved.subject_end, 80);
-        assert_eq!(preserved.score, 20);
-        assert_eq!(preserved.edit_script.ops, vec![(GapAlignOpType::Sub, 80)]);
+    fn disc_diag_state_initializes_like_ncbi_reset() {
+        let state = DiscDiagState::default();
+        assert_eq!(state.last_hit, -DISC_MEGABLAST_WINDOW_SIZE);
+        assert!(!state.hit_saved);
+        assert_eq!(state.hit_len, 0);
     }
 }

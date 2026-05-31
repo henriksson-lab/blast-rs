@@ -144,18 +144,6 @@ pub fn gapped_align(
             }
             1 => {
                 if let Some(last) = ops.last_mut() {
-                    if last.0 == GapAlignOpType::Ins {
-                        last.1 += 1;
-                    } else {
-                        ops.push((GapAlignOpType::Ins, 1));
-                    }
-                } else {
-                    ops.push((GapAlignOpType::Ins, 1));
-                }
-                j -= 1;
-            }
-            2 => {
-                if let Some(last) = ops.last_mut() {
                     if last.0 == GapAlignOpType::Del {
                         last.1 += 1;
                     } else {
@@ -163,6 +151,18 @@ pub fn gapped_align(
                     }
                 } else {
                     ops.push((GapAlignOpType::Del, 1));
+                }
+                j -= 1;
+            }
+            2 => {
+                if let Some(last) = ops.last_mut() {
+                    if last.0 == GapAlignOpType::Ins {
+                        last.1 += 1;
+                    } else {
+                        ops.push((GapAlignOpType::Ins, 1));
+                    }
+                } else {
+                    ops.push((GapAlignOpType::Ins, 1));
                 }
                 i -= 1;
             }
@@ -248,11 +248,7 @@ mod tests {
         let (score, esp) = result.unwrap();
         // Best alignment: 8 matches (16) - gap_open+gap_extend (3+1=4) = 12
         assert!(score >= 12, "score={} should be >= 12", score);
-        // Should contain a Del operation (gap in query = deletion)
-        let has_gap = esp
-            .ops
-            .iter()
-            .any(|(op, _)| *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins);
+        let has_gap = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Del);
         assert!(has_gap, "expected a gap operation, ops={:?}", esp.ops);
     }
 
@@ -267,10 +263,7 @@ mod tests {
         assert!(result.is_some());
         let (score, esp) = result.unwrap();
         assert!(score >= 12, "score={} should be >= 12", score);
-        let has_gap = esp
-            .ops
-            .iter()
-            .any(|(op, _)| *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins);
+        let has_gap = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Ins);
         assert!(has_gap, "expected a gap operation, ops={:?}", esp.ops);
     }
 

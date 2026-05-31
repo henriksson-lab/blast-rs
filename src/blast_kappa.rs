@@ -16310,7 +16310,11 @@ pub fn blast_redo_one_match_in_memory_with_adjustment(
         let mut in_align = window.align.as_deref();
         let mut query_composition = query_info[query_index].composition.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
-            query_info[query_index].seq.length.max(0) as usize
+            crate::composition::blast_read_aa_composition(
+                query_info[query_index].seq.data(),
+                crate::matrix::AA_SIZE,
+            )
+            .1
         } else {
             0
         };
@@ -16493,7 +16497,11 @@ pub fn blast_redo_one_match_in_memory_with_position_adjustment(
         let mut in_align = window.align.as_deref();
         let mut query_composition = query_info[query_index].composition.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
-            query_info[query_index].seq.length.max(0) as usize
+            crate::composition::blast_read_aa_composition(
+                query_info[query_index].seq.data(),
+                crate::matrix::AA_SIZE,
+            )
+            .1
         } else {
             0
         };
@@ -16706,7 +16714,11 @@ pub fn blast_redo_one_match_with_callbacks_and_adjustment(
         let mut in_align = window.align.as_deref();
         let mut query_composition = query_info[query_index].composition.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
-            query_info[query_index].seq.length.max(0) as usize
+            crate::composition::blast_read_aa_composition(
+                query_info[query_index].seq.data(),
+                crate::matrix::AA_SIZE,
+            )
+            .1
         } else {
             0
         };
@@ -16733,7 +16745,7 @@ pub fn blast_redo_one_match_with_callbacks_and_adjustment(
                     &window.query_range,
                     &mut query,
                     &query_info[query_index].words,
-                    window.align.as_deref().unwrap(),
+                    align,
                     near_identical_status,
                     params.compo_adjust_mode,
                     false,
@@ -16964,7 +16976,7 @@ pub fn blast_redo_one_match_with_callbacks_and_position_adjustment(
                     &window.query_range,
                     &mut query,
                     &query_info[query_index].words,
-                    window.align.as_deref().unwrap(),
+                    align,
                     near_identical_status,
                     params.compo_adjust_mode,
                     false,

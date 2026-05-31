@@ -961,6 +961,10 @@ pub fn protein_gapped_align(
     gap_extend: i32,
     x_dropoff: i32,
 ) -> Option<ProteinGappedResult> {
+    if query.is_empty() || subject.is_empty() {
+        return None;
+    }
+
     // Clamp seed points to valid range
     let seed_q = seed_q.min(query.len().saturating_sub(1));
     let seed_s = seed_s.min(subject.len().saturating_sub(1));
@@ -995,8 +999,7 @@ pub fn protein_gapped_align(
         (0, 0, 0, Vec::new())
     };
 
-    let total_score = score_l + score_r;
-    if total_score <= 0 {
+    if score_l + score_r <= 0 {
         return None;
     }
 
@@ -1009,15 +1012,54 @@ pub fn protein_gapped_align(
     }
     // Match NCBI `Blast_PrelimEditBlockToGapEditScript`: concatenate the
     // reverse half as-is and the forward half reversed, preserving all ops.
-    // Downstream length/gap accounting walks the full script.
     if edit_script.ops.is_empty() {
         return None;
     }
 
-    let final_q_start = q_start;
-    let final_q_end = seed_q + qr + 1;
-    let final_s_start = s_start;
-    let final_s_end = seed_s + sr + 1;
+    let mut final_q_start = q_start;
+    let mut final_q_end = seed_q + qr + 1;
+    let mut final_s_start = s_start;
+    let mut final_s_end = seed_s + sr + 1;
+    let mut score_left = score_l;
+    let mut score_right = score_r;
+
+    // NCBI `BLAST_GappedAlignmentWithTraceback` (`blast_gapalign.c:4771-4801`):
+    // rarely (typically when the scoring system changes between the score-only
+    // and traceback stages, as happens with composition-based statistics) it is
+    // possible to compute an optimal alignment with a leading or trailing gap.
+    // Prune these unneeded gaps here and update the score and alignment
+    // boundaries. The add-back uses positive-magnitude gap_open/gap_extend (the
+    // DP applied them as negatives), so removing the op cancels them out.
+    // GapAlignOpType convention: Del == gap in query == consumes subject;
+    // Ins == gap in subject == consumes query (matches C eGapAlignDel/eGapAlignIns).
+    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
+        let (op, num) = edit_script.ops[0];
+        score_left += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            final_s_start += num as usize;
+        } else {
+            final_q_start += num as usize;
+        }
+        edit_script.ops.remove(0);
+    }
+    while !edit_script.ops.is_empty()
+        && edit_script.ops[edit_script.ops.len() - 1].0 != GapAlignOpType::Sub
+    {
+        let (op, num) = edit_script.ops[edit_script.ops.len() - 1];
+        score_right += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            final_s_end -= num as usize;
+        } else {
+            final_q_end -= num as usize;
+        }
+        edit_script.ops.pop();
+    }
+
+    let total_score = score_left + score_right;
+    if edit_script.ops.is_empty() {
+        return None;
+    }
+
     let local_q = &query[final_q_start..final_q_end];
     let local_s = &subject[final_s_start..final_s_end];
     let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
@@ -1098,8 +1140,7 @@ pub fn protein_gapped_align_pssm(
         (0, 0, 0, Vec::new())
     };
 
-    let total_score = score_l + score_r;
-    if total_score <= 0 {
+    if score_l + score_r <= 0 {
         return None;
     }
 
@@ -1114,10 +1155,43 @@ pub fn protein_gapped_align_pssm(
         return None;
     }
 
-    let final_q_start = q_start;
-    let final_q_end = seed_q + qr + 1;
-    let final_s_start = s_start;
-    let final_s_end = seed_s + sr + 1;
+    let mut final_q_start = q_start;
+    let mut final_q_end = seed_q + qr + 1;
+    let mut final_s_start = s_start;
+    let mut final_s_end = seed_s + sr + 1;
+    let mut score_left = score_l;
+    let mut score_right = score_r;
+
+    // NCBI `BLAST_GappedAlignmentWithTraceback` prunes terminal non-Sub ops
+    // after building the script regardless of the score source. Keep the PSSM
+    // path in lockstep with the square-matrix path above.
+    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
+        let (op, num) = edit_script.ops[0];
+        score_left += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            final_s_start += num as usize;
+        } else {
+            final_q_start += num as usize;
+        }
+        edit_script.ops.remove(0);
+    }
+    while !edit_script.ops.is_empty()
+        && edit_script.ops[edit_script.ops.len() - 1].0 != GapAlignOpType::Sub
+    {
+        let (op, num) = edit_script.ops[edit_script.ops.len() - 1];
+        score_right += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            final_s_end -= num as usize;
+        } else {
+            final_q_end -= num as usize;
+        }
+        edit_script.ops.pop();
+    }
+    if edit_script.ops.is_empty() {
+        return None;
+    }
+
+    let total_score = score_left + score_right;
     let local_q = &query[final_q_start..final_q_end];
     let local_s = &subject[final_s_start..final_s_end];
     let (align_length, num_ident, gap_opens) = edit_script.count_identities(local_q, local_s);
@@ -1488,6 +1562,28 @@ mod tests {
     }
 
     #[test]
+    fn test_protein_gapped_align_strips_terminal_gaps() {
+        // NCBI BLAST_GappedAlignmentWithTraceback (blast_gapalign.c:4771-4801)
+        // prunes leading/trailing non-Sub ops from the edit script. The returned
+        // script must therefore always begin and end on a Sub op.
+        let m = simple_blosum62();
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let r = protein_gapped_align(&query, &subject, 4, 4, &m, 11, 1, 50).unwrap();
+        assert!(!r.edit_script.ops.is_empty());
+        assert_eq!(
+            r.edit_script.ops.first().unwrap().0,
+            GapAlignOpType::Sub,
+            "edit script must start on a Sub op after terminal-gap stripping"
+        );
+        assert_eq!(
+            r.edit_script.ops.last().unwrap().0,
+            GapAlignOpType::Sub,
+            "edit script must end on a Sub op after terminal-gap stripping"
+        );
+    }
+
+    #[test]
     fn test_protein_gapped_align_pssm_uses_absolute_query_offset() {
         let query = vec![1u8, 2, 3];
         let subject = query.clone();
@@ -1503,6 +1599,22 @@ mod tests {
         assert_eq!(result.query_start, 0);
         assert_eq!(result.query_end, query.len());
         assert_eq!(result.num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn test_protein_gapped_align_pssm_strips_terminal_gaps() {
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let subject = query.clone();
+        let mut pssm = vec![vec![-20; AA_SIZE]; query.len()];
+        for (pos, &aa) in query.iter().enumerate() {
+            pssm[pos][aa as usize] = 8;
+        }
+
+        let r = protein_gapped_align_pssm(&query, &subject, 4, 4, 0, &pssm, 11, 1, 50)
+            .expect("PSSM gapped alignment");
+        assert!(!r.edit_script.ops.is_empty());
+        assert_eq!(r.edit_script.ops.first().unwrap().0, GapAlignOpType::Sub);
+        assert_eq!(r.edit_script.ops.last().unwrap().0, GapAlignOpType::Sub);
     }
 
     #[test]

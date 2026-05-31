@@ -1064,6 +1064,12 @@ fn adjusted_greedy_seed(
 
 /// blast-rs: Rust convenience wrapper that preserves the older tuple return
 /// shape by hiding the adjusted seed returned by `greedy_align_with_seed`.
+///
+/// `subject` must be a DECODED BLASTNA sequence (one base per byte, values
+/// `< 16`, no NCBI2na 2-bit packing and no sentinels). NCBI's `s_FindFirstMismatch`
+/// (`greedy_align.c:315`) has a separate compressed-subject (`rem` / `fence_hit`)
+/// branch for the packed path; the wired Rust callers always decode the subject
+/// first, so that branch is intentionally not ported here.
 pub fn greedy_align(
     query: &[u8],
     subject: &[u8],
@@ -1073,6 +1079,13 @@ pub fn greedy_align(
     penalty: i32,
     x_dropoff: i32,
 ) -> Option<(i32, usize, usize, usize, usize, GapEditScript)> {
+    // The greedy extender assumes a decoded BLASTNA subject (see doc above).
+    // NCBI's compressed `rem`/`fence_hit` mismatch branch is deliberately not
+    // ported; this guards the invariant in debug builds.
+    debug_assert!(
+        subject.iter().all(|&b| b < 16),
+        "greedy expects a decoded BLASTNA subject (no NCBI2na packing / sentinels)"
+    );
     let (score, query_start, query_end, subject_start, subject_end, edit_script, _, _) =
         greedy_align_with_seed(query, subject, q_seed, s_seed, reward, penalty, x_dropoff)?;
     Some((

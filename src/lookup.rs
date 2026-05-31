@@ -83,6 +83,23 @@ struct RpsInitHitRecord {
     score: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RpsTwoHitDiagState {
+    last_hit: i32,
+    flag: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RpsTwoHitOutcome {
+    NoReach {
+        init_hit: Option<RpsInitHitRecord>,
+    },
+    Reached {
+        init_hit: Option<RpsInitHitRecord>,
+        s_last_off: i32,
+    },
+}
+
 /// blast-rs: RPS scan/HSP bridge for the represented ungapped payload path;
 /// not a direct NCBI C port.
 ///
@@ -3844,6 +3861,21 @@ fn s_blast_rps_word_finder_two_hit_scan(
     subject: &[u8],
     window_size: i32,
 ) -> RpsWordFinderScan {
+    s_blast_rps_word_finder_two_hit_scan_impl(lookup, subject, window_size, None)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RpsTwoHitPayloadConfig {
+    x_dropoff: i32,
+    score_cutoff: i32,
+}
+
+fn s_blast_rps_word_finder_two_hit_scan_impl(
+    lookup: &mut BlastRpsLookupTable,
+    subject: &[u8],
+    window_size: i32,
+    payload_config: Option<RpsTwoHitPayloadConfig>,
+) -> RpsWordFinderScan {
     if lookup.wordsize <= 0 || window_size <= lookup.wordsize {
         return RpsWordFinderScan::default();
     }
@@ -3858,39 +3890,86 @@ fn s_blast_rps_word_finder_two_hit_scan(
         };
     }
 
-    let mut accepted = Vec::new();
-    for (idx, &second) in hits.iter().enumerate().skip(1) {
-        let mut best_first = None;
-        for &first in hits[..idx].iter().rev() {
-            if first.subject_offset == second.subject_offset {
+    let mut seeds = Vec::new();
+    let mut init_hits = Vec::new();
+    let mut diag_states: std::collections::HashMap<i32, RpsTwoHitDiagState> =
+        std::collections::HashMap::new();
+    let ws = lookup.wordsize;
+    let mut hits_extended = 0i32;
+
+    for second in hits {
+        let diag = second.query_offset - second.subject_offset;
+        let state = diag_states.entry(diag).or_insert(RpsTwoHitDiagState {
+            last_hit: -window_size,
+            flag: false,
+        });
+        let s_off = second.subject_offset;
+
+        if state.flag {
+            if s_off < state.last_hit {
                 continue;
             }
-            let first_diag = first.query_offset - first.subject_offset;
-            let second_diag = second.query_offset - second.subject_offset;
-            if first_diag != second_diag {
-                continue;
-            }
-            let distance = second.subject_offset - first.subject_offset;
-            if distance < lookup.wordsize {
-                continue;
-            }
-            if distance >= window_size {
-                break;
-            }
-            best_first = Some(first);
-            break;
+            state.last_hit = s_off;
+            state.flag = false;
+            continue;
         }
 
-        if let Some(first) = best_first {
-            accepted.push(RpsTwoHitSeed { first, second });
+        let diff = s_off - state.last_hit;
+        if diff >= window_size {
+            state.last_hit = s_off;
+            state.flag = false;
+            continue;
+        }
+        if diff < ws {
+            continue;
+        }
+
+        let first = OffsetPair {
+            query_offset: state.last_hit + diag,
+            subject_offset: state.last_hit,
+        };
+        let seed = RpsTwoHitSeed { first, second };
+        seeds.push(seed);
+        hits_extended += 1;
+
+        if let Some(config) = payload_config {
+            match rps_extend_two_hit_payload(
+                &lookup.rps_pssm,
+                subject,
+                ws as usize,
+                config.x_dropoff,
+                config.score_cutoff,
+                seed,
+            ) {
+                RpsTwoHitOutcome::Reached {
+                    init_hit,
+                    s_last_off,
+                } => {
+                    if let Some(init_hit) = init_hit {
+                        init_hits.push(init_hit);
+                    }
+                    state.last_hit = s_last_off - (ws - 1);
+                    state.flag = true;
+                }
+                RpsTwoHitOutcome::NoReach { init_hit } => {
+                    if let Some(init_hit) = init_hit {
+                        init_hits.push(init_hit);
+                    }
+                    state.last_hit = s_off;
+                    state.flag = false;
+                }
+            }
+        } else {
+            state.last_hit = s_off;
+            state.flag = false;
         }
     }
-    let hits_extended = accepted.len() as i32;
+
     RpsWordFinderScan {
-        seeds: accepted,
+        seeds,
         total_hits,
         hits_extended,
-        init_hits: Vec::new(),
+        init_hits,
     }
 }
 
@@ -3982,7 +4061,7 @@ fn rps_extend_two_hit_payload(
     x_dropoff: i32,
     score_cutoff: i32,
     seed: RpsTwoHitSeed,
-) -> Option<RpsInitHitRecord> {
+) -> RpsTwoHitOutcome {
     let q_right_off = seed.second.query_offset as usize;
     let s_right_off = seed.second.subject_offset as usize;
     let s_left_off = seed.first.subject_offset as usize + word_size;
@@ -4009,32 +4088,41 @@ fn rps_extend_two_hit_payload(
     let ext_q = q_right_off + right_d;
     let ext_s = s_right_off + right_d;
     let (left_score, left_d) = rps_extend_left(pssm, subject, ext_q, ext_s, x_dropoff);
-    if left_score < score_cutoff || left_d == 0 {
-        return None;
-    }
-
     let reached_first = left_d >= (ext_s as i32 - s_left_off as i32);
-    let (score, right_d) = if reached_first {
-        let (right_score, right_d, _) =
-            rps_extend_right(pssm, subject, ext_q, ext_s, x_dropoff, left_score);
-        (left_score.max(right_score), right_d)
-    } else {
-        (left_score, 0)
-    };
-    if score < score_cutoff {
-        return None;
+    if !reached_first {
+        let init_hit = (left_score >= score_cutoff && left_d > 0).then(|| {
+            let q_start = ext_q as i32 - left_d;
+            let s_start = ext_s as i32 - left_d;
+            RpsInitHitRecord {
+                q_start,
+                s_start,
+                q_off: seed.second.query_offset,
+                s_off: seed.second.subject_offset,
+                len: left_d,
+                score: left_score,
+            }
+        });
+        return RpsTwoHitOutcome::NoReach { init_hit };
     }
 
+    let (right_score, right_d, s_last_off_delta) =
+        rps_extend_right(pssm, subject, ext_q, ext_s, x_dropoff, left_score);
+    let score = left_score.max(right_score);
+    let s_last_off = ext_s as i32 + s_last_off_delta;
     let q_start = ext_q as i32 - left_d;
     let s_start = ext_s as i32 - left_d;
-    Some(RpsInitHitRecord {
+    let init_hit = (score >= score_cutoff).then_some(RpsInitHitRecord {
         q_start,
         s_start,
         q_off: seed.second.query_offset,
         s_off: seed.second.subject_offset,
         len: left_d + right_d,
         score,
-    })
+    });
+    RpsTwoHitOutcome::Reached {
+        init_hit,
+        s_last_off,
+    }
 }
 
 /// blast-rs: side-channel preserving wrapper around
@@ -4089,24 +4177,19 @@ pub fn s_blast_rps_word_finder_two_hit_with_extension_payloads(
     init_hitlist: Option<&mut crate::extend::InitHitList>,
     ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
 ) -> RpsWordFinderScan {
-    let mut scan = s_blast_rps_word_finder_two_hit_scan(lookup, subject, window_size);
-    let word_size = lookup.wordsize.max(0) as usize;
-    if word_size > 0 && !lookup.rps_pssm.is_empty() {
-        scan.init_hits = scan
-            .seeds
-            .iter()
-            .filter_map(|&seed| {
-                rps_extend_two_hit_payload(
-                    &lookup.rps_pssm,
-                    subject,
-                    word_size,
-                    x_dropoff,
-                    score_cutoff,
-                    seed,
-                )
-            })
-            .collect();
-    }
+    let scan = if lookup.wordsize > 0 && !lookup.rps_pssm.is_empty() {
+        s_blast_rps_word_finder_two_hit_scan_impl(
+            lookup,
+            subject,
+            window_size,
+            Some(RpsTwoHitPayloadConfig {
+                x_dropoff,
+                score_cutoff,
+            }),
+        )
+    } else {
+        s_blast_rps_word_finder_two_hit_scan(lookup, subject, window_size)
+    };
 
     let saved_hits = scan.init_hits.len() as i32;
     if let Some(init_hitlist) = init_hitlist {
@@ -6958,6 +7041,76 @@ mod tests {
         assert_eq!(data.length, 10);
         assert_eq!(data.score, 50);
         assert_eq!(stats.lookup_hits, 2);
+        assert_eq!(stats.init_extends, 1);
+        assert_eq!(stats.good_init_extends, 1);
+    }
+
+    #[test]
+    fn rps_two_hit_payload_suppresses_extra_seed_inside_right_extension() {
+        let mut lookup = BlastRpsLookupTable {
+            alphabet_size: 28,
+            wordsize: 3,
+            charsize: 5,
+            backbone_size: 32768,
+            rps_backbone: vec![RpsBackboneCell::default(); 32768],
+            pv: vec![0; (32768 >> crate::stat::PV_ARRAY_BTS) + 1],
+            rps_pssm: vec![vec![-8; 28]; 24],
+            num_buckets: 1,
+            bucket_array: vec![RpsBucket::default()],
+        };
+        for (word, corrected_query_offset) in
+            [([1u8, 2, 3], 4), ([4u8, 5, 6], 11), ([7u8, 8, 9], 15)]
+        {
+            let index = s_compute_table_index(3, 5, &word);
+            lookup.pv[index >> crate::stat::PV_ARRAY_BTS] |=
+                1u32 << (index & crate::stat::PV_ARRAY_MASK as usize);
+            lookup.rps_backbone[index] = RpsBackboneCell {
+                num_used: 1,
+                offset_pairs: vec![OffsetPair {
+                    query_offset: corrected_query_offset + lookup.wordsize - 1,
+                    subject_offset: 0,
+                }],
+            };
+        }
+
+        let mut subject = vec![25u8; 20];
+        subject[3..6].copy_from_slice(&[1, 2, 3]);
+        subject[10..13].copy_from_slice(&[4, 5, 6]);
+        subject[13] = 10;
+        subject[14..17].copy_from_slice(&[7, 8, 9]);
+        for (subject_offset, residue) in subject.iter().enumerate().take(20).skip(3) {
+            let query_offset = subject_offset + 1;
+            lookup.rps_pssm[query_offset][*residue as usize] = 5;
+        }
+
+        let mut init_hitlist = crate::extend::InitHitList::new();
+        let mut stats = crate::diagnostics::UngappedStats::default();
+        let scan = s_blast_rps_word_finder_two_hit_with_extension_payloads(
+            &mut lookup,
+            &subject,
+            40,
+            100,
+            1,
+            Some(&mut init_hitlist),
+            Some(&mut stats),
+        );
+
+        assert_eq!(scan.total_hits, 3);
+        assert_eq!(scan.hits_extended, 1);
+        assert_eq!(
+            scan.seeds,
+            vec![RpsTwoHitSeed {
+                first: OffsetPair {
+                    query_offset: 4,
+                    subject_offset: 3,
+                },
+                second: OffsetPair {
+                    query_offset: 11,
+                    subject_offset: 10,
+                },
+            }]
+        );
+        assert_eq!(init_hitlist.total(), 1);
         assert_eq!(stats.init_extends, 1);
         assert_eq!(stats.good_init_extends, 1);
     }

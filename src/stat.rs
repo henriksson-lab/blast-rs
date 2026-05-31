@@ -3281,7 +3281,9 @@ pub fn compute_search_space(
     num_seqs: i32,
     length_adjustment: i32,
 ) -> f64 {
-    let eff_query = (query_length - length_adjustment as i64).max(1);
+    // NCBI BLAST_CalcEffLengths (blast_setup.c:836-843) clamps ONLY the db side
+    // to >= 1; the query term (query_length - length_adjustment) is unclamped.
+    let eff_query = query_length - length_adjustment as i64;
     let eff_db = (db_length - num_seqs as i64 * length_adjustment as i64).max(1);
     eff_query as f64 * eff_db as f64
 }
@@ -7257,9 +7259,10 @@ mod tests {
     #[test]
     fn test_search_space_clamped() {
         let ss = compute_search_space(10, 100, 5, 50);
-        // eff_query = max(10-50, 1) = 1
-        // eff_db = max(100 - 5*50, 1) = max(-150, 1) = 1
-        assert_eq!(ss, 1.0);
+        // NCBI BLAST_CalcEffLengths clamps ONLY the db side to >=1; the query
+        // term (query_length - length_adjustment) is unclamped:
+        // eff_query = 10 - 50 = -40 ; eff_db = max(100 - 5*50, 1) = 1 ; ss = -40.
+        assert_eq!(ss, -40.0);
     }
 
     #[test]

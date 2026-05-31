@@ -578,8 +578,15 @@ impl BlastnArgs {
                     }
                 }
                 "dc-megablast" => {
+                    // NCBI CDiscNucleotideOptionsHandle: word_size=BLAST_WORDSIZE_NUCL(11),
+                    // window_size=BLAST_WINDOW_SIZE_DISC(40). (The disc scan clamps word_size
+                    // to 11/12 internally, so the default value is output-neutral but is now
+                    // faithful to NCBI.)
                     if self.word_size.is_none() {
-                        self.word_size = Some("28".to_string());
+                        self.word_size = Some("11".to_string());
+                    }
+                    if self.window_size.is_none() {
+                        self.window_size = Some("40".to_string());
                     }
                     if self.reward.is_none() {
                         self.reward = Some("2".to_string());
@@ -1777,7 +1784,7 @@ fn main_inner() {
     validate_remote_options(&args);
     validate_boolean_options(program, &args);
     validate_index_options(&args);
-    validate_choice_options(&args);
+    validate_choice_options(program, &args);
     maybe_emit_missing_db_before_plain_unsupported_outfmt(program, &args);
     validate_outfmt_options(&args);
     validate_program_outfmt_options(program, &args);
@@ -2033,7 +2040,10 @@ fn db_path_has_known_blast_component(db_path: &std::path::Path) -> bool {
         "nal", "nin", "nsq", "nhr", "nog", "nsd", "nsi", "not", "ntf", "nto", "pal", "pin", "psq",
         "phr", "pog", "psd", "psi", "pot", "ptf", "pto",
     ] {
-        if db_path.with_extension(ext).exists() {
+        let mut component = db_path.as_os_str().to_os_string();
+        component.push(".");
+        component.push(ext);
+        if std::path::PathBuf::from(component).exists() {
             return true;
         }
     }
@@ -2301,14 +2311,216 @@ fn emit_invalid_taxidlist_error() -> ! {
     std::process::exit(1);
 }
 
-fn validate_gi_list_database_support(args: &BlastnArgs, db_path: &Path) {
-    if args.gilist.is_some() || args.negative_gilist.is_some() {
-        eprintln!(
-            "BLAST Database error: GI list specified but no ISAM file found for GI in {}",
-            db_path.display()
-        );
-        std::process::exit(2);
+fn db_filter_options_present(args: &BlastnArgs) -> bool {
+    args.gilist.is_some()
+        || args.negative_gilist.is_some()
+        || args.seqidlist.is_some()
+        || args.negative_seqidlist.is_some()
+        || args.taxids.is_some()
+        || args.negative_taxids.is_some()
+        || args.taxidlist.is_some()
+        || args.negative_taxidlist.is_some()
+}
+
+struct CliFilterTempDir {
+    path: PathBuf,
+}
+
+impl CliFilterTempDir {
+    fn new() -> io::Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "blast-cli-filter-db-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
     }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CliFilterTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn open_cli_db_with_filters(
+    args: &BlastnArgs,
+    db_path: &Path,
+    expected_type: DbType,
+) -> Result<(BlastDb, Option<CliFilterTempDir>), Box<dyn std::error::Error>> {
+    let mut db = BlastDb::open(db_path)?;
+    if db.db_type != expected_type || !db_filter_options_present(args) {
+        return Ok((db, None));
+    }
+
+    if args.taxids.is_some()
+        || args.negative_taxids.is_some()
+        || args.taxidlist.is_some()
+        || args.negative_taxidlist.is_some()
+    {
+        let _ = db.load_tax_lookup_from_base_path(db_path)?;
+    }
+
+    let allowed = cli_allowed_oids_for_db(args, &db, db_path);
+    if allowed.iter().all(|&keep| !keep) {
+        return Err("database filter options select no sequences".into());
+    }
+
+    let tmp = CliFilterTempDir::new()?;
+    let alias_base = tmp.path().join("restricted_db");
+    let oidlist_path = tmp.path().join("restricted.oid");
+    write_oidlist_bitmap(&oidlist_path, &allowed)?;
+
+    let alias_ext = if expected_type == DbType::Nucleotide {
+        "nal"
+    } else {
+        "pal"
+    };
+    let alias_path = alias_base.with_extension(alias_ext);
+    let alias = format!(
+        "TITLE filtered database\nDBLIST {}\nOIDLIST {}\n",
+        db_path.display(),
+        oidlist_path.display()
+    );
+    std::fs::write(&alias_path, alias)?;
+    let filtered = BlastDb::open(&alias_base)?;
+    Ok((filtered, Some(tmp)))
+}
+
+fn cli_allowed_oids_for_db(args: &BlastnArgs, db: &BlastDb, db_path: &Path) -> Vec<bool> {
+    let positive_gis = parse_u32_list_filter(args.gilist.as_ref());
+    let negative_gis = parse_u32_list_filter(args.negative_gilist.as_ref());
+    let positive_seqids = parse_text_list_filter(args.seqidlist.as_ref());
+    let negative_seqids = parse_text_list_filter(args.negative_seqidlist.as_ref());
+    let positive_taxids = expand_taxid_filter_set(
+        parse_taxid_filters(args.taxids.as_deref(), args.taxidlist.as_ref()),
+        args,
+        Some(db_path),
+    );
+    let negative_taxids = expand_taxid_filter_set(
+        parse_taxid_filters(
+            args.negative_taxids.as_deref(),
+            args.negative_taxidlist.as_ref(),
+        ),
+        args,
+        Some(db_path),
+    );
+
+    (0..db.num_oids)
+        .map(|oid| {
+            let gi = if positive_gis.is_empty() && negative_gis.is_empty() {
+                None
+            } else {
+                db.get_gi(oid)
+            };
+            let keep_gi = positive_gis.is_empty()
+                || gi
+                    .as_ref()
+                    .is_some_and(|value| positive_gis.contains(value));
+            let keep_negative_gi = gi
+                .as_ref()
+                .is_none_or(|value| !negative_gis.contains(value));
+
+            let keep_seqid = positive_seqids.is_empty()
+                || db_oid_matches_seqid_filter(db, oid, &positive_seqids);
+            let keep_negative_seqid = negative_seqids.is_empty()
+                || !db_oid_matches_seqid_filter(db, oid, &negative_seqids);
+
+            let taxids = if positive_taxids.is_empty() && negative_taxids.is_empty() {
+                Vec::new()
+            } else {
+                db.get_taxids(oid)
+            };
+            let keep_taxid = positive_taxids.is_empty()
+                || taxids.iter().any(|taxid| positive_taxids.contains(taxid));
+            let keep_negative_taxid = !taxids.iter().any(|taxid| negative_taxids.contains(taxid));
+
+            keep_gi
+                && keep_negative_gi
+                && keep_seqid
+                && keep_negative_seqid
+                && keep_taxid
+                && keep_negative_taxid
+        })
+        .collect()
+}
+
+fn db_oid_matches_seqid_filter(
+    db: &BlastDb,
+    oid: u32,
+    filters: &std::collections::HashSet<String>,
+) -> bool {
+    [
+        db.get_accession(oid),
+        db.get_bare_accession(oid),
+        db.get_display_id(oid),
+        db.get_blast_seqid_chain(oid),
+        db.get_defline(oid),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|id| subject_id_matches_filter(&id, filters))
+}
+
+fn parse_u32_list_filter(path: Option<&PathBuf>) -> std::collections::HashSet<u32> {
+    let Some(path) = path else {
+        return std::collections::HashSet::new();
+    };
+    let Ok(data) = std::fs::read(path) else {
+        return std::collections::HashSet::new();
+    };
+    if data
+        .iter()
+        .all(|&b| b.is_ascii_digit() || b.is_ascii_whitespace() || matches!(b, b'+' | b'-' | b','))
+    {
+        return String::from_utf8_lossy(&data)
+            .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+            .filter_map(|token| token.trim().parse::<u32>().ok())
+            .collect();
+    }
+    if data.len() % 4 != 0 {
+        return std::collections::HashSet::new();
+    }
+    let words: Vec<u32> = data
+        .chunks_exact(4)
+        .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+    let values = if words.first() == Some(&0xffff_ffff)
+        && words
+            .get(1)
+            .is_some_and(|&count| count as usize == words.len().saturating_sub(2))
+    {
+        &words[2..]
+    } else if words
+        .first()
+        .is_some_and(|&count| count as usize == words.len().saturating_sub(1))
+    {
+        &words[1..]
+    } else {
+        &words[..]
+    };
+    values.iter().copied().collect()
+}
+
+fn write_oidlist_bitmap(path: &Path, allowed: &[bool]) -> io::Result<()> {
+    let mut data = Vec::new();
+    let last_oid = allowed.len().saturating_sub(1).min(u32::MAX as usize) as u32;
+    data.extend_from_slice(&last_oid.to_be_bytes());
+    data.resize(4 + allowed.len().div_ceil(8), 0);
+    for (oid, &keep) in allowed.iter().enumerate() {
+        if keep {
+            data[4 + oid / 8] |= 0x80 >> (oid % 8);
+        }
+    }
+    std::fs::write(path, data)
 }
 
 fn validate_id_list_filters(args: &BlastnArgs) {
@@ -2512,6 +2724,7 @@ fn validate_boolean_options(program: &str, args: &BlastnArgs) {
 
 /// The index prefix string used for `megablast_index_exists` lookups:
 /// the explicit `-index_name`, else the database path.
+#[cfg_attr(test, allow(dead_code))]
 fn index_prefix_for_args(args: &BlastnArgs) -> Option<String> {
     if let Some(index_name) = args.index_name.as_deref() {
         return Some(index_name.to_string());
@@ -2610,7 +2823,7 @@ fn emit_missing_default_database_index_warning(db: &str) {
     eprintln!(" Database index will not be used.");
 }
 
-fn validate_choice_options(args: &BlastnArgs) {
+fn validate_choice_options(program: &str, args: &BlastnArgs) {
     if !matches!(args.strand.as_str(), "both" | "minus" | "plus") {
         let error = format!(
             "Argument \"strand\". Illegal value, expected `both', `minus', `plus':  `{}'",
@@ -2621,40 +2834,36 @@ fn validate_choice_options(args: &BlastnArgs) {
     }
 
     if let Some(task) = args.task.as_deref() {
-        // Accept all NCBI BLAST+ tasks. Program-specific subsets are enforced
-        // elsewhere when the option matters; here we just reject unknown
-        // task names. NCBI's value sets per program:
-        //   blastn: blastn / blastn-short / dc-megablast / megablast / rmblastn / vecscreen
-        //   blastp: blastp / blastp-short / blastp-fast
-        //   blastx: blastx / blastx-fast
-        //   tblastn: tblastn / tblastn-fast
-        //   psiblast, deltablast, rpsblast, rpstblastn (each its own task name)
-        const VALID_TASKS: &[&str] = &[
-            "blastn",
-            "blastn-short",
-            "dc-megablast",
-            "megablast",
-            "rmblastn",
-            "vecscreen",
-            "blastp",
-            "blastp-short",
-            "blastp-fast",
-            "blastx",
-            "blastx-fast",
-            "tblastn",
-            "tblastn-fast",
-            "tblastx",
-            "psiblast",
-            "deltablast",
-            "rpsblast",
-            "rpstblastn",
-        ];
-        if !VALID_TASKS.contains(&task) {
+        let valid_tasks: &[&str] = match program {
+            "blastn" => &[
+                "blastn",
+                "blastn-short",
+                "dc-megablast",
+                "megablast",
+                "rmblastn",
+                "vecscreen",
+            ],
+            "blastp" => &["blastp", "blastp-short", "blastp-fast"],
+            "blastx" => &["blastx", "blastx-fast"],
+            "tblastn" => &["tblastn", "tblastn-fast"],
+            "tblastx" => &["tblastx"],
+            "psiblast" => &["psiblast"],
+            "deltablast" => &["deltablast"],
+            "rpsblast" => &["rpsblast"],
+            "rpstblastn" => &["rpstblastn"],
+            _ => &[],
+        };
+        if !valid_tasks.contains(&task) {
+            let expected = valid_tasks
+                .iter()
+                .map(|task| format!("'{task}'"))
+                .collect::<Vec<_>>()
+                .join(" ");
             let error = format!(
-                "Argument \"task\". Illegal value, expected Permissible values: 'blastn' 'blastn-short' 'dc-megablast' 'megablast' 'rmblastn' :  `{task}'"
+                "Argument \"task\". Illegal value, expected Permissible values: {expected} :  `{task}'"
             );
             let detail = format!("(CArgException::eConstraint) {error}");
-            emit_blastn_usage_constraint_error(&error, &detail);
+            emit_program_usage_constraint_error(program, &error, &detail);
         }
     }
 
@@ -2680,6 +2889,18 @@ fn ncbi_bool_enabled(value: Option<&str>, default: bool) -> bool {
     match value.map(|v| v.to_ascii_lowercase()) {
         None => default,
         Some(v) => matches!(v.as_str(), "true" | "t" | "1" | "yes"),
+    }
+}
+
+fn blastn_xml_filter(args: &BlastnArgs) -> &'static str {
+    match (
+        args.dust != "no",
+        ncbi_bool_enabled(Some(&args.soft_masking), true),
+    ) {
+        (true, true) => "L;m;",
+        (true, false) => "L;",
+        (false, true) => "m;",
+        (false, false) => "F",
     }
 }
 
@@ -3303,6 +3524,20 @@ fn validate_subject_filter_options(program: &str, args: &BlastnArgs) {
             program,
             "Argument \"subject\". Incompatible with argument:  `negative_taxidlist'",
             "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `negative_taxidlist'",
+        );
+    }
+    if args.db_soft_mask.is_some() {
+        emit_program_usage_constraint_error(
+            program,
+            "Argument \"subject\". Incompatible with argument:  `db_soft_mask'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `db_soft_mask'",
+        );
+    }
+    if args.db_hard_mask.is_some() {
+        emit_program_usage_constraint_error(
+            program,
+            "Argument \"subject\". Incompatible with argument:  `db_hard_mask'",
+            "(CArgException::eConstraint) Argument \"subject\". Incompatible with argument:  `db_hard_mask'",
         );
     }
 }
@@ -4090,6 +4325,7 @@ fn run_blastp_with_output_labels(
                         query_end: hsp.query_end as i32,
                         subject_start: hsp.subject_start as i32 + 1,
                         subject_end: hsp.subject_end as i32,
+                        subject_is_plain_nucleotide: false,
                         evalue: hsp.evalue,
                         bit_score: hsp.bit_score,
                         query_len: qrec.sequence.len() as i32,
@@ -4201,7 +4437,7 @@ fn run_blastp_with_output_labels(
         .db
         .as_ref()
         .ok_or("blastp requires --db or --subject")?;
-    let db = BlastDb::open(db_path)?;
+    let (db, _filter_tmp) = open_cli_db_with_filters(args, db_path, DbType::Protein)?;
     if db.db_type != DbType::Protein {
         return Err("blastp requires a protein database".into());
     }
@@ -4304,6 +4540,7 @@ fn run_blastp_with_output_labels(
                     query_end: hsp.query_end as i32,
                     subject_start: hsp.subject_start as i32 + 1,
                     subject_end: hsp.subject_end as i32,
+                    subject_is_plain_nucleotide: false,
                     evalue: hsp.evalue,
                     bit_score: hsp.bit_score,
                     query_len: qrec.sequence.len() as i32,
@@ -4522,6 +4759,7 @@ fn search_result_hsps_to_tabular_hits(
                 query_end,
                 subject_start,
                 subject_end,
+                subject_is_plain_nucleotide: false,
                 evalue: hsp.evalue,
                 bit_score: hsp.bit_score,
                 query_len: query_len as i32,
@@ -5346,31 +5584,33 @@ fn build_blastp_params_with_seg_default(
     match args.task.as_deref() {
         // blastp-short defaults from NCBI's CBlastOptionsFactory:
         //   matrix=PAM30, gap_open=9, gap_extend=1, word_size=2,
-        //   evalue=20000, filter off. NOTE: enabling these *exposed* a
-        //   seed/lookup-table sensitivity bug — with word_size=2 our
-        //   neighborhood scan over-generates seeds compared to NCBI's,
-        //   producing ~37k extra lines vs NCBI's "No hits found". The
-        //   task-default emission is only safe once the protein lookup
-        //   table is tightened for word_size=2 (separate bug). Skip
-        //   blastp-short defaults for now to keep the previous behaviour
-        //   (blastp default params + user-supplied -task name) which is
-        //   closer to NCBI's actual blastp-short output for the fixtures
-        //   we test against.
+        //   evalue=20000, filter off.
         Some("blastp-short") => {
-            // intentionally not setting blastp-short defaults until the
-            // upstream lookup-table issue is fixed.
+            if args.matrix.is_none() {
+                params.matrix = blast_rs::api::MatrixType::Pam30;
+            }
+            if args.gapopen.is_none() {
+                params.gap_open = 9;
+            }
+            if args.gapextend.is_none() {
+                params.gap_extend = 1;
+            }
+            if args.word_size.is_none() {
+                params.word_size = 2;
+            }
+            if args.evalue == "10.0" {
+                params.evalue_threshold = 20000.0;
+            }
+            if args.seg.is_none() {
+                params.filter_low_complexity = false;
+            }
         }
         Some("blastp-fast") | Some("blastx-fast") | Some("tblastn-fast") => {
             // NCBI's *-fast tasks all use word_size=5 with the compressed
-            // AA lookup table and `BLAST_WORD_THRESHOLD_BLASTP_FAST`. The
-            // 2.17 header defines this constant as 20, but the 2.12 binary
-            // we test against reports `Neighboring words threshold: 21` —
-            // so we use 21 to match the binary that defines our parity
-            // target. (If we ever switch parity targets to a newer NCBI,
-            // drop this back to 20.)
+            // AA lookup table and `BLAST_WORD_THRESHOLD_BLASTP_FAST`.
             params.word_size = 5;
             if args.threshold.is_none() {
-                params.word_threshold = Some(21.0);
+                params.word_threshold = Some(20.0);
             }
         }
         _ => {}
@@ -5398,15 +5638,9 @@ fn build_blastp_params_with_seg_default(
         .map(|value| parse_validated_i32("word_size", value))
     {
         params.word_size = ws as usize;
-        // NOTE: NCBI 2.17's `CBlastProteinOptionsHandle::SetWordSize`
-        // (`blast_prot_options.cpp:56-77`) auto-maps word_size to the
-        // matching neighborhood threshold (ws=5 → 20, ws=6 → 21, ws=7 →
-        // 20.25). But the NCBI 2.12 binary we use as parity target does
-        // NOT do this auto-mapping for ws=6 or ws=7 — `-word_size 6`
-        // there still reports `Neighboring words threshold: 11`. The
-        // -task *-fast branch above handles ws=5 via the task code path
-        // (which 2.12 *does* honor). Don't add the ws=6/7 auto-mapping
-        // here — it would break parity with our 2.12 target.
+        if args.threshold.is_none() {
+            params.word_threshold = ncbi_protein_word_threshold_for_word_size(ws);
+        }
     }
     if let Some(comp) = args
         .comp_based_stats
@@ -5494,6 +5728,9 @@ fn build_blastp_params_with_seg_default(
             true
         }
     };
+    if matches!(args.task.as_deref(), Some("blastp-short")) && args.seg.is_none() {
+        params.filter_low_complexity = false;
+    }
     params.sum_stats = !args.ungapped && ncbi_bool_enabled(args.sum_stats.as_deref(), true);
     params.ungapped = args.ungapped;
     params.max_target_seqs = args.effective_max_target_seqs() as usize;
@@ -5503,6 +5740,15 @@ fn build_blastp_params_with_seg_default(
         params.culling_limit = Some(culling_limit as usize);
     }
     params
+}
+
+fn ncbi_protein_word_threshold_for_word_size(word_size: i32) -> Option<f64> {
+    match word_size {
+        5 => Some(20.0),
+        6 => Some(21.0),
+        7 => Some(20.25),
+        _ => None,
+    }
 }
 
 fn apply_protein_matrix_gap_defaults(args: &BlastnArgs, params: &mut blast_rs::api::SearchParams) {
@@ -5537,8 +5783,12 @@ fn default_protein_gap_costs(matrix: blast_rs::api::MatrixType) -> (i32, i32) {
 }
 
 fn default_protein_two_hit_window(matrix: blast_rs::api::MatrixType) -> usize {
+    // NCBI BLAST_GetSuggestedWindowSize (blast_options.c:1211).
     match matrix {
+        blast_rs::api::MatrixType::Blosum45 => 60,
+        blast_rs::api::MatrixType::Blosum80 => 25,
         blast_rs::api::MatrixType::Pam30 => 15,
+        blast_rs::api::MatrixType::Pam70 => 20,
         _ => blast_rs::stat::BLAST_WINDOW_SIZE_PROT as usize,
     }
 }
@@ -5844,7 +6094,7 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             .db
             .as_ref()
             .ok_or("blastx requires --db or --subject")?;
-        let db = BlastDb::open(db_path)?;
+        let (db, _filter_tmp) = open_cli_db_with_filters(args, db_path, DbType::Protein)?;
         if db.db_type != DbType::Protein {
             return Err("blastx requires a protein database".into());
         }
@@ -6028,7 +6278,7 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             .db
             .as_ref()
             .ok_or("tblastn requires --db or --subject")?;
-        let db = BlastDb::open(db_path)?;
+        let (db, _filter_tmp) = open_cli_db_with_filters(args, db_path, DbType::Nucleotide)?;
         if db.db_type != DbType::Nucleotide {
             return Err("tblastn requires a nucleotide database".into());
         }
@@ -6700,7 +6950,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             .db
             .as_ref()
             .ok_or("tblastx requires --db or --subject")?;
-        let db = BlastDb::open(db_path)?;
+        let (db, _filter_tmp) = open_cli_db_with_filters(args, db_path, DbType::Nucleotide)?;
         if db.db_type != DbType::Nucleotide {
             return Err("tblastx requires a nucleotide database".into());
         }
@@ -7066,15 +7316,10 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         .db
         .as_ref()
         .ok_or("Either --db or --subject is required")?;
-    validate_gi_list_database_support(args, db_path);
-    #[cfg(not(test))]
-    let mut db = BlastDb::open(db_path)?;
-    #[cfg(test)]
-    let db = BlastDb::open(db_path)?;
+    let (mut db, _filter_tmp) = open_cli_db_with_filters(args, db_path, DbType::Nucleotide)?;
     if db.db_type != DbType::Nucleotide {
         return Err("blastn requires a nucleotide database".into());
     }
-    #[cfg(not(test))]
     if outfmt_requests_taxonomy(&args.outfmt) {
         db.load_tax_lookup_from_base_path(db_path)?;
     }
@@ -7093,22 +7338,28 @@ fn run_blastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg_attr(test, allow(dead_code))]
 fn outfmt_requests_taxonomy(outfmt: &str) -> bool {
     let mut parts = outfmt.split_whitespace();
-    if parts
+    let outfmt_num = parts
         .next()
         .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(6)
-        != 6
-    {
+        .unwrap_or(6);
+    if !matches!(outfmt_num, 6 | 7 | 10) {
         return false;
     }
     parts.any(|field| {
+        let field = field.strip_prefix('-').unwrap_or(field);
+        if field.starts_with("delim=") {
+            return false;
+        }
         matches!(
             field,
             "staxid"
                 | "staxids"
                 | "ssciname"
+                | "sscinames"
                 | "scomname"
+                | "scomnames"
                 | "sblastname"
+                | "sblastnames"
                 | "sskingdom"
                 | "sskingdoms"
         )
@@ -7126,6 +7377,17 @@ fn run_blastn_rust(
     profile_last: &mut Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use rayon::prelude::*;
+
+    // NCBI `-window_size` (`BLAST_WINDOW_SIZE_NUCL = 0` by default for blastn /
+    // megablast) drives the contiguous-blastn two-hit initial-word gate in
+    // `search.rs::diag_initial_hit_core_packed`. The gate reads a per-thread
+    // value; window 0 leaves the scan one-hit (byte-identical default). Set it
+    // on this (main) thread for the single-threaded path; the parallel path sets
+    // it per rayon worker in its `map_init`. Only the contiguous packed scan
+    // consumes it (disc/megablast scans ignore it), so this is safe to set
+    // unconditionally.
+    let blastn_window_size = args.window_size().max(0);
+    blast_rs::search::set_blastn_window_size(blastn_window_size);
 
     // NCBI BLAST resolves taxonomy names through taxdb on BLASTDB. A taxdb
     // sitting next to an explicitly path-qualified database is not enough.
@@ -7503,6 +7765,7 @@ fn run_blastn_rust(
     #[cfg(not(test))]
     let indexed_candidate_oids: Option<Vec<u32>> = if args.db.is_some()
         && ncbi_bool_enabled(Some(args.use_index.as_str()), false)
+        && !db_filter_options_present(args)
         && blastn_task_uses_database_index(args)
         && index_prefix_for_args(args)
             .is_some_and(|prefix| blast_rs::db::megablast_index_exists(&prefix))
@@ -8266,6 +8529,11 @@ fn run_blastn_rust(
                         .into_par_iter()
                         .map_init(
                             || {
+                                // Per rayon worker: thread-locals are not
+                                // inherited from the main thread, so set the
+                                // blastn two-hit window here too (window 0 is
+                                // inert; see top of run_blastn_rust).
+                                blast_rs::search::set_blastn_window_size(blastn_window_size);
                                 prepared_queries
                                     .iter()
                                     .map(|prepared| prepared.last_hit_scratch(use_diag_hash))
@@ -8702,6 +8970,10 @@ fn run_blastn_rust(
                 .into_par_iter()
                 .map_init(
                     || {
+                        // Per rayon worker: set the blastn two-hit window
+                        // thread-local (not inherited from the main thread;
+                        // window 0 is inert).
+                        blast_rs::search::set_blastn_window_size(blastn_window_size);
                         prepared_queries
                             .iter()
                             .map(|prepared| prepared.last_hit_scratch(use_diag_hash))
@@ -8968,6 +9240,7 @@ fn run_blastn_rust(
                         query_end: q_end,
                         subject_start: s_start,
                         subject_end: s_end,
+                        subject_is_plain_nucleotide: true,
                         evalue: if hsp.context == 1 {
                             eq.kbp_minus
                                 .raw_to_evalue(output_score, eq.search_space_minus)
@@ -9491,6 +9764,7 @@ fn write_commented_tabular_output_with_iteration<W: Write>(
     } else {
         blast_rs::format::DEFAULT_TABULAR_COLUMNS.to_string()
     };
+    blast_rs::format::format_tabular_custom(&mut std::io::sink(), &[], &cols)?;
     let cols_for_header = blast_rs::format::expanded_column_tokens(&cols);
     let field_names = cols_for_header
         .iter()
@@ -10151,6 +10425,7 @@ fn run_blastn_subject(
                     query_end: q_end,
                     subject_start: s_start,
                     subject_end: s_end,
+                    subject_is_plain_nucleotide: true,
                     evalue: kbp.raw_to_evalue(output_score, search_space),
                     bit_score: kbp.raw_to_bit(output_score),
                     query_len,
@@ -13070,7 +13345,7 @@ fn write_blastp_xml_output<W: Write>(
     xml_version: &str,
     xml_reference: &str,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -13359,7 +13634,7 @@ fn write_translated_xml_output<W: Write>(
     query_is_translated: bool,
     subject_is_translated: bool,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -13986,7 +14261,7 @@ fn write_blastn_subject_xml_output<W: Write>(
         })
         .collect();
 
-    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -14064,10 +14339,7 @@ fn write_blastn_subject_xml_output<W: Write>(
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
         args.gapextend()
     )?;
-    // NCBI emits `L;m;` when DUST is active (L = DUST low-complexity filter,
-    // m = lowercase soft masking pass-through). Without DUST it would just
-    // be `m;` (or `F` when no filtering at all).
-    let filter_str = if args.dust != "no" { "L;m;" } else { "m;" };
+    let filter_str = blastn_xml_filter(args);
     writeln!(
         writer,
         "      <Parameters_filter>{}</Parameters_filter>",
@@ -14296,7 +14568,7 @@ fn write_blastn_db_xml_output<W: Write>(
     hit_groups: &std::collections::HashMap<String, String>,
     hit_metadata: &std::collections::HashMap<String, (String, String, String, i32)>,
 ) -> std::io::Result<()> {
-    writeln!(writer, "<?xml version=\"1.0\" encoding=\"US-ASCII\"?>")?;
+    writeln!(writer, "<?xml version=\"1.0\"?>")?;
     writeln!(writer, "<!DOCTYPE BlastOutput PUBLIC \"-//NCBI//NCBI BlastOutput/EN\" \"http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd\">")?;
     writeln!(writer, "<BlastOutput>")?;
     writeln!(
@@ -14324,14 +14596,16 @@ fn write_blastn_db_xml_output<W: Write>(
         xml_escape(database_label)
     )?;
     if let Some(query) = queries.first() {
+        let (query_id, query_def) = xml_query_id_and_def(query, 0, args.parse_deflines);
         writeln!(
             writer,
-            "  <BlastOutput_query-ID>Query_1</BlastOutput_query-ID>"
+            "  <BlastOutput_query-ID>{}</BlastOutput_query-ID>",
+            xml_escape(&query_id)
         )?;
         writeln!(
             writer,
             "  <BlastOutput_query-def>{}</BlastOutput_query-def>",
-            xml_escape(&query.defline)
+            xml_escape(&query_def)
         )?;
         writeln!(
             writer,
@@ -14366,7 +14640,7 @@ fn write_blastn_db_xml_output<W: Write>(
         "      <Parameters_gap-extend>{}</Parameters_gap-extend>",
         args.gapextend()
     )?;
-    let filter_str = if args.dust != "no" { "L;m;" } else { "m;" };
+    let filter_str = blastn_xml_filter(args);
     writeln!(
         writer,
         "      <Parameters_filter>{}</Parameters_filter>",
@@ -14396,13 +14670,14 @@ fn write_blastn_db_xml_output<W: Write>(
         )?;
         writeln!(
             writer,
-            "  <Iteration_query-ID>Query_{}</Iteration_query-ID>",
-            query_index + 1
+            "  <Iteration_query-ID>{}</Iteration_query-ID>",
+            xml_escape(&xml_query_id_and_def(query, query_index, args.parse_deflines).0)
         )?;
+        let query_def = xml_query_id_and_def(query, query_index, args.parse_deflines).1;
         writeln!(
             writer,
             "  <Iteration_query-def>{}</Iteration_query-def>",
-            xml_escape(&query.defline)
+            xml_escape(&query_def)
         )?;
         writeln!(
             writer,
@@ -16123,14 +16398,7 @@ fn write_flat_query_anchored<W: Write>(
                 hit.subject_start,
             )
         };
-        owned.push((
-            hit.subject_id.clone(),
-            qseq,
-            sseq,
-            q_start,
-            s_start,
-            s_end,
-        ));
+        owned.push((hit.subject_id.clone(), qseq, sseq, q_start, s_start, s_end));
     }
     let hsps: Vec<blast_rs::format::FlatHsp> = owned
         .iter()
@@ -17347,6 +17615,53 @@ mod tests {
     }
 
     #[test]
+    fn test_blastp_cli_word_size_applies_ncbi_threshold_mapping() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--word_size",
+            "6",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(params.word_size, 6);
+        assert_eq!(params.word_threshold, Some(21.0));
+    }
+
+    #[test]
+    fn test_blastp_short_applies_ncbi_task_defaults() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "tests/fixtures/protein_query.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--task",
+            "blastp-short",
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp command");
+        };
+
+        let params = build_blastp_params(&args);
+
+        assert_eq!(params.matrix, blast_rs::api::MatrixType::Pam30);
+        assert_eq!((params.gap_open, params.gap_extend), (9, 1));
+        assert_eq!(params.word_size, 2);
+        assert_eq!(params.evalue_threshold, 20000.0);
+        assert!(!params.filter_low_complexity);
+    }
+
+    #[test]
     fn test_blastp_cli_honors_explicit_gap_costs_matching_blastn_defaults() {
         let cli = Cli::parse_from([
             "blast-cli",
@@ -17741,6 +18056,78 @@ mod tests {
             err.to_string(),
             "BLAST query error: CAlnReader::GetSeqEntry(): Seq_entry is not available until after Read()"
         );
+    }
+
+    fn write_filter_test_protein_db(tmp: &tempfile::TempDir) -> PathBuf {
+        let db_base = tmp.path().join("filter_db");
+        let mut builder = BlastDbBuilder::new(DbType::Protein, "filter db");
+        for (accession, seq) in [
+            ("gi|101|ref|KEEP_001.1|", b"ACDEFGHIK".as_slice()),
+            ("gi|102|ref|DROP_001.1|", b"ACDEFGHIK".as_slice()),
+            ("lcl|local_subject", b"ACDEFGHIK".as_slice()),
+        ] {
+            builder.add(blast_rs::api::SequenceEntry {
+                title: accession.to_string(),
+                accession: accession.to_string(),
+                sequence: seq.to_vec(),
+                taxid: None,
+            });
+        }
+        builder.write(&db_base).unwrap();
+        db_base
+    }
+
+    #[test]
+    fn cli_db_filters_reopen_database_with_gilist_restriction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = write_filter_test_protein_db(&tmp);
+        let gilist = tmp.path().join("keep.gil");
+        std::fs::write(&gilist, "102\n").unwrap();
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "query.fa",
+            "--db",
+            db_base.to_str().unwrap(),
+            "--gilist",
+            gilist.to_str().unwrap(),
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp args");
+        };
+
+        let (db, _tmp) = open_cli_db_with_filters(&args, &db_base, DbType::Protein).unwrap();
+
+        assert_eq!(db.num_oids, 1);
+        assert_eq!(db.stats_num_oids, 1);
+        assert_eq!(db.get_gi(0), Some(102));
+    }
+
+    #[test]
+    fn cli_db_filters_apply_negative_seqid_restriction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_base = write_filter_test_protein_db(&tmp);
+        let seqidlist = tmp.path().join("drop.sid");
+        std::fs::write(&seqidlist, "DROP_001\n").unwrap();
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastp",
+            "--query",
+            "query.fa",
+            "--db",
+            db_base.to_str().unwrap(),
+            "--negative_seqidlist",
+            seqidlist.to_str().unwrap(),
+        ]);
+        let Commands::Blastp(args) = cli.command else {
+            panic!("expected blastp args");
+        };
+
+        let (db, _tmp) = open_cli_db_with_filters(&args, &db_base, DbType::Protein).unwrap();
+
+        assert_eq!(db.num_oids, 2);
+        assert!((0..db.num_oids).all(|oid| db.get_accession(oid).as_deref() != Some("DROP_001.1")));
     }
 
     #[test]
@@ -18575,7 +18962,10 @@ mod tests {
 
         args.apply_task_defaults();
 
-        assert_eq!(args.word_size(), 28);
+        // NCBI CDiscNucleotideOptionsHandle: word_size=11 (BLAST_WORDSIZE_NUCL),
+        // window_size=40 (BLAST_WINDOW_SIZE_DISC).
+        assert_eq!(args.word_size(), 11);
+        assert_eq!(args.window_size(), 40);
         assert_eq!(args.reward(), 2);
         assert_eq!(args.penalty(), -3);
         assert_eq!(args.gapopen(), 5);
@@ -19204,6 +19594,7 @@ mod tests {
             query_end,
             subject_start: 1,
             subject_end: align_len,
+            subject_is_plain_nucleotide: false,
             evalue,
             bit_score: raw_score as f64,
             query_len: 40,

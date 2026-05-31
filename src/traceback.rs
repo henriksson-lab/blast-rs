@@ -1818,12 +1818,12 @@ fn gapped_score_one_dir_generic(
             } else {
                 bi + 1
             };
-            let Some(&b_letter) = b.get(b_idx) else {
-                break;
-            };
 
             let sgc = sa[bi].best_gap;
-            let next_sc = sa[bi].best + generic_matrix_score(matrix, a_letter, b_letter);
+            let next_sc = b
+                .get(b_idx)
+                .map(|&b_letter| sa[bi].best + generic_matrix_score(matrix, a_letter, b_letter))
+                .unwrap_or(MININT);
 
             if sc < sgc {
                 sc = sgc;
@@ -2609,10 +2609,11 @@ pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
         return true;
     }
     let (factor, effective_gap_open, effective_gap_extend) = if gap_open == 0 && gap_extend == 0 {
-        // NCBI `Blast_HSPReevaluateWithAmbiguitiesGapped`: non-affine greedy
-        // stores gap_open/gap_extend as 0, then reevaluates with factor=2 and
-        // a synthetic linear gap cost.
-        (2, 0, (reward - 2 * penalty))
+        // NCBI `Blast_HSPReevaluateWithAmbiguitiesGapped` (blast_hits.c:517): for
+        // non-affine greedy, factor=2 ONLY when reward is odd (else factor=1), and
+        // gap_extend = (reward - 2*penalty) * factor / 2.
+        let factor = if reward % 2 == 1 { 2 } else { 1 };
+        (factor, 0, (reward - 2 * penalty) * factor / 2)
     } else {
         (1, gap_open, gap_extend)
     };
@@ -2914,8 +2915,7 @@ pub fn blast_gapped_alignment_with_traceback(
         (0, 0, 0, Vec::new())
     };
 
-    let total_score = score_l + score_r;
-    if total_score <= 0 {
+    if score_l + score_r <= 0 {
         return None;
     }
 
@@ -2928,20 +2928,51 @@ pub fn blast_gapped_alignment_with_traceback(
         esp.push(op, cnt);
     }
 
-    // Do NOT strip terminal gaps. NCBI `Blast_HSPCalcLengthAndGaps`
-    // (`blast_hits.c:1054`) walks the entire edit script and counts every
-    // Del/Ins as a gap_open. Stripping leading/trailing gaps here was a
-    // Rust-only divergence that produced a 1-low gap_opens count whenever
-    // ALIGN_EX traceback ended on a gap state.
-    let query_end = seed_q + qr + 1;
-    let subject_end = seed_s + sr + 1;
+    let mut query_start = q_start;
+    let mut subject_start = s_start;
+    let mut query_end = seed_q + qr + 1;
+    let mut subject_end = seed_s + sr + 1;
+    let mut score_left = score_l;
+    let mut score_right = score_r;
+
+    // NCBI `BLAST_GappedAlignmentWithTraceback` (`blast_gapalign.c:4771-4801`):
+    // rarely (typically when the scoring system changes between the score-only
+    // and traceback stages, as happens with composition-based statistics) it is
+    // possible to compute an optimal alignment with a leading or trailing gap.
+    // Prune these unneeded gaps here and update the score and alignment
+    // boundaries. The penalty add-back uses positive-magnitude gap_open/gap_extend
+    // (the DP applied them as negatives), so removing the op cancels them out.
+    // GapAlignOpType convention: Del == gap in query == consumes subject;
+    // Ins == gap in subject == consumes query (matches C eGapAlignDel/eGapAlignIns).
+    while !esp.ops.is_empty() && esp.ops[0].0 != GapAlignOpType::Sub {
+        let (op, num) = esp.ops[0];
+        score_left += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            subject_start += num as usize;
+        } else {
+            query_start += num as usize;
+        }
+        esp.ops.remove(0);
+    }
+    while !esp.ops.is_empty() && esp.ops[esp.ops.len() - 1].0 != GapAlignOpType::Sub {
+        let (op, num) = esp.ops[esp.ops.len() - 1];
+        score_right += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            subject_end -= num as usize;
+        } else {
+            query_end -= num as usize;
+        }
+        esp.ops.pop();
+    }
+
+    let total_score = score_left + score_right;
 
     Some(TracebackResult {
         score: total_score,
         edit_script: esp,
-        query_start: q_start,
+        query_start,
         query_end,
-        subject_start: s_start,
+        subject_start,
         subject_end,
     })
 }
@@ -4179,6 +4210,19 @@ mod tests {
     }
 
     #[test]
+    fn test_blast_gapped_alignment_with_traceback_strips_terminal_gaps() {
+        // NCBI BLAST_GappedAlignmentWithTraceback (blast_gapalign.c:4771-4801)
+        // prunes leading/trailing non-Sub ops; the returned script must begin
+        // and end on a Sub op.
+        let q = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let s = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
+        let r = blast_gapped_alignment_with_traceback(&q, &s, 4, 4, 1, -3, 5, 2, 30).unwrap();
+        assert!(!r.edit_script.ops.is_empty());
+        assert_eq!(r.edit_script.ops.first().unwrap().0, GapAlignOpType::Sub);
+        assert_eq!(r.edit_script.ops.last().unwrap().0, GapAlignOpType::Sub);
+    }
+
+    #[test]
     fn test_blast_gapped_alignment_with_traceback_exact_match_extends_to_edges() {
         let q = crate::encoding::encode_blastna_sequence(
             b"GAATCCATGCTGTGGGCCAGCAAGAGTTAAGGTGCTCATGGTTTTGAGAAAACATCTGAGGACTCTGACAGCACTCTCCCATCCTTGGTCTCCACAGTCT",
@@ -4416,6 +4460,23 @@ mod tests {
     }
 
     #[test]
+    fn test_gapped_score_one_dir_processes_boundary_cell_without_next_subject() {
+        let mut matrix = vec![vec![-3; 16]; 16];
+        for i in 0..4 {
+            matrix[i][i] = 2;
+        }
+        let query = vec![15u8, 0];
+        let subject = vec![15u8, 0];
+
+        let (score, a_off, b_off) =
+            gapped_score_one_dir_generic(&query, &subject, 1, 1, &matrix, 7, 2, 12, false);
+
+        assert_eq!(score, 2);
+        assert_eq!(a_off, 1);
+        assert_eq!(b_off, 1);
+    }
+
+    #[test]
     fn test_c_named_packed_gapped_alignment_wrappers_match_existing_paths() {
         let query = vec![0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let subject = vec![0u8, 1, 2, 3, 0, 1, 3, 3, 0, 1, 2, 3];
@@ -4554,9 +4615,9 @@ mod tests {
             0
         );
 
-        assert_eq!(gap_align.score, 4);
-        assert_eq!((gap_align.query_start, gap_align.subject_start), (2, 2));
-        assert_eq!((gap_align.query_stop, gap_align.subject_stop), (4, 4));
+        assert_eq!(gap_align.score, 8);
+        assert_eq!((gap_align.query_start, gap_align.subject_start), (1, 1));
+        assert_eq!((gap_align.query_stop, gap_align.subject_stop), (5, 5));
     }
 
     #[test]
@@ -4605,9 +4666,9 @@ mod tests {
         assert_eq!(extensions, 1);
         assert_eq!(list.hsps.len(), 1);
         let hsp = &list.hsps[0];
-        assert_eq!(hsp.score, 4);
-        assert_eq!((hsp.query_offset, hsp.query_end), (2, 4));
-        assert_eq!((hsp.subject_offset, hsp.subject_end), (2, 4));
+        assert_eq!(hsp.score, 8);
+        assert_eq!((hsp.query_offset, hsp.query_end), (1, 5));
+        assert_eq!((hsp.subject_offset, hsp.subject_end), (1, 5));
         assert_eq!(
             hsp.pat_info,
             Some(crate::hspstream::PhiPatInfo {

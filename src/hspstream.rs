@@ -3338,38 +3338,32 @@ pub fn blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
     // offset, subject offset, AND subject frame before merging. Frame
     // matters for translated programs (blastx, tblastn, tblastx) where
     // different frames can share offset values.
-    let mut keep = vec![true; hsp_list.hsps.len()];
+    let mut active = std::mem::take(&mut hsp_list.hsps);
+    let mut extras = Vec::new();
     let mut index = 0;
-    while index < hsp_list.hsps.len() {
-        let mut next = index + 1;
-        while next < hsp_list.hsps.len()
-            && hsp_list.hsps[index].context == hsp_list.hsps[next].context
-            && hsp_list.hsps[index].query_offset == hsp_list.hsps[next].query_offset
-            && hsp_list.hsps[index].subject_offset == hsp_list.hsps[next].subject_offset
-            && hsp_list.hsps[index].subject_frame == hsp_list.hsps[next].subject_frame
+    while index < active.len() {
+        while index + 1 < active.len()
+            && active[index].context == active[index + 1].context
+            && active[index].query_offset == active[index + 1].query_offset
+            && active[index].subject_offset == active[index + 1].subject_offset
+            && active[index].subject_frame == active[index + 1].subject_frame
         {
             c_return_count = c_return_count.saturating_sub(1);
-            let leader = hsp_list.hsps[index].clone();
-            if !trim_or_drop_common_endpoint(&leader, &mut hsp_list.hsps[next], true, trim_blastn) {
-                keep[next] = false;
+            let leader = active[index].clone();
+            let mut trailing = active.remove(index + 1);
+            if trim_or_drop_common_endpoint(&leader, &mut trailing, true, trim_blastn) {
+                extras.push(trailing);
             }
-            next += 1;
         }
-        index = next;
+        index += 1;
     }
-    let mut keep_index = 0;
-    hsp_list.hsps.retain(|_| {
-        let keep_hsp = keep[keep_index];
-        keep_index += 1;
-        keep_hsp
-    });
 
-    if hsp_list.hsps.len() > 1 {
+    if active.len() > 1 {
         // NCBI `s_QueryEndCompareHSPs` (`blast_hits.c:2333`): context-asc,
         // query.end-asc, subject.end-asc, score-desc, query.offset-desc,
         // subject.offset-desc. Missing the context sort key would cause
         // cross-context interleaving and incorrect merges below.
-        hsp_list.hsps.sort_by(|a, b| {
+        active.sort_by(|a, b| {
             a.context
                 .cmp(&b.context)
                 .then_with(|| a.query_end.cmp(&b.query_end))
@@ -3380,38 +3374,27 @@ pub fn blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
         });
         // NCBI `blast_hits.c:2509-2514` matches on context, query.end,
         // subject.end, AND subject.frame for the second-pass merge.
-        let mut keep = vec![true; hsp_list.hsps.len()];
         let mut index = 0;
-        while index < hsp_list.hsps.len() {
-            let mut next = index + 1;
-            while next < hsp_list.hsps.len()
-                && hsp_list.hsps[index].context == hsp_list.hsps[next].context
-                && hsp_list.hsps[index].query_end == hsp_list.hsps[next].query_end
-                && hsp_list.hsps[index].subject_end == hsp_list.hsps[next].subject_end
-                && hsp_list.hsps[index].subject_frame == hsp_list.hsps[next].subject_frame
+        while index < active.len() {
+            while index + 1 < active.len()
+                && active[index].context == active[index + 1].context
+                && active[index].query_end == active[index + 1].query_end
+                && active[index].subject_end == active[index + 1].subject_end
+                && active[index].subject_frame == active[index + 1].subject_frame
             {
                 c_return_count = c_return_count.saturating_sub(1);
-                let leader = hsp_list.hsps[index].clone();
-                if !trim_or_drop_common_endpoint(
-                    &leader,
-                    &mut hsp_list.hsps[next],
-                    false,
-                    trim_blastn,
-                ) {
-                    keep[next] = false;
+                let leader = active[index].clone();
+                let mut trailing = active.remove(index + 1);
+                if trim_or_drop_common_endpoint(&leader, &mut trailing, false, trim_blastn) {
+                    extras.push(trailing);
                 }
-                next += 1;
             }
-            index = next;
+            index += 1;
         }
-        let mut keep_index = 0;
-        hsp_list.hsps.retain(|_| {
-            let keep_hsp = keep[keep_index];
-            keep_index += 1;
-            keep_hsp
-        });
     }
 
+    active.append(&mut extras);
+    hsp_list.hsps = active;
     hsp_list.best_evalue = s_blast_get_best_evalue(hsp_list);
     c_return_count as i16
 }
@@ -7562,6 +7545,62 @@ mod tests {
             vec![(GapAlignOpType::Sub, 4)]
         );
         assert_eq!(list.best_evalue, 1.0e-20);
+    }
+
+    #[test]
+    fn test_purge_common_endpoints_blastn_excludes_first_pass_extras_from_second_pass() {
+        let mut start_leader = make_hsp(100, 1.0e-5);
+        start_leader.query_offset = 0;
+        start_leader.subject_offset = 0;
+        start_leader.query_end = 4;
+        start_leader.subject_end = 4;
+        start_leader.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 4)],
+        });
+
+        let mut trimmed_extra = make_hsp(90, 1.0e-20);
+        trimmed_extra.query_offset = 0;
+        trimmed_extra.subject_offset = 0;
+        trimmed_extra.query_end = 8;
+        trimmed_extra.subject_end = 8;
+        trimmed_extra.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 8)],
+        });
+
+        let mut same_end_active = make_hsp(95, 1.0e-10);
+        same_end_active.query_offset = 2;
+        same_end_active.subject_offset = 2;
+        same_end_active.query_end = 8;
+        same_end_active.subject_end = 8;
+        same_end_active.edit_script = Some(crate::gapinfo::GapEditScript {
+            ops: vec![(GapAlignOpType::Sub, 6)],
+        });
+
+        let mut list = blast_hsp_list_new(0);
+        list.hsps = vec![trimmed_extra, same_end_active, start_leader];
+        list.best_evalue = s_blast_get_best_evalue(&list);
+
+        let returned_count = blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
+            crate::program::BLASTN,
+            Some(&mut list),
+            false,
+        );
+
+        assert_eq!(returned_count, 2);
+        assert_eq!(list.hsps.len(), 3);
+        assert_eq!(
+            list.hsps
+                .iter()
+                .map(|hsp| (
+                    hsp.score,
+                    hsp.query_offset,
+                    hsp.subject_offset,
+                    hsp.query_end,
+                    hsp.subject_end,
+                ))
+                .collect::<Vec<_>>(),
+            vec![(100, 0, 0, 4, 4), (95, 2, 2, 8, 8), (90, 4, 4, 8, 8)]
+        );
     }
 
     #[test]

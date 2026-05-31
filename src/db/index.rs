@@ -902,7 +902,6 @@ fn parse_megablast_index_subject_map(
     let c_subject_count = metadata
         .stop_oid
         .checked_sub(metadata.start_oid)
-        .and_then(|span| span.checked_add(1))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1941,6 +1940,23 @@ impl TaxNameDb {
     }
 }
 
+fn filter_megablast_candidate_oids(
+    candidates: impl IntoIterator<Item = u32>,
+    ranges: &[(u32, u32)],
+    num_oids: u32,
+) -> Vec<u32> {
+    if ranges.is_empty() {
+        return candidates
+            .into_iter()
+            .filter(|&oid| oid < num_oids)
+            .collect();
+    }
+    candidates
+        .into_iter()
+        .filter(|&oid| ranges.iter().any(|&(start, end)| oid >= start && oid < end))
+        .collect()
+}
+
 impl BlastDb {
     /// Return native MegaBLAST index candidate OIDs for encoded query strands.
     ///
@@ -1963,10 +1979,11 @@ impl BlastDb {
                 candidates.extend(volume.candidate_oids_for_query(query));
             }
         }
-        Ok(candidates
-            .into_iter()
-            .filter(|&oid| oid < self.num_oids)
-            .collect())
+        Ok(filter_megablast_candidate_oids(
+            candidates.into_iter(),
+            &self.volume_oid_ranges(),
+            self.num_oids,
+        ))
     }
 
     /// Global OID ranges for each physical volume in database order.
@@ -2049,6 +2066,14 @@ impl BlastDb {
     }
 
     fn open_alias(base_path: &Path, alias: crate::db::alias::AliasFile) -> io::Result<Self> {
+        if let Some(memb_bit) = alias.memb_bit {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "Alias MEMB_BIT {memb_bit} requires ASN.1 defline membership filtering, which is not yet implemented"
+                ),
+            ));
+        }
         let mut alias_stack = vec![base_path.to_path_buf()];
         let data = Self::open_alias_volumes(base_path, &alias, &mut alias_stack)?;
 
@@ -3894,7 +3919,7 @@ mod tests {
     }
 
     fn write_synthetic_megablast_volume_payload(path: &Path) {
-        let mut data = megablast_volume_header_bytes(6, 1, 4, 16, 0, 1);
+        let mut data = megablast_volume_header_bytes(6, 1, 4, 16, 0, 2);
 
         data.extend_from_slice(&6u32.to_le_bytes());
         for word in [1u32, 0, 4, 0, 6] {
@@ -4048,7 +4073,7 @@ mod tests {
     fn megablast_index_volumes_loads_all_parsed_payloads() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let index_prefix = tmp.path().join("testdb");
-        write_megablast_super_header(&megablast_index_super_header_path(&index_prefix), 2, 2);
+        write_megablast_super_header(&megablast_index_super_header_path(&index_prefix), 4, 2);
         write_synthetic_megablast_volume_payload(&megablast_index_volume_path(&index_prefix, 0));
         write_synthetic_megablast_volume_payload(&megablast_index_volume_path(&index_prefix, 1));
 
@@ -4065,6 +4090,15 @@ mod tests {
             volumes[1].offset_data.offset_list_words(0),
             Some(&[111, 222][..])
         );
+    }
+
+    #[test]
+    fn megablast_index_candidates_keep_active_global_oids() {
+        let candidates = filter_megablast_candidate_oids([0, 10, 11, 12], &[(10, 12)], 2);
+        assert_eq!(candidates, vec![10, 11]);
+
+        let local_candidates = filter_megablast_candidate_oids([0, 1, 2, 10], &[], 2);
+        assert_eq!(local_candidates, vec![0, 1]);
     }
 
     #[test]
@@ -4819,7 +4853,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alias_memb_bit_is_parsed_only_not_oid_filter() {
+    fn test_alias_memb_bit_fails_instead_of_searching_unfiltered_db() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("base");
         write_tiny_accession_nucl_db(&base, &["seq1", "seq2", "seq3", "seq4"]);
@@ -4829,13 +4863,15 @@ mod tests {
         )
         .unwrap();
 
-        let db = BlastDb::open(&tmp.path().join("memb")).unwrap();
-
-        assert_eq!(db.num_oids, 4);
-        assert_eq!(db.stats_num_oids, 4);
-        assert_eq!(db.get_accession(0).as_deref(), Some("seq1"));
-        assert_eq!(db.get_accession(3).as_deref(), Some("seq4"));
-        assert_eq!(db.volume_oid_ranges(), vec![(0, 4)]);
+        let err = match BlastDb::open(&tmp.path().join("memb")) {
+            Ok(_) => panic!("MEMB_BIT alias should not open unfiltered"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            err.to_string().contains("MEMB_BIT"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

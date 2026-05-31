@@ -118,12 +118,15 @@ pub fn semi_gapped_align(
             }
 
             if best_score - sc > x_dropoff {
-                // Failed x-dropoff
+                // Match NCBI ALIGN_EX/Blast_SemiGappedAlign band semantics:
+                // when pruning the leading column, advance the band but keep
+                // the previous-row cell value available as the next row's
+                // diagonal predecessor. Non-leading pruned cells are cleared.
                 if b_index == first_b_index {
                     first_b_index += 1;
+                } else {
+                    score_array[b_index].best = MININT;
                 }
-                score_array[b_index].best = MININT;
-                score_array[b_index].best_gap = MININT;
             } else {
                 last_b_index = b_index;
                 if sc > best_score {
@@ -169,4 +172,36 @@ pub fn semi_gapped_align(
     }
 
     (best_score, a_off, b_off + 1) // +1 to match NCBI's 1-based offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn simple_matrix() -> [[i32; AA_SIZE]; AA_SIZE] {
+        let mut matrix = [[-3; AA_SIZE]; AA_SIZE];
+        for (i, row) in matrix.iter_mut().enumerate() {
+            row[i] = 2;
+        }
+        matrix
+    }
+
+    #[test]
+    fn semi_gapped_align_smoke_keeps_ncbi_band_state() {
+        let matrix = simple_matrix();
+        let (score, a_off, b_off) = semi_gapped_align(
+            &[0, 1, 2, 3, 4],
+            &[0, 1, 2, 3, 4],
+            4,
+            4,
+            &matrix,
+            3,
+            1,
+            6,
+            false,
+        );
+
+        assert_eq!(score, 6);
+        assert_eq!((a_off, b_off), (3, 4));
+    }
 }
