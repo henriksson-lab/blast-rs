@@ -67,6 +67,101 @@ fn run_blastn_subject_cli(args: &[&str], stdin: Option<&[u8]>) -> std::process::
 }
 
 #[test]
+fn blastn_cli_soft_masking_false_uses_hard_masked_query() {
+    let tmp = TempDir::new().expect("tempdir");
+    let query = tmp.path().join("query.fa");
+    let subject = tmp.path().join("subject.fa");
+    let soft_out = tmp.path().join("soft.tsv");
+    let hard_out = tmp.path().join("hard.tsv");
+    std::fs::write(&query, b">q\nACGTACGTaaaaACGTACGT\n").expect("write query");
+    std::fs::write(&subject, b">s\nACGTACGTAAAACGTACGT\n").expect("write subject");
+    let query = query.display().to_string();
+    let subject = subject.display().to_string();
+    let soft_out_arg = soft_out.display().to_string();
+    let hard_out_arg = hard_out.display().to_string();
+
+    let soft = run_blastn_subject_cli(
+        &[
+            "--query",
+            &query,
+            "--subject",
+            &subject,
+            "--task",
+            "blastn-short",
+            "--word_size",
+            "4",
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "true",
+            "--evalue",
+            "100000000000000000000",
+            "--outfmt",
+            "6 score qseq",
+            "--out",
+            &soft_out_arg,
+        ],
+        None,
+    );
+    let hard = run_blastn_subject_cli(
+        &[
+            "--query",
+            &query,
+            "--subject",
+            &subject,
+            "--task",
+            "blastn-short",
+            "--word_size",
+            "4",
+            "--dust",
+            "no",
+            "--lcase_masking",
+            "--soft_masking",
+            "false",
+            "--evalue",
+            "100000000000000000000",
+            "--outfmt",
+            "6 score qseq",
+            "--out",
+            &hard_out_arg,
+        ],
+        None,
+    );
+
+    assert!(
+        soft.status.success(),
+        "soft stderr: {}",
+        String::from_utf8_lossy(&soft.stderr)
+    );
+    assert!(
+        hard.status.success(),
+        "hard stderr: {}",
+        String::from_utf8_lossy(&hard.stderr)
+    );
+    let soft_stdout = std::fs::read_to_string(&soft_out).expect("read soft output");
+    let hard_stdout = std::fs::read_to_string(&hard_out).expect("read hard output");
+    let first_score = |text: &str| -> i32 {
+        text.lines()
+            .next()
+            .and_then(|line| line.split('\t').next())
+            .and_then(|score| score.parse::<i32>().ok())
+            .unwrap()
+    };
+    assert!(
+        soft_stdout
+            .lines()
+            .next()
+            .is_some_and(|line| !line.contains('N')),
+        "soft stdout: {soft_stdout}"
+    );
+    assert!(
+        first_score(&soft_stdout) > first_score(&hard_stdout),
+        "soft stdout: {soft_stdout}\nhard stdout: {hard_stdout}"
+    );
+}
+
+#[test]
 fn blastn_cli_reads_query_from_stdin_marker() {
     let query = std::fs::read("tests/fixtures/query_short_match.fa").expect("read query fixture");
     let baseline = run_blastn_subject_cli(
@@ -20955,7 +21050,7 @@ fn psiblast_ncbi_parity_pseudocount_zero_single_round_output() {
 }
 
 #[test]
-fn psiblast_ncbi_audit_num_iterations_zero_direct_stdout_stat_gap() {
+fn psiblast_ncbi_parity_num_iterations_zero_direct_stdout() {
     if !ncbi_bin("psiblast").exists() {
         eprintln!("Skipping: psiblast not found");
         return;
@@ -21044,9 +21139,10 @@ fn psiblast_ncbi_audit_num_iterations_zero_direct_stdout_stat_gap() {
     );
     assert_eq!(
         &rust_final[10..],
-        &["1.83e-04", "15.8"],
-        "Rust direct-stdout final-row statistic changed; re-audit the remaining PSI statistic recomputation TODO"
+        &["2.54e-04", "15.5"],
+        "Rust direct-stdout final-row statistic changed"
     );
+    assert_eq!(rust.stdout, ncbi.stdout, "stdout differs");
 }
 
 #[test]
@@ -21135,8 +21231,8 @@ fn psiblast_ncbi_parity_num_iterations_zero_output_shape() {
     );
     assert_eq!(
         &rust_final_fields[10..],
-        &["1.83e-04", "15.8"],
-        "Rust subject final-row statistic changed; re-audit the remaining PSI statistic recomputation TODO"
+        &["2.54e-04", "15.5"],
+        "Rust subject final-row statistic changed"
     );
 }
 
@@ -21239,13 +21335,13 @@ fn psiblast_db_ncbi_parity_num_iterations_zero_stat_fixture() {
     );
     assert_eq!(
         &rust_final[10..],
-        &["1.83e-04", "15.8"],
-        "Rust DB final-row statistic changed; re-audit the remaining PSI statistic recomputation TODO"
+        &["2.54e-04", "15.5"],
+        "Rust DB final-row statistic changed"
     );
 }
 
 #[test]
-fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
+fn psiblast_subject_ncbi_parity_traceback_window_gap_placement() {
     if !ncbi_bin("psiblast").exists() {
         eprintln!("Skipping: psiblast not found");
         return;
@@ -21278,7 +21374,7 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
         .arg("--threshold")
         .arg("1000")
         .output()
-        .expect("run blast-cli psiblast traceback-window audit");
+        .expect("run blast-cli psiblast traceback-window parity");
     let ncbi = std::process::Command::new(ncbi_bin("psiblast"))
         .arg("-query")
         .arg(&query)
@@ -21293,7 +21389,7 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
         .arg("-threshold")
         .arg("1000")
         .output()
-        .expect("run NCBI psiblast traceback-window audit");
+        .expect("run NCBI psiblast traceback-window parity");
 
     assert!(rust.status.success(), "blast-cli psiblast failed");
     assert!(ncbi.status.success(), "NCBI psiblast failed");
@@ -21332,7 +21428,7 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
     assert_eq!(
         &rust_fields[2..5],
         &["90.000", "10", "0"],
-        "Rust traceback-window identity fixture changed; re-audit PSI gap placement"
+        "Rust traceback-window identity fixture changed"
     );
     assert_eq!(
         &ncbi_fields[12..],
@@ -21342,7 +21438,11 @@ fn psiblast_subject_ncbi_audit_traceback_window_gap_placement() {
     assert_eq!(
         &rust_fields[12..],
         &["KKWL-FGFLG", "KKWLTFGFLG"],
-        "Rust traceback-window edit script changed; re-audit PSI gap placement"
+        "Rust traceback-window edit script changed"
+    );
+    assert_eq!(
+        rust_lines[0], ncbi_lines[0],
+        "traceback-window output row differs"
     );
 
     let ncbi_stderr = String::from_utf8_lossy(&ncbi.stderr);
@@ -21480,8 +21580,8 @@ fn psiblast_ncbi_parity_pseudocount_negative_one_iteration_output() {
     );
     assert_eq!(
         &rust_fields[10..],
-        &["1.83e-04", "15.8"],
-        "Rust pseudocount=-1 statistic fixture changed; re-audit the PSI statistic-input TODO"
+        &["3.90e-07", "23.1"],
+        "Rust pseudocount=-1 statistic fixture changed"
     );
     assert_eq!(
         String::from_utf8_lossy(&rust.stderr),
@@ -21562,8 +21662,8 @@ fn psiblast_ncbi_parity_inclusion_ethresh_zero_iteration_output() {
     );
     assert_eq!(
         &rust_fields[10..],
-        &["1.41e-08", "26.9"],
-        "Rust inclusion_ethresh=0 statistic fixture changed; re-audit the PSI statistic-input TODO"
+        &["3.90e-07", "23.1"],
+        "Rust inclusion_ethresh=0 statistic fixture changed"
     );
     assert_eq!(
         String::from_utf8_lossy(&rust.stderr),
@@ -21605,12 +21705,12 @@ fn psiblast_db_ncbi_parity_psi_numeric_option_stat_fixtures() {
     );
 
     for (rust_option, ncbi_option, value, rust_stats) in [
-        ("--pseudocount", "-pseudocount", "-1", ["1.83e-04", "15.8"]),
+        ("--pseudocount", "-pseudocount", "-1", ["3.90e-07", "23.1"]),
         (
             "--inclusion_ethresh",
             "-inclusion_ethresh",
             "0",
-            ["1.41e-08", "26.9"],
+            ["3.90e-07", "23.1"],
         ),
     ] {
         let rust = std::process::Command::new(&blast_cli)
@@ -21673,7 +21773,7 @@ fn psiblast_db_ncbi_parity_psi_numeric_option_stat_fixtures() {
         assert_eq!(
             &rust_fields[10..],
             &rust_stats,
-            "Rust {rust_option} {value} DB statistic fixture changed; re-audit the PSI statistic-input TODO"
+            "Rust {rust_option} {value} DB statistic fixture changed"
         );
         assert_eq!(
             String::from_utf8_lossy(&rust.stderr),
@@ -26498,7 +26598,7 @@ fn tblastx_subject_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular(
 }
 
 #[test]
-fn blastx_subject_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
+fn blastx_subject_ncbi_parity_mixed_frameshift_gap_pairwise_alignment() {
     if !ncbi_bin("blastx").exists() {
         eprintln!("Skipping: blastx not found");
         return;
@@ -26578,17 +26678,7 @@ fn blastx_subject_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
 
     let rust = std::fs::read_to_string(&rust_out).expect("read rust output");
     let ncbi = std::fs::read_to_string(&ncbi_out).expect("read ncbi output");
-    for output in [&rust, &ncbi] {
-        assert!(output.contains("Score = 58.4 bits (174)"));
-        assert!(output.contains("Identities = 32/40 (80%)"));
-        assert!(output.contains("Positives = 34/40 (85%)"));
-        assert!(output.contains("Gaps = 3/40 (8%)"));
-        assert!(output.contains("Frame = +1"));
-        assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKL---NESSAFY"));
-        assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY"));
-    }
-    assert!(rust.contains("Expect = 3e-20"));
-    assert!(ncbi.contains("Expect = 3e-20"));
+    assert_eq!(rust, ncbi, "subject mixed pairwise output diverged");
 }
 
 #[test]
@@ -29569,7 +29659,7 @@ fn tblastx_db_ncbi_parity_frameshift_gap_script() {
 }
 
 #[test]
-fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta() {
+fn tblastx_db_ncbi_parity_mixed_frameshift_gap_candidate_pairwise_padding() {
     if !ncbi_bin("tblastx").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: tblastx or makeblastdb not found");
         return;
@@ -29666,12 +29756,7 @@ fn tblastx_db_ncbi_audit_mixed_frameshift_gap_candidate_pairwise_padding_delta()
     }
     assert!(ncbi.contains("Query  48  RTLRIHQFNMTKFITS  1"));
     assert!(ncbi.contains("Sbjct  100 QTLRIHQFNMTKFITS  53"));
-    assert!(rust.contains("Query  48   RTLRIHQFNMTKFITS  1"));
-    assert!(rust.contains("Sbjct  100  QTLRIHQFNMTKFITS  53"));
-    assert_ne!(
-        rust, ncbi,
-        "audit fixture should keep pinning the current coordinate-column delta"
-    );
+    assert_eq!(rust, ncbi, "mixed candidate pairwise output diverged");
 }
 
 #[test]
@@ -29794,7 +29879,7 @@ fn tblastx_db_ncbi_parity_mixed_candidate_splits_into_gapless_hsps_tabular() {
 }
 
 #[test]
-fn blastx_db_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
+fn blastx_db_ncbi_parity_mixed_frameshift_gap_pairwise_alignment() {
     if !ncbi_bin("blastx").exists() || !ncbi_bin("makeblastdb").exists() {
         eprintln!("Skipping: blastx or makeblastdb not found");
         return;
@@ -29885,14 +29970,11 @@ fn blastx_db_ncbi_audit_mixed_frameshift_gap_pairwise_alignment() {
 
     let rust = std::fs::read_to_string(&rust_out).expect("read rust output");
     let ncbi = std::fs::read_to_string(&ncbi_out).expect("read ncbi output");
-    for output in [&rust, &ncbi] {
-        assert!(output.contains("Gaps = 3/40"));
-        assert!(output.contains("Frame = +1"));
-        assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKL---NESSAFY"));
-        assert!(output.contains("ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY"));
-    }
-    assert!(rust.contains("Expect = 3e-20"));
-    assert!(ncbi.contains("Expect = 3e-20"));
+    assert!(
+        !rust.contains("Score = 10.8 bits (14)"),
+        "sub-cutoff traceback HSP should be purged:\n{rust}"
+    );
+    assert_eq!(rust, ncbi, "DB mixed pairwise output diverged");
 }
 
 #[test]
@@ -31362,15 +31444,35 @@ fn tblastx_accepts_explicit_positive_max_intron_without_linker_panic() {
     let subject =
         "ATGAAATTTCTGATTCTGCTGTTTATTCTGTGTCTGTTTCCTGTTCTGGCTGCTGATAATCATGGTGTTTCTATGAATGCTTCT";
     let (_tmp, db) = build_nucleotide_db(vec![nt_entry("N001", "indel", subject)]);
-    let params = SearchParams::tblastx()
+    let base_params = SearchParams::tblastx()
         .evalue(1000.0)
         .num_threads(1)
-        .filter_low_complexity(false)
-        .max_intron_length(303);
+        .filter_low_complexity(false);
+    let params = base_params.clone().max_intron_length(303);
 
+    let default_results = tblastx(&db, query, &base_params);
     let results = tblastx(&db, query, &params);
     assert_eq!(results.len(), 1, "expected one subject hit");
     assert!(results[0].hsps.iter().all(|hsp| hsp.num_gaps == 0));
+    let signature = |results: &[SearchResult]| {
+        results
+            .iter()
+            .flat_map(|result| {
+                result.hsps.iter().map(|hsp| {
+                    (
+                        result.subject_oid,
+                        hsp.score,
+                        hsp.query_start,
+                        hsp.query_end,
+                        hsp.subject_start,
+                        hsp.subject_end,
+                        hsp.num_links,
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(signature(&results), signature(&default_results));
 }
 
 #[test]
@@ -34332,14 +34434,8 @@ fn test_core_nt_alias_primer_taxonomy_outfmt_matches_ncbi() {
 }
 
 /// blastx parity against NCBI on a clean, gapless full-length hit: a DNA query
-/// whose frame +1 translates exactly to the protein subject.
-///
-/// The alignment matches NCBI exactly (coords, %id, length, bitscore), but the
-/// e-value / effective-search-space currently does NOT (blastp on the same
-/// protein is byte-exact, so the gap is blastx-specific: the length adjustment
-/// for translated nucleotide queries). This is an ACTIVE parity test pinning
-/// that bug — it is expected to fail until blast-rs's blastx statistics match
-/// NCBI. The byte-exact `assert_eq!` covers the e-value column.
+/// whose frame +1 translates exactly to the protein subject. The byte-exact
+/// `assert_eq!` covers coordinates, score, bits, and e-value.
 #[test]
 fn blastx_subject_ncbi_parity_exact_full_length_hit() {
     // frame +1 translation == subject protein MAKELVNRICELLDKQGITPEQAFRELGFSVNTLYRWRKQ

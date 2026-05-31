@@ -343,45 +343,68 @@ Single crate `blast-rs` with modules:
 ## Benchmarks
 
 These numbers are only meant to track this translation against the local NCBI
-BLAST+ 2.17.0 reference binary. They are not general performance claims.
+BLAST+ 2.17.0 reference binary. They are not general performance claims. The
+benchmarks below are intentionally real-data oriented and include parity checks;
+they are better used as regression baselines than marketing numbers.
 
 Benchmark setup:
 
 - Rust binary: `target/release/blast-cli`
-- Reference binary: `ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin/blastn`
+- Reference binaries: `ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin/*`
 - Build used for this run: release build, no LTO
-- Host date: 2026-04-26
+- Host date: 2026-05-31
 - Threads: 1
-- Output: tabular file output, then `cmp` against the reference output
-- Timing: median wall-clock seconds from 3 runs, using `/usr/bin/time`
+- Output: tabular stdout redirected to files, then sorted line-set and
+  coordinate-set comparisons against the reference output
+- Timing/RSS: one run per case with `/usr/bin/time -v`
 
 Command shape:
 
 ```bash
-blast-cli blastn --task blastn-short --dust no --evalue 10 \
-    --query <query.fa> --db <db> \
-    --outfmt '6 qseqid sseqid pident length qstart qend sstart send bitscore evalue' \
-    --max_hsps 1 --num_threads 1 --out rust.tsv
+target/release/blast-cli <program> \
+    -query <query.fa> -db <db> -num_threads 1 \
+    -outfmt '6 qseqid sseqid qstart qend sstart send bitscore evalue' \
+    -evalue 10 > rust.tsv
 
-blastn -task blastn-short -dust no -evalue 10 \
-    -query <query.fa> -db <db> \
-    -outfmt '6 qseqid sseqid pident length qstart qend sstart send bitscore evalue' \
-    -max_hsps 1 -num_threads 1 -out ncbi.tsv
+ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin/<program> \
+    -query <query.fa> -db <db> -num_threads 1 \
+    -outfmt '6 qseqid sseqid qstart qend sstart send bitscore evalue' \
+    -evalue 10 > ncbi.tsv
 ```
 
-| Case | Query | Database | Output parity | Rows / bytes | Rust median | NCBI median | Speedup |
-|------|-------|----------|---------------|--------------|-------------|-------------|---------|
-| Short query vs yeast | `tests/fixtures/large_db/query_500.fa` | `tests/fixtures/large_db/yeast` | byte-identical (`cmp=0`) | 17 / 1260 | 0.33 s | 0.38 s | 1.15x |
-| Short query vs C. elegans | `tests/fixtures/large_db/query_500.fa` | `tests/fixtures/large_db/celegans` | byte-identical (`cmp=0`) | 6 / 466 | 4.48 s | 5.55 s | 1.24x |
-| Longer query vs C. elegans | `tests/fixtures/large_db/query_2000.fa` | `tests/fixtures/large_db/celegans` | byte-identical (`cmp=0`) | 7 / 566 | 11.61 s | 14.70 s | 1.27x |
+Real-data fixture results:
 
-Raw timings:
+| Program | Query | Database | Parity summary | Rust time / RSS | NCBI time / RSS | Relative speed |
+|---------|-------|----------|----------------|-----------------|-----------------|----------------|
+| `blastn` | `/tmp/bench/nt20.fa` | `tests/fixtures/large_db/celegans` | byte-identical: 1160/1160 rows | 2.75 s / 87 MB | 0.38 s / 74 MB | Rust 7.2x slower |
+| `blastx` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | Rust 107 rows, NCBI 113; Rust rows all shared, 6 NCBI-only | 1.04 s / 9 MB | 0.66 s / 28 MB | Rust 1.6x slower |
+| `tblastn` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 77/88 NCBI; 21 Rust-only, 11 NCBI-only | 1.88 s / 8 MB | 0.21 s / 26 MB | Rust 9.0x slower |
+| `tblastx` | `/tmp/bench/nt10.fa` | `tests/fixtures/seqn/seqn` | rows shared 256/263 NCBI; 10 Rust-only, 7 NCBI-only | 2.36 s / 11 MB | 0.46 s / 26 MB | Rust 5.1x slower |
 
-| Case | Rust runs | NCBI runs |
-|------|-----------|-----------|
-| Short query vs yeast | 0.34, 0.32, 0.33 s | 0.38, 0.39, 0.37 s |
-| Short query vs C. elegans | 4.38, 4.55, 4.48 s | 5.25, 5.55, 5.61 s |
-| Longer query vs C. elegans | 11.86, 11.61, 11.14 s | 14.79, 14.55, 14.70 s |
+The `blastn` case is exact on this fixture. The translated-search cases still
+show small residual hit-set differences on broader real data, mostly around
+translated hit selection and near-threshold HSPs.
+
+AMRFinderPlus workload results:
+
+```bash
+BLAST_RS_CLI_BIN=target/release/blast-cli \
+BLAST_RS_PERF_REPS=1 \
+BLAST_RS_PERF_THREADS=1 \
+cargo test --release --test amr_workload_perf -- --ignored --nocapture
+```
+
+This uses the sibling `../ncbi-amrfinderplus-rs` checkout:
+
+| Program | Workload | Parity summary | Rust time / RSS | NCBI time / RSS | Relative speed |
+|---------|----------|----------------|-----------------|-----------------|----------------|
+| `blastp` | `tests/golden/test_prot.fa` vs AMRProt `2026-03-24.1` | 7630 shared hit pairs; 22 NCBI-only, 37 Rust-only; recall 0.9971, precision 0.9952 | 2.373 s / 477.8 MB | 1.731 s / 75.9 MB | Rust 1.37x slower |
+| `blastx` | `tests/golden/test_dna.fa` vs AMRProt `2026-03-24.1` | 12621 shared hit pairs; 158 NCBI-only, 162 Rust-only; recall 0.9876, precision 0.9873 | 12.637 s / 493.1 MB | 6.579 s / 87.9 MB | Rust 1.92x slower |
+
+The AMR workload passes the harness recall threshold. Peak RSS remains higher
+for blast-rs, though the dense protein word-size 5 lookup now builds directly
+into its finalized backbone layout instead of staging table-sized `Vec<Vec<_>>`
+rows.
 
 
 ## Algorithms
@@ -471,13 +494,15 @@ The NCBI BLAST+ 2.17.0 tarball includes a large subset of the NCBI C++ Toolkit (
   Matching NCBI's gap choice requires porting that in-loop seed gate (replacing
   the post-hoc traceback dedup in `src/search.rs`) and rebaselining the gapped
   parity fixtures — a dedicated effort, not yet done.
-- **Multi-query throughput** -- blast-rs re-scans the database once per query, so
-  wall time grows roughly linearly with the number of queries. NCBI concatenates
-  all queries into one lookup table and scans the database once, staying nearly
-  flat. For a single query blast-rs is competitive (~1.3× NCBI); for many
-  queries it is substantially slower (e.g. ~20 s vs ~1 s for 60 × 2000 bp vs the
-  C. elegans genome). Peak RSS is comparable. Closing this requires a
-  concatenated-query lookup table and single-scan engine (planned).
+- **Throughput and RSS** -- blast-rs is currently slower than NCBI BLAST+ on the
+  real-data CLI benchmarks above. The gap is especially visible for multi-query
+  workloads because blast-rs re-scans the database once per query, while NCBI
+  concatenates all queries into one lookup table and scans the database once.
+  The AMRFinderPlus workload also shows higher peak RSS in blast-rs
+  (~478-493 MB vs ~76-88 MB for NCBI in the run above), because this
+  implementation still keeps more lookup/search state resident.
+  Closing this requires a concatenated-query lookup table, a single-scan engine,
+  and memory-layout work.
 
 ### Struct-field gaps relative to NCBI
 

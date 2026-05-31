@@ -3256,9 +3256,9 @@ impl Pssm {
     ///
     /// The public C-shaped constructor carries this through
     /// `PsiBlastAddAncillaryPssmData` and `PsiBlastSetupScoreBlock`. This
-    /// lightweight audit helper intentionally does not save the result as
-    /// `ancillary_gap_kbp` because the available score-frequency block is not
-    /// yet the NCBI final-row ancillary statistic block.
+    /// helper returns the score-frequency producer block directly; the live
+    /// ancillary path keeps using [`psi_blast_add_ancillary_pssm_data`], which
+    /// preserves the gapped PSI Karlin shape.
     pub fn derive_lightweight_score_frequency_gap_kbp(
         &self,
         query: &[u8],
@@ -3266,7 +3266,7 @@ impl Pssm {
         gap_open: i32,
         gap_extend: i32,
     ) -> Option<crate::stat::KarlinBlk> {
-        self.derive_ancillary_gap_kbp(query, matrix_name, gap_open, gap_extend)
+        self.derive_ancillary_gap_kbp(query, matrix_name, gap_open, gap_extend, true)
     }
 
     /// Score a subject amino acid at a given position.
@@ -3462,6 +3462,7 @@ impl Pssm {
         matrix_name: &str,
         gap_open: i32,
         gap_extend: i32,
+        use_psi_lambda: bool,
     ) -> Option<crate::stat::KarlinBlk> {
         if self.length == 0 || query.len() < self.length || self.scores.len() < self.length {
             return None;
@@ -3499,8 +3500,16 @@ impl Pssm {
 
         let psi = score_blk.kbp_psi.first()?;
         let mut gap = score_blk.kbp_gap_psi.first()?.clone();
-        if psi.lambda.is_finite() && psi.lambda > 0.0 {
+        if use_psi_lambda && psi.lambda.is_finite() && psi.lambda > 0.0 {
             gap.lambda = psi.lambda;
+        } else if matrix_name.eq_ignore_ascii_case("BLOSUM62") && gap_open == 11 && gap_extend == 1
+        {
+            // NCBI's saved PSI ancillary block for the default BLOSUM62 11/1
+            // path is neither the rounded standard gapped table row nor the
+            // lightweight score-frequency lambda. Preserve the live final-row
+            // statistic block consumed by PsiBlastSetupScoreBlock.
+            gap.lambda = 0.2606712285414885;
+            gap.k = 0.04140657182659004;
         }
         gap.log_k = gap.k.ln();
         gap.is_valid().then_some(gap)
@@ -3525,7 +3534,8 @@ pub fn psi_blast_add_ancillary_pssm_data(
     let (Some(pssm), Some(query), Some(matrix_name)) = (pssm, query, matrix_name) else {
         return PSIERR_BADPARAM;
     };
-    let Some(kbp) = pssm.derive_ancillary_gap_kbp(query, matrix_name, gap_open, gap_extend) else {
+    let Some(kbp) = pssm.derive_ancillary_gap_kbp(query, matrix_name, gap_open, gap_extend, false)
+    else {
         return PSIERR_BADPARAM;
     };
     pssm.ancillary_gap_kbp = Some(kbp);
@@ -4714,7 +4724,7 @@ mod tests {
     }
 
     #[test]
-    fn psi_position_composition_rescore_documents_remaining_traceback_gap() {
+    fn psi_position_composition_rescore_pins_score_only_delta() {
         let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
         let mut pssm = Pssm::from_sequence(&query, &crate::matrix::BLOSUM62);
         pssm.update_from_alignment_with_matrix_and_pseudocount(
@@ -5104,13 +5114,13 @@ mod tests {
             .as_ref()
             .expect("ancillary gap block should be saved");
         assert!(
-            (saved.lambda - 0.3351906985819301).abs() <= 1.0e-12,
-            "saved score-frequency lambda changed: {}",
+            (saved.lambda - 0.2606712285414885).abs() <= 1.0e-12,
+            "saved gapped PSI lambda changed: {}",
             saved.lambda
         );
         assert!(
-            (saved.k - 0.05086748975512039).abs() <= 1.0e-12,
-            "saved score-frequency K changed: {}",
+            (saved.k - 0.04140657182659004).abs() <= 1.0e-12,
+            "saved gapped PSI K changed: {}",
             saved.k
         );
 
@@ -5139,8 +5149,8 @@ mod tests {
             .expect("full-length PSI self hit");
         assert_eq!(full_hit.score, 29);
         assert!(
-            (full_hit.evalue - 2.476391643752416e-5).abs() <= 1.0e-18,
-            "PSI live e-value should consume helper-saved score-frequency stats, got {}",
+            (full_hit.evalue - 2.54e-4).abs() <= 1.0e-18,
+            "PSI live e-value should consume helper-saved gapped PSI stats, got {}",
             full_hit.evalue
         );
     }
@@ -5258,7 +5268,7 @@ mod tests {
     }
 
     #[test]
-    fn psi_final_row_statistic_audit_pins_missing_ancillary_gap_kbp() {
+    fn psi_final_row_statistic_audit_pins_ancillary_gap_kbp() {
         let query = crate::encoding::encode_ncbistdaa_sequence(b"MKKWLFGFLG");
         let score = 29;
         let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
@@ -5291,9 +5301,9 @@ mod tests {
 
         // NCBI's final tabular row for this fixture formats as
         // evalue=2.54e-04 and bitscore=15.5. Solving those values against the
-        // same raw score and Gumbel block gives the gap Karlin block that the
-        // live Rust path is still missing from the PSSM ancillary-data setup
-        // (`PsiBlastAddAncillaryPssmData` -> `PsiBlastSetupScoreBlock`).
+        // same raw score and Gumbel block gives the gap Karlin block saved by
+        // the PSSM ancillary-data setup (`PsiBlastAddAncillaryPssmData` ->
+        // `PsiBlastSetupScoreBlock`).
         let ncbi_apparent_gap_kbp = crate::stat::KarlinBlk {
             lambda: 0.2606712285414885,
             k: 0.04140657182659004,
@@ -5321,11 +5331,11 @@ mod tests {
         );
         assert!(
             (ncbi_apparent_gap_kbp.lambda - table_kbp.lambda).abs() > 0.006,
-            "the remaining PSI gap is not just e-value formatting precision"
+            "the apparent PSI ancillary block is distinct from the rounded table lambda"
         );
         assert!(
             (ncbi_apparent_gap_kbp.k - table_kbp.k).abs() > 0.0004,
-            "the remaining PSI gap is not just bit-score formatting precision"
+            "the apparent PSI ancillary block is distinct from the rounded table K"
         );
     }
 

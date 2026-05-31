@@ -1728,22 +1728,19 @@ fn blast_hsp_list_get_evalues_for_linking(
     link_hsp_params: &LinkHSPParameters,
     gapped_calculation: bool,
 ) {
-    // NCBI `Blast_HSPListGetEvalues` (blast_hits.c:1811) is called from
-    // `BLAST_LinkHsps` (link_hsps.c:1791-1797) with the subject length already
-    // reduced for translated programs (`subject_length / CODON_LENGTH`) and the
-    // Gumbel block carrying its original (unscaled) db_length. The Spouge
-    // routine then forms `db_scale_factor = gbp->db_length / n_` where
-    // `n_` is exactly that reduced subject length. We mirror this verbatim:
-    // do NOT derive a per-list translated length or rescale db_length.
-    let subject_stat_length = if blast_subject_is_translated(program_number) {
-        (subject_length / CODON_LENGTH).max(1)
-    } else {
-        subject_length.max(1)
-    };
     for hsp in &mut hsp_list.hsp_array {
         let context = hsp.context.max(0) as usize;
         let Some(context_info) = query_info.contexts.get(context) else {
             continue;
+        };
+        // NCBI `Blast_HSPListGetEvalues` receives the translated subject
+        // length from the caller and applies the subject-side CODON_LENGTH
+        // reduction here for translated-subject programs. The context length
+        // adjustment is then applied in the same units.
+        let subject_stat_length = if blast_subject_is_translated(program_number) {
+            ((subject_length / CODON_LENGTH) - context_info.length_adjustment).max(1)
+        } else {
+            subject_length.max(1)
         };
         let kbp = if gapped_calculation {
             sbp.kbp_gap
@@ -1771,8 +1768,10 @@ fn blast_hsp_list_get_evalues_for_linking(
                 if let Some(db_length) = sbp.link_gbp_db_length {
                     gbp.db_length = db_length.max(1);
                 }
-                hsp.evalue = spouge_evalue(hsp.score, kbp, &gbp, query_length, subject_stat_length)
-                    / blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
+                hsp.evalue = spouge_evalue(hsp.score, kbp, &gbp, query_length, subject_stat_length);
+                if blast_subject_is_translated(program_number) {
+                    hsp.evalue /= blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
+                }
                 continue;
             }
         }
@@ -1781,8 +1780,10 @@ fn blast_hsp_list_get_evalues_for_linking(
         } else {
             query_length as f64 * subject_stat_length as f64
         };
-        hsp.evalue = kbp.raw_to_evalue(hsp.score, searchsp)
-            / blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
+        hsp.evalue = kbp.raw_to_evalue(hsp.score, searchsp);
+        if blast_subject_is_translated(program_number) {
+            hsp.evalue /= blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
+        }
     }
 }
 
@@ -2034,7 +2035,7 @@ mod tests {
         qi.contexts[0].eff_searchsp = 10_000;
         let mut sbp = simple_score_block(2);
         sbp.kbp_gap[0].round_down = true;
-        let expected = sbp.kbp_gap[0].raw_to_evalue(12, 10_000.0) / blast_gap_decay_divisor(0.5, 1);
+        let expected = sbp.kbp_gap[0].raw_to_evalue(12, 10_000.0);
         let mut hsp_list = LinkBlastHspList {
             oid: 0,
             query_index: 0,

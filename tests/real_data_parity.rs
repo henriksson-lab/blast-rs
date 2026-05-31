@@ -342,8 +342,8 @@ fn real_data_blastx_nt20_seqp_cbs2_documents_current_composition_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 73);
-    assert_eq!(rs_set.len(), 82);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (26, 35));
+    assert_eq!(rs_set.len(), 68);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (33, 28));
 }
 
 #[test]
@@ -381,35 +381,11 @@ fn real_data_tblastn_prot30_seqn_cbs0_documents_current_coordinate_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 88);
-    // Over-report 168 vs NCBI's 88 (diff 3 missing / 83 extra).
-    //
-    // DIAGNOSIS (2026-05-31, corrected): this is NOT a stats divergence.
-    // rs's tblastn e-values are byte-identical to NCBI's: comparing rs vs
-    // NCBI (`-evalue 1000`) across all 83 extra HSPs gives ratio 1.00
-    // (max 1.03 from display rounding). The faithful H2/H3 round (per-context
-    // ungapped Karlin params + NCBI's linked-evalue length, dropping rs's
-    // `num>1` gate) made rs's e-values CORRECT; the old 82 count was a
-    // coincidence — over-estimated e-values happened to drop ~83 borderline
-    // HSPs to roughly NCBI's count.
-    //
-    // The real cause: NCBI does not GENERATE these 83 HSPs at evalue=10,
-    // even though their (NCBI-computed) e-values are < 10 (0.8 .. 9.9).
-    // They appear only at much higher `-evalue` (e.g. an E=0.81 HSP first
-    // shows up at `-evalue 200`), so an evalue-dependent step in NCBI's
-    // preliminary HSP pipeline rejects them. It is NOT reproducible by any
-    // uniform per-query saving cutoff: 74/83 are ungapped (so prelim score ==
-    // traceback score), and within a single query NCBI keeps bits=22.7 while
-    // dropping other bits=22.7 and even bits=23.9 HSPs — no score threshold
-    // separates kept from dropped. Spouge cutoff (n=33 -> no drops; n=avg=157
-    // -> drops the wrong 6) and Karlin db-wide cutoff (drops the wrong 8) all
-    // err in BOTH directions. The discriminator is per-subject inside a stage
-    // we cannot observe without NCBI execution tracing (the baked NB_TRACE
-    // hooks cover other coordinates and the local build cannot be recompiled).
-    // Same instrumentation-blocked class as the q2000 greedy / dc-mb DP walls.
-    // Keeping the faithful (byte-exact-e-value) behavior per the
-    // faithfulness-over-parity mandate.
-    assert_eq!(rs_set.len(), 168);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (3, 83));
+    // Current small-fixture gap after the translated-subject path was reshaped
+    // to append per-frame HSPs, link, then reap by prelim e-value like
+    // `s_BlastSearchEngineCore`.
+    assert_eq!(rs_set.len(), 98);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (11, 21));
 }
 
 #[test]
@@ -447,8 +423,8 @@ fn real_data_tblastn_prot30_seqn_cbs2_documents_current_composition_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 71);
-    assert_eq!(rs_set.len(), 79);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (28, 36));
+    assert_eq!(rs_set.len(), 99);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (27, 55));
 }
 
 #[test]
@@ -1055,9 +1031,8 @@ fn real_data_blastx_evalue_drift_on_shared_hsps() {
 }
 
 /// NCBI rejects `-max_intron_length` on tblastx ("Uneven gap linking of HSPs is
-/// allowed for blastx, tblastn, and psitblastn only"); blast-rs currently
-/// accepts it (and even alters output via HSP linking). Documents the
-/// error-parity gap.
+/// allowed for blastx, tblastn, and psitblastn only"). blast-rs should reject
+/// the same nonzero value at CLI validation time.
 #[test]
 #[ignore = "requires local NCBI 2.17 binaries and /tmp/bench real-data fixtures"]
 fn real_data_tblastx_should_reject_max_intron_length_like_ncbi() {

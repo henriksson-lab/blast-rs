@@ -87,11 +87,11 @@ pub struct ProteinLookupTable {
     /// Overflow array for cells with > HITS_PER_CELL hits.
     overflow: Vec<i32>,
     pv: Vec<u64>,
-    /// Compressed-alphabet lookup table, populated only for `word_size >= 5`.
+    /// Compressed-alphabet lookup table, populated only for `word_size > 5`.
     /// NCBI's `BLAST_FillLookupTableOptions` (`blast_options.c`) switches to
     /// `eCompressedAaLookupTable` for `word_size > 5`; the dense neighborhood
     /// backbone (2^(word_size*5) cells with 28-letter neighbor enumeration)
-    /// is infeasible for `word_size >= 5`. When present, the two-hit/one-hit
+    /// is infeasible above `word_size` 5. When present, the two-hit/one-hit
     /// scanners drive the identical extension logic from the compressed scan's
     /// `(query_offset, subject_offset)` stream instead of the dense backbone.
     compressed: Option<BlastCompressedAaLookupTable>,
@@ -367,20 +367,28 @@ impl ProteinLookupTable {
         // NCBI switches to the compressed-alphabet lookup table for large word
         // sizes (`eCompressedAaLookupTable`), where the dense 28-letter
         // neighborhood backbone explodes (ws6 -> ~22 GB / billions of
-        // insertions). The dense path below is left BYTE-FOR-BYTE unchanged for
-        // `word_size <= 4`; only `word_size >= 5` takes the compressed branch.
+        // insertions). The dense path below keeps NCBI's ws5 dense-table choice
+        // but writes directly to the finalized backbone layout to avoid a large
+        // Rust-only transient Vec<Vec<_>> allocation.
         // NCBI BLAST_FillLookupTableOptions (blast_options.c:1165) routes to the
         // compressed table only for word_size > 5; ws5 stays on the dense
         // 28-letter table. (See the build below.)
         if word_size > 5 {
             return Self::build_compressed(query, word_size, matrix, threshold);
         }
+        if word_size < 5 {
+            return Self::build_dense_thin(query, word_size, matrix, threshold);
+        }
         let alphabet_size = AA_SIZE;
         // NCBI sizes the AA backbone to the highest valid BLASTAA index plus
         // one; the rolling scan mask is still the full charsize bit mask.
         let table_size = aa_lookup_backbone_size(word_size);
-        let mut backbone: Vec<Vec<i32>> = vec![Vec::new(); table_size];
-        let mut exact_backbone: Vec<Vec<i32>> = vec![Vec::new(); table_size];
+        let empty_cell = BackboneCell {
+            num_used: 0,
+            entries: [0; HITS_PER_CELL],
+        };
+        let mut backbone: Vec<BackboneCell> = vec![empty_cell; table_size];
+        let mut overflow: Vec<i32> = Vec::new();
 
         // Precompute per-row maximums for branch-and-bound pruning.
         // row_max[aa] = max score achievable when the query letter is `aa`.
@@ -396,6 +404,78 @@ impl ProteinLookupTable {
         }
 
         let thresh_i = threshold as i32; // integer threshold for comparison
+        if query.len() >= word_size {
+            let mut exact_words: std::collections::BTreeMap<usize, Vec<i32>> =
+                std::collections::BTreeMap::new();
+            for i in 0..=(query.len() - word_size) {
+                let query_word = &query[i..i + word_size];
+                if !protein_lookup_word_is_valid(query_word.iter().copied()) {
+                    continue;
+                }
+                let hash = word_hash(query_word, alphabet_size);
+                exact_words.entry(hash).or_default().push(i as i32);
+            }
+
+            let mut word_buf = vec![0u8; word_size];
+            for offsets in exact_words.values() {
+                let query_offset = offsets[0] as usize;
+                let query_word = &query[query_offset..query_offset + word_size];
+                s_add_word_hits_thick(
+                    &mut backbone,
+                    &mut overflow,
+                    matrix,
+                    query_word,
+                    offsets,
+                    thresh_i,
+                    &row_max,
+                    &mut word_buf,
+                    alphabet_size,
+                    word_size,
+                );
+            }
+        }
+
+        // Build presence vector.
+        let pv_len = table_size.div_ceil(64);
+        let mut pv = vec![0u64; pv_len];
+        for (idx, cell) in backbone.iter().enumerate() {
+            if cell.num_used != 0 {
+                pv[idx >> 6] |= 1u64 << (idx & 63);
+            }
+        }
+
+        ProteinLookupTable {
+            word_size,
+            backbone,
+            overflow,
+            pv,
+            compressed: None,
+        }
+    }
+
+    fn build_dense_thin(
+        query: &[u8],
+        word_size: usize,
+        matrix: &[[i32; AA_SIZE]; AA_SIZE],
+        threshold: f64,
+    ) -> Self {
+        let alphabet_size = AA_SIZE;
+        let table_size = aa_lookup_backbone_size(word_size);
+        let mut backbone: Vec<Vec<i32>> = vec![Vec::new(); table_size];
+        let mut exact_backbone: Vec<Vec<i32>> = vec![Vec::new(); table_size];
+
+        let mut row_max = [0i32; AA_SIZE];
+        for q in 0..AA_SIZE {
+            let mut mx = i32::MIN;
+            for s in 0..AA_SIZE {
+                if matrix[q][s] > mx {
+                    mx = matrix[q][s];
+                }
+            }
+            row_max[q] = mx;
+        }
+
+        let thresh_i = threshold as i32;
         if query.len() >= word_size {
             for i in 0..=(query.len() - word_size) {
                 let query_word = &query[i..i + word_size];
@@ -427,7 +507,6 @@ impl ProteinLookupTable {
             }
         }
 
-        // Build presence vector.
         let pv_len = table_size.div_ceil(64);
         let mut pv = vec![0u64; pv_len];
         for (idx, entries) in backbone.iter().enumerate() {
@@ -436,8 +515,6 @@ impl ProteinLookupTable {
             }
         }
 
-        // Convert to thick backbone (inline ≤3 hits, overflow for rest).
-        // Matches NCBI BLAST+ AaLookupBackboneCell layout.
         let empty_cell = BackboneCell {
             num_used: 0,
             entries: [0; HITS_PER_CELL],
@@ -452,12 +529,10 @@ impl ProteinLookupTable {
             }
             thick[idx].num_used = n as u16;
             if n <= HITS_PER_CELL {
-                // Store inline — no pointer chase needed at scan time
                 for (i, &val) in entries.iter().enumerate() {
                     thick[idx].entries[i] = val;
                 }
             } else {
-                // Store overflow cursor in entries[0]
                 thick[idx].entries[0] = overflow.len() as i32;
                 overflow.extend_from_slice(entries);
             }
@@ -472,7 +547,7 @@ impl ProteinLookupTable {
         }
     }
 
-    /// Build the compressed-alphabet lookup table for `word_size` 5/6/7.
+    /// Build the compressed-alphabet lookup table for `word_size` 6/7.
     ///
     /// NCBI: `BlastCompressedAaLookupTableNew` (`blast_aalookup.c:1270`). The
     /// 28-letter protein alphabet is collapsed to a 15-letter alphabet
@@ -694,6 +769,7 @@ pub fn blast_aa_lookup_finalize(
 }
 
 /// NCBI: s_AddWordHits (blast_aalookup.c).
+#[allow(dead_code)]
 fn s_add_word_hits(
     backbone: &mut [Vec<i32>],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -740,6 +816,7 @@ fn s_add_word_hits(
 }
 
 /// NCBI: s_AddWordHitsCore (blast_aalookup.c).
+#[allow(dead_code)]
 fn s_add_word_hits_core(
     backbone: &mut [Vec<i32>],
     info: &mut NeighborInfo<'_>,
@@ -771,6 +848,104 @@ fn s_add_word_hits_core(
         if score + cell_score >= info.threshold {
             info.subject_word[current_pos] = aa as u8;
             s_add_word_hits_core(backbone, info, score + cell_score, current_pos + 1);
+        }
+    }
+}
+
+/// blast-rs: dense AA lookup builder that writes directly to the finalized
+/// thick-backbone representation instead of staging millions of empty Vec rows.
+fn s_add_word_hits_thick(
+    backbone: &mut [BackboneCell],
+    overflow: &mut Vec<i32>,
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    query_word: &[u8],
+    offset_list: &[i32],
+    threshold: i32,
+    row_max: &[i32; AA_SIZE],
+    subject_word: &mut [u8],
+    alphabet_size: usize,
+    word_size: usize,
+) {
+    let self_score: i32 = query_word
+        .iter()
+        .map(|&aa| matrix[aa as usize][aa as usize])
+        .sum();
+
+    if threshold == 0 || self_score < threshold {
+        for &query_offset in offset_list {
+            blast_lookup_add_word_hit_thick(
+                backbone,
+                overflow,
+                word_size,
+                CHARSIZE,
+                query_word,
+                query_offset,
+            );
+        }
+    }
+
+    if threshold == 0 {
+        return;
+    }
+
+    let mut info = NeighborInfo {
+        query_word,
+        subject_word,
+        alphabet_size,
+        word_size,
+        matrix,
+        row_max,
+        offset_list,
+        threshold,
+    };
+
+    let mut score = row_max[query_word[0] as usize];
+    for &aa in &query_word[1..] {
+        score += row_max[aa as usize];
+    }
+
+    s_add_word_hits_core_thick(backbone, overflow, &mut info, score, 0);
+}
+
+fn s_add_word_hits_core_thick(
+    backbone: &mut [BackboneCell],
+    overflow: &mut Vec<i32>,
+    info: &mut NeighborInfo<'_>,
+    mut score: i32,
+    current_pos: usize,
+) {
+    score -= info.row_max[info.query_word[current_pos] as usize];
+    let row = &info.matrix[info.query_word[current_pos] as usize];
+
+    if current_pos == info.word_size - 1 {
+        for (aa, &cell_score) in row.iter().take(info.alphabet_size).enumerate() {
+            if score + cell_score >= info.threshold {
+                info.subject_word[current_pos] = aa as u8;
+                for &query_offset in info.offset_list {
+                    blast_lookup_add_word_hit_thick(
+                        backbone,
+                        overflow,
+                        info.word_size,
+                        CHARSIZE,
+                        info.subject_word,
+                        query_offset,
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    for (aa, &cell_score) in row.iter().take(info.alphabet_size).enumerate() {
+        if score + cell_score >= info.threshold {
+            info.subject_word[current_pos] = aa as u8;
+            s_add_word_hits_core_thick(
+                backbone,
+                overflow,
+                info,
+                score + cell_score,
+                current_pos + 1,
+            );
         }
     }
 }
@@ -1637,6 +1812,38 @@ pub(crate) fn blast_lookup_add_word_hit(
     if let Some(cell) = backbone.get_mut(index) {
         cell.push(query_offset);
     }
+}
+
+fn blast_lookup_add_word_hit_thick(
+    backbone: &mut [BackboneCell],
+    overflow: &mut Vec<i32>,
+    wordsize: usize,
+    charsize: usize,
+    seq: &[u8],
+    query_offset: i32,
+) {
+    if !protein_lookup_word_is_valid(seq.iter().take(wordsize).copied()) {
+        return;
+    }
+    let index = s_compute_table_index(wordsize, charsize, seq);
+    let Some(cell) = backbone.get_mut(index) else {
+        return;
+    };
+
+    let num_used = cell.num_used as usize;
+    assert!(num_used < u16::MAX as usize, "protein lookup cell overflow");
+    if num_used < HITS_PER_CELL {
+        cell.entries[num_used] = query_offset;
+    } else if num_used == HITS_PER_CELL {
+        let start = overflow.len();
+        overflow.extend_from_slice(&cell.entries);
+        overflow.push(query_offset);
+        cell.entries = [0; HITS_PER_CELL];
+        cell.entries[0] = start as i32;
+    } else {
+        overflow.push(query_offset);
+    }
+    cell.num_used += 1;
 }
 
 /// NCBI: s_ComputeTableIndex (lookup_util.c).
@@ -3834,6 +4041,24 @@ mod tests {
             total_entries > 1,
             "Low threshold should produce neighboring words (got {})",
             total_entries
+        );
+    }
+
+    #[test]
+    fn protein_lookup_word_size_five_stays_dense_like_ncbi() {
+        let m = crate::matrix::BLOSUM62;
+        let query = encode_ncbistdaa_sequence(b"AGIMVAGIMV");
+
+        let ws5 = ProteinLookupTable::build(&query, 5, &m, 11.0);
+        assert!(
+            ws5.compressed.is_none(),
+            "NCBI keeps word_size 5 on the dense AA lookup path"
+        );
+
+        let ws6 = ProteinLookupTable::build(&query, 6, &m, 11.0);
+        assert!(
+            ws6.compressed.is_some(),
+            "word_size > 5 should use the compressed AA lookup path"
         );
     }
 

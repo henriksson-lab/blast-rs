@@ -3675,18 +3675,12 @@ pub fn s_sort_hsp_list_by_oid(left: &HspList, right: &HspList) -> i32 {
     right.oid - left.oid
 }
 
-/// blast-rs: Rust no-op equivalent of static `s_FinalizeWriter`; not a direct NCBI C port.
+/// blast-rs: Rust lifecycle equivalent of static `s_FinalizeWriter`; not a direct NCBI C port.
 pub fn s_finalize_writer(stream: Option<&HspStream>) {
     let Some(stream) = stream else {
         return;
     };
     stream.pre_pipes.lock().unwrap().clear();
-    let mut results = stream.results.lock().unwrap();
-    for hitlist in results.hitlists.iter_mut().flatten() {
-        for hsp_list in &mut hitlist.hsp_lists {
-            hsp_list.sort_by_score();
-        }
-    }
 }
 
 /// blast-rs: Port-shaped close corresponding to `BlastHSPStreamClose`; not a direct NCBI C port.
@@ -4763,6 +4757,28 @@ mod tests {
         let (status, list) = blast_hsp_stream_read(Some(&stream));
         assert_eq!(status, K_BLAST_HSP_STREAM_SUCCESS);
         assert_eq!(list.expect("first list").oid, 1);
+    }
+
+    #[test]
+    fn translated_hsp_stream_close_preserves_hsp_order_within_subject() {
+        let stream = blast_hsp_stream_new(1);
+        let mut list = HspList::new(11);
+        list.add_hsp(make_hsp(10, 1e-2));
+        list.add_hsp(make_hsp(50, 1e-5));
+        list.add_hsp(make_hsp(20, 1e-3));
+
+        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        blast_hsp_stream_close(Some(&stream));
+
+        let (status, list) = blast_hsp_stream_read(Some(&stream));
+        assert_eq!(status, K_BLAST_HSP_STREAM_SUCCESS);
+        let scores: Vec<i32> = list
+            .expect("closed stream should return written list")
+            .hsps
+            .iter()
+            .map(|hsp| hsp.score)
+            .collect();
+        assert_eq!(scores, vec![10, 50, 20]);
     }
 
     #[test]

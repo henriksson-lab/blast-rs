@@ -2110,13 +2110,9 @@ impl MatrixStatRow {
 /// direct NCBI C port.
 /// Uses per-subject lengths for more accurate e-values than simple Karlin formula.
 /// Spouge e-value with NCBI's HSP-linking gap-decay correction
-/// applied. Used by translated searches (blastx/tblastn/tblastx) and
-/// ungapped paths where `do_sum_stats=TRUE` (set in
-/// `blast_options.c:1467`). NCBI applies this divisor in
-/// `link_hsps.c:1791` via `link_hsp_params->gap_decay_rate`. The
-/// default rate is `BLAST_GAP_DECAY_RATE_GAPPED = 0.1` for protein
-/// gapped, giving an effective `/0.9 ≈ ×1.111` scaling vs. the raw
-/// per-pair Spouge.
+/// applied. Callers select this helper only for program/reporting paths whose
+/// NCBI equivalent applies `BLAST_GapDecayDivisor`; raw per-pair Spouge callers
+/// should use [`spouge_evalue`].
 pub fn spouge_evalue_with_gap_decay(
     score: i32,
     kbp: &KarlinBlk,
@@ -2130,13 +2126,10 @@ pub fn spouge_evalue_with_gap_decay(
 
 /// blast-rs: Ergonomic Spouge score-to-E-value helper; not a direct NCBI C
 /// port. Returns the raw
-/// per-pair Spouge finite-size-corrected e-value. Some NCBI call sites
-/// (e.g. translated searches with HSP linking via `link_hsps.c:1791`)
-/// further divide by `BLAST_GapDecayDivisor(gap_decay_rate, 1)` —
-/// callers in those paths should use [`spouge_evalue_with_gap_decay`]
-/// instead. Standard blastp / direct traceback paths
-/// (`blast_traceback.c:234`, `blast_kappa.c:419`) pass
-/// `gap_decay_rate=0` and use the raw value unchanged.
+/// per-pair Spouge finite-size-corrected e-value.
+/// Standard blastp / direct traceback paths (`blast_traceback.c:234`,
+/// `blast_kappa.c:419`) pass `gap_decay_rate=0` and use the raw value
+/// unchanged.
 pub fn spouge_evalue(
     score: i32,
     kbp: &KarlinBlk,

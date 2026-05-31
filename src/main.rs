@@ -5267,7 +5267,7 @@ fn emit_psiblast_pssm_comp_stats_warning(
 fn should_run_iterative_psiblast(args: &BlastnArgs) -> bool {
     args.num_iterations.is_some()
         || args.inclusion_ethresh.is_some()
-        || args.pseudocount.is_some()
+        || matches!(args.pseudocount_value(), Some(value) if value >= 0)
         || args.in_msa.is_some()
         || args.in_pssm.is_some()
         || (args.save_each_pssm && (args.out_pssm.is_some() || args.out_ascii_pssm.is_some()))
@@ -5605,6 +5605,7 @@ fn build_translated_blastp_params(args: &BlastnArgs) -> blast_rs::api::SearchPar
 
 fn apply_tblastx_param_overrides(params: &mut blast_rs::api::SearchParams) {
     params.comp_adjust = 0;
+    params.max_intron_length = 0;
     params.x_drop_gapped = blast_rs::stat::BLAST_GAP_X_DROPOFF_TBLASTX;
     params.x_drop_final = blast_rs::stat::BLAST_GAP_X_DROPOFF_FINAL_TBLASTX;
 }
@@ -5905,6 +5906,14 @@ fn pairwise_stats_h(value: f64) -> String {
     }
 }
 
+fn pairwise_stats_h_gapped(value: f64) -> String {
+    if value.abs() < 0.1 {
+        format!("{value:.4}")
+    } else {
+        pairwise_stats_h(value)
+    }
+}
+
 fn pairwise_stats_a(value: f64) -> String {
     if value.abs() < 1.0 {
         format!("{value:.3}")
@@ -5915,7 +5924,9 @@ fn pairwise_stats_a(value: f64) -> String {
 
 fn pairwise_stats_sig3(value: f64) -> String {
     let abs = value.abs();
-    if abs >= 10.0 {
+    if abs >= 100.0 {
+        format!("{value:.0}.")
+    } else if abs >= 10.0 {
         format!("{value:.1}")
     } else if abs >= 1.0 {
         format!("{value:.2}")
@@ -6144,14 +6155,8 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if db.db_type != DbType::Protein {
             return Err("blastx requires a protein database".into());
         }
-        // Scan the database once over all queries' frames concatenated, instead
-        // of re-scanning per query (NCBI's concatenated-query engine).
-        let mut batched_blastx = {
-            let qseqs: Vec<&[u8]> = queries.iter().map(|q| q.sequence.as_slice()).collect();
-            blast_rs::api::blastx_batch(&db, &qseqs, &params)
-        };
-        for (qi, qrec) in queries.iter().enumerate() {
-            let mut results = std::mem::take(&mut batched_blastx[qi]);
+        for qrec in &queries {
+            let mut results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
             filter_results_by_query_strand(&mut results, &args.strand);
             for result in &results {
                 let subject_id =
@@ -6328,14 +6333,8 @@ fn run_tblastn(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if db.db_type != DbType::Nucleotide {
             return Err("tblastn requires a nucleotide database".into());
         }
-        // Scan the database once over all queries (concatenated into one lookup,
-        // each subject translated once) instead of re-scanning per query.
-        let mut batched_tblastn = {
-            let qseqs: Vec<&[u8]> = queries.iter().map(|q| q.sequence.as_slice()).collect();
-            blast_rs::api::tblastn_batch(&db, &qseqs, &params)
-        };
-        for (qi, qrec) in queries.iter().enumerate() {
-            let results = std::mem::take(&mut batched_tblastn[qi]);
+        for qrec in &queries {
+            let results = blast_rs::api::tblastn(&db, &qrec.sequence, &params);
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
@@ -7006,12 +7005,8 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if db.db_type != DbType::Nucleotide {
             return Err("tblastx requires a nucleotide database".into());
         }
-        let mut batched_tblastx = {
-            let qseqs: Vec<&[u8]> = queries.iter().map(|q| q.sequence.as_slice()).collect();
-            blast_rs::api::tblastx_batch(&db, &qseqs, &params)
-        };
-        for (qi, qrec) in queries.iter().enumerate() {
-            let mut results = std::mem::take(&mut batched_tblastx[qi]);
+        for qrec in &queries {
+            let mut results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
             filter_results_by_query_strand(&mut results, &args.strand);
             for result in &results {
                 let subject_id =
@@ -7669,18 +7664,12 @@ fn run_blastn_rust(
 
     let mut all_hits: Vec<(u32, TabularHit)> = Vec::new();
 
-    // DUST applies in `-ungapped` mode exactly as in the gapped path: it is
-    // SOFT masking — masked low-complexity regions are excluded from SEEDING
-    // (the lookup table is built from the masked query) but remain available
-    // for ungapped EXTENSION (extension runs against the un-masked query via
-    // the `*_nomask` buffers). NCBI does the same: empirically `-ungapped`
-    // with default DUST yields ~550 HSPs on yeast/nt10 while `-ungapped
-    // -dust no` yields ~1609, so DUST is NOT ignored for ungapped. Mirrors
-    // the gapped path (BlastSeqBlkSetSeqRanges / soft-mask seeding in
-    // s_BlastApplyFilter), so only the seeding word source differs from
-    // extension. (Was previously gated off by `&& !args.ungapped`, which
-    // hard-disabled DUST and over-reported low-complexity seeds.)
+    // DUST applies in `-ungapped` mode exactly as in the gapped path. With
+    // `-soft_masking true`, masked low-complexity regions are excluded from
+    // seeding but remain available for extension. With `-soft_masking false`,
+    // the masked buffer is also the runtime query, which makes the mask hard.
     let apply_dust = args.dust != "no";
+    let soft_masking = ncbi_bool_enabled(Some(&args.soft_masking), true);
 
     // Pre-compute invariant values outside the per-query loop. The per-query
     // loop body shadows `cutoff_score` / `ungapped_x_dropoff` /
@@ -7747,8 +7736,8 @@ fn run_blastn_rust(
         .map(|rec| -> Result<EncodedQuery, Box<dyn std::error::Error>> {
             let (loc_start, loc_end) = query_loc_bounds(args, rec.sequence.len())?;
             let raw_query = &rec.sequence[loc_start..loc_end];
-            let plus_nomask = blast_rs::encoding::encode_blastna_sequence(raw_query);
-            let minus_nomask =
+            let mut plus_nomask = blast_rs::encoding::encode_blastna_sequence(raw_query);
+            let mut minus_nomask =
                 blast_rs::encoding::reverse_complement_blastna_sequence(&plus_nomask);
             let mut plus_masked = plus_nomask.clone();
             let mut minus_masked = minus_nomask.clone();
@@ -7760,6 +7749,10 @@ fn run_blastn_rust(
                 apply_lowercase_mask(raw_query, &mut plus_masked);
                 let reversed_raw_query: Vec<u8> = raw_query.iter().rev().copied().collect();
                 apply_lowercase_mask(&reversed_raw_query, &mut minus_masked);
+            }
+            if !soft_masking {
+                plus_nomask.clone_from(&plus_masked);
+                minus_nomask.clone_from(&minus_masked);
             }
             let (q_kbp_plus, q_kbp_minus, q_sp_plus, q_sp_minus, q_lap, q_lam) =
                 compute_query_stats(&plus_nomask, &minus_nomask);
@@ -10353,8 +10346,8 @@ fn run_blastn_subject(
         let query_ids = fasta_record_ids(query_rec, args.parse_deflines);
         let (loc_start, loc_end) = query_loc_bounds(args, query_rec.sequence.len())?;
         let raw_query = &query_rec.sequence[loc_start..loc_end];
-        let query_plus_nomask = blast_rs::encoding::encode_blastna_sequence(raw_query);
-        let query_minus_nomask =
+        let mut query_plus_nomask = blast_rs::encoding::encode_blastna_sequence(raw_query);
+        let mut query_minus_nomask =
             blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus_nomask);
         let mut query_plus = query_plus_nomask.clone();
         if args.dust != "no" {
@@ -10364,6 +10357,10 @@ fn run_blastn_subject(
             apply_lowercase_mask(raw_query, &mut query_plus);
         }
         let query_minus = blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus);
+        if !ncbi_bool_enabled(Some(&args.soft_masking), true) {
+            query_plus_nomask.clone_from(&query_plus);
+            query_minus_nomask.clone_from(&query_minus);
+        }
         let (kbp, search_space, _) = blastn_subject_stats(
             args,
             &query_plus_nomask,
@@ -12548,14 +12545,14 @@ fn translated_pairwise_sequence_column_adjustment(
     hit: &TabularHit,
     query_is_translated: bool,
     subject_is_translated: bool,
-    subject_mode: bool,
+    _subject_mode: bool,
 ) -> usize {
     usize::from(
-        subject_mode
-            && query_is_translated
+        query_is_translated
             && subject_is_translated
-            && hit.qframe == -3
-            && hit.sframe == -2
+            && hit.qframe < 0
+            && hit.sframe < 0
+            && hit.query_start.abs() < 100
             && hit.subject_start.abs() >= 100,
     )
 }
@@ -12957,7 +12954,7 @@ fn write_blastp_pairwise_query_stats_with_trailing<W: Write>(
         "{:>8}{:>9}{:>9}{:>9}{:>9}{:>9} ",
         pairwise_stats_lambda(gapped_display.lambda),
         pairwise_stats_k_gapped(gapped_display.k),
-        pairwise_stats_h(gapped_display.h),
+        pairwise_stats_h_gapped(gapped_display.h),
         pairwise_stats_a(gapped_display.a),
         pairwise_stats_sig3(gapped_display.alpha),
         pairwise_stats_sig3(gapped_display.sigma)
@@ -13091,7 +13088,7 @@ fn write_translated_pairwise_query_stats<W: Write>(
         "{:>8}{:>9}{:>9}{:>9}{:>9}{:>9} ",
         pairwise_stats_lambda(gapped_display.lambda),
         pairwise_stats_k_gapped(gapped_display.k),
-        pairwise_stats_h(gapped_display.h),
+        pairwise_stats_h_gapped(gapped_display.h),
         pairwise_stats_a(gapped_display.a),
         pairwise_stats_sig3(gapped_display.alpha),
         pairwise_stats_sig3(gapped_display.sigma)
@@ -13307,7 +13304,15 @@ fn write_blastp_pairwise_subject_database_line<W: Write>(
     prefix: &str,
     subject_path: Option<&PathBuf>,
 ) -> io::Result<()> {
-    write_pairwise_subject_database_line(writer, prefix, subject_path)
+    let Some(subject) = subject_path else {
+        return writeln!(writer, "{}Database: User specified sequence set.", prefix);
+    };
+    writeln!(
+        writer,
+        "{}Database: User specified sequence set (Input: {}).",
+        prefix,
+        subject.display()
+    )
 }
 
 #[derive(Clone)]
@@ -17623,7 +17628,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tblastx_cli_preserves_explicit_max_intron_length() {
+    fn test_tblastx_cli_overrides_max_intron_length_to_zero() {
         let cli = Cli::parse_from([
             "blast-cli",
             "tblastx",
@@ -17641,7 +17646,7 @@ mod tests {
         let mut params = build_translated_blastp_params(&args);
         apply_tblastx_param_overrides(&mut params);
 
-        assert_eq!(params.max_intron_length, 300);
+        assert_eq!(params.max_intron_length, 0);
     }
 
     #[test]
@@ -19762,6 +19767,16 @@ mod tests {
         .unwrap();
         out.extend_from_slice(b"QTL");
         assert_eq!(String::from_utf8(out).unwrap(), "Sbjct  100 QTL");
+
+        let mut hit = tabular_hit_for_best_hit_filter("s1", 48, 1, 100, 1.0e-10);
+        hit.subject_start = 100;
+        hit.qframe = -2;
+        hit.sframe = -2;
+        assert_eq!(
+            translated_pairwise_sequence_column(3)
+                - translated_pairwise_sequence_column_adjustment(&hit, true, true, false),
+            translated_pairwise_sequence_column(3) - 1
+        );
 
         let mut out = Vec::new();
         write_translated_pairwise_coord_prefix(
