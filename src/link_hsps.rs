@@ -39,8 +39,8 @@ use crate::program::{
 };
 use crate::queryinfo::QueryInfo;
 use crate::stat::{
-    blast_gap_decay_divisor, blast_spouge_sto_e, large_gap_sum_e, small_gap_sum_e,
-    uneven_gap_sum_e, GumbelBlk, KarlinBlk,
+    blast_gap_decay_divisor, blast_large_gap_sum_e, blast_small_gap_sum_e, blast_spouge_sto_e,
+    blast_uneven_gap_sum_e, GumbelBlk, KarlinBlk,
 };
 
 /// NCBI BLAST constants (`blast_def.h` / `ncbi_std.h`).
@@ -856,16 +856,15 @@ pub fn s_blast_even_gap_link_hsps(
                 let b0num = nodes[best0].hsp_link.num[0];
                 nodes[best0].hsp_link.sum[0] += b0num * cutoff[0];
 
-                let mut p0 = small_gap_sum_e(
+                let mut p0 = blast_small_gap_sum_e(
                     window_size,
-                    b0num as u32,
+                    b0num as i16,
                     nodes[best0].hsp_link.xsum[0],
                     query_length,
                     subject_length_eff,
-                    ctx.eff_searchsp as f64,
+                    ctx.eff_searchsp,
                     blast_gap_decay_divisor(gap_decay_rate, b0num as u32),
-                )
-                .unwrap_or(INT4_MAX);
+                );
 
                 if b0num > 1 {
                     if gap_prob == 0.0 {
@@ -879,15 +878,14 @@ pub fn s_blast_even_gap_link_hsps(
                 }
 
                 let b1num = nodes[best1].hsp_link.num[1];
-                let mut p1 = large_gap_sum_e(
-                    b1num as u32,
+                let mut p1 = blast_large_gap_sum_e(
+                    b1num as i16,
                     nodes[best1].hsp_link.xsum[1],
                     query_length,
                     subject_length_eff,
-                    ctx.eff_searchsp as f64,
+                    ctx.eff_searchsp,
                     blast_gap_decay_divisor(gap_decay_rate, b1num as u32),
-                )
-                .unwrap_or(INT4_MAX);
+                );
 
                 if b1num > 1 {
                     if (1.0 - gap_prob) == 0.0 {
@@ -912,15 +910,14 @@ pub fn s_blast_even_gap_link_hsps(
                 let b1num = nodes[best1].hsp_link.num[1];
                 nodes[best1].hsp_link.sum[1] += b1num * cutoff[1];
 
-                let p1 = large_gap_sum_e(
-                    b1num as u32,
+                let p1 = blast_large_gap_sum_e(
+                    b1num as i16,
                     nodes[best1].hsp_link.xsum[1],
                     query_length,
                     subject_length_eff,
-                    ctx.eff_searchsp as f64,
+                    ctx.eff_searchsp,
                     blast_gap_decay_divisor(gap_decay_rate, b1num as u32),
-                )
-                .unwrap_or(INT4_MAX);
+                );
                 prob[1] = p1;
                 ordering_method = ELinkOrderingMethod::ELinkLargeGaps;
             }
@@ -1076,17 +1073,16 @@ fn s_sum_hsp_evalue(
     let query_window_size = link_hsp_params.overlap_size + link_hsp_params.gap_size + 1;
     let subject_window_size = link_hsp_params.overlap_size + link_hsp_params.longest_intron + 1;
 
-    let sum_evalue = uneven_gap_sum_e(
+    let sum_evalue = blast_uneven_gap_sum_e(
         query_window_size,
         subject_window_size,
-        num as u32,
+        num as i16,
         sum_score,
         query_eff_length,
         subject_eff_length,
-        query_info.contexts[context].eff_searchsp as f64,
+        query_info.contexts[context].eff_searchsp,
         blast_gap_decay_divisor(gap_decay_rate, num as u32),
-    )
-    .unwrap_or(INT4_MAX);
+    );
 
     (sum_evalue, sum_score)
 }
@@ -2027,7 +2023,9 @@ mod tests {
 
         assert_eq!(rc, 0);
         assert_eq!(hsp_list.hsp_array[0].num, 1);
-        assert_eq!(hsp_list.best_evalue, 3.0);
+        let expected =
+            sbp.kbp_gap[0].raw_to_evalue(50, 1_000_000_000.0) / blast_gap_decay_divisor(0.5, 1);
+        assert!((hsp_list.best_evalue - expected).abs() < 1.0e-300);
     }
 
     #[test]
@@ -2036,7 +2034,6 @@ mod tests {
         qi.contexts[0].eff_searchsp = 10_000;
         let mut sbp = simple_score_block(2);
         sbp.kbp_gap[0].round_down = true;
-        let expected = sbp.kbp_gap[0].raw_to_evalue(12, 10_000.0);
         let mut hsp_list = LinkBlastHspList {
             oid: 0,
             query_index: 0,
@@ -2053,6 +2050,8 @@ mod tests {
             cutoff_big_gap: 0,
             longest_intron: 500,
         };
+        let expected = sbp.kbp_gap[0].raw_to_evalue(12, 10_000.0)
+            / blast_gap_decay_divisor(params.gap_decay_rate, 1);
 
         let rc = blast_link_hsps(BLASTN, &mut hsp_list, &qi, 300, &sbp, &params, true);
 
@@ -2426,7 +2425,7 @@ mod tests {
         let (evalue, sum_score) =
             s_sum_hsp_evalue(TBLASTN, &qi, 300, &params, &sets, &hsp_array, 0, 1);
 
-        let expected = uneven_gap_sum_e(
+        let expected = crate::stat::uneven_gap_sum_e(
             10,
             33,
             2,

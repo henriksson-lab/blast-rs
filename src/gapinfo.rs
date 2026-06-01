@@ -4131,20 +4131,60 @@ pub fn blast_na_extend_jumper(
     blast_na_extend_jumper_sort_hits(offset_pairs);
 
     for pair in offset_pairs.iter().copied() {
-        let Some((q_offset, s_offset, diag)) = blast_na_extend_jumper_preextend_hit(
-            pair,
-            query,
-            subject,
-            subject_length,
-            lut_word_length,
-            ext_to,
-            s_range,
-        ) else {
+        let mut s_offset = pair.subject_offset;
+        let mut q_offset = pair.query_offset;
+        if q_offset < 0
+            || s_offset < 0
+            || q_offset >= query.len() as i32
+            || s_offset >= subject_length
+        {
             continue;
-        };
+        }
+        let diag = i64::from(s_offset) - i64::from(q_offset);
         if diag == last_diag && q_offset < skip_until {
             continue;
         }
+
+        let mut ext_left = 0;
+        let mut s_off = s_offset;
+        while ext_left < ext_to && ext_left < s_offset && q_offset - ext_left > 0 {
+            s_off -= 1;
+            let q = q_offset - ext_left - 1;
+            let s_byte = subject[(s_off / 4) as usize];
+            let s_base = ((s_byte << (2 * (s_off % 4))) >> 6) & 3;
+            if s_base != query[q as usize] {
+                break;
+            }
+            ext_left += 1;
+        }
+
+        if ext_left < ext_to {
+            let mut ext_right = 0;
+            s_off = s_offset.saturating_add(lut_word_length);
+            if s_off.saturating_add(ext_to).saturating_sub(ext_left) > s_range as i32 {
+                continue;
+            }
+            let mut q = q_offset.saturating_add(lut_word_length);
+            while ext_right < ext_to.saturating_sub(ext_left) {
+                if q < 0 || q >= query.len() as i32 || s_off < 0 || s_off >= subject_length {
+                    break;
+                }
+                let s_byte = subject[(s_off / 4) as usize];
+                let s_base = ((s_byte << (2 * (s_off % 4))) >> 6) & 3;
+                if s_base != query[q as usize] {
+                    break;
+                }
+                s_off += 1;
+                q += 1;
+                ext_right += 1;
+            }
+            if ext_left + ext_right < ext_to {
+                continue;
+            }
+        }
+
+        q_offset -= ext_left;
+        s_offset -= ext_left;
 
         let context = crate::queryinfo::bsearch_context_info(q_offset, query_info);
         let Some(context_info) = query_info.contexts.get(context.max(0) as usize) else {
@@ -4163,7 +4203,9 @@ pub fn blast_na_extend_jumper(
         if query_slice.len() < query_len.max(0) as usize {
             continue;
         }
-        let Some((new_hsp, right_ungapped_ext_len)) = blast_na_extend_jumper_extend_one_hit(
+        let mut num_identical = 0;
+        let mut right_ungapped_ext_len = 0;
+        let status = jumper_gapped_alignment_compressed_with_traceback(
             query_slice,
             subject,
             query_len,
@@ -4172,11 +4214,51 @@ pub fn blast_na_extend_jumper(
             s_offset,
             jumper,
             score_params,
-            hit_params,
             align_params,
+            &mut num_identical,
+            &mut right_ungapped_ext_len,
+        );
+        if status != 0 {
+            continue;
+        }
+        let Some((
+            score,
+            query_align_start,
+            query_align_stop,
+            subject_align_start,
+            subject_align_stop,
+        )) = jumper_alignment_outputs(jumper)
+        else {
+            continue;
+        };
+        if !jumper_good_align(
+            score,
+            query_align_start,
+            query_align_stop,
+            subject_align_start,
+            subject_align_stop,
+            num_identical,
+            &hit_params.options,
+            query_len,
+        ) {
+            continue;
+        }
+        let Some((new_hsp, _map_info)) = s_create_hsp(
+            query_slice,
+            query_len,
             context,
             context_info.frame,
+            subject,
+            subject_length,
             subject_frame,
+            jumper,
+            query_align_start,
+            query_align_stop,
+            subject_align_start,
+            subject_align_stop,
+            score,
+            score_params.penalty,
+            hit_params.options.splice,
         ) else {
             continue;
         };
@@ -4186,25 +4268,31 @@ pub fn blast_na_extend_jumper(
             .saturating_add(right_ungapped_ext_len);
         last_diag = diag;
 
-        let status = blast_na_extend_jumper_save_hsp_and_rescue(
-            new_hsp,
-            subject_index,
-            context,
-            query_slice,
-            context_info.frame,
-            query_len,
-            subject,
-            subject_length,
-            subject_frame,
-            score_params,
-            hit_params.options.longest_intron,
-            hsp_list,
-        );
-        if status < 0 {
-            return -1;
-        }
-        if status > 0 {
+        let saved_hsp = new_hsp.clone();
+        let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+        if status != 0 {
             break;
+        }
+        if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
+            if let Some(s_index) = subject_index {
+                let status = blast_na_extend_jumper_small_word_rescue(
+                    &saved_hsp,
+                    s_index,
+                    context,
+                    query_slice,
+                    context_info.frame,
+                    query_len,
+                    subject,
+                    subject_length,
+                    subject_frame,
+                    score_params,
+                    hit_params.options.longest_intron,
+                    hsp_list,
+                );
+                if status < 0 {
+                    return -1;
+                }
+            }
         }
     }
 
@@ -4221,176 +4309,6 @@ fn blast_na_extend_jumper_sort_hits(offset_pairs: &mut [crate::lookup::OffsetPai
             .then_with(|| a.query_offset.cmp(&b.query_offset))
             .then_with(|| a.subject_offset.cmp(&b.subject_offset))
     });
-}
-
-/// NCBI: exact left/right pre-extension phase in `BlastNaExtendJumper`.
-fn blast_na_extend_jumper_preextend_hit(
-    pair: crate::lookup::OffsetPair,
-    query: &[u8],
-    subject: &[u8],
-    subject_length: i32,
-    lut_word_length: i32,
-    ext_to: i32,
-    s_range: u32,
-) -> Option<(i32, i32, i64)> {
-    let mut s_offset = pair.subject_offset;
-    let mut q_offset = pair.query_offset;
-    if q_offset < 0 || s_offset < 0 || q_offset >= query.len() as i32 || s_offset >= subject_length
-    {
-        return None;
-    }
-    let diag = i64::from(s_offset) - i64::from(q_offset);
-    let mut ext_left = 0;
-    while ext_left < ext_to && ext_left < s_offset && q_offset - ext_left > 0 {
-        let probe_s = s_offset - ext_left - 1;
-        let probe_q = q_offset - ext_left - 1;
-        if crate::encoding::ncbi2na_base_at(subject, probe_s as usize)
-            != query.get(probe_q as usize).copied().unwrap_or(0xff)
-        {
-            break;
-        }
-        ext_left += 1;
-    }
-
-    if ext_left < ext_to {
-        let mut ext_right = 0;
-        let mut s_off = s_offset.saturating_add(lut_word_length);
-        if s_off.saturating_add(ext_to).saturating_sub(ext_left) > s_range as i32 {
-            return None;
-        }
-        let mut q_off = q_offset.saturating_add(lut_word_length);
-        while ext_right < ext_to.saturating_sub(ext_left) {
-            if crate::encoding::ncbi2na_base_at(subject, s_off as usize)
-                != query.get(q_off as usize).copied().unwrap_or(0xff)
-            {
-                break;
-            }
-            s_off += 1;
-            q_off += 1;
-            ext_right += 1;
-        }
-        if ext_left + ext_right < ext_to {
-            return None;
-        }
-    }
-
-    q_offset -= ext_left;
-    s_offset -= ext_left;
-    Some((q_offset, s_offset, diag))
-}
-
-/// NCBI: Jumper traceback, `JumperGoodAlign`, and `s_CreateHSP` for one hit.
-#[allow(clippy::too_many_arguments)]
-fn blast_na_extend_jumper_extend_one_hit(
-    query_slice: &[u8],
-    subject: &[u8],
-    query_len: i32,
-    subject_length: i32,
-    local_q_offset: i32,
-    s_offset: i32,
-    jumper: &mut JumperGapAlign,
-    score_params: &crate::parameters::ScoringParameters,
-    hit_params: &crate::parameters::HitSavingParameters,
-    align_params: JumperAlignParams,
-    context: i32,
-    context_frame: i32,
-    subject_frame: i32,
-) -> Option<(crate::hspstream::Hsp, i32)> {
-    let mut num_identical = 0;
-    let mut right_ungapped_ext_len = 0;
-    let status = jumper_gapped_alignment_compressed_with_traceback(
-        query_slice,
-        subject,
-        query_len,
-        subject_length,
-        local_q_offset,
-        s_offset,
-        jumper,
-        score_params,
-        align_params,
-        &mut num_identical,
-        &mut right_ungapped_ext_len,
-    );
-    if status != 0 {
-        return None;
-    }
-    let (score, query_align_start, query_align_stop, subject_align_start, subject_align_stop) =
-        jumper_alignment_outputs(jumper)?;
-    if !jumper_good_align(
-        score,
-        query_align_start,
-        query_align_stop,
-        subject_align_start,
-        subject_align_stop,
-        num_identical,
-        &hit_params.options,
-        query_len,
-    ) {
-        return None;
-    }
-    let (new_hsp, _map_info) = s_create_hsp(
-        query_slice,
-        query_len,
-        context,
-        context_frame,
-        subject,
-        subject_length,
-        subject_frame,
-        jumper,
-        query_align_start,
-        query_align_stop,
-        subject_align_start,
-        subject_align_stop,
-        score,
-        score_params.penalty,
-        hit_params.options.splice,
-    )?;
-    Some((new_hsp, right_ungapped_ext_len))
-}
-
-/// NCBI: `Blast_HSPListSaveHSP` plus represented mapper small-word rescue.
-#[allow(clippy::too_many_arguments)]
-fn blast_na_extend_jumper_save_hsp_and_rescue(
-    new_hsp: crate::hspstream::Hsp,
-    subject_index: Option<&SubjectIndex>,
-    context: i32,
-    query_slice: &[u8],
-    context_frame: i32,
-    query_len: i32,
-    subject: &[u8],
-    subject_length: i32,
-    subject_frame: i32,
-    score_params: &crate::parameters::ScoringParameters,
-    longest_intron: i32,
-    hsp_list: &mut crate::hspstream::HspList,
-) -> i32 {
-    let saved_hsp = new_hsp.clone();
-    let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
-    if status != 0 {
-        return 1;
-    }
-    if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
-        if let Some(s_index) = subject_index {
-            let status = blast_na_extend_jumper_small_word_rescue(
-                &saved_hsp,
-                s_index,
-                context,
-                query_slice,
-                context_frame,
-                query_len,
-                subject,
-                subject_length,
-                subject_frame,
-                score_params,
-                longest_intron,
-                hsp_list,
-            );
-            if status < 0 {
-                return -1;
-            }
-        }
-    }
-    0
 }
 
 /// blast-rs: Port-shaped equivalent of NCBI `JumperNaWordFinder`

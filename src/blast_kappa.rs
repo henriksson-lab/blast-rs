@@ -10126,10 +10126,10 @@ mod struct_tests {
         }];
         let mut lists: [Option<Box<BlastCompoAlignment>>; 6] = Default::default();
         let mut counts = [0i32; 6];
-        result_hsp_to_distinct_align(&mut lists, &mut counts, &hsps, 0, 32.0);
+        result_hsp_to_distinct_align(&mut lists, &mut counts, &hsps, 0, 32.125);
         // C: `(int)(hsp->score * localScalingFactor)` — Rust uses
-        // `.round() as i32` for nearest-integer behavior.
-        assert_eq!(lists[0].as_ref().unwrap().score, 3200);
+        // truncating cast semantics, not `BLAST_Nint`.
+        assert_eq!(lists[0].as_ref().unwrap().score, 3212);
         assert_eq!(lists[0].as_ref().unwrap().frame, -2);
     }
 
@@ -14250,13 +14250,26 @@ pub fn blast_redo_alignment_core_mt(
         align_params.compo_adjust_mode,
         CompoAdjustMode::NoCompositionBasedStats
     ) {
-        s_blast_redo_alignment_core_mt_no_composition(
-            program,
-            query_info,
-            align_params,
-            this_match,
-            results,
-        )
+        if this_match.hsps.is_empty() {
+            0
+        } else {
+            this_match.sort_by_score();
+            this_match.best_evalue = this_match
+                .hsps
+                .iter()
+                .map(|hsp| hsp.evalue)
+                .fold(i32::MAX as f64, f64::min);
+            let per_query =
+                s_blast_redo_alignment_group_hsps_by_query(program, query_info, this_match);
+            let mut touched_queries = s_blast_redo_alignment_update_hitlists(
+                per_query,
+                align_params,
+                this_match,
+                results,
+            );
+            s_blast_redo_alignment_finalize_touched_hitlists(&mut touched_queries, results);
+            0
+        }
     } else {
         -1
     };
@@ -14272,26 +14285,6 @@ pub fn blast_redo_alignment_core_mt(
     );
 
     status
-}
-
-/// NCBI: no-composition branch inside `Blast_RedoAlignmentCore_MT`, over the
-/// represented in-memory single-match input.
-fn s_blast_redo_alignment_core_mt_no_composition(
-    program: ProgramType,
-    query_info: &crate::queryinfo::QueryInfo,
-    align_params: &BlastRedoAlignParams,
-    this_match: &mut HspList,
-    results: &mut crate::hspstream::HspResults,
-) -> i32 {
-    if this_match.hsps.is_empty() {
-        return 0;
-    }
-    s_hsp_list_normalize_current_best_evalue(this_match);
-    let per_query = s_blast_redo_alignment_group_hsps_by_query(program, query_info, this_match);
-    let mut touched_queries =
-        s_blast_redo_alignment_update_hitlists(per_query, align_params, this_match, results);
-    s_blast_redo_alignment_finalize_touched_hitlists(&mut touched_queries, results);
-    0
 }
 
 /// NCBI: score ordering and best-evalue refresh for an HSP list.
@@ -19568,7 +19561,7 @@ pub fn result_hsp_to_distinct_align(
         }
         let frame_index = frame_index as usize;
         let mut new_align = BlastCompoAlignment::new(
-            crate::math::blast_nint(hsp.score as f64 * local_scaling_factor) as i32,
+            (hsp.score as f64 * local_scaling_factor) as i32,
             MatrixAdjustRule::DontAdjust,
             hsp.context,
             hsp.query_offset,

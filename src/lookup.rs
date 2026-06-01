@@ -2905,15 +2905,50 @@ pub fn s_mb_disc_word_scan_subject_11_18_1(
 ) -> Vec<OffsetPair> {
     debug_assert_eq!(mb_lt.lut_word_length, 11);
     debug_assert_eq!(mb_lt.word_length, 18);
-    s_mb_disc_word_scan_subject_template(
-        mb_lt,
-        subject,
-        subject_len,
-        max_hits,
-        scan_range,
-        18,
-        DiscTemplateType::Template11_18Coding,
-    )
+    debug_assert_eq!(mb_lt.template_type, DiscTemplateType::Template11_18Coding);
+
+    let mut hits = Vec::new();
+    const TEMPLATE_LENGTH: usize = 18;
+    if subject_len < TEMPLATE_LENGTH {
+        return hits;
+    }
+    let last_start = scan_range
+        .min(subject_len.saturating_sub(TEMPLATE_LENGTH))
+        .saturating_add(1);
+    let max_hits = max_hits.saturating_sub(mb_lt.longest_chain.max(0) as usize);
+    let template_mask = (1u64 << (BITS_PER_NUC * TEMPLATE_LENGTH as u32)) - 1;
+    let mut accum = 0u64;
+
+    for pos in 0..subject_len {
+        accum = ((accum << BITS_PER_NUC)
+            | u64::from(crate::encoding::ncbi2na_base_at(subject, pos)))
+            & template_mask;
+        if pos + 1 < TEMPLATE_LENGTH {
+            continue;
+        }
+
+        let s_off = pos + 1 - TEMPLATE_LENGTH;
+        if s_off >= last_start {
+            break;
+        }
+        let lo = accum as u32;
+        let hi = (accum >> 32) as u32;
+        let index = (lo & 0x00000003)
+            | ((lo & 0x000000f0) >> 2)
+            | ((lo & 0x00003c00) >> 4)
+            | ((lo & 0x00030000) >> 6)
+            | ((lo & 0x03c00000) >> 10)
+            | ((lo & 0xf0000000) >> 12)
+            | ((hi & 0x0000000c) << 18);
+        if s_blast_mb_lookup_has_hits(mb_lt, i64::from(index)) != 0 {
+            if hits.len() >= max_hits {
+                break;
+            }
+            s_blast_mb_lookup_retrieve(mb_lt, i64::from(index), &mut hits, s_off as i32);
+        }
+    }
+
+    hits
 }
 
 /// Port of NCBI static `s_MB_DiscWordScanSubject_11_21_1`
@@ -2927,15 +2962,51 @@ pub fn s_mb_disc_word_scan_subject_11_21_1(
 ) -> Vec<OffsetPair> {
     debug_assert_eq!(mb_lt.lut_word_length, 11);
     debug_assert_eq!(mb_lt.word_length, 21);
-    s_mb_disc_word_scan_subject_template(
-        mb_lt,
-        subject,
-        subject_len,
-        max_hits,
-        scan_range,
-        21,
-        DiscTemplateType::Template11_21Coding,
-    )
+    debug_assert_eq!(mb_lt.template_type, DiscTemplateType::Template11_21Coding);
+
+    let mut hits = Vec::new();
+    const TEMPLATE_LENGTH: usize = 21;
+    if subject_len < TEMPLATE_LENGTH {
+        return hits;
+    }
+    let last_start = scan_range
+        .min(subject_len.saturating_sub(TEMPLATE_LENGTH))
+        .saturating_add(1);
+    let max_hits = max_hits.saturating_sub(mb_lt.longest_chain.max(0) as usize);
+    let template_mask = (1u64 << (BITS_PER_NUC * TEMPLATE_LENGTH as u32)) - 1;
+    let mut accum = 0u64;
+
+    for pos in 0..subject_len {
+        accum = ((accum << BITS_PER_NUC)
+            | u64::from(crate::encoding::ncbi2na_base_at(subject, pos)))
+            & template_mask;
+        if pos + 1 < TEMPLATE_LENGTH {
+            continue;
+        }
+
+        let s_off = pos + 1 - TEMPLATE_LENGTH;
+        if s_off >= last_start {
+            break;
+        }
+        let lo = accum as u32;
+        let hi = (accum >> 32) as u32;
+        let index = (lo & 0x00000003)
+            | ((lo & 0x000000f0) >> 2)
+            | ((lo & 0x00000c00) >> 4)
+            | ((lo & 0x000f0000) >> 8)
+            | ((lo & 0x00c00000) >> 10)
+            | ((lo & 0xf0000000) >> 14)
+            | ((hi & 0x0000000c) << 16)
+            | ((hi & 0x00000300) << 12);
+        if s_blast_mb_lookup_has_hits(mb_lt, i64::from(index)) != 0 {
+            if hits.len() >= max_hits {
+                break;
+            }
+            s_blast_mb_lookup_retrieve(mb_lt, i64::from(index), &mut hits, s_off as i32);
+        }
+    }
+
+    hits
 }
 
 /// Port of NCBI `s_MBCountWordsInSubject_16_1` (`blast_nalookup.c:1127`)

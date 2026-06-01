@@ -267,7 +267,11 @@ pub fn blast_hsp_get_target_translation<'a>(
     hsp: Option<&Hsp>,
 ) -> Option<BlastTargetTranslationView<'a>> {
     let hsp = hsp?;
-    let context = blast_frame_to_context_blastx(hsp.subject_frame) as usize;
+    let context = crate::util::blast_frame_to_context(hsp.subject_frame, target_t.program_number);
+    if context < 0 {
+        return None;
+    }
+    let context = context as usize;
     let range = target_t.range.as_mut()?;
     if context >= target_t.translations.len() || 2 * context + 1 >= range.len() {
         return None;
@@ -1184,19 +1188,6 @@ pub fn s_blast_hsp_rps_update(hsp: &mut Hsp) {
     }
 }
 
-/// blast-rs: Local BLASTX frame-to-context mapping helper; not a direct NCBI C port.
-fn blast_frame_to_context_blastx(frame: i32) -> i32 {
-    match frame {
-        1 => 0,
-        2 => 1,
-        3 => 2,
-        -1 => 3,
-        -2 => 4,
-        -3 => 5,
-        _ => 0,
-    }
-}
-
 /// NCBI: s_BlastHSPListRPSUpdate (blast_traceback.c:155).
 ///
 /// For RPS programs, the traceback code has query/subject roles reversed.
@@ -1216,7 +1207,7 @@ pub fn s_blast_hsp_list_rps_update(program: crate::program::ProgramType, hsp_lis
         s_blast_hsp_rps_update(hsp);
 
         if program == crate::program::RPS_TBLASTN {
-            hsp.context = blast_frame_to_context_blastx(hsp.query_frame);
+            hsp.context = crate::util::blast_frame_to_context(hsp.query_frame, program);
         }
     }
 
@@ -5415,6 +5406,30 @@ mod tests {
         assert!(
             blast_hsp_get_target_translation(&mut partial_without_subject, Some(&hsp)).is_none()
         );
+    }
+
+    #[test]
+    fn target_translation_uses_program_aware_context_for_nucleotide_minus_strand() {
+        let mut target = crate::util::SBlastTargetTranslation {
+            program_number: crate::program::BLASTN,
+            gen_code_string: crate::util::STANDARD_GENETIC_CODE,
+            translations: vec![None; crate::util::NUM_FRAMES],
+            partial: false,
+            num_frames: crate::util::NUM_FRAMES as i32,
+            range: Some(vec![0; 2 * crate::util::NUM_FRAMES]),
+            subject_blk: None,
+        };
+        target.translations[1] = Some(vec![20, 21, 22, 23]);
+        target.range.as_mut().unwrap()[2] = 1;
+        target.range.as_mut().unwrap()[3] = 3;
+
+        let mut hsp = make_hsp(30, 1.0e-6);
+        hsp.subject_frame = -1;
+
+        let view = blast_hsp_get_target_translation(&mut target, Some(&hsp)).expect("view");
+        assert_eq!(view.pointer_offset, 0);
+        assert_eq!(view.translated_length, 3);
+        assert_eq!(view.get(1), Some(21));
     }
 
     #[test]

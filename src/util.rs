@@ -503,6 +503,25 @@ pub enum SubjectMaskingType {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompressedNucSeq {
+    pub buffer: Vec<u8>,
+    pub offset: usize,
+}
+
+impl CompressedNucSeq {
+    /// Returns the logical `compressed_nuc_seq` view, equivalent to C's
+    /// `compressed_nuc_seq_start + offset`.
+    pub fn as_logical_slice(&self) -> &[u8] {
+        self.buffer.get(self.offset..).unwrap_or(&[])
+    }
+
+    /// Returns the allocation start, equivalent to C's `compressed_nuc_seq_start`.
+    pub fn as_start_slice(&self) -> &[u8] {
+        &self.buffer
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlastSequenceBlk {
     pub sequence: Option<Vec<u8>>,
     pub sequence_start: Option<Vec<u8>>,
@@ -517,7 +536,7 @@ pub struct BlastSequenceBlk {
     pub nomask_allocated: bool,
     pub oof_sequence: Option<Vec<u8>>,
     pub oof_sequence_allocated: bool,
-    pub compressed_nuc_seq: Option<Vec<u8>>,
+    pub compressed_nuc_seq: Option<CompressedNucSeq>,
     pub compressed_nuc_seq_start: Option<Vec<u8>>,
     pub lcase_mask_allocated: bool,
     pub chunk: i32,
@@ -1001,7 +1020,10 @@ pub fn blast_compress_blastna_sequence(seq_blk: Option<&mut BlastSequenceBlk>) -
     }
 
     seq_blk.compressed_nuc_seq_start = Some(new_seq.clone());
-    seq_blk.compressed_nuc_seq = Some(new_seq[3..].to_vec());
+    seq_blk.compressed_nuc_seq = Some(CompressedNucSeq {
+        buffer: new_seq,
+        offset: 3,
+    });
     0
 }
 
@@ -1141,59 +1163,394 @@ pub fn blast_translate_compressed_sequence(
     if frame == 0 || length + 1 < frame.unsigned_abs() as usize + CODON_LENGTH {
         return 0;
     }
+    if nt_seq.is_empty() {
+        return 0;
+    }
 
     prot_seq[0] = NULLB;
     let prot_seq_start = 1usize;
     let mut out = prot_seq_start;
-    let abs_frame = frame.unsigned_abs() as usize;
+    let mut codon = 0usize;
+    let remainder = length % 4;
 
     if frame > 0 {
-        let mut state = abs_frame - 1;
-        let mut pos = state;
-        while pos + CODON_LENGTH <= length {
-            let byte_index = pos / 4;
-            let byte_value = nt_seq[byte_index];
-            let codon = match state {
-                0 => byte_value >> 2,
-                1 => byte_value & 0x3f,
-                2 => {
-                    let next_byte = nt_seq.get(byte_index + 1).copied().unwrap_or(0);
-                    ((byte_value & 0x0f) << 2) | (next_byte >> 6)
+        let full_bytes = length / 4usize;
+        let nt_seq_end = full_bytes.saturating_sub(1);
+        let last_remainder = (4 * (length / 4) + 1 - frame as usize) % CODON_LENGTH;
+        let total_remainder = last_remainder + remainder;
+
+        let mut state = frame as usize - 1;
+        let mut nt = 0usize;
+        let mut byte_value = nt_seq[nt] as usize;
+
+        while nt < nt_seq_end {
+            match state {
+                0 => {
+                    codon = byte_value >> 2;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+
+                    codon = (byte_value & 3) << 4;
+                    nt += 1;
+                    byte_value = nt_seq[nt] as usize;
+                    codon += byte_value >> 4;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    if nt >= nt_seq_end {
+                        state = 2;
+                    } else {
+                        codon = (byte_value & 15) << 2;
+                        nt += 1;
+                        byte_value = nt_seq[nt] as usize;
+                        codon += byte_value >> 6;
+                        prot_seq[out] = translation[codon];
+                        out += 1;
+                        if nt >= nt_seq_end {
+                            state = 1;
+                        } else {
+                            codon = byte_value & 63;
+                            prot_seq[out] = translation[codon];
+                            out += 1;
+                            nt += 1;
+                            byte_value = nt_seq[nt] as usize;
+                            state = 0;
+                        }
+                    }
                 }
                 3 => {
-                    let next_byte = nt_seq.get(byte_index + 1).copied().unwrap_or(0);
-                    ((byte_value & 0x03) << 4) | (next_byte >> 4)
+                    codon = (byte_value & 3) << 4;
+                    nt += 1;
+                    byte_value = nt_seq[nt] as usize;
+                    codon += byte_value >> 4;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    if nt >= nt_seq_end {
+                        state = 2;
+                    } else {
+                        codon = (byte_value & 15) << 2;
+                        nt += 1;
+                        byte_value = nt_seq[nt] as usize;
+                        codon += byte_value >> 6;
+                        prot_seq[out] = translation[codon];
+                        out += 1;
+                        if nt >= nt_seq_end {
+                            state = 1;
+                        } else {
+                            codon = byte_value & 63;
+                            prot_seq[out] = translation[codon];
+                            out += 1;
+                            nt += 1;
+                            byte_value = nt_seq[nt] as usize;
+                            state = 0;
+                        }
+                    }
+                }
+                2 => {
+                    codon = (byte_value & 15) << 2;
+                    nt += 1;
+                    byte_value = nt_seq[nt] as usize;
+                    codon += byte_value >> 6;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    if nt >= nt_seq_end {
+                        state = 1;
+                    } else {
+                        codon = byte_value & 63;
+                        prot_seq[out] = translation[codon];
+                        out += 1;
+                        nt += 1;
+                        byte_value = nt_seq[nt] as usize;
+                        state = 0;
+                    }
+                }
+                1 => {
+                    codon = byte_value & 63;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    nt += 1;
+                    byte_value = nt_seq[nt] as usize;
+                    state = 0;
                 }
                 _ => unreachable!(),
-            } as usize;
+            }
+
+            while nt + 10 < nt_seq_end {
+                nt += 1;
+                let byte_value1 = nt_seq[nt] as usize;
+                nt += 1;
+                let byte_value2 = nt_seq[nt] as usize;
+                nt += 1;
+                let byte_value3 = nt_seq[nt] as usize;
+
+                codon = byte_value >> 2;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = (byte_value & 3) << 4;
+                codon += byte_value1 >> 4;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                nt += 1;
+                let byte_value4 = nt_seq[nt] as usize;
+                codon = (byte_value1 & 15) << 2;
+                codon += byte_value2 >> 6;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = byte_value2 & 63;
+                nt += 1;
+                let byte_value5 = nt_seq[nt] as usize;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = byte_value3 >> 2;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                nt += 1;
+                byte_value = nt_seq[nt] as usize;
+                codon = (byte_value3 & 3) << 4;
+                codon += byte_value4 >> 4;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = (byte_value4 & 15) << 2;
+                codon += byte_value5 >> 6;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = byte_value5 & 63;
+                prot_seq[out] = translation[codon];
+                out += 1;
+                state = 0;
+            }
+        }
+
+        if state == 1 {
+            byte_value = nt_seq[nt] as usize;
+            codon = byte_value & 63;
+            state = 0;
             prot_seq[out] = translation[codon];
             out += 1;
-            pos += CODON_LENGTH;
-            state = (state + CODON_LENGTH) & 3;
+        } else if state == 0 {
+            byte_value = nt_seq[nt] as usize;
+            codon = byte_value >> 2;
+            state = 3;
+            prot_seq[out] = translation[codon];
+            out += 1;
+        }
+
+        if full_bytes > 0 && total_remainder >= CODON_LENGTH {
+            if nt_seq.len() <= nt_seq_end + 1 {
+                prot_seq[out] = NULLB;
+                return out - prot_seq_start;
+            }
+            byte_value = nt_seq[nt_seq_end] as usize;
+            let last_byte = nt_seq[nt_seq_end + 1] as usize;
+            if state == 0 {
+                codon = last_byte >> 2;
+            } else if state == 2 {
+                codon = (byte_value & 15) << 2;
+                codon += last_byte >> 6;
+            } else if state == 3 {
+                codon = (byte_value & 3) << 4;
+                codon += last_byte >> 4;
+            }
+            prot_seq[out] = translation[codon];
+            out += 1;
         }
     } else {
-        let mut end = length + 1 - abs_frame;
-        while end >= CODON_LENGTH {
-            let pos = end - CODON_LENGTH;
-            let state = pos & 3;
-            let byte_index = pos / 4;
-            let byte_value = nt_seq[byte_index];
-            let codon = match state {
-                0 => byte_value >> 2,
-                1 => byte_value & 0x3f,
-                2 => {
-                    let next_byte = nt_seq.get(byte_index + 1).copied().unwrap_or(0);
-                    ((byte_value & 0x0f) << 2) | (next_byte >> 6)
-                }
-                3 => {
-                    let next_byte = nt_seq.get(byte_index + 1).copied().unwrap_or(0);
-                    ((byte_value & 0x03) << 4) | (next_byte >> 4)
-                }
-                _ => unreachable!(),
-            } as usize;
+        let nt_seq_start = 0usize;
+        let full_bytes = length / 4usize;
+        let mut nt = full_bytes;
+        let mut state = remainder as i32 + frame;
+        let mut emitted_from_partial_tail = false;
+
+        if state >= 0 {
+            if nt >= nt_seq.len() {
+                prot_seq[out] = NULLB;
+                return out - prot_seq_start;
+            }
+            let last_byte = nt_seq[nt] as usize;
+            nt = nt.saturating_sub(1);
+            emitted_from_partial_tail = true;
+            if state == 0 {
+                codon = last_byte >> 6;
+                let byte_value = nt_seq[nt] as usize;
+                codon += (byte_value & 15) << 2;
+                state = 1;
+            } else if state == 1 {
+                codon = last_byte >> 4;
+                let byte_value = nt_seq[nt] as usize;
+                codon += (byte_value & 3) << 4;
+                state = 2;
+            } else if state == 2 {
+                codon = last_byte >> 2;
+                state = 3;
+            }
             prot_seq[out] = translation[codon];
             out += 1;
-            end -= CODON_LENGTH;
+        } else {
+            state = 3 + remainder as i32 + frame + 1;
+            nt = nt.saturating_sub(1);
+        }
+
+        let mut byte_value = nt_seq[nt] as usize;
+        while nt > nt_seq_start {
+            match state {
+                3 => {
+                    codon = byte_value & 63;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+
+                    codon = byte_value >> 6;
+                    nt -= 1;
+                    byte_value = nt_seq[nt] as usize;
+                    codon += (byte_value & 15) << 2;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    if nt <= nt_seq_start {
+                        state = 1;
+                    } else {
+                        codon = byte_value >> 4;
+                        nt -= 1;
+                        byte_value = nt_seq[nt] as usize;
+                        codon += (byte_value & 3) << 4;
+                        prot_seq[out] = translation[codon];
+                        out += 1;
+                        if nt <= nt_seq_start {
+                            state = 2;
+                        } else {
+                            codon = byte_value >> 2;
+                            prot_seq[out] = translation[codon];
+                            out += 1;
+                            nt -= 1;
+                            byte_value = nt_seq[nt] as usize;
+                            state = 3;
+                        }
+                    }
+                }
+                0 => {
+                    codon = byte_value >> 6;
+                    nt -= 1;
+                    byte_value = nt_seq[nt] as usize;
+                    codon += (byte_value & 15) << 2;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    if nt <= nt_seq_start {
+                        state = 1;
+                    } else {
+                        codon = byte_value >> 4;
+                        nt -= 1;
+                        byte_value = nt_seq[nt] as usize;
+                        codon += (byte_value & 3) << 4;
+                        prot_seq[out] = translation[codon];
+                        out += 1;
+                        if nt <= nt_seq_start {
+                            state = 2;
+                        } else {
+                            codon = byte_value >> 2;
+                            prot_seq[out] = translation[codon];
+                            out += 1;
+                            nt -= 1;
+                            byte_value = nt_seq[nt] as usize;
+                            state = 3;
+                        }
+                    }
+                }
+                1 => {
+                    codon = byte_value >> 4;
+                    nt -= 1;
+                    byte_value = nt_seq[nt] as usize;
+                    codon += (byte_value & 3) << 4;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    if nt <= nt_seq_start {
+                        state = 2;
+                    } else {
+                        codon = byte_value >> 2;
+                        prot_seq[out] = translation[codon];
+                        out += 1;
+                        nt -= 1;
+                        byte_value = nt_seq[nt] as usize;
+                        state = 3;
+                    }
+                }
+                2 => {
+                    codon = byte_value >> 2;
+                    prot_seq[out] = translation[codon];
+                    out += 1;
+                    nt -= 1;
+                    byte_value = nt_seq[nt] as usize;
+                    state = 3;
+                }
+                _ => unreachable!(),
+            }
+
+            while nt > nt_seq_start + 10 {
+                nt -= 1;
+                let byte_value1 = nt_seq[nt] as usize;
+                nt -= 1;
+                let byte_value2 = nt_seq[nt] as usize;
+                nt -= 1;
+                let byte_value3 = nt_seq[nt] as usize;
+
+                codon = byte_value & 63;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = byte_value >> 6;
+                codon += (byte_value1 & 15) << 2;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                nt -= 1;
+                let byte_value4 = nt_seq[nt] as usize;
+                codon = byte_value1 >> 4;
+                codon += (byte_value2 & 3) << 4;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = byte_value2 >> 2;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                nt -= 1;
+                let byte_value5 = nt_seq[nt] as usize;
+
+                codon = byte_value3 & 63;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                nt -= 1;
+                byte_value = nt_seq[nt] as usize;
+                codon = byte_value3 >> 6;
+                codon += (byte_value4 & 15) << 2;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = byte_value4 >> 4;
+                codon += (byte_value5 & 3) << 4;
+                prot_seq[out] = translation[codon];
+                out += 1;
+
+                codon = byte_value5 >> 2;
+                prot_seq[out] = translation[codon];
+                out += 1;
+            }
+        }
+
+        byte_value = nt_seq[nt] as usize;
+        if full_bytes == 0 && emitted_from_partial_tail {
+        } else if state == 3 {
+            codon = byte_value & 63;
+            prot_seq[out] = translation[codon];
+            out += 1;
+        } else if state == 2 {
+            codon = byte_value >> 2;
+            prot_seq[out] = translation[codon];
+            out += 1;
         }
     }
 
@@ -2046,10 +2403,20 @@ mod tests {
         blk.length = 5;
         assert_eq!(blast_compress_blastna_sequence(Some(&mut blk)), 0);
         let compressed = blk.compressed_nuc_seq.unwrap();
-        assert_eq!(compressed[0], 0b00_01_10_11);
-        assert_eq!(compressed[1], 0b01_10_11_00);
-        assert_eq!(compressed[2], 0b10_11_00_00);
-        assert_eq!(compressed[4], 0);
+        assert_eq!(compressed.offset, 3);
+        assert_eq!(
+            blk.compressed_nuc_seq_start.as_deref(),
+            Some(compressed.as_start_slice())
+        );
+        assert_eq!(compressed.as_start_slice()[0], 0b00);
+        assert_eq!(compressed.as_start_slice()[1], 0b00_01);
+        assert_eq!(compressed.as_start_slice()[2], 0b00_01_10);
+
+        let logical = compressed.as_logical_slice();
+        assert_eq!(logical[0], 0b00_01_10_11);
+        assert_eq!(logical[1], 0b01_10_11_00);
+        assert_eq!(logical[2], 0b10_11_00_00);
+        assert_eq!(logical[4], 0);
     }
 
     #[test]
@@ -2150,6 +2517,42 @@ mod tests {
             blast_translate_compressed_sequence(&table, ncbi4na.len(), Some(&packed), 1, None),
             0
         );
+    }
+
+    #[test]
+    fn test_blast_translate_compressed_sequence_matches_ncbi4na_all_tails_and_fast_loop() {
+        let table = s_blast_get_translation_table(Some(&STANDARD_GENETIC_CODE), false).unwrap();
+        let rc_table = s_blast_get_translation_table(Some(&STANDARD_GENETIC_CODE), true).unwrap();
+        let bases = [1u8, 2, 4, 8];
+
+        for len in 3..96usize {
+            let ncbi4na: Vec<u8> = (0..len).map(|i| bases[(i * 7 + len) & 3]).collect();
+            let (packed_status, packed) =
+                blast_pack_dna(&ncbi4na, ncbi4na.len(), E_BLAST_ENCODING_NCBI4NA);
+            assert_eq!(packed_status, 0);
+            let packed = packed.unwrap();
+            let (flat, offsets) =
+                blast_get_all_translations(&ncbi4na, ncbi4na.len(), &STANDARD_GENETIC_CODE);
+
+            for (context, frame) in [1, 2, 3, -1, -2, -3].into_iter().enumerate() {
+                let mut prot = vec![0u8; ncbi4na.len() + 3];
+                let translation = if frame > 0 { &table } else { &rc_table };
+                let got_len = blast_translate_compressed_sequence(
+                    translation,
+                    ncbi4na.len(),
+                    Some(&packed),
+                    frame,
+                    Some(&mut prot),
+                );
+                let begin = offsets[context] as usize;
+                let end = offsets[context + 1] as usize;
+                assert_eq!(
+                    &prot[..=got_len],
+                    &flat[begin..end],
+                    "len {len} frame {frame}"
+                );
+            }
+        }
     }
 
     #[test]
