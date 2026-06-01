@@ -718,19 +718,6 @@ fn apply_tblastx_linked_sum_stats(
         // `gapped_calculation=false` so `blast_link_hsps` reads `kbp` (ungapped),
         // matching `link_hsps.c:457`. The `score_block` already populates both
         // arrays with ungapped Karlin params for this reason.
-        //
-        // For singletons, NCBI's `s_BlastEvenGapLinkHSPs` (called from
-        // `blast_link_hsps` when longest_intron<=0) computes the evalue via
-        // `BLAST_SmallGapSumE` / `BLAST_LargeGapSumE` which apply
-        // `BLAST_GapDecayDivisor(0.5, 1) = 0.5` even for num=1. Our linker
-        // early-returns at hspcnt<=1, so pre-divide singletons by the same
-        // divisor to mirror NCBI's even-gap singleton e-value.
-        if hsp_list.hsp_array.len() == 1 {
-            let divisor = crate::stat::blast_gap_decay_divisor(link_params.gap_decay_rate, 1);
-            if divisor > 0.0 {
-                hsp_list.hsp_array[0].evalue /= divisor;
-            }
-        }
         blast_link_hsps(
             TBLASTX,
             &mut hsp_list,
@@ -808,7 +795,8 @@ fn apply_blastx_linked_sum_stats(
         recompute_evalues_before_uneven_linking: recompute_evalues_before_linking,
     };
 
-    if max_intron_length <= 0 {
+    let longest_intron = translated_gapped_link_longest_intron(max_intron_length);
+    if longest_intron <= 0 {
         for result in results.iter_mut() {
             for hsp in &mut result.hsps {
                 let context = query_info
@@ -851,7 +839,7 @@ fn apply_blastx_linked_sum_stats(
     let link_params = LinkHSPParameters {
         gap_prob: crate::stat::BLAST_GAP_PROB_GAPPED,
         gap_decay_rate: crate::stat::BLAST_GAP_DECAY_RATE_GAPPED,
-        longest_intron: translated_link_longest_intron(max_intron_length),
+        longest_intron,
         ..LinkHSPParameters::default()
     };
 
@@ -1320,46 +1308,6 @@ fn push_hsp_for_subject(
             });
         }
     }
-}
-
-/// blast-rs: Deduplicates translated API HSP variants; not a direct NCBI C port.
-fn prune_translated_hsp_variants(hsps: &mut Vec<Hsp>) {
-    let mut best_by_start: HashMap<(usize, usize, i32, i32), Hsp> = HashMap::new();
-    for hsp in hsps.drain(..) {
-        let key = (
-            hsp.query_start,
-            hsp.subject_start,
-            hsp.query_frame,
-            hsp.subject_frame,
-        );
-        match best_by_start.get_mut(&key) {
-            Some(existing) => {
-                let hsp_span = (
-                    hsp.score,
-                    usize::MAX
-                        - (hsp.query_end.saturating_sub(hsp.query_start)
-                            + hsp.subject_end.saturating_sub(hsp.subject_start)),
-                    usize::MAX - hsp.query_end,
-                    usize::MAX - hsp.subject_end,
-                );
-                let existing_span = (
-                    existing.score,
-                    usize::MAX
-                        - (existing.query_end.saturating_sub(existing.query_start)
-                            + existing.subject_end.saturating_sub(existing.subject_start)),
-                    usize::MAX - existing.query_end,
-                    usize::MAX - existing.subject_end,
-                );
-                if hsp_span > existing_span {
-                    *existing = hsp;
-                }
-            }
-            None => {
-                best_by_start.insert(key, hsp);
-            }
-        }
-    }
-    hsps.extend(best_by_start.into_values());
 }
 
 /// blast-rs: Public-HSP e-value/score ordering adapter; not a direct NCBI C port.
@@ -4308,7 +4256,6 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
 
     let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
-    let x_drop_ungapped = raw_ungapped_xdrop_bits(params.x_drop_ungapped, &ungapped_kbp);
     let x_drop_gapped = raw_gapped_xdrop_bits(params.x_drop_gapped, &prot_kbp);
     let x_drop_final = raw_gapped_xdrop_bits(params.x_drop_final, &prot_kbp);
     // H2: gap_trigger is now computed per-frame from the per-context ungapped
@@ -4436,11 +4383,6 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         let off = attrib_info.contexts[fi].query_offset as usize;
         concat[off..off + (e - b)].copy_from_slice(&translation_buffer[b..e]);
     }
-    let context_starts: Vec<usize> = attrib_info
-        .contexts
-        .iter()
-        .map(|ctx| ctx.query_offset as usize)
-        .collect();
     let concat_lookup = if frame_plans.is_empty() {
         None
     } else {
@@ -4449,19 +4391,17 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         ))
     };
 
-    // NCBI's two-hit finder gates each saved init HSP on the per-context
-    // `cutoffs->cutoff_score` (`aa_ungapped.c:588`). The concatenated 6-frame
-    // scan uses ONE cutoff, so use the minimum per-frame ungapped seed cutoff
-    // (NCBI `cutoff_score_min`); each frame is re-filtered by its own
-    // `blastx_seed_cutoff` downstream.
-    let scan_cutoff_min = frame_plans
+    // NCBI's two-hit finder reads x-drop and save cutoff from the active query
+    // context (`aa_ungapped.c:560,588`), so the concatenated-frame lookup must
+    // carry those per-context word parameters into the scanner.
+    let context_scan_params: Vec<crate::protein_lookup::ProteinContextScanParams> = frame_plans
         .iter()
-        .map(|&(begin, end, _frame, search_space, ctx)| {
-            let frame_gap_trigger_raw = raw_gap_trigger_bits(
-                crate::stat::BLAST_GAP_TRIGGER_PROT,
-                &ungapped_kbp_array[ctx],
-            );
-            protein_prelim_seed_cutoff(
+        .enumerate()
+        .map(|(fi, &(begin, end, _frame, search_space, ctx))| {
+            let frame_ungapped_kbp = &ungapped_kbp_array[ctx];
+            let frame_gap_trigger_raw =
+                raw_gap_trigger_bits(crate::stat::BLAST_GAP_TRIGGER_PROT, frame_ungapped_kbp);
+            let cutoff_score = protein_prelim_seed_cutoff(
                 frame_gap_trigger_raw,
                 prelim_evalue,
                 &prot_kbp,
@@ -4469,11 +4409,14 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 (end - begin) as i32,
                 avg_subject_length as i32,
                 search_space,
-            )
+            );
+            crate::protein_lookup::ProteinContextScanParams {
+                query_start: attrib_info.contexts[fi].query_offset as usize,
+                x_dropoff: raw_ungapped_xdrop_bits(params.x_drop_ungapped, frame_ungapped_kbp),
+                cutoff_score: cutoff_score.max(1),
+            }
         })
-        .min()
-        .unwrap_or(1)
-        .max(1);
+        .collect();
 
     let mut results = vec![None; db.num_oids as usize];
     let mut scratch = ProteinScratch::new();
@@ -4489,16 +4432,14 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             let mut accession: Option<String> = None;
             let mut title: Option<String> = None;
             scratch.diag_buf.clear();
-            let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse_contexts(
+            let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse_context_params(
                 &concat,
                 subj_aa,
                 &matrix,
                 concat_lookup,
-                x_drop_ungapped,
                 params.two_hit_window as i32,
-                scan_cutoff_min,
                 &mut scratch.diag_buf,
-                &context_starts,
+                &context_scan_params,
             );
             if scan_hits.is_empty() {
                 continue;
@@ -4652,7 +4593,6 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     reap_hsps_by_prelim_evalue(&mut results, prelim_evalue);
     apply_api_evalue_filter(&mut results, params.evalue_threshold);
     for result in &mut results {
-        prune_translated_hsp_variants(&mut result.hsps);
         result.hsps.sort_by(compare_hsps_by_evalue_then_score);
     }
     apply_api_min_score_filter(&mut results, params.min_score);
@@ -4686,10 +4626,8 @@ pub fn blastx_batch(
     let matrix_name = protein_matrix_name(params.matrix);
     let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
     let ungapped_kbp = crate::stat::protein_ungapped_kbp_for_matrix(matrix_name);
-    let x_drop_ungapped = raw_ungapped_xdrop_bits(params.x_drop_ungapped, &ungapped_kbp);
     let x_drop_gapped = raw_gapped_xdrop_bits(params.x_drop_gapped, &prot_kbp);
     let x_drop_final = raw_gapped_xdrop_bits(params.x_drop_final, &prot_kbp);
-    let gap_trigger_raw = raw_gap_trigger_bits(crate::stat::BLAST_GAP_TRIGGER_PROT, &ungapped_kbp);
     let total_subj_len: usize = (0..db.num_oids)
         .map(|oid| db.get_seq_len(oid) as usize)
         .sum();
@@ -4729,12 +4667,12 @@ pub fn blastx_batch(
         real_num_seqs: db.num_oids as i32,
     };
     let kbp_array = vec![prot_kbp.clone(); crate::util::NUM_FRAMES];
-    let kbp_std_array = vec![ungapped_kbp.clone(); crate::util::NUM_FRAMES];
 
     struct QPlan {
         translation: Vec<u8>,
         query_info: crate::queryinfo::QueryInfo,
-        frames: Vec<(usize, usize, i32, f64)>,
+        frames: Vec<(usize, usize, i32, f64, usize)>,
+        ungapped_kbp_array: Vec<KarlinBlk>,
         link_avg_query_length: i32,
     }
     let qplans: Vec<QPlan> = queries
@@ -4745,6 +4683,7 @@ pub fn blastx_batch(
                     translation: Vec::new(),
                     query_info: crate::queryinfo::QueryInfo::new_blastp(&[]),
                     frames: Vec::new(),
+                    ungapped_kbp_array: vec![ungapped_kbp.clone(); crate::util::NUM_FRAMES],
                     link_avg_query_length: 1,
                 };
             }
@@ -4767,6 +4706,30 @@ pub fn blastx_batch(
             }
             let mut query_info =
                 crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&frame_offsets);
+            let ideal_ungapped_kbp =
+                crate::stat::protein_ideal_ungapped_kbp_for_matrix(matrix_name);
+            let mut ungapped_kbp_array = vec![ungapped_kbp.clone(); crate::util::NUM_FRAMES];
+            for ctx in 0..crate::util::NUM_FRAMES {
+                let begin = (frame_offsets[ctx] + 1) as usize;
+                let end = frame_offsets[ctx + 1] as usize;
+                if begin >= end {
+                    continue;
+                }
+                let prot: &[u8] = &translation[begin..end];
+                if crate::composition::blast_read_aa_composition(prot, AA_SIZE).1 == 0 {
+                    continue;
+                }
+                let mut ctx_kbp = crate::stat::query_specific_protein_ungapped_kbp_for_matrix(
+                    prot,
+                    matrix_name,
+                    &matrix,
+                );
+                if ctx_kbp.lambda >= ideal_ungapped_kbp.lambda {
+                    ctx_kbp = ideal_ungapped_kbp.clone();
+                }
+                ungapped_kbp_array[ctx] = ctx_kbp;
+            }
+            let kbp_std_array = ungapped_kbp_array.clone();
             crate::blast_setup::blast_calc_eff_lengths(
                 crate::program::BLASTX,
                 &scoring_options,
@@ -4792,13 +4755,14 @@ pub fn blastx_batch(
                     continue;
                 }
                 let search_space = query_info.contexts[ctx].eff_searchsp.max(1) as f64;
-                frames.push((begin, end, frame, search_space));
+                frames.push((begin, end, frame, search_space, ctx));
             }
             QPlan {
                 translation,
                 link_avg_query_length: query_info_average_context_length(&query_info),
                 query_info,
                 frames,
+                ungapped_kbp_array,
             }
         })
         .collect();
@@ -4812,7 +4776,7 @@ pub fn blastx_batch(
     let flat_lengths: Vec<usize> = flat
         .iter()
         .map(|&(qi, fj)| {
-            let (b, e, _, _) = qplans[qi].frames[fj];
+            let (b, e, _, _, _) = qplans[qi].frames[fj];
             e - b
         })
         .collect();
@@ -4820,15 +4784,10 @@ pub fn blastx_batch(
     let mut concat: Vec<u8> =
         vec![crate::protein_lookup::PROTEIN_CONCAT_SENTINEL; attrib_info.seq_buf_len().max(1)];
     for (gi, &(qi, fj)) in flat.iter().enumerate() {
-        let (b, e, _, _) = qplans[qi].frames[fj];
+        let (b, e, _, _, _) = qplans[qi].frames[fj];
         let off = attrib_info.contexts[gi].query_offset as usize;
         concat[off..off + (e - b)].copy_from_slice(&qplans[qi].translation[b..e]);
     }
-    let context_starts: Vec<usize> = attrib_info
-        .contexts
-        .iter()
-        .map(|ctx| ctx.query_offset as usize)
-        .collect();
     let lookup = if flat.is_empty() {
         None
     } else {
@@ -4837,28 +4796,30 @@ pub fn blastx_batch(
         ))
     };
 
-    // NCBI two-hit finder gates each saved init HSP on the per-context
-    // `cutoffs->cutoff_score` (`aa_ungapped.c:588`). This concatenated
-    // multi-query 6-frame scan uses ONE cutoff, so use the minimum per-frame
-    // ungapped seed cutoff (NCBI `cutoff_score_min`); each frame is re-filtered
-    // by its own `blastx_seed_cutoff` downstream.
-    let scan_cutoff_min = flat
+    let context_scan_params: Vec<crate::protein_lookup::ProteinContextScanParams> = flat
         .iter()
-        .map(|&(qi, fj)| {
-            let (begin, end, _frame, search_space) = qplans[qi].frames[fj];
-            protein_prelim_seed_cutoff(
-                gap_trigger_raw,
+        .enumerate()
+        .map(|(gi, &(qi, fj))| {
+            let (begin, end, _frame, search_space, ctx) = qplans[qi].frames[fj];
+            let frame_ungapped_kbp = &qplans[qi].ungapped_kbp_array[ctx];
+            let frame_gap_trigger_raw =
+                raw_gap_trigger_bits(crate::stat::BLAST_GAP_TRIGGER_PROT, frame_ungapped_kbp);
+            let cutoff_score = protein_prelim_seed_cutoff(
+                frame_gap_trigger_raw,
                 prelim_evalue,
                 &prot_kbp,
                 gumbel_blk.as_ref(),
                 (end - begin) as i32,
                 avg_subject_length as i32,
                 search_space,
-            )
+            );
+            crate::protein_lookup::ProteinContextScanParams {
+                query_start: attrib_info.contexts[gi].query_offset as usize,
+                x_dropoff: raw_ungapped_xdrop_bits(params.x_drop_ungapped, frame_ungapped_kbp),
+                cutoff_score: cutoff_score.max(1),
+            }
         })
-        .min()
-        .unwrap_or(1)
-        .max(1);
+        .collect();
 
     let mut results: Vec<Vec<Option<SearchResult>>> = (0..queries.len())
         .map(|_| vec![None; db.num_oids as usize])
@@ -4873,16 +4834,14 @@ pub fn blastx_batch(
             }
             let subj_aa = &subj_raw[..subj_len];
             scratch.diag_buf.clear();
-            let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse_contexts(
+            let scan_hits = crate::protein_lookup::protein_scan_with_table_reuse_context_params(
                 &concat,
                 subj_aa,
                 &matrix,
                 lookup,
-                x_drop_ungapped,
                 params.two_hit_window as i32,
-                scan_cutoff_min,
                 &mut scratch.diag_buf,
-                &context_starts,
+                &context_scan_params,
             );
             if scan_hits.is_empty() {
                 continue;
@@ -4908,10 +4867,14 @@ pub fn blastx_batch(
                 if frame_ungapped.is_empty() {
                     continue;
                 }
-                let (begin, end, frame, search_space) = qplans[qi].frames[fj];
+                let (begin, end, frame, search_space, ctx) = qplans[qi].frames[fj];
                 let prot: &[u8] = &qplans[qi].translation[begin..end];
+                let frame_gap_trigger_raw = raw_gap_trigger_bits(
+                    crate::stat::BLAST_GAP_TRIGGER_PROT,
+                    &qplans[qi].ungapped_kbp_array[ctx],
+                );
                 let blastx_seed_cutoff = protein_prelim_seed_cutoff(
-                    gap_trigger_raw,
+                    frame_gap_trigger_raw,
                     prelim_evalue,
                     &prot_kbp,
                     gumbel_blk.as_ref(),
@@ -5039,7 +5002,6 @@ pub fn blastx_batch(
             reap_hsps_by_prelim_evalue(&mut qres, prelim_evalue);
             apply_api_evalue_filter(&mut qres, params.evalue_threshold);
             for result in &mut qres {
-                prune_translated_hsp_variants(&mut result.hsps);
                 result.hsps.sort_by(compare_hsps_by_evalue_then_score);
             }
             apply_api_min_score_filter(&mut qres, params.min_score);
@@ -5911,9 +5873,6 @@ pub fn tblastn_batch(
     (0..queries.len())
         .map(|qi| {
             let mut qres = std::mem::take(&mut results[qi]);
-            for result in &mut qres {
-                prune_translated_hsp_variants(&mut result.hsps);
-            }
             if translated_sum_stats {
                 apply_tblastn_linked_sum_stats(
                     &mut qres,
@@ -6356,6 +6315,11 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
 
     let mut results = vec![None; db.num_oids as usize];
     let mut cutoff_score_min = i32::MAX;
+    let avg_subj_len_nt = if db.num_oids > 0 {
+        (total_subj_len as i64 / db.num_oids as i64).max(1) as i32
+    } else {
+        1
+    };
     // Reuse a single diagonal tracking buffer across all
     // (oid, s_frame) calls of the concatenated-context word finder.
     // The scanner clears + resizes it on each call, so it's safe to share.
@@ -6423,7 +6387,7 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     q_plan.gap_trigger_raw,
                     ctx_kbp,
                     q_prot.len() as i32,
-                    s_prot.len() as i32,
+                    avg_subj_len_nt,
                     hit_cutoff,
                 );
                 cutoff_score_min = cutoff_score_min.min(save_cutoff);
@@ -6505,11 +6469,6 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     }
 
     if params.sum_stats {
-        let avg_subj_len_nt = if db.num_oids > 0 {
-            (total_subj_len as i64 / db.num_oids as i64).max(1) as i32
-        } else {
-            1
-        };
         let cutoff_score_min = if cutoff_score_min == i32::MAX {
             0
         } else {
@@ -6701,7 +6660,7 @@ pub fn tblastx_batch(
                 gap_trigger_raw: ctx_gap_trigger_raw,
             });
         }
-        let kbp_std_array = vec![ungapped_kbp.clone(); crate::util::NUM_FRAMES];
+        let kbp_std_array = kbp_array.clone();
         crate::blast_setup::blast_calc_eff_lengths(
             crate::program::TBLASTX,
             &scoring_options,
@@ -6737,6 +6696,11 @@ pub fn tblastx_batch(
     if pre.is_empty() {
         return empty();
     }
+    let avg_subj_len_nt = if db.num_oids > 0 {
+        (total_subj_len as i64 / db.num_oids as i64).max(1) as i32
+    } else {
+        1
+    };
 
     // Concatenate all (query, frame) contexts into one lookup with one
     // inter-context sentinel each (matching `QueryInfo::new_blastp` layout).
@@ -6817,7 +6781,7 @@ pub fn tblastx_batch(
                             p.gap_trigger_raw,
                             &p.kbp,
                             q_prot_len,
-                            s_prot.len() as i32,
+                            avg_subj_len_nt,
                             hit_cutoff,
                         );
                         crate::protein_lookup::ProteinContextScanParams {
@@ -6877,7 +6841,7 @@ pub fn tblastx_batch(
                         p.gap_trigger_raw,
                         ctx_kbp,
                         q_prot.len() as i32,
-                        s_prot.len() as i32,
+                        avg_subj_len_nt,
                         hit_cutoff,
                     );
                     let hsps = process_tblastx_pair_hsps(
@@ -6967,7 +6931,7 @@ pub fn tblastx_batch(
                             p.gap_trigger_raw,
                             &p.kbp,
                             p.masked.len() as i32,
-                            1,
+                            avg_subj_len_nt,
                             hit_cutoff,
                         )
                     })

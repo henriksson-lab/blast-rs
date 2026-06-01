@@ -376,10 +376,10 @@ Real-data fixture results:
 
 | Program | Query | Database | Parity summary | Rust time / RSS | NCBI time / RSS | Relative speed |
 |---------|-------|----------|----------------|-----------------|-----------------|----------------|
-| `blastn` | `/tmp/bench/nt20.fa` | `tests/fixtures/large_db/celegans` | sorted row-set identical: 1160/1160 rows | 2.61 s / 90 MB | 0.32 s / 76 MB | Rust 8.2x slower |
-| `blastx` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | Rust 107 rows, NCBI 113; Rust rows all shared, 6 NCBI-only | 1.32 s / 10 MB | 0.58 s / 28 MB | Rust 2.3x slower |
-| `tblastn` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 77/88 NCBI; 21 Rust-only, 11 NCBI-only | 1.89 s / 9 MB | 0.19 s / 26 MB | Rust 9.9x slower |
-| `tblastx` | `/tmp/bench/nt10.fa` | `tests/fixtures/seqn/seqn` | rows shared 258/263 NCBI; 8 Rust-only, 5 NCBI-only | 1.88 s / 11 MB | 0.42 s / 26 MB | Rust 4.5x slower |
+| `blastn` | `/tmp/bench/nt20.fa` | `tests/fixtures/large_db/celegans` | sorted row-set identical: 1160/1160 rows | 2.70 s / 88 MB | 0.33 s / 74 MB | Rust 8.2x slower |
+| `blastx` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | coordinate rows shared 107/113 NCBI; 2 Rust-only, 6 NCBI-only | 1.34 s / 10 MB | 0.59 s / 28 MB | Rust 2.3x slower |
+| `tblastn` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 77/88 NCBI; 9 Rust-only, 11 NCBI-only | 2.00 s / 9 MB | 0.19 s / 26 MB | Rust 10.5x slower |
+| `tblastx` | `/tmp/bench/nt10.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 258/263 NCBI; 8 Rust-only, 5 NCBI-only | 1.57 s / 9 MB | 0.43 s / 26 MB | Rust 3.7x slower |
 
 The `blastn` case is exact on this fixture. The translated-search cases still
 show small residual hit-set differences on broader real data, mostly around

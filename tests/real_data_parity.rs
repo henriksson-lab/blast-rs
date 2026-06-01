@@ -303,8 +303,8 @@ fn real_data_blastx_nt20_seqp_cbs0_documents_current_coordinate_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 113);
-    assert_eq!(rs_set.len(), 107);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (6, 0));
+    assert_eq!(rs_set.len(), 109);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (6, 2));
 }
 
 #[test]
@@ -342,8 +342,8 @@ fn real_data_blastx_nt20_seqp_cbs2_documents_current_composition_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 73);
-    assert_eq!(rs_set.len(), 68);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (33, 28));
+    assert_eq!(rs_set.len(), 87);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (25, 39));
 }
 
 #[test]

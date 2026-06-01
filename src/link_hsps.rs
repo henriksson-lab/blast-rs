@@ -1658,11 +1658,6 @@ pub fn blast_link_hsps(
         h.num = 1;
     }
     let singleton = hsp_list.hsp_array.len() <= 1;
-    if singleton && link_hsp_params.longest_intron <= 0 {
-        hsp_list.best_evalue = hsp_list.hsp_array[0].evalue;
-        return 0;
-    }
-
     if link_hsp_params.longest_intron <= 0 {
         s_blast_even_gap_link_hsps(
             program_number,
