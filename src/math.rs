@@ -17,11 +17,12 @@ pub const NCBIMATH_PI: f64 = std::f64::consts::PI;
 pub const LOGDERIV_ORDER_MAX: i32 = 4;
 pub const POLYGAMMA_ORDER_MAX: i32 = LOGDERIV_ORDER_MAX;
 
-/// blast-rs: C99/POSIX.1-2001 libm `expm1` helper outside BLAST provenance.
+/// NCBI: BLAST_Expm1 (ncbi_math.c:31).
 ///
 /// Computes `exp(x) - 1` for small x while avoiding catastrophic cancellation.
-/// This is a Rust-local implementation of the standard C99/POSIX libm `expm1`
-/// operation; it is not ported from NCBI BLAST source.
+/// Keep the cutoff and Taylor polynomial in the same shape as NCBI so callers
+/// such as `BLAST_KarlinEtoP` and `s_BlastSumP` get the same `double`
+/// arithmetic path as the C code.
 pub fn expm1(x: f64) -> f64 {
     let absx = x.abs();
     if absx > 0.33 {

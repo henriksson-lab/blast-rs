@@ -5047,7 +5047,9 @@ fn apply_blastn_linked_sum_stats_to_hsps(
         query_index: 0,
         hsp_array: hsps
             .iter()
-            .map(|hsp| LinkBlastHsp {
+            .enumerate()
+            .map(|(source_index, hsp)| LinkBlastHsp {
+                source_index,
                 score: hsp.score,
                 num_ident: hsp.num_ident,
                 bit_score: hsp.bit_score,
@@ -5072,20 +5074,6 @@ fn apply_blastn_linked_sum_stats_to_hsps(
         best_evalue: f64::INFINITY,
     };
 
-    let original_keys: Vec<(i32, i32, i32, i32, i32, i32)> = hsps
-        .iter()
-        .map(|hsp| {
-            (
-                hsp.score,
-                hsp.context,
-                hsp.query_start,
-                hsp.query_end,
-                hsp.subject_start,
-                hsp.subject_end,
-            )
-        })
-        .collect();
-
     blast_link_hsps(
         BLASTN,
         &mut hsp_list,
@@ -5096,30 +5084,10 @@ fn apply_blastn_linked_sum_stats_to_hsps(
         false,
     );
 
-    let mut linked_stats: std::collections::HashMap<
-        (i32, i32, i32, i32, i32, i32),
-        Vec<(f64, f64)>,
-    > = std::collections::HashMap::new();
     for linked in &hsp_list.hsp_array {
-        linked_stats
-            .entry((
-                linked.score,
-                linked.context,
-                linked.query.offset,
-                linked.query.end,
-                linked.subject.offset,
-                linked.subject.end,
-            ))
-            .or_default()
-            .push((linked.evalue, linked.bit_score));
-    }
-
-    for (hsp, key) in hsps.iter_mut().zip(original_keys) {
-        if let Some(stats) = linked_stats.get_mut(&key) {
-            if let Some((evalue, bit_score)) = stats.pop() {
-                hsp.evalue = evalue;
-                hsp.bit_score = bit_score;
-            }
+        if let Some(hsp) = hsps.get_mut(linked.source_index) {
+            hsp.evalue = linked.evalue;
+            hsp.bit_score = linked.bit_score;
         }
     }
 }
@@ -7594,7 +7562,8 @@ fn run_blastn_rust(
                     &mut alpha,
                     &mut beta,
                 );
-                blast_rs::stat::compute_length_adjustment_exact(
+                let mut len_adj = 0;
+                let _ = blast_rs::stat::blast_compute_length_adjustment(
                     kbp.k,
                     kbp.log_k,
                     alpha / kbp.lambda,
@@ -7602,8 +7571,9 @@ fn run_blastn_rust(
                     qlen,
                     database_length,
                     db.stats_num_oids.min(i32::MAX as u64) as i32,
-                )
-                .0
+                    Some(&mut len_adj),
+                );
+                len_adj
             };
             let eff_db = std::cmp::max(
                 database_length - db.stats_num_oids.min(i64::MAX as u64) as i64 * len_adj as i64,
@@ -12748,7 +12718,8 @@ fn blastp_pairwise_effective_search_space(
         .unwrap_or_else(|| blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name));
     let len_adj = if let Some(gp) = gapped_params {
         let alpha_d_lambda = gp.alpha / kbp.lambda;
-        blast_rs::stat::compute_length_adjustment_exact(
+        let mut len_adj = 0;
+        let _ = blast_rs::stat::blast_compute_length_adjustment(
             kbp.k,
             kbp.log_k,
             alpha_d_lambda,
@@ -12756,8 +12727,9 @@ fn blastp_pairwise_effective_search_space(
             query_len as i32,
             total_subject_len,
             num_subjects,
-        )
-        .0
+            Some(&mut len_adj),
+        );
+        len_adj
     } else {
         blast_rs::stat::compute_length_adjustment(
             query_len as i32,
@@ -12787,7 +12759,8 @@ fn translated_ungapped_pairwise_effective_search_space(
     let kbp = blast_rs::stat::protein_ungapped_kbp_for_matrix(matrix_name);
     let (alpha, beta) = blast_rs::stat::lookup_matrix_ungapped_alpha_beta(matrix_name)
         .unwrap_or((kbp.lambda / kbp.h, 0.0));
-    let (len_adj, _) = blast_rs::stat::compute_length_adjustment_exact(
+    let mut len_adj = 0;
+    let _ = blast_rs::stat::blast_compute_length_adjustment(
         kbp.k,
         kbp.log_k,
         alpha / kbp.lambda,
@@ -12795,6 +12768,7 @@ fn translated_ungapped_pairwise_effective_search_space(
         query_len as i32,
         total_subject_len,
         num_subjects,
+        Some(&mut len_adj),
     );
     blast_rs::stat::compute_search_space(query_len as i64, total_subject_len, num_subjects, len_adj)
 }
@@ -14199,7 +14173,8 @@ fn blastp_xml_statistics(
     }
     let len_adj = if let Some(gp) = gp {
         let alpha_d_lambda = gp.alpha / kbp.lambda;
-        blast_rs::stat::compute_length_adjustment_exact(
+        let mut len_adj = 0;
+        let _ = blast_rs::stat::blast_compute_length_adjustment(
             kbp.k,
             kbp.log_k,
             alpha_d_lambda,
@@ -14207,8 +14182,9 @@ fn blastp_xml_statistics(
             query_len as i32,
             total_subject_len,
             num_subjects,
-        )
-        .0
+            Some(&mut len_adj),
+        );
+        len_adj
     } else {
         blast_rs::stat::compute_length_adjustment(
             query_len as i32,
@@ -14254,7 +14230,8 @@ fn tblastx_xml_statistics(
     };
     let (alpha, beta) = blast_rs::stat::lookup_matrix_ungapped_alpha_beta(matrix_name)
         .unwrap_or((kbp.lambda / kbp.h, 0.0));
-    let len_adj = blast_rs::stat::compute_length_adjustment_exact(
+    let mut len_adj = 0;
+    let _ = blast_rs::stat::blast_compute_length_adjustment(
         kbp.k,
         kbp.log_k,
         alpha / kbp.lambda,
@@ -14262,8 +14239,8 @@ fn tblastx_xml_statistics(
         query_len as i32,
         total_subject_len,
         num_subjects,
-    )
-    .0;
+        Some(&mut len_adj),
+    );
     let eff_space = blast_rs::stat::compute_search_space(
         query_len as i64,
         total_subject_len,
@@ -14291,7 +14268,8 @@ fn tblastx_ideal_xml_statistics(
     };
     let (alpha, beta) = blast_rs::stat::lookup_matrix_ungapped_alpha_beta(matrix_name)
         .unwrap_or((kbp.lambda / kbp.h, 0.0));
-    let len_adj = blast_rs::stat::compute_length_adjustment_exact(
+    let mut len_adj = 0;
+    let _ = blast_rs::stat::blast_compute_length_adjustment(
         kbp.k,
         kbp.log_k,
         alpha / kbp.lambda,
@@ -14299,8 +14277,8 @@ fn tblastx_ideal_xml_statistics(
         query_len as i32,
         total_subject_len,
         num_subjects,
-    )
-    .0;
+        Some(&mut len_adj),
+    );
     let eff_space = blast_rs::stat::compute_search_space(
         query_len as i64,
         total_subject_len,
@@ -15669,7 +15647,8 @@ fn blastn_subject_stats(
             &mut alpha,
             &mut beta,
         );
-        blast_rs::stat::compute_length_adjustment_exact(
+        let mut len_adj = 0;
+        let _ = blast_rs::stat::blast_compute_length_adjustment(
             kbp.k,
             kbp.log_k,
             alpha / kbp.lambda,
@@ -15677,8 +15656,9 @@ fn blastn_subject_stats(
             qlen,
             database_length,
             num_subjects,
-        )
-        .0
+            Some(&mut len_adj),
+        );
+        len_adj
     };
     let eff_db = std::cmp::max(database_length - num_subjects as i64 * len_adj as i64, 1);
     let search_space = eff_db as f64 * (qlen - len_adj).max(1) as f64;

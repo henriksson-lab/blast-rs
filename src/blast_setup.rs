@@ -28,11 +28,11 @@ use crate::seqsrc::{
     blast_seq_src_get_tot_len, blast_seq_src_get_tot_len_stats, BlastSeqSource,
 };
 use crate::stat::{
-    blast_get_nucl_alpha_beta, blast_gumbel_blk_calc, blast_karlin_blk_gapped_calc,
-    blast_karlin_blk_nucl_gapped_calc, blast_score_blk_kbp_ideal_calc,
-    blast_score_blk_kbp_ungapped_calc, blast_score_blk_matrix_fill, blast_score_blk_new,
-    blast_score_freq_new, blast_score_set_ambig_res, compute_length_adjustment_exact,
-    BlastScoreBlk, KarlinBlk, BLAST_GAP_EXTN_MEGABLAST, BLAST_GAP_OPEN_MEGABLAST,
+    blast_compute_length_adjustment, blast_get_nucl_alpha_beta, blast_gumbel_blk_calc,
+    blast_karlin_blk_gapped_calc, blast_karlin_blk_nucl_gapped_calc,
+    blast_score_blk_kbp_ideal_calc, blast_score_blk_kbp_ungapped_calc, blast_score_blk_matrix_fill,
+    blast_score_blk_new, blast_score_freq_new, blast_score_set_ambig_res, BlastScoreBlk, KarlinBlk,
+    BLAST_GAP_EXTN_MEGABLAST, BLAST_GAP_OPEN_MEGABLAST,
 };
 use crate::util::{BlastSequenceBlk, SSeqRange};
 
@@ -962,7 +962,8 @@ pub fn blast_calc_eff_lengths(
             )
         };
 
-        let (length_adjustment, _converged) = compute_length_adjustment_exact(
+        let mut length_adjustment = 0;
+        let _ = blast_compute_length_adjustment(
             kbp.k,
             kbp.log_k,
             alpha / kbp.lambda,
@@ -970,6 +971,7 @@ pub fn blast_calc_eff_lengths(
             query_length,
             db_length,
             db_num_seqs,
+            Some(&mut length_adjustment),
         );
 
         if effective_search_space == 0 {

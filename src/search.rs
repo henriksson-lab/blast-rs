@@ -9067,33 +9067,6 @@ mod tests {
         }
     }
 
-    fn test_search_hsp(
-        query_start: i32,
-        query_end: i32,
-        subject_start: i32,
-        subject_end: i32,
-        score: i32,
-    ) -> SearchHsp {
-        SearchHsp {
-            query_start,
-            query_end,
-            subject_start,
-            subject_end,
-            query_gapped_start: query_start,
-            subject_gapped_start: subject_start,
-            score,
-            bit_score: 0.0,
-            evalue: 0.0,
-            num_ident: query_end - query_start,
-            align_length: query_end - query_start,
-            mismatches: 0,
-            gap_opens: 0,
-            context: 0,
-            qseq: None,
-            sseq: None,
-        }
-    }
-
     #[test]
     fn test_decode_packed_ncbi2na_with_ambiguity_overlays_runs() {
         let packed = pack_ncbi2na_bases(&[0, 1, 2, 3, 0, 1, 2, 3]);

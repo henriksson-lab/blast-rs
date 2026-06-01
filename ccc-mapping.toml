@@ -1329,10 +1329,6 @@ rust  = "composition_scale_matrix"
 other = "s_ScaleSquareMatrix"
 
 [[entries]]
-rust  = "s_adjust_evalues_for_composition"
-other = "s_AdjustEvaluesForComposition"
-
-[[entries]]
 rust  = "blast_karlin_eto_p"
 other = "BLAST_KarlinEtoP"
 

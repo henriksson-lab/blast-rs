@@ -2112,7 +2112,7 @@ impl MatrixStatRow {
 /// Spouge e-value with NCBI's HSP-linking gap-decay correction
 /// applied. Callers select this helper only for program/reporting paths whose
 /// NCBI equivalent applies `BLAST_GapDecayDivisor`; raw per-pair Spouge callers
-/// should use [`spouge_evalue`].
+/// should use [`blast_spouge_sto_e`].
 pub fn spouge_evalue_with_gap_decay(
     score: i32,
     kbp: &KarlinBlk,
@@ -2120,26 +2120,25 @@ pub fn spouge_evalue_with_gap_decay(
     query_length: i32,
     subject_length: i32,
 ) -> f64 {
-    let raw = spouge_evalue(score, kbp, gbp, query_length, subject_length);
+    let raw = blast_spouge_sto_e(score, Some(kbp), Some(gbp), query_length, subject_length);
     raw / blast_gap_decay_divisor(BLAST_GAP_DECAY_RATE_GAPPED, 1)
 }
 
-/// blast-rs: Ergonomic Spouge score-to-E-value helper; not a direct NCBI C
-/// port. Returns the raw
-/// per-pair Spouge finite-size-corrected e-value.
-/// Standard blastp / direct traceback paths (`blast_traceback.c:234`,
-/// `blast_kappa.c:419`) pass `gap_decay_rate=0` and use the raw value
-/// unchanged.
-pub fn spouge_evalue(
-    score: i32,
-    kbp: &KarlinBlk,
-    gbp: &GumbelBlk,
-    query_length: i32,
-    subject_length: i32,
+/// NCBI: BLAST_SpougeStoE (blast_stat.c:5176).
+/// Port with pointer-shaped arguments.
+pub fn blast_spouge_sto_e(
+    y_: i32,
+    kbp: Option<&KarlinBlk>,
+    gbp: Option<&GumbelBlk>,
+    m_: i32,
+    n_: i32,
 ) -> f64 {
+    let (Some(kbp), Some(gbp)) = (kbp, gbp) else {
+        return -1.0;
+    };
     let scale_factor = kbp.lambda / gbp.lambda;
     let db_scale_factor = if gbp.db_length > 0 {
-        gbp.db_length as f64 / subject_length as f64
+        gbp.db_length as f64 / n_ as f64
     } else {
         1.0
     };
@@ -2158,9 +2157,9 @@ pub fn spouge_evalue(
 
     const CONST_VAL: f64 = 0.39894228040143267793994605993438; // 1/sqrt(2*PI)
 
-    let y = score as f64;
-    let m = query_length as f64;
-    let n = subject_length as f64;
+    let y = y_ as f64;
+    let m = m_ as f64;
+    let n = n_ as f64;
 
     let m_li_y = m - (ai_hat * y + bi_hat);
     let vi_y = (2.0 * alphai_hat / kbp.lambda).max(alphai_hat * y + betai_hat);
@@ -2190,31 +2189,18 @@ pub fn spouge_evalue(
     area * kbp.k * (-kbp.lambda * y).exp() * db_scale_factor
 }
 
-/// NCBI: BLAST_SpougeStoE (blast_stat.c:5176).
+/// NCBI: BLAST_SpougeEtoS (blast_stat.c:5236).
 /// Port with pointer-shaped arguments.
-pub fn blast_spouge_sto_e(
-    y_: i32,
+pub fn blast_spouge_eto_s(
+    e0: f64,
     kbp: Option<&KarlinBlk>,
     gbp: Option<&GumbelBlk>,
-    m_: i32,
-    n_: i32,
-) -> f64 {
+    m: i32,
+    n: i32,
+) -> i32 {
     let (Some(kbp), Some(gbp)) = (kbp, gbp) else {
-        return -1.0;
+        return BLAST_SCORE_MIN;
     };
-    spouge_evalue(y_, kbp, gbp, m_, n_)
-}
-
-/// blast-rs: Ergonomic Spouge E-value-to-score helper; not a direct NCBI C
-/// port. Binary-search the
-/// raw score `S` such that `BLAST_SpougeStoE(S, kbp, gbp, m, n) <= e0`.
-///
-/// Used for the per-context cutoff in `BlastHitSavingParametersUpdate`
-/// (`blast_parameters.c:940`): the cutoff is computed at `m=query_length` and
-/// `n=avg_subject_length`, with `gbp->db_length` set to the full DB. The
-/// binary search uses Spouge's full FSC formula, so the cutoff is more
-/// conservative than the simple Karlin `evalue_to_raw` formula.
-pub fn spouge_etos(e0: f64, kbp: &KarlinBlk, gbp: &GumbelBlk, m: i32, n: i32) -> i32 {
     let db_scale_factor = if gbp.db_length > 0 {
         gbp.db_length as f64
     } else {
@@ -2228,23 +2214,19 @@ pub fn spouge_etos(e0: f64, kbp: &KarlinBlk, gbp: &GumbelBlk, m: i32, n: i32) ->
     }
 
     let mut a: i32 = 0;
-    let mut e = spouge_evalue(b, kbp, gbp, m, n);
+    let mut e = blast_spouge_sto_e(b, Some(kbp), Some(gbp), m, n);
 
     if e > e0 {
         while e > e0 {
             a = b;
-            // C: `b *= 2;` — note the integer overflow possibility on a
-            // pathological input is mirrored from C verbatim
-            b = b.saturating_mul(2);
-            e = spouge_evalue(b, kbp, gbp, m, n);
-            if b == i32::MAX {
-                break;
-            }
+            // C: `b *= 2;`.
+            b *= 2;
+            e = blast_spouge_sto_e(b, Some(kbp), Some(gbp), m, n);
         }
     }
     while b - a > 1 {
         let c = (a + b) / 2;
-        e = spouge_evalue(c, kbp, gbp, m, n);
+        e = blast_spouge_sto_e(c, Some(kbp), Some(gbp), m, n);
         if e > e0 {
             a = c;
         } else {
@@ -2253,21 +2235,6 @@ pub fn spouge_etos(e0: f64, kbp: &KarlinBlk, gbp: &GumbelBlk, m: i32, n: i32) ->
     }
     let _ = e; // suppress unused on the final iteration
     a
-}
-
-/// NCBI: BLAST_SpougeEtoS (blast_stat.c:5236).
-/// Port with pointer-shaped arguments.
-pub fn blast_spouge_eto_s(
-    e0: f64,
-    kbp: Option<&KarlinBlk>,
-    gbp: Option<&GumbelBlk>,
-    m: i32,
-    n: i32,
-) -> i32 {
-    let (Some(kbp), Some(gbp)) = (kbp, gbp) else {
-        return BLAST_SCORE_MIN;
-    };
-    spouge_etos(e0, kbp, gbp, m, n)
 }
 
 /// blast-rs: BLOSUM62-specific Gumbel table helper; not a direct NCBI C port.
@@ -2526,7 +2493,8 @@ pub fn compute_length_adjustment(
     if kbp.h <= 0.0 {
         return 0;
     }
-    let (adj, _converged) = compute_length_adjustment_exact(
+    let mut adj = 0;
+    let _ = blast_compute_length_adjustment(
         kbp.k,
         kbp.log_k,
         1.0 / kbp.h,
@@ -2534,6 +2502,7 @@ pub fn compute_length_adjustment(
         query_length,
         db_length,
         num_seqs,
+        Some(&mut adj),
     );
     adj
 }
@@ -4345,10 +4314,9 @@ pub fn scaled_nucl_gapped_kbp_lookup(
     ))
 }
 
-/// blast-rs: Tuple-returning length-adjustment helper; not a direct NCBI C port.
-/// Computes the length adjustment for effective search space.
-/// Returns (length_adjustment, converged).
-pub fn compute_length_adjustment_exact(
+/// NCBI: BLAST_ComputeLengthAdjustment (blast_stat.c:5041).
+/// Port with pointer-style output and integer convergence status.
+pub fn blast_compute_length_adjustment(
     k: f64,
     log_k: f64,
     alpha_d_lambda: f64,
@@ -4356,7 +4324,11 @@ pub fn compute_length_adjustment_exact(
     query_length: i32,
     db_length: i64,
     db_num_seqs: i32,
-) -> (i32, bool) {
+    length_adjustment: Option<&mut i32>,
+) -> i32 {
+    let Some(length_adjustment) = length_adjustment else {
+        return 1;
+    };
     let m = query_length as f64;
     let n = db_length as f64;
     let nn = db_num_seqs as f64;
@@ -4366,7 +4338,8 @@ pub fn compute_length_adjustment_exact(
     let mb = m * nn + n;
     let c = n * m - m.max(n) / k;
     if c < 0.0 {
-        return (0, false);
+        *length_adjustment = 0;
+        return 1;
     }
     let ell_max_init = 2.0 * c / (mb + (mb * mb - 4.0 * a * c).sqrt());
 
@@ -4414,33 +4387,6 @@ pub fn compute_length_adjustment_exact(
             }
         }
     }
-    (adj, converged)
-}
-
-/// NCBI: BLAST_ComputeLengthAdjustment (blast_stat.c:5041).
-/// Port with pointer-style output and integer convergence status.
-pub fn blast_compute_length_adjustment(
-    k: f64,
-    log_k: f64,
-    alpha_d_lambda: f64,
-    beta: f64,
-    query_length: i32,
-    db_length: i64,
-    db_num_seqs: i32,
-    length_adjustment: Option<&mut i32>,
-) -> i32 {
-    let Some(length_adjustment) = length_adjustment else {
-        return 1;
-    };
-    let (adj, converged) = compute_length_adjustment_exact(
-        k,
-        log_k,
-        alpha_d_lambda,
-        beta,
-        query_length,
-        db_length,
-        db_num_seqs,
-    );
     *length_adjustment = adj;
     if converged {
         0
@@ -7009,7 +6955,8 @@ mod tests {
     #[test]
     fn test_length_adjustment_exact_convergence() {
         let kbp = lookup_protein_params(11, 1).unwrap();
-        let (adj, converged) = compute_length_adjustment_exact(
+        let mut adj = 0;
+        let status = blast_compute_length_adjustment(
             kbp.k,
             kbp.k.ln(),
             kbp.alpha / kbp.lambda,
@@ -7017,8 +6964,9 @@ mod tests {
             300,
             1_000_000,
             5000,
+            Some(&mut adj),
         );
-        assert!(converged, "Length adjustment should converge");
+        assert_eq!(status, 0, "Length adjustment should converge");
         assert!(adj > 0, "Length adjustment should be positive");
         assert!(adj < 300, "Length adjustment should be < query length");
     }
@@ -7037,7 +6985,8 @@ mod tests {
             5000,
             Some(&mut adj),
         );
-        let (expected, converged) = compute_length_adjustment_exact(
+        let mut expected = -1;
+        let expected_status = blast_compute_length_adjustment(
             kbp.k,
             kbp.k.ln(),
             kbp.alpha / kbp.lambda,
@@ -7045,9 +6994,10 @@ mod tests {
             300,
             1_000_000,
             5000,
+            Some(&mut expected),
         );
         assert_eq!(adj, expected);
-        assert_eq!(status, if converged { 0 } else { 1 });
+        assert_eq!(status, expected_status);
 
         assert_eq!(
             blast_compute_length_adjustment(
@@ -7431,11 +7381,10 @@ mod tests {
         let m = 250;
         let n = 400;
         let evalue = blast_spouge_sto_e(score, Some(&kbp), Some(&gbp), m, n);
-        let expected = spouge_evalue(score, &kbp, &gbp, m, n);
-        assert!((evalue - expected).abs() <= expected.abs() * 1e-12);
+        assert!(evalue > 0.0);
 
         let cutoff = blast_spouge_eto_s(evalue, Some(&kbp), Some(&gbp), m, n);
-        assert_eq!(cutoff, spouge_etos(evalue, &kbp, &gbp, m, n));
+        assert!(cutoff >= 0);
         assert_eq!(blast_spouge_sto_e(score, None, Some(&gbp), m, n), -1.0);
         assert_eq!(
             blast_spouge_eto_s(evalue, Some(&kbp), None, m, n),

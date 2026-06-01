@@ -15304,6 +15304,8 @@ fn blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
     num_contexts: usize,
     alignments: &mut [Option<Box<BlastCompoAlignment>>],
     redone: &mut HspList,
+    pvalue_for_this_pair: &mut f64,
+    lambda_ratio: &mut f64,
 ) -> i32 {
     if incoming_aligns.is_none() {
         return 0;
@@ -15319,8 +15321,8 @@ fn blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
                 BlastCompoHeap::new(subject.hitlist_size, subject.inclusion_ethresh);
                 compo_query_info.len()
             ];
-        let mut pvalue_for_this_pair = -1.0;
-        let mut lambda_ratio = 1.0;
+        *pvalue_for_this_pair = -1.0;
+        *lambda_ratio = 1.0;
         if align_params.position_based {
             let mut adjusted_pssm = Vec::new();
             blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustment(
@@ -15334,9 +15336,9 @@ fn blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
                 compo_query_info,
                 &significant_matches,
                 &mut adjusted_pssm,
-                &mut pvalue_for_this_pair,
+                pvalue_for_this_pair,
                 0,
-                &mut lambda_ratio,
+                lambda_ratio,
             )
         } else {
             let mut adjusted_matrix = match square_matrix_from_vec(&align_params.matrix_info.matrix)
@@ -15364,14 +15366,14 @@ fn blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
                 &significant_matches,
                 &mut adjusted_matrix,
                 workspace.as_ref(),
-                &mut pvalue_for_this_pair,
+                pvalue_for_this_pair,
                 0,
-                &mut lambda_ratio,
+                lambda_ratio,
             )
         }
     } else {
-        let mut pvalue_for_this_pair = -1.0;
-        let mut lambda_ratio = 1.0;
+        *pvalue_for_this_pair = -1.0;
+        *lambda_ratio = 1.0;
         if align_params.position_based {
             let mut adjusted_pssm = Vec::new();
             blast_redo_one_match_with_callbacks_and_position_adjustment(
@@ -15383,9 +15385,9 @@ fn blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
                 matching_seq,
                 compo_query_info,
                 &mut adjusted_pssm,
-                &mut pvalue_for_this_pair,
+                pvalue_for_this_pair,
                 0,
-                &mut lambda_ratio,
+                lambda_ratio,
             )
         } else {
             let mut adjusted_matrix = match square_matrix_from_vec(&align_params.matrix_info.matrix)
@@ -15411,9 +15413,9 @@ fn blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
                 compo_query_info,
                 &mut adjusted_matrix,
                 workspace.as_ref(),
-                &mut pvalue_for_this_pair,
+                pvalue_for_this_pair,
                 0,
-                &mut lambda_ratio,
+                lambda_ratio,
             )
         }
     };
@@ -15456,6 +15458,7 @@ fn blast_redo_alignment_core_one_match_with_callbacks_evaluate(
     subject: BlastRedoCallbackSubjectConfig<'_>,
     redone: &mut HspList,
     context_index: usize,
+    pvalue_for_this_pair: f64,
 ) -> (usize, f64) {
     if redone.hsps.len() > 1 {
         s_hitlist_reap_contained(&mut redone.hsps);
@@ -15478,7 +15481,7 @@ fn blast_redo_alignment_core_one_match_with_callbacks_evaluate(
         ctx.eff_searchsp as f64,
         kbp_gap.get(eval_context),
         subject.link_context,
-        -1.0,
+        pvalue_for_this_pair,
         subject.expect_value,
         align_params.do_link_hsps,
     );
@@ -15575,6 +15578,8 @@ fn blast_redo_alignment_core_one_match_with_callbacks_inner(
     let matching_seq = matching_sequence_initialize(subject.subject_length, this_match.oid, 0);
     let mut alignments = vec![None; plan.num_contexts];
     let mut redone = HspList::new(this_match.oid);
+    let mut pvalue_for_this_pair = -1.0;
+    let mut lambda_ratio = 1.0;
 
     for frame_index in 0..plan.num_frames {
         let status = blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
@@ -15592,6 +15597,8 @@ fn blast_redo_alignment_core_one_match_with_callbacks_inner(
             plan.num_contexts,
             &mut alignments,
             &mut redone,
+            &mut pvalue_for_this_pair,
+            &mut lambda_ratio,
         );
         if status != 0 {
             return status;
@@ -15606,6 +15613,7 @@ fn blast_redo_alignment_core_one_match_with_callbacks_inner(
         subject,
         &mut redone,
         plan.context_index,
+        pvalue_for_this_pair,
     );
 
     blast_redo_alignment_core_one_match_with_callbacks_update_results(
@@ -15781,6 +15789,8 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         matching_sequence_initialize(subject.subject_source.len() as i32, this_match.oid, 0);
     let mut alignments = vec![None; num_contexts];
     let mut redone = HspList::new(this_match.oid);
+    let mut pvalue_for_this_pair = -1.0;
+    let mut _lambda_ratio = 1.0;
 
     for frame_index in 0..num_frames {
         let incoming_aligns = &incoming_align_set[frame_index];
@@ -15815,8 +15825,8 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                 )
             } else if align_params.position_based {
                 let mut adjusted_pssm = Vec::new();
-                let mut pvalue_for_this_pair = -1.0;
-                let mut lambda_ratio = 1.0;
+                pvalue_for_this_pair = -1.0;
+                _lambda_ratio = 1.0;
                 blast_redo_one_match_smith_waterman_in_memory_protein_position_adjustment(
                     &mut alignments,
                     align_params,
@@ -15833,7 +15843,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                     &mut adjusted_pssm,
                     &mut pvalue_for_this_pair,
                     0,
-                    &mut lambda_ratio,
+                    &mut _lambda_ratio,
                 )
             } else if no_composition {
                 blast_redo_one_match_smith_waterman_in_memory_protein(
@@ -15860,8 +15870,8 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                 } else {
                     None
                 };
-                let mut pvalue_for_this_pair = -1.0;
-                let mut lambda_ratio = 1.0;
+                pvalue_for_this_pair = -1.0;
+                _lambda_ratio = 1.0;
                 blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
                     &mut alignments,
                     align_params,
@@ -15879,7 +15889,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                     workspace.as_ref(),
                     &mut pvalue_for_this_pair,
                     0,
-                    &mut lambda_ratio,
+                    &mut _lambda_ratio,
                 )
             }
         } else if no_composition {
@@ -15899,8 +15909,8 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
             )
         } else if align_params.position_based {
             let mut adjusted_pssm = Vec::new();
-            let mut pvalue_for_this_pair = -1.0;
-            let mut lambda_ratio = 1.0;
+            pvalue_for_this_pair = -1.0;
+            _lambda_ratio = 1.0;
             blast_redo_one_match_in_memory_with_position_adjustment(
                 &mut alignments,
                 align_params,
@@ -15915,7 +15925,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                 &mut adjusted_pssm,
                 &mut pvalue_for_this_pair,
                 0,
-                &mut lambda_ratio,
+                &mut _lambda_ratio,
             )
         } else {
             let mut adjusted_matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
@@ -15927,8 +15937,8 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
             } else {
                 None
             };
-            let mut pvalue_for_this_pair = -1.0;
-            let mut lambda_ratio = 1.0;
+            pvalue_for_this_pair = -1.0;
+            _lambda_ratio = 1.0;
             blast_redo_one_match_in_memory_with_adjustment(
                 &mut alignments,
                 align_params,
@@ -15944,7 +15954,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                 workspace.as_ref(),
                 &mut pvalue_for_this_pair,
                 0,
-                &mut lambda_ratio,
+                &mut _lambda_ratio,
             )
         };
         if status != 0 {
@@ -15995,7 +16005,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         ctx.eff_searchsp as f64,
         kbp_gap.get(eval_context),
         subject.link_context,
-        -1.0,
+        pvalue_for_this_pair,
         subject.expect_value,
         align_params.do_link_hsps,
     );
@@ -19558,7 +19568,7 @@ pub fn result_hsp_to_distinct_align(
         }
         let frame_index = frame_index as usize;
         let mut new_align = BlastCompoAlignment::new(
-            (hsp.score as f64 * local_scaling_factor).round() as i32,
+            crate::math::blast_nint(hsp.score as f64 * local_scaling_factor) as i32,
             MatrixAdjustRule::DontAdjust,
             hsp.context,
             hsp.query_offset,
@@ -20750,7 +20760,9 @@ pub fn blast_link_hsps_for_kappa(
         hsp_array: hsp_list
             .hsps
             .iter()
-            .map(|hsp| crate::link_hsps::LinkBlastHsp {
+            .enumerate()
+            .map(|(source_index, hsp)| crate::link_hsps::LinkBlastHsp {
+                source_index,
                 score: hsp.score,
                 num_ident: hsp.num_ident,
                 bit_score: hsp.bit_score,
@@ -20956,9 +20968,21 @@ pub fn blast_hsp_list_get_evalues(
         {
             let query_length = context_info.query_length;
             if is_rps {
-                crate::stat::spouge_evalue(score, &scaled_kbp, gbp, subject_length, query_length)
+                crate::stat::blast_spouge_sto_e(
+                    score,
+                    Some(&scaled_kbp),
+                    Some(gbp),
+                    subject_length,
+                    query_length,
+                )
             } else {
-                crate::stat::spouge_evalue(score, &scaled_kbp, gbp, query_length, subject_length)
+                crate::stat::blast_spouge_sto_e(
+                    score,
+                    Some(&scaled_kbp),
+                    Some(gbp),
+                    query_length,
+                    subject_length,
+                )
             }
         } else {
             let search_space = context_info.eff_searchsp as f64;

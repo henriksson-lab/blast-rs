@@ -303,8 +303,8 @@ fn real_data_blastx_nt20_seqp_cbs0_documents_current_coordinate_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 113);
-    assert_eq!(rs_set.len(), 109);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (6, 2));
+    assert_eq!(rs_set.len(), 113);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (0, 0));
 }
 
 #[test]
@@ -342,8 +342,8 @@ fn real_data_blastx_nt20_seqp_cbs2_documents_current_composition_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 73);
-    assert_eq!(rs_set.len(), 87);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (25, 39));
+    assert_eq!(rs_set.len(), 72);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (7, 6));
 }
 
 #[test]
@@ -381,11 +381,10 @@ fn real_data_tblastn_prot30_seqn_cbs0_documents_current_coordinate_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 88);
-    // Current small-fixture gap after the tblastn linker was restored to pass
-    // the raw nucleotide subject length into `blast_link_hsps`, matching NCBI's
-    // internal translated-subject length conversion.
-    assert_eq!(rs_set.len(), 86);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (11, 9));
+    // Current small-fixture gap after using NCBI's translated minimum subject
+    // length for the translated-subject Spouge cutoff path.
+    assert_eq!(rs_set.len(), 83);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (6, 1));
 }
 
 #[test]
@@ -423,8 +422,8 @@ fn real_data_tblastn_prot30_seqn_cbs2_documents_current_composition_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 71);
-    assert_eq!(rs_set.len(), 99);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (27, 55));
+    assert_eq!(rs_set.len(), 79);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (9, 17));
 }
 
 #[test]
@@ -687,30 +686,6 @@ fn run_status_and_lines(program: &Path, args: &[&str]) -> (i32, BTreeSet<String>
         .map(str::to_owned)
         .collect();
     (code, lines)
-}
-
-/// Returns true if `program args` exits on its own within `secs`, false if it
-/// had to be killed (i.e. it hung).
-fn run_completes_within(program: &Path, args: &[&str], secs: u64) -> bool {
-    let mut child = Command::new(program)
-        .args(args)
-        .current_dir(repo_root())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap_or_else(|err| panic!("failed to spawn {}: {err}", program.display()));
-    let start = std::time::Instant::now();
-    loop {
-        if child.try_wait().expect("try_wait").is_some() {
-            return true;
-        }
-        if start.elapsed() > std::time::Duration::from_secs(secs) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
 }
 
 /// Map coordinate key (qseqid, qstart, qend, sstart, send) -> (bitscore, evalue)

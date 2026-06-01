@@ -615,33 +615,6 @@ pub fn blast_int4_matrix_from_freq(
     result
 }
 
-/// Adjust e-value using composition-based statistics.
-/// NCBI: s_AdjustEvaluesForComposition (composition_adjustment.c).
-///
-/// Computes composition-specific lambda, derives a composition P-value,
-/// then combines it with the alignment P-value using Fisher's method.
-pub fn s_adjust_evalues_for_composition(
-    raw_evalue: f64,
-    score: i32,
-    query_prob: &[f64],
-    subject_prob: &[f64],
-    matrix: &[[i32; AA_SIZE]; AA_SIZE],
-    standard_lambda: f64,
-    k: f64,
-    search_space: f64,
-) -> f64 {
-    // Score-only helper: compute the composition-specific lambda ratio and
-    // scale the e-value. Full mode-2 matrix adjustment is handled by
-    // `blast_composition_matrix_adj` at the search/redo call sites.
-    match composition_lambda_ratio(matrix, query_prob, subject_prob, standard_lambda) {
-        None => raw_evalue,
-        Some(lambda_ratio) => {
-            let scaled_lambda = standard_lambda / lambda_ratio;
-            search_space * k * (-scaled_lambda * score as f64).exp()
-        }
-    }
-}
-
 /// NCBI: BLAST_KarlinEtoP (blast_stat.c).
 pub fn blast_karlin_eto_p(x: f64) -> f64 {
     // NCBI: `return -BLAST_Expm1(-x);` (= 1 - exp(-x) stably).

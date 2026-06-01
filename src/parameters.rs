@@ -766,10 +766,10 @@ pub fn blast_hit_saving_parameters_update_c(
                     1.0
                 };
                 params.prelim_evalue = cbs_stretch * evalue;
-                stat::spouge_etos(
+                stat::blast_spouge_eto_s(
                     cbs_stretch * evalue,
-                    kbp,
-                    gbp,
+                    Some(kbp),
+                    Some(gbp),
                     context_info.query_length,
                     avg_subject_length,
                 )

@@ -376,10 +376,12 @@ Real-data fixture results:
 
 | Program | Query | Database | Parity summary | Rust time / RSS | NCBI time / RSS | Relative speed |
 |---------|-------|----------|----------------|-----------------|-----------------|----------------|
-| `blastn` | `/tmp/bench/nt20.fa` | `tests/fixtures/large_db/celegans` | sorted row-set identical: 1160/1160 rows | 2.70 s / 88 MB | 0.33 s / 74 MB | Rust 8.2x slower |
-| `blastx` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | coordinate rows shared 107/113 NCBI; 2 Rust-only, 6 NCBI-only | 1.34 s / 10 MB | 0.59 s / 28 MB | Rust 2.3x slower |
-| `tblastn` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 77/88 NCBI; 9 Rust-only, 11 NCBI-only | 2.00 s / 9 MB | 0.19 s / 26 MB | Rust 10.5x slower |
-| `tblastx` | `/tmp/bench/nt10.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 258/263 NCBI; 8 Rust-only, 5 NCBI-only | 1.57 s / 9 MB | 0.43 s / 26 MB | Rust 3.7x slower |
+| `blastn` | `/tmp/bench/nt20.fa` | `tests/fixtures/large_db/celegans` | sorted row-set identical: 1160/1160 rows | 2.65 s / 87 MB | 0.31 s / 74 MB | Rust 8.5x slower |
+| `blastx` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | coordinate rows shared 66/73 NCBI; 6 Rust-only, 7 NCBI-only | 8.78 s / 9 MB | 0.81 s / 28 MB | Rust 10.8x slower |
+| `blastx -comp_based_stats 0` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | sorted row-set identical: 113/113 rows | 1.20 s / 10 MB | 0.55 s / 28 MB | Rust 2.2x slower |
+| `tblastn` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 56/71 NCBI; 17 Rust-only, 9 NCBI-only | 4.22 s / 9 MB | 0.36 s / 26 MB | Rust 11.7x slower |
+| `tblastn -comp_based_stats 0` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 79/88 NCBI; 1 Rust-only, 6 NCBI-only | 1.11 s / 8 MB | 0.19 s / 25 MB | Rust 5.8x slower |
+| `tblastx` | `/tmp/bench/nt10.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 239/263 NCBI; 8 Rust-only, 5 NCBI-only | 1.18 s / 9 MB | 0.41 s / 26 MB | Rust 2.9x slower |
 
 The `blastn` case is exact on this fixture. The translated-search cases still
 show small residual hit-set differences on broader real data, mostly around

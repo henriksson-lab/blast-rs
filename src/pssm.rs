@@ -4288,10 +4288,10 @@ pub fn try_psi_blast_iteration(
                 }
             };
             let evalue = if let Some(gbp) = gumbel_blk {
-                crate::stat::spouge_evalue(
+                crate::stat::blast_spouge_sto_e(
                     score,
-                    &kbp,
-                    gbp,
+                    Some(&kbp),
+                    Some(gbp),
                     pssm.length as i32,
                     subj_seq.len() as i32,
                 )
@@ -5231,10 +5231,10 @@ mod tests {
         };
         let gumbel = crate::stat::protein_gumbel_blk(11, 1, query.len() as i64)
             .expect("BLOSUM62 11/1 Gumbel params");
-        let current_evalue = crate::stat::spouge_evalue(
+        let current_evalue = crate::stat::blast_spouge_sto_e(
             score,
-            &base_kbp,
-            &gumbel,
+            Some(&base_kbp),
+            Some(&gumbel),
             query.len() as i32,
             query.len() as i32,
         );
@@ -5247,10 +5247,10 @@ mod tests {
             lambda: base_kbp.lambda * lambda_ratio,
             ..base_kbp
         };
-        let ratio_evalue = crate::stat::spouge_evalue(
+        let ratio_evalue = crate::stat::blast_spouge_sto_e(
             score,
-            &ratio_kbp,
-            &gumbel,
+            Some(&ratio_kbp),
+            Some(&gumbel),
             query.len() as i32,
             query.len() as i32,
         );
@@ -5281,10 +5281,10 @@ mod tests {
             h: 0.0,
             round_down: false,
         };
-        let table_evalue = crate::stat::spouge_evalue(
+        let table_evalue = crate::stat::blast_spouge_sto_e(
             score,
-            &table_kbp,
-            &gumbel,
+            Some(&table_kbp),
+            Some(&gumbel),
             query.len() as i32,
             query.len() as i32,
         );
@@ -5311,10 +5311,10 @@ mod tests {
             h: 0.0,
             round_down: false,
         };
-        let ncbi_apparent_evalue = crate::stat::spouge_evalue(
+        let ncbi_apparent_evalue = crate::stat::blast_spouge_sto_e(
             score,
-            &ncbi_apparent_gap_kbp,
-            &gumbel,
+            Some(&ncbi_apparent_gap_kbp),
+            Some(&gumbel),
             query.len() as i32,
             query.len() as i32,
         );
