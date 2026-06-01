@@ -19,8 +19,7 @@ pub fn translate_codon(b1: u8, b2: u8, b3: u8, genetic_code: &[u8; 64]) -> u8 {
 /// Port of NCBI `s_CodonToAA` (`blast_util.c:369`). When an input base
 /// is an ambiguity code matching multiple unambiguous bases, enumerates
 /// every compatible codon; returns the unique amino acid if they all
-/// agree, otherwise returns NCBIstdaa `X`. `FENCE_SENTRY` is preserved;
-/// other malformed bytes > 15 yield `X`.
+/// agree, otherwise returns NCBIstdaa `X`. `FENCE_SENTRY` is preserved.
 ///
 /// NCBI's C iterates `mapping[4] = {T=8, C=2, A=1, G=4}` so its
 /// `codes` table is TCAG-ordered. Our [`STANDARD_GENETIC_CODE`] is
@@ -31,17 +30,19 @@ pub fn s_codon_to_aa(codon: [u8; 3], genetic_code: &[u8; 64]) -> u8 {
     let c0 = codon[0];
     let c1 = codon[1];
     let c2 = codon[2];
-    if c0 == FENCE_SENTRY || c1 == FENCE_SENTRY || c2 == FENCE_SENTRY {
-        return FENCE_SENTRY;
-    }
     if (c0 | c1 | c2) > 15 {
-        return crate::encoding::NCBISTDAA_X;
+        if c0 == FENCE_SENTRY || c1 == FENCE_SENTRY || c2 == FENCE_SENTRY {
+            return FENCE_SENTRY;
+        }
     }
 
     // Fast path for unambiguous codons (each base is a single bit, i.e. one of
     // 1/2/4/8). This covers the vast majority of bytes in `blast_get_translation`
     // hot loops, eliminating the 4×4×4 ambiguity enumeration.
-    let all_single = c0 != 0
+    let all_single = c0 <= 15
+        && c1 <= 15
+        && c2 <= 15
+        && c0 != 0
         && (c0 & (c0 - 1)) == 0
         && c1 != 0
         && (c1 & (c1 - 1)) == 0
@@ -2399,11 +2400,20 @@ mod tests {
     }
 
     #[test]
-    fn test_s_codon_to_aa_malformed_returns_x() {
-        // Non-sentinel malformed bytes > 15 yield X.
+    fn test_s_codon_to_aa_malformed_falls_through_like_c() {
+        // NCBI `s_CodonToAA` only special-cases FENCE_SENTRY when a byte is
+        // >15; otherwise the mapping loop still consumes whatever low ncbi4na
+        // bits are set. 200 has only the T bit set among the low four bits,
+        // so AT(200) follows ATT -> I.
+        assert_eq!(s_codon_to_aa([1, 8, 200], &STANDARD_GENETIC_CODE), 9);
+        // 16 has no low ncbi4na bits set, so the mapping loop never assigns
+        // an amino acid and returns the C initial value, NULLB.
+        assert_eq!(s_codon_to_aa([16, 8, 4], &STANDARD_GENETIC_CODE), NULLB);
+        // 24 has the low T bit set in addition to high malformed bits, so it
+        // falls through as T.
         assert_eq!(
-            s_codon_to_aa([1, 8, 200], &STANDARD_GENETIC_CODE),
-            crate::encoding::NCBISTDAA_X
+            s_codon_to_aa([24, 1, 1], &STANDARD_GENETIC_CODE),
+            crate::encoding::NCBISTDAA_STOP
         );
     }
 

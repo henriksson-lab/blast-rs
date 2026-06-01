@@ -352,7 +352,7 @@ Benchmark setup:
 - Rust binary: `target/release/blast-cli`
 - Reference binaries: `ncbi-blast-2.17.0+-src/c++/ReleaseMT/bin/*`
 - Build used for this run: release build, no LTO
-- Host date: 2026-05-31
+- Host date: 2026-06-01
 - Threads: 1
 - Output: tabular stdout redirected to files, then sorted line-set and
   coordinate-set comparisons against the reference output
@@ -376,10 +376,10 @@ Real-data fixture results:
 
 | Program | Query | Database | Parity summary | Rust time / RSS | NCBI time / RSS | Relative speed |
 |---------|-------|----------|----------------|-----------------|-----------------|----------------|
-| `blastn` | `/tmp/bench/nt20.fa` | `tests/fixtures/large_db/celegans` | byte-identical: 1160/1160 rows | 2.75 s / 87 MB | 0.38 s / 74 MB | Rust 7.2x slower |
-| `blastx` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | Rust 107 rows, NCBI 113; Rust rows all shared, 6 NCBI-only | 1.04 s / 9 MB | 0.66 s / 28 MB | Rust 1.6x slower |
-| `tblastn` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 77/88 NCBI; 21 Rust-only, 11 NCBI-only | 1.88 s / 8 MB | 0.21 s / 26 MB | Rust 9.0x slower |
-| `tblastx` | `/tmp/bench/nt10.fa` | `tests/fixtures/seqn/seqn` | rows shared 256/263 NCBI; 10 Rust-only, 7 NCBI-only | 2.36 s / 11 MB | 0.46 s / 26 MB | Rust 5.1x slower |
+| `blastn` | `/tmp/bench/nt20.fa` | `tests/fixtures/large_db/celegans` | sorted row-set identical: 1160/1160 rows | 2.61 s / 90 MB | 0.32 s / 76 MB | Rust 8.2x slower |
+| `blastx` | `/tmp/bench/nt20.fa` | `tests/fixtures/seqp/seqp` | Rust 107 rows, NCBI 113; Rust rows all shared, 6 NCBI-only | 1.32 s / 10 MB | 0.58 s / 28 MB | Rust 2.3x slower |
+| `tblastn` | `/tmp/bench/prot30.fa` | `tests/fixtures/seqn/seqn` | coordinate rows shared 77/88 NCBI; 21 Rust-only, 11 NCBI-only | 1.89 s / 9 MB | 0.19 s / 26 MB | Rust 9.9x slower |
+| `tblastx` | `/tmp/bench/nt10.fa` | `tests/fixtures/seqn/seqn` | rows shared 258/263 NCBI; 8 Rust-only, 5 NCBI-only | 1.88 s / 11 MB | 0.42 s / 26 MB | Rust 4.5x slower |
 
 The `blastn` case is exact on this fixture. The translated-search cases still
 show small residual hit-set differences on broader real data, mostly around

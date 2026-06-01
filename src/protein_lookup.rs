@@ -97,6 +97,13 @@ pub struct ProteinLookupTable {
     compressed: Option<BlastCompressedAaLookupTable>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ProteinContextScanParams {
+    pub query_start: usize,
+    pub x_dropoff: i32,
+    pub cutoff_score: i32,
+}
+
 const COMPRESSED_HITS_PER_BACKBONE_CELL: usize = 4;
 const COMPRESSED_HITS_PER_OVERFLOW_CELL: usize = 4;
 const COMPRESSED_HITS_CELL_MASK: i32 = 0x03;
@@ -1553,6 +1560,63 @@ thread_local! {
     /// reused (capacity retained) across every subject (`blast_engine.c:1039`).
     static COMPRESSED_SCAN_BUF: std::cell::Cell<Vec<crate::lookup::OffsetPair>> =
         const { std::cell::Cell::new(Vec::new()) };
+
+    /// Per-thread diagonal generation stamps for protein word finders.
+    ///
+    /// NCBI reuses diagonal state across subjects and makes a logical clear
+    /// cheap; the Rust scanner used to `clear + resize` the whole diagonal array
+    /// for every subject/frame. These stamps let us ignore stale `diag_buf`
+    /// entries unless their slot was touched in the current scan.
+    static DIAG_STAMP_SCRATCH: std::cell::Cell<DiagStampScratch> =
+        const { std::cell::Cell::new(DiagStampScratch::new()) };
+}
+
+struct DiagStampScratch {
+    stamps: Vec<u32>,
+    generation: u32,
+}
+
+impl DiagStampScratch {
+    const fn new() -> Self {
+        Self {
+            stamps: Vec::new(),
+            generation: 0,
+        }
+    }
+}
+
+impl Default for DiagStampScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn take_diag_stamp_scratch(diag_count: usize) -> DiagStampScratch {
+    DIAG_STAMP_SCRATCH.with(|slot| {
+        let mut scratch = slot.take();
+        scratch.generation = scratch.generation.wrapping_add(1);
+        if scratch.generation == 0 {
+            scratch.stamps.fill(0);
+            scratch.generation = 1;
+        }
+        if scratch.stamps.len() < diag_count {
+            scratch.stamps.resize(diag_count, 0);
+        }
+        scratch
+    })
+}
+
+fn put_diag_stamp_scratch(scratch: DiagStampScratch) {
+    DIAG_STAMP_SCRATCH.with(|slot| slot.set(scratch));
+}
+
+#[inline]
+fn prepare_diag_buf(diag_buf: &mut Vec<(i32, bool)>, diag_count: usize, initial: (i32, bool)) {
+    if diag_buf.len() < diag_count {
+        diag_buf.resize(diag_count, initial);
+    } else {
+        diag_buf.truncate(diag_count);
+    }
 }
 
 /// blast-rs: inline-read helper for FIX B. Mirrors the offset-copy block of
@@ -2516,7 +2580,7 @@ pub fn s_blast_aa_word_finder_two_hit(
     // gate). Callers that have a real per-context ungapped cutoff should go
     // through `protein_scan_with_table_reuse`/`blast_aa_word_finder`.
     s_blast_aa_word_finder_two_hit_scan(
-        query, subject, matrix, table, x_dropoff, window, 1, diag_buf, None, None,
+        query, subject, matrix, table, x_dropoff, window, 1, diag_buf, None, None, None,
     )
     .hits
 }
@@ -2540,6 +2604,7 @@ fn s_blast_aa_word_finder_two_hit_compressed(
     cutoff_score: i32,
     diag_buf: &mut Vec<(i32, bool)>,
     context_starts: Option<&[usize]>,
+    context_params: Option<&[ProteinContextScanParams]>,
     mut side_channels: Option<&mut BlastAaWordFinderSideChannels<'_>>,
 ) -> BlastAaWordFinderScan {
     let word_size = table.word_size;
@@ -2550,8 +2615,9 @@ fn s_blast_aa_word_finder_two_hit_compressed(
         diag_count <<= 1;
     }
     let diag_mask = diag_count - 1;
-    diag_buf.clear();
-    diag_buf.resize(diag_count, (-window, false));
+    let mut diag_stamps = take_diag_stamp_scratch(diag_count);
+    let generation = diag_stamps.generation;
+    prepare_diag_buf(diag_buf, diag_count, (-window, false));
     let diag_array = diag_buf;
     let diag_offset = window;
 
@@ -2581,26 +2647,44 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                 let s_pos = pair.subject_offset as usize;
                 let s_off = s_pos as i32;
                 let diag = q_pos.wrapping_sub(s_pos) & diag_mask;
-                let (last_hit, flag) = diag_array[diag];
+                let (last_hit, flag) = if diag_stamps.stamps[diag] == generation {
+                    diag_array[diag]
+                } else {
+                    (-window, false)
+                };
 
                 if flag {
                     if s_off + diag_offset < last_hit {
                         continue;
                     }
+                    diag_stamps.stamps[diag] = generation;
                     diag_array[diag] = (s_off + diag_offset, false);
                     continue;
                 }
                 let diff = s_off - (last_hit - diag_offset);
                 if diff >= window {
+                    diag_stamps.stamps[diag] = generation;
                     diag_array[diag] = (s_off + diag_offset, false);
                     continue;
                 }
                 if diff < ws {
                     continue;
                 }
-                if let Some(starts) = context_starts {
-                    let ctx_start = context_start_for_offset(starts, q_pos);
+                let mut context_x_dropoff = x_dropoff;
+                let mut context_cutoff_score = cutoff_score;
+                let ctx_start = if let Some(params) = context_params {
+                    let ctx = context_params_for_offset(params, q_pos);
+                    context_x_dropoff = ctx.x_dropoff;
+                    context_cutoff_score = ctx.cutoff_score;
+                    ctx.query_start
+                } else if let Some(starts) = context_starts {
+                    context_start_for_offset(starts, q_pos)
+                } else {
+                    0
+                };
+                if context_params.is_some() || context_starts.is_some() {
                     if (diff as usize) > q_pos || q_pos - (diff as usize) < ctx_start {
+                        diag_stamps.stamps[diag] = generation;
                         diag_array[diag] = (s_off + diag_offset, false);
                         continue;
                     }
@@ -2616,7 +2700,7 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                     subject,
                     matrix,
                     word_size,
-                    x_dropoff,
+                    context_x_dropoff,
                     q_right_off,
                     s_right_off,
                     s_left_off,
@@ -2626,9 +2710,10 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                         // the init HSP only when `score >= cutoffs->cutoff_score`; the
                         // diagonal `last_hit`/`flag` update below is INDEPENDENT of the
                         // cutoff and happens regardless of whether the HSP was saved.
+                        diag_stamps.stamps[diag] = generation;
                         diag_array[diag] = (s_last_off - (ws - 1) + diag_offset, true);
                         if let Some(hit) = hit {
-                            if hit.score >= cutoff_score {
+                            if hit.score >= context_cutoff_score {
                                 if let Some(channels) = side_channels.as_deref_mut() {
                                     if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut()
                                     {
@@ -2649,7 +2734,7 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                     }
                     TwoHitOutcome::NoReach { hit } => {
                         if let Some(hit) = hit {
-                            if hit.score >= cutoff_score {
+                            if hit.score >= context_cutoff_score {
                                 if let Some(channels) = side_channels.as_deref_mut() {
                                     if let Some(init_hitlist) = channels.init_hitlist.as_deref_mut()
                                     {
@@ -2667,6 +2752,7 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                                 hits.push(hit);
                             }
                         }
+                        diag_stamps.stamps[diag] = generation;
                         diag_array[diag] = (s_off + diag_offset, false);
                     }
                 }
@@ -2676,6 +2762,7 @@ fn s_blast_aa_word_finder_two_hit_compressed(
     // FIX C: return the (now-populated, retained-capacity) buffer to the
     // thread-local for the next subject.
     COMPRESSED_SCAN_BUF.set(scan_buf);
+    put_diag_stamp_scratch(diag_stamps);
 
     let scan = BlastAaWordFinderScan {
         hits,
@@ -2710,6 +2797,7 @@ fn s_blast_aa_word_finder_two_hit_scan(
     cutoff_score: i32,
     diag_buf: &mut Vec<(i32, bool)>,
     context_starts: Option<&[usize]>,
+    context_params: Option<&[ProteinContextScanParams]>,
     mut side_channels: Option<&mut BlastAaWordFinderSideChannels<'_>>,
 ) -> BlastAaWordFinderScan {
     let word_size = table.word_size;
@@ -2728,6 +2816,7 @@ fn s_blast_aa_word_finder_two_hit_scan(
             cutoff_score,
             diag_buf,
             context_starts,
+            context_params,
             side_channels,
         );
     }
@@ -2737,8 +2826,9 @@ fn s_blast_aa_word_finder_two_hit_scan(
         diag_count <<= 1;
     }
     let diag_mask = diag_count - 1;
-    diag_buf.clear();
-    diag_buf.resize(diag_count, (-window, false));
+    let mut diag_stamps = take_diag_stamp_scratch(diag_count);
+    let generation = diag_stamps.generation;
+    prepare_diag_buf(diag_buf, diag_count, (-window, false));
     let diag_array = diag_buf;
 
     let mut hits: Vec<ProteinHit> = Vec::new();
@@ -2758,6 +2848,7 @@ fn s_blast_aa_word_finder_two_hit_scan(
     let overflow = table.overflow.as_ptr();
     let subj = subject.as_ptr();
     let diag_ptr = diag_array.as_mut_ptr();
+    let stamp_ptr = diag_stamps.stamps.as_mut_ptr();
     let diag_offset = window;
     let mut total_hits = 0i32;
     let mut hits_extended = 0i32;
@@ -2794,26 +2885,44 @@ fn s_blast_aa_word_finder_two_hit_scan(
                 let q_pos = *hit_ptr.add(i) as usize;
                 let s_off = s_pos as i32;
                 let diag = q_pos.wrapping_sub(s_pos) & diag_mask;
-                let (last_hit, flag) = *diag_ptr.add(diag);
+                let (last_hit, flag) = if *stamp_ptr.add(diag) == generation {
+                    *diag_ptr.add(diag)
+                } else {
+                    (-window, false)
+                };
 
                 if flag {
                     if s_off + diag_offset < last_hit {
                         continue;
                     }
+                    *stamp_ptr.add(diag) = generation;
                     *diag_ptr.add(diag) = (s_off + diag_offset, false);
                     continue;
                 }
                 let diff = s_off - (last_hit - diag_offset);
                 if diff >= window {
+                    *stamp_ptr.add(diag) = generation;
                     *diag_ptr.add(diag) = (s_off + diag_offset, false);
                     continue;
                 }
                 if diff < ws {
                     continue;
                 }
-                if let Some(starts) = context_starts {
-                    let ctx_start = context_start_for_offset(starts, q_pos);
+                let mut context_x_dropoff = x_dropoff;
+                let mut context_cutoff_score = cutoff_score;
+                let ctx_start = if let Some(params) = context_params {
+                    let ctx = context_params_for_offset(params, q_pos);
+                    context_x_dropoff = ctx.x_dropoff;
+                    context_cutoff_score = ctx.cutoff_score;
+                    ctx.query_start
+                } else if let Some(starts) = context_starts {
+                    context_start_for_offset(starts, q_pos)
+                } else {
+                    0
+                };
+                if context_params.is_some() || context_starts.is_some() {
                     if (diff as usize) > q_pos || q_pos - (diff as usize) < ctx_start {
+                        *stamp_ptr.add(diag) = generation;
                         *diag_ptr.add(diag) = (s_off + diag_offset, false);
                         continue;
                     }
@@ -2829,7 +2938,7 @@ fn s_blast_aa_word_finder_two_hit_scan(
                     subject,
                     matrix,
                     word_size,
-                    x_dropoff,
+                    context_x_dropoff,
                     q_right_off,
                     s_right_off,
                     s_left_off,
@@ -2841,9 +2950,10 @@ fn s_blast_aa_word_finder_two_hit_scan(
                         // below the save cutoff. The diagonal update is
                         // INDEPENDENT of the cutoff; only HSP saving is gated on
                         // `score >= cutoffs->cutoff_score` (`aa_ungapped.c:588`).
+                        *stamp_ptr.add(diag) = generation;
                         *diag_ptr.add(diag) = (s_last_off - (ws - 1) + diag_offset, true);
                         if let Some(hit) = hit {
-                            if hit.score >= cutoff_score {
+                            if hit.score >= context_cutoff_score {
                                 let record = BlastAaInitHitRecord {
                                     q_start: hit.query_start as i32,
                                     s_start: hit.subject_start as i32,
@@ -2872,7 +2982,7 @@ fn s_blast_aa_word_finder_two_hit_scan(
                     }
                     TwoHitOutcome::NoReach { hit } => {
                         if let Some(hit) = hit {
-                            if hit.score >= cutoff_score {
+                            if hit.score >= context_cutoff_score {
                                 let record = BlastAaInitHitRecord {
                                     q_start: hit.query_start as i32,
                                     s_start: hit.subject_start as i32,
@@ -2898,6 +3008,7 @@ fn s_blast_aa_word_finder_two_hit_scan(
                                 hits.push(hit);
                             }
                         }
+                        *stamp_ptr.add(diag) = generation;
                         *diag_ptr.add(diag) = (s_off + diag_offset, false);
                     }
                 }
@@ -2924,6 +3035,7 @@ fn s_blast_aa_word_finder_two_hit_scan(
             saved_hits,
         );
     }
+    put_diag_stamp_scratch(diag_stamps);
     scan
 }
 
@@ -2933,6 +3045,18 @@ fn context_start_for_offset(context_starts: &[usize], query_offset: usize) -> us
         Ok(i) => context_starts[i],
         Err(0) => 0,
         Err(i) => context_starts[i - 1],
+    }
+}
+
+#[inline]
+fn context_params_for_offset(
+    context_params: &[ProteinContextScanParams],
+    query_offset: usize,
+) -> ProteinContextScanParams {
+    match context_params.binary_search_by_key(&query_offset, |ctx| ctx.query_start) {
+        Ok(i) => context_params[i],
+        Err(0) => context_params[0],
+        Err(i) => context_params[i - 1],
     }
 }
 
@@ -2974,8 +3098,9 @@ fn s_blast_aa_word_finder_one_hit_compressed(
         diag_count <<= 1;
     }
     let diag_mask = diag_count - 1;
-    diag_buf.clear();
-    diag_buf.resize(diag_count, (0, false));
+    let mut diag_stamps = take_diag_stamp_scratch(diag_count);
+    let generation = diag_stamps.generation;
+    prepare_diag_buf(diag_buf, diag_count, (0, false));
     let diag_array = diag_buf;
 
     let mut hits = Vec::new();
@@ -2996,7 +3121,11 @@ fn s_blast_aa_word_finder_one_hit_compressed(
                 let q_pos = pair.query_offset as usize;
                 let s_pos = pair.subject_offset as usize;
                 let diag = s_pos.wrapping_sub(q_pos) & diag_mask;
-                let last_hit = diag_array[diag].0;
+                let last_hit = if diag_stamps.stamps[diag] == generation {
+                    diag_array[diag].0
+                } else {
+                    0
+                };
                 let diff = s_pos as i32 - last_hit;
                 if diff < 0 {
                     continue;
@@ -3006,6 +3135,7 @@ fn s_blast_aa_word_finder_one_hit_compressed(
                 let (hit, s_last_off) = s_blast_aa_extend_one_hit(
                     query, subject, matrix, word_size, x_dropoff, q_pos, s_pos,
                 );
+                diag_stamps.stamps[diag] = generation;
                 diag_array[diag] = (s_last_off - (ws - 1), false);
                 if let Some(hit) = hit {
                     if hit.score >= cutoff_score {
@@ -3030,6 +3160,7 @@ fn s_blast_aa_word_finder_one_hit_compressed(
     ) as i32;
     // FIX C: return the buffer to the thread-local for the next subject.
     COMPRESSED_SCAN_BUF.set(scan_buf);
+    put_diag_stamp_scratch(diag_stamps);
 
     let scan = BlastAaWordFinderScan {
         hits,
@@ -3089,8 +3220,9 @@ fn s_blast_aa_word_finder_one_hit_scan(
         diag_count <<= 1;
     }
     let diag_mask = diag_count - 1;
-    diag_buf.clear();
-    diag_buf.resize(diag_count, (0, false));
+    let mut diag_stamps = take_diag_stamp_scratch(diag_count);
+    let generation = diag_stamps.generation;
+    prepare_diag_buf(diag_buf, diag_count, (0, false));
 
     let mut hits = Vec::new();
     let ws = word_size as i32;
@@ -3103,6 +3235,7 @@ fn s_blast_aa_word_finder_one_hit_scan(
     let overflow = table.overflow.as_ptr();
     let subj = subject.as_ptr();
     let diag_ptr = diag_buf.as_mut_ptr();
+    let stamp_ptr = diag_stamps.stamps.as_mut_ptr();
     let mut total_hits = 0i32;
     let mut hits_extended = 0i32;
 
@@ -3136,7 +3269,11 @@ fn s_blast_aa_word_finder_one_hit_scan(
             for i in 0..hit_len {
                 let q_pos = *hit_ptr.add(i) as usize;
                 let diag = s_pos.wrapping_sub(q_pos) & diag_mask;
-                let last_hit = (*diag_ptr.add(diag)).0;
+                let last_hit = if *stamp_ptr.add(diag) == generation {
+                    (*diag_ptr.add(diag)).0
+                } else {
+                    0
+                };
                 let diff = s_pos as i32 - last_hit;
                 if diff < 0 {
                     continue;
@@ -3146,6 +3283,7 @@ fn s_blast_aa_word_finder_one_hit_scan(
                 let (hit, s_last_off) = s_blast_aa_extend_one_hit(
                     query, subject, matrix, word_size, x_dropoff, q_pos, s_pos,
                 );
+                *stamp_ptr.add(diag) = generation;
                 *diag_ptr.add(diag) = (s_last_off - (ws - 1), false);
                 if let Some(hit) = hit {
                     if hit.score >= cutoff_score {
@@ -3196,6 +3334,7 @@ fn s_blast_aa_word_finder_one_hit_scan(
             saved_hits,
         );
     }
+    put_diag_stamp_scratch(diag_stamps);
     scan
 }
 
@@ -3235,6 +3374,7 @@ pub fn blast_aa_word_finder(
             window_size,
             cutoff_score,
             diag_buf,
+            None,
             None,
             None,
         )
@@ -3288,6 +3428,7 @@ pub fn blast_aa_word_finder_with_side_channels(
             window_size,
             cutoff_score,
             diag_buf,
+            None,
             None,
             Some(&mut side_channels),
         )
@@ -3372,11 +3513,66 @@ pub fn protein_scan_with_table_reuse_contexts(
             diag_buf,
             Some(context_starts),
             None,
+            None,
         )
         .hits;
         // This path scans concatenated Rust query buffers and must pass the
         // same-context guard directly into the two-hit body. NCBI still sorts at
         // `BlastAaWordFinder` after scanning, so do the equivalent here.
+        blast_init_protein_hits_sort_by_score(&mut scan);
+        scan
+    }
+}
+
+/// Scan a concatenated query buffer with per-query-context word parameters.
+/// NCBI stores `BlastInitialWordParameters.cutoffs[context]` and
+/// `BlastExtensionParameters.x_dropoff_init[context]`; this wrapper carries the
+/// same per-context values into the word finder while keeping the same-context
+/// two-hit diagonal rule.
+#[allow(clippy::too_many_arguments)]
+pub fn protein_scan_with_table_reuse_context_params(
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    table: &ProteinLookupTable,
+    window: i32,
+    diag_buf: &mut Vec<(i32, bool)>,
+    context_params: &[ProteinContextScanParams],
+) -> Vec<ProteinHit> {
+    if context_params.is_empty() {
+        return Vec::new();
+    }
+    let x_dropoff = context_params[0].x_dropoff;
+    let cutoff_score = context_params[0].cutoff_score;
+    if window <= 0 {
+        let mut scan = s_blast_aa_word_finder_one_hit_scan(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            cutoff_score,
+            diag_buf,
+            None,
+        )
+        .hits;
+        blast_init_protein_hits_sort_by_score(&mut scan);
+        scan
+    } else {
+        let mut scan = s_blast_aa_word_finder_two_hit_scan(
+            query,
+            subject,
+            matrix,
+            table,
+            x_dropoff,
+            window,
+            cutoff_score,
+            diag_buf,
+            None,
+            Some(context_params),
+            None,
+        )
+        .hits;
         blast_init_protein_hits_sort_by_score(&mut scan);
         scan
     }
@@ -4077,6 +4273,114 @@ mod tests {
             "Should find hits for identical sequences"
         );
         // hits2 may or may not be empty depending on BLOSUM62 neighborhood
+    }
+
+    #[test]
+    fn protein_scanners_ignore_stale_reused_diagonal_scratch() {
+        let m = simple_matrix();
+        let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+        let subject = vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
+        let table = ProteinLookupTable::build(&query, 3, &m, 12.0);
+
+        let mut clean_diag = Vec::new();
+        let clean_two_hit =
+            blast_aa_word_finder(&query, &subject, &m, &table, 20, 12, 1, &mut clean_diag)
+                .expect("clean two-hit scan");
+
+        let mut stale_diag = vec![(10_000, true); clean_diag.len().max(64)];
+        let stale_two_hit =
+            blast_aa_word_finder(&query, &subject, &m, &table, 20, 12, 1, &mut stale_diag)
+                .expect("stale two-hit scan");
+
+        assert_eq!(stale_two_hit.len(), clean_two_hit.len());
+        for (hit, exp) in stale_two_hit.iter().zip(clean_two_hit.iter()) {
+            assert_eq!(
+                (
+                    hit.query_start,
+                    hit.query_end,
+                    hit.subject_start,
+                    hit.subject_end,
+                    hit.score,
+                    hit.num_ident,
+                ),
+                (
+                    exp.query_start,
+                    exp.query_end,
+                    exp.subject_start,
+                    exp.subject_end,
+                    exp.score,
+                    exp.num_ident,
+                )
+            );
+        }
+
+        let mut clean_one_diag = Vec::new();
+        let clean_one_hit =
+            blast_aa_word_finder(&query, &subject, &m, &table, 20, 0, 1, &mut clean_one_diag)
+                .expect("clean one-hit scan");
+
+        let mut stale_one_diag = vec![(10_000, true); clean_one_diag.len().max(64)];
+        let stale_one_hit =
+            blast_aa_word_finder(&query, &subject, &m, &table, 20, 0, 1, &mut stale_one_diag)
+                .expect("stale one-hit scan");
+
+        assert_eq!(stale_one_hit.len(), clean_one_hit.len());
+        for (hit, exp) in stale_one_hit.iter().zip(clean_one_hit.iter()) {
+            assert_eq!(
+                (
+                    hit.query_start,
+                    hit.query_end,
+                    hit.subject_start,
+                    hit.subject_end,
+                    hit.score,
+                    hit.num_ident,
+                ),
+                (
+                    exp.query_start,
+                    exp.query_end,
+                    exp.subject_start,
+                    exp.subject_end,
+                    exp.score,
+                    exp.num_ident,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn concatenated_context_scan_uses_per_context_cutoff() {
+        let m = simple_matrix();
+        let q = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let second_start = q.len() + 1;
+        let mut concat = q.clone();
+        concat.push(PROTEIN_CONCAT_SENTINEL);
+        concat.extend_from_slice(&q);
+        let table = ProteinLookupTable::build(&concat, 3, &m, 12.0);
+        let mut diag = Vec::new();
+
+        let hits = protein_scan_with_table_reuse_context_params(
+            &concat,
+            &q,
+            &m,
+            &table,
+            40,
+            &mut diag,
+            &[
+                ProteinContextScanParams {
+                    query_start: 0,
+                    x_dropoff: 40,
+                    cutoff_score: 999,
+                },
+                ProteinContextScanParams {
+                    query_start: second_start,
+                    x_dropoff: 40,
+                    cutoff_score: 1,
+                },
+            ],
+        );
+
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.query_start >= second_start));
     }
 
     #[test]

@@ -317,9 +317,10 @@ pub fn blast_hsp_get_target_translation<'a>(
         let nucl_length_usize = nucl_length as usize;
         let nucl_seq = subject_seq.get(nucl_shift..nucl_shift + nucl_length_usize)?;
 
+        let old_cached_width = stop - start;
         range[2 * context] = start_shift;
         start = start_shift;
-        if translation_length > stop - start || target_t.translations[context].is_none() {
+        if translation_length > old_cached_width || target_t.translations[context].is_none() {
             target_t.translations[context] = Some(vec![0; translation_length.max(0) as usize + 2]);
         }
 
@@ -5414,6 +5415,38 @@ mod tests {
         assert!(
             blast_hsp_get_target_translation(&mut partial_without_subject, Some(&hsp)).is_none()
         );
+    }
+
+    #[test]
+    fn target_translation_reallocates_against_old_cached_width_like_c() {
+        let sequence = (0..600).map(|i| [1u8, 2, 4, 8][i % 4]).collect::<Vec<_>>();
+        let mut subject_blk = crate::util::BlastSequenceBlk::default();
+        subject_blk.sequence = Some(sequence);
+        subject_blk.length = 600;
+
+        let mut target = crate::util::SBlastTargetTranslation {
+            program_number: crate::program::TBLASTN,
+            gen_code_string: crate::util::STANDARD_GENETIC_CODE,
+            translations: vec![None; crate::util::NUM_FRAMES],
+            partial: true,
+            num_frames: crate::util::NUM_FRAMES as i32,
+            range: Some(vec![0; 2 * crate::util::NUM_FRAMES]),
+            subject_blk: Some(subject_blk),
+        };
+        target.range.as_mut().unwrap()[0] = 100;
+        target.range.as_mut().unwrap()[1] = 200;
+        target.translations[0] = Some(vec![0; 102]);
+
+        let mut hsp = make_hsp(30, 1.0e-6);
+        hsp.subject_frame = 1;
+        hsp.subject_offset = 20;
+        hsp.subject_end = 80;
+
+        let view = blast_hsp_get_target_translation(&mut target, Some(&hsp)).expect("view");
+        assert_eq!(view.pointer_offset, 1);
+        assert!(view.sequence.len() >= 116);
+        assert_eq!(target.range.as_ref().unwrap()[0], 0);
+        assert_eq!(target.range.as_ref().unwrap()[1], 113);
     }
 
     #[test]

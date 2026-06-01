@@ -381,11 +381,11 @@ fn real_data_tblastn_prot30_seqn_cbs0_documents_current_coordinate_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 88);
-    // Current small-fixture gap after the translated-subject path was reshaped
-    // to append per-frame HSPs, link, then reap by prelim e-value like
-    // `s_BlastSearchEngineCore`.
-    assert_eq!(rs_set.len(), 98);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (11, 21));
+    // Current small-fixture gap after the tblastn linker was restored to pass
+    // the raw nucleotide subject length into `blast_link_hsps`, matching NCBI's
+    // internal translated-subject length conversion.
+    assert_eq!(rs_set.len(), 86);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (11, 9));
 }
 
 #[test]
@@ -461,7 +461,7 @@ fn real_data_tblastx_nt20_seqn_documents_current_coordinate_gap() {
 
     assert_eq!(ncbi_set.len(), 458);
     assert_eq!(rs_set.len(), 465);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (8, 15));
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (6, 13));
 }
 
 #[test]
@@ -498,7 +498,7 @@ fn real_data_tblastx_nt10_seqn_documents_current_coordinate_gap() {
 
     assert_eq!(ncbi_set.len(), 263);
     assert_eq!(rs_set.len(), 266);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (7, 10));
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (5, 8));
 }
 
 #[test]
