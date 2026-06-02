@@ -2608,11 +2608,7 @@ fn diag_initial_hit_core_packed(
     let two_hit = two_hit.expect("two-hit store required when window_size > 0");
     let stored_last = last_hit.get(diag_mask, q0, s0);
     let hit_saved = two_hit.get_flag(diag_mask, q0, s0);
-    let last = if !hit_saved && stored_last == 0 {
-        -window_size
-    } else {
-        stored_last
-    };
+    let last = stored_last;
 
     // na_ungapped.c:672 — a hit within the explored area is rejected.
     if s_off_pos < last {
@@ -2620,9 +2616,9 @@ fn diag_initial_hit_core_packed(
     }
 
     // na_ungapped.c:675 — `two_hits && (hit_saved || s_end_pos > last_hit + window)`.
-    // With scan_range == 0, that branch holds a lone first hit
-    // (`hit_ready = 0`, na_ungapped.c:719). A later same-diagonal hit inside
-    // the window falls through and is ready to extend.
+    // NCBI initializes unseen diagonal entries to zero. A first hit ending inside
+    // the initial window therefore falls through and extends; a first hit beyond
+    // the window is held (`hit_ready = 0`, na_ungapped.c:714-715).
     let mut hit_ready = true;
     if hit_saved || s_end_word > last + window_size {
         hit_ready = false;
@@ -6231,7 +6227,7 @@ fn cutoff_traceback(tb: &mut TracebackResult, q_cut_abs: usize, s_cut_abs: usize
     use crate::gapinfo::GapAlignOpType::{Decline, Del, Del1, Del2, Ins, Ins1, Ins2, Sub};
     let q_cut = q_cut_abs as i64 - tb.query_start as i64;
     let s_cut = s_cut_abs as i64 - tb.subject_start as i64;
-    if q_cut <= 0 || s_cut <= 0 {
+    if q_cut < 0 || s_cut < 0 {
         return;
     }
     let mut qid = 0i64;
@@ -6239,7 +6235,7 @@ fn cutoff_traceback(tb: &mut TracebackResult, q_cut_abs: usize, s_cut_abs: usize
     let mut found = false;
     let mut found_index = 0usize;
     let mut found_opid = 0i32;
-    'outer: for (index, &(op, num)) in tb.edit_script.ops.iter().enumerate() {
+    'outer: for (index, (op, num)) in tb.edit_script.iter().enumerate() {
         let mut opid = 0i32;
         while opid < num {
             match op {
@@ -6271,7 +6267,7 @@ fn cutoff_traceback(tb: &mut TracebackResult, q_cut_abs: usize, s_cut_abs: usize
     if !found {
         return;
     }
-    let ops = &tb.edit_script.ops;
+    let ops = tb.edit_script.ops_vec();
     let (op, num) = ops[found_index];
     if cut_begin {
         let mut new_ops: Vec<(crate::gapinfo::GapAlignOpType, i32)> = Vec::new();
@@ -6280,13 +6276,13 @@ fn cutoff_traceback(tb: &mut TracebackResult, q_cut_abs: usize, s_cut_abs: usize
             new_ops.push((op, num - found_opid));
         }
         new_ops.extend_from_slice(&ops[found_index + 1..]);
-        tb.edit_script.ops = new_ops;
+        tb.edit_script.replace_ops(new_ops);
         tb.query_start += qid as usize;
         tb.subject_start += sid as usize;
     } else {
         let mut new_ops: Vec<(crate::gapinfo::GapAlignOpType, i32)> = ops[..found_index].to_vec();
         new_ops.push((op, if found_opid < num { found_opid } else { num }));
-        tb.edit_script.ops = new_ops;
+        tb.edit_script.replace_ops(new_ops);
         tb.query_end = tb.query_start + qid as usize;
         tb.subject_end = tb.subject_start + sid as usize;
     }
@@ -9213,9 +9209,10 @@ mod tests {
                 context: 0,
                 tb: TracebackResult {
                     score,
-                    edit_script: GapEditScript {
-                        ops: vec![(GapAlignOpType::Sub, (q_end - q_start) as i32)],
-                    },
+                    edit_script: GapEditScript::from_ops(vec![(
+                        GapAlignOpType::Sub,
+                        (q_end - q_start) as i32,
+                    )]),
                     query_start: q_start,
                     query_end: q_end,
                     subject_start: q_start,
@@ -9251,6 +9248,27 @@ mod tests {
                 (90, 4, 4, 8, 8, true),
             ]
         );
+    }
+
+    #[test]
+    fn test_cutoff_traceback_allows_zero_axis_cut_like_ncbi() {
+        let mut tb = TracebackResult {
+            score: 10,
+            edit_script: GapEditScript::from_ops(vec![
+                (GapAlignOpType::Ins, 2),
+                (GapAlignOpType::Sub, 6),
+            ]),
+            query_start: 0,
+            query_end: 8,
+            subject_start: 0,
+            subject_end: 6,
+        };
+
+        cutoff_traceback(&mut tb, 2, 0, false);
+
+        assert_eq!(tb.query_end, 2);
+        assert_eq!(tb.subject_end, 0);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Ins, 2)]);
     }
 
     #[test]
@@ -10219,25 +10237,27 @@ mod tests {
     }
 
     #[test]
-    fn blastn_window_size_two_hit_gate_holds_isolated_first_hit() {
+    fn blastn_window_size_two_hit_gate_matches_ncbi_initial_window() {
         // NCBI `s_BlastnDiagTableExtendInitialHit` (na_ungapped.c:632): with
-        // `-window_size > 0` (`two_hits == TRUE`), a lone first word hit on a
-        // diagonal is HELD (hit_ready = 0) and never extended; with the default
-        // window 0 (`two_hits == FALSE`) it is extended immediately.
+        // `-window_size > 0` (`two_hits == TRUE`), unseen diagonal slots start
+        // with last_hit=0. A first word ending inside the initial window extends;
+        // one beyond the initial window is held (hit_ready = 0).
         let query = encode_blastna_sequence(b"ACGACGTTGCA");
         let rc = reverse_complement_blastna_sequence(&query);
-        // A single isolated copy of the only query word, padded so it has no
-        // diagonal partner inside the window.
-        let subject = encode_blastna_sequence(b"TTTTTTTTTTTTACGACGTTGCATTTTTTTTTTT");
-        let subject_packed = pack_ncbi2na_bases(&subject);
+        let subject_inside = encode_blastna_sequence(b"TTTTTTTTTTTTACGACGTTGCATTTTTTTTTTT");
+        let subject_inside_packed = pack_ncbi2na_bases(&subject_inside);
+        let subject_beyond = encode_blastna_sequence(
+            b"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTACGACGTTGCA",
+        );
+        let subject_beyond_packed = pack_ncbi2na_bases(&subject_beyond);
         let kbp = test_kbp();
         let prepared = PreparedBlastnQuery::new(&query, &rc, 11);
 
         let prev = set_blastn_window_size(0);
         let one_hit = blastn_ungapped_search_packed_prepared(
             &prepared,
-            &subject_packed,
-            subject.len(),
+            &subject_inside_packed,
+            subject_inside.len(),
             1,
             -3,
             20,
@@ -10253,8 +10273,24 @@ mod tests {
         set_blastn_window_size(40);
         let two_hit = blastn_ungapped_search_packed_prepared(
             &prepared,
-            &subject_packed,
-            subject.len(),
+            &subject_inside_packed,
+            subject_inside.len(),
+            1,
+            -3,
+            20,
+            &kbp,
+            1e6,
+            1e10,
+        );
+        assert!(
+            !two_hit.is_empty(),
+            "window 40 should extend a first hit ending inside the initial window: {two_hit:?}"
+        );
+
+        let held = blastn_ungapped_search_packed_prepared(
+            &prepared,
+            &subject_beyond_packed,
+            subject_beyond.len(),
             1,
             -3,
             20,
@@ -10264,8 +10300,8 @@ mod tests {
         );
         set_blastn_window_size(prev);
         assert!(
-            two_hit.is_empty(),
-            "window 40 (two-hit) should HOLD the isolated first hit (no extension): {two_hit:?}"
+            held.is_empty(),
+            "window 40 should hold an isolated first hit beyond the initial window: {held:?}"
         );
     }
 

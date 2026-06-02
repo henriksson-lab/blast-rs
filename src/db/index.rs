@@ -907,6 +907,13 @@ fn parse_megablast_index_subject_map(
                 io::ErrorKind::InvalidData,
                 "native MegaBLAST subject-map OID span overflows",
             )
+        })?
+        .checked_add(1)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native MegaBLAST subject-map subject count overflows",
+            )
         })? as usize;
     let subject_words = subject_map_bytes / 4;
     if subject_words < c_subject_count {
@@ -4060,8 +4067,8 @@ mod tests {
             data.extend_from_slice(&word.to_le_bytes());
         }
 
-        data.extend_from_slice(&16u32.to_le_bytes());
-        for word in [1u32, 2, 0, 8] {
+        data.extend_from_slice(&20u32.to_le_bytes());
+        for word in [1u32, 2, 3, 0, 8] {
             data.extend_from_slice(&word.to_le_bytes());
         }
 
@@ -4181,7 +4188,7 @@ mod tests {
         assert_eq!(volume.subject_map.offset_bits, 4);
         assert_eq!(volume.subject_map.lengths, vec![20, 30]);
         assert_eq!(volume.subject_map.lid_map_words.len(), 8);
-        assert_eq!(volume.subject_map.subjects, vec![1, 2]);
+        assert_eq!(volume.subject_map.subjects, vec![1, 2, 3]);
         assert_eq!(volume.subject_map.chunks, vec![0, 8]);
         assert_eq!(
             volume.subject_map.seq_store,
@@ -4228,7 +4235,7 @@ mod tests {
             offset_bits: 4,
             lengths: vec![120, 120],
             lid_map_words: vec![0, 1, 0, 40, 1, 2, 32, 72],
-            subjects: vec![1, 2, 0],
+            subjects: vec![1, 2, 3],
             chunks: vec![0, 32],
             seq_store: Vec::new(),
         };
@@ -4318,7 +4325,7 @@ mod tests {
                 offset_bits: 4,
                 lengths: vec![120, 120],
                 lid_map_words: vec![0, 1, 0, 40, 1, 2, 32, 72],
-                subjects: vec![1, 2, 0],
+                subjects: vec![1, 2, 3],
                 chunks: vec![0, 32],
                 seq_store: Vec::new(),
             },

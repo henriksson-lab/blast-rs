@@ -183,17 +183,18 @@ pub fn dynamic_uint4_array_dup(src: Option<&SDynamicUint4Array>) -> Option<SDyna
     retval
         .data
         .extend_from_slice(&src.data[..src.num_used as usize]);
-    retval.num_used = src.num_used;
     Some(retval)
 }
 
 /// Port of NCBI `DynamicUint4Array_Copy` (`blast_dynarray.c:146`).
 pub fn dynamic_uint4_array_copy(dest: &mut SDynamicUint4Array, src: &SDynamicUint4Array) -> i32 {
     dest.data.clear();
+    if dest.num_allocated < src.num_allocated {
+        dest.num_allocated = src.num_allocated;
+    }
     dest.data
         .extend_from_slice(&src.data[..src.num_used as usize]);
     dest.num_used = src.num_used;
-    dest.num_allocated = src.num_allocated;
     0
 }
 
@@ -2150,13 +2151,22 @@ mod tests {
         assert_eq!(&arr.data[..9], &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
 
         let dup = dynamic_uint4_array_dup(Some(&arr)).unwrap();
-        assert!(dynamic_uint4_array_are_equal(Some(&arr), Some(&dup)));
+        // Upstream DynamicUint4Array_Dup copies the backing data but leaves
+        // num_used at the calloc-initialized value.
+        assert_eq!(dup.num_used, 0);
+        assert_eq!(dup.num_allocated, arr.num_allocated);
+        assert_eq!(
+            &dup.data[..arr.num_used as usize],
+            &arr.data[..arr.num_used as usize]
+        );
+        assert!(!dynamic_uint4_array_are_equal(Some(&arr), Some(&dup)));
         assert!(!dynamic_uint4_array_are_equal(Some(&arr), None));
         assert!(dynamic_uint4_array_are_equal(None, None));
 
-        let mut copied = dynamic_uint4_array_new_ex(1);
+        let mut copied = dynamic_uint4_array_new_ex(32);
         assert_eq!(dynamic_uint4_array_copy(&mut copied, &arr), 0);
         assert!(dynamic_uint4_array_are_equal(Some(&arr), Some(&copied)));
+        assert_eq!(copied.num_allocated, 32);
         assert_eq!(dynamic_uint4_array_free(Some(copied)), None);
     }
 

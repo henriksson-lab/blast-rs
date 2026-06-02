@@ -14,22 +14,26 @@ pub enum GapAlignOpType {
     Decline = 7,
 }
 
-/// A gap edit script representing a gapped alignment.
+/// NCBI `GapEditScript` (`gapinfo.h`).
+///
+/// The C struct owns parallel `op_type` and `num` arrays plus `size`.
 #[derive(Debug, Clone, Default)]
 pub struct GapEditScript {
-    pub ops: Vec<(GapAlignOpType, i32)>, // (operation, count) pairs
+    pub op_type: Vec<GapAlignOpType>,
+    pub num: Vec<i32>,
+    pub size: i32,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct GapStateArrayStruct {
-    pub state_array: Vec<i32>,
+    pub state_array: Vec<u8>,
     pub length: i32,
-    pub used: bool,
+    pub used: i32,
     pub next: Option<Box<GapStateArrayStruct>>,
 }
 
 const GAP_STATE_CHUNKSIZE: usize = 2_097_152;
-const GAP_STATE_MIN_CELLS: usize = GAP_STATE_CHUNKSIZE / std::mem::size_of::<i32>();
+const GAP_STATE_MIN_CELLS: usize = GAP_STATE_CHUNKSIZE / std::mem::size_of::<u8>();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GapPrelimEditScript {
@@ -37,9 +41,11 @@ pub struct GapPrelimEditScript {
     pub num: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GapPrelimEditBlock {
     pub edit_ops: Vec<GapPrelimEditScript>,
+    pub num_ops_allocated: i32,
+    pub num_ops: i32,
     pub last_op: Option<GapAlignOpType>,
 }
 
@@ -478,8 +484,8 @@ pub fn s_gap_get_state(
     }
     let mut cursor = head.as_deref_mut();
     while let Some(node) = cursor {
-        if !node.used && node.length as usize >= requested_len {
-            node.used = true;
+        if node.used == 0 && node.length as usize >= requested_len {
+            node.used = 1;
             return Some(node);
         }
         if node.next.is_none() {
@@ -497,7 +503,7 @@ pub fn s_gap_get_state(
 pub fn s_gap_purge_state(state_struct: &mut GapStateArrayStruct) -> bool {
     let mut cursor = Some(state_struct);
     while let Some(node) = cursor {
-        node.used = false;
+        node.used = 0;
         cursor = node.next.as_deref_mut();
     }
     true
@@ -509,7 +515,7 @@ fn gap_state_array_new(requested_len: usize) -> GapStateArrayStruct {
     GapStateArrayStruct {
         state_array: vec![0; alloc_len],
         length: alloc_len as i32,
-        used: false,
+        used: 0,
         next: None,
     }
 }
@@ -519,7 +525,7 @@ pub fn gap_edit_script_new(size: i32) -> Option<GapEditScript> {
     if size <= 0 {
         return None;
     }
-    Some(GapEditScript::with_capacity(size as usize))
+    Some(GapEditScript::with_size(size as usize))
 }
 
 /// blast-rs: Rust ownership equivalent of NCBI `GapEditScriptDelete` (gapinfo.c:74); not a direct NCBI C port.
@@ -552,16 +558,16 @@ pub fn gap_edit_script_partial_copy(
     let stop = stop as usize;
     let size = stop - start + 1;
     let needed = offset + size;
-    if stop >= old_script.ops.len() || needed > new_script.ops.capacity() {
+    if stop >= old_script.len() || needed > new_script.len() {
         return -1;
     }
 
-    if new_script.ops.len() < needed {
-        new_script.ops.resize(needed, (GapAlignOpType::Sub, 0));
-    }
     let mut old_index = start;
     for new_index in offset..needed {
-        new_script.ops[new_index] = old_script.ops[old_index];
+        let (op, count) = old_script
+            .get(old_index)
+            .unwrap_or((GapAlignOpType::Sub, 0));
+        new_script.set(new_index, op, count);
         old_index += 1;
     }
     0
@@ -580,6 +586,7 @@ pub fn s_gap_prelim_edit_block_realloc(edit_block: &mut GapPrelimEditBlock, tota
             return -1;
         }
     }
+    edit_block.num_ops_allocated = edit_block.edit_ops.capacity() as i32;
     0
 }
 
@@ -600,6 +607,8 @@ pub fn s_gap_prelim_edit_block_add_new(
         op_type,
         num: num_ops,
     });
+    edit_block.num_ops = edit_block.edit_ops.len() as i32;
+    edit_block.num_ops_allocated = edit_block.edit_ops.capacity() as i32;
     0
 }
 
@@ -615,6 +624,8 @@ pub fn gap_prelim_edit_block_add(
     if edit_block.last_op == Some(op_type) {
         if let Some(last) = edit_block.edit_ops.last_mut() {
             last.num += num_ops;
+            edit_block.num_ops = edit_block.edit_ops.len() as i32;
+            edit_block.num_ops_allocated = edit_block.edit_ops.capacity() as i32;
             return;
         }
     }
@@ -625,6 +636,8 @@ pub fn gap_prelim_edit_block_add(
 pub fn gap_prelim_edit_block_new() -> GapPrelimEditBlock {
     let mut edit_block = GapPrelimEditBlock {
         edit_ops: Vec::new(),
+        num_ops_allocated: 0,
+        num_ops: 0,
         last_op: None,
     };
     let _ = s_gap_prelim_edit_block_realloc(&mut edit_block, 100);
@@ -640,6 +653,8 @@ pub fn gap_prelim_edit_block_free(_: Option<GapPrelimEditBlock>) -> Option<GapPr
 pub fn gap_prelim_edit_block_reset(edit_block: Option<&mut GapPrelimEditBlock>) {
     if let Some(edit_block) = edit_block {
         edit_block.edit_ops.clear();
+        edit_block.num_ops = 0;
+        edit_block.num_ops_allocated = edit_block.edit_ops.capacity() as i32;
         edit_block.last_op = None;
     }
 }
@@ -677,7 +692,7 @@ pub fn blast_prelim_edit_block_to_gap_edit_script(
 
     let mut script = GapEditScript::with_capacity(size);
     for op in &rev_prelim_tback.edit_ops {
-        script.ops.push((op.op_type, op.num));
+        script.push_raw(op.op_type, op.num);
     }
 
     if fwd_prelim_tback.edit_ops.is_empty() {
@@ -686,14 +701,16 @@ pub fn blast_prelim_edit_block_to_gap_edit_script(
 
     let mut fwd_ops = fwd_prelim_tback.edit_ops.as_slice();
     if merge_ops {
-        if let (Some(last_script), Some(last_fwd)) = (script.ops.last_mut(), fwd_ops.last()) {
-            last_script.1 += last_fwd.num;
+        if let Some(last_fwd) = fwd_ops.last() {
+            if let Some(last_index) = script.len().checked_sub(1) {
+                script.add_num(last_index, last_fwd.num);
+            }
         }
         fwd_ops = &fwd_ops[..fwd_ops.len() - 1];
     }
 
     for op in fwd_ops.iter().rev() {
-        script.ops.push((op.op_type, op.num));
+        script.push_raw(op.op_type, op.num);
     }
 
     Some(script)
@@ -793,9 +810,14 @@ pub fn s_blast_oof_traceback_to_gap_edit_script(
         fwd_ops.truncate(keep_len);
     }
 
+    let fwd_num_ops_allocated = fwd_ops.capacity() as i32;
+    let fwd_num_ops = fwd_ops.len() as i32;
+    let fwd_last_op = fwd_ops.last().map(|op| op.op_type);
     let fwd_prelim = GapPrelimEditBlock {
-        last_op: fwd_ops.last().map(|op| op.op_type),
         edit_ops: fwd_ops,
+        num_ops_allocated: fwd_num_ops_allocated,
+        num_ops: fwd_num_ops,
+        last_op: fwd_last_op,
     };
     let Some(mut script) =
         blast_prelim_edit_block_to_gap_edit_script(Some(&tmp_prelim_tback), Some(&fwd_prelim))
@@ -809,37 +831,42 @@ pub fn s_blast_oof_traceback_to_gap_edit_script(
     }
 
     let mut num_nuc = 0;
-    let mut keep_size = script.ops.len();
-    for (idx, (op, num)) in script.ops.iter_mut().enumerate() {
-        let span = oof_op_nucleotide_span(*op);
-        let total_actions = span * *num;
+    let mut keep_size = script.len();
+    for idx in 0..script.len() {
+        let (op, mut num) = script.get(idx).unwrap_or((GapAlignOpType::Sub, 0));
+        let span = oof_op_nucleotide_span(op);
+        let total_actions = span * num;
         if num_nuc + total_actions >= nucl_align_length {
-            *num = (nucl_align_length - num_nuc + span - 1) / span;
+            num = (nucl_align_length - num_nuc + span - 1) / span;
+            script.set_num(idx, num);
             keep_size = idx + 1;
             break;
         }
         num_nuc += total_actions;
     }
-    script.ops.truncate(keep_size);
+    script.truncate(keep_size);
 
     let mut split_script = GapEditScript::new();
-    for (op, num) in script.ops {
+    for (op, num) in script.iter() {
         if (op as u32) % 3 != 0 && num > 1 {
             for _ in 0..num {
-                split_script.ops.push((op, 1));
+                split_script.push_raw(op, 1);
             }
         } else {
-            split_script.ops.push((op, num));
+            split_script.push_raw(op, num);
         }
     }
 
-    if let Some((first, rest)) = split_script.ops.split_first_mut() {
-        let mut last_op = first.0;
-        for (op, num) in rest {
-            if *op == GapAlignOpType::Sub && (last_op as u32) % 3 != 0 {
-                *num += 1;
+    if let Some((mut last_op, _)) = split_script.first() {
+        for index in 1..split_script.len() {
+            let (op, count) = split_script.get(index).unwrap_or((GapAlignOpType::Sub, 0));
+            if op == GapAlignOpType::Sub && (last_op as u32) % 3 != 0 {
+                split_script.set_num(index, count + 1);
             }
-            last_op = *op;
+            last_op = split_script
+                .get(index)
+                .unwrap_or((GapAlignOpType::Sub, 0))
+                .0;
         }
     }
 
@@ -1664,7 +1691,7 @@ pub fn s_create_hsp_for_word_hit(
     }
 
     let mut edit_script = GapEditScript::new();
-    edit_script.ops.push((GapAlignOpType::Sub, length));
+    edit_script.push_raw(GapAlignOpType::Sub, length);
     let mut hsp = crate::hspstream::Hsp {
         score: length,
         num_ident: length,
@@ -2335,7 +2362,8 @@ pub fn gap_edit_script_combine(
     let Some(mut append_script) = append.take() else {
         return edit_script.clone();
     };
-    if append_script.ops.is_empty() {
+    if append_script.is_empty() {
+        append_script.clear();
         return edit_script.clone();
     }
     let Some(script) = edit_script.as_mut() else {
@@ -2343,9 +2371,21 @@ pub fn gap_edit_script_combine(
         return edit_script.clone();
     };
 
-    for (op, count) in append_script.ops.drain(..) {
-        script.push(op, count);
+    let mut append_index = 0usize;
+    if !script.is_empty()
+        && script.last().map(|(op, _)| op) == append_script.first().map(|(op, _)| op)
+    {
+        if let Some((_, count)) = append_script.first() {
+            let last_index = script.len() - 1;
+            script.add_num(last_index, count);
+        }
+        append_index = 1;
     }
+    for index in append_index..append_script.len() {
+        let (op, count) = append_script.get(index).unwrap_or((GapAlignOpType::Sub, 0));
+        script.push_raw(op, count);
+    }
+    append_script.clear();
     edit_script.clone()
 }
 
@@ -5971,8 +6011,143 @@ impl GapEditScript {
     /// blast-rs: Rust constructor wrapper with reserved storage; not a direct NCBI C port.
     pub fn with_capacity(size: usize) -> Self {
         GapEditScript {
-            ops: Vec::with_capacity(size),
+            op_type: Vec::with_capacity(size),
+            num: Vec::with_capacity(size),
+            size: 0,
         }
+    }
+
+    /// blast-rs: C-shaped constructor for `GapEditScriptNew`; not for append-style builders.
+    pub fn with_size(size: usize) -> Self {
+        GapEditScript {
+            op_type: vec![GapAlignOpType::Del; size],
+            num: vec![0; size],
+            size: size as i32,
+        }
+    }
+
+    pub fn from_ops<I>(ops: I) -> Self
+    where
+        I: IntoIterator<Item = (GapAlignOpType, i32)>,
+    {
+        let iter = ops.into_iter();
+        let (lower, _) = iter.size_hint();
+        let mut script = GapEditScript::with_capacity(lower);
+        for (op, count) in iter {
+            script.push_raw(op, count);
+        }
+        script
+    }
+
+    pub fn len(&self) -> usize {
+        self.size.max(0) as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.op_type.capacity().min(self.num.capacity())
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.op_type.reserve(additional);
+        self.num.reserve(additional);
+    }
+
+    pub fn get(&self, index: usize) -> Option<(GapAlignOpType, i32)> {
+        (index < self.len()).then(|| (self.op_type[index], self.num[index]))
+    }
+
+    pub fn first(&self) -> Option<(GapAlignOpType, i32)> {
+        self.get(0)
+    }
+
+    pub fn last(&self) -> Option<(GapAlignOpType, i32)> {
+        self.len().checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    pub fn set(&mut self, index: usize, op: GapAlignOpType, count: i32) {
+        if index < self.len() {
+            self.op_type[index] = op;
+            self.num[index] = count;
+        }
+    }
+
+    pub fn set_num(&mut self, index: usize, count: i32) {
+        if index < self.len() {
+            self.num[index] = count;
+        }
+    }
+
+    pub fn add_num(&mut self, index: usize, delta: i32) {
+        if index < self.len() {
+            self.num[index] += delta;
+        }
+    }
+
+    pub fn push_raw(&mut self, op: GapAlignOpType, count: i32) {
+        self.op_type.push(op);
+        self.num.push(count);
+        self.size = self.op_type.len() as i32;
+    }
+
+    pub fn pop(&mut self) -> Option<(GapAlignOpType, i32)> {
+        let op = self.op_type.pop()?;
+        let count = self.num.pop().unwrap_or(0);
+        self.size = self.op_type.len() as i32;
+        Some((op, count))
+    }
+
+    pub fn remove(&mut self, index: usize) -> Option<(GapAlignOpType, i32)> {
+        if index >= self.len() {
+            return None;
+        }
+        let op = self.op_type.remove(index);
+        let count = self.num.remove(index);
+        self.size = self.op_type.len() as i32;
+        Some((op, count))
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.op_type.truncate(len);
+        self.num.truncate(len);
+        self.size = self.op_type.len() as i32;
+    }
+
+    pub fn resize(&mut self, len: usize, value: (GapAlignOpType, i32)) {
+        self.op_type.resize(len, value.0);
+        self.num.resize(len, value.1);
+        self.size = self.op_type.len() as i32;
+    }
+
+    pub fn clear(&mut self) {
+        self.op_type.clear();
+        self.num.clear();
+        self.size = 0;
+    }
+
+    pub fn ops_vec(&self) -> Vec<(GapAlignOpType, i32)> {
+        self.iter().collect()
+    }
+
+    pub fn replace_ops<I>(&mut self, ops: I)
+    where
+        I: IntoIterator<Item = (GapAlignOpType, i32)>,
+    {
+        self.clear();
+        for (op, count) in ops {
+            self.push_raw(op, count);
+        }
+    }
+
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (GapAlignOpType, i32)> + '_ {
+        self.op_type
+            .iter()
+            .copied()
+            .zip(self.num.iter().copied())
+            .take(self.len())
     }
 
     /// blast-rs: Append helper that preserves C edit-script merge semantics; not a direct NCBI C port.
@@ -5986,20 +6161,20 @@ impl GapEditScript {
     /// single op (`3:20`), and downstream reevaluation walks them
     /// differently — affecting Kadane's-best-subarray decisions.
     pub fn push(&mut self, op: GapAlignOpType, count: i32) {
-        if let Some(last) = self.ops.last_mut() {
-            if last.0 == op {
-                last.1 += count;
+        if let Some(last_index) = self.len().checked_sub(1) {
+            if self.op_type[last_index] == op {
+                self.num[last_index] += count;
                 return;
             }
         }
-        self.ops.push((op, count));
+        self.push_raw(op, count);
     }
 
     /// blast-rs: Native edit-script summary helper; not a direct NCBI C port.
     ///
     /// Total alignment length (sum of all op counts).
     pub fn alignment_length(&self) -> i32 {
-        self.ops.iter().map(|(_, n)| *n).sum()
+        self.iter().map(|(_, n)| n).sum()
     }
 
     /// blast-rs: Native alignment rendering helper; not a direct NCBI C port.
@@ -6018,7 +6193,7 @@ impl GapEditScript {
         let mut q_pos = 0usize;
         let mut s_pos = 0usize;
 
-        for &(op, count) in &self.ops {
+        for (op, count) in self.iter() {
             let count = count as usize;
             match op {
                 GapAlignOpType::Sub => {
@@ -6094,7 +6269,7 @@ impl GapEditScript {
         let mut num_ident = 0i32;
         let mut gap_opens = 0i32;
 
-        for &(op, count) in &self.ops {
+        for (op, count) in self.iter() {
             let count = count as usize;
             align_len += count as i32;
 
@@ -6164,11 +6339,11 @@ mod tests {
         let state = Some(Box::new(GapStateArrayStruct {
             state_array: vec![1, 2, 3],
             length: 3,
-            used: true,
+            used: 1,
             next: Some(Box::new(GapStateArrayStruct {
                 state_array: vec![4],
                 length: 1,
-                used: false,
+                used: 0,
                 next: None,
             })),
         }));
@@ -6177,32 +6352,32 @@ mod tests {
         let mut state_pool = None;
         {
             let state = s_gap_get_state(&mut state_pool, 16).expect("allocated state");
-            assert!(state.used);
+            assert!(state.used != 0);
             assert!(state.length as usize >= GAP_STATE_MIN_CELLS);
             assert_eq!(state.state_array.len(), state.length as usize);
         }
         {
             let state = s_gap_get_state(&mut state_pool, 32).expect("second state");
-            assert!(state.used);
+            assert!(state.used != 0);
             assert!(state.length as usize >= GAP_STATE_MIN_CELLS);
         }
         let mut first = state_pool.as_mut().expect("head state");
-        assert!(first.used);
-        assert!(first.next.as_ref().expect("next state").used);
+        assert!(first.used != 0);
+        assert!(first.next.as_ref().expect("next state").used != 0);
         assert!(s_gap_purge_state(&mut first));
-        assert!(!first.used);
-        assert!(!first.next.as_ref().expect("next state").used);
+        assert!(first.used == 0);
+        assert!(first.next.as_ref().expect("next state").used == 0);
         let reused = s_gap_get_state(&mut state_pool, 8).expect("reused state");
-        assert!(reused.used);
+        assert!(reused.used != 0);
 
         assert!(gap_edit_script_new(0).is_none());
         let mut source = gap_edit_script_new(3).expect("source script");
-        source.push(GapAlignOpType::Sub, 5);
-        source.push(GapAlignOpType::Del, 2);
-        source.push(GapAlignOpType::Ins, 1);
+        source.set(0, GapAlignOpType::Sub, 5);
+        source.set(1, GapAlignOpType::Del, 2);
+        source.set(2, GapAlignOpType::Ins, 1);
 
         let duplicate = gap_edit_script_dup(Some(&source)).expect("duplicate script");
-        assert_eq!(duplicate.ops, source.ops);
+        assert_eq!(duplicate.ops_vec(), source.ops_vec());
         assert!(gap_edit_script_dup(None).is_none());
 
         let mut dest = gap_edit_script_new(3).expect("destination script");
@@ -6210,7 +6385,7 @@ mod tests {
             gap_edit_script_partial_copy(&mut dest, 1, Some(&source), 0, 1),
             0
         );
-        assert_eq!(dest.ops[1..3], source.ops[0..2]);
+        assert_eq!(dest.ops_vec()[1..3], source.ops_vec()[0..2]);
         assert_eq!(
             gap_edit_script_partial_copy(&mut dest, 2, Some(&source), 0, 2),
             -1
@@ -6373,6 +6548,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Del),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6386,13 +6563,15 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
 
         let script = blast_prelim_edit_block_to_gap_edit_script(Some(&rev), Some(&fwd))
             .expect("edit script");
 
         assert_eq!(
-            script.ops,
+            script.ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 4),
                 (GapAlignOpType::Del, 2),
@@ -6411,6 +6590,8 @@ mod tests {
                 num: 4,
             }],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6424,18 +6605,22 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
 
         let script = blast_prelim_edit_block_to_gap_edit_script(Some(&rev), Some(&fwd))
             .expect("edit script");
 
         assert_eq!(
-            script.ops,
+            script.ops_vec(),
             vec![(GapAlignOpType::Sub, 7), (GapAlignOpType::Del, 2)]
         );
         let empty = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         assert!(blast_prelim_edit_block_to_gap_edit_script(Some(&empty), Some(&empty)).is_none());
     }
@@ -6448,6 +6633,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Ins1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6461,6 +6648,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Del),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6475,7 +6664,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Del, 1),
@@ -6493,6 +6682,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Ins1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![GapPrelimEditScript {
@@ -6500,6 +6691,8 @@ mod tests {
                 num: 2,
             }],
             last_op: Some(GapAlignOpType::Del),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6514,7 +6707,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![(GapAlignOpType::Sub, 1), (GapAlignOpType::Del, 2)]
         );
     }
@@ -6527,6 +6720,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![GapPrelimEditScript {
@@ -6534,10 +6729,10 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
-        let mut script = Some(GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 1)],
-        });
+        let mut script = Some(GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 1)]));
 
         assert_eq!(
             s_blast_oof_traceback_to_gap_edit_script(None, Some(&fwd), 3, Some(&mut script)),
@@ -6552,7 +6747,7 @@ mod tests {
             -1
         );
         assert_eq!(
-            script.expect("existing script").ops,
+            script.expect("existing script").ops_vec(),
             vec![(GapAlignOpType::Sub, 1)]
         );
     }
@@ -6562,14 +6757,16 @@ mod tests {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
-        let mut script = Some(GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 1)],
-        });
+        let mut script = Some(GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 1)]));
 
         assert_eq!(
             s_blast_oof_traceback_to_gap_edit_script(Some(&rev), Some(&fwd), 0, Some(&mut script),),
@@ -6577,9 +6774,7 @@ mod tests {
         );
         assert!(script.is_none());
 
-        script = Some(GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 1)],
-        });
+        script = Some(GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 1)]));
         assert_eq!(
             s_blast_oof_traceback_to_gap_edit_script(Some(&rev), Some(&fwd), -3, Some(&mut script),),
             0
@@ -6595,6 +6790,8 @@ mod tests {
                 num: 2,
             }],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![GapPrelimEditScript {
@@ -6602,10 +6799,10 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Del),
+
+            ..Default::default()
         };
-        let mut script = Some(GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 1)],
-        });
+        let mut script = Some(GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 1)]));
 
         assert_eq!(
             s_blast_oof_traceback_to_gap_edit_script(Some(&rev), Some(&fwd), 0, Some(&mut script),),
@@ -6622,6 +6819,8 @@ mod tests {
                 num: 2,
             }],
             last_op: Some(GapAlignOpType::Ins1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![GapPrelimEditScript {
@@ -6629,6 +6828,8 @@ mod tests {
                 num: 3,
             }],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6643,7 +6844,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Ins1, 1),
@@ -6661,6 +6862,8 @@ mod tests {
                 num: 2,
             }],
             last_op: Some(GapAlignOpType::Del1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![GapPrelimEditScript {
@@ -6668,6 +6871,8 @@ mod tests {
                 num: 3,
             }],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6682,7 +6887,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Del1, 1),
@@ -6700,6 +6905,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Del2),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6713,6 +6920,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Ins2),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6726,7 +6935,10 @@ mod tests {
             0
         );
 
-        assert_eq!(script.expect("script").ops, vec![(GapAlignOpType::Sub, 4)]);
+        assert_eq!(
+            script.expect("script").ops_vec(),
+            vec![(GapAlignOpType::Sub, 4)]
+        );
     }
 
     #[test]
@@ -6737,6 +6949,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Del1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6750,6 +6964,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Del2),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6764,7 +6980,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Del, 1),
@@ -6781,6 +6997,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Ins1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6794,6 +7012,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Ins2),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6808,7 +7028,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Ins, 1),
@@ -6825,6 +7045,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Ins1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6842,6 +7064,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Ins1),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6856,7 +7080,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Ins2, 1),
@@ -6874,6 +7098,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Del1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6891,6 +7117,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Del),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6905,7 +7133,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Del, 1),
@@ -6923,6 +7151,8 @@ mod tests {
                 num: 1,
             }],
             last_op: Some(GapAlignOpType::Del1),
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6936,6 +7166,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Del2),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6950,7 +7182,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Del, 1),
@@ -6965,6 +7197,8 @@ mod tests {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -6978,6 +7212,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Del),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -6987,7 +7223,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![(GapAlignOpType::Del, 1), (GapAlignOpType::Sub, 2)]
         );
     }
@@ -6997,6 +7233,8 @@ mod tests {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![GapPrelimEditScript {
@@ -7004,6 +7242,8 @@ mod tests {
                 num: 3,
             }],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -7012,7 +7252,10 @@ mod tests {
             0
         );
 
-        assert_eq!(script.expect("script").ops, vec![(GapAlignOpType::Sub, 2)]);
+        assert_eq!(
+            script.expect("script").ops_vec(),
+            vec![(GapAlignOpType::Sub, 2)]
+        );
     }
 
     #[test]
@@ -7020,6 +7263,8 @@ mod tests {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -7037,6 +7282,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -7046,7 +7293,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![(GapAlignOpType::Sub, 1), (GapAlignOpType::Ins, 2)]
         );
     }
@@ -7056,6 +7303,8 @@ mod tests {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -7085,6 +7334,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -7099,7 +7350,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 2),
                 (GapAlignOpType::Ins1, 1),
@@ -7116,6 +7367,8 @@ mod tests {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -7133,6 +7386,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Sub),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -7142,7 +7397,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 1),
                 (GapAlignOpType::Ins1, 1),
@@ -7156,6 +7411,8 @@ mod tests {
         let rev = GapPrelimEditBlock {
             edit_ops: Vec::new(),
             last_op: None,
+
+            ..Default::default()
         };
         let fwd = GapPrelimEditBlock {
             edit_ops: vec![
@@ -7169,6 +7426,8 @@ mod tests {
                 },
             ],
             last_op: Some(GapAlignOpType::Ins1),
+
+            ..Default::default()
         };
         let mut script = None;
 
@@ -7178,7 +7437,7 @@ mod tests {
         );
 
         assert_eq!(
-            script.expect("script").ops,
+            script.expect("script").ops_vec(),
             vec![(GapAlignOpType::Ins1, 1), (GapAlignOpType::Ins1, 1)]
         );
     }
@@ -7240,7 +7499,7 @@ mod tests {
         let script =
             jumper_prelim_edit_block_to_gap_edit_script(&left, &right).expect("gap script");
         assert_eq!(
-            script.ops,
+            script.ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 4),
                 (GapAlignOpType::Ins, 1),
@@ -8884,7 +9143,7 @@ mod tests {
         assert_eq!((hsp.query_offset, hsp.query_end), (2, 6));
         assert_eq!((hsp.subject_offset, hsp.subject_end), (3, 7));
         assert_eq!(
-            hsp.edit_script.as_ref().unwrap().ops,
+            hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 4)]
         );
         assert_eq!(
@@ -9150,6 +9409,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -9238,6 +9499,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -9344,6 +9607,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -9560,6 +9825,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -9632,6 +9899,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -9959,6 +10228,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -10206,6 +10477,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -10288,6 +10561,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let align_params = JumperAlignParams {
@@ -10784,6 +11059,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -10909,6 +11186,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -11014,6 +11293,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -11092,6 +11373,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -11161,6 +11444,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -11238,6 +11523,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[subject_bases.len()]);
         let mut jumper = JumperGapAlign {
@@ -11294,6 +11581,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -11428,6 +11717,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let chain_hsp = crate::hspstream::Hsp {
@@ -11522,6 +11813,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let second = Box::new(crate::spliced_hits::HSPContainer {
@@ -11611,6 +11904,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let chain = Box::new(crate::spliced_hits::HSPChain {
@@ -11688,6 +11983,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let chain = Box::new(crate::spliced_hits::HSPChain {
@@ -11769,6 +12066,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let chain = Box::new(crate::spliced_hits::HSPChain {
@@ -11840,6 +12139,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let chain = Box::new(crate::spliced_hits::HSPChain {
@@ -11916,6 +12217,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let second_chain = Box::new(crate::spliced_hits::HSPChain {
@@ -12012,6 +12315,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let chain_hsp = crate::hspstream::Hsp {
@@ -12112,6 +12417,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let second_chain = Box::new(crate::spliced_hits::HSPChain {
@@ -12222,6 +12529,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo {
             num_queries: 2,
@@ -12362,6 +12671,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let high_score_chain = Box::new(crate::spliced_hits::HSPChain {
@@ -12464,6 +12775,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo {
             num_queries: 2,
@@ -12585,6 +12898,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mapper_data = crate::spliced_hits::BlastHSPMapperData {
@@ -12777,6 +13092,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut jumper = JumperGapAlign {
@@ -12971,6 +13288,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let empty_chain = Box::new(crate::spliced_hits::HSPChain {
@@ -13106,6 +13425,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut missing_context_hsp = mapper_saved_hsp(13, 23, 13, 23);
@@ -13936,6 +14257,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14000,6 +14323,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14063,6 +14388,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14128,6 +14455,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14190,6 +14519,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14255,6 +14586,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo {
             num_queries: 1,
@@ -14331,6 +14664,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14395,6 +14730,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14457,6 +14794,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14518,6 +14857,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo {
             num_queries: 0,
@@ -14588,6 +14929,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[16]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14652,6 +14995,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14722,6 +15067,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
         let mut init_hitlist = crate::extend::InitHitList::new();
@@ -14776,29 +15123,27 @@ mod tests {
 
     #[test]
     fn gap_edit_script_combine_moves_append_and_merges_same_ops() {
-        let mut base = Some(GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 3)],
-        });
-        let mut append = Some(GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 2), (GapAlignOpType::Del, 1)],
-        });
+        let mut base = Some(GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 3)]));
+        let mut append = Some(GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 2),
+            (GapAlignOpType::Del, 1),
+        ]));
         let combined = gap_edit_script_combine(&mut base, &mut append).expect("combined");
         assert_eq!(
-            combined.ops,
+            combined.ops_vec(),
             vec![(GapAlignOpType::Sub, 5), (GapAlignOpType::Del, 1)]
         );
         assert!(append.is_none());
 
         let mut empty_base = None;
-        let mut append_only = Some(GapEditScript {
-            ops: vec![(GapAlignOpType::Ins, 4)],
-        });
+        let mut append_only = Some(GapEditScript::from_ops(vec![(GapAlignOpType::Ins, 4)]));
         assert_eq!(
             gap_edit_script_combine(&mut empty_base, &mut append_only)
-                .unwrap()
-                .ops,
+                .expect("combined")
+                .ops_vec(),
             vec![(GapAlignOpType::Ins, 4)]
         );
+        assert!(append_only.is_none());
     }
 
     /// Helper: BLASTNA byte to IUPAC char (A=0,C=1,G=2,T=3).

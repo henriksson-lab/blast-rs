@@ -152,7 +152,6 @@ pub(crate) mod engine;
 #[allow(dead_code)]
 pub(crate) mod extend;
 #[allow(dead_code)]
-pub(crate) mod gapalign;
 #[allow(dead_code)]
 pub(crate) mod greedy;
 #[allow(dead_code)]

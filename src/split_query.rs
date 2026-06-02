@@ -5,8 +5,8 @@ pub const K_OUT_OF_MEMORY: i16 = -2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SQueryChunkBoundary {
-    pub left: u32,
-    pub right: u32,
+    pub left: i32,
+    pub right: i32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,8 +78,8 @@ pub fn split_query_blk_set_chunk_bounds(
     if chunk_num >= squery_blk.num_chunks {
         return K_BAD_PARAMETER;
     }
-    squery_blk.chunk_bounds[chunk_num as usize].left = starting_offset;
-    squery_blk.chunk_bounds[chunk_num as usize].right = ending_offset;
+    squery_blk.chunk_bounds[chunk_num as usize].left = starting_offset as i32;
+    squery_blk.chunk_bounds[chunk_num as usize].right = ending_offset as i32;
     0
 }
 
@@ -277,5 +277,20 @@ mod tests {
             K_BAD_PARAMETER
         );
         assert!(split_query_blk_free(Some(blk)).is_none());
+    }
+
+    #[test]
+    fn chunk_bounds_use_signed_seq_range_storage() {
+        let mut blk = split_query_blk_new(1, false).expect("split block");
+        assert_eq!(
+            split_query_blk_set_chunk_bounds(Some(&mut blk), 0, u32::MAX, 0x8000_0000),
+            0
+        );
+        assert_eq!(blk.chunk_bounds[0].left, -1);
+        assert_eq!(blk.chunk_bounds[0].right, i32::MIN);
+        assert_eq!(
+            split_query_blk_get_chunk_bounds(Some(&blk), 0),
+            (0, Some((-1i32 as usize, i32::MIN as usize)))
+        );
     }
 }

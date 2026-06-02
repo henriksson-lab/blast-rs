@@ -113,12 +113,22 @@ pub struct BlastHSP {
     pub context: i32,
     pub gap_info: Option<crate::gapinfo::GapEditScript>,
     pub num: i32,
-    pub xsum: f64,
-    pub num_gaps: i32,
     pub comp_adjustment_method: i16,
     pub pat_info: Option<SPHIHspInfo>,
     pub num_positives: i32,
     pub map_info: Option<BlastHSPMappingInfo>,
+}
+
+fn gap_edit_script_num_gap_opens(script: &crate::gapinfo::GapEditScript) -> i32 {
+    script
+        .iter()
+        .filter(|(op, count)| {
+            matches!(
+                op,
+                crate::gapinfo::GapAlignOpType::Ins | crate::gapinfo::GapAlignOpType::Del
+            ) && *count > 0
+        })
+        .count() as i32
 }
 
 impl BlastHSP {
@@ -133,8 +143,6 @@ impl BlastHSP {
             context: hsp.context,
             gap_info: hsp.edit_script,
             num: 0,
-            xsum: 0.0,
-            num_gaps: hsp.num_gaps,
             comp_adjustment_method: hsp.comp_adjustment_method as i16,
             pat_info: hsp.pat_info.map(Into::into),
             num_positives: 0,
@@ -157,7 +165,11 @@ impl BlastHSP {
             context: self.context,
             query_frame: self.query.frame as i32,
             subject_frame: self.subject.frame as i32,
-            num_gaps: self.num_gaps,
+            num_gaps: self
+                .gap_info
+                .as_ref()
+                .map(gap_edit_script_num_gap_opens)
+                .unwrap_or(0),
             comp_adjustment_method: self.comp_adjustment_method as i32,
             edit_script: self.gap_info,
             pat_info: self.pat_info.map(Into::into),
@@ -231,9 +243,10 @@ pub struct PhiPatInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlastHSPMappingInfo {
     pub edits: Option<JumperEditsBlock>,
-    pub subject_overhangs: Option<SequenceOverhangs>,
     pub left_edge: u8,
     pub right_edge: u8,
+    pub flags: i32,
+    pub subject_overhangs: Option<SequenceOverhangs>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -337,9 +350,9 @@ pub fn blast_hsp_get_num_identities_plain(
     subject: &[u8],
     hsp: &mut Hsp,
 ) -> (i16, i32) {
-    let ops = hsp.edit_script.as_ref().map(|script| script.ops.as_slice());
+    let ops = hsp.edit_script.as_ref().map(|script| script.ops_vec());
     let (num_ident, align_length, _) =
-        crate::blast_kappa::blast_hsp_get_num_identities(query, subject, hsp, ops, None);
+        crate::blast_kappa::blast_hsp_get_num_identities(query, subject, hsp, ops.as_deref(), None);
     hsp.num_ident = num_ident;
     (0, align_length)
 }
@@ -380,7 +393,7 @@ pub fn s_blast_hsp_get_oof_num_identities_and_positives(
     let mut num_pos = 0;
     let mut align_length = 0;
 
-    for &(op, count) in &edit_script.ops {
+    for (op, count) in edit_script.iter() {
         match op {
             GapAlignOpType::Sub => {
                 align_length += count;
@@ -543,17 +556,18 @@ fn blast_seg_get_translated_offsets(
     frame: i32,
     seq_length: i32,
 ) -> (i32, i32) {
-    let frame_abs = frame.abs();
     if frame > 0 {
         (
-            offset * crate::util::CODON_LENGTH as i32 + frame,
-            end * crate::util::CODON_LENGTH as i32 + frame - 1,
+            offset * crate::util::CODON_LENGTH as i32 + frame - 1,
+            end * crate::util::CODON_LENGTH as i32 + frame - 2,
+        )
+    } else if frame < 0 {
+        (
+            seq_length - offset * crate::util::CODON_LENGTH as i32 + frame,
+            seq_length - end * crate::util::CODON_LENGTH as i32 + frame + 1,
         )
     } else {
-        (
-            seq_length - offset * crate::util::CODON_LENGTH as i32 + frame + 1,
-            seq_length - end * crate::util::CODON_LENGTH as i32 - frame_abs + 2,
-        )
+        (offset + 1, end)
     }
 }
 
@@ -568,6 +582,31 @@ pub fn blast_hsp_get_adjusted_offsets(
     query_length: i32,
     subject_length: i32,
 ) -> (i32, i32, i32, i32) {
+    if hsp.edit_script.is_none() {
+        return (
+            hsp.query_offset + 1,
+            hsp.query_end,
+            hsp.subject_offset + 1,
+            hsp.subject_end,
+        );
+    }
+
+    if !crate::program::blast_query_is_translated(program)
+        && !crate::program::blast_subject_is_translated(program)
+    {
+        if hsp.query_frame != hsp.subject_frame {
+            let q_end = query_length - hsp.query_offset;
+            let q_start = q_end - hsp.query_end + hsp.query_offset + 1;
+            return (q_start, q_end, hsp.subject_end, hsp.subject_offset + 1);
+        }
+        return (
+            hsp.query_offset + 1,
+            hsp.query_end,
+            hsp.subject_offset + 1,
+            hsp.subject_end,
+        );
+    }
+
     let (q_start, q_end) = if crate::program::blast_query_is_translated(program) {
         blast_seg_get_translated_offsets(
             hsp.query_offset,
@@ -579,12 +618,13 @@ pub fn blast_hsp_get_adjusted_offsets(
         (hsp.query_offset + 1, hsp.query_end)
     };
     let (s_start, s_end) = if crate::program::blast_subject_is_translated(program) {
-        blast_seg_get_translated_offsets(
+        let (_, s_end) = blast_seg_get_translated_offsets(
             hsp.subject_offset,
             hsp.subject_end,
             hsp.subject_frame,
             subject_length,
-        )
+        );
+        (q_start, s_end)
     } else {
         (hsp.subject_offset + 1, hsp.subject_end)
     };
@@ -609,29 +649,31 @@ pub fn blast_hsp_get_partial_subject_translation(
         .or_else(|| subject_blk.sequence_start.as_deref())
         .ok_or(-1_i16)?;
     let subject_length = subject_blk.length.max(0);
-    const K_MAX_TRANSLATION: i32 = 99;
+    const MAX_FULL_TRANSLATION: i32 = 2100;
 
-    let (nucl_start, mut nucl_end) = if hsp.subject_offset < 0 {
-        (0, subject_length)
-    } else {
+    let (nucl_start, nucl_length, start_shift) = if !is_ooframe {
+        let start =
+            (hsp.subject_offset * crate::util::CODON_LENGTH as i32 - MAX_FULL_TRANSLATION).max(0);
+        let length = subject_length
+            .min(hsp.subject_end * crate::util::CODON_LENGTH as i32 + MAX_FULL_TRANSLATION)
+            - start;
         (
-            (hsp.subject_offset * crate::util::CODON_LENGTH as i32 - K_MAX_TRANSLATION).max(0),
-            subject_length
-                .min(hsp.subject_end * crate::util::CODON_LENGTH as i32 + K_MAX_TRANSLATION),
+            start,
+            length.max(0),
+            start / crate::util::CODON_LENGTH as i32,
         )
+    } else {
+        let start = (hsp.subject_offset - MAX_FULL_TRANSLATION).max(0);
+        let length = subject_length.min(hsp.subject_end + MAX_FULL_TRANSLATION) - start;
+        (start, length.max(0), start)
     };
-    if subject_length - nucl_end <= 21 {
-        nucl_end = subject_length;
-    }
-
-    let nucl_length = (nucl_end - nucl_start).max(0) as usize;
-    let start_shift = nucl_start / crate::util::CODON_LENGTH as i32;
     let nucl_shift = if hsp.subject_frame < 0 {
-        subject_length - nucl_start - nucl_length as i32
+        subject_length - nucl_start - nucl_length
     } else {
         nucl_start
     }
     .max(0) as usize;
+    let nucl_length = nucl_length as usize;
     let nucl_seq = subject_seq
         .get(nucl_shift..nucl_shift + nucl_length)
         .ok_or(-1_i16)?;
@@ -648,8 +690,10 @@ pub fn blast_hsp_get_partial_subject_translation(
     .map_err(|_| -1_i16)?;
 
     let (translation_buffer, subject, subject_length) = if is_ooframe {
-        let subject = partial.mixed_seq.ok_or(-1_i16)?;
-        let subject_length = partial.protein_length.unwrap_or(subject.len()) as i32;
+        let mixed_seq = partial.mixed_seq.ok_or(-1_i16)?;
+        let subject_length = partial.protein_length.unwrap_or(mixed_seq.len()) as i32;
+        let subject_start = crate::util::CODON_LENGTH.min(mixed_seq.len());
+        let subject = mixed_seq[subject_start..].to_vec();
         (Vec::new(), subject, subject_length)
     } else {
         let translation_buffer = partial.translation_buffer.ok_or(-1_i16)?;
@@ -1355,12 +1399,14 @@ pub fn s_blast_hsp_rps_update(hsp: &mut Hsp) {
     let Some(edit_script) = hsp.edit_script.as_mut() else {
         return;
     };
-    for (op, _) in &mut edit_script.ops {
-        *op = match *op {
+    for index in 0..edit_script.len() {
+        let (op, count) = edit_script.get(index).unwrap_or((GapAlignOpType::Sub, 0));
+        let new_op = match op {
             GapAlignOpType::Ins => GapAlignOpType::Del,
             GapAlignOpType::Del => GapAlignOpType::Ins,
             other => other,
         };
+        edit_script.set(index, new_op, count);
     }
 }
 
@@ -1704,11 +1750,13 @@ pub fn s_rps_fetch_consensus_sequence(
     seq_src: Option<&dyn crate::seqsrc::BlastSeqSource>,
     oid: i32,
 ) -> Option<crate::seqsrc::SeqData> {
-    let arg = crate::seqsrc::GetSeqArg {
+    let mut arg = crate::seqsrc::BlastSeqSrcGetSeqArg {
         oid,
-        encoding: blast_traceback_get_encoding(program_number),
+        encoding: blast_traceback_get_encoding(program_number).into(),
+        check_oid_exclusion: true,
+        ..crate::seqsrc::BlastSeqSrcGetSeqArg::default()
     };
-    crate::seqsrc::blast_seq_src_get_sequence(seq_src, Some(&arg))
+    crate::seqsrc::blast_seq_src_get_sequence(seq_src, Some(&mut arg))
 }
 
 /// blast-rs: Port-shaped profile PSSM setup adapter for `s_RPSComputeTraceback`
@@ -2024,34 +2072,6 @@ where
     0
 }
 
-/// blast-rs: Effective-search-space helper for Rust HSP post-traceback update; not a direct NCBI C port.
-fn hsp_effective_search_space(
-    hsp: &Hsp,
-    query_info: &crate::queryinfo::QueryInfo,
-    subject_length: i32,
-) -> f64 {
-    let context = hsp.context.max(0) as usize;
-    let Some(ctx) = query_info.contexts.get(context) else {
-        return subject_length.max(1) as f64;
-    };
-    if ctx.eff_searchsp > 0 {
-        ctx.eff_searchsp as f64
-    } else {
-        ctx.query_length.max(1) as f64 * subject_length.max(1) as f64
-    }
-}
-
-/// blast-rs: Karlin block lookup helper for Rust HSP post-traceback update; not a direct NCBI C port.
-fn hsp_kbp_for_context<'a>(
-    kbp_array: &'a [crate::stat::KarlinBlk],
-    context: usize,
-) -> Option<&'a crate::stat::KarlinBlk> {
-    kbp_array
-        .get(context)
-        .filter(|kbp| kbp.is_valid())
-        .or_else(|| kbp_array.iter().find(|kbp| kbp.is_valid()))
-}
-
 /// blast-rs: Port-shaped coordinator for NCBI `s_HSPListPostTracebackUpdate`
 /// (`blast_traceback.c:199`).
 /// not a direct NCBI C port.
@@ -2096,32 +2116,22 @@ pub fn s_hsp_list_post_traceback_update(
         *hsp_list = blast_hsp_list.into_legacy_hsp_list();
         hsp_list.hsp_max = source_hsp_max;
     } else {
-        let kbp_array = if k_gapped && !sbp.kbp_gap.is_empty() {
-            &sbp.kbp_gap
-        } else {
-            &sbp.kbp
-        };
         let scale_factor = if crate::program::blast_program_is_rps_blast(program_number) {
             score_params.scale_factor
         } else {
             1.0
         };
-        // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`.
-        let mut best_evalue = i32::MAX as f64;
-        for hsp in &mut hsp_list.hsps {
-            let context = hsp.context.max(0) as usize;
-            if let Some(kbp) = hsp_kbp_for_context(kbp_array, context) {
-                let mut kbp = kbp.clone();
-                if scale_factor != 1.0 && scale_factor > 0.0 {
-                    kbp.lambda /= scale_factor;
-                }
-                let search_space = hsp_effective_search_space(hsp, query_info, subject_length);
-                hsp.evalue = kbp.raw_to_evalue(hsp.score, search_space);
-                hsp.bit_score = kbp.raw_to_bit(hsp.score);
-                best_evalue = best_evalue.min(hsp.evalue);
-            }
-        }
-        hsp_list.best_evalue = best_evalue;
+        let _ = crate::blast_kappa::blast_hsp_list_get_evalues(
+            program_number,
+            query_info,
+            subject_length,
+            hsp_list,
+            k_gapped,
+            false,
+            sbp,
+            0.0,
+            scale_factor,
+        );
     }
 
     let _ = blast_hsp_list_reap_by_evalue(Some(hsp_list), &hit_params.options);
@@ -2132,12 +2142,7 @@ pub fn s_hsp_list_post_traceback_update(
     } else {
         &sbp.kbp
     };
-    for hsp in &mut hsp_list.hsps {
-        let context = hsp.context.max(0) as usize;
-        if let Some(kbp) = hsp_kbp_for_context(kbp_array, context) {
-            hsp.bit_score = kbp.raw_to_bit(hsp.score);
-        }
-    }
+    let _ = crate::stat::blast_hsp_list_get_bit_scores(Some(hsp_list), k_gapped, kbp_array);
     hsp_list.best_evalue = s_blast_get_best_evalue(hsp_list);
     0
 }
@@ -2150,7 +2155,7 @@ pub fn blast_hsp_calc_length_and_gaps(hsp: &Hsp) -> (i32, i32, i32) {
     let mut gap_opens = 0;
 
     if let Some(edit_script) = &hsp.edit_script {
-        for &(op, count) in &edit_script.ops {
+        for (op, count) in edit_script.iter() {
             // NCBI `Blast_HSPCalcLengthAndGaps` (`blast_hits.c:1065`) only
             // counts `eGapAlignDel` and `eGapAlignIns`; frame-shift variants
             // `Del1/Del2/Ins1/Ins2` are NOT counted as gaps (they're
@@ -2383,7 +2388,7 @@ pub fn s_cut_off_gap_edit_script(hsp: &mut Hsp, q_cut: i32, s_cut: i32, cut_begi
     let mut found_index = 0usize;
     let mut found_opid = 0i32;
 
-    'outer: for (index, &(op, num)) in edit_script.ops.iter().enumerate() {
+    'outer: for (index, (op, num)) in edit_script.iter().enumerate() {
         let mut opid = 0;
         while opid < num {
             match op {
@@ -2392,11 +2397,11 @@ pub fn s_cut_off_gap_edit_script(hsp: &mut Hsp, q_cut: i32, s_cut: i32, cut_begi
                     sid += 1;
                     opid += 1;
                 }
-                GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2 => {
+                GapAlignOpType::Del => {
                     sid += num;
                     opid += num;
                 }
-                GapAlignOpType::Ins | GapAlignOpType::Ins1 | GapAlignOpType::Ins2 => {
+                GapAlignOpType::Ins => {
                     qid += num;
                     opid += num;
                 }
@@ -2420,23 +2425,31 @@ pub fn s_cut_off_gap_edit_script(hsp: &mut Hsp, q_cut: i32, s_cut: i32, cut_begi
         return;
     }
 
-    let (_, found_num) = edit_script.ops[found_index];
+    let (_, found_num) = edit_script
+        .get(found_index)
+        .unwrap_or((GapAlignOpType::Sub, 0));
     if cut_begin {
         let mut new_ops = Vec::new();
         if found_opid < found_num {
-            debug_assert_eq!(edit_script.ops[found_index].0, GapAlignOpType::Sub);
-            new_ops.push((edit_script.ops[found_index].0, found_num - found_opid));
+            let (found_op, _) = edit_script
+                .get(found_index)
+                .unwrap_or((GapAlignOpType::Sub, 0));
+            debug_assert_eq!(found_op, GapAlignOpType::Sub);
+            new_ops.push((found_op, found_num - found_opid));
         }
-        new_ops.extend_from_slice(&edit_script.ops[found_index + 1..]);
-        edit_script.ops = new_ops;
+        new_ops.extend(edit_script.iter().skip(found_index + 1));
+        edit_script.replace_ops(new_ops);
         hsp.query_offset += qid;
         hsp.subject_offset += sid;
     } else {
         if found_opid < found_num {
-            debug_assert_eq!(edit_script.ops[found_index].0, GapAlignOpType::Sub);
-            edit_script.ops[found_index].1 = found_opid;
+            let (found_op, _) = edit_script
+                .get(found_index)
+                .unwrap_or((GapAlignOpType::Sub, 0));
+            debug_assert_eq!(found_op, GapAlignOpType::Sub);
+            edit_script.set_num(found_index, found_opid);
         }
-        edit_script.ops.truncate(found_index + 1);
+        edit_script.truncate(found_index + 1);
         hsp.query_end = hsp.query_offset + qid;
         hsp.subject_end = hsp.subject_offset + sid;
     }
@@ -4665,19 +4678,63 @@ pub fn blast_hsp_stream_register_mt_lock(stream: Option<&HspStream>, has_lock: b
 
 #[derive(Debug, Clone, Default)]
 pub struct BlastHSPPipe {
-    pub stage: i32,
+    pub data: Option<BlastHSPPipeData>,
+    pub run_fn_ptr: Option<BlastHSPPipeRunFn>,
+    pub free_fn_ptr: Option<BlastHSPPipeFreeFn>,
+    pub next: Option<Box<BlastHSPPipe>>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct BlastHSPWriter {
-    pub initialized: bool,
-    pub finalized: bool,
+    pub data: Option<BlastHSPWriterData>,
+    pub init_fn_ptr: Option<BlastHSPWriterInitFn>,
+    pub run_fn_ptr: Option<BlastHSPWriterRunFn>,
+    pub final_fn_ptr: Option<BlastHSPWriterFinalFn>,
+    pub free_fn_ptr: Option<BlastHSPWriterFreeFn>,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct BlastHSPWriterInfo {
+    pub params: Option<BlastHSPWriterData>,
+    pub new_fn_ptr: Option<BlastHSPWriterNewFn>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BlastHSPPipeInfo {
+    pub params: Option<BlastHSPPipeData>,
+    pub new_fn_ptr: Option<BlastHSPPipeNewFn>,
+    pub next: Option<Box<BlastHSPPipeInfo>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum BlastHSPWriterData {
+    #[default]
+    None,
+    HspResults(Box<BlastHSPResults>),
+    Opaque,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum BlastHSPPipeData {
+    #[default]
+    None,
+    Opaque,
+}
+
+pub type BlastHSPWriterNewFn = fn(Option<BlastHSPWriterData>) -> BlastHSPWriter;
+pub type BlastHSPWriterFreeFn = fn(BlastHSPWriter) -> Option<BlastHSPWriter>;
+pub type BlastHSPWriterInitFn = fn(Option<&mut BlastHSPWriterData>, Option<&mut ()>) -> i32;
+pub type BlastHSPWriterRunFn = fn(Option<&mut BlastHSPWriterData>, &mut BlastHSPList) -> i32;
+pub type BlastHSPWriterFinalFn = fn(Option<&mut BlastHSPWriterData>, Option<&mut ()>) -> i32;
+pub type BlastHSPPipeNewFn = fn(Option<BlastHSPPipeData>) -> BlastHSPPipe;
+pub type BlastHSPPipeFreeFn = fn(BlastHSPPipe) -> Option<BlastHSPPipe>;
+pub type BlastHSPPipeRunFn = fn(Option<&mut BlastHSPPipeData>, &mut BlastHSPResults) -> i32;
 
 /// blast-rs: Port-shaped status helper corresponding to `BlastHSPStreamRegisterPipe`; not a direct NCBI C port.
 pub fn blast_hsp_stream_register_pipe(
     stream: Option<&HspStream>,
     pipe: Option<BlastHSPPipe>,
+    stage: i32,
 ) -> i32 {
     let Some(stream) = stream else {
         return -1;
@@ -4685,7 +4742,7 @@ pub fn blast_hsp_stream_register_pipe(
     let Some(pipe) = pipe else {
         return -1;
     };
-    match pipe.stage {
+    match stage {
         E_PRELIM_SEARCH => {
             stream.pre_pipes.lock().unwrap().push(pipe);
             0
@@ -4700,17 +4757,12 @@ pub fn blast_hsp_stream_register_pipe(
 
 /// blast-rs: Port-shaped constructor corresponding to `BlastHSPWriterNew`; not a direct NCBI C port.
 pub fn blast_hsp_writer_new() -> BlastHSPWriter {
-    let mut writer = BlastHSPWriter::default();
-    writer.initialized = false;
-    writer.finalized = false;
-    writer
+    BlastHSPWriter::default()
 }
 
 /// blast-rs: Port-shaped constructor corresponding to `BlastHSPPipeNew`; not a direct NCBI C port.
-pub fn blast_hsp_pipe_new(stage: i32) -> BlastHSPPipe {
-    let mut pipe = BlastHSPPipe::default();
-    pipe.stage = stage;
-    pipe
+pub fn blast_hsp_pipe_new() -> BlastHSPPipe {
+    BlastHSPPipe::default()
 }
 
 /// blast-rs: Test/introspection helper for the Rust stream's pipe-chain equivalent; not a direct NCBI C port.
@@ -5119,7 +5171,8 @@ mod tests {
         assert_eq!(
             blast_hsp_stream_register_pipe(
                 Some(&stream),
-                Some(blast_hsp_pipe_new(E_TRACEBACK_SEARCH))
+                Some(blast_hsp_pipe_new()),
+                E_TRACEBACK_SEARCH,
             ),
             0
         );
@@ -5263,26 +5316,34 @@ mod tests {
         assert_eq!(
             blast_hsp_stream_register_pipe(
                 Some(&stream),
-                Some(blast_hsp_pipe_new(E_PRELIM_SEARCH)),
+                Some(blast_hsp_pipe_new()),
+                E_PRELIM_SEARCH,
             ),
             0
         );
         assert_eq!(
             blast_hsp_stream_register_pipe(
                 Some(&stream),
-                Some(blast_hsp_pipe_new(E_TRACEBACK_SEARCH)),
+                Some(blast_hsp_pipe_new()),
+                E_TRACEBACK_SEARCH,
             ),
             0
         );
         assert_eq!(blast_hsp_stream_pipe_counts(Some(&stream)), Some((1, 1)));
         assert_eq!(
-            blast_hsp_stream_register_pipe(Some(&stream), Some(blast_hsp_pipe_new(E_BOTH))),
+            blast_hsp_stream_register_pipe(Some(&stream), Some(blast_hsp_pipe_new()), E_BOTH),
             -1
         );
-        assert_eq!(blast_hsp_stream_register_pipe(Some(&stream), None), -1);
+        assert_eq!(
+            blast_hsp_stream_register_pipe(Some(&stream), None, E_BOTH),
+            -1
+        );
         let writer = blast_hsp_writer_new();
-        assert!(!writer.initialized);
-        assert!(!writer.finalized);
+        assert!(writer.data.is_none());
+        assert!(writer.init_fn_ptr.is_none());
+        assert!(writer.run_fn_ptr.is_none());
+        assert!(writer.final_fn_ptr.is_none());
+        assert!(writer.free_fn_ptr.is_none());
         blast_hsp_stream_simple_close(Some(&stream));
         assert_eq!(blast_hsp_stream_pipe_counts(Some(&stream)), Some((0, 1)));
         blast_hsp_stream_mapping_close(Some(&stream));
@@ -5675,16 +5736,14 @@ mod tests {
         let mut oof = make_hsp(40, 1e-8);
         oof.query_offset = 1;
         oof.subject_offset = 2;
-        oof.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (GapAlignOpType::Sub, 2),
-                (GapAlignOpType::Ins, 1),
-                (GapAlignOpType::Del, 1),
-                (GapAlignOpType::Del2, 1),
-                (GapAlignOpType::Ins2, 1),
-                (GapAlignOpType::Sub, 1),
-            ],
-        });
+        oof.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 2),
+            (GapAlignOpType::Ins, 1),
+            (GapAlignOpType::Del, 1),
+            (GapAlignOpType::Del2, 1),
+            (GapAlignOpType::Ins2, 1),
+            (GapAlignOpType::Sub, 1),
+        ]));
         let oof_query = [0, 7, 8, 99, 10];
         let oof_subject = [0, 0, 7, 0, 0, 9, 0, 0, 0, 0, 0, 10];
         let mut matrix = vec![vec![0; 256]; 256];
@@ -5863,7 +5922,16 @@ mod tests {
 
         assert_eq!(
             blast_hsp_get_adjusted_offsets(crate::program::BLASTX, &hsp, 99, 100),
-            (95, 87, 6, 11)
+            (2, 4, 6, 11)
+        );
+
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            3,
+        )]));
+        assert_eq!(
+            blast_hsp_get_adjusted_offsets(crate::program::BLASTX, &hsp, 99, 100),
+            (94, 86, 6, 11)
         );
 
         hsp.query_frame = 0;
@@ -5872,7 +5940,18 @@ mod tests {
         hsp.subject_frame = 2;
         assert_eq!(
             blast_hsp_get_adjusted_offsets(crate::program::TBLASTN, &hsp, 20, 120),
-            (2, 4, 8, 16)
+            (2, 4, 2, 15)
+        );
+
+        hsp.query_offset = 10;
+        hsp.query_end = 20;
+        hsp.query_frame = 1;
+        hsp.subject_offset = 5;
+        hsp.subject_end = 15;
+        hsp.subject_frame = -1;
+        assert_eq!(
+            blast_hsp_get_adjusted_offsets(crate::program::BLASTN, &hsp, 100, 100),
+            (81, 90, 15, 6)
         );
     }
 
@@ -5901,14 +5980,14 @@ mod tests {
         )
         .expect("partial translation");
 
-        assert_eq!(partial.start_shift, 7);
+        assert_eq!(partial.start_shift, 0);
         assert_eq!(
             (
                 hsp.subject_offset,
                 hsp.subject_end,
                 hsp.subject_gapped_start
             ),
-            (33, 38, 35)
+            (40, 45, 42)
         );
         assert_eq!(partial.subject_length, partial.subject.len() as i32);
         assert_eq!(
@@ -5950,19 +6029,17 @@ mod tests {
         begin.subject_offset = 100;
         begin.query_end = 20;
         begin.subject_end = 112;
-        begin.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (GapAlignOpType::Sub, 3),
-                (GapAlignOpType::Del, 2),
-                (GapAlignOpType::Sub, 5),
-                (GapAlignOpType::Ins, 1),
-            ],
-        });
+        begin.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 3),
+            (GapAlignOpType::Del, 2),
+            (GapAlignOpType::Sub, 5),
+            (GapAlignOpType::Ins, 1),
+        ]));
 
         s_cut_off_gap_edit_script(&mut begin, 15, 105, true);
         assert_eq!((begin.query_offset, begin.subject_offset), (15, 107));
         assert_eq!(
-            begin.edit_script.as_ref().unwrap().ops,
+            begin.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 3), (GapAlignOpType::Ins, 1)]
         );
 
@@ -5971,19 +6048,17 @@ mod tests {
         end.subject_offset = 100;
         end.query_end = 20;
         end.subject_end = 112;
-        end.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (GapAlignOpType::Sub, 3),
-                (GapAlignOpType::Del, 2),
-                (GapAlignOpType::Sub, 5),
-                (GapAlignOpType::Ins, 1),
-            ],
-        });
+        end.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 3),
+            (GapAlignOpType::Del, 2),
+            (GapAlignOpType::Sub, 5),
+            (GapAlignOpType::Ins, 1),
+        ]));
 
         s_cut_off_gap_edit_script(&mut end, 15, 105, false);
         assert_eq!((end.query_end, end.subject_end), (15, 107));
         assert_eq!(
-            end.edit_script.as_ref().unwrap().ops,
+            end.edit_script.as_ref().unwrap().ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 3),
                 (GapAlignOpType::Del, 2),
@@ -5995,8 +6070,31 @@ mod tests {
         s_cut_off_gap_edit_script(&mut untouched, 1000, 1000, false);
         assert_eq!(untouched.query_end, end.query_end);
         assert_eq!(
-            untouched.edit_script.unwrap().ops,
-            end.edit_script.unwrap().ops
+            untouched.edit_script.unwrap().ops_vec(),
+            end.edit_script.unwrap().ops_vec()
+        );
+    }
+
+    #[test]
+    fn cut_off_gap_edit_script_does_not_advance_on_frameshift_ops() {
+        let mut hsp = make_hsp(50, 1e-8);
+        hsp.query_offset = 0;
+        hsp.subject_offset = 0;
+        hsp.query_end = 6;
+        hsp.subject_end = 6;
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 1),
+            (GapAlignOpType::Del2, 1),
+            (GapAlignOpType::Ins1, 1),
+            (GapAlignOpType::Sub, 5),
+        ]));
+
+        s_cut_off_gap_edit_script(&mut hsp, 2, 2, true);
+
+        assert_eq!((hsp.query_offset, hsp.subject_offset), (2, 2));
+        assert_eq!(
+            hsp.edit_script.as_ref().unwrap().ops_vec(),
+            vec![(GapAlignOpType::Sub, 4)]
         );
     }
 
@@ -6748,6 +6846,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 1e-6,
+
+            ..Default::default()
         };
         let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[100]);
         query_info.contexts[0].eff_searchsp = 10_000;
@@ -6803,6 +6903,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 1000.0,
+
+            ..Default::default()
         };
         let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[50, 50]);
         query_info.contexts[0].eff_searchsp = 1_000;
@@ -6860,7 +6962,7 @@ mod tests {
     }
 
     #[test]
-    fn hsp_list_post_traceback_update_falls_back_for_missing_hsp_context() {
+    fn hsp_list_post_traceback_update_uses_get_evalues_and_bits_handoff() {
         let mut scoring_options = crate::options::ScoringOptions::new_blastp();
         scoring_options.gapped_calculation = true;
         let score_params =
@@ -6875,8 +6977,11 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 1000.0,
+
+            ..Default::default()
         };
-        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[50]);
+        let mut query_info = crate::queryinfo::QueryInfo::new_blastp(&[50]);
+        query_info.contexts[0].eff_searchsp = 75;
         let kbp = crate::stat::KarlinBlk {
             lambda: 0.3,
             k: 0.2,
@@ -6910,7 +7015,7 @@ mod tests {
         assert_eq!(list.hsps.len(), 1);
         assert_eq!(list.hsps[0].context, 4);
         assert!((list.hsps[0].evalue - kbp.raw_to_evalue(12, 75.0)).abs() < 1e-12);
-        assert!((list.hsps[0].bit_score - kbp.raw_to_bit(12)).abs() < 1e-12);
+        assert_eq!(list.hsps[0].bit_score, 12.0 * 0.9);
     }
 
     #[test]
@@ -6955,13 +7060,11 @@ mod tests {
         hsp.subject_end = 44;
         hsp.subject_gapped_start = 31;
         hsp.subject_frame = 2;
-        hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (GapAlignOpType::Sub, 4),
-                (GapAlignOpType::Ins, 2),
-                (GapAlignOpType::Del, 1),
-            ],
-        });
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 4),
+            (GapAlignOpType::Ins, 2),
+            (GapAlignOpType::Del, 1),
+        ]));
         list.hsps.push(hsp);
 
         s_blast_hsp_list_rps_update(crate::program::RPS_TBLASTN, &mut list);
@@ -6984,7 +7087,7 @@ mod tests {
             (2, -1, 1)
         );
         assert_eq!(
-            hsp.edit_script.as_ref().unwrap().ops,
+            hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 4),
                 (GapAlignOpType::Del, 2),
@@ -7002,13 +7105,11 @@ mod tests {
         hsp.subject_end = 125;
         assert_eq!(blast_hsp_calc_length_and_gaps(&hsp), (25, 0, 0));
 
-        hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (crate::gapinfo::GapAlignOpType::Sub, 8),
-                (crate::gapinfo::GapAlignOpType::Del, 3),
-                (crate::gapinfo::GapAlignOpType::Ins, 2),
-            ],
-        });
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (crate::gapinfo::GapAlignOpType::Sub, 8),
+            (crate::gapinfo::GapAlignOpType::Del, 3),
+            (crate::gapinfo::GapAlignOpType::Ins, 2),
+        ]));
         assert_eq!(blast_hsp_calc_length_and_gaps(&hsp), (23, 5, 2));
     }
 
@@ -7958,18 +8059,20 @@ mod tests {
         leader.subject_offset = 0;
         leader.query_end = 4;
         leader.subject_end = 4;
-        leader.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 4)],
-        });
+        leader.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            4,
+        )]));
 
         let mut duplicate = make_hsp(90, 1.0e-20);
         duplicate.query_offset = 0;
         duplicate.subject_offset = 0;
         duplicate.query_end = 8;
         duplicate.subject_end = 8;
-        duplicate.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 8)],
-        });
+        duplicate.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            8,
+        )]));
 
         let mut list = blast_hsp_list_new(0);
         list.hsps = vec![duplicate, leader];
@@ -7993,7 +8096,7 @@ mod tests {
         assert_eq!((trimmed.query_offset, trimmed.subject_offset), (4, 4));
         assert_eq!((trimmed.query_end, trimmed.subject_end), (8, 8));
         assert_eq!(
-            trimmed.edit_script.as_ref().unwrap().ops,
+            trimmed.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 4)]
         );
         assert_eq!(list.best_evalue, 1.0e-20);
@@ -8006,27 +8109,30 @@ mod tests {
         start_leader.subject_offset = 0;
         start_leader.query_end = 4;
         start_leader.subject_end = 4;
-        start_leader.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 4)],
-        });
+        start_leader.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            4,
+        )]));
 
         let mut trimmed_extra = make_hsp(90, 1.0e-20);
         trimmed_extra.query_offset = 0;
         trimmed_extra.subject_offset = 0;
         trimmed_extra.query_end = 8;
         trimmed_extra.subject_end = 8;
-        trimmed_extra.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 8)],
-        });
+        trimmed_extra.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            8,
+        )]));
 
         let mut same_end_active = make_hsp(95, 1.0e-10);
         same_end_active.query_offset = 2;
         same_end_active.subject_offset = 2;
         same_end_active.query_end = 8;
         same_end_active.subject_end = 8;
-        same_end_active.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 6)],
-        });
+        same_end_active.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            6,
+        )]));
 
         let mut list = blast_hsp_list_new(0);
         list.hsps = vec![trimmed_extra, same_end_active, start_leader];
@@ -8077,6 +8183,22 @@ mod tests {
 
         assert_eq!(legacy.hsps.len(), 1);
         assert_eq!(legacy.hsps[0].score, 50);
+    }
+
+    #[test]
+    fn blast_hsp_adapter_counts_only_c_gap_open_ops() {
+        let mut hsp = BlastHSP::from_legacy_hsp(make_hsp(50, 1.0e-20));
+        hsp.gap_info = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 2),
+            (GapAlignOpType::Del2, 1),
+            (GapAlignOpType::Ins1, 1),
+            (GapAlignOpType::Del, 3),
+            (GapAlignOpType::Ins, 2),
+        ]));
+
+        let legacy = hsp.into_legacy_hsp();
+
+        assert_eq!(legacy.num_gaps, 2);
     }
 
     #[test]
@@ -9562,9 +9684,10 @@ mod tests {
         hsp.subject_offset = 10;
         hsp.subject_end = 16;
         hsp.subject_gapped_start = 11;
-        hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Ins, 2), (GapAlignOpType::Del, 1)],
-        });
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Ins, 2),
+            (GapAlignOpType::Del, 1),
+        ]));
         list.add_hsp(hsp);
         assert_eq!(stream.blast_hspstream_write(0, list), 0);
         let mut results = HspResults::new(1);
@@ -9605,8 +9728,8 @@ mod tests {
         assert_eq!(hsp.query_offset, 10);
         assert_eq!(hsp.subject_offset, 2);
         let script = hsp.edit_script.as_ref().expect("edit script");
-        assert_eq!(script.ops[0].0, GapAlignOpType::Del);
-        assert_eq!(script.ops[1].0, GapAlignOpType::Ins);
+        assert_eq!(script.ops_vec()[0].0, GapAlignOpType::Del);
+        assert_eq!(script.ops_vec()[1].0, GapAlignOpType::Ins);
     }
 
     #[test]

@@ -2605,7 +2605,7 @@ pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
     // substitution scoring matches what the DP used. NCBI does the same via
     // `sbp->matrix->data[*query & 0x0f][*subject]` (`blast_hits.c:548`).
     let matrix = blast_score_blk_nucl_matrix_create(reward, penalty);
-    if tb.edit_script.ops.is_empty() {
+    if tb.edit_script.is_empty() {
         return true;
     }
     let (factor, effective_gap_open, effective_gap_extend) = if gap_open == 0 && gap_extend == 0 {
@@ -2644,7 +2644,7 @@ pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
     let mut best_end_esp_num: i32 = -1;
 
     // Clone the ops into a mutable buffer so we can split a run if needed.
-    let mut ops = tb.edit_script.ops.clone();
+    let mut ops = tb.edit_script.ops_vec();
 
     let mut index = 0;
     while index < ops.len() {
@@ -2656,8 +2656,8 @@ pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
                 GapAlignOpType::Sub => {
                     // Apply one substitution using the BLASTNA matrix.
                     let q = (query.get(qp).copied().unwrap_or(15) & 0x0f) as usize;
-                    let s = (subject.get(sp).copied().unwrap_or(15) & 0x0f) as usize;
-                    sum += factor * matrix[q][s];
+                    let s = subject.get(sp).copied().unwrap_or(15) as usize;
+                    sum += factor * matrix[q].get(s).copied().unwrap_or(0);
                     qp += 1;
                     sp += 1;
                     op_index += 1;
@@ -2731,7 +2731,7 @@ pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
         let mut qpp = best_q_start;
         let mut spp = best_s_start;
         while qpp > 0 && spp > 0 {
-            let q = query.get(qpp - 1).copied().unwrap_or(15) & 0x0f;
+            let q = query.get(qpp - 1).copied().unwrap_or(15);
             let s = subject.get(spp - 1).copied().unwrap_or(15);
             // NCBI also requires q[qp]<4 (unambiguous) — blast_hits.c:622.
             if q != s || q >= 4 {
@@ -2754,7 +2754,7 @@ pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
         let mut qpp = best_q_end;
         let mut spp = best_s_end;
         while qpp < query.len() && spp < subject.len() {
-            let q = query[qpp] & 0x0f;
+            let q = query[qpp];
             let s = subject[spp];
             if q != s || q >= 4 {
                 break;
@@ -2770,7 +2770,7 @@ pub fn blast_hsp_reevaluate_with_ambiguities_gapped(
         score += ext * reward;
     }
 
-    tb.edit_script.ops = ops;
+    tb.edit_script.replace_ops(ops);
     s_update_reevaluated_hsp(
         tb,
         true,
@@ -2817,26 +2817,26 @@ pub fn s_update_reevaluated_hsp(
     tb.subject_end = best_s_start + best_s_end.saturating_sub(best_s_start);
 
     if gapped {
-        let last_num = match tb.edit_script.ops.len().checked_sub(1) {
+        let last_num = match tb.edit_script.len().checked_sub(1) {
             Some(idx) => idx,
             None => return false,
         };
 
-        if best_end_esp_index >= tb.edit_script.ops.len()
-            || best_start_esp_index > best_end_esp_index
-        {
+        if best_end_esp_index >= tb.edit_script.len() || best_start_esp_index > best_end_esp_index {
             return false;
         }
 
         if best_end_esp_index != last_num || best_start_esp_index > 0 {
-            tb.edit_script.ops = tb.edit_script.ops[best_start_esp_index..=best_end_esp_index]
-                .iter()
-                .copied()
-                .collect();
+            let ops = tb.edit_script.ops_vec();
+            tb.edit_script.replace_ops(
+                ops[best_start_esp_index..=best_end_esp_index]
+                    .iter()
+                    .copied(),
+            );
         }
 
-        if let Some(last) = tb.edit_script.ops.last_mut() {
-            last.1 = best_end_esp_num;
+        if let Some(last_index) = tb.edit_script.len().checked_sub(1) {
+            tb.edit_script.set_num(last_index, best_end_esp_num);
         }
     }
 
@@ -2944,25 +2944,25 @@ pub fn blast_gapped_alignment_with_traceback(
     // (the DP applied them as negatives), so removing the op cancels them out.
     // GapAlignOpType convention: Del == gap in query == consumes subject;
     // Ins == gap in subject == consumes query (matches C eGapAlignDel/eGapAlignIns).
-    while !esp.ops.is_empty() && esp.ops[0].0 != GapAlignOpType::Sub {
-        let (op, num) = esp.ops[0];
+    while !esp.is_empty() && esp.first().is_some_and(|(op, _)| op != GapAlignOpType::Sub) {
+        let (op, num) = esp.first().expect("non-empty edit script");
         score_left += gap_open + num * gap_extend;
         if op == GapAlignOpType::Del {
             subject_start += num as usize;
         } else {
             query_start += num as usize;
         }
-        esp.ops.remove(0);
+        esp.remove(0);
     }
-    while !esp.ops.is_empty() && esp.ops[esp.ops.len() - 1].0 != GapAlignOpType::Sub {
-        let (op, num) = esp.ops[esp.ops.len() - 1];
+    while !esp.is_empty() && esp.last().is_some_and(|(op, _)| op != GapAlignOpType::Sub) {
+        let (op, num) = esp.last().expect("non-empty edit script");
         score_right += gap_open + num * gap_extend;
         if op == GapAlignOpType::Del {
             subject_end -= num as usize;
         } else {
             query_end -= num as usize;
         }
-        esp.ops.pop();
+        esp.pop();
     }
 
     let total_score = score_left + score_right;
@@ -3932,7 +3932,7 @@ mod tests {
         assert_eq!((r.query_start, r.query_end), (0, 82));
         assert_eq!((r.subject_start, r.subject_end), (0, 77));
         // NCBI path: 35 Sub, 5 Ins (gap in B), 42 Sub.
-        let ops = &r.edit_script.ops;
+        let ops = &r.edit_script.ops_vec();
         assert_eq!(ops.len(), 3, "expected 3 op-runs, got {:?}", ops);
         assert_eq!(
             ops[0],
@@ -3963,9 +3963,7 @@ mod tests {
         let s = q.clone();
         let mut tb = TracebackResult {
             score: 10,
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, 10)],
-            },
+            edit_script: GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 10)]),
             query_start: 0,
             query_end: 10,
             subject_start: 0,
@@ -3974,7 +3972,7 @@ mod tests {
         let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
         assert!(!delete);
         assert_eq!(tb.score, 10);
-        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 10)]);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 10)]);
         assert_eq!((tb.query_start, tb.query_end), (0, 10));
         assert_eq!((tb.subject_start, tb.subject_end), (0, 10));
     }
@@ -3986,7 +3984,7 @@ mod tests {
         let s: Vec<u8> = vec![0, 1, 2, 3];
         let mut tb = TracebackResult {
             score: 4,
-            edit_script: GapEditScript { ops: vec![] },
+            edit_script: GapEditScript::from_ops(vec![]),
             query_start: 0,
             query_end: 0,
             subject_start: 0,
@@ -4005,9 +4003,7 @@ mod tests {
         let s: Vec<u8> = vec![0, 1, 2, 3, 0];
         let mut tb = TracebackResult {
             score: 5,
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, 5)],
-            },
+            edit_script: GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 5)]),
             query_start: 0,
             query_end: 5,
             subject_start: 0,
@@ -4016,7 +4012,7 @@ mod tests {
         let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 0, 0, 1);
         assert!(!delete);
         assert_eq!(tb.score, 5);
-        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 5)]);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 5)]);
     }
 
     #[test]
@@ -4027,9 +4023,7 @@ mod tests {
         let s: Vec<u8> = vec![3, 3, 3, 3]; // TTTT
         let mut tb = TracebackResult {
             score: -12,
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, 4)],
-            },
+            edit_script: GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 4)]),
             query_start: 0,
             query_end: 4,
             subject_start: 0,
@@ -4048,9 +4042,7 @@ mod tests {
         let s: Vec<u8> = vec![0, 1, 2, 3, 0, 1];
         let mut tb = TracebackResult {
             score: 4,
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, 4)],
-            },
+            edit_script: GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 4)]),
             query_start: 0,
             query_end: 4,
             subject_start: 0,
@@ -4059,9 +4051,29 @@ mod tests {
         let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
         assert!(!delete);
         assert_eq!(tb.score, 6);
-        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 6)]);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 6)]);
         assert_eq!(tb.query_end, 6);
         assert_eq!(tb.subject_end, 6);
+    }
+
+    #[test]
+    fn test_reevaluate_right_extension_uses_raw_query_ambiguity_guard() {
+        let q: Vec<u8> = vec![0, 1, 0x10, 2];
+        let s: Vec<u8> = vec![0, 1, 0, 2];
+        let mut tb = TracebackResult {
+            score: 2,
+            edit_script: GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 2)]),
+            query_start: 0,
+            query_end: 2,
+            subject_start: 0,
+            subject_end: 2,
+        };
+
+        let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
+        assert!(!delete);
+        assert_eq!(tb.score, 2);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 2)]);
+        assert_eq!((tb.query_end, tb.subject_end), (2, 2));
     }
 
     #[test]
@@ -4073,9 +4085,7 @@ mod tests {
         let s: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 0, 2, 1, 3, 0];
         let mut tb = TracebackResult {
             score: -5, // 10 - 5*3 = -5 with reward=1 penalty=-3
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, 15)],
-            },
+            edit_script: GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 15)]),
             query_start: 0,
             query_end: 15,
             subject_start: 0,
@@ -4084,7 +4094,7 @@ mod tests {
         let delete = blast_hsp_reevaluate_with_ambiguities_gapped(&mut tb, &q, &s, 1, -3, 5, 2, 1);
         assert!(!delete);
         assert_eq!(tb.score, 10);
-        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 10)]);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 10)]);
         assert_eq!((tb.query_start, tb.query_end), (0, 10));
     }
 
@@ -4092,14 +4102,12 @@ mod tests {
     fn test_update_reevaluated_hsp_trims_gap_script_like_c() {
         let mut tb = TracebackResult {
             score: 0,
-            edit_script: GapEditScript {
-                ops: vec![
-                    (GapAlignOpType::Sub, 3),
-                    (GapAlignOpType::Ins, 2),
-                    (GapAlignOpType::Sub, 5),
-                    (GapAlignOpType::Del, 1),
-                ],
-            },
+            edit_script: GapEditScript::from_ops(vec![
+                (GapAlignOpType::Sub, 3),
+                (GapAlignOpType::Ins, 2),
+                (GapAlignOpType::Sub, 5),
+                (GapAlignOpType::Del, 1),
+            ]),
             query_start: 2,
             query_end: 13,
             subject_start: 10,
@@ -4113,7 +4121,7 @@ mod tests {
         assert_eq!((tb.query_start, tb.query_end), (4, 11));
         assert_eq!((tb.subject_start, tb.subject_end), (12, 19));
         assert_eq!(
-            tb.edit_script.ops,
+            tb.edit_script.ops_vec(),
             vec![(GapAlignOpType::Ins, 2), (GapAlignOpType::Sub, 4)]
         );
     }
@@ -4122,9 +4130,7 @@ mod tests {
     fn test_update_reevaluated_hsp_ungapped_leaves_script_and_deletes_below_cutoff() {
         let mut tb = TracebackResult {
             score: 0,
-            edit_script: GapEditScript {
-                ops: vec![(GapAlignOpType::Sub, 6)],
-            },
+            edit_script: GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 6)]),
             query_start: 0,
             query_end: 6,
             subject_start: 0,
@@ -4136,7 +4142,7 @@ mod tests {
         ));
         assert_eq!(tb.score, 7);
         assert_eq!((tb.query_start, tb.query_end), (0, 6));
-        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 6)]);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 6)]);
 
         assert!(!s_update_reevaluated_hsp_ungapped(
             &mut tb, 10, 11, 1, 5, 2, 6
@@ -4144,7 +4150,7 @@ mod tests {
         assert_eq!(tb.score, 11);
         assert_eq!((tb.query_start, tb.query_end), (1, 5));
         assert_eq!((tb.subject_start, tb.subject_end), (2, 6));
-        assert_eq!(tb.edit_script.ops, vec![(GapAlignOpType::Sub, 6)]);
+        assert_eq!(tb.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 6)]);
     }
 
     #[test]
@@ -4153,8 +4159,8 @@ mod tests {
         let s = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, 8, 0, 8, 2, -3, 5, 2);
         assert_eq!(score, 16);
-        assert_eq!(esp.ops.len(), 1);
-        assert_eq!(esp.ops[0], (GapAlignOpType::Sub, 8));
+        assert_eq!(esp.len(), 1);
+        assert_eq!(esp.ops_vec()[0], (GapAlignOpType::Sub, 8));
     }
 
     #[test]
@@ -4163,7 +4169,7 @@ mod tests {
         let s = vec![0u8, 1, 2, 3, 3, 1, 2, 3]; // pos 4: 0→3
         let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, 8, 0, 8, 2, -3, 5, 2);
         assert!(score > 0);
-        let total: i32 = esp.ops.iter().map(|(_, n)| *n).sum();
+        let total: i32 = esp.ops_vec().iter().map(|(_, n)| *n).sum();
         assert!(total >= 7, "alignment should be at least 7 bases");
     }
 
@@ -4201,11 +4207,11 @@ mod tests {
         let r = r.unwrap();
         assert!(r.score > 0, "score={}", r.score);
         // Check edit script has content
-        let total_ops: i32 = r.edit_script.ops.iter().map(|(_, n)| *n).sum();
+        let total_ops: i32 = r.edit_script.ops_vec().iter().map(|(_, n)| *n).sum();
         assert!(
             total_ops > 0,
             "edit script should have operations, got {:?}",
-            r.edit_script.ops
+            r.edit_script.ops_vec()
         );
     }
 
@@ -4217,9 +4223,15 @@ mod tests {
         let q = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let s = vec![0u8, 1, 2, 3, 0, 1, 2, 3];
         let r = blast_gapped_alignment_with_traceback(&q, &s, 4, 4, 1, -3, 5, 2, 30).unwrap();
-        assert!(!r.edit_script.ops.is_empty());
-        assert_eq!(r.edit_script.ops.first().unwrap().0, GapAlignOpType::Sub);
-        assert_eq!(r.edit_script.ops.last().unwrap().0, GapAlignOpType::Sub);
+        assert!(!r.edit_script.is_empty());
+        assert_eq!(
+            r.edit_script.ops_vec().first().unwrap().0,
+            GapAlignOpType::Sub
+        );
+        assert_eq!(
+            r.edit_script.ops_vec().last().unwrap().0,
+            GapAlignOpType::Sub
+        );
     }
 
     #[test]
@@ -4248,17 +4260,17 @@ mod tests {
         let r = blast_gapped_alignment_with_traceback(&q, &s, 12, 12, 2, -3, 3, 1, 30)
             .expect("single-gap alignment should succeed");
         assert!(
-            r.edit_script.ops.iter().any(|(op, _)| matches!(
+            r.edit_script.ops_vec().iter().any(|(op, _)| matches!(
                 op,
                 GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2
             )),
             "expected one gap-in-query operation, got {:?}",
-            r.edit_script.ops
+            r.edit_script.ops_vec()
         );
         assert!(
-            r.edit_script.ops.len() <= 5,
+            r.edit_script.len() <= 5,
             "single-gap case should not fragment heavily, got {:?}",
-            r.edit_script.ops
+            r.edit_script.ops_vec()
         );
     }
 
@@ -4296,8 +4308,15 @@ mod tests {
         assert!(score > 0, "should find alignment, score={}", score);
         // Extra subject bases are represented as Del in gapinfo/C script
         // convention: deletion in query, i.e. a gap in query.
-        let has_del = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Del);
-        assert!(has_del, "expected Del (gap in query), ops={:?}", esp.ops);
+        let has_del = esp
+            .ops_vec()
+            .iter()
+            .any(|(op, _)| *op == GapAlignOpType::Del);
+        assert!(
+            has_del,
+            "expected Del (gap in query), ops={:?}",
+            esp.ops_vec()
+        );
     }
 
     /// Alignment where subject has a deletion relative to query (gap in subject).
@@ -4317,8 +4336,15 @@ mod tests {
         assert!(score > 0, "should find alignment, score={}", score);
         // Extra query bases are represented as Ins in gapinfo/C script
         // convention: insertion in query, i.e. a gap in subject.
-        let has_ins = esp.ops.iter().any(|(op, _)| *op == GapAlignOpType::Ins);
-        assert!(has_ins, "expected Ins (gap in subject), ops={:?}", esp.ops);
+        let has_ins = esp
+            .ops_vec()
+            .iter()
+            .any(|(op, _)| *op == GapAlignOpType::Ins);
+        assert!(
+            has_ins,
+            "expected Ins (gap in subject), ops={:?}",
+            esp.ops_vec()
+        );
     }
 
     /// Alignment requiring multiple gaps.
@@ -4332,15 +4358,15 @@ mod tests {
         let (score, esp, _, _, _, _) = traceback_align(&q, &s, 0, q.len(), 0, s.len(), 2, -3, 3, 1);
         assert!(score > 0, "should find alignment, score={}", score);
         // Count gap operations (Del = gap in query, Ins = gap in subject).
-        let gap_ops: Vec<_> = esp
-            .ops
+        let ops = esp.ops_vec();
+        let gap_ops: Vec<_> = ops
             .iter()
             .filter(|(op, _)| *op == GapAlignOpType::Del || *op == GapAlignOpType::Ins)
             .collect();
         assert!(
             !gap_ops.is_empty(),
             "expected at least one gap operation, ops={:?}",
-            esp.ops
+            esp.ops_vec()
         );
     }
 
@@ -4364,8 +4390,8 @@ mod tests {
         assert_eq!(as_start, 5, "subject alignment start");
         assert_eq!(as_end, 13, "subject alignment end");
         // Edit script should be a single Sub run of length 8
-        assert_eq!(esp.ops.len(), 1);
-        assert_eq!(esp.ops[0], (GapAlignOpType::Sub, 8));
+        assert_eq!(esp.len(), 1);
+        assert_eq!(esp.ops_vec()[0], (GapAlignOpType::Sub, 8));
     }
 
     /// The traceback score should match what the DP matrix says.
@@ -4395,7 +4421,7 @@ mod tests {
         let mut computed_score = 0i32;
         let mut qi = aq_start;
         let mut si = as_start;
-        for (op, count) in &esp.ops {
+        for (op, count) in &esp.ops_vec() {
             match op {
                 GapAlignOpType::Sub => {
                     for _ in 0..*count {
@@ -4418,9 +4444,12 @@ mod tests {
             }
         }
         assert_eq!(
-            score, computed_score,
+            score,
+            computed_score,
             "DP score {} should match recomputed score {} from edit script {:?}",
-            score, computed_score, esp.ops
+            score,
+            computed_score,
+            esp.ops_vec()
         );
     }
 
@@ -4714,8 +4743,8 @@ mod tests {
             gap_align
                 .edit_script
                 .as_ref()
-                .map(|script| script.ops.as_slice()),
-            Some(&[(GapAlignOpType::Sub, 6)][..])
+                .map(|script| script.ops_vec()),
+            Some(vec![(GapAlignOpType::Sub, 6)])
         );
     }
 
@@ -4772,6 +4801,8 @@ mod tests {
             gap_open: 5,
             gap_extend: 2,
             scale_factor: 1.0,
+
+            ..Default::default()
         };
         let mut hit_options = crate::options::HitSavingOptions::default();
         hit_options.program_number = crate::program::PHI_BLASTP;
@@ -4783,6 +4814,8 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 0.0,
+
+            ..Default::default()
         };
 
         assert_eq!(
@@ -5608,13 +5641,20 @@ mod tests {
         );
         let script = script.expect("script");
         assert!(script
-            .ops
+            .ops_vec()
             .iter()
             .any(|(op, count)| *op == GapAlignOpType::Ins1 && *count == 1));
         assert!(script
-            .ops
+            .ops_vec()
             .iter()
             .all(|(op, count)| (*op as u32) % 3 == 0 || *count == 1));
-        assert!(script.ops.iter().map(|(_, count)| *count).sum::<i32>() > 0);
+        assert!(
+            script
+                .ops_vec()
+                .iter()
+                .map(|(_, count)| *count)
+                .sum::<i32>()
+                > 0
+        );
     }
 }

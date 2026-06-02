@@ -120,12 +120,10 @@ impl CompoAdjustMode {
 /// reverse-of-computation order; we model the linked list with a
 /// `next: Option<Box<Self>>` so ownership transfers are explicit.
 ///
-/// `context` in NCBI's C is `void *` carrying traceback data of an
-/// arbitrary type (commonly a `GapEditScript*`). The Rust port stores a
-/// concrete `Option<crate::gapinfo::GapEditScript>` because that's the
-/// only context value used by the kappa driver in our tree. If a future
-/// caller needs heterogeneous contexts, swap for an enum or trait
-/// object.
+/// `context` in NCBI's C is `void *` carrying traceback data. The faithful
+/// Rust slot is `BlastCompoAlignmentContext`: it can carry the copied
+/// traceback script, the original HSP context used by `s_RedoOneAlignment`,
+/// or both while the surrounding redo code is being made C-shaped.
 #[derive(Debug, Clone)]
 pub struct BlastCompoAlignment {
     pub score: i32,
@@ -133,13 +131,32 @@ pub struct BlastCompoAlignment {
     pub query_index: i32,
     pub query_start: i32,
     pub query_end: i32,
-    pub query_gapped_start: i32,
     pub match_start: i32,
     pub match_end: i32,
-    pub match_gapped_start: i32,
     pub frame: i32,
-    pub context: Option<crate::gapinfo::GapEditScript>,
+    pub context: Option<BlastCompoAlignmentContext>,
     pub next: Option<Box<BlastCompoAlignment>>,
+}
+
+/// Rust owner for C `BlastCompo_Alignment.context`.
+///
+/// C stores an untyped pointer here. In the redo path it is either traceback
+/// data that must be freed by the caller-provided deleter, or the original
+/// `BlastHSP*` whose gapped starts seed `s_RedoOneAlignment`. Keeping those
+/// members here lets the alignment struct keep the upstream field set instead
+/// of carrying Rust-only top-level gapped-start fields.
+#[derive(Debug, Clone, Default)]
+pub struct BlastCompoAlignmentContext {
+    pub edit_script: Option<crate::gapinfo::GapEditScript>,
+    pub hsp: Option<BlastCompoAlignmentHspContext>,
+}
+
+/// Minimal owned mirror of the `BlastHSP*` data read through
+/// `BlastCompo_Alignment.context` by NCBI `s_RedoOneAlignment`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlastCompoAlignmentHspContext {
+    pub query_gapped_start: i32,
+    pub subject_gapped_start: i32,
 }
 
 impl BlastCompoAlignment {
@@ -159,7 +176,7 @@ impl BlastCompoAlignment {
         match_start: i32,
         match_end: i32,
         frame: i32,
-        context: Option<crate::gapinfo::GapEditScript>,
+        context: Option<BlastCompoAlignmentContext>,
     ) -> Self {
         Self {
             score,
@@ -167,28 +184,67 @@ impl BlastCompoAlignment {
             query_index,
             query_start,
             query_end,
-            query_gapped_start: query_start,
             match_start,
             match_end,
-            match_gapped_start: match_start,
             frame,
             context,
             next: None,
         }
     }
+
+    pub fn with_hsp_context(mut self, query_gapped_start: i32, subject_gapped_start: i32) -> Self {
+        let ctx = self.context.get_or_insert_with(Default::default);
+        ctx.hsp = Some(BlastCompoAlignmentHspContext {
+            query_gapped_start,
+            subject_gapped_start,
+        });
+        self
+    }
+
+    pub fn query_gapped_start(&self) -> i32 {
+        self.context
+            .as_ref()
+            .and_then(|ctx| ctx.hsp)
+            .map(|hsp| hsp.query_gapped_start)
+            .unwrap_or(self.query_start)
+    }
+
+    pub fn match_gapped_start(&self) -> i32 {
+        self.context
+            .as_ref()
+            .and_then(|ctx| ctx.hsp)
+            .map(|hsp| hsp.subject_gapped_start)
+            .unwrap_or(self.match_start)
+    }
 }
 
 /// `BlastCompo_GappingParams` (`redo_alignment.h:101`). Parameters
 /// passed to the gapped-alignment callback inside the kappa driver.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct BlastCompoGappingParams {
     pub gap_open: i32,
     pub gap_extend: i32,
     pub decline_align: i32,
     pub x_dropoff: i32,
-    // `void *context` from C dropped: no caller currently uses it; a
-    // generic parameter or trait object will be needed when the OOF
-    // path is ported.
+    pub context: Option<BlastCompoGappingContext>,
+}
+
+impl Default for BlastCompoGappingParams {
+    fn default() -> Self {
+        Self {
+            gap_open: 0,
+            gap_extend: 0,
+            decline_align: 0,
+            x_dropoff: 0,
+            context: None,
+        }
+    }
+}
+
+/// Rust owner for C `BlastCompo_GappingParams.context`.
+#[derive(Debug, Clone, Default)]
+pub struct BlastCompoGappingContext {
+    pub oof_context_index: Option<i32>,
 }
 
 /// `BlastCompo_SequenceRange` (`redo_alignment.h:118`). Half-open
@@ -326,34 +382,45 @@ pub fn sequence_data_release(self_: &mut BlastCompoSequenceData) {
 
 /// `BlastCompo_MatchingSequence` (`redo_alignment.h:156`). Identifies
 /// one subject sequence and provides a hook for callbacks to access
-/// the underlying database/translation. NCBI's `local_data` is a
-/// `void *`; we keep a generic index payload here and let the caller
-/// own any larger state outside the struct.
-#[derive(Debug, Clone, Copy)]
+/// the underlying database/translation.
+#[derive(Debug, Clone)]
 pub struct BlastCompoMatchingSequence {
     pub length: i32,
     pub index: i32,
-    pub local_data_index: i32,
+    pub local_data: Option<BlastKappaSequenceInfo>,
 }
 
-/// blast-rs: Convenience wrapper around the name-matched matching-sequence
-/// initializer; not a direct NCBI C port.
-///
-/// The C code fills a small stack struct for the current database sequence before
-/// invoking the redo-alignment callbacks. The C `local_data` pointer is modeled
-/// as `local_data_index`; callers that need richer state keep it externally and
-/// use this index as the lookup key.
+/// `BlastKappa_SequenceInfo` (`blast_kappa.c:893`), stored through
+/// `BlastCompo_MatchingSequence.local_data`.
+#[derive(Clone)]
+pub struct BlastKappaSequenceInfo {
+    pub prog_number: ProgramType,
+    pub seq_src: Option<*const dyn crate::seqsrc::BlastSeqSource>,
+    pub seq_arg: crate::seqsrc::BlastSeqSrcGetSeqArg,
+}
+
+impl std::fmt::Debug for BlastKappaSequenceInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlastKappaSequenceInfo")
+            .field("prog_number", &self.prog_number)
+            .field("seq_src", &self.seq_src.map(|_| "BlastSeqSource"))
+            .field("seq_arg", &self.seq_arg)
+            .finish()
+    }
+}
+
+impl Default for BlastCompoMatchingSequence {
+    fn default() -> Self {
+        Self {
+            length: 0,
+            index: -1,
+            local_data: None,
+        }
+    }
+}
+
+/// blast-rs: Materialized-subject convenience initializer; not a direct NCBI C port.
 pub fn matching_sequence_initialize(
-    length: i32,
-    index: i32,
-    local_data_index: i32,
-) -> BlastCompoMatchingSequence {
-    s_matching_sequence_initialize(length, index, local_data_index)
-}
-
-/// blast-rs: Name-matched wrapper for NCBI static `s_MatchingSequenceInitialize`
-/// (`blast_kappa.c:1357`) over Rust's in-memory matching-sequence view; not a direct NCBI C port.
-pub fn s_matching_sequence_initialize(
     length: i32,
     index: i32,
     local_data_index: i32,
@@ -361,12 +428,113 @@ pub fn s_matching_sequence_initialize(
     let mut matching_sequence = BlastCompoMatchingSequence {
         length: 0,
         index: 0,
-        local_data_index: 0,
+        local_data: None,
     };
     matching_sequence.length = length;
     matching_sequence.index = index;
-    matching_sequence.local_data_index = local_data_index;
+    matching_sequence.local_data = Some(BlastKappaSequenceInfo {
+        prog_number: crate::program::UNDEFINED,
+        seq_src: None,
+        seq_arg: crate::seqsrc::BlastSeqSrcGetSeqArg {
+            oid: local_data_index,
+            check_oid_exclusion: true,
+            ..crate::seqsrc::BlastSeqSrcGetSeqArg::default()
+        },
+    });
     matching_sequence
+}
+
+/// NCBI: `s_MatchingSequenceInitialize` (`blast_kappa.c:1357`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_matching_sequence_initialize(
+    self_: &mut BlastCompoMatchingSequence,
+    program_number: ProgramType,
+    seq_src: &dyn crate::seqsrc::BlastSeqSource,
+    default_db_genetic_code: i32,
+    subject_index: i32,
+    ranges: Option<crate::seqsrc::BlastSeqSrcSetRangesArg>,
+) -> i32 {
+    self_.length = 0;
+    self_.local_data = None;
+
+    let mut seq_arg = crate::seqsrc::BlastSeqSrcGetSeqArg {
+        oid: subject_index,
+        check_oid_exclusion: true,
+        ranges,
+        encoding: if program_number == crate::program::TBLASTN {
+            crate::seqsrc::EBlastEncoding::Ncbi4na
+        } else {
+            crate::seqsrc::EBlastEncoding::Protein
+        },
+        ..crate::seqsrc::BlastSeqSrcGetSeqArg::default()
+    };
+    self_.index = subject_index;
+
+    if crate::seqsrc::blast_seq_src_get_sequence(Some(seq_src), Some(&mut seq_arg)).is_some() {
+        self_.length = seq_arg.seq.as_ref().map(|seq| seq.length).unwrap_or(0);
+        if crate::program::blast_subject_is_translated(program_number) {
+            if let Some(seq) = seq_arg.seq.as_mut() {
+                if seq.gen_code_string.is_none() {
+                    let gen_code =
+                        crate::util::gen_code_singleton_find(default_db_genetic_code as u32)
+                            .and_then(|code| code.try_into().ok())
+                            .unwrap_or_else(|| {
+                                *crate::util::lookup_genetic_code(default_db_genetic_code as u8)
+                            });
+                    seq.gen_code_string = Some(gen_code);
+                }
+            }
+        }
+    }
+
+    let seq_src_ptr = seq_src as *const dyn crate::seqsrc::BlastSeqSource;
+    // C stores this as a borrowed BlastSeqSrc*. Rust's trait-object raw pointer
+    // carries a lifetime, so erase it at the same boundary; callers must keep
+    // the source alive until `s_MatchingSequenceRelease`.
+    let seq_src_ptr: *const (dyn crate::seqsrc::BlastSeqSource + 'static) = unsafe {
+        std::mem::transmute::<
+            *const dyn crate::seqsrc::BlastSeqSource,
+            *const (dyn crate::seqsrc::BlastSeqSource + 'static),
+        >(seq_src_ptr)
+    };
+
+    self_.local_data = Some(BlastKappaSequenceInfo {
+        prog_number: program_number,
+        seq_src: Some(seq_src_ptr),
+        seq_arg,
+    });
+
+    if self_.length == 0 {
+        matching_sequence_release(self_);
+        return -1;
+    }
+
+    0
+}
+
+/// `Blast_AminoAcidComposition` (`composition_adjustment.h:54`).
+#[derive(Debug, Clone)]
+pub struct BlastAminoAcidComposition {
+    pub prob: Vec<f64>,
+    pub num_true_amino_acids: i32,
+}
+
+impl Default for BlastAminoAcidComposition {
+    fn default() -> Self {
+        Self {
+            prob: vec![0.0; crate::matrix::AA_SIZE],
+            num_true_amino_acids: 0,
+        }
+    }
+}
+
+impl BlastAminoAcidComposition {
+    pub fn from_prob(prob: Vec<f64>, num_true_amino_acids: i32) -> Self {
+        Self {
+            prob,
+            num_true_amino_acids,
+        }
+    }
 }
 
 /// `BlastCompo_QueryInfo` (`redo_alignment.h:166`). Per-query metadata
@@ -378,7 +546,7 @@ pub fn s_matching_sequence_initialize(
 pub struct BlastCompoQueryInfo {
     pub origin: i32,
     pub seq: BlastCompoSequenceData,
-    pub composition: Vec<f64>, // BLASTAA_SIZE entries; per-residue freq
+    pub composition: BlastAminoAcidComposition,
     pub eff_search_space: f64,
     pub words: Vec<u64>,
 }
@@ -446,7 +614,9 @@ pub struct KappaCompactSearchItems {
 /// this struct carries those same fields for relative-entropy adjustment.
 #[derive(Debug, Clone)]
 pub struct BlastCompositionWorkspace {
-    pub joint_probs:
+    pub mat_b:
+        [[f64; crate::composition::COMPO_NUM_TRUE_AA]; crate::composition::COMPO_NUM_TRUE_AA],
+    pub mat_final:
         [[f64; crate::composition::COMPO_NUM_TRUE_AA]; crate::composition::COMPO_NUM_TRUE_AA],
     pub first_standard_freq: [f64; crate::composition::COMPO_NUM_TRUE_AA],
     pub second_standard_freq: [f64; crate::composition::COMPO_NUM_TRUE_AA],
@@ -455,10 +625,12 @@ pub struct BlastCompositionWorkspace {
 impl BlastCompositionWorkspace {
     /// blast-rs: Constructs the local BLOSUM62 composition workspace; not a direct NCBI C port.
     pub fn blosum62() -> Self {
-        let (joint_probs, first_standard_freq, second_standard_freq) =
+        let (mat_b, first_standard_freq, second_standard_freq) =
             crate::composition::blosum62_workspace();
         Self {
-            joint_probs,
+            mat_b,
+            mat_final: [[0.0; crate::composition::COMPO_NUM_TRUE_AA];
+                crate::composition::COMPO_NUM_TRUE_AA],
             first_standard_freq,
             second_standard_freq,
         }
@@ -693,6 +865,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: 0,
                 x_dropoff: 20,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -815,6 +988,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: 0,
                 x_dropoff: 30,
+                context: None,
             },
             compo_adjust_mode,
             local_scaling_factor: 1.0,
@@ -943,7 +1117,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: 8,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1036,7 +1210,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_one_match_with_callbacks_redoes_composition_adjusted() {
         let query_source = vec![1u8; 8];
-        let (query_composition, _) =
+        let (query_composition, query_num_true) =
             crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
@@ -1045,7 +1219,10 @@ mod struct_tests {
                 data_offset: 0,
                 length: 8,
             },
-            composition: query_composition,
+            composition: BlastAminoAcidComposition::from_prob(
+                query_composition,
+                query_num_true as i32,
+            ),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1102,7 +1279,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_one_match_with_callbacks_redoes_position_based_composition_adjusted() {
         let query_source = vec![1u8; 8];
-        let (query_composition, _) =
+        let (query_composition, query_num_true) =
             crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
@@ -1111,7 +1288,10 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: query_composition,
+            composition: BlastAminoAcidComposition::from_prob(
+                query_composition,
+                query_num_true as i32,
+            ),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1189,7 +1369,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: 8,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1241,7 +1421,7 @@ mod struct_tests {
     #[test]
     fn blast_redo_one_match_smith_waterman_with_callbacks_redoes_composition_adjusted() {
         let query_source = vec![1u8; 8];
-        let (query_composition, _) =
+        let (query_composition, query_num_true) =
             crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
@@ -1250,7 +1430,10 @@ mod struct_tests {
                 data_offset: 0,
                 length: 8,
             },
-            composition: query_composition,
+            composition: BlastAminoAcidComposition::from_prob(
+                query_composition,
+                query_num_true as i32,
+            ),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1311,7 +1494,7 @@ mod struct_tests {
     fn blast_redo_one_match_smith_waterman_with_callbacks_redoes_position_based_composition_adjusted(
     ) {
         let query_source = vec![1u8; 8];
-        let (query_composition, _) =
+        let (query_composition, query_num_true) =
             crate::composition::blast_read_aa_composition(&query_source, crate::matrix::AA_SIZE);
         let query_info = vec![BlastCompoQueryInfo {
             origin: 0,
@@ -1320,7 +1503,10 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: query_composition,
+            composition: BlastAminoAcidComposition::from_prob(
+                query_composition,
+                query_num_true as i32,
+            ),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1654,7 +1840,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1709,7 +1895,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -1772,7 +1958,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -2086,7 +2272,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -2145,7 +2331,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -2201,7 +2387,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -2263,7 +2449,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -2332,7 +2518,7 @@ mod struct_tests {
                 data_offset: 0,
                 length: query_source.len() as i32,
             },
-            composition: Vec::new(),
+            composition: BlastAminoAcidComposition::default(),
             eff_search_space: 100.0,
             words: Vec::new(),
         }];
@@ -2880,15 +3066,15 @@ mod struct_tests {
         assert_eq!(copy.score, 100);
         assert_eq!(copy.gap_x_dropoff, 65);
         assert_eq!(
-            copy.edit_script.as_ref().unwrap().ops.len(),
-            ws.edit_script.as_ref().unwrap().ops.len()
+            copy.edit_script.as_ref().unwrap().len(),
+            ws.edit_script.as_ref().unwrap().len()
         );
         ws.edit_script
             .as_mut()
             .unwrap()
             .push(crate::gapinfo::GapAlignOpType::Ins, 2);
-        assert_eq!(copy.edit_script.as_ref().unwrap().ops.len(), 1);
-        assert_eq!(ws.edit_script.as_ref().unwrap().ops.len(), 2);
+        assert_eq!(copy.edit_script.as_ref().unwrap().len(), 1);
+        assert_eq!(ws.edit_script.as_ref().unwrap().len(), 2);
     }
 
     #[test]
@@ -2981,13 +3167,17 @@ mod struct_tests {
         let mut mtx = Vec::<Vec<i32>>::new();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -2998,6 +3188,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 0,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -3088,13 +3279,17 @@ mod struct_tests {
         let original_matrix_value = mtx[1][1];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -3108,6 +3303,7 @@ mod struct_tests {
                 gap_extend: 32,
                 decline_align: i32::MIN,
                 x_dropoff: 2078,
+                context: None,
             },
             CompoAdjustMode::CompositionMatrixAdjust,
             SCALING_FACTOR,
@@ -3198,6 +3394,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -3244,13 +3441,17 @@ mod struct_tests {
             let original_mtx = mtx.clone();
             let mut scoring = crate::parameters::ScoringParameters::from_options(
                 &crate::options::ScoringOptions {
+                    matrix_path: None,
                     reward: 0,
                     penalty: 0,
                     gap_open: 11,
                     gap_extend: 1,
+                    shift_pen: i16::MAX as i32,
                     gapped_calculation: true,
+                    complexity_adjusted_scoring: false,
                     matrix_name: Some("BLOSUM62".to_string()),
                     is_ooframe: false,
+                    program_number: crate::program::UNDEFINED,
                 },
                 1.0,
             );
@@ -3350,13 +3551,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -3372,6 +3577,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -3478,13 +3684,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -3495,6 +3705,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -3603,13 +3814,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -3620,6 +3835,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -3752,13 +3968,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -3769,6 +3989,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -3895,13 +4116,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -3917,6 +4142,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -4031,13 +4257,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -4048,6 +4278,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -4254,13 +4485,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -4271,6 +4506,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -4396,13 +4632,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -4413,6 +4653,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -4531,13 +4772,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -4548,6 +4793,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -4658,13 +4904,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -4680,6 +4930,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -4784,13 +5035,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -4806,6 +5061,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -4911,13 +5167,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -4933,6 +5193,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -5046,13 +5307,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -5063,6 +5328,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -5175,13 +5441,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -5197,6 +5467,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -5360,13 +5631,17 @@ mod struct_tests {
         let mut mtx = matrix_info.matrix.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -5377,6 +5652,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -5552,13 +5828,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -5574,6 +5854,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -5678,13 +5959,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -5700,6 +5985,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -5838,13 +6124,17 @@ mod struct_tests {
         let mut mtx_comp = matrix_info_comp.matrix.clone();
         let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -5855,6 +6145,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -5931,23 +6222,8 @@ mod struct_tests {
             },
         );
 
-        assert_eq!(rc_comp, 0);
-        assert_eq!(hsp_list_comp.oid, 9);
-        assert_eq!(hsp_list_comp.hsps.len(), 1);
-        assert_eq!(hsp_list_comp.hsps[0].query_frame, 1);
-        assert_eq!(hsp_list_comp.hsps[0].subject_frame, 1);
-        assert_eq!(hsp_list_comp.hsps[0].num_ident, 4);
-        assert_eq!(
-            hsp_list_comp.hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
-        assert!(hsp_list_comp.hsps[0].edit_script.is_some());
-        let hitlist_comp = results_comp.hitlists[0].as_ref().expect("query hitlist");
-        assert_eq!(hitlist_comp.hsp_lists.len(), 1);
-        assert_eq!(
-            hitlist_comp.hsp_lists[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
+        assert_eq!(rc_comp, -1);
+        assert!(results_comp.hitlists[0].is_none());
 
         let mut hsp_list_comp_sw = HspList::new(10);
         hsp_list_comp_sw.add_hsp(Hsp {
@@ -5997,23 +6273,8 @@ mod struct_tests {
             },
         );
 
-        assert_eq!(rc_comp_sw, 0);
-        assert_eq!(hsp_list_comp_sw.oid, 10);
-        assert_eq!(hsp_list_comp_sw.hsps.len(), 1);
-        assert_eq!(hsp_list_comp_sw.hsps[0].query_frame, 1);
-        assert_eq!(hsp_list_comp_sw.hsps[0].subject_frame, 1);
-        assert_eq!(hsp_list_comp_sw.hsps[0].num_ident, 4);
-        assert_eq!(
-            hsp_list_comp_sw.hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
-        assert!(hsp_list_comp_sw.hsps[0].edit_script.is_some());
-        let hitlist_comp_sw = results_comp_sw.hitlists[0].as_ref().expect("query hitlist");
-        assert_eq!(hitlist_comp_sw.hsp_lists.len(), 1);
-        assert_eq!(
-            hitlist_comp_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
+        assert_eq!(rc_comp_sw, -1);
+        assert!(results_comp_sw.hitlists[0].is_none());
     }
 
     #[test]
@@ -6043,13 +6304,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -6065,6 +6330,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -6174,13 +6440,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -6191,6 +6461,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -6318,13 +6589,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -6335,6 +6610,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -6463,13 +6739,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -6480,6 +6760,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -6608,13 +6889,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -6630,6 +6915,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -6744,13 +7030,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -6761,6 +7051,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -6971,13 +7262,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -6988,6 +7283,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -7078,13 +7374,17 @@ mod struct_tests {
         let mut mtx_sw = original_mtx.clone();
         let mut scoring_sw = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -7192,13 +7492,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -7214,6 +7518,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -7335,13 +7640,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -7357,6 +7666,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -7460,13 +7770,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -7482,6 +7796,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -7567,13 +7882,17 @@ mod struct_tests {
         let mut mtx_comp = matrix_info_comp.matrix.clone();
         let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -7584,6 +7903,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -7709,13 +8029,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -7731,6 +8055,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -7817,13 +8142,17 @@ mod struct_tests {
         let mut mtx_comp = matrix_info_comp.matrix.clone();
         let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -7834,6 +8163,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -7913,21 +8243,8 @@ mod struct_tests {
             &mut results_comp,
         );
 
-        assert_eq!(rc_comp, 0);
-        assert_eq!(matches_comp[0].hsp_list.hsps[0].query_frame, 1);
-        assert_eq!(matches_comp[0].hsp_list.hsps[0].subject_frame, 1);
-        assert_eq!(matches_comp[0].hsp_list.hsps[0].num_ident, 4);
-        assert_eq!(
-            matches_comp[0].hsp_list.hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
-        let hitlist_comp = results_comp.hitlists[0].as_ref().expect("query hitlist");
-        assert_eq!(hitlist_comp.hsp_lists.len(), 1);
-        assert_eq!(hitlist_comp.hsp_lists[0].oid, 9);
-        assert_eq!(
-            hitlist_comp.hsp_lists[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
+        assert_eq!(rc_comp, -1);
+        assert!(results_comp.hitlists[0].is_none());
 
         let mut hsp_list_comp_sw = HspList::new(10);
         hsp_list_comp_sw.add_hsp(Hsp {
@@ -7980,22 +8297,8 @@ mod struct_tests {
             &mut results_comp_sw,
         );
 
-        assert_eq!(rc_comp_sw, 0);
-        assert_eq!(matches_comp_sw[0].hsp_list.hsps[0].query_frame, 1);
-        assert_eq!(matches_comp_sw[0].hsp_list.hsps[0].subject_frame, 1);
-        assert_eq!(matches_comp_sw[0].hsp_list.hsps[0].num_ident, 4);
-        assert_eq!(
-            matches_comp_sw[0].hsp_list.hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
-        assert!(matches_comp_sw[0].hsp_list.hsps[0].edit_script.is_some());
-        let hitlist_comp_sw = results_comp_sw.hitlists[0].as_ref().expect("query hitlist");
-        assert_eq!(hitlist_comp_sw.hsp_lists.len(), 1);
-        assert_eq!(hitlist_comp_sw.hsp_lists[0].oid, 10);
-        assert_eq!(
-            hitlist_comp_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
+        assert_eq!(rc_comp_sw, -1);
+        assert!(results_comp_sw.hitlists[0].is_none());
     }
 
     #[test]
@@ -8050,13 +8353,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -8067,6 +8374,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -8231,13 +8539,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -8248,6 +8560,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -8333,6 +8646,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -8499,13 +8813,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -8516,6 +8834,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -8784,13 +9103,17 @@ mod struct_tests {
         let original_mtx = mtx.clone();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -8801,6 +9124,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -8894,13 +9218,17 @@ mod struct_tests {
         let mut mtx_sw = original_mtx.clone();
         let mut scoring_sw = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9087,13 +9415,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9109,6 +9441,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -9197,13 +9530,17 @@ mod struct_tests {
         let mut mtx_comp = matrix_info_comp.matrix.clone();
         let mut scoring_comp = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9214,6 +9551,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::CompositionBasedStats,
             1.0,
@@ -9291,25 +9629,12 @@ mod struct_tests {
             &mut results_comp,
         );
 
-        assert_eq!(rc_comp, 0);
+        assert_eq!(rc_comp, -1);
         assert_eq!(
             *seqsrc.encodings.lock().unwrap(),
             vec![crate::seqsrc::SeqEncoding::Ncbi4na]
         );
-        assert_eq!(matches_comp[0].hsps[0].query_frame, 1);
-        assert_eq!(matches_comp[0].hsps[0].subject_frame, 1);
-        assert_eq!(matches_comp[0].hsps[0].num_ident, 4);
-        assert_eq!(
-            matches_comp[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
-        let hitlist_comp = results_comp.hitlists[0].as_ref().expect("query hitlist");
-        assert_eq!(hitlist_comp.hsp_lists.len(), 1);
-        assert_eq!(hitlist_comp.hsp_lists[0].oid, 0);
-        assert_eq!(
-            hitlist_comp.hsp_lists[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
+        assert!(results_comp.hitlists[0].is_none());
 
         seqsrc.encodings.lock().unwrap().clear();
         let mut hsp_list_comp_sw = HspList::new(0);
@@ -9367,26 +9692,12 @@ mod struct_tests {
             &mut results_comp_sw,
         );
 
-        assert_eq!(rc_comp_sw, 0);
+        assert_eq!(rc_comp_sw, -1);
         assert_eq!(
             *seqsrc.encodings.lock().unwrap(),
             vec![crate::seqsrc::SeqEncoding::Ncbi4na]
         );
-        assert_eq!(matches_comp_sw[0].hsps[0].query_frame, 1);
-        assert_eq!(matches_comp_sw[0].hsps[0].subject_frame, 1);
-        assert_eq!(matches_comp_sw[0].hsps[0].num_ident, 4);
-        assert_eq!(
-            matches_comp_sw[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
-        assert!(matches_comp_sw[0].hsps[0].edit_script.is_some());
-        let hitlist_comp_sw = results_comp_sw.hitlists[0].as_ref().expect("query hitlist");
-        assert_eq!(hitlist_comp_sw.hsp_lists.len(), 1);
-        assert_eq!(hitlist_comp_sw.hsp_lists[0].oid, 0);
-        assert_eq!(
-            hitlist_comp_sw.hsp_lists[0].hsps[0].comp_adjustment_method,
-            CompoAdjustMode::CompositionBasedStats as i32
-        );
+        assert!(results_comp_sw.hitlists[0].is_none());
     }
 
     #[test]
@@ -9438,13 +9749,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 1,
                 penalty: -3,
                 gap_open: 5,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: None,
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9455,6 +9770,7 @@ mod struct_tests {
                 gap_extend: 2,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -9566,13 +9882,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9588,6 +9908,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -9701,13 +10022,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9723,6 +10048,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -9826,13 +10152,17 @@ mod struct_tests {
         let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9843,6 +10173,7 @@ mod struct_tests {
                 gap_extend: 1,
                 decline_align: i32::MIN,
                 x_dropoff: 30,
+                context: None,
             },
             CompoAdjustMode::NoCompositionBasedStats,
             1.0,
@@ -9917,13 +10248,17 @@ mod struct_tests {
     fn get_align_params_blastp_assembly() {
         let scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -9977,13 +10312,17 @@ mod struct_tests {
     fn get_align_params_link_hsps_uses_cutoff_score_min() {
         let scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -10021,13 +10360,17 @@ mod struct_tests {
     fn get_align_params_preserves_position_based_matrix_flag() {
         let scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -10070,6 +10413,7 @@ mod struct_tests {
             gap_extend: 1,
             decline_align: i32::MIN,
             x_dropoff: 65,
+            context: None,
         };
         let p = blast_redo_align_params_new(
             matrix_info,
@@ -10111,6 +10455,7 @@ mod struct_tests {
             gap_extend: 0,
             decline_align: i32::MIN,
             x_dropoff: 0,
+            context: None,
         };
         let mut slot = Some(blast_redo_align_params_new(
             matrix_info,
@@ -10164,12 +10509,12 @@ mod struct_tests {
                                   // appends to tail, not head).
         let head_0 = lists[0].as_ref().expect("head 0");
         assert_eq!(head_0.score, 100);
-        assert_eq!(head_0.query_gapped_start, 4);
-        assert_eq!(head_0.match_gapped_start, 5);
+        assert_eq!(head_0.query_gapped_start(), 4);
+        assert_eq!(head_0.match_gapped_start(), 5);
         let next_0 = head_0.next.as_ref().expect("second in list");
         assert_eq!(next_0.score, 60);
-        assert_eq!(next_0.query_gapped_start, 64);
-        assert_eq!(next_0.match_gapped_start, 65);
+        assert_eq!(next_0.query_gapped_start(), 64);
+        assert_eq!(next_0.match_gapped_start(), 65);
         // Frame 1's list has just the single 80-score HSP.
         let head_1 = lists[1].as_ref().expect("head 1");
         assert_eq!(head_1.score, 80);
@@ -10252,26 +10597,153 @@ mod struct_tests {
     }
 
     #[test]
-    fn matching_sequence_release_resets_state() {
+    fn matching_sequence_release_clears_local_data_only() {
         let mut s = matching_sequence_initialize(1234, 5, 7);
         assert_eq!(s.length, 1234);
         assert_eq!(s.index, 5);
-        assert_eq!(s.local_data_index, 7);
+        assert_eq!(s.local_data.as_ref().map(|data| data.seq_arg.oid), Some(7));
 
         matching_sequence_release(&mut s);
-        assert_eq!(s.local_data_index, -1);
-        assert_eq!(s.length, 0);
-        // index left untouched per the C `if (self->index >= 0)` guard
-        // (the C function reads index but does not reset it).
+        assert!(s.local_data.is_none());
+        // C nulls local_data but does not reset length or index.
+        assert_eq!(s.length, 1234);
         assert_eq!(s.index, 5);
     }
 
     #[test]
-    fn matching_sequence_initialize_name_matched_wrapper_matches_helper() {
-        let s = s_matching_sequence_initialize(1234, 5, 7);
-        assert_eq!(s.length, 1234);
-        assert_eq!(s.index, 5);
-        assert_eq!(s.local_data_index, 7);
+    fn matching_sequence_initialize_fetches_seqsrc_subject() {
+        struct TestSeqSrc {
+            sequence: Vec<u8>,
+            releases: std::sync::Mutex<i32>,
+        }
+
+        impl crate::seqsrc::BlastSeqSource for TestSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                1
+            }
+            fn total_length(&self) -> i64 {
+                self.sequence.len() as i64
+            }
+            fn max_seq_len(&self) -> i32 {
+                self.sequence.len() as i32
+            }
+            fn avg_seq_len(&self) -> i32 {
+                self.sequence.len() as i32
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn is_protein(&self) -> bool {
+                false
+            }
+            fn seq_len(&self, _oid: i32) -> i32 {
+                self.sequence.len() as i32
+            }
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                assert_eq!(arg.oid, 7);
+                assert_eq!(arg.encoding, crate::seqsrc::SeqEncoding::Ncbi4na);
+                assert!(arg.check_oid_exclusion);
+                Some(crate::seqsrc::SeqData {
+                    sequence: self.sequence.clone(),
+                    length: self.sequence.len() as i32,
+                })
+            }
+            fn release_sequence(&self, arg: &mut crate::seqsrc::BlastSeqSrcGetSeqArg) {
+                *self.releases.lock().unwrap() += 1;
+                arg.seq = None;
+            }
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(std::iter::once(7))
+            }
+        }
+
+        let seqsrc = TestSeqSrc {
+            sequence: vec![1, 2, 4, 8, 1],
+            releases: std::sync::Mutex::new(0),
+        };
+        let mut s = BlastCompoMatchingSequence::default();
+        let rc =
+            s_matching_sequence_initialize(&mut s, crate::program::TBLASTN, &seqsrc, 1, 7, None);
+        assert_eq!(rc, 0);
+        assert_eq!(s.length, 5);
+        assert_eq!(s.index, 7);
+        let local_data = s.local_data.as_ref().expect("local data");
+        assert_eq!(local_data.prog_number, crate::program::TBLASTN);
+        assert_eq!(local_data.seq_arg.oid, 7);
+        assert_eq!(
+            local_data.seq_arg.encoding,
+            crate::seqsrc::EBlastEncoding::Ncbi4na
+        );
+        assert!(local_data
+            .seq_arg
+            .seq
+            .as_ref()
+            .unwrap()
+            .gen_code_string
+            .is_some());
+
+        matching_sequence_release(&mut s);
+        assert!(s.local_data.is_none());
+        assert_eq!(s.length, 5);
+        assert_eq!(*seqsrc.releases.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn matching_sequence_initialize_failed_fetch_does_not_release_sequence() {
+        struct TestSeqSrc {
+            releases: std::sync::Mutex<i32>,
+        }
+
+        impl crate::seqsrc::BlastSeqSource for TestSeqSrc {
+            fn num_seqs(&self) -> i32 {
+                1
+            }
+            fn total_length(&self) -> i64 {
+                0
+            }
+            fn max_seq_len(&self) -> i32 {
+                0
+            }
+            fn avg_seq_len(&self) -> i32 {
+                0
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn is_protein(&self) -> bool {
+                false
+            }
+            fn seq_len(&self, _oid: i32) -> i32 {
+                0
+            }
+            fn get_sequence(
+                &self,
+                arg: &crate::seqsrc::GetSeqArg,
+            ) -> Option<crate::seqsrc::SeqData> {
+                assert_eq!(arg.oid, 7);
+                None
+            }
+            fn release_sequence(&self, _arg: &mut crate::seqsrc::BlastSeqSrcGetSeqArg) {
+                *self.releases.lock().unwrap() += 1;
+            }
+            fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+                Box::new(std::iter::once(7))
+            }
+        }
+
+        let seqsrc = TestSeqSrc {
+            releases: std::sync::Mutex::new(0),
+        };
+        let mut s = BlastCompoMatchingSequence::default();
+        let rc =
+            s_matching_sequence_initialize(&mut s, crate::program::TBLASTN, &seqsrc, 1, 7, None);
+        assert_eq!(rc, -1);
+        assert!(s.local_data.is_none());
+        assert_eq!(s.length, 0);
+        assert_eq!(*seqsrc.releases.lock().unwrap(), 0);
     }
 
     #[test]
@@ -10285,13 +10757,17 @@ mod struct_tests {
         }];
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -10720,13 +11196,17 @@ mod struct_tests {
     fn gapping_params_new_picks_min_lambda() {
         let scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -10761,13 +11241,17 @@ mod struct_tests {
     fn gapping_params_new_falls_back_to_raw_when_no_lambda() {
         let scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -10853,13 +11337,17 @@ mod struct_tests {
             .collect();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 11,
                 gap_extend: 1,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -10929,13 +11417,17 @@ mod struct_tests {
             .collect();
         let mut scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
+                matrix_path: None,
                 reward: 0,
                 penalty: 0,
                 gap_open: 9,
                 gap_extend: 2,
+                shift_pen: i16::MAX as i32,
                 gapped_calculation: true,
+                complexity_adjusted_scoring: false,
                 matrix_name: Some("BLOSUM62".to_string()),
                 is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
             },
             1.0,
         );
@@ -11036,9 +11528,9 @@ mod struct_tests {
         b.best_evalue = 1.0;
         let mut c = HspList::new(3);
         c.best_evalue = 1e-5;
-        heap.records.push(a);
-        heap.records.push(b);
-        heap.records.push(c);
+        assert!(heap.insert(a).is_none());
+        assert!(heap.insert(b).is_none());
+        assert!(heap.insert(c).is_none());
 
         // Pop order: largest e-value first.
         let first = heap.pop_worst().expect("first pop");
@@ -11094,7 +11586,10 @@ mod struct_tests {
             .insert(heap_hsp_list(3, 5e-4, 5))
             .expect("old worst discarded");
         assert_eq!(discarded.oid, 2);
-        assert!(heap.records.iter().any(|record| record.oid == 3));
+        assert!(heap
+            .records()
+            .iter()
+            .any(|record| record.subject_index == 3));
     }
 
     #[test]
@@ -11123,7 +11618,7 @@ mod struct_tests {
         assert!(heap.insert(heap_hsp_list(1, 1e-3, 10)).is_none());
         assert!(heap.filled_to_cutoff());
         assert!(heap.insert(heap_hsp_list(2, 5e-3, 5)).is_none());
-        assert_eq!(heap.records.len(), 2);
+        assert_eq!(heap.records().len(), 2);
     }
 
     #[test]
@@ -11167,10 +11662,10 @@ mod struct_tests {
         let mut heap = BlastCompoHeap::new(10, 1e-5);
         let mut a = HspList::new(1);
         a.best_evalue = 1e-10;
-        heap.records.push(a);
-        assert!(!heap.records.is_empty());
+        assert!(heap.insert(a).is_none());
+        assert!(!heap.records().is_empty());
         clear_heap(&mut heap);
-        assert!(heap.records.is_empty());
+        assert!(heap.records().is_empty());
     }
 
     #[test]
@@ -11180,8 +11675,8 @@ mod struct_tests {
         a.best_evalue = 1e-10;
         let mut b = HspList::new(2);
         b.best_evalue = 1.0;
-        heaps[0].records.push(a);
-        heaps[0].records.push(b);
+        assert!(heaps[0].insert(a).is_none());
+        assert!(heaps[0].insert(b).is_none());
         let results = fill_results_from_compo_heaps(&mut heaps);
         let hl = results.hitlists[0].as_ref().expect("hitlist");
         // Best-evalue (smallest) should be at the head after reverse.
@@ -11212,7 +11707,7 @@ mod struct_tests {
 
         assert!(worker_heaps
             .iter()
-            .all(|worker| worker.iter().all(|heap| heap.records.is_empty())));
+            .all(|worker| worker.iter().all(|heap| heap.records().is_empty())));
         let results = fill_results_from_compo_heaps(&mut global);
         let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
         let oids: Vec<i32> = hitlist.hsp_lists.iter().map(|list| list.oid).collect();
@@ -11267,7 +11762,8 @@ mod struct_tests {
         // Word array exists (10 - 8 + 1 = 3 slots).
         assert_eq!(result[0].words.len(), 3);
         // Composition skipped.
-        assert!(result[0].composition.is_empty());
+        assert!(result[0].composition.prob.iter().all(|&p| p == 0.0));
+        assert_eq!(result[0].composition.num_true_amino_acids, 0);
 
         assert_eq!(result[1].origin, 11);
         assert_eq!(result[1].seq.data(), &(11..=20).collect::<Vec<u8>>()[..]);
@@ -11923,7 +12419,7 @@ mod struct_tests {
             list.hsps[0].comp_adjustment_method,
             CompoAdjustMode::CompositionBasedStats as i32
         );
-        assert_eq!(list.hsps[0].edit_script.as_ref().unwrap().ops.len(), 1);
+        assert_eq!(list.hsps[0].edit_script.as_ref().unwrap().len(), 1);
         assert_eq!(list.hsps[1].subject_frame, -2);
     }
 
@@ -12156,10 +12652,12 @@ mod struct_tests {
             40,
             60,
             3,
-            Some(first_script),
-        );
-        first.query_gapped_start = 47;
-        first.match_gapped_start = 49;
+            Some(BlastCompoAlignmentContext {
+                edit_script: Some(first_script),
+                hsp: None,
+            }),
+        )
+        .with_hsp_context(47, 49);
         first.next = Some(Box::new(second));
         let mut head: Option<Box<BlastCompoAlignment>> = Some(Box::new(first));
         let mut hsp_list = HspList::new(0);
@@ -12193,7 +12691,7 @@ mod struct_tests {
             hsp_list.hsps[2].comp_adjustment_method,
             CompoAdjustMode::NoCompositionBasedStats as i32
         );
-        assert_eq!(hsp_list.hsps[0].edit_script.as_ref().unwrap().ops.len(), 3);
+        assert_eq!(hsp_list.hsps[0].edit_script.as_ref().unwrap().len(), 3);
         assert_eq!(hsp_list.hsps[0].num_gaps, 1);
         assert!(hsp_list.hsps[1].edit_script.is_none());
         // Tags emitted in pre-sort order (matching alignment list traversal).
@@ -12383,6 +12881,7 @@ mod struct_tests {
         // Position-based lengths are packed by GET_NUCL_LENGTH first.
         let packed = 2 * (101 - 2) + 5;
         assert_eq!(get_translated_length(packed, 1, true), 33);
+        assert_eq!(get_translated_length(packed, -3, true), 33);
     }
 
     #[test]
@@ -13022,13 +13521,17 @@ fn location_compare_windows(
 /// NCBI: s_GetTranslatedLength (redo_alignment.c:657).
 /// naming: Public Rust helper omits the private `s_` prefix.
 pub fn get_translated_length(length: i32, frame: i32, is_pos_based: bool) -> i32 {
-    let nucl_length = if is_pos_based {
-        get_nucl_length(length)
+    if is_pos_based {
+        let seq_frame = if frame < 0 {
+            frame.abs() + 2
+        } else {
+            frame - 1
+        };
+        let nucl_length = get_nucl_length(length);
+        (nucl_length - seq_frame % 3) / 3
     } else {
-        length
-    };
-    let frame = frame.abs().max(1);
-    ((nucl_length - frame + 1) / 3).max(0)
+        (length - frame.abs() + 1) / 3
+    }
 }
 
 /// NCBI: s_WindowsFromTranslatedAligns (redo_alignment.c:676).
@@ -13811,7 +14314,10 @@ pub fn new_alignment_using_xdrop(
         amatch_start,
         amatch_end,
         subject_range.context,
-        Some(edit_script),
+        Some(BlastCompoAlignmentContext {
+            edit_script: Some(edit_script),
+            hsp: None,
+        }),
     );
     Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
 }
@@ -13870,7 +14376,10 @@ pub fn new_alignment_using_xdrop_protein(
         amatch_start,
         amatch_end,
         subject_range.context,
-        Some(tb.edit_script),
+        Some(BlastCompoAlignmentContext {
+            edit_script: Some(tb.edit_script),
+            hsp: None,
+        }),
     );
     Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
 }
@@ -13925,7 +14434,10 @@ pub fn new_alignment_using_xdrop_protein_pssm(
         amatch_start,
         amatch_end,
         subject_range.context,
-        Some(tb.edit_script),
+        Some(BlastCompoAlignmentContext {
+            edit_script: Some(tb.edit_script),
+            hsp: None,
+        }),
     );
     Some((new_align, q_end_xdrop as i32, s_end_xdrop as i32))
 }
@@ -14466,11 +14978,13 @@ impl BlastGapAlignWorkspace {
     pub fn s_blast_gap_align_struct_copy(&self) -> Self {
         let copied_script = if let Some(src_script) = self.edit_script.as_ref() {
             let mut dst_script = crate::gapinfo::GapEditScript::default();
-            let op_count = src_script.ops.len();
-            dst_script.ops.reserve(op_count);
+            let op_count = src_script.len();
+            dst_script.reserve(op_count);
             for index in 0..op_count {
-                let (op_type, count) = src_script.ops[index];
-                dst_script.ops.push((op_type, count));
+                let (op_type, count) = src_script
+                    .get(index)
+                    .unwrap_or((crate::gapinfo::GapAlignOpType::Sub, 0));
+                dst_script.push_raw(op_type, count);
             }
             Some(dst_script)
         } else {
@@ -14531,6 +15045,7 @@ pub fn s_blast_gap_align_struct_free(slot: &mut Option<BlastGapAlignWorkspace>) 
 pub struct BlastKappaGappingParamsContext {
     pub scoring_params: crate::parameters::ScoringParameters,
     pub gap_align: BlastGapAlignWorkspace,
+    pub sbp: Option<BlastScoreBlkSnapshot>,
     pub local_scaling_factor: f64,
     pub program: ProgramType,
 }
@@ -15009,6 +15524,21 @@ fn materialized_redo_program_is_supported(program: ProgramType) -> bool {
             | crate::program::TBLASTN
             | crate::program::TBLASTX
             | crate::program::PSI_BLAST
+    )
+}
+
+/// NCBI `BlastExtensionOptionsValidate` permits composition adjustment only
+/// for blastp, blastx, tblastn, and RPS/PSI variants; tblastx is ungapped-only
+/// and never enters the kappa CBS traceback path.
+fn composition_redo_program_is_supported(program: ProgramType) -> bool {
+    matches!(
+        program,
+        crate::program::BLASTP
+            | crate::program::BLASTX
+            | crate::program::TBLASTN
+            | crate::program::PSI_BLAST
+            | crate::program::RPS_BLAST
+            | crate::program::RPS_TBLASTN
     )
 }
 
@@ -15598,9 +16128,88 @@ pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
                 continue;
             }
 
+            if program == crate::program::TBLASTN {
+                let mut matching_seq = BlastCompoMatchingSequence::default();
+                if s_matching_sequence_initialize(
+                    &mut matching_seq,
+                    program,
+                    seqsrc,
+                    1,
+                    hsp_list.oid,
+                    None,
+                ) != 0
+                {
+                    status = -1;
+                    break;
+                }
+                let subject_sequence = {
+                    let Some(local_data) = matching_seq.local_data.as_ref() else {
+                        matching_sequence_release(&mut matching_seq);
+                        status = -1;
+                        break;
+                    };
+                    let Some(subject_blk) = local_data.seq_arg.seq.as_ref() else {
+                        matching_sequence_release(&mut matching_seq);
+                        status = -1;
+                        break;
+                    };
+                    let Some(sequence) = subject_blk.sequence.as_deref() else {
+                        matching_sequence_release(&mut matching_seq);
+                        status = -1;
+                        break;
+                    };
+                    if subject_blk.length < 0 || subject_blk.length as usize > sequence.len() {
+                        matching_sequence_release(&mut matching_seq);
+                        status = -1;
+                        break;
+                    }
+                    &sequence[..subject_blk.length as usize]
+                };
+                let mut local_results = crate::hspstream::HspResults::new(num_queries as i32);
+                status = blast_redo_alignment_core_one_match_in_memory_inner(
+                    program,
+                    query,
+                    query_info,
+                    kbp_gap,
+                    align_params,
+                    hsp_list,
+                    &mut local_results,
+                    Some(&heaps[..]),
+                    None,
+                    BlastRedoInMemorySubject {
+                        subject_source: subject_sequence,
+                        reward: subject_cfg.reward,
+                        penalty: subject_cfg.penalty,
+                        genetic_code: subject_cfg.genetic_code,
+                        smith_waterman: subject_cfg.smith_waterman,
+                        expect_value: subject_cfg.expect_value,
+                        hitlist_size: subject_cfg.hitlist_size,
+                        inclusion_ethresh: subject_cfg.inclusion_ethresh,
+                        link_context: subject_cfg.link_context,
+                    },
+                );
+                matching_sequence_release(&mut matching_seq);
+                if status != 0 {
+                    break;
+                }
+
+                for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
+                    if query_index >= heaps.len() {
+                        continue;
+                    }
+                    if let Some(hitlist) = hitlist {
+                        for hsp_list in hitlist.hsp_lists {
+                            let _discarded = heaps[query_index].insert(hsp_list);
+                        }
+                    }
+                }
+                continue;
+            }
+
             let Some(seq_data) = seqsrc.get_sequence(&crate::seqsrc::GetSeqArg {
                 oid: hsp_list.oid,
                 encoding,
+                ..crate::seqsrc::GetSeqArg::default()
             }) else {
                 status = -1;
                 break;
@@ -15786,6 +16395,13 @@ fn blast_redo_alignment_core_one_match_with_callbacks_validate(
         align_params.compo_adjust_mode,
         CompoAdjustMode::NoCompositionBasedStats
     ) && program == crate::program::BLASTN
+    {
+        return Err(-1);
+    }
+    if !matches!(
+        align_params.compo_adjust_mode,
+        CompoAdjustMode::NoCompositionBasedStats
+    ) && !composition_redo_program_is_supported(program)
     {
         return Err(-1);
     }
@@ -16244,8 +16860,14 @@ fn compute_num_identities_with_callbacks(
             hsp.subject_offset,
             hsp.subject_end,
             hsp.subject_frame,
-            hsp.edit_script.clone(),
-        );
+            hsp.edit_script
+                .clone()
+                .map(|edit_script| BlastCompoAlignmentContext {
+                    edit_script: Some(edit_script),
+                    hsp: None,
+                }),
+        )
+        .with_hsp_context(hsp.query_gapped_start, hsp.subject_gapped_start);
         let mut subject = BlastCompoSequenceData::default();
         let mut query = BlastCompoSequenceData::default();
         let mut subject_maybe_biased = false;
@@ -16276,9 +16898,14 @@ fn compute_num_identities_with_callbacks(
         local_hsp.subject_offset -= subject_range.begin;
         local_hsp.subject_end -= subject_range.begin;
         local_hsp.subject_gapped_start -= subject_range.begin;
-        let edit_ops = hsp.edit_script.as_ref().map(|script| script.ops.as_slice());
-        let (num_ident, _align_length, _num_pos) =
-            blast_hsp_get_num_identities(query.data(), subject.data(), &local_hsp, edit_ops, None);
+        let edit_ops = hsp.edit_script.as_ref().map(|script| script.ops_vec());
+        let (num_ident, _align_length, _num_pos) = blast_hsp_get_num_identities(
+            query.data(),
+            subject.data(),
+            &local_hsp,
+            edit_ops.as_deref(),
+            None,
+        );
         hsp.num_ident = num_ident;
         sequence_data_release(&mut subject);
         sequence_data_release(&mut query);
@@ -16306,6 +16933,9 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         CompoAdjustMode::NoCompositionBasedStats
     );
     if !no_composition && program == crate::program::BLASTN {
+        return -1;
+    }
+    if !no_composition && !composition_redo_program_is_supported(program) {
         return -1;
     }
     if align_params.position_based
@@ -16651,7 +17281,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         let edit_ops: Vec<Option<Vec<(crate::gapinfo::GapAlignOpType, i32)>>> = redone
             .hsps
             .iter()
-            .map(|hsp| hsp.edit_script.as_ref().map(|script| script.ops.clone()))
+            .map(|hsp| hsp.edit_script.as_ref().map(|script| script.ops_vec()))
             .collect();
         if crate::program::blast_subject_is_translated(program) {
             if compute_num_identities_translated_subject_by_context(
@@ -16820,8 +17450,8 @@ pub fn blast_redo_one_match_in_memory(
                         &window.query_range,
                         &subject,
                         &window.subject_range,
-                        align.query_gapped_start,
-                        align.match_gapped_start,
+                        align.query_gapped_start(),
+                        align.match_gapped_start(),
                         MatrixAdjustRule::DontAdjust,
                         reward,
                         penalty,
@@ -16835,8 +17465,8 @@ pub fn blast_redo_one_match_in_memory(
                         &window.query_range,
                         &subject,
                         &window.subject_range,
-                        align.query_gapped_start,
-                        align.match_gapped_start,
+                        align.query_gapped_start(),
+                        align.match_gapped_start(),
                         MatrixAdjustRule::DontAdjust,
                         &params.matrix_info,
                         params.gapping_params.gap_open,
@@ -16895,6 +17525,7 @@ pub fn blast_redo_one_match_in_memory_with_adjustment(
         CompoAdjustMode::NoCompositionBasedStats
     ) || params.position_based
         || program == crate::program::BLASTN
+        || (params.query_is_translated && params.subject_is_translated)
     {
         return -1;
     }
@@ -16945,7 +17576,7 @@ pub fn blast_redo_one_match_in_memory_with_adjustment(
         let mut subject_maybe_biased = true;
         let mut hsp_index = 0;
         let mut num_adjustments = 0;
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             crate::composition::blast_read_aa_composition(
                 query_info[query_index].seq.data(),
@@ -17078,8 +17709,8 @@ pub fn blast_redo_one_match_in_memory_with_adjustment(
                         &window.query_range,
                         &subject,
                         &window.subject_range,
-                        align.query_gapped_start,
-                        align.match_gapped_start,
+                        align.query_gapped_start(),
+                        align.match_gapped_start(),
                         matrix_adjust_rule,
                         matrix,
                         params.gapping_params.gap_open,
@@ -17194,7 +17825,7 @@ pub fn blast_redo_one_match_in_memory_with_position_adjustment(
         };
 
         let mut in_align = window.align.as_deref();
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             crate::composition::blast_read_aa_composition(
                 query_info[query_index].seq.data(),
@@ -17264,8 +17895,8 @@ pub fn blast_redo_one_match_in_memory_with_position_adjustment(
                     &window.query_range,
                     &subject,
                     &window.subject_range,
-                    align.query_gapped_start,
-                    align.match_gapped_start,
+                    align.query_gapped_start(),
+                    align.match_gapped_start(),
                     matrix_adjust_rule,
                     adjusted_pssm,
                     params.gapping_params.gap_open,
@@ -17375,6 +18006,9 @@ pub fn blast_redo_one_match_with_callbacks_and_adjustment(
     else {
         return -1;
     };
+    if params.query_is_translated && params.subject_is_translated {
+        return -1;
+    }
 
     let windows = match windows_from_aligns(
         incoming_aligns,
@@ -17419,7 +18053,7 @@ pub fn blast_redo_one_match_with_callbacks_and_adjustment(
         let mut num_adjustments = 0;
         let mut hsp_index = 0;
         let mut in_align = window.align.as_deref();
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             crate::composition::blast_read_aa_composition(
                 query_info[query_index].seq.data(),
@@ -17654,7 +18288,7 @@ pub fn blast_redo_one_match_with_callbacks_and_position_adjustment(
         let mut num_adjustments = 0;
         let mut hsp_index = 0;
         let mut in_align = window.align.as_deref();
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             query_info[query_index].seq.length.max(0) as usize
         } else {
@@ -17763,8 +18397,8 @@ pub fn blast_redo_one_match_with_callbacks_and_position_adjustment(
                         &window.query_range,
                         &subject,
                         &window.subject_range,
-                        align.query_gapped_start,
-                        align.match_gapped_start,
+                        align.query_gapped_start(),
+                        align.match_gapped_start(),
                         matrix_adjust_rule,
                         adjusted_pssm,
                         params.gapping_params.gap_open,
@@ -18159,6 +18793,7 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
         CompoAdjustMode::NoCompositionBasedStats
     ) || params.position_based
         || program == crate::program::BLASTN
+        || (params.query_is_translated && params.subject_is_translated)
     {
         return -1;
     }
@@ -18218,7 +18853,7 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
             }
         };
 
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             query_info[query_index].seq.length.max(0) as usize
         } else {
@@ -18451,7 +19086,7 @@ pub fn blast_redo_one_match_smith_waterman_in_memory_protein_position_adjustment
             }
         };
 
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             query_info[query_index].seq.length.max(0) as usize
         } else {
@@ -18675,6 +19310,9 @@ pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
     else {
         return -1;
     };
+    if params.query_is_translated && params.subject_is_translated {
+        return -1;
+    }
 
     let windows = match windows_from_aligns(
         incoming_aligns,
@@ -18731,7 +19369,7 @@ pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
             return status;
         }
 
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             query_info[query_index].seq.length.max(0) as usize
         } else {
@@ -18992,7 +19630,7 @@ pub fn blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustmen
             return status;
         }
 
-        let mut query_composition = query_info[query_index].composition.clone();
+        let mut query_composition = query_info[query_index].composition.prob.clone();
         let mut query_num_true = if query_composition.iter().any(|&p| p > 0.0) {
             query_info[query_index].seq.length.max(0) as usize
         } else {
@@ -20003,7 +20641,7 @@ pub fn blast_adjust_scores_with_workspace_v2(
             subject_prob,
             re_pseudocounts,
             K_FIXED_RE_BLOSUM62,
-            &workspace.joint_probs,
+            &workspace.mat_b,
             &workspace.first_standard_freq,
             &workspace.second_standard_freq,
             matrix_info.ungapped_lambda,
@@ -20309,7 +20947,7 @@ pub fn result_hsp_to_distinct_align(
             continue;
         }
         let frame_index = frame_index as usize;
-        let mut new_align = BlastCompoAlignment::new(
+        let new_align = BlastCompoAlignment::new(
             (hsp.score as f64 * local_scaling_factor) as i32,
             MatrixAdjustRule::DontAdjust,
             hsp.context,
@@ -20319,9 +20957,8 @@ pub fn result_hsp_to_distinct_align(
             hsp.subject_end,
             hsp.subject_frame,
             None,
-        );
-        new_align.query_gapped_start = hsp.query_gapped_start;
-        new_align.match_gapped_start = hsp.subject_gapped_start;
+        )
+        .with_hsp_context(hsp.query_gapped_start, hsp.subject_gapped_start);
         let new_box = Box::new(new_align);
 
         match lists[frame_index].as_mut() {
@@ -20385,16 +21022,27 @@ pub fn do_seg_sequence_data(seq_data: &mut BlastCompoSequenceData) -> (i32, bool
 ///
 /// In the C source this releases the BlastSeqSrc-managed subject
 /// sequence and frees the per-match `BlastKappa_SequenceInfo`
-/// payload. The Rust `BlastCompoMatchingSequence` doesn't carry a
-/// `local_data` pointer (the C `void *` payload is replaced by
-/// `local_data_index`), so the cleanup work is handled by the
-/// caller's lifetime management. We provide this hook for parity so
-/// callers porting NCBI flow can keep matching call sites; it
-/// resets the index to `-1`, mirroring NCBI's `if (self->index >= 0)`
-/// guard semantics.
+/// payload. Rust now carries an owned `local_data` slot corresponding to C's
+/// `void *`; the pointed-to subject-source state is still managed by the
+/// caller's lifetime. We provide this hook for parity so
+/// callers porting NCBI flow can keep matching call sites. The C function
+/// releases through `BlastSeqSrc` only when `index >= 0 && length > 0`, then
+/// nulls `local_data`; it does not reset `index` or `length`.
 pub fn matching_sequence_release(self_: &mut BlastCompoMatchingSequence) {
-    self_.local_data_index = -1;
-    self_.length = 0;
+    if let Some(mut local_data) = self_.local_data.take() {
+        if self_.index >= 0 && self_.length > 0 {
+            if let Some(seq_src) = local_data.seq_src {
+                // C stores a borrowed BlastSeqSrc* in local_data and releases through
+                // that vtable before freeing the payload.
+                unsafe {
+                    crate::seqsrc::blast_seq_src_release_sequence(
+                        Some(&*seq_src),
+                        Some(&mut local_data.seq_arg),
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// NCBI: s_RescaleSearch (blast_kappa.c:2117).
@@ -20827,6 +21475,7 @@ pub fn s_gapping_params_new(
         gap_extend: scoring.gap_extend,
         decline_align: i32::MIN, // unused in the kappa pipeline; NCBI default
         x_dropoff,
+        context: None,
     }
 }
 
@@ -21026,23 +21675,46 @@ pub fn saved_parameters_free(saved: &mut Option<BlastKappaSavedParameters>) {
     params.original_expect_value = 0.0;
 }
 
+/// Internal `BlastCompo_HeapRecord` (`compo_heap.c:75`).
+#[derive(Debug, Clone)]
+pub struct BlastCompoHeapRecord {
+    pub best_evalue: f64,
+    pub best_score: i32,
+    pub subject_index: i32,
+    pub these_alignments: HspList,
+}
+
+impl BlastCompoHeapRecord {
+    fn from_hsp_list(record: HspList) -> Self {
+        let best_score = record.hsps.iter().map(|hsp| hsp.score).max().unwrap_or(0);
+        Self {
+            best_evalue: record.best_evalue,
+            best_score,
+            subject_index: record.oid,
+            these_alignments: record,
+        }
+    }
+
+    fn into_hsp_list(self) -> HspList {
+        self.these_alignments
+    }
+}
+
 /// NCBI: BlastCompo_Heap (compo_heap.h:82).
 ///
-/// The C struct keeps
-/// hits as either an unsorted array (until `n == heapThreshold`) or as
-/// a max-heap keyed on e-value (after the threshold). Once it's a heap,
-/// new candidates with e-value >= `worstEvalue` are rejected unless
-/// they pass `ecutoff`.
-///
-/// This Rust port stores the records as a single `Vec<HspList>` and
-/// resorts on demand — the C array/heap split is a memory-management
-/// optimization that's irrelevant in Rust. The semantics
-/// (`would_insert`, `insert`, `pop`) are preserved.
+/// The member set mirrors C: `n`, `capacity`, `heapThreshold`, `ecutoff`,
+/// `worstEvalue`, plus the split `array` / `heapArray` storage. The remaining
+/// method bodies are transitional and should be ported next to the C
+/// heapify-up/down routines now that the fields exist.
 #[derive(Debug, Clone, Default)]
 pub struct BlastCompoHeap {
-    pub records: Vec<HspList>,
+    pub n: i32,
+    pub capacity: i32,
     pub heap_threshold: i32,
     pub ecutoff: f64,
+    pub worst_evalue: f64,
+    pub array: Vec<BlastCompoHeapRecord>,
+    pub heap_array: Vec<BlastCompoHeapRecord>,
 }
 
 /// `EVALUE_STRETCH` (`redo_alignment.c:1588`).
@@ -21052,10 +21724,33 @@ impl BlastCompoHeap {
     /// NCBI: BlastCompo_HeapNew (compo_heap.c:50).
     /// naming: Associated constructor on `BlastCompoHeap`.
     pub fn new(heap_threshold: i32, ecutoff: f64) -> Self {
+        let capacity = heap_threshold.max(0);
         Self {
-            records: Vec::new(),
+            n: 0,
+            capacity,
             heap_threshold,
             ecutoff,
+            worst_evalue: f64::INFINITY,
+            array: Vec::with_capacity(capacity as usize),
+            heap_array: Vec::new(),
+        }
+    }
+
+    /// Transitional accessor while call sites move to C `array`/`heapArray`.
+    fn records(&self) -> &[BlastCompoHeapRecord] {
+        if self.heap_array.is_empty() {
+            &self.array
+        } else {
+            &self.heap_array
+        }
+    }
+
+    /// Transitional accessor while call sites move to C `array`/`heapArray`.
+    fn records_mut(&mut self) -> &mut Vec<BlastCompoHeapRecord> {
+        if self.heap_array.is_empty() {
+            &mut self.array
+        } else {
+            &mut self.heap_array
         }
     }
 
@@ -21063,12 +21758,13 @@ impl BlastCompoHeap {
     ///
     /// Worst (largest) e-value currently in the heap, or `+∞` if empty.
     pub fn worst_evalue(&self) -> f64 {
-        self.records
+        let records = self.records();
+        records
             .iter()
             .map(|r| r.best_evalue)
             .fold(f64::NEG_INFINITY, f64::max)
             .max(f64::NEG_INFINITY)
-            .max(if self.records.is_empty() {
+            .max(if records.is_empty() {
                 f64::INFINITY
             } else {
                 f64::NEG_INFINITY
@@ -21076,12 +21772,17 @@ impl BlastCompoHeap {
     }
 
     /// blast-rs: Local heap tie-break helper; not a direct NCBI C port.
-    fn best_score(record: &HspList) -> i32 {
-        record.hsps.iter().map(|hsp| hsp.score).max().unwrap_or(0)
+    fn best_score(record: &BlastCompoHeapRecord) -> i32 {
+        record.best_score
     }
 
     /// blast-rs: Local heap tie-break helper; not a direct NCBI C port.
-    fn record_worse_than(record: &HspList, evalue: f64, score: i32, subject_index: i32) -> bool {
+    fn record_worse_than(
+        record: &BlastCompoHeapRecord,
+        evalue: f64,
+        score: i32,
+        subject_index: i32,
+    ) -> bool {
         if record.best_evalue > evalue {
             return true;
         }
@@ -21095,23 +21796,24 @@ impl BlastCompoHeap {
         if record_score > score {
             return false;
         }
-        record.oid < subject_index
+        record.subject_index < subject_index
     }
 
     /// blast-rs: Local heap scan helper replacing C heap internals; not a direct NCBI C port.
     fn worst_record_index(&self) -> Option<usize> {
-        if self.records.is_empty() {
+        let records = self.records();
+        if records.is_empty() {
             return None;
         }
         let mut worst_idx = 0usize;
-        for i in 1..self.records.len() {
-            let current = &self.records[i];
-            let worst = &self.records[worst_idx];
+        for i in 1..records.len() {
+            let current = &records[i];
+            let worst = &records[worst_idx];
             if Self::record_worse_than(
                 current,
                 worst.best_evalue,
                 Self::best_score(worst),
-                worst.oid,
+                worst.subject_index,
             ) {
                 worst_idx = i;
             }
@@ -21128,14 +21830,14 @@ impl BlastCompoHeap {
     /// cutoff, the candidate e-value is better than the current worst, or it
     /// wins the NCBI tie-breaker against the current worst record.
     pub fn would_insert(&self, evalue: f64, score: i32, subject_index: i32) -> bool {
-        if self.records.len() < self.heap_threshold.max(0) as usize
+        if self.records().len() < self.heap_threshold.max(0) as usize
             || evalue <= self.ecutoff
             || evalue < self.worst_evalue()
         {
             return true;
         }
         if let Some(worst_idx) = self.worst_record_index() {
-            Self::record_worse_than(&self.records[worst_idx], evalue, score, subject_index)
+            Self::record_worse_than(&self.records()[worst_idx], evalue, score, subject_index)
         } else {
             true
         }
@@ -21148,35 +21850,41 @@ impl BlastCompoHeap {
     /// candidate does not pass `ecutoff`, the worse of the candidate and the
     /// current worst record is returned as discarded.
     pub fn insert(&mut self, record: HspList) -> Option<HspList> {
-        let evalue = record.best_evalue;
-        let score = Self::best_score(&record);
-        let subject_index = record.oid;
+        let new_record = BlastCompoHeapRecord::from_hsp_list(record);
+        let evalue = new_record.best_evalue;
+        let score = new_record.best_score;
+        let subject_index = new_record.subject_index;
         if !self.would_insert(evalue, score, subject_index) {
-            return Some(record);
+            return Some(new_record.into_hsp_list());
         }
 
         let threshold = self.heap_threshold.max(0) as usize;
-        if self.records.is_empty()
-            || self.records.len() < threshold
+        if self.records().is_empty()
+            || self.records().len() < threshold
             || (evalue <= self.ecutoff && self.worst_evalue() <= self.ecutoff)
         {
-            self.records.push(record);
+            self.records_mut().push(new_record);
+            self.n = self.records().len() as i32;
+            self.worst_evalue = self.worst_evalue();
             return None;
         }
 
         if let Some(worst_idx) = self.worst_record_index() {
-            if Self::record_worse_than(&self.records[worst_idx], evalue, score, subject_index) {
-                return Some(std::mem::replace(&mut self.records[worst_idx], record));
+            if Self::record_worse_than(&self.records()[worst_idx], evalue, score, subject_index) {
+                let discarded = std::mem::replace(&mut self.records_mut()[worst_idx], new_record);
+                self.n = self.records().len() as i32;
+                self.worst_evalue = self.worst_evalue();
+                return Some(discarded.into_hsp_list());
             }
         }
-        Some(record)
+        Some(new_record.into_hsp_list())
     }
 
     /// NCBI: BlastCompo_HeapFilledToCutoff (compo_heap.c:270).
     /// naming: Rust exposes this as an associated method on the composition
     /// heap type.
     pub fn filled_to_cutoff(&self) -> bool {
-        self.records.len() >= self.heap_threshold.max(0) as usize
+        self.records().len() >= self.heap_threshold.max(0) as usize
             && self.worst_evalue() <= self.ecutoff
     }
 
@@ -21188,7 +21896,10 @@ impl BlastCompoHeap {
     /// heap type.
     pub fn pop_worst(&mut self) -> Option<HspList> {
         let worst_idx = self.worst_record_index()?;
-        Some(self.records.swap_remove(worst_idx))
+        let record = self.records_mut().swap_remove(worst_idx);
+        self.n = self.records().len() as i32;
+        self.worst_evalue = self.worst_evalue();
+        Some(record.into_hsp_list())
     }
 }
 
@@ -21319,13 +22030,13 @@ pub fn get_query_info(
             };
             let words = create_word_array(&seq_slice).unwrap_or_default();
             let composition = if skip {
-                Vec::new()
+                BlastAminoAcidComposition::default()
             } else {
-                let (probs, _num_true) = crate::composition::blast_read_aa_composition(
+                let (probs, num_true) = crate::composition::blast_read_aa_composition(
                     &seq_slice,
                     crate::matrix::AA_SIZE,
                 );
-                probs
+                BlastAminoAcidComposition::from_prob(probs, num_true as i32)
             };
             BlastCompoQueryInfo {
                 origin: ctx.query_offset,
@@ -21772,7 +22483,6 @@ pub fn blast_link_hsps_for_kappa(
 /// by `GapEditScript::push`, so each insertion/deletion op contributes one.
 pub fn gap_edit_script_num_gap_opens(script: &crate::gapinfo::GapEditScript) -> i32 {
     script
-        .ops
         .iter()
         .filter(|(op, _)| {
             matches!(
@@ -22093,7 +22803,10 @@ pub fn hsp_list_from_distinct_alignments(
     let mut comp_tags: Vec<CompoAdjustMode> = Vec::new();
     let mut cursor = alignments.take();
     while let Some(mut node) = cursor {
-        let edit_script = node.context.take();
+        let edit_script = node
+            .context
+            .take()
+            .and_then(|mut ctx| ctx.edit_script.take());
         let num_gaps = edit_script
             .as_ref()
             .map(gap_edit_script_num_gap_opens)
@@ -22170,7 +22883,12 @@ pub fn new_alignment_from_gap_align(
     // C: `BlastCompo_AlignmentNew(... *edit_script)` followed by
     // `*edit_script = NULL` on success. Rust takes ownership via
     // `Option::take()`.
-    let context = edit_script.take();
+    let context = edit_script
+        .take()
+        .map(|edit_script| BlastCompoAlignmentContext {
+            edit_script: Some(edit_script),
+            hsp: None,
+        });
     Some(BlastCompoAlignment::new(
         gap_align.score,
         matrix_adjust_rule,

@@ -5068,8 +5068,6 @@ fn apply_blastn_linked_sum_stats_to_hsps(
                     context: hsp.context,
                     gap_info: None,
                     num: 1,
-                    xsum: 0.0,
-                    num_gaps: hsp.gap_opens,
                     comp_adjustment_method: 0,
                     pat_info: None,
                     num_positives: 0,

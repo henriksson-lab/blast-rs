@@ -480,37 +480,49 @@ pub fn lookup_table_options_validate(
 /// Scoring options.
 #[derive(Debug, Clone)]
 pub struct ScoringOptions {
+    pub matrix_path: Option<String>,
     pub reward: i32,
     pub penalty: i32,
+    pub gapped_calculation: bool,
+    pub complexity_adjusted_scoring: bool,
     pub gap_open: i32,
     pub gap_extend: i32,
-    pub gapped_calculation: bool,
+    pub shift_pen: i32,
     pub matrix_name: Option<String>,
     pub is_ooframe: bool,
+    pub program_number: ProgramType,
 }
 
 impl ScoringOptions {
     pub fn new_blastn() -> Self {
         ScoringOptions {
+            matrix_path: None,
             reward: REWARD,
             penalty: PENALTY,
+            gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             gap_open: GAP_OPEN_NUCL,
             gap_extend: GAP_EXTN_NUCL,
-            gapped_calculation: true,
+            shift_pen: 0,
             matrix_name: None,
             is_ooframe: false,
+            program_number: program::BLASTN,
         }
     }
 
     pub fn new_blastp() -> Self {
         ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
+            gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             gap_open: GAP_OPEN_PROT,
             gap_extend: GAP_EXTN_PROT,
-            gapped_calculation: true,
+            shift_pen: i16::MAX as i32,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: program::BLASTP,
         }
     }
 }
@@ -529,6 +541,8 @@ pub fn blast_scoring_options_new(
     if program_number == program::TBLASTX {
         new_options.gapped_calculation = false;
     }
+    new_options.program_number = program_number;
+    new_options.complexity_adjusted_scoring = false;
     *options = Some(new_options);
     0
 }
@@ -537,6 +551,7 @@ pub fn blast_scoring_options_new(
 pub fn blast_scoring_options_free(options: &mut Option<ScoringOptions>) -> Option<ScoringOptions> {
     if let Some(options) = options.as_mut() {
         options.matrix_name = None;
+        options.matrix_path = None;
     }
     *options = None;
     None
@@ -612,6 +627,7 @@ pub fn blast_fill_scoring_options(
     if gap_extend >= 0 {
         options.gap_extend = gap_extend;
     }
+    options.program_number = program_number;
 
     0
 }
@@ -1120,6 +1136,58 @@ fn blast_extension_scoring_options_validate(
     0
 }
 
+/// Port of NCBI `BLAST_InitDefaultOptions` (`blast_options.c:1647`).
+pub fn blast_init_default_options(
+    program_number: ProgramType,
+    lookup_options: &mut Option<LookupTableOptions>,
+    query_setup_options: &mut Option<QuerySetUpOptions>,
+    word_options: &mut Option<InitialWordOptions>,
+    ext_options: &mut Option<ExtensionOptions>,
+    hit_options: &mut Option<HitSavingOptions>,
+    score_options: &mut Option<ScoringOptions>,
+    eff_len_options: &mut Option<EffectiveLengthsOptions>,
+    psi_options: &mut Option<PSIBlastOptions>,
+    db_options: &mut Option<DatabaseOptions>,
+) -> i16 {
+    let mut status = lookup_table_options_new(program_number, lookup_options);
+    if status != 0 {
+        return status;
+    }
+    status = blast_query_set_up_options_new(query_setup_options);
+    if status != 0 {
+        return status;
+    }
+    status = blast_initial_word_options_new(program_number, word_options);
+    if status != 0 {
+        return status;
+    }
+    status = blast_scoring_options_new(program_number, score_options);
+    if status != 0 {
+        return status;
+    }
+
+    let gapped_calculation = score_options
+        .as_ref()
+        .is_some_and(|options| options.gapped_calculation);
+    status = blast_extension_options_new(program_number, ext_options, gapped_calculation);
+    if status != 0 {
+        return status;
+    }
+    status = blast_hit_saving_options_new(program_number, hit_options, gapped_calculation);
+    if status != 0 {
+        return status;
+    }
+    status = blast_effective_lengths_options_new(eff_len_options);
+    if status != 0 {
+        return status;
+    }
+    status = psi_blast_options_new(psi_options);
+    if status != 0 {
+        return status;
+    }
+    blast_database_options_new(db_options)
+}
+
 /// Port of NCBI `BLAST_ValidateOptions` (`blast_options.c:1751`).
 pub fn blast_validate_options(
     program_number: ProgramType,
@@ -1336,7 +1404,11 @@ mod tests {
         assert_eq!(s.penalty, -3);
         assert_eq!(s.gap_open, 5);
         assert_eq!(s.gap_extend, 2);
+        assert_eq!(s.shift_pen, 0);
         assert!(s.gapped_calculation);
+        assert!(!s.complexity_adjusted_scoring);
+        assert_eq!(s.matrix_path, None);
+        assert_eq!(s.program_number, crate::program::BLASTN);
     }
 
     #[test]
@@ -1344,7 +1416,11 @@ mod tests {
         let s = ScoringOptions::new_blastp();
         assert_eq!(s.gap_open, 11);
         assert_eq!(s.gap_extend, 1);
+        assert_eq!(s.shift_pen, i16::MAX as i32);
         assert_eq!(s.matrix_name.as_deref(), Some("BLOSUM62"));
+        assert!(!s.complexity_adjusted_scoring);
+        assert_eq!(s.matrix_path, None);
+        assert_eq!(s.program_number, crate::program::BLASTP);
     }
 
     #[test]
@@ -1718,6 +1794,67 @@ mod tests {
 
         let mut database = None;
         assert_eq!(blast_database_options_new(&mut database), 0);
+        assert_eq!(
+            database.as_ref().map(|options| options.genetic_code),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn translated_blast_init_default_options_uses_scoring_gapped_flag() {
+        let mut lookup = None;
+        let mut query_setup = None;
+        let mut word = None;
+        let mut extension = None;
+        let mut hit = None;
+        let mut scoring = None;
+        let mut effective = None;
+        let mut psi = None;
+        let mut database = None;
+
+        assert_eq!(
+            blast_init_default_options(
+                crate::program::TBLASTX,
+                &mut lookup,
+                &mut query_setup,
+                &mut word,
+                &mut extension,
+                &mut hit,
+                &mut scoring,
+                &mut effective,
+                &mut psi,
+                &mut database,
+            ),
+            0
+        );
+
+        assert_eq!(
+            lookup.as_ref().map(|options| options.program_number),
+            Some(crate::program::TBLASTX)
+        );
+        assert!(
+            !scoring
+                .as_ref()
+                .expect("tblastx scoring options")
+                .gapped_calculation
+        );
+        assert_eq!(
+            extension.as_ref().map(|options| options.program_number),
+            Some(crate::program::TBLASTX)
+        );
+        assert!(
+            hit.as_ref()
+                .expect("tblastx hit saving options")
+                .do_sum_stats
+        );
+        assert_eq!(
+            effective.as_ref().map(|options| options.num_searchspaces),
+            Some(0)
+        );
+        assert_eq!(
+            psi.as_ref().map(|options| options.pseudo_count),
+            Some(crate::stat::PSI_PSEUDO_COUNT_CONST)
+        );
         assert_eq!(
             database.as_ref().map(|options| options.genetic_code),
             Some(1)
@@ -2322,6 +2459,7 @@ mod tests {
 
         // Construct an invalid option set and verify the invariant is broken
         let bad = ScoringOptions {
+            matrix_path: None,
             reward: -1,
             penalty: 3,
             ..ScoringOptions::new_blastn()

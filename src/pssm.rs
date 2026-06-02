@@ -651,7 +651,7 @@ pub fn psi_create_pssm_with_diagnostics(
 
     status = psi_compute_freq_ratios(
         Some(&msa),
-        Some(&seq_weights),
+        Some(&mut seq_weights),
         Some(&*sbp),
         Some(&aligned_block),
         options.pseudo_count,
@@ -2243,7 +2243,7 @@ fn psi_effective_observations_from_blocks(
 /// Port of NCBI `_PSIComputeFreqRatios`.
 pub fn psi_compute_freq_ratios(
     msa: Option<&PsiMsa>,
-    seq_weights: Option<&PsiSequenceWeights>,
+    seq_weights: Option<&mut PsiSequenceWeights>,
     sbp: Option<&crate::stat::BlastScoreBlk>,
     aligned_blocks: Option<&PsiAlignedBlock>,
     pseudo_count: i32,
@@ -2267,6 +2267,7 @@ pub fn psi_compute_freq_ratios(
         || aligned_blocks.pos_extnt.len() < q
         || aligned_blocks.size.len() < q
         || seq_weights.std_prob.len() < a
+        || seq_weights.independent_observations.len() < q
         || seq_weights.pos_num_participating.len() < q
         || seq_weights.pos_distinct_distrib.len() < q
         || !seq_weights
@@ -2295,6 +2296,7 @@ pub fn psi_compute_freq_ratios(
         if msa.cell[K_QUERY_INDEX][p].letter != x_residue {
             observations =
                 psi_effective_observations_from_blocks(aligned_blocks, seq_weights, p, q, &expno);
+            seq_weights.independent_observations[p] = observations;
             if pseudo_count == 0 {
                 let mut match_weights = [0.0; AA_SIZE];
                 for (r, value) in match_weights.iter_mut().enumerate() {
@@ -8269,7 +8271,7 @@ mod tests {
         assert_eq!(
             psi_compute_freq_ratios(
                 Some(&short_query_row),
-                Some(&seq_weights),
+                Some(&mut seq_weights),
                 Some(&sbp),
                 Some(&blocks),
                 5,
@@ -8284,7 +8286,7 @@ mod tests {
         assert_eq!(
             psi_compute_freq_ratios(
                 Some(&msa),
-                Some(&seq_weights),
+                Some(&mut seq_weights),
                 Some(&sbp),
                 Some(&short_blocks),
                 5,
@@ -8299,7 +8301,7 @@ mod tests {
         assert_eq!(
             psi_compute_freq_ratios(
                 Some(&msa),
-                Some(&short_std_prob),
+                Some(&mut short_std_prob),
                 Some(&sbp),
                 Some(&blocks),
                 5,
@@ -8314,7 +8316,7 @@ mod tests {
         assert_eq!(
             psi_compute_freq_ratios(
                 Some(&msa),
-                Some(&short_distrib),
+                Some(&mut short_distrib),
                 Some(&sbp),
                 Some(&blocks),
                 5,
@@ -8329,7 +8331,7 @@ mod tests {
         assert_eq!(
             psi_compute_freq_ratios(
                 Some(&msa),
-                Some(&short_match_weights),
+                Some(&mut short_match_weights),
                 Some(&sbp),
                 Some(&blocks),
                 5,
@@ -8346,7 +8348,7 @@ mod tests {
         assert_eq!(
             psi_compute_freq_ratios(
                 Some(&msa),
-                Some(&seq_weights),
+                Some(&mut seq_weights),
                 Some(&sbp),
                 Some(&blocks),
                 5,
@@ -8355,6 +8357,38 @@ mod tests {
             ),
             PSIERR_BADPARAM
         );
+
+        let mut short_observations = seq_weights.clone();
+        short_observations.independent_observations.truncate(1);
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&msa),
+                Some(&mut short_observations),
+                Some(&sbp),
+                Some(&blocks),
+                5,
+                false,
+                Some(&mut internal),
+            ),
+            PSIERR_BADPARAM
+        );
+
+        seq_weights.independent_observations.fill(-1.0);
+        assert_eq!(
+            psi_compute_freq_ratios(
+                Some(&msa),
+                Some(&mut seq_weights),
+                Some(&sbp),
+                Some(&blocks),
+                5,
+                false,
+                Some(&mut internal),
+            ),
+            PSI_SUCCESS
+        );
+        assert!(seq_weights.independent_observations[..2]
+            .iter()
+            .all(|value| *value >= 0.0 && value.is_finite()));
     }
 
     #[test]

@@ -27,23 +27,43 @@ fn parse_fasta_sequences(
     let fasta_data = std::fs::read_to_string(fasta_path)?;
     let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
 
-    let mut current_header = String::new();
+    let mut current_header: Option<String> = None;
     let mut current_seq = Vec::new();
 
     for (line_idx, line) in fasta_data.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
         if let Some(hdr) = line.strip_prefix('>') {
-            if !current_header.is_empty() || !current_seq.is_empty() {
-                sequences.push((current_header, current_seq));
+            if let Some(header) = current_header.take() {
+                if !current_seq.is_empty() {
+                    sequences.push((header, current_seq));
+                }
             }
-            current_header = hdr.to_string();
+            current_header = Some(hdr.to_string());
             current_seq = Vec::new();
         } else {
+            if current_header.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "FASTA input does not start with a defline or comment before line {}",
+                        line_idx + 1
+                    ),
+                ));
+            }
             for (col_idx, &b) in line.as_bytes().iter().enumerate() {
                 if b.is_ascii_whitespace() {
                     continue;
                 }
                 if valid_fasta_residue(b, allow_protein_stop) {
-                    current_seq.push(b.to_ascii_uppercase());
+                    let upper = b.to_ascii_uppercase();
+                    current_seq.push(if !allow_protein_stop && upper == b'-' {
+                        b'N'
+                    } else {
+                        upper
+                    });
                 } else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -57,8 +77,10 @@ fn parse_fasta_sequences(
             }
         }
     }
-    if !current_header.is_empty() || !current_seq.is_empty() {
-        sequences.push((current_header, current_seq));
+    if let Some(header) = current_header {
+        if !current_seq.is_empty() {
+            sequences.push((header, current_seq));
+        }
     }
 
     Ok(sequences)
@@ -67,7 +89,7 @@ fn parse_fasta_sequences(
 fn valid_fasta_residue(b: u8, allow_protein_stop: bool) -> bool {
     let upper = b.to_ascii_uppercase();
     if allow_protein_stop {
-        upper.is_ascii_uppercase() || b == b'*'
+        upper.is_ascii_uppercase() || b == b'*' || b == b'-'
     } else {
         matches!(
             upper,
@@ -86,6 +108,7 @@ fn valid_fasta_residue(b: u8, allow_protein_stop: bool) -> bool {
                 | b'H'
                 | b'V'
                 | b'N'
+                | b'-'
         )
     }
 }
@@ -336,6 +359,41 @@ mod tests {
             db.get_sequence(0),
             crate::encoding::encode_ncbistdaa_sequence(b"MA*R")
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_parse_fasta_sequences_matches_makeblastdb_record_boundaries() {
+        let dir = std::env::temp_dir().join("blast_makedb_parser_boundaries");
+        std::fs::create_dir_all(&dir).ok();
+
+        let no_defline = dir.join("no_defline.fa");
+        std::fs::write(&no_defline, "ACGT\n").unwrap();
+        let err = parse_fasta_sequences(&no_defline, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let fasta = dir.join("records.fa");
+        std::fs::write(
+            &fasta,
+            ";leading comment\n>empty\n# mid comment\n>seq1\nAC-GT\n;ignored\nTGCA\n",
+        )
+        .unwrap();
+        let records = parse_fasta_sequences(&fasta, false).unwrap();
+        assert_eq!(records, vec![("seq1".to_string(), b"ACNGTTGCA".to_vec())]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_parse_fasta_sequences_accepts_protein_gap() {
+        let dir = std::env::temp_dir().join("blast_makedb_parser_protein_gap");
+        std::fs::create_dir_all(&dir).ok();
+
+        let fasta = dir.join("prot.fa");
+        std::fs::write(&fasta, ">prot_gap\nMA-R\n").unwrap();
+        let records = parse_fasta_sequences(&fasta, true).unwrap();
+        assert_eq!(records, vec![("prot_gap".to_string(), b"MA-R".to_vec())]);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -620,7 +620,7 @@ fn s_compute_alignment_score(hsp: &Hsp, score_options: &ScoringOptions, query_le
             .map(|edits| edits.edits.as_slice())
             .unwrap_or(&[]);
         let mut query_pos = hsp.query_offset;
-        for &(op, count) in &script.ops {
+        for (op, count) in script.iter() {
             match op {
                 GapAlignOpType::Sub => {
                     let query_end = query_pos.saturating_add(count);
@@ -766,7 +766,7 @@ pub fn s_test_hsp_ranges(hsp: &Hsp) -> bool {
     if let Some(script) = hsp.edit_script.as_ref() {
         let mut query_used = 0i64;
         let mut subject_used = 0i64;
-        for &(op, count) in &script.ops {
+        for (op, count) in script.iter() {
             if count < 0 {
                 return false;
             }
@@ -824,7 +824,7 @@ fn mapper_trim_op_deltas(op: GapAlignOpType, count: i32) -> (i32, i32) {
     (query, subject)
 }
 
-fn mapper_trim_score_from_script(
+fn mapper_fallback_score_from_script(
     hsp: &mut Hsp,
     mismatch_score: i32,
     gap_open_score: i32,
@@ -841,7 +841,7 @@ fn mapper_trim_score_from_script(
 
     let mut score: i32 = 0;
     let mut num_ident: i32 = 0;
-    for &(op, count) in &script.ops {
+    for (op, count) in script.iter() {
         match op {
             GapAlignOpType::Sub => {
                 score = score.saturating_add(count);
@@ -864,6 +864,80 @@ fn mapper_trim_score_from_script(
         }
     }
     hsp.num_ident = num_ident;
+    score
+}
+
+fn mapper_compute_alignment_score(
+    hsp: &mut Hsp,
+    mismatch_score: i32,
+    gap_open_score: i32,
+    gap_extend_score: i32,
+) -> i32 {
+    let Some(info) = hsp.map_info.as_ref() else {
+        return mapper_fallback_score_from_script(
+            hsp,
+            mismatch_score,
+            gap_open_score,
+            gap_extend_score,
+        );
+    };
+    let edit_slice = info
+        .edits
+        .as_ref()
+        .map(|edits| edits.edits.as_slice())
+        .unwrap_or(&[]);
+
+    let gap_base = 15;
+    let mut last_pos = hsp.query_offset;
+    let mut score: i32 = 0;
+    let mut num_identical: i32 = 0;
+    let mut query_gap: i32 = 0;
+    let mut subject_gap: i32 = 0;
+
+    for edit in edit_slice {
+        let num_matches = edit.query_pos.saturating_sub(last_pos);
+        last_pos = edit.query_pos;
+        score = score.saturating_add(num_matches);
+        num_identical = num_identical.saturating_add(num_matches);
+
+        if edit.query_base == gap_base {
+            query_gap = query_gap.saturating_add(1);
+            if subject_gap > 0 {
+                score = score.saturating_add(s_compute_gap_score(subject_gap, -12, -1, -4));
+                subject_gap = 0;
+            }
+        } else if edit.subject_base == gap_base {
+            subject_gap = subject_gap.saturating_add(1);
+            last_pos = last_pos.saturating_add(1);
+            if query_gap > 0 {
+                score = score.saturating_add(s_compute_gap_score(query_gap, -12, -1, -4));
+                query_gap = 0;
+            }
+        } else {
+            score = score.saturating_add(mismatch_score);
+            last_pos = last_pos.saturating_add(1);
+            if subject_gap > 0 {
+                score = score.saturating_add(s_compute_gap_score(subject_gap, -12, -1, -4));
+                subject_gap = 0;
+            }
+            if query_gap > 0 {
+                score = score.saturating_add(s_compute_gap_score(query_gap, -12, -1, -4));
+                query_gap = 0;
+            }
+        }
+    }
+
+    if subject_gap > 0 {
+        score = score.saturating_add(s_compute_gap_score(subject_gap, -12, -1, -4));
+    }
+    if query_gap > 0 {
+        score = score.saturating_add(s_compute_gap_score(query_gap, -12, -1, -4));
+    }
+
+    let tail_matches = hsp.query_end.saturating_sub(last_pos);
+    score = score.saturating_add(tail_matches);
+    num_identical = num_identical.saturating_add(tail_matches);
+    hsp.num_ident = num_identical;
     score
 }
 
@@ -896,11 +970,11 @@ pub fn s_trim_hsp(
     let mut delta_subject: i32 = 0;
     if let Some(script) = hsp.edit_script.as_mut() {
         let mut num_left = num;
-        while num_left > 0 && !script.ops.is_empty() {
-            let idx = if is_start { 0 } else { script.ops.len() - 1 };
-            let (op, count) = script.ops[idx];
+        while num_left > 0 && !script.is_empty() {
+            let idx = if is_start { 0 } else { script.len() - 1 };
+            let (op, count) = script.get(idx).unwrap_or((GapAlignOpType::Sub, 0));
             if count <= 0 {
-                script.ops.remove(idx);
+                script.remove(idx);
                 continue;
             }
 
@@ -916,15 +990,15 @@ pub fn s_trim_hsp(
                 delta_subject = delta_subject.saturating_add(ds);
                 num_left = num_left.saturating_sub(trim);
                 if trim == count {
-                    script.ops.remove(idx);
+                    script.remove(idx);
                 } else {
-                    script.ops[idx].1 -= trim;
+                    script.set_num(idx, count - trim);
                 }
             } else {
                 let (dq, ds) = mapper_trim_op_deltas(op, count);
                 delta_query = delta_query.saturating_add(dq);
                 delta_subject = delta_subject.saturating_add(ds);
-                script.ops.remove(idx);
+                script.remove(idx);
             }
         }
         if num_left > 0 {
@@ -951,7 +1025,7 @@ pub fn s_trim_hsp(
     }
 
     hsp.score =
-        mapper_trim_score_from_script(hsp, mismatch_score, gap_open_score, gap_extend_score);
+        mapper_compute_alignment_score(hsp, mismatch_score, gap_open_score, gap_extend_score);
     0
 }
 
@@ -1054,7 +1128,7 @@ fn mapper_trim_map_info(
     if is_start {
         let mut k = edits.edits.len();
         let mut p = hsp.query_end.saturating_sub(1);
-        for &(op, count) in script.ops.iter().rev() {
+        for (op, count) in script.iter().rev() {
             if !matches!(
                 op,
                 GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2
@@ -1080,7 +1154,7 @@ fn mapper_trim_map_info(
     } else {
         let mut k = 0usize;
         let mut p = hsp.query_offset;
-        for &(op, count) in &script.ops {
+        for (op, count) in script.iter() {
             if !matches!(
                 op,
                 GapAlignOpType::Del | GapAlignOpType::Del1 | GapAlignOpType::Del2
@@ -1652,7 +1726,7 @@ pub fn s_merge_hsps(
         .edit_script
         .clone()
         .unwrap_or_else(crate::gapinfo::GapEditScript::new);
-    if script.ops.is_empty() && first.query_end > first.query_offset {
+    if script.is_empty() && first.query_end > first.query_offset {
         script.push(
             GapAlignOpType::Sub,
             first
@@ -1671,7 +1745,7 @@ pub fn s_merge_hsps(
         script.push(GapAlignOpType::Ins, subject_gap);
     }
     if let Some(second_script) = second.edit_script.as_ref() {
-        for &(op, count) in &second_script.ops {
+        for (op, count) in second_script.iter() {
             script.push(op, count);
         }
     } else if second.query_end > second.query_offset {
@@ -1695,7 +1769,7 @@ pub fn s_merge_hsps(
     merged.query_end = second.query_end;
     merged.subject_end = second.subject_end;
     merged.edit_script = Some(script);
-    merged.score = mapper_trim_score_from_script(
+    merged.score = mapper_compute_alignment_score(
         &mut merged,
         score_opts.penalty,
         score_opts.gap_open,
@@ -1706,10 +1780,9 @@ pub fn s_merge_hsps(
         .as_ref()
         .map(|script| {
             script
-                .ops
                 .iter()
                 .filter(|(op, _)| !matches!(op, GapAlignOpType::Sub | GapAlignOpType::Decline))
-                .map(|(_, count)| *count)
+                .map(|(_, count)| count)
                 .sum()
         })
         .unwrap_or(0);
@@ -3417,7 +3490,7 @@ fn mapper_extend_hsp(
         .edit_script
         .clone()
         .unwrap_or_else(crate::gapinfo::GapEditScript::new);
-    if script.ops.is_empty() && hsp.query_end > hsp.query_offset {
+    if script.is_empty() && hsp.query_end > hsp.query_offset {
         script.push(
             GapAlignOpType::Sub,
             hsp.query_end
@@ -3427,7 +3500,7 @@ fn mapper_extend_hsp(
     }
 
     if is_left {
-        for &(op, count) in &script.ops {
+        for (op, count) in script.iter() {
             extension.push(op, count);
         }
         hsp.edit_script = Some(extension);
@@ -3436,7 +3509,7 @@ fn mapper_extend_hsp(
         hsp.query_gapped_start = hsp.query_offset;
         hsp.subject_gapped_start = hsp.subject_offset;
     } else {
-        for (op, count) in extension.ops {
+        for (op, count) in extension.iter() {
             script.push(op, count);
         }
         hsp.edit_script = Some(script);
@@ -3444,7 +3517,7 @@ fn mapper_extend_hsp(
         hsp.subject_end = hsp.subject_end.saturating_add(subject_len);
     }
 
-    hsp.score = mapper_trim_score_from_script(
+    hsp.score = mapper_compute_alignment_score(
         hsp,
         score_opts.penalty,
         score_opts.gap_open,
@@ -3455,10 +3528,9 @@ fn mapper_extend_hsp(
         .as_ref()
         .map(|script| {
             script
-                .ops
                 .iter()
                 .filter(|(op, _)| !matches!(op, GapAlignOpType::Sub | GapAlignOpType::Decline))
-                .map(|(_, count)| *count)
+                .map(|(_, count)| count)
                 .sum()
         })
         .unwrap_or(0);
@@ -4325,6 +4397,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
         let mut edited_b = hsp(30, 0, 6, 6, 9);
         edited_b.query_end = 16;
@@ -4365,6 +4439,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
 
         let mut second = hsp(35, 0, 5, 5, 10);
@@ -4387,6 +4463,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -4423,9 +4501,11 @@ mod tests {
         assert_eq!(empty_chain.score, 0);
 
         let mut scripted = chain(99, 0, 2, 0, 0);
-        scripted.hsps.as_mut().unwrap().hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 5), (GapAlignOpType::Ins, 2)],
-        });
+        scripted.hsps.as_mut().unwrap().hsp.edit_script =
+            Some(crate::gapinfo::GapEditScript::from_ops(vec![
+                (GapAlignOpType::Sub, 5),
+                (GapAlignOpType::Ins, 2),
+            ]));
         assert_eq!(
             s_compute_chain_score(Some(&mut scripted), Some(&opts), 100, true),
             -4
@@ -4433,9 +4513,9 @@ mod tests {
         assert_eq!(scripted.score, -4);
 
         let mut edited = chain(99, 0, 2, 0, 0);
-        edited.hsps.as_mut().unwrap().hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 5)],
-        });
+        edited.hsps.as_mut().unwrap().hsp.edit_script = Some(
+            crate::gapinfo::GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 5)]),
+        );
         edited.hsps.as_mut().unwrap().hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![JumperEdit {
@@ -4447,6 +4527,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
         assert_eq!(
             s_compute_chain_score(Some(&mut edited), Some(&opts), 100, true),
@@ -4478,6 +4560,8 @@ mod tests {
                 subject_overhangs: None,
                 left_edge: 0,
                 right_edge: MAPPER_SPLICE_SIGNAL,
+
+                flags: 0,
             });
         let mut second = hsp(20, 0, 15, 14, 8);
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
@@ -4485,6 +4569,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL,
             right_edge: 0,
+
+            flags: 0,
         });
         let mut second_hsp = Some(second);
         scored_chain.hsps.as_mut().unwrap().next = hsp_container_new(&mut second_hsp);
@@ -4565,9 +4651,10 @@ mod tests {
     #[test]
     fn test_hsp_ranges_checks_spans_and_edit_script() {
         let mut valid = hsp(10, 0, 4, 8, 10);
-        valid.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        valid.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         assert!(s_test_hsp_ranges(&valid));
 
         let mut invalid = valid.clone();
@@ -4585,18 +4672,20 @@ mod tests {
         let mut oversized_script = hsp(0, 0, 0, 0, 1);
         oversized_script.query_end = i32::MAX;
         oversized_script.subject_end = i32::MAX;
-        oversized_script.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, i32::MAX), (GapAlignOpType::Ins, 1)],
-        });
+        oversized_script.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, i32::MAX),
+            (GapAlignOpType::Ins, 1),
+        ]));
         assert!(!s_test_hsp_ranges(&oversized_script));
     }
 
     #[test]
     fn trim_hsp_rejects_oversized_trims_and_preserves_noop_state() {
         let mut hsp = hsp(10, 0, 4, 8, 10);
-        hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![JumperEdit {
@@ -4611,6 +4700,8 @@ mod tests {
             }),
             left_edge: 3,
             right_edge: 4,
+
+            flags: 0,
         });
         let original = hsp.clone();
         let assert_unchanged = |hsp: &Hsp| {
@@ -4621,11 +4712,8 @@ mod tests {
             assert_eq!(hsp.subject_offset, original.subject_offset);
             assert_eq!(hsp.subject_end, original.subject_end);
             assert_eq!(
-                hsp.edit_script.as_ref().map(|script| script.ops.clone()),
-                original
-                    .edit_script
-                    .as_ref()
-                    .map(|script| script.ops.clone())
+                hsp.edit_script.as_ref().map(|script| script.ops_vec()),
+                original.edit_script.as_ref().map(|script| script.ops_vec())
             );
             assert_eq!(
                 hsp.map_info.as_ref().and_then(|info| info.edits.clone()),
@@ -4670,18 +4758,16 @@ mod tests {
         extreme_score.subject_offset = 0;
         extreme_score.query_end = i32::MAX;
         extreme_score.subject_end = i32::MAX;
-        extreme_score.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (GapAlignOpType::Sub, i32::MAX),
-                (GapAlignOpType::Sub, i32::MAX),
-            ],
-        });
+        extreme_score.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, i32::MAX),
+            (GapAlignOpType::Sub, i32::MAX),
+        ]));
         assert_eq!(
             s_trim_hsp(&mut extreme_score, 1, true, true, -4, -12, -1, None),
             0
         );
-        assert_eq!(extreme_score.score, i32::MAX);
-        assert_eq!(extreme_score.num_ident, i32::MAX);
+        assert_eq!(extreme_score.score, i32::MAX - 6);
+        assert_eq!(extreme_score.num_ident, i32::MAX - 2);
     }
 
     #[test]
@@ -4689,13 +4775,11 @@ mod tests {
         let mut hsp = hsp(0, 0, 4, 8, 10);
         hsp.query_end = 18;
         hsp.subject_end = 22;
-        hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (GapAlignOpType::Sub, 4),
-                (GapAlignOpType::Ins, 2),
-                (GapAlignOpType::Sub, 8),
-            ],
-        });
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 4),
+            (GapAlignOpType::Ins, 2),
+            (GapAlignOpType::Sub, 8),
+        ]));
         hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![
@@ -4722,6 +4806,8 @@ mod tests {
             }),
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
         let query = vec![0, 1, 2, 3, 1, 1, 2, 3, 0, 1, 3, 3, 0, 1, 2, 3, 0, 1];
 
@@ -4732,7 +4818,7 @@ mod tests {
         assert_eq!(hsp.query_offset, 9);
         assert_eq!(hsp.subject_offset, 12);
         assert_eq!(
-            hsp.edit_script.as_ref().unwrap().ops,
+            hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Ins, 1), (GapAlignOpType::Sub, 8)]
         );
         assert_eq!(hsp.num_ident, 8);
@@ -4756,13 +4842,11 @@ mod tests {
         let mut hsp = hsp(0, 0, 4, 8, 10);
         hsp.query_end = 18;
         hsp.subject_end = 22;
-        hsp.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![
-                (GapAlignOpType::Sub, 8),
-                (GapAlignOpType::Del, 3),
-                (GapAlignOpType::Sub, 3),
-            ],
-        });
+        hsp.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 8),
+            (GapAlignOpType::Del, 3),
+            (GapAlignOpType::Sub, 3),
+        ]));
         hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![
@@ -4794,6 +4878,8 @@ mod tests {
             }),
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
         let query = vec![0, 1, 2, 3, 1, 2, 1, 0, 2, 3, 0, 1, 2, 0, 3, 3, 2, 1];
 
@@ -4804,10 +4890,10 @@ mod tests {
         assert_eq!(hsp.query_end, 15);
         assert_eq!(hsp.subject_end, 18);
         assert_eq!(
-            hsp.edit_script.as_ref().unwrap().ops,
+            hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 8), (GapAlignOpType::Del, 2)]
         );
-        assert_eq!(hsp.num_ident, 8);
+        assert_eq!(hsp.num_ident, 10);
         let map_info = hsp.map_info.as_ref().unwrap();
         assert_eq!(
             map_info.subject_overhangs.as_ref().unwrap().right,
@@ -4840,23 +4926,25 @@ mod tests {
         let mut first = hsp(0, 0, 0, 20, 10);
         first.query_end = 10;
         first.subject_end = 30;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
 
         let mut second = hsp(0, 0, 7, 40, 10);
         second.query_end = 20;
         second.subject_end = 53;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 13)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            13,
+        )]));
 
         assert_eq!(s_trim_overlap(&mut first, &mut second, None), 0);
         assert_eq!(first.query_end, 10);
         assert_eq!(second.query_offset, 10);
         assert_eq!(second.subject_offset, 43);
         assert_eq!(
-            second.edit_script.as_ref().unwrap().ops,
+            second.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 10)]
         );
     }
@@ -4866,23 +4954,25 @@ mod tests {
         let mut first = hsp(0, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 20;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 20)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            20,
+        )]));
 
         let mut second = hsp(0, 0, 12, 15, 5);
         second.query_end = 17;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 5)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            5,
+        )]));
 
         assert_eq!(s_trim_overlap(&mut first, &mut second, None), 0);
         assert_eq!(first.subject_end, 15);
         assert_eq!(second.subject_offset, 15);
         assert_eq!(second.subject_end, 20);
         assert_eq!(
-            first.edit_script.as_ref().unwrap().ops,
+            first.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 15)]
         );
     }
@@ -4906,20 +4996,24 @@ mod tests {
         let mut first = hsp(8, 0, 0, 0, 8);
         first.query_end = 8;
         first.subject_end = 8;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 8)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            8,
+        )]));
         let mut second = hsp(12, 0, 10, 10, 10);
         second.query_end = 20;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 3,
             right_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 2,
+
+            flags: 0,
         });
         let mut first_slot = Some(first);
         let mut second_slot = Some(second);
@@ -4951,27 +5045,32 @@ mod tests {
         let mut first = hsp(12, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         let mut second = hsp(14, 0, 12, 12, 12);
         second.query_end = 24;
         second.subject_end = 24;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 12)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            12,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 1,
             right_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 2,
+
+            flags: 0,
         });
         let mut third = hsp(9, 0, 30, 30, 9);
         third.query_end = 39;
         third.subject_end = 39;
-        third.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 9)],
-        });
+        third.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            9,
+        )]));
         let mut first_slot = Some(first);
         let mut second_slot = Some(second);
         let mut third_slot = Some(third);
@@ -4997,7 +5096,7 @@ mod tests {
         );
         assert_eq!(second.hsp.map_info.as_ref().unwrap().right_edge, 2);
         assert_eq!(
-            second.hsp.edit_script.as_ref().unwrap().ops,
+            second.hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 6)]
         );
         assert_eq!(chain.score, 18);
@@ -5153,15 +5252,17 @@ mod tests {
     #[test]
     fn merge_hsps_stitches_extents_and_gap_script() {
         let mut first = hsp(10, 1, 0, 0, 10);
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         let mut second = hsp(8, 1, 13, 12, 8);
         second.query_end = 21;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 8)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            8,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![JumperEdit {
@@ -5176,6 +5277,8 @@ mod tests {
             }),
             left_edge: 7,
             right_edge: 8,
+
+            flags: 0,
         });
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
@@ -5191,6 +5294,8 @@ mod tests {
             }),
             left_edge: 9,
             right_edge: 10,
+
+            flags: 0,
         });
 
         let scores = ScoringOptions::new_blastn();
@@ -5203,14 +5308,14 @@ mod tests {
         assert_eq!(merged.subject_offset, 0);
         assert_eq!(merged.subject_end, 20);
         assert_eq!(
-            merged.edit_script.unwrap().ops,
+            merged.edit_script.unwrap().ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 12),
                 (GapAlignOpType::Ins, 1),
                 (GapAlignOpType::Sub, 8),
             ]
         );
-        assert_eq!(merged.num_ident, 20);
+        assert_eq!(merged.num_ident, 16);
         let map_info = merged.map_info.as_ref().unwrap();
         assert_eq!(map_info.left_edge, 7);
         assert_eq!(map_info.right_edge, 10);
@@ -5285,15 +5390,17 @@ mod tests {
     fn intron_to_gap_replaces_adjacent_hsp_pair_with_merged_hsp() {
         let scores = ScoringOptions::new_blastn();
         let mut first = hsp(10, 0, 0, 0, 10);
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         let mut second = hsp(8, 0, 12, 12, 8);
         second.query_end = 20;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 8)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            8,
+        )]));
         let mut third_slot = Some(hsp(5, 0, 30, 30, 5));
         let mut second_slot = Some(second);
         let mut head = HSPContainer {
@@ -5308,7 +5415,7 @@ mod tests {
         assert_eq!(head.hsp.query_end, 20);
         assert_eq!(head.hsp.subject_end, 20);
         assert_eq!(
-            head.hsp.edit_script.as_ref().unwrap().ops,
+            head.hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 20)]
         );
         assert_eq!(head.next.as_ref().unwrap().hsp.query_offset, 30);
@@ -5319,15 +5426,17 @@ mod tests {
     fn intron_to_gap_trims_overlap_before_merging() {
         let scores = ScoringOptions::new_blastn();
         let mut first = hsp(10, 0, 0, 0, 10);
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         let mut second = hsp(8, 0, 8, 10, 8);
         second.query_end = 18;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         let mut second_slot = Some(second);
         let mut head = HSPContainer {
             hsp: first,
@@ -5340,7 +5449,7 @@ mod tests {
         assert_eq!(head.hsp.subject_end, 20);
         assert!(head.next.is_none());
         assert_eq!(
-            head.hsp.edit_script.as_ref().unwrap().ops,
+            head.hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 10),
                 (GapAlignOpType::Del, 2),
@@ -5383,9 +5492,10 @@ mod tests {
     fn find_splice_junctions_merges_short_gap_pair_and_recomputes_score() {
         let scores = ScoringOptions::new_blastn();
         let mut first = hsp(12, 0, 0, 0, 10);
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
@@ -5394,13 +5504,16 @@ mod tests {
             }),
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
         let mut second = hsp(10, 0, 12, 12, 8);
         second.query_end = 20;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 8)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            8,
+        )]));
         let mut second_slot = Some(second);
         let mut chain = hsp_chain_new(0);
         chain.hsps = Some(Box::new(HSPContainer {
@@ -5420,7 +5533,7 @@ mod tests {
         assert_eq!(head.hsp.subject_end, 20);
         assert!(head.next.is_none());
         assert_eq!(
-            head.hsp.edit_script.as_ref().unwrap().ops,
+            head.hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 10),
                 (GapAlignOpType::Ins, 2),
@@ -5435,15 +5548,17 @@ mod tests {
     fn find_splice_junctions_trims_query_overlap_when_gap_state_is_unavailable() {
         let scores = ScoringOptions::new_blastn();
         let mut first = hsp(60, 0, 0, 0, 10);
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         let mut second = hsp(60, 0, 8, 70, 10);
         second.query_end = 18;
         second.subject_end = 80;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         let mut second_slot = Some(second);
         let mut chain = hsp_chain_new(0);
         chain.hsps = Some(Box::new(HSPContainer {
@@ -5463,7 +5578,7 @@ mod tests {
         assert_eq!(second.hsp.query_offset, 10);
         assert_eq!(second.hsp.subject_offset, 72);
         assert_eq!(
-            second.hsp.edit_script.as_ref().unwrap().ops,
+            second.hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 8)]
         );
     }
@@ -5588,9 +5703,10 @@ mod tests {
         let mut plus = hsp(120, 1, 0, 100, 120);
         plus.query_end = 120;
         plus.subject_end = 220;
-        plus.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 120)],
-        });
+        plus.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            120,
+        )]));
         let mut first_slot = Some(plus);
         let mut first_list = Some(hsp_chain_new(1));
         first_list.as_mut().unwrap().score = 120;
@@ -5599,9 +5715,10 @@ mod tests {
         let mut minus = hsp(20, -1, 0, 180, 20);
         minus.query_end = 20;
         minus.subject_end = 200;
-        minus.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 20)],
-        });
+        minus.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            20,
+        )]));
         let mut second_slot = Some(minus);
         let mut second_list = Some(hsp_chain_new(-1));
         second_list.as_mut().unwrap().score = 20;
@@ -5624,7 +5741,7 @@ mod tests {
         assert_eq!(hsp.subject_end, 200);
         assert_eq!(hsp.query_end, 100);
         assert_eq!(
-            hsp.edit_script.as_ref().unwrap().ops,
+            hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 100)]
         );
         assert_eq!(first.score, 100);
@@ -5860,9 +5977,10 @@ mod tests {
 
         let mut first = hsp(12, 0, 0, 0, 10);
         first.query_frame = 1;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
@@ -5871,14 +5989,17 @@ mod tests {
             }),
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
         let mut second = hsp(10, 0, 12, 12, 8);
         second.query_frame = 1;
         second.query_end = 20;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 8)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            8,
+        )]));
 
         let mut hsp_list = HspList::new(13);
         hsp_list.hsps.push(second);
@@ -5905,7 +6026,7 @@ mod tests {
         assert_eq!(head.hsp.subject_end, 20);
         assert!(head.next.is_none());
         assert_eq!(
-            head.hsp.edit_script.as_ref().unwrap().ops,
+            head.hsp.edit_script.as_ref().unwrap().ops_vec(),
             vec![
                 (GapAlignOpType::Sub, 10),
                 (GapAlignOpType::Ins, 2),
@@ -6341,21 +6462,25 @@ mod tests {
         let mut first = hsp(30, 0, 0, 10, 20);
         first.query_end = 20;
         first.subject_end = 30;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 20)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            20,
+        )]));
 
         let mut second = hsp(20, 0, 15, 40, 15);
         second.query_end = 30;
         second.subject_end = 55;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 15)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            15,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL | 1,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -6366,7 +6491,7 @@ mod tests {
         assert_eq!(second.query_offset, 15);
         assert_eq!(second.subject_offset, 40);
         assert_eq!(
-            second.edit_script.as_ref().unwrap().ops,
+            second.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 15)]
         );
         assert_eq!(
@@ -6380,22 +6505,26 @@ mod tests {
         let mut first = hsp(10, 0, 0, 10, 20);
         first.query_end = 20;
         first.subject_end = 30;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 20)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            20,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: None,
             left_edge: 0,
             right_edge: MAPPER_SPLICE_SIGNAL | 1,
+
+            flags: 0,
         });
 
         let mut second = hsp(30, 0, 15, 40, 15);
         second.query_end = 30;
         second.subject_end = 55;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 15)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            15,
+        )]));
 
         assert_eq!(
             s_find_splice_junctions_for_overlaps(&mut first, &mut second, None, 30, true),
@@ -6405,7 +6534,7 @@ mod tests {
         assert_eq!(first.subject_end, 30);
         assert_eq!(second.query_offset, 15);
         assert_eq!(
-            first.edit_script.as_ref().unwrap().ops,
+            first.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 20)]
         );
         assert_eq!(
@@ -6436,9 +6565,10 @@ mod tests {
         let mut first = hsp(100, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![
@@ -6462,19 +6592,24 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: MAPPER_SPLICE_SIGNAL | 0x03,
+
+            flags: 0,
         });
 
         let mut second = hsp(100, 0, 8, 20, 10);
         second.query_end = 18;
         second.subject_end = 30;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock::default()),
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL | 0x02,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -6485,7 +6620,7 @@ mod tests {
         assert_eq!(first.subject_end, 8);
         assert_eq!(second.query_offset, 8);
         assert_eq!(
-            first.edit_script.as_ref().unwrap().ops,
+            first.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 8)]
         );
         assert_eq!(
@@ -6515,9 +6650,10 @@ mod tests {
         let mut first = hsp(100, 0, 0, 0, 12);
         first.query_end = 12;
         first.subject_end = 12;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 12)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            12,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![
@@ -6536,14 +6672,17 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
 
         let mut second = hsp(100, 0, 8, 20, 10);
         second.query_end = 18;
         second.subject_end = 30;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![JumperEdit {
@@ -6555,6 +6694,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0x02,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -6579,22 +6720,26 @@ mod tests {
         let mut first = hsp(100, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock::default()),
             subject_overhangs: None,
             left_edge: 0,
             right_edge: MAPPER_SPLICE_SIGNAL | 0x03,
+
+            flags: 0,
         });
 
         let mut second = hsp(100, 0, 8, 20, 10);
         second.query_end = 18;
         second.subject_end = 30;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![
@@ -6618,6 +6763,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL | 0x02,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -6628,7 +6775,7 @@ mod tests {
         assert_eq!(second.query_offset, 10);
         assert_eq!(second.subject_offset, 22);
         assert_eq!(
-            second.edit_script.as_ref().unwrap().ops,
+            second.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 8)]
         );
         assert_eq!(
@@ -6658,9 +6805,10 @@ mod tests {
         let mut first = hsp(100, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![JumperEdit {
@@ -6672,14 +6820,17 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: MAPPER_SPLICE_SIGNAL | 0x03,
+
+            flags: 0,
         });
 
         let mut second = hsp(100, 0, 8, 20, 10);
         second.query_end = 18;
         second.subject_end = 30;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
                 edits: vec![JumperEdit {
@@ -6691,6 +6842,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL | 0x02,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -6700,11 +6853,11 @@ mod tests {
         assert_eq!(first.query_end, 10);
         assert_eq!(second.query_offset, 8);
         assert_eq!(
-            first.edit_script.as_ref().unwrap().ops,
+            first.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 10)]
         );
         assert_eq!(
-            second.edit_script.as_ref().unwrap().ops,
+            second.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 10)]
         );
         assert_eq!(
@@ -6725,14 +6878,17 @@ mod tests {
         let mut first = hsp(100, 0, 0, 0, 20);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: None,
             left_edge: 0,
             right_edge: 0x0b,
+
+            flags: 0,
         });
 
         let mut second = hsp(100, 0, 8, 8, 20);
@@ -6740,14 +6896,17 @@ mod tests {
         second.query_end = 20;
         second.subject_offset = 8;
         second.subject_end = 20;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: None,
             left_edge: 0x02,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -6767,16 +6926,14 @@ mod tests {
             0
         );
         assert_eq!(
-            first.edit_script.as_ref().unwrap().ops,
+            first.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 8)]
         );
     }
 
     #[test]
     fn extend_alignment_cleanup_drops_owned_rust_payloads() {
-        let script = crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 4)],
-        };
+        let script = crate::gapinfo::GapEditScript::from_ops(vec![(GapAlignOpType::Sub, 4)]);
         s_extend_alignment_cleanup(Some(vec![0, 1, 2, 3]), Some(()), Some(script), Some(()));
         s_extend_alignment_cleanup::<(), ()>(None, None, None, None);
     }
@@ -6789,16 +6946,18 @@ mod tests {
         let mut first = hsp(10, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
 
         let mut second = hsp(10, 0, 14, 100, 10);
         second.query_end = 24;
         second.subject_end = 110;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
 
         let first_right = [2, 3, 0, 0, 0, 0];
         let second_left = [0, 2, 0, 0, 0, 0];
@@ -6827,7 +6986,7 @@ mod tests {
             0
         );
         assert_eq!(
-            second.edit_script.as_ref().unwrap().ops,
+            second.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 14)]
         );
     }
@@ -6840,16 +6999,18 @@ mod tests {
         let mut first = hsp(10, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
 
         let mut second = hsp(10, 0, 14, 100, 10);
         second.query_end = 24;
         second.subject_end = 110;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
 
         let first_right = [0, 0, 0, 0, 2, 3];
         let second_left = [0, 0, 0, 0, 0, 2];
@@ -6878,7 +7039,7 @@ mod tests {
             0
         );
         assert_eq!(
-            first.edit_script.as_ref().unwrap().ops,
+            first.edit_script.as_ref().unwrap().ops_vec(),
             vec![(GapAlignOpType::Sub, 14)]
         );
     }
@@ -6895,6 +7056,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: 0,
             right_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 7,
+
+            flags: 0,
         });
         let mut second = hsp(10, 0, 14, 100, 10);
         second.query_end = 24;
@@ -6904,6 +7067,8 @@ mod tests {
             subject_overhangs: None,
             left_edge: MAPPER_SPLICE_SIGNAL | MAPPER_EXON | 3,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(
@@ -6991,9 +7156,10 @@ mod tests {
         let mut first = hsp(10, 0, 0, 0, 10);
         first.query_end = 10;
         first.subject_end = 10;
-        first.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        first.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock::default()),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
@@ -7002,14 +7168,17 @@ mod tests {
             }),
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
 
         let mut second = hsp(10, 0, 14, 100, 10);
         second.query_end = 24;
         second.subject_end = 110;
-        second.edit_script = Some(crate::gapinfo::GapEditScript {
-            ops: vec![(GapAlignOpType::Sub, 10)],
-        });
+        second.edit_script = Some(crate::gapinfo::GapEditScript::from_ops(vec![(
+            GapAlignOpType::Sub,
+            10,
+        )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock::default()),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
@@ -7018,6 +7187,8 @@ mod tests {
             }),
             left_edge: 0,
             right_edge: 0,
+
+            flags: 0,
         });
 
         assert_eq!(

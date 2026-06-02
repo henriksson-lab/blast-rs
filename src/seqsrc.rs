@@ -4,7 +4,24 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crate::util::SSeqRange;
+use crate::util::{BlastSequenceBlk, SSeqRange};
+
+/// Direct Rust mirror of NCBI `EBlastEncoding` (`blast_encoding.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EBlastEncoding {
+    Protein = 0,
+    Nucleotide = 1,
+    Ncbi4na = 2,
+    Ncbi2na = 3,
+    Error = 255,
+}
+
+impl Default for EBlastEncoding {
+    fn default() -> Self {
+        Self::Protein
+    }
+}
 
 /// Encoding for sequence retrieval.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -17,12 +34,77 @@ pub enum SeqEncoding {
     Ncbi4na,
     /// NCBI2na encoding
     Ncbi2na,
+    /// Invalid encoding sentinel.
+    Error,
+}
+
+impl From<EBlastEncoding> for SeqEncoding {
+    fn from(value: EBlastEncoding) -> Self {
+        match value {
+            EBlastEncoding::Protein => SeqEncoding::Protein,
+            EBlastEncoding::Nucleotide => SeqEncoding::Nucleotide,
+            EBlastEncoding::Ncbi4na => SeqEncoding::Ncbi4na,
+            EBlastEncoding::Ncbi2na => SeqEncoding::Ncbi2na,
+            EBlastEncoding::Error => SeqEncoding::Error,
+        }
+    }
+}
+
+impl From<SeqEncoding> for EBlastEncoding {
+    fn from(value: SeqEncoding) -> Self {
+        match value {
+            SeqEncoding::Protein => EBlastEncoding::Protein,
+            SeqEncoding::Nucleotide => EBlastEncoding::Nucleotide,
+            SeqEncoding::Ncbi4na => EBlastEncoding::Ncbi4na,
+            SeqEncoding::Ncbi2na => EBlastEncoding::Ncbi2na,
+            SeqEncoding::Error => EBlastEncoding::Error,
+        }
+    }
 }
 
 /// Arguments for fetching a sequence.
+#[derive(Debug, Clone, PartialEq)]
 pub struct GetSeqArg {
     pub oid: i32,
     pub encoding: SeqEncoding,
+    pub reset_ranges: bool,
+    pub check_oid_exclusion: bool,
+    pub ranges: Option<BlastSeqSrcSetRangesArg>,
+}
+
+impl Default for GetSeqArg {
+    fn default() -> Self {
+        Self {
+            oid: 0,
+            encoding: SeqEncoding::Protein,
+            reset_ranges: false,
+            check_oid_exclusion: false,
+            ranges: None,
+        }
+    }
+}
+
+/// Direct Rust mirror of NCBI `BlastSeqSrcGetSeqArg` (`blast_seqsrc.h`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlastSeqSrcGetSeqArg {
+    pub oid: i32,
+    pub encoding: EBlastEncoding,
+    pub reset_ranges: bool,
+    pub check_oid_exclusion: bool,
+    pub seq: Option<BlastSequenceBlk>,
+    pub ranges: Option<BlastSeqSrcSetRangesArg>,
+}
+
+impl BlastSeqSrcGetSeqArg {
+    pub fn as_get_seq_arg(&self) -> GetSeqArg {
+        GetSeqArg {
+            oid: self.oid,
+            encoding: self.encoding.into(),
+            reset_ranges: self.reset_ranges,
+            check_oid_exclusion: self.check_oid_exclusion,
+            ranges: self.ranges.clone(),
+        }
+    }
 }
 
 /// Fetched sequence data.
@@ -97,6 +179,63 @@ pub trait BlastSeqSource: Send + Sync {
 
     /// Fetch sequence data for the given OID with the specified encoding.
     fn get_sequence(&self, arg: &GetSeqArg) -> Option<SeqData>;
+
+    /// Fetch sequence data through NCBI's `BlastSeqSrcGetSeqArg` object.
+    fn get_sequence_blk(&self, arg: &mut BlastSeqSrcGetSeqArg) -> Option<SeqData> {
+        if arg.reset_ranges && !self.is_protein() {
+            arg.ranges = None;
+        }
+        let data = self.get_sequence(&arg.as_get_seq_arg())?;
+        let copied = matches!(
+            arg.encoding,
+            EBlastEncoding::Nucleotide | EBlastEncoding::Ncbi4na
+        );
+        let has_sentinel_byte = arg.encoding == EBlastEncoding::Nucleotide;
+
+        let mut seq = arg.seq.take().unwrap_or_default();
+        seq.sequence_start = None;
+        seq.sequence = None;
+        seq.sequence_start_allocated = false;
+        seq.sequence_allocated = false;
+
+        if copied {
+            seq.sequence_start_allocated = true;
+            seq.sequence_start = Some(data.sequence.clone());
+            seq.sequence = if has_sentinel_byte {
+                Some(data.sequence.get(1..).unwrap_or(&[]).to_vec())
+            } else {
+                seq.sequence_start.clone()
+            };
+        } else {
+            seq.sequence_allocated = true;
+            seq.sequence = Some(data.sequence.clone());
+        }
+
+        seq.sequence_start_nomask = seq.sequence_start.clone();
+        seq.sequence_nomask = seq.sequence.clone();
+        seq.nomask_allocated = false;
+        seq.length = data.length;
+        seq.oid = arg.oid;
+        seq.bases_offset = 0;
+        arg.seq = Some(seq);
+        Some(data)
+    }
+
+    /// Release a sequence obtained through `get_sequence_blk`.
+    fn release_sequence(&self, arg: &mut BlastSeqSrcGetSeqArg) {
+        if let Some(seq) = arg.seq.as_mut() {
+            if seq.sequence_start_allocated {
+                seq.sequence_start = None;
+                seq.sequence_start_allocated = false;
+                seq.sequence = None;
+            }
+            if seq.sequence_allocated {
+                seq.sequence = None;
+                seq.sequence_allocated = false;
+            }
+        }
+        arg.ranges = None;
+    }
 
     /// Iterator over OIDs.
     fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_>;
@@ -456,9 +595,19 @@ pub fn blast_seq_src_get_is_prot(seq_src: &dyn BlastSeqSource) -> bool {
 /// Port of NCBI `BlastSeqSrcGetSequence` (`blast_seqsrc.c:271`).
 pub fn blast_seq_src_get_sequence(
     seq_src: Option<&dyn BlastSeqSource>,
-    getseq_arg: Option<&GetSeqArg>,
+    getseq_arg: Option<&mut BlastSeqSrcGetSeqArg>,
 ) -> Option<SeqData> {
-    seq_src?.get_sequence(getseq_arg?)
+    seq_src?.get_sequence_blk(getseq_arg?)
+}
+
+/// Port of NCBI `BlastSeqSrcReleaseSequence` (`blast_seqsrc.c:290`).
+pub fn blast_seq_src_release_sequence(
+    seq_src: Option<&dyn BlastSeqSource>,
+    getseq_arg: Option<&mut BlastSeqSrcGetSeqArg>,
+) {
+    if let (Some(seq_src), Some(getseq_arg)) = (seq_src, getseq_arg) {
+        seq_src.release_sequence(getseq_arg);
+    }
 }
 
 /// Port of NCBI `BlastSeqSrcGetSeqLen` (`blast_seqsrc.c:281`).
@@ -487,6 +636,7 @@ pub fn blast_seq_src_get_gis(seq_src: &dyn BlastSeqSource, oid: i32) -> Option<B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     struct MockSeqSrc {
         seqs: Vec<Vec<u8>>,
@@ -500,6 +650,12 @@ mod tests {
         ranges: Option<Vec<SSeqRange>>,
         gis: Vec<i32>,
         reset_count: i32,
+    }
+
+    struct RecordingSeqSrc {
+        seqs: Vec<Vec<u8>>,
+        is_protein: bool,
+        last_arg: Mutex<Option<GetSeqArg>>,
     }
 
     impl BlastSeqSource for MockSeqSrc {
@@ -608,6 +764,45 @@ mod tests {
         }
     }
 
+    impl BlastSeqSource for RecordingSeqSrc {
+        fn num_seqs(&self) -> i32 {
+            self.seqs.len() as i32
+        }
+        fn total_length(&self) -> i64 {
+            self.seqs.iter().map(|s| s.len() as i64).sum()
+        }
+        fn max_seq_len(&self) -> i32 {
+            self.seqs.iter().map(|s| s.len() as i32).max().unwrap_or(0)
+        }
+        fn avg_seq_len(&self) -> i32 {
+            if self.seqs.is_empty() {
+                0
+            } else {
+                (self.total_length() / self.num_seqs() as i64) as i32
+            }
+        }
+        fn name(&self) -> &str {
+            "recording"
+        }
+        fn is_protein(&self) -> bool {
+            self.is_protein
+        }
+        fn seq_len(&self, oid: i32) -> i32 {
+            self.seqs[oid as usize].len() as i32
+        }
+        fn get_sequence(&self, arg: &GetSeqArg) -> Option<SeqData> {
+            *self.last_arg.lock().unwrap() = Some(arg.clone());
+            let seq = self.seqs.get(arg.oid as usize)?;
+            Some(SeqData {
+                sequence: seq.clone(),
+                length: seq.len() as i32,
+            })
+        }
+        fn iter_oids(&self) -> Box<dyn Iterator<Item = i32> + '_> {
+            Box::new(0..self.num_seqs())
+        }
+    }
+
     fn mock_seqsrc_constructor(_: Option<Box<dyn Any + Send>>) -> Option<Arc<dyn BlastSeqSource>> {
         Some(Arc::new(MockSeqSrc {
             seqs: vec![vec![1, 2, 3], vec![4, 5]],
@@ -666,6 +861,7 @@ mod tests {
             .get_sequence(&GetSeqArg {
                 oid: 0,
                 encoding: SeqEncoding::Protein,
+                ..GetSeqArg::default()
             })
             .unwrap();
         assert_eq!(data.length, 4);
@@ -687,14 +883,133 @@ mod tests {
         assert!(!blast_seq_src_get_is_prot(&src));
         assert_eq!(blast_seq_src_get_seq_len(&src, 1), 2);
 
-        let arg = GetSeqArg {
+        let mut arg = BlastSeqSrcGetSeqArg {
             oid: 0,
-            encoding: SeqEncoding::Protein,
+            encoding: EBlastEncoding::Protein,
+            ..BlastSeqSrcGetSeqArg::default()
         };
-        let data = blast_seq_src_get_sequence(Some(&src), Some(&arg)).expect("sequence");
+        let data = blast_seq_src_get_sequence(Some(&src), Some(&mut arg)).expect("sequence");
         assert_eq!(data.sequence, vec![0, 1, 2, 3]);
-        assert!(blast_seq_src_get_sequence(None, Some(&arg)).is_none());
+        assert_eq!(arg.seq.as_ref().map(|seq| seq.length), Some(4));
+        blast_seq_src_release_sequence(Some(&src), Some(&mut arg));
+        assert!(arg.seq.is_some());
+        assert!(arg.seq.as_ref().unwrap().sequence.is_none());
+        assert!(blast_seq_src_get_sequence(None, Some(&mut arg)).is_none());
         assert!(blast_seq_src_get_sequence(Some(&src), None).is_none());
+    }
+
+    #[test]
+    fn translated_seqsrc_get_sequence_blk_preserves_encoding_and_block_layout() {
+        assert_eq!(SeqEncoding::from(EBlastEncoding::Error), SeqEncoding::Error);
+        assert_eq!(
+            EBlastEncoding::from(SeqEncoding::Error),
+            EBlastEncoding::Error
+        );
+
+        let src = MockSeqSrc {
+            seqs: vec![vec![99, 1, 2, 3], vec![4, 5, 6]],
+        };
+        let mut nucleotide_arg = BlastSeqSrcGetSeqArg {
+            oid: 0,
+            encoding: EBlastEncoding::Nucleotide,
+            ..BlastSeqSrcGetSeqArg::default()
+        };
+        blast_seq_src_get_sequence(Some(&src), Some(&mut nucleotide_arg)).expect("sequence");
+        let seq = nucleotide_arg.seq.as_ref().unwrap();
+        assert_eq!(seq.sequence_start, Some(vec![99, 1, 2, 3]));
+        assert_eq!(seq.sequence, Some(vec![1, 2, 3]));
+        assert!(seq.sequence_start_allocated);
+        assert!(!seq.sequence_allocated);
+
+        let mut ncbi4na_arg = BlastSeqSrcGetSeqArg {
+            oid: 1,
+            encoding: EBlastEncoding::Ncbi4na,
+            ..BlastSeqSrcGetSeqArg::default()
+        };
+        blast_seq_src_get_sequence(Some(&src), Some(&mut ncbi4na_arg)).expect("sequence");
+        let seq = ncbi4na_arg.seq.as_ref().unwrap();
+        assert_eq!(seq.sequence_start, Some(vec![4, 5, 6]));
+        assert_eq!(seq.sequence, Some(vec![4, 5, 6]));
+        assert!(seq.sequence_start_allocated);
+        assert!(!seq.sequence_allocated);
+
+        let mut protein_arg = BlastSeqSrcGetSeqArg {
+            oid: 1,
+            encoding: EBlastEncoding::Protein,
+            ..BlastSeqSrcGetSeqArg::default()
+        };
+        blast_seq_src_get_sequence(Some(&src), Some(&mut protein_arg)).expect("sequence");
+        let seq = protein_arg.seq.as_ref().unwrap();
+        assert_eq!(seq.sequence_start, None);
+        assert_eq!(seq.sequence, Some(vec![4, 5, 6]));
+        assert!(!seq.sequence_start_allocated);
+        assert!(seq.sequence_allocated);
+
+        blast_seq_src_release_sequence(Some(&src), Some(&mut ncbi4na_arg));
+        let seq = ncbi4na_arg.seq.as_ref().unwrap();
+        assert!(seq.sequence_start.is_none());
+        assert!(seq.sequence.is_none());
+        assert!(!seq.sequence_start_allocated);
+        assert!(ncbi4na_arg.ranges.is_none());
+    }
+
+    #[test]
+    fn translated_seqsrc_get_sequence_blk_reset_ranges_before_fetch_for_nucleotide_sources() {
+        let src = RecordingSeqSrc {
+            seqs: vec![vec![0, 1, 2]],
+            is_protein: false,
+            last_arg: Mutex::new(None),
+        };
+        let mut arg = BlastSeqSrcGetSeqArg {
+            oid: 0,
+            encoding: EBlastEncoding::Nucleotide,
+            reset_ranges: true,
+            ranges: Some(BlastSeqSrcSetRangesArg {
+                oid: 0,
+                capacity: 1,
+                num_ranges: 1,
+                ranges: vec![0, 2],
+            }),
+            ..BlastSeqSrcGetSeqArg::default()
+        };
+        blast_seq_src_get_sequence(Some(&src), Some(&mut arg)).expect("sequence");
+        assert!(arg.ranges.is_none());
+        assert!(src
+            .last_arg
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .ranges
+            .is_none());
+
+        let protein_src = RecordingSeqSrc {
+            seqs: vec![vec![0, 1, 2]],
+            is_protein: true,
+            last_arg: Mutex::new(None),
+        };
+        let mut protein_arg = BlastSeqSrcGetSeqArg {
+            oid: 0,
+            encoding: EBlastEncoding::Protein,
+            reset_ranges: true,
+            ranges: Some(BlastSeqSrcSetRangesArg {
+                oid: 0,
+                capacity: 1,
+                num_ranges: 1,
+                ranges: vec![0, 2],
+            }),
+            ..BlastSeqSrcGetSeqArg::default()
+        };
+        blast_seq_src_get_sequence(Some(&protein_src), Some(&mut protein_arg)).expect("sequence");
+        assert!(protein_arg.ranges.is_some());
+        assert!(protein_src
+            .last_arg
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .ranges
+            .is_some());
     }
 
     fn test_hsp(
@@ -776,6 +1091,7 @@ mod tests {
             let data = src.get_sequence(&GetSeqArg {
                 oid: *oid,
                 encoding: SeqEncoding::Nucleotide,
+                ..GetSeqArg::default()
             });
             assert!(data.is_some(), "Failed to get sequence for OID {}", oid);
         }
@@ -820,33 +1136,38 @@ mod tests {
         assert!(src
             .get_sequence(&GetSeqArg {
                 oid: 0,
-                encoding: SeqEncoding::Nucleotide
+                encoding: SeqEncoding::Nucleotide,
+                ..GetSeqArg::default()
             })
             .is_some());
         assert!(src
             .get_sequence(&GetSeqArg {
                 oid: 1,
-                encoding: SeqEncoding::Nucleotide
+                encoding: SeqEncoding::Nucleotide,
+                ..GetSeqArg::default()
             })
             .is_some());
         // Out of bounds
         assert!(src
             .get_sequence(&GetSeqArg {
                 oid: 2,
-                encoding: SeqEncoding::Nucleotide
+                encoding: SeqEncoding::Nucleotide,
+                ..GetSeqArg::default()
             })
             .is_none());
         assert!(src
             .get_sequence(&GetSeqArg {
                 oid: 99,
-                encoding: SeqEncoding::Nucleotide
+                encoding: SeqEncoding::Nucleotide,
+                ..GetSeqArg::default()
             })
             .is_none());
         // Negative OID (wraps to large usize, so should be None)
         assert!(src
             .get_sequence(&GetSeqArg {
                 oid: -1,
-                encoding: SeqEncoding::Nucleotide
+                encoding: SeqEncoding::Nucleotide,
+                ..GetSeqArg::default()
             })
             .is_none());
     }

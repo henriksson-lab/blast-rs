@@ -381,8 +381,12 @@ fn blast_prelim_edit_block_to_gap_edit_script(
     }
 
     if merge_ops {
-        if let Some(last) = esp.ops.last_mut() {
-            last.1 += fwd_prelim_tback.edit_ops.last().unwrap().num;
+        if let Some(last_index) = esp.len().checked_sub(1) {
+            let (_, count) = esp.get(last_index).unwrap();
+            esp.set_num(
+                last_index,
+                count + fwd_prelim_tback.edit_ops.last().unwrap().num,
+            );
         }
     }
 
@@ -475,41 +479,45 @@ fn greedy_edit_script_from_extensions(
 
 // NCBI: s_RebuildEditScript (blast_gapalign.c:2635).
 fn s_rebuild_edit_script(esp: &mut GapEditScript) {
-    let len = esp.ops.len();
     let mut j: isize = -1;
-    for i in 0..len {
-        let (op, count) = esp.ops[i];
-        if count == 0 {
+    let old_size = esp.size.max(0) as usize;
+    for i in 0..old_size {
+        if esp.num[i] == 0 {
             continue;
         }
-        if j >= 0 && op == esp.ops[j as usize].0 {
-            esp.ops[j as usize].1 += count;
+        if j >= 0 && esp.op_type[i] == esp.op_type[j as usize] {
+            esp.num[j as usize] += esp.num[i];
         } else if j == -1
-            || op == GapAlignOpType::Sub
-            || esp.ops[j as usize].0 == GapAlignOpType::Sub
+            || esp.op_type[i] == GapAlignOpType::Sub
+            || esp.op_type[j as usize] == GapAlignOpType::Sub
         {
             j += 1;
-            esp.ops[j as usize] = (op, count);
+            esp.op_type[j as usize] = esp.op_type[i];
+            esp.num[j as usize] = esp.num[i];
         } else {
-            let d = esp.ops[j as usize].1 - count;
+            let d = esp.num[j as usize] - esp.num[i];
             if d > 0 {
-                esp.ops[j as usize - 1].1 += count;
-                esp.ops[j as usize].1 = d;
+                esp.num[j as usize - 1] += esp.num[i];
+                esp.num[j as usize] = d;
             } else if d < 0 {
                 if j == 0 && i > 0 {
-                    esp.ops[j as usize].0 = GapAlignOpType::Sub;
+                    esp.op_type[j as usize] = GapAlignOpType::Sub;
                     j += 1;
                 } else {
-                    esp.ops[j as usize - 1].1 += esp.ops[j as usize].1;
+                    esp.num[j as usize - 1] += esp.num[j as usize];
                 }
-                esp.ops[j as usize] = (op, -d);
+                esp.num[j as usize] = -d;
+                esp.op_type[j as usize] = esp.op_type[i];
             } else {
-                esp.ops[j as usize - 1].1 += esp.ops[j as usize].1;
+                esp.num[j as usize - 1] += esp.num[j as usize];
                 j -= 1;
             }
         }
     }
-    esp.ops.truncate((j + 1).max(0) as usize);
+    esp.size = (j + 1).max(0) as i32;
+    let new_size = esp.size as usize;
+    esp.op_type.truncate(new_size);
+    esp.num.truncate(new_size);
 }
 
 // NCBI: s_UpdateEditScript (blast_gapalign.c:2573).
@@ -530,38 +538,36 @@ fn s_update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
             if op < 0 {
                 return;
             }
-            match esp.ops[op as usize].0 {
+            match esp.op_type[op as usize] {
                 GapAlignOpType::Sub => {
-                    qd -= esp.ops[op as usize].1;
-                    sd -= esp.ops[op as usize].1;
+                    qd -= esp.num[op as usize];
+                    sd -= esp.num[op as usize];
                 }
-                GapAlignOpType::Ins => qd -= esp.ops[op as usize].1,
-                GapAlignOpType::Del => sd -= esp.ops[op as usize].1,
+                GapAlignOpType::Ins => qd -= esp.num[op as usize],
+                GapAlignOpType::Del => sd -= esp.num[op as usize],
                 _ => {}
             }
             if qd <= 0 && sd <= 0 {
                 break;
             }
         }
-        esp.ops[op as usize].1 = -qd.max(sd);
+        esp.num[op as usize] = -qd.max(sd);
         // C: `esp->op_type[op++] = eGapAlignSub;` — stamp Sub at the old
         // op, then advance past it for the zero-out loop.
-        esp.ops[op as usize].0 = GapAlignOpType::Sub;
+        esp.op_type[op as usize] = GapAlignOpType::Sub;
         let mut next = op as usize + 1;
         while next < pos.saturating_sub(1) {
-            esp.ops[next].1 = 0;
+            esp.num[next] = 0;
             next += 1;
         }
-        esp.ops[pos].1 += bf;
+        esp.num[pos] += bf;
         qd -= sd;
-        if pos > 0 {
-            esp.ops[pos - 1].0 = if qd > 0 {
-                GapAlignOpType::Del
-            } else {
-                GapAlignOpType::Ins
-            };
-            esp.ops[pos - 1].1 = qd.unsigned_abs() as i32;
-        }
+        esp.op_type[pos - 1] = if qd > 0 {
+            GapAlignOpType::Del
+        } else {
+            GapAlignOpType::Ins
+        };
+        esp.num[pos - 1] = qd.unsigned_abs() as i32;
     }
 
     if af > 0 {
@@ -569,41 +575,39 @@ fn s_update_edit_script(esp: &mut GapEditScript, pos: usize, bf: i32, af: i32) {
         let (mut qd, mut sd) = (af, af);
         loop {
             op += 1;
-            if op as usize >= esp.ops.len() {
+            if op >= esp.size {
                 return;
             }
-            match esp.ops[op as usize].0 {
+            match esp.op_type[op as usize] {
                 GapAlignOpType::Sub => {
-                    qd -= esp.ops[op as usize].1;
-                    sd -= esp.ops[op as usize].1;
+                    qd -= esp.num[op as usize];
+                    sd -= esp.num[op as usize];
                 }
-                GapAlignOpType::Ins => qd -= esp.ops[op as usize].1,
-                GapAlignOpType::Del => sd -= esp.ops[op as usize].1,
+                GapAlignOpType::Ins => qd -= esp.num[op as usize],
+                GapAlignOpType::Del => sd -= esp.num[op as usize],
                 _ => {}
             }
             if qd <= 0 && sd <= 0 {
                 break;
             }
         }
-        esp.ops[op as usize].1 = -qd.max(sd);
+        esp.num[op as usize] = -qd.max(sd);
         // C: `esp->op_type[op--] = eGapAlignSub;` — stamp Sub at op,
         // then step back through the gap-zeroing loop.
-        esp.ops[op as usize].0 = GapAlignOpType::Sub;
+        esp.op_type[op as usize] = GapAlignOpType::Sub;
         let mut prev = op as usize - 1;
         while prev > pos + 1 {
-            esp.ops[prev].1 = 0;
+            esp.num[prev] = 0;
             prev -= 1;
         }
-        esp.ops[pos].1 += af;
+        esp.num[pos] += af;
         qd -= sd;
-        if pos + 1 < esp.ops.len() {
-            esp.ops[pos + 1].0 = if qd > 0 {
-                GapAlignOpType::Del
-            } else {
-                GapAlignOpType::Ins
-            };
-            esp.ops[pos + 1].1 = qd.unsigned_abs() as i32;
-        }
+        esp.op_type[pos + 1] = if qd > 0 {
+            GapAlignOpType::Del
+        } else {
+            GapAlignOpType::Ins
+        };
+        esp.num[pos + 1] = qd.unsigned_abs() as i32;
     }
 }
 
@@ -612,13 +616,14 @@ fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
     let (mut q1, mut s1) = (0usize, 0usize);
     let qf = query.len();
     let sf = subject.len();
-    for i in 0..esp.ops.len() {
-        if esp.ops[i].1 == 0 {
+    let old_size = esp.size.max(0) as usize;
+    for i in 0..old_size {
+        if esp.num[i] == 0 {
             continue;
         }
-        match esp.ops[i].0 {
+        match esp.op_type[i] {
             GapAlignOpType::Sub => {
-                if esp.ops[i].1 >= 12 {
+                if esp.num[i] >= 12 {
                     let mut nm1 = 1i32;
                     if i > 0 {
                         while nm1 as usize <= q1
@@ -628,10 +633,10 @@ fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
                             nm1 += 1;
                         }
                     }
-                    q1 += esp.ops[i].1 as usize;
-                    s1 += esp.ops[i].1 as usize;
+                    q1 += esp.num[i] as usize;
+                    s1 += esp.num[i] as usize;
                     let mut nm2 = 0i32;
-                    if i + 1 < esp.ops.len() {
+                    if i < old_size - 1 {
                         while q1 + 1 < qf && s1 + 1 < sf {
                             let is_match = query[q1] == subject[s1];
                             q1 += 1;
@@ -649,43 +654,44 @@ fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
                     q1 = q1.saturating_sub(1);
                     s1 = s1.saturating_sub(1);
                 } else {
-                    q1 += esp.ops[i].1 as usize;
-                    s1 += esp.ops[i].1 as usize;
+                    q1 += esp.num[i] as usize;
+                    s1 += esp.num[i] as usize;
                 }
             }
-            GapAlignOpType::Ins => q1 += esp.ops[i].1 as usize,
-            GapAlignOpType::Del => s1 += esp.ops[i].1 as usize,
+            GapAlignOpType::Ins => q1 += esp.num[i] as usize,
+            GapAlignOpType::Del => s1 += esp.num[i] as usize,
             _ => {}
         }
     }
     s_rebuild_edit_script(esp);
 
     let (mut q, mut s) = (0usize, 0usize);
-    for i in 0..esp.ops.len() {
-        if esp.ops[i].0 == GapAlignOpType::Sub {
-            q += esp.ops[i].1.max(0) as usize;
-            s += esp.ops[i].1.max(0) as usize;
+    let old_size = esp.size.max(0) as usize;
+    for i in 0..old_size {
+        if esp.op_type[i] == GapAlignOpType::Sub {
+            q += esp.num[i].max(0) as usize;
+            s += esp.num[i].max(0) as usize;
             continue;
         }
-        if i > 1 && esp.ops[i].0 != esp.ops[i - 2].0 && esp.ops[i - 2].1 > 0 {
-            let mut d = esp.ops[i].1 + esp.ops[i - 1].1 + esp.ops[i - 2].1;
+        if i > 1 && esp.op_type[i] != esp.op_type[i - 2] && esp.num[i - 2] > 0 {
+            let mut d = esp.num[i] + esp.num[i - 1] + esp.num[i - 2];
             if d == 3 {
-                esp.ops[i - 2].1 = 0;
-                esp.ops[i - 1].1 = 2;
-                esp.ops[i].1 = 0;
-                if esp.ops[i].0 == GapAlignOpType::Ins {
+                esp.num[i - 2] = 0;
+                esp.num[i - 1] = 2;
+                esp.num[i] = 0;
+                if esp.op_type[i] == GapAlignOpType::Ins {
                     q += 1;
                 } else {
                     s += 1;
                 }
             } else if d < 12 {
-                let slide = esp.ops[i].1.min(esp.ops[i - 2].1);
-                let middle = esp.ops[i - 1].1.max(0) as usize;
+                let slide = esp.num[i].min(esp.num[i - 2]);
+                let middle = esp.num[i - 1].max(0) as usize;
                 q = q.saturating_sub(middle);
                 s = s.saturating_sub(middle);
                 let mut q1 = q;
                 let mut s1 = s;
-                if esp.ops[i].0 == GapAlignOpType::Ins {
+                if esp.op_type[i] == GapAlignOpType::Ins {
                     s = s.saturating_sub(slide.max(0) as usize);
                 } else {
                     q = q.saturating_sub(slide.max(0) as usize);
@@ -713,18 +719,18 @@ fn s_reduce_gaps(esp: &mut GapEditScript, query: &[u8], subject: &[u8]) {
                 }
                 d = slide;
                 if nm2 >= nm1 - d {
-                    esp.ops[i - 2].1 -= d;
-                    esp.ops[i - 1].1 += d;
-                    esp.ops[i].1 -= d;
+                    esp.num[i - 2] -= d;
+                    esp.num[i - 1] += d;
+                    esp.num[i] -= d;
                 } else {
                     q = q1;
                     s = s1;
                 }
             }
         }
-        match esp.ops[i].0 {
-            GapAlignOpType::Ins => q += esp.ops[i].1.max(0) as usize,
-            GapAlignOpType::Del => s += esp.ops[i].1.max(0) as usize,
+        match esp.op_type[i] {
+            GapAlignOpType::Ins => q += esp.num[i].max(0) as usize,
+            GapAlignOpType::Del => s += esp.num[i].max(0) as usize,
             _ => {}
         }
     }
@@ -1175,7 +1181,7 @@ mod tests {
         assert_eq!(score, 8);
         assert_eq!((qs, qe), (0, 8));
         assert_eq!((ss, se), (0, 8));
-        assert_eq!(esp.ops, vec![(GapAlignOpType::Sub, 8)]);
+        assert_eq!(esp.ops_vec(), vec![(GapAlignOpType::Sub, 8)]);
     }
 
     #[test]
@@ -1187,7 +1193,7 @@ mod tests {
         .to_vec();
         let result = greedy_align(&q, &s, 10, 10, 1, -2, 20).expect("greedy gap");
         assert!(result.0 > 0);
-        assert!(!result.5.ops.is_empty());
+        assert!(!result.5.is_empty());
         assert!(result.2 > result.1);
         assert!(result.4 > result.3);
     }

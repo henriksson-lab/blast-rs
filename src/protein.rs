@@ -3,7 +3,11 @@
 
 #[cfg(test)]
 use crate::encoding::ncbistdaa_to_aminoacid_char;
-use crate::gapinfo::{GapAlignOpType, GapEditScript};
+use crate::gapinfo::{
+    blast_prelim_edit_block_to_gap_edit_script, gap_prelim_edit_block_add,
+    gap_prelim_edit_block_new, GapAlignOpType, GapEditScript, GapPrelimEditBlock,
+    GapStateArrayStruct, JumperGapAlign,
+};
 use crate::matrix::AA_SIZE;
 use crate::stat::MININT;
 use std::cell::RefCell;
@@ -18,6 +22,76 @@ use std::cell::RefCell;
 struct ProteinDpScratch {
     sa: Vec<GapDP>,
     script_pool: Vec<Vec<u8>>,
+    row_starts: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SGreedyAlignMem {
+    _private: (),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ChainingStruct {
+    _private: (),
+}
+
+/// NCBI `BlastGapAlignStruct` (`blast_gapalign.h`).
+///
+/// This is intentionally shaped like the C workspace, including members that
+/// current Rust callers do not yet exercise. `sbp` is present as an owned
+/// optional score-block clone/handle; the faithful long-term port should pass
+/// the live score block through this member instead of side channels.
+#[derive(Debug, Clone)]
+pub struct BlastGapAlignStruct {
+    pub position_based: bool,
+    pub state_struct: Option<Box<GapStateArrayStruct>>,
+    pub edit_script: Option<GapEditScript>,
+    pub fwd_prelim_tback: Option<GapPrelimEditBlock>,
+    pub rev_prelim_tback: Option<GapPrelimEditBlock>,
+    pub greedy_align_mem: Option<SGreedyAlignMem>,
+    pub dp_mem: Vec<GapDP>,
+    pub dp_mem_alloc: i32,
+    pub sbp: Option<crate::stat::BlastScoreBlk>,
+    pub gap_x_dropoff: i32,
+    pub max_mismatches: i32,
+    pub mismatch_window: i32,
+    pub query_start: i32,
+    pub query_stop: i32,
+    pub subject_start: i32,
+    pub subject_stop: i32,
+    pub greedy_query_seed_start: i32,
+    pub greedy_subject_seed_start: i32,
+    pub score: i32,
+    pub jumper: Option<Box<JumperGapAlign>>,
+    pub chaining: Option<Box<ChainingStruct>>,
+}
+
+impl Default for BlastGapAlignStruct {
+    fn default() -> Self {
+        Self {
+            position_based: false,
+            state_struct: None,
+            edit_script: None,
+            fwd_prelim_tback: Some(gap_prelim_edit_block_new()),
+            rev_prelim_tback: Some(gap_prelim_edit_block_new()),
+            greedy_align_mem: None,
+            dp_mem: Vec::new(),
+            dp_mem_alloc: 0,
+            sbp: None,
+            gap_x_dropoff: 0,
+            max_mismatches: 0,
+            mismatch_window: 0,
+            query_start: 0,
+            query_stop: 0,
+            subject_start: 0,
+            subject_stop: 0,
+            greedy_query_seed_start: 0,
+            greedy_subject_seed_start: 0,
+            score: 0,
+            jumper: None,
+            chaining: None,
+        }
+    }
 }
 
 thread_local! {
@@ -209,11 +283,11 @@ pub struct ProteinGappedResult {
     pub edit_script: GapEditScript,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[allow(dead_code)]
-struct GapDP {
-    best: i32,
-    best_gap: i32,
+pub struct GapDP {
+    pub best: i32,
+    pub best_gap: i32,
 }
 
 // NCBI's `eGapAlignOpType` enum values from `gapinfo.h:44`. These also
@@ -364,10 +438,14 @@ fn protein_align_ex_scored_inner(
 
     let pool = &mut scratch.script_pool;
     let mut scripts: Vec<Vec<u8>> = Vec::with_capacity(m + 1);
+    let mut row_starts = std::mem::take(&mut scratch.row_starts);
+    row_starts.clear();
+    row_starts.reserve(m + 1);
     let mut first_row = pool.pop().unwrap_or_default();
     first_row.clear();
     first_row.resize(b_size, SCRIPT_GAP_IN_A);
     scripts.push(first_row);
+    row_starts.push(0);
 
     let mut best_score = 0i32;
     let mut first_b = 0usize;
@@ -382,9 +460,10 @@ fn protein_align_ex_scored_inner(
         let a_letter = a[a_idx];
         let query_pos = query_offset + a_idx;
 
+        let row_start = first_b;
         let mut row_script = pool.pop().unwrap_or_default();
         row_script.clear();
-        row_script.resize(b_size + extra + 10, 0);
+        row_script.resize((b_size - row_start) + extra + 10, 0);
         let mut sc = MININT;
         let mut sgr = MININT;
         let mut last_b = first_b;
@@ -443,8 +522,9 @@ fn protein_align_ex_scored_inner(
                 sa[bi].best = sc;
             }
             sc = next_sc;
-            if bi < row_script.len() {
-                row_script[bi] = script;
+            let script_idx = bi.saturating_sub(row_start);
+            if script_idx < row_script.len() {
+                row_script[script_idx] = script;
             }
         }
 
@@ -452,6 +532,7 @@ fn protein_align_ex_scored_inner(
             // NCBI breaks here too. Push the row_script and exit the outer
             // loop so traceback can find the path that ended in this row.
             scripts.push(row_script);
+            row_starts.push(row_start);
             break;
         }
 
@@ -479,15 +560,17 @@ fn protein_align_ex_scored_inner(
                     best: sgr,
                     best_gap: sgr - gap_oe,
                 };
-                if b_size >= row_script.len() {
-                    row_script.resize(b_size + 1, 0);
+                let script_idx = b_size.saturating_sub(row_start);
+                if script_idx >= row_script.len() {
+                    row_script.resize(script_idx + 1, 0);
                 }
-                row_script[b_size] = SCRIPT_GAP_IN_A;
+                row_script[script_idx] = SCRIPT_GAP_IN_A;
                 sgr -= gap_extend;
                 b_size += 1;
             }
         }
         scripts.push(row_script);
+        row_starts.push(row_start);
         if b_size <= n {
             if b_size >= sa.len() {
                 sa.resize(
@@ -512,10 +595,18 @@ fn protein_align_ex_scored_inner(
     let mut cur_script = SCRIPT_SUB;
 
     while ai > 0 || bi > 0 {
-        if ai >= scripts.len() || bi >= scripts[ai].len() {
+        if ai >= scripts.len() || ai >= row_starts.len() {
             break;
         }
-        let s = scripts[ai][bi];
+        let row_start = row_starts[ai];
+        if bi < row_start {
+            break;
+        }
+        let script_idx = bi - row_start;
+        if script_idx >= scripts[ai].len() {
+            break;
+        }
+        let s = scripts[ai][script_idx];
         cur_script = match cur_script & SCRIPT_OP_MASK {
             SCRIPT_GAP_IN_A => {
                 if s & SCRIPT_EXTEND_GAP_A != 0 {
@@ -577,6 +668,7 @@ fn protein_align_ex_scored_inner(
             pool.push(row);
         }
     }
+    scratch.row_starts = row_starts;
 
     (best_score, a_off, b_off, ops)
 }
@@ -620,27 +712,39 @@ fn trim_terminal_gap_ops(
     // NCBI `BLAST_GappedAlignmentWithTraceback` (`blast_gapalign.c:4771-4801`):
     // after converting preliminary traceback, prune terminal non-Sub ops and
     // add back their gap penalties while moving the corresponding endpoint.
-    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
-        let (op, num) = edit_script.ops[0];
+    while !edit_script.is_empty()
+        && edit_script
+            .first()
+            .is_some_and(|(op, _)| op != GapAlignOpType::Sub)
+    {
+        let (op, num) = edit_script.first().unwrap_or((GapAlignOpType::Sub, 0));
         *score_left += gap_open + num * gap_extend;
         if op == GapAlignOpType::Del {
             *subject_start += num as usize;
         } else {
             *query_start += num as usize;
         }
-        edit_script.ops.remove(0);
+        edit_script.remove(0);
     }
-    while !edit_script.ops.is_empty()
-        && edit_script.ops[edit_script.ops.len() - 1].0 != GapAlignOpType::Sub
+    while !edit_script.is_empty()
+        && edit_script
+            .last()
+            .is_some_and(|(op, _)| op != GapAlignOpType::Sub)
     {
-        let (op, num) = edit_script.ops[edit_script.ops.len() - 1];
+        let (op, num) = edit_script.last().unwrap_or((GapAlignOpType::Sub, 0));
         *score_right += gap_open + num * gap_extend;
         if op == GapAlignOpType::Del {
             *subject_end -= num as usize;
         } else {
             *query_end -= num as usize;
         }
-        edit_script.ops.pop();
+        edit_script.pop();
+    }
+}
+
+fn add_ops_to_prelim_block(block: &mut GapPrelimEditBlock, ops: &[(GapAlignOpType, i32)]) {
+    for &(op, count) in ops {
+        gap_prelim_edit_block_add(block, op, count);
     }
 }
 
@@ -710,18 +814,18 @@ fn protein_gapped_score_one_dir(
             } else {
                 bi + 1
             };
-            if b_idx >= subject.len() {
-                break;
-            }
-            let b_letter = subject[b_idx] as usize;
-
             let sgc = sa[bi].best_gap;
-            let mat_score = if a_letter < AA_SIZE && b_letter < AA_SIZE {
-                matrix[a_letter][b_letter]
+            let next_sc = if b_idx < subject.len() {
+                let b_letter = subject[b_idx] as usize;
+                let mat_score = if a_letter < AA_SIZE && b_letter < AA_SIZE {
+                    matrix[a_letter][b_letter]
+                } else {
+                    -4
+                };
+                sa[bi].best + mat_score
             } else {
-                -4
+                MININT
             };
-            let next_sc = sa[bi].best + mat_score;
 
             if sc < sgc {
                 sc = sgc;
@@ -733,26 +837,32 @@ fn protein_gapped_score_one_dir(
             if best_score - sc > x_dropoff {
                 if first_b == bi {
                     first_b += 1;
+                } else {
+                    sa[bi].best = MININT;
                 }
-                sa[bi].best = MININT;
             } else {
                 last_b = bi;
                 if sc > best_score {
                     best_score = sc;
                     best_q = ai;
-                    best_s = bi + 1;
+                    best_s = bi;
                 }
-                sa[bi].best_gap = sc.max(sgc) - gap_oe;
-                sgr = sc.max(sgr) - gap_oe;
+
+                let score_gap_col = sgc - gap_extend;
+                if score_gap_col < sc - gap_oe {
+                    sa[bi].best_gap = sc - gap_oe;
+                } else {
+                    sa[bi].best_gap = score_gap_col;
+                }
+                let score_gap_row = sgr - gap_extend;
+                if score_gap_row < sc - gap_oe {
+                    sgr = sc - gap_oe;
+                } else {
+                    sgr = score_gap_row;
+                }
                 sa[bi].best = sc;
-                sc = next_sc;
-                sgr -= gap_extend;
-                continue;
             }
 
-            sa[bi].best_gap = MININT;
-            sgr = MININT;
-            sa[bi].best = MININT;
             sc = next_sc;
         }
 
@@ -1041,16 +1151,20 @@ pub fn protein_gapped_align(
         return None;
     }
 
-    let mut edit_script = GapEditScript::new();
-    for &(op, cnt) in &left_ops {
-        edit_script.push(op, cnt);
+    let mut gap_align = BlastGapAlignStruct::default();
+    if let Some(rev) = gap_align.rev_prelim_tback.as_mut() {
+        add_ops_to_prelim_block(rev, &left_ops);
     }
-    for &(op, cnt) in right_ops.iter().rev() {
-        edit_script.push(op, cnt);
+    if let Some(fwd) = gap_align.fwd_prelim_tback.as_mut() {
+        add_ops_to_prelim_block(fwd, &right_ops);
     }
+    let mut edit_script = blast_prelim_edit_block_to_gap_edit_script(
+        gap_align.rev_prelim_tback.as_ref(),
+        gap_align.fwd_prelim_tback.as_ref(),
+    )?;
     // Match NCBI `Blast_PrelimEditBlockToGapEditScript`: concatenate the
     // reverse half as-is and the forward half reversed, preserving all ops.
-    if edit_script.ops.is_empty() {
+    if edit_script.is_empty() {
         return None;
     }
 
@@ -1074,7 +1188,7 @@ pub fn protein_gapped_align(
     );
 
     let total_score = score_left + score_right;
-    if edit_script.ops.is_empty() {
+    if edit_script.is_empty() {
         return None;
     }
 
@@ -1163,14 +1277,18 @@ pub fn protein_gapped_align_pssm(
         return None;
     }
 
-    let mut edit_script = GapEditScript::new();
-    for &(op, cnt) in &left_ops {
-        edit_script.push(op, cnt);
+    let mut gap_align = BlastGapAlignStruct::default();
+    if let Some(rev) = gap_align.rev_prelim_tback.as_mut() {
+        add_ops_to_prelim_block(rev, &left_ops);
     }
-    for &(op, cnt) in right_ops.iter().rev() {
-        edit_script.push(op, cnt);
+    if let Some(fwd) = gap_align.fwd_prelim_tback.as_mut() {
+        add_ops_to_prelim_block(fwd, &right_ops);
     }
-    if edit_script.ops.is_empty() {
+    let mut edit_script = blast_prelim_edit_block_to_gap_edit_script(
+        gap_align.rev_prelim_tback.as_ref(),
+        gap_align.fwd_prelim_tback.as_ref(),
+    )?;
+    if edit_script.is_empty() {
         return None;
     }
 
@@ -1192,7 +1310,7 @@ pub fn protein_gapped_align_pssm(
         gap_open,
         gap_extend,
     );
-    if edit_script.ops.is_empty() {
+    if edit_script.is_empty() {
         return None;
     }
 
@@ -1308,7 +1426,7 @@ pub fn s_sw_find_final_ends_using_xdrop(
     // `s_SWFindFinalEndsUsingXdrop` only fills the forward preliminary
     // traceback and returns extents/score; the terminal-gap pruning belongs to
     // `BLAST_GappedAlignmentWithTraceback`, not this SW-bounded callback.
-    if edit_script.ops.is_empty() {
+    if edit_script.is_empty() {
         return None;
     }
 
@@ -1427,7 +1545,7 @@ pub fn protein_sw_bounded_xdrop_align_pssm(
     for &(op, cnt) in &ops {
         edit_script.push(op, cnt);
     }
-    if edit_script.ops.is_empty() {
+    if edit_script.is_empty() {
         return None;
     }
 
@@ -1568,7 +1686,7 @@ mod tests {
             1,
         );
 
-        assert_eq!(edit_script.ops, vec![(GapAlignOpType::Sub, 3)]);
+        assert_eq!(edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 3)]);
         assert_eq!(q_start, 10);
         assert_eq!(q_end, 19);
         assert_eq!(s_start, 32);
@@ -1612,14 +1730,14 @@ mod tests {
         let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         let subject = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         let r = protein_gapped_align(&query, &subject, 4, 4, &m, 11, 1, 50).unwrap();
-        assert!(!r.edit_script.ops.is_empty());
+        assert!(!r.edit_script.is_empty());
         assert_eq!(
-            r.edit_script.ops.first().unwrap().0,
+            r.edit_script.ops_vec().first().unwrap().0,
             GapAlignOpType::Sub,
             "edit script must start on a Sub op after terminal-gap stripping"
         );
         assert_eq!(
-            r.edit_script.ops.last().unwrap().0,
+            r.edit_script.ops_vec().last().unwrap().0,
             GapAlignOpType::Sub,
             "edit script must end on a Sub op after terminal-gap stripping"
         );
@@ -1683,9 +1801,15 @@ mod tests {
 
         let r = protein_gapped_align_pssm(&query, &subject, 4, 4, 0, &pssm, 11, 1, 50)
             .expect("PSSM gapped alignment");
-        assert!(!r.edit_script.ops.is_empty());
-        assert_eq!(r.edit_script.ops.first().unwrap().0, GapAlignOpType::Sub);
-        assert_eq!(r.edit_script.ops.last().unwrap().0, GapAlignOpType::Sub);
+        assert!(!r.edit_script.is_empty());
+        assert_eq!(
+            r.edit_script.ops_vec().first().unwrap().0,
+            GapAlignOpType::Sub
+        );
+        assert_eq!(
+            r.edit_script.ops_vec().last().unwrap().0,
+            GapAlignOpType::Sub
+        );
     }
 
     #[test]

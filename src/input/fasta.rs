@@ -26,13 +26,18 @@ pub fn parse_fasta_with_default_id<R: Read>(mut reader: R, default_id: &str) -> 
     }
 
     let fasta_input = strip_fasta_comment_lines(&input);
-    let mut records = parse_noodles_fasta_records(&fasta_input);
+    let mut records = parse_noodles_fasta_records(&fasta_input).unwrap_or_else(|_| {
+        if fasta_input.first() == Some(&b'>') {
+            parse_lenient_fasta_records(&fasta_input, default_id)
+        } else {
+            Vec::new()
+        }
+    });
     if records.is_empty() {
         if let Some(offset) = first_embedded_header_offset(&fasta_input) {
-            records = parse_noodles_fasta_records(&fasta_input[offset..]);
-            if records.is_empty() {
-                records = parse_lenient_fasta_records(&fasta_input[offset..], default_id);
-            }
+            records = parse_noodles_fasta_records(&fasta_input[offset..]).unwrap_or_else(|_| {
+                parse_lenient_fasta_records(&fasta_input[offset..], default_id)
+            });
         }
     }
 
@@ -76,7 +81,7 @@ fn strip_fasta_comment_lines(input: &[u8]) -> Vec<u8> {
     stripped
 }
 
-fn parse_noodles_fasta_records(input: &[u8]) -> Vec<FastaRecord> {
+fn parse_noodles_fasta_records(input: &[u8]) -> Result<Vec<FastaRecord>, ()> {
     let buf = BufReader::new(input);
     let mut noodles_reader = noodles_fasta::io::Reader::new(buf);
     let mut records = Vec::new();
@@ -84,7 +89,7 @@ fn parse_noodles_fasta_records(input: &[u8]) -> Vec<FastaRecord> {
     for result in noodles_reader.records() {
         let record = match result {
             Ok(r) => r,
-            Err(_) => break,
+            Err(_) => return Err(()),
         };
 
         let name = std::str::from_utf8(record.name()).unwrap_or("").to_string();
@@ -108,7 +113,7 @@ fn parse_noodles_fasta_records(input: &[u8]) -> Vec<FastaRecord> {
         });
     }
 
-    records
+    Ok(records)
 }
 
 fn parse_lenient_fasta_records(input: &[u8], default_id: &str) -> Vec<FastaRecord> {
@@ -292,6 +297,24 @@ ACGT
         assert_eq!(records[0].id, "Query_1");
         assert_eq!(records[0].defline, "Query_1");
         assert_eq!(records[0].sequence, b"ACGT");
+    }
+
+    #[test]
+    fn test_parse_fasta_empty_defline_after_record_uses_default_id() {
+        let records = parse_fasta_with_default_id(
+            &b">q1
+ACGT
+>
+TGCA
+"[..],
+            "Query_1",
+        );
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, "q1");
+        assert_eq!(records[0].sequence, b"ACGT");
+        assert_eq!(records[1].id, "Query_1");
+        assert_eq!(records[1].defline, "Query_1");
+        assert_eq!(records[1].sequence, b"TGCA");
     }
 
     #[test]

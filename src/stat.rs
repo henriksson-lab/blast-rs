@@ -656,8 +656,8 @@ pub fn blast_karlin_blk_copy(kbp_to: Option<&mut KarlinBlk>, kbp_from: Option<&K
 ///
 /// NCBI explicitly skips `BLAST_SCORE_MIN`/`BLAST_SCORE_MAX` sentinels
 /// (used for gap rows/columns and other "impossible" entries) when
-/// computing the loscore/hiscore range. The clamp at the end also
-/// restores those sentinels if the loop produced no real scores.
+/// computing the loscore/hiscore range. If no real scores are present,
+/// upstream leaves the initial sentinel pair unchanged.
 pub fn blast_score_blk_max_score_set(sbp: &mut BlastScoreBlk) -> i16 {
     if sbp.matrix.data.is_empty() {
         return 1;
@@ -678,11 +678,6 @@ pub fn blast_score_blk_max_score_set(sbp: &mut BlastScoreBlk) -> i16 {
                 hiscore = score;
             }
         }
-    }
-    // NCBI `blast_stat.c:1525`: clamp if no real scores were observed.
-    if loscore == BLAST_SCORE_MAX && hiscore == BLAST_SCORE_MIN {
-        loscore = BLAST_SCORE_MIN;
-        hiscore = BLAST_SCORE_MAX;
     }
     if loscore < BLAST_SCORE_MIN {
         loscore = BLAST_SCORE_MIN;
@@ -5456,7 +5451,7 @@ mod tests {
     }
 
     #[test]
-    fn blast_score_blk_max_score_set_clamps_all_sentinel_matrix() {
+    fn blast_score_blk_max_score_set_leaves_all_sentinel_matrix_bounds() {
         let mut sbp =
             blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("score block");
         sbp.alphabet_size = 2;
@@ -5470,8 +5465,8 @@ mod tests {
         };
 
         assert_eq!(blast_score_blk_max_score_set(&mut sbp), 0);
-        assert_eq!(sbp.loscore, BLAST_SCORE_MIN);
-        assert_eq!(sbp.hiscore, BLAST_SCORE_MAX);
+        assert_eq!(sbp.loscore, BLAST_SCORE_MAX);
+        assert_eq!(sbp.hiscore, BLAST_SCORE_MIN);
     }
 
     #[test]
@@ -6298,11 +6293,16 @@ mod tests {
     #[test]
     fn test_scoreblk_nucl_properties() {
         let m = crate::matrix::nucleotide_matrix(1, -3);
-        // Find min/max scores in the matrix
+        // Find min/max real scores in the matrix. NCBI's
+        // BlastScoreBlkMaxScoreSet skips sentinel entries such as the strand
+        // separator row/column.
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
         for i in 0..16 {
             for j in 0..16 {
+                if m[i][j] <= BLAST_SCORE_MIN || m[i][j] >= BLAST_SCORE_MAX {
+                    continue;
+                }
                 if m[i][j] < lo {
                     lo = m[i][j];
                 }

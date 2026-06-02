@@ -1275,13 +1275,17 @@ mod tests {
     #[test]
     fn score_blk_matrix_init_matches_nucleotide_and_protein_setup() {
         let nucleotide_options = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 0,
             gap_extend: 0,
+            shift_pen: 0,
             gapped_calculation: false,
+            complexity_adjusted_scoring: false,
             matrix_name: None,
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut nuc_sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 2).expect("sbp");
@@ -1304,13 +1308,17 @@ mod tests {
             .contains(&crate::encoding::IUPACNA_TO_BLASTNA[b'N' as usize]));
 
         let protein_options = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("blosum62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut protein_sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
@@ -1365,13 +1373,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut protein_sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 2).expect("sbp");
@@ -1442,13 +1454,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 5,
             gap_extend: 2,
+            shift_pen: 0,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: None,
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("sbp");
@@ -1491,13 +1507,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 1,
             penalty: -2,
             gap_open: 1,
             gap_extend: 3,
+            shift_pen: 0,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: None,
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTNA_SEQ_CODE, 1).expect("sbp");
@@ -1526,13 +1546,17 @@ mod tests {
     #[test]
     fn phi_score_blk_fill_uses_phi_specific_gap_table() {
         let options = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut sbp =
             crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 2).expect("sbp");
@@ -1621,13 +1645,17 @@ mod tests {
         };
         let mut query_info = QueryInfo::new_blastp(&[20]);
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut sbp = None;
         assert_eq!(
@@ -1649,13 +1677,17 @@ mod tests {
 
         let mut mapping_query_info = QueryInfo::new_blastn(&[20]);
         let mapping_scoring = ScoringOptions {
+            matrix_path: None,
             reward: BLAST_REWARD,
             penalty: BLAST_PENALTY,
             gap_open: BLAST_GAP_OPEN_MEGABLAST,
             gap_extend: BLAST_GAP_EXTN_MEGABLAST,
+            shift_pen: 0,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: None,
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut mapping_sbp = None;
         assert_eq!(
@@ -1712,13 +1744,17 @@ mod tests {
             genetic_code: 1,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let mut lookup_segments = None;
         let mut mask = None;
@@ -1909,13 +1945,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let eff = EffectiveLengthsParameters {
             options: EffectiveLengthsOptions::default(),
@@ -1955,13 +1995,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let eff = EffectiveLengthsParameters {
             options: EffectiveLengthsOptions::default(),
@@ -2001,13 +2045,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let eff = EffectiveLengthsParameters {
             options: EffectiveLengthsOptions::default(),
@@ -2068,13 +2116,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let eff = EffectiveLengthsParameters {
             options: EffectiveLengthsOptions {
@@ -2130,13 +2182,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let eff = EffectiveLengthsParameters {
             options: EffectiveLengthsOptions::default(),
@@ -2195,14 +2251,16 @@ mod tests {
         blast_get_subject_totals(None, Some(&mut total), Some(&mut num));
         assert_eq!((total, num), (-1, -1));
 
-        let arg = GetSeqArg {
+        let mut arg = crate::seqsrc::BlastSeqSrcGetSeqArg {
             oid: 0,
-            encoding: SeqEncoding::Protein,
+            encoding: SeqEncoding::Protein.into(),
+            ..crate::seqsrc::BlastSeqSrcGetSeqArg::default()
         };
-        let data =
-            crate::seqsrc::blast_seq_src_get_sequence(Some(&src), Some(&arg)).expect("sequence");
+        let data = crate::seqsrc::blast_seq_src_get_sequence(Some(&src), Some(&mut arg))
+            .expect("sequence");
         assert_eq!(data.length, 4);
-        assert!(crate::seqsrc::blast_seq_src_get_sequence(None, Some(&arg)).is_none());
+        assert!(arg.seq.is_some());
+        assert!(crate::seqsrc::blast_seq_src_get_sequence(None, Some(&mut arg)).is_none());
     }
 
     #[test]
@@ -2223,13 +2281,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let eff = EffectiveLengthsParameters {
             options: EffectiveLengthsOptions::default(),
@@ -2295,13 +2357,17 @@ mod tests {
             min_length: 0,
         };
         let scoring = ScoringOptions {
+            matrix_path: None,
             reward: 0,
             penalty: 0,
             gap_open: 11,
             gap_extend: 1,
+            shift_pen: i16::MAX as i32,
             gapped_calculation: true,
+            complexity_adjusted_scoring: false,
             matrix_name: Some("BLOSUM62".to_string()),
             is_ooframe: false,
+            program_number: crate::program::UNDEFINED,
         };
         let kbp = protein_kbp();
         let mut sbp =
@@ -2319,6 +2385,8 @@ mod tests {
             cutoffs: vec![BlastGappedCutoffs::default()],
             link_hsp_params: Some(LinkHSPParameters::default()),
             prelim_evalue: 0.0,
+
+            ..Default::default()
         };
         let mut word = InitialWordParameters {
             options: InitialWordOptions::new_blastp(),

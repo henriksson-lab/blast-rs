@@ -865,10 +865,7 @@ pub fn bl_smith_waterman_find_start(
 const COMPO_SCORE_MIN: i32 = i32::MIN / 2;
 
 fn pssm_cell_score(pssm: &[Vec<i32>], query_offset: usize, query_pos: usize, subject: u8) -> i32 {
-    pssm.get(query_offset.saturating_add(query_pos))
-        .and_then(|row| row.get(subject as usize))
-        .copied()
-        .unwrap_or(-4)
+    pssm[query_offset + query_pos][subject as usize]
 }
 
 /// PSSM-backed variant of [`bl_basic_smith_waterman_score_only`].
@@ -1813,7 +1810,7 @@ mod tests {
             .expect("expected exact query hit");
 
         assert_eq!((hit.b_start, hit.b_end), (5, 13));
-        assert_eq!(hit.edit_script.ops, vec![(GapAlignOpType::Sub, 8)]);
+        assert_eq!(hit.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 8)]);
     }
 
     #[test]
@@ -1829,7 +1826,7 @@ mod tests {
             .expect("expected subject-offset hit after internal swap");
 
         assert_eq!((hit.a_start, hit.a_end), (0, 8));
-        assert_eq!(hit.edit_script.ops, vec![(GapAlignOpType::Sub, 8)]);
+        assert_eq!(hit.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 8)]);
     }
 
     #[test]
@@ -1855,7 +1852,7 @@ mod tests {
 
         assert_eq!((hit.a_start, hit.a_end), (0, 4));
         assert_eq!((hit.b_start, hit.b_end), (7, 11));
-        assert_eq!(hit.edit_script.ops, vec![(GapAlignOpType::Sub, 4)]);
+        assert_eq!(hit.edit_script.ops_vec(), vec![(GapAlignOpType::Sub, 4)]);
     }
 
     #[test]

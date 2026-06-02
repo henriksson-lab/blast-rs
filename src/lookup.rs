@@ -197,8 +197,11 @@ pub fn blast_rps_seqsrc_scan_write_hsp_stream(
     let min_subject_len = lookup.wordsize.max(0);
 
     for oid in seq_src.iter_oids() {
-        let Some(seq_data) = seq_src.get_sequence(&crate::seqsrc::GetSeqArg { oid, encoding })
-        else {
+        let Some(seq_data) = seq_src.get_sequence(&crate::seqsrc::GetSeqArg {
+            oid,
+            encoding,
+            ..crate::seqsrc::GetSeqArg::default()
+        }) else {
             continue;
         };
         if seq_data.length < min_subject_len || seq_data.sequence.len() < min_subject_len as usize {
@@ -2054,6 +2057,7 @@ pub fn s_na_hash_lookup_scan_subject_for_word_counts(
         let Some(seq_data) = seq_src.get_sequence(&crate::seqsrc::GetSeqArg {
             oid,
             encoding: crate::seqsrc::SeqEncoding::Protein,
+            ..crate::seqsrc::GetSeqArg::default()
         }) else {
             continue;
         };
@@ -2108,8 +2112,8 @@ pub fn s_na_hash_lookup_remove_poly_a_words(lookup: Option<&mut BlastNaHashLooku
     clear_pv_bit(&mut lookup.pv, u32::MAX, pv_array_bts);
 
     for i in 1..4u32 {
-        let word = i;
-        for _ in 0..word_size {
+        for k in 0..word_size.min(16) {
+            let word = i << (k * 2);
             clear_pv_bit(&mut lookup.pv, word, pv_array_bts);
         }
     }
@@ -2178,6 +2182,7 @@ pub fn na_hash_lookup_thread_data_new(
         seq_arg.push(crate::seqsrc::GetSeqArg {
             oid: 0,
             encoding: crate::seqsrc::SeqEncoding::Protein,
+            ..crate::seqsrc::GetSeqArg::default()
         });
         seq_src_vec.push(crate::seqsrc::blast_seq_src_copy(Some(seq_src))?);
         itr.push(crate::seqsrc::blast_seq_src_iterator_new_ex(1));
@@ -3092,6 +3097,7 @@ pub fn s_scan_subject_for_word_counts(
         if let Some(seq_data) = seq_src.get_sequence(&crate::seqsrc::GetSeqArg {
             oid,
             encoding: crate::seqsrc::SeqEncoding::Protein,
+            ..crate::seqsrc::GetSeqArg::default()
         }) {
             let status = s_mb_count_words_in_subject_16_1(
                 Some(&seq_data.sequence),
@@ -5772,7 +5778,7 @@ mod tests {
         };
 
         assert_eq!(s_na_hash_lookup_remove_poly_a_words(Some(&mut lookup)), 0);
-        for index in [0u32, 1, 2, 3] {
+        for index in [0u32, 1, 2, 3, 4, 8, 12] {
             assert_eq!(
                 lookup.pv[(index >> crate::stat::PV_ARRAY_BTS) as usize]
                     & (1 << (index & crate::stat::PV_ARRAY_MASK)),

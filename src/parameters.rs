@@ -89,7 +89,22 @@ pub struct ScoringParameters {
     pub penalty: i32,
     pub gap_open: i32,
     pub gap_extend: i32,
+    pub shift_pen: i32,
     pub scale_factor: f64,
+}
+
+impl Default for ScoringParameters {
+    fn default() -> Self {
+        Self {
+            options: ScoringOptions::new_blastp(),
+            reward: 0,
+            penalty: 0,
+            gap_open: 0,
+            gap_extend: 0,
+            shift_pen: i16::MAX as i32,
+            scale_factor: 1.0,
+        }
+    }
 }
 
 impl ScoringParameters {
@@ -102,6 +117,7 @@ impl ScoringParameters {
             penalty: opts.penalty,
             gap_open: opts.gap_open,
             gap_extend: opts.gap_extend,
+            shift_pen: scaled_i32(opts.shift_pen, scale_factor),
             scale_factor,
         }
     }
@@ -121,10 +137,29 @@ pub struct ExtensionParameters {
 pub struct HitSavingParameters {
     pub options: HitSavingOptions,
     pub cutoff_score_min: i32,
-    pub low_score: Vec<i32>,
     pub cutoffs: Vec<BlastGappedCutoffs>,
     pub link_hsp_params: Option<LinkHSPParameters>,
+    pub restricted_align: bool,
+    pub do_sum_stats: bool,
+    pub mask_level: i32,
+    pub low_score: Vec<i32>,
     pub prelim_evalue: f64,
+}
+
+impl Default for HitSavingParameters {
+    fn default() -> Self {
+        Self {
+            options: HitSavingOptions::default(),
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            restricted_align: false,
+            do_sum_stats: false,
+            mask_level: 101,
+            low_score: Vec::new(),
+            prelim_evalue: 0.0,
+        }
+    }
 }
 
 /// Initial word parameters computed from options and score block.
@@ -264,12 +299,14 @@ pub fn blast_scoring_parameters_new(
         return 1;
     };
     let scale_factor = sbp.map_or(1.0, |sbp| sbp.scale_factor);
+    let int_scale_factor = scale_factor as i32;
     *parameters = Some(ScoringParameters {
         options: score_options.clone(),
         reward: score_options.reward,
         penalty: score_options.penalty,
-        gap_open: scaled_i32(score_options.gap_open, scale_factor),
-        gap_extend: scaled_i32(score_options.gap_extend, scale_factor),
+        gap_open: score_options.gap_open * int_scale_factor,
+        gap_extend: score_options.gap_extend * int_scale_factor,
+        shift_pen: score_options.shift_pen * int_scale_factor,
         scale_factor,
     });
     0
@@ -714,6 +751,15 @@ pub fn blast_hit_saving_parameters_update_c(
         return -1;
     };
     let scale_factor = sbp_view.scale_factor;
+    params.do_sum_stats = params.options.do_sum_stats;
+    params.restricted_align = program_number == program::BLASTP
+        && gapped_calculation
+        && params.options.expect_value <= 10.0;
+    if (program_number == program::BLASTN || program_number == program::MAPPING)
+        && params.options.mask_level >= 0
+    {
+        params.mask_level = params.options.mask_level;
+    }
     params.prelim_evalue = params.options.expect_value;
     if params.cutoffs.len() < query_info.num_contexts() {
         params
@@ -885,13 +931,16 @@ pub fn blast_hit_saving_parameters_new(
     let mut params = HitSavingParameters {
         options: params_options,
         cutoff_score_min: 0,
+        cutoffs: vec![BlastGappedCutoffs::default(); query_info.num_contexts()],
+        link_hsp_params,
+        restricted_align: false,
+        do_sum_stats: options.do_sum_stats,
+        mask_level: 101,
         low_score: if options.low_score_perc > 0.00001 {
             vec![0; query_info.num_queries.max(0) as usize]
         } else {
             Vec::new()
         },
-        cutoffs: vec![BlastGappedCutoffs::default(); query_info.num_contexts()],
-        link_hsp_params,
         prelim_evalue: options.expect_value,
     };
 
@@ -1266,7 +1315,8 @@ mod tests {
     /// Port of NCBI blastsetup_unit_test: derive parameters from blastp options.
     #[test]
     fn test_parameters_from_blastp_options() {
-        let scoring_opts = ScoringOptions::new_blastp();
+        let mut scoring_opts = ScoringOptions::new_blastp();
+        scoring_opts.shift_pen = 7;
         let params = ScoringParameters::from_options(&scoring_opts, 1.0);
 
         assert_eq!(params.gap_open, GAP_OPEN_PROT);
@@ -1399,6 +1449,7 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+            ..Default::default()
         });
         let mut initial = Some(InitialWordParameters {
             options: initial_opts,
@@ -1447,6 +1498,7 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+            ..Default::default()
         };
         let word = InitialWordParameters {
             options: InitialWordOptions::new_blastn(),
@@ -1497,6 +1549,7 @@ mod tests {
             cutoffs: Vec::new(),
             link_hsp_params: None,
             prelim_evalue: 10.0,
+            ..Default::default()
         });
         let mut eff = Some(EffectiveLengthsParameters {
             options: EffectiveLengthsOptions::default(),
@@ -1544,7 +1597,8 @@ mod tests {
         let kbp = vec![test_kbp()];
         let score_block = test_score_blk(kbp[0].clone(), 2.0);
 
-        let scoring_opts = ScoringOptions::new_blastp();
+        let mut scoring_opts = ScoringOptions::new_blastp();
+        scoring_opts.shift_pen = 7;
         let mut scoring = None;
         assert_eq!(
             blast_scoring_parameters_new(Some(&scoring_opts), Some(&score_block), &mut scoring),
@@ -1553,6 +1607,7 @@ mod tests {
         let scoring = scoring.expect("scoring parameters");
         assert_eq!(scoring.gap_open, GAP_OPEN_PROT * 2);
         assert_eq!(scoring.gap_extend, GAP_EXTN_PROT * 2);
+        assert_eq!(scoring.shift_pen, 14);
         assert_eq!(scoring.scale_factor, 2.0);
         assert_eq!(
             blast_scoring_parameters_new_c(Some(&scoring_opts), Some(&score_block), None),
@@ -1567,10 +1622,10 @@ mod tests {
             ),
             0
         );
-        assert_eq!(
-            scoring_c.expect("c scoring parameters").gap_open,
-            GAP_OPEN_PROT * 2
-        );
+        let scoring_c = scoring_c.expect("c scoring parameters");
+        assert_eq!(scoring_c.gap_open, GAP_OPEN_PROT * 2);
+        assert_eq!(scoring_c.gap_extend, GAP_EXTN_PROT * 2);
+        assert_eq!(scoring_c.shift_pen, 14);
 
         let effective_opts = EffectiveLengthsOptions::default();
         let mut effective = None;
@@ -1964,9 +2019,12 @@ mod tests {
             cutoffs: vec![BlastGappedCutoffs {
                 cutoff_score: 11,
                 cutoff_score_max: 17,
+                ..Default::default()
             }],
             link_hsp_params: None,
             prelim_evalue: 10.0,
+
+            ..Default::default()
         };
         let word = InitialWordParameters {
             options: InitialWordOptions::new_blastp(),

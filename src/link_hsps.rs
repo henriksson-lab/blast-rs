@@ -65,58 +65,31 @@ pub enum ELinkOrderingMethod {
 }
 const E_ORDERING_METHODS: usize = 2;
 
-/// Minimal HSP segment (port of `BlastSeg`, `blast_hits.h:96`).
-#[derive(Debug, Clone, Default)]
-struct LinkBlastSeg {
-    pub frame: i32,
-    pub offset: i32,
-    pub end: i32,
-    pub gapped_start: i32,
-}
+type LinkBlastHsp = BlastHSP;
 
-/// Minimal HSP structure used by the linking machinery
-/// (port of `BlastHSP`, `blast_hits.h:125`).
+/// Linker-local owner for active `BlastHSP*` entries.
 ///
-/// Only the fields consulted by `link_hsps.c` are kept. `SearchHsp`
-/// from `src/search.rs` does not store `gapped_start` or `subject.frame`,
-/// so callers wiring this module into the pipeline must assemble these
-/// minimal records from their `SearchHsp`s.
-#[derive(Debug, Clone, Default)]
-struct LinkBlastHsp {
-    /// Stable index of the source HSP in the caller's HSP array. NCBI linking
-    /// mutates `BlastHSP*` objects in place; Rust adapters copy into this
-    /// minimal structure, so they use this field to write linked e-values and
-    /// link counts back to the exact originating HSP rather than matching by
-    /// coordinates.
-    pub source_index: usize,
-    pub score: i32,
-    pub num_ident: i32,
-    pub bit_score: f64,
-    pub evalue: f64,
-    pub query: LinkBlastSeg,
-    pub subject: LinkBlastSeg,
-    pub context: i32,
-    /// Number of HSPs linked together for sum statistics. `0` or `1`
-    /// means "not part of a linked set".
-    pub num: i32,
-    /// Sum-score in bit space for the linked set, mirroring `BlastHSP::xsum`
-    /// (`blast_hits.h`). Used downstream to keep the linked sum separate from
-    /// the per-HSP `bit_score` column.
-    pub xsum: f64,
-}
-
-/// A list of HSPs for one subject (port of `BlastHSPList`, `blast_hits.h:151`).
+/// The HSP records themselves are upstream-shaped `BlastHSP`s. The separate
+/// `source_indices` vector is Rust adapter state used only to copy C-mutated
+/// fields back into the original `BlastHSPList` slots after null compaction.
 #[derive(Debug, Clone, Default)]
 struct LinkBlastHspList {
     pub oid: i32,
     pub query_index: i32,
     pub hsp_array: Vec<LinkBlastHsp>,
+    pub source_indices: Vec<usize>,
     pub best_evalue: f64,
 }
 
 impl LinkBlastHspList {
     pub fn hspcnt(&self) -> i32 {
         self.hsp_array.len() as i32
+    }
+
+    fn ensure_source_indices(&mut self) {
+        if self.source_indices.len() != self.hsp_array.len() {
+            self.source_indices = (0..self.hsp_array.len()).collect();
+        }
     }
 }
 
@@ -284,7 +257,7 @@ fn rev_compare_hsps_transl(h1: &LinkBlastHsp, h2: &LinkBlastHsp) -> std::cmp::Or
 }
 
 #[inline]
-fn signum_i32(v: i32) -> i32 {
+fn signum_i32(v: i16) -> i32 {
     match v.cmp(&0) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -365,6 +338,7 @@ fn s_blast_even_gap_link_hsps(
     link_hsp_params: &LinkHSPParameters,
     gapped_calculation: bool,
 ) -> i32 {
+    hsp_list.ensure_source_indices();
     if hsp_list.hsp_array.is_empty() {
         return -1;
     }
@@ -957,12 +931,10 @@ fn s_blast_even_gap_link_hsps(
         } // end while num_hsps
     } // end for frame_index
 
-    // NCBI (`:1005-1090`) performs additional sorting + pointer stitching to
-    // reorder the final hsp_array, preserving the linking information. We
-    // reproduce the effect on the underlying hsp_array by sorting nodes
-    // according to the `FwdCompareHSPs` comparator (the second qsort
-    // dominates per NCBI). Then copy HSPs back into hsp_list in that order,
-    // setting `num` for chain members.
+    // NCBI (`:1005-1090`) sorts by forward position, then stitches linked
+    // chains through `hsp_link.link[ordering_method]` before copying the HSP
+    // pointer array back. The stitching step matters: a linked chain remains
+    // adjacent even when an unlinked HSP has an intermediate forward offset.
     {
         let mut order: Vec<usize> = (1..num_nodes).collect();
         if kTranslatedQuery {
@@ -981,45 +953,39 @@ fn s_blast_even_gap_link_hsps(
             });
         }
 
-        // Propagate `num` (number of linked HSPs) to chain members.
-        // Walk the chains via `hsp_link.link[ordering_method]` from any
-        // start_of_chain or from an unlinked HSP.
-        for i in 0..order.len() {
-            let h = order[i];
-            if !nodes[h].linked_set || nodes[h].start_of_chain {
-                let om = nodes[h].ordering_method as usize;
-                let num_links = if nodes[h].linked_set {
-                    nodes[h].hsp_link.num[om]
-                } else {
-                    1
-                };
+        let mut final_order: Vec<usize> = Vec::with_capacity(order.len());
+        for &h in &order {
+            if nodes[h].linked_set && !nodes[h].start_of_chain {
+                continue;
+            }
+
+            final_order.push(h);
+            let om = nodes[h].ordering_method as usize;
+            if let Some(mut link_h) = nodes[h].hsp_link.link[om] {
+                let num_links = nodes[h].hsp_link.num[om];
                 hsp_list.hsp_array[nodes[h].hsp_idx as usize].num = num_links;
-                if nodes[h].linked_set {
-                    // NCBI stores `xsum` in `H->xsum` (LinkHSPStruct field),
-                    // not in `hsp->bit_score` (`link_hsps.c:1050,1062`). The
-                    // per-HSP `bit_score` in the BlastHSP array stays the
-                    // individual lambda*score-based bit score so the tabular
-                    // and XML formatters can report each HSP's own bit score
-                    // while the evalue is shared across the linked set.
-                    let xsum = nodes[h].hsp_link.xsum[om];
-                    hsp_list.hsp_array[nodes[h].hsp_idx as usize].xsum = xsum;
-                    // Walk the link chain, propagating num to each member.
-                    let mut cur_link = nodes[h].hsp_link.link[om];
-                    while let Some(link_h) = cur_link {
-                        hsp_list.hsp_array[nodes[link_h].hsp_idx as usize].num = num_links;
-                        hsp_list.hsp_array[nodes[link_h].hsp_idx as usize].xsum = xsum;
-                        cur_link = nodes[link_h].hsp_link.link[om];
-                    }
+                loop {
+                    hsp_list.hsp_array[nodes[link_h].hsp_idx as usize].num = num_links;
+                    final_order.push(link_h);
+                    let Some(next_link) = nodes[link_h].hsp_link.link[om] else {
+                        break;
+                    };
+                    link_h = next_link;
                 }
+            } else {
+                hsp_list.hsp_array[nodes[h].hsp_idx as usize].num = 1;
             }
         }
 
-        // Physically reorder hsp_array according to `order`.
-        let mut new_array: Vec<LinkBlastHsp> = Vec::with_capacity(order.len());
-        for &h in &order {
-            new_array.push(hsp_list.hsp_array[nodes[h].hsp_idx as usize].clone());
+        let mut new_array: Vec<LinkBlastHsp> = Vec::with_capacity(final_order.len());
+        let mut new_source_indices: Vec<usize> = Vec::with_capacity(final_order.len());
+        for &h in &final_order {
+            let hsp_idx = nodes[h].hsp_idx as usize;
+            new_array.push(hsp_list.hsp_array[hsp_idx].clone());
+            new_source_indices.push(hsp_list.source_indices[hsp_idx]);
         }
         hsp_list.hsp_array = new_array;
+        hsp_list.source_indices = new_source_indices;
     }
 
     0
@@ -1143,6 +1109,23 @@ fn score_compare_hsps(h1: &LinkBlastHsp, h2: &LinkBlastHsp) -> std::cmp::Orderin
         .then_with(|| h2.query.end.cmp(&h1.query.end))
 }
 
+/// NCBI sorts arrays of `BlastHSP*`; the pointer target remains the same HSP.
+/// Rust keeps a sidecar source-index array for copy-back, so it must be sorted
+/// together with the HSP records whenever we mirror a pointer-array sort.
+fn sort_link_hsp_list_by_score(hsp_list: &mut LinkBlastHspList) {
+    hsp_list.ensure_source_indices();
+    let hsps = std::mem::take(&mut hsp_list.hsp_array);
+    let sources = std::mem::take(&mut hsp_list.source_indices);
+    let mut paired: Vec<(LinkBlastHsp, usize)> = hsps.into_iter().zip(sources).collect();
+    paired.sort_by(|(h1, _), (h2, _)| score_compare_hsps(h1, h2));
+    hsp_list.hsp_array = Vec::with_capacity(paired.len());
+    hsp_list.source_indices = Vec::with_capacity(paired.len());
+    for (hsp, source_index) in paired {
+        hsp_list.hsp_array.push(hsp);
+        hsp_list.source_indices.push(source_index);
+    }
+}
+
 /// Port of NCBI `Blast_HSPListAdjustOddBlastnScores`
 /// (`blast_hits.c:3053`), adapted to the linker-local score block.
 fn blast_hsp_list_adjust_odd_blastn_scores(
@@ -1150,6 +1133,7 @@ fn blast_hsp_list_adjust_odd_blastn_scores(
     gapped_calculation: bool,
     sbp: &LinkScoreBlock,
 ) {
+    hsp_list.ensure_source_indices();
     if hsp_list.hsp_array.is_empty()
         || !gapped_calculation
         || !sbp
@@ -1167,7 +1151,7 @@ fn blast_hsp_list_adjust_odd_blastn_scores(
 
     // C sorts immediately because equalized odd/even scores can change the
     // order consumed by later uneven-gap linking.
-    hsp_list.hsp_array.sort_by(score_compare_hsps);
+    sort_link_hsp_list_by_score(hsp_list);
 }
 
 /// Binary search for the index in a sorted (by queryId, query.offset)
@@ -1477,6 +1461,7 @@ fn s_blast_uneven_gap_link_hsps(
     link_hsp_params: &LinkHSPParameters,
     gapped_calculation: bool,
 ) -> i32 {
+    hsp_list.ensure_source_indices();
     if hsp_list.hsp_array.len() <= 1 {
         return 0;
     }
@@ -1652,6 +1637,7 @@ fn blast_link_hsps(
     link_hsp_params: &LinkHSPParameters,
     gapped_calculation: bool,
 ) -> i32 {
+    hsp_list.ensure_source_indices();
     if hsp_list.hsp_array.is_empty() {
         return 0;
     }
@@ -1701,7 +1687,7 @@ fn blast_link_hsps(
     }
 
     // Sort by score descending and compute best_evalue.
-    hsp_list.hsp_array.sort_by(score_compare_hsps);
+    sort_link_hsp_list_by_score(hsp_list);
     let mut best_evalue = hsp_list.hsp_array[0].evalue;
     for hsp in hsp_list.hsp_array.iter().skip(1) {
         if hsp.evalue < best_evalue {
@@ -1713,29 +1699,10 @@ fn blast_link_hsps(
     0
 }
 
-fn link_hsp_from_blast_hsp(source_index: usize, hsp: &BlastHSP) -> LinkBlastHsp {
-    LinkBlastHsp {
-        source_index,
-        score: hsp.score,
-        num_ident: hsp.num_ident,
-        bit_score: hsp.bit_score,
-        evalue: hsp.evalue,
-        query: LinkBlastSeg {
-            frame: hsp.query.frame as i32,
-            offset: hsp.query.offset,
-            end: hsp.query.end,
-            gapped_start: hsp.query.gapped_start,
-        },
-        subject: LinkBlastSeg {
-            frame: hsp.subject.frame as i32,
-            offset: hsp.subject.offset,
-            end: hsp.subject.end,
-            gapped_start: hsp.subject.gapped_start,
-        },
-        context: hsp.context,
-        num: hsp.num.max(1),
-        xsum: hsp.xsum,
-    }
+fn link_hsp_from_blast_hsp(hsp: &BlastHSP) -> LinkBlastHsp {
+    let mut linked = hsp.clone();
+    linked.num = linked.num.max(1);
+    linked
 }
 
 fn blast_hsp_update_from_link_hsp(hsp: &mut BlastHSP, linked: &LinkBlastHsp) {
@@ -1743,7 +1710,6 @@ fn blast_hsp_update_from_link_hsp(hsp: &mut BlastHSP, linked: &LinkBlastHsp) {
     hsp.bit_score = linked.bit_score;
     hsp.evalue = linked.evalue;
     hsp.num = linked.num;
-    hsp.xsum = linked.xsum;
 }
 
 /// Port-shaped entry point for `BLAST_LinkHsps` over NCBI `BlastHSPList`.
@@ -1777,16 +1743,16 @@ pub fn blast_link_hsp_list(
     let mut link_list = LinkBlastHspList {
         oid: hsp_list.oid,
         query_index: hsp_list.query_index,
-        hsp_array: originals
-            .iter()
-            .enumerate()
-            .filter_map(|(source_index, hsp)| {
-                hsp.as_ref()
-                    .map(|hsp| link_hsp_from_blast_hsp(source_index, hsp))
-            })
-            .collect(),
+        hsp_array: Vec::new(),
+        source_indices: Vec::new(),
         best_evalue: hsp_list.best_evalue,
     };
+    for (source_index, hsp) in originals.iter().enumerate() {
+        if let Some(hsp) = hsp {
+            link_list.hsp_array.push(link_hsp_from_blast_hsp(hsp));
+            link_list.source_indices.push(source_index);
+        }
+    }
     if link_list.hsp_array.is_empty() {
         hsp_list.hsp_array.clear();
         hsp_list.hspcnt = 0;
@@ -1806,8 +1772,9 @@ pub fn blast_link_hsp_list(
     );
 
     let mut linked_hsps = Vec::with_capacity(link_list.hsp_array.len());
-    for linked in link_list.hsp_array {
-        if let Some(mut hsp) = originals.get(linked.source_index).and_then(Clone::clone) {
+    for (linked_pos, linked) in link_list.hsp_array.into_iter().enumerate() {
+        let source_index = link_list.source_indices[linked_pos];
+        if let Some(mut hsp) = originals.get(source_index).and_then(Clone::clone) {
             blast_hsp_update_from_link_hsp(&mut hsp, &linked);
             linked_hsps.push(Some(hsp));
         }
@@ -1863,8 +1830,8 @@ fn blast_hsp_list_get_evalues_for_linking(
                 subject_end: hsp.subject.end,
                 subject_gapped_start: hsp.subject.gapped_start,
                 context: hsp.context,
-                query_frame: hsp.query.frame,
-                subject_frame: hsp.subject.frame,
+                query_frame: hsp.query.frame as i32,
+                subject_frame: hsp.subject.frame as i32,
                 num_gaps: 0,
                 comp_adjustment_method: 0,
                 edit_script: None,
@@ -1920,26 +1887,29 @@ mod tests {
         frame: i32,
     ) -> LinkBlastHsp {
         LinkBlastHsp {
-            source_index: 0,
             score,
             num_ident: q_end - q_off,
             bit_score: 0.0,
             evalue: 10.0,
-            query: LinkBlastSeg {
+            query: crate::hspstream::BlastSeg {
                 frame: 1,
                 offset: q_off,
                 end: q_end,
                 gapped_start: q_off,
             },
-            subject: LinkBlastSeg {
-                frame,
+            subject: crate::hspstream::BlastSeg {
+                frame: frame as i16,
                 offset: s_off,
                 end: s_end,
                 gapped_start: s_off,
             },
             context,
+            gap_info: None,
             num: 1,
-            xsum: 0.0,
+            comp_adjustment_method: 0,
+            pat_info: None,
+            num_positives: 0,
+            map_info: None,
         }
     }
 
@@ -1972,8 +1942,6 @@ mod tests {
             context,
             gap_info: None,
             num: 1,
-            xsum: 0.0,
-            num_gaps: 0,
             comp_adjustment_method: 0,
             pat_info: None,
             num_positives: 0,
@@ -2093,6 +2061,7 @@ mod tests {
                 make_hsp(0, 0, 10, 10, 20, 12, 1),
                 make_hsp(0, 0, 10, 20, 30, 11, 1),
             ],
+            source_indices: vec![30, 10, 20],
             best_evalue: f64::MAX,
         };
 
@@ -2106,6 +2075,28 @@ mod tests {
             .collect();
         assert_eq!(scores, vec![12, 12, 10]);
         assert_eq!(subject_offsets, vec![10, 30, 20]);
+        assert_eq!(hsp_list.source_indices, vec![10, 30, 20]);
+    }
+
+    #[test]
+    fn test_score_sort_preserves_source_indices() {
+        let mut hsp_list = LinkBlastHspList {
+            oid: 0,
+            query_index: 0,
+            hsp_array: vec![
+                make_hsp(0, 0, 10, 30, 40, 20, 1),
+                make_hsp(0, 0, 10, 10, 20, 40, 1),
+                make_hsp(0, 0, 10, 20, 30, 30, 1),
+            ],
+            source_indices: vec![30, 10, 20],
+            best_evalue: f64::MAX,
+        };
+
+        sort_link_hsp_list_by_score(&mut hsp_list);
+
+        let scores: Vec<i32> = hsp_list.hsp_array.iter().map(|hsp| hsp.score).collect();
+        assert_eq!(scores, vec![40, 30, 20]);
+        assert_eq!(hsp_list.source_indices, vec![10, 20, 30]);
     }
 
     #[test]
@@ -2117,6 +2108,7 @@ mod tests {
             oid: 0,
             query_index: 0,
             hsp_array: original.clone(),
+            source_indices: Vec::new(),
             best_evalue: f64::MAX,
         };
 
@@ -2129,6 +2121,7 @@ mod tests {
             oid: 0,
             query_index: 0,
             hsp_array: original,
+            source_indices: Vec::new(),
             best_evalue: f64::MAX,
         };
 
@@ -2150,6 +2143,7 @@ mod tests {
                 make_hsp(0, 10, 60, 100, 150, 50, 1),
                 make_hsp(0, 70, 120, 170, 220, 50, 1),
             ],
+            source_indices: Vec::new(),
             best_evalue: f64::MAX,
         };
         let qi = one_context_query_info(1, 500);
@@ -2178,6 +2172,46 @@ mod tests {
     }
 
     #[test]
+    fn test_even_gap_final_order_stitches_linked_chain_before_interleaved_hsp() {
+        let mut hsp_list = LinkBlastHspList {
+            oid: 0,
+            query_index: 0,
+            hsp_array: vec![
+                make_hsp(0, 10, 60, 100, 150, 80, 1),
+                make_hsp(0, 70, 120, 170, 220, 80, 1),
+                make_hsp(0, 40, 90, 40, 90, 20, -1),
+            ],
+            source_indices: vec![10, 20, 30],
+            best_evalue: f64::MAX,
+        };
+        let qi = one_context_query_info(1, 500);
+        let sbp = simple_score_block(2);
+        let params = LinkHSPParameters {
+            gap_prob: 0.5,
+            gap_size: 40,
+            overlap_size: 9,
+            gap_decay_rate: 0.5,
+            cutoff_small_gap: 20,
+            cutoff_big_gap: 50,
+            longest_intron: 0,
+        };
+
+        let rc = s_blast_even_gap_link_hsps(BLASTN, &mut hsp_list, &qi, 5000, &sbp, &params, true);
+
+        assert_eq!(rc, 0);
+        let subject_offsets: Vec<i32> = hsp_list
+            .hsp_array
+            .iter()
+            .map(|hsp| hsp.subject.offset)
+            .collect();
+        assert_eq!(subject_offsets, vec![100, 170, 40]);
+        assert_eq!(hsp_list.source_indices, vec![10, 20, 30]);
+        assert_eq!(hsp_list.hsp_array[0].num, 2);
+        assert_eq!(hsp_list.hsp_array[1].num, 2);
+        assert_eq!(hsp_list.hsp_array[2].num, 1);
+    }
+
+    #[test]
     fn test_blast_link_hsps_empty_returns_zero() {
         let mut hsp_list = LinkBlastHspList::default();
         hsp_list.best_evalue = f64::MAX;
@@ -2197,6 +2231,7 @@ mod tests {
             oid: 0,
             query_index: 0,
             hsp_array: vec![make_hsp(0, 0, 50, 0, 50, 100, 1)],
+            source_indices: Vec::new(),
             best_evalue: f64::MAX,
         };
         let qi = one_context_query_info(1, 500);
@@ -2228,6 +2263,7 @@ mod tests {
             oid: 0,
             query_index: 0,
             hsp_array: vec![lone],
+            source_indices: Vec::new(),
             best_evalue: f64::MAX,
         };
         let qi = one_context_query_info(1, 100);
@@ -2253,6 +2289,7 @@ mod tests {
             oid: 0,
             query_index: 0,
             hsp_array: vec![make_hsp(0, 10, 40, 10, 40, 13, 1)],
+            source_indices: Vec::new(),
             best_evalue: 123.0,
         };
         hsp_list.hsp_array[0].evalue = 456.0;
@@ -2288,6 +2325,7 @@ mod tests {
                 make_hsp(0, 10, 40, 100, 130, 30, 1),
                 make_hsp(0, 50, 80, 200, 230, 30, 1),
             ],
+            source_indices: Vec::new(),
             best_evalue: f64::MAX,
         };
         let qi = one_context_query_info(1, 500);
@@ -2320,6 +2358,7 @@ mod tests {
             oid: 0,
             query_index: 0,
             hsp_array: vec![make_hsp(0, 0, 30, 0, 30, 50, 1)],
+            source_indices: Vec::new(),
             best_evalue: f64::MAX,
         };
         let qi = one_context_query_info(1, 500);
@@ -2352,6 +2391,7 @@ mod tests {
                 make_hsp(0, 10, 40, 10, 40, 70, 1),
                 make_hsp(0, 100, 130, 100, 130, 60, 1),
             ],
+            source_indices: Vec::new(),
             best_evalue: 123.0,
         };
         hsp_list.hsp_array[0].evalue = 123.0;
@@ -2392,6 +2432,7 @@ mod tests {
             query_index: 0,
             hsp_array: vec![make_hsp(0, 10, 40, 10, 40, 70, 1)],
             best_evalue: 123.0,
+            ..Default::default()
         };
         hsp_list.hsp_array[0].evalue = 123.0;
         let params = LinkHSPParameters {
@@ -2460,26 +2501,29 @@ mod tests {
         let original_context = hsp.context;
         let original_num_ident = hsp.num_ident;
         let linked = LinkBlastHsp {
-            source_index: 0,
             score: 77,
             num_ident: 999,
             bit_score: 12.5,
             evalue: 1.0e-9,
-            query: LinkBlastSeg {
+            query: crate::hspstream::BlastSeg {
                 frame: -1,
                 offset: 100,
                 end: 160,
                 gapped_start: 120,
             },
-            subject: LinkBlastSeg {
+            subject: crate::hspstream::BlastSeg {
                 frame: -2,
                 offset: 300,
                 end: 480,
                 gapped_start: 330,
             },
             context: 4,
+            gap_info: None,
             num: 3,
-            xsum: 42.0,
+            comp_adjustment_method: 0,
+            pat_info: None,
+            num_positives: 0,
+            map_info: None,
         };
 
         blast_hsp_update_from_link_hsp(&mut hsp, &linked);
@@ -2492,7 +2536,6 @@ mod tests {
         assert_eq!(hsp.bit_score, 12.5);
         assert_eq!(hsp.evalue, 1.0e-9);
         assert_eq!(hsp.num, 3);
-        assert_eq!(hsp.xsum, 42.0);
     }
 
     #[test]
@@ -2531,6 +2574,7 @@ mod tests {
             query_index: 0,
             hsp_array: vec![make_hsp(0, 0, 16, 0, 18, 63, 1)],
             best_evalue: 1.0,
+            ..Default::default()
         };
 
         let rc = blast_link_hsps(TBLASTN, &mut hsp_list, &qi, 20, &sbp, &params, true);
@@ -2591,6 +2635,7 @@ mod tests {
             query_index: 0,
             hsp_array: vec![make_hsp(0, 0, 8, 0, 8, 38, 1)],
             best_evalue: 1.0,
+            ..Default::default()
         };
 
         let rc = blast_link_hsps(TBLASTN, &mut hsp_list, &qi, 24, &sbp, &params, true);
