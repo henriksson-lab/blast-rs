@@ -2372,6 +2372,39 @@ fn jumper_shift_trace(trace: &mut u32, shift: i32, window: i32) {
     }
 }
 
+fn jumper_query_word4(query: &[u8], start: i32) -> Option<u32> {
+    if start < 0 {
+        return None;
+    }
+    let start = start as usize;
+    let bytes = query.get(start..start.checked_add(4)?)?;
+    Some(
+        (bytes[0] as u32)
+            | ((bytes[1] as u32) << 8)
+            | ((bytes[2] as u32) << 16)
+            | ((bytes[3] as u32) << 24),
+    )
+}
+
+fn jumper_packed_word_matches(
+    table: &[u32],
+    query: &[u8],
+    query_start: i32,
+    subject: &[u8],
+    subject_byte: i32,
+) -> bool {
+    if subject_byte < 0 || table.len() < 256 {
+        return false;
+    }
+    let Some(query_word) = jumper_query_word4(query, query_start) else {
+        return false;
+    };
+    let Some(&packed_subject) = subject.get(subject_byte as usize) else {
+        return false;
+    };
+    table[packed_subject as usize] == query_word
+}
+
 /// blast-rs: Unpacked-subject rightward jump validation helper; not a direct NCBI C port.
 fn jumper_match_run_right(
     query: &[u8],
@@ -2941,6 +2974,7 @@ pub fn jumper_extend_right_compressed(
     mismatch_score: i32,
     max_mismatches: i32,
     window: i32,
+    table: &[u32],
     num_identical: &mut i32,
     ungapped_ext_len: &mut i32,
 ) -> (i32, i32, i32) {
@@ -2961,6 +2995,17 @@ pub fn jumper_extend_right_compressed(
     let mut is_ungapped = true;
 
     while cp < query.len() as i32 && cq < subject_length && num_mismatches < max_mismatches {
+        if (cq & 3) == 0
+            && cp < query.len() as i32 - 4
+            && cq < subject_length - 4
+            && jumper_packed_word_matches(table, query, cp, subject, cq / 4)
+        {
+            cp += 4;
+            cq += 4;
+            new_matches += 4;
+            continue;
+        }
+
         if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
             cp += 1;
             cq += 1;
@@ -3039,6 +3084,7 @@ pub fn jumper_extend_left_compressed(
     mismatch_score: i32,
     max_mismatches: i32,
     window: i32,
+    table: &[u32],
     num_identical: &mut i32,
 ) -> (i32, i32, i32) {
     if query.is_empty()
@@ -3062,6 +3108,17 @@ pub fn jumper_extend_left_compressed(
     let mut best_score = 0;
 
     while cp >= 0 && cq >= 0 && num_mismatches < max_mismatches {
+        if (cq & 3) == 3
+            && cp >= 4
+            && cq >= 4
+            && jumper_packed_word_matches(table, query, cp - 3, subject, cq / 4)
+        {
+            cp -= 4;
+            cq -= 4;
+            new_matches += 4;
+            continue;
+        }
+
         if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
             cp -= 1;
             cq -= 1;
@@ -3135,6 +3192,7 @@ pub fn jumper_extend_right_compressed_with_traceback(
     gap_extend_score: i32,
     max_mismatches: i32,
     window: i32,
+    table: &[u32],
     edit_script: &mut JumperPrelimEditBlock,
     num_identical: &mut i32,
     left_extension: bool,
@@ -3153,6 +3211,17 @@ pub fn jumper_extend_right_compressed_with_traceback(
     let mut is_ungapped = true;
 
     while cp < query.len() as i32 && cq < subject_length && num_mismatches < max_mismatches {
+        if (cq & 3) == 0
+            && cp < query.len() as i32 - 4
+            && cq < subject_length - 4
+            && jumper_packed_word_matches(table, query, cp, subject, cq / 4)
+        {
+            cp += 4;
+            cq += 4;
+            new_matches += 4;
+            continue;
+        }
+
         if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
             cp += 1;
             cq += 1;
@@ -3252,6 +3321,7 @@ pub fn jumper_extend_left_compressed_with_traceback(
     gap_extend_score: i32,
     max_mismatches: i32,
     window: i32,
+    table: &[u32],
     edit_script: &mut JumperPrelimEditBlock,
     num_identical: &mut i32,
 ) -> (i32, i32, i32) {
@@ -3272,6 +3342,17 @@ pub fn jumper_extend_left_compressed_with_traceback(
     let trace_mask = jumper_trace_mask(max_mismatches);
 
     while cp >= 0 && cq >= 0 && num_mismatches < max_mismatches {
+        if (cq & 3) == 3
+            && cp >= 4
+            && cq >= 4
+            && jumper_packed_word_matches(table, query, cp - 3, subject, cq / 4)
+        {
+            cp -= 4;
+            cq -= 4;
+            new_matches += 4;
+            continue;
+        }
+
         if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
             cp -= 1;
             cq -= 1;
@@ -3361,6 +3442,7 @@ pub fn jumper_extend_right_compressed_with_traceback_optimal(
     max_mismatches: i32,
     window: i32,
     x_drop: i32,
+    table: &[u32],
     edit_script: &mut JumperPrelimEditBlock,
     best_num_identical: &mut i32,
     left_extension: bool,
@@ -3386,6 +3468,17 @@ pub fn jumper_extend_right_compressed_with_traceback_optimal(
     let mut last_gap_open = 0;
 
     while cp < query.len() as i32 && cq < subject_length && num_mismatches < max_mismatches {
+        if (cq & 3) == 0
+            && cp < query.len() as i32 - 4
+            && cq < subject_length - 4
+            && jumper_packed_word_matches(table, query, cp, subject, cq / 4)
+        {
+            cp += 4;
+            cq += 4;
+            new_matches += 4;
+            continue;
+        }
+
         if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
             cp += 1;
             cq += 1;
@@ -3510,6 +3603,7 @@ pub fn jumper_extend_left_compressed_with_traceback_optimal(
     max_mismatches: i32,
     window: i32,
     x_drop: i32,
+    table: &[u32],
     edit_script: &mut JumperPrelimEditBlock,
     best_num_identical: &mut i32,
 ) -> (i32, i32, i32) {
@@ -3537,6 +3631,17 @@ pub fn jumper_extend_left_compressed_with_traceback_optimal(
     let mut last_gap_open = 0;
 
     while cp >= 0 && cq >= 0 && num_mismatches < max_mismatches {
+        if (cq & 3) == 3
+            && cp >= 4
+            && cq >= 4
+            && jumper_packed_word_matches(table, query, cp - 3, subject, cq / 4)
+        {
+            cp -= 4;
+            cq -= 4;
+            new_matches += 4;
+            continue;
+        }
+
         if query[cp as usize] == crate::encoding::ncbi2na_base_at(subject, cq as usize) {
             cp -= 1;
             cq -= 1;
@@ -3713,6 +3818,7 @@ pub fn jumper_gapped_alignment_compressed_with_traceback(
             align_params.max_mismatches,
             align_params.mismatch_window,
             align_params.gap_x_dropoff,
+            &jumper.table,
             rev_prelim_block,
             num_identical,
         );
@@ -3741,6 +3847,7 @@ pub fn jumper_gapped_alignment_compressed_with_traceback(
             align_params.max_mismatches,
             align_params.mismatch_window,
             align_params.gap_x_dropoff,
+            &jumper.table,
             fwd_prelim_block,
             num_identical,
             left_ext_done,
@@ -4221,6 +4328,12 @@ pub fn blast_na_extend_jumper(
         if status != 0 {
             continue;
         }
+        hits_extended += 1;
+        skip_until = local_q_offset
+            .saturating_add(query_start)
+            .saturating_add(right_ungapped_ext_len);
+        last_diag = diag;
+
         let Some((
             score,
             query_align_start,
@@ -4262,11 +4375,6 @@ pub fn blast_na_extend_jumper(
         ) else {
             continue;
         };
-        hits_extended += 1;
-        skip_until = local_q_offset
-            .saturating_add(query_start)
-            .saturating_add(right_ungapped_ext_len);
-        last_diag = diag;
 
         let saved_hsp = new_hsp.clone();
         let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
@@ -8076,6 +8184,8 @@ mod tests {
         let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut table = vec![0u32; 256];
+        s_create_table(&mut table);
         let mut num_identical = 0;
         let mut ungapped_ext_len = -1;
 
@@ -8087,6 +8197,7 @@ mod tests {
             -3,
             3,
             8,
+            &table,
             &mut num_identical,
             &mut ungapped_ext_len,
         );
@@ -8102,6 +8213,8 @@ mod tests {
         let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 9];
         let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut table = vec![0u32; 256];
+        s_create_table(&mut table);
         let mut num_identical = 0;
 
         let (score, q_len, s_len) = jumper_extend_left_compressed(
@@ -8113,6 +8226,7 @@ mod tests {
             -3,
             3,
             8,
+            &table,
             &mut num_identical,
         );
 
@@ -8126,6 +8240,8 @@ mod tests {
         let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut table = vec![0u32; 256];
+        s_create_table(&mut table);
         let mut script = JumperPrelimEditBlock::default();
         let mut num_identical = 0;
         let mut ungapped_ext_len = -1;
@@ -8140,6 +8256,7 @@ mod tests {
             -1,
             3,
             8,
+            &table,
             &mut script,
             &mut num_identical,
             false,
@@ -8158,6 +8275,8 @@ mod tests {
         let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 9];
         let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut table = vec![0u32; 256];
+        s_create_table(&mut table);
         let mut script = JumperPrelimEditBlock::default();
         let mut num_identical = 0;
 
@@ -8172,6 +8291,7 @@ mod tests {
             -1,
             3,
             8,
+            &table,
             &mut script,
             &mut num_identical,
         );
@@ -8187,6 +8307,8 @@ mod tests {
         let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut table = vec![0u32; 256];
+        s_create_table(&mut table);
         let mut script = JumperPrelimEditBlock::default();
         let mut best_num_identical = 0;
         let mut ungapped_ext_len = -1;
@@ -8202,6 +8324,7 @@ mod tests {
             3,
             8,
             100,
+            &table,
             &mut script,
             &mut best_num_identical,
             false,
@@ -8220,6 +8343,8 @@ mod tests {
         let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 9];
         let subject_bases = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
+        let mut table = vec![0u32; 256];
+        s_create_table(&mut table);
         let mut script = JumperPrelimEditBlock::default();
         let mut best_num_identical = 0;
 
@@ -8235,6 +8360,7 @@ mod tests {
             3,
             8,
             100,
+            &table,
             &mut script,
             &mut best_num_identical,
         );

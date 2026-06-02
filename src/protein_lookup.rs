@@ -1583,55 +1583,86 @@ thread_local! {
 /// `subject_length + window`, making prior `last_hit` values naturally stale.
 #[derive(Debug, Clone)]
 pub struct BlastExtendWord {
-    entries: Vec<(i32, bool)>,
-    offset: i32,
-    window: i32,
-    mask: usize,
+    inner: crate::extend::BlastExtendWord,
 }
 
 impl BlastExtendWord {
     pub fn new(window: i32) -> Self {
-        Self {
-            entries: Vec::new(),
-            offset: window.max(0),
-            window: window.max(0),
-            mask: 0,
+        let mut options = crate::options::InitialWordOptions::new_blastp();
+        options.window_size = window.max(0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options,
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: [0; 256],
+        };
+        let inner = crate::extend::blast_extend_word_new(
+            0,
+            &word_params,
+            crate::extend::DiagTableType::DiagArray,
+        )
+        .unwrap_or_default();
+        Self { inner }
+    }
+
+    fn word_params(window: i32) -> crate::parameters::InitialWordParameters {
+        let mut options = crate::options::InitialWordOptions::new_blastp();
+        options.window_size = window.max(0);
+        crate::parameters::InitialWordParameters {
+            options,
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: [0; 256],
         }
     }
 
     fn prepare_two_hit(&mut self, query_len: usize, window: i32) {
         let window = window.max(0);
-        let mut diag_count = 1usize;
-        while diag_count < query_len + window as usize {
-            diag_count <<= 1;
-        }
-        if self.window != window || self.entries.len() != diag_count {
-            self.entries.clear();
-            self.entries.resize(diag_count, (0, false));
-            self.offset = window;
-            self.window = window;
-            self.mask = diag_count - 1;
-        } else if self.entries.is_empty() {
-            self.entries.resize(diag_count, (0, false));
-            self.offset = window;
-            self.mask = diag_count - 1;
+        let needs_new = self
+            .inner
+            .diag_table
+            .as_ref()
+            .map(|diag| {
+                let target = query_len as i32 + window;
+                diag.window != window || diag.diag_array_length < target.max(1)
+            })
+            .unwrap_or(true);
+        if needs_new {
+            if let Some(new_inner) = crate::extend::blast_extend_word_new(
+                query_len as u32,
+                &Self::word_params(window),
+                crate::extend::DiagTableType::DiagArray,
+            ) {
+                self.inner = new_inner;
+            }
         }
     }
 
     /// NCBI: `Blast_ExtendWordExit` (`blast_extend.c`).
     pub fn exit(&mut self, subject_len: usize) {
-        if self.offset >= i32::MAX / 4 {
-            self.reset();
-        } else {
-            self.offset = self.offset + subject_len as i32 + self.window;
-        }
+        let _ = crate::extend::blast_extend_word_exit(
+            Some(&mut self.inner),
+            subject_len.min(i32::MAX as usize) as i32,
+        );
     }
 
     /// Force a fresh diagonal table, for callers that begin a new independent
     /// subject stream on the same scratch object.
     pub fn reset(&mut self) {
-        self.entries.fill((0, false));
-        self.offset = self.window;
+        if let Some(diag) = self.inner.diag_table.as_mut() {
+            let _ = crate::extend::s_blast_diag_clear(Some(diag));
+        }
+    }
+
+    fn diag_table_mut(&mut self) -> &mut crate::extend::BlastDiagTable {
+        self.inner
+            .diag_table
+            .as_mut()
+            .expect("protein two-hit scanner requires a diagonal array")
     }
 }
 
@@ -2690,9 +2721,10 @@ fn s_blast_aa_word_finder_two_hit_compressed(
     let lookup = table.compressed.as_ref().expect("compressed table present");
 
     diag_table.prepare_two_hit(query.len(), window);
-    let diag_mask = diag_table.mask;
-    let diag_array = &mut diag_table.entries;
+    let diag_table = diag_table.diag_table_mut();
+    let diag_mask = diag_table.diag_mask as usize;
     let diag_offset = diag_table.offset;
+    let diag_array = &mut diag_table.hit_level_array;
 
     let mut hits: Vec<ProteinHit> = Vec::new();
     let ws = word_size as i32;
@@ -2720,18 +2752,21 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                 let s_pos = pair.subject_offset as usize;
                 let s_off = s_pos as i32;
                 let diag = q_pos.wrapping_sub(s_pos) & diag_mask;
-                let (last_hit, flag) = diag_array[diag];
+                let last_hit = diag_array[diag].last_hit;
+                let flag = diag_array[diag].flag;
 
                 if flag {
                     if s_off + diag_offset < last_hit {
                         continue;
                     }
-                    diag_array[diag] = (s_off + diag_offset, false);
+                    diag_array[diag].last_hit = s_off + diag_offset;
+                    diag_array[diag].flag = false;
                     continue;
                 }
                 let diff = s_off - (last_hit - diag_offset);
                 if diff >= window {
-                    diag_array[diag] = (s_off + diag_offset, false);
+                    diag_array[diag].last_hit = s_off + diag_offset;
+                    diag_array[diag].flag = false;
                     continue;
                 }
                 if diff < ws {
@@ -2751,7 +2786,8 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                 };
                 if context_params.is_some() || context_starts.is_some() {
                     if q_pos.wrapping_sub(diff as usize) < ctx_start {
-                        diag_array[diag] = (s_off + diag_offset, false);
+                        diag_array[diag].last_hit = s_off + diag_offset;
+                        diag_array[diag].flag = false;
                         continue;
                     }
                 }
@@ -2776,7 +2812,8 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                         // the init HSP only when `score >= cutoffs->cutoff_score`; the
                         // diagonal `last_hit`/`flag` update below is INDEPENDENT of the
                         // cutoff and happens regardless of whether the HSP was saved.
-                        diag_array[diag] = (s_last_off - (ws - 1) + diag_offset, true);
+                        diag_array[diag].last_hit = s_last_off - (ws - 1) + diag_offset;
+                        diag_array[diag].flag = true;
                         if let Some(hit) = hit {
                             if hit.score >= context_cutoff_score {
                                 if let Some(channels) = side_channels.as_deref_mut() {
@@ -2817,7 +2854,8 @@ fn s_blast_aa_word_finder_two_hit_compressed(
                                 hits.push(hit);
                             }
                         }
-                        diag_array[diag] = (s_off + diag_offset, false);
+                        diag_array[diag].last_hit = s_off + diag_offset;
+                        diag_array[diag].flag = false;
                     }
                 }
             }
@@ -2885,9 +2923,10 @@ fn s_blast_aa_word_finder_two_hit_scan(
     }
 
     diag_table.prepare_two_hit(query.len(), window);
-    let diag_mask = diag_table.mask;
+    let diag_table = diag_table.diag_table_mut();
+    let diag_mask = diag_table.diag_mask as usize;
     let diag_offset = diag_table.offset;
-    let diag_array = &mut diag_table.entries;
+    let diag_array = &mut diag_table.hit_level_array;
 
     let mut hits: Vec<ProteinHit> = Vec::new();
     let ws = word_size as i32;
@@ -2941,18 +2980,22 @@ fn s_blast_aa_word_finder_two_hit_scan(
                 let q_pos = *hit_ptr.add(i) as usize;
                 let s_off = s_pos as i32;
                 let diag = q_pos.wrapping_sub(s_pos) & diag_mask;
-                let (last_hit, flag) = *diag_ptr.add(diag);
+                let diag_entry = &*diag_ptr.add(diag);
+                let last_hit = diag_entry.last_hit;
+                let flag = diag_entry.flag;
 
                 if flag {
                     if s_off + diag_offset < last_hit {
                         continue;
                     }
-                    *diag_ptr.add(diag) = (s_off + diag_offset, false);
+                    (*diag_ptr.add(diag)).last_hit = s_off + diag_offset;
+                    (*diag_ptr.add(diag)).flag = false;
                     continue;
                 }
                 let diff = s_off - (last_hit - diag_offset);
                 if diff >= window {
-                    *diag_ptr.add(diag) = (s_off + diag_offset, false);
+                    (*diag_ptr.add(diag)).last_hit = s_off + diag_offset;
+                    (*diag_ptr.add(diag)).flag = false;
                     continue;
                 }
                 if diff < ws {
@@ -2972,7 +3015,8 @@ fn s_blast_aa_word_finder_two_hit_scan(
                 };
                 if context_params.is_some() || context_starts.is_some() {
                     if q_pos.wrapping_sub(diff as usize) < ctx_start {
-                        *diag_ptr.add(diag) = (s_off + diag_offset, false);
+                        (*diag_ptr.add(diag)).last_hit = s_off + diag_offset;
+                        (*diag_ptr.add(diag)).flag = false;
                         continue;
                     }
                 }
@@ -2999,7 +3043,8 @@ fn s_blast_aa_word_finder_two_hit_scan(
                         // below the save cutoff. The diagonal update is
                         // INDEPENDENT of the cutoff; only HSP saving is gated on
                         // `score >= cutoffs->cutoff_score` (`aa_ungapped.c:588`).
-                        *diag_ptr.add(diag) = (s_last_off - (ws - 1) + diag_offset, true);
+                        (*diag_ptr.add(diag)).last_hit = s_last_off - (ws - 1) + diag_offset;
+                        (*diag_ptr.add(diag)).flag = true;
                         if let Some(hit) = hit {
                             if hit.score >= context_cutoff_score {
                                 let record = BlastAaInitHitRecord {
@@ -3056,7 +3101,8 @@ fn s_blast_aa_word_finder_two_hit_scan(
                                 hits.push(hit);
                             }
                         }
-                        *diag_ptr.add(diag) = (s_off + diag_offset, false);
+                        (*diag_ptr.add(diag)).last_hit = s_off + diag_offset;
+                        (*diag_ptr.add(diag)).flag = false;
                     }
                 }
             }

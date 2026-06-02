@@ -606,6 +606,44 @@ pub(crate) fn protein_align_ex(
     )
 }
 
+fn trim_terminal_gap_ops(
+    edit_script: &mut GapEditScript,
+    query_start: &mut usize,
+    query_end: &mut usize,
+    subject_start: &mut usize,
+    subject_end: &mut usize,
+    score_left: &mut i32,
+    score_right: &mut i32,
+    gap_open: i32,
+    gap_extend: i32,
+) {
+    // NCBI `BLAST_GappedAlignmentWithTraceback` (`blast_gapalign.c:4771-4801`):
+    // after converting preliminary traceback, prune terminal non-Sub ops and
+    // add back their gap penalties while moving the corresponding endpoint.
+    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
+        let (op, num) = edit_script.ops[0];
+        *score_left += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            *subject_start += num as usize;
+        } else {
+            *query_start += num as usize;
+        }
+        edit_script.ops.remove(0);
+    }
+    while !edit_script.ops.is_empty()
+        && edit_script.ops[edit_script.ops.len() - 1].0 != GapAlignOpType::Sub
+    {
+        let (op, num) = edit_script.ops[edit_script.ops.len() - 1];
+        *score_right += gap_open + num * gap_extend;
+        if op == GapAlignOpType::Del {
+            *subject_end -= num as usize;
+        } else {
+            *query_end -= num as usize;
+        }
+        edit_script.ops.pop();
+    }
+}
+
 /// Score-only gapped extension in one direction (left or right from seed).
 /// Returns the best score found.
 /// Score-only gapped extension in one direction, matching NCBI Blast_SemiGappedAlign.
@@ -965,9 +1003,9 @@ pub fn protein_gapped_align(
         return None;
     }
 
-    // Clamp seed points to valid range
-    let seed_q = seed_q.min(query.len().saturating_sub(1));
-    let seed_s = seed_s.min(subject.len().saturating_sub(1));
+    if seed_q >= query.len() || seed_s >= subject.len() {
+        return None;
+    }
 
     let (score_l, ql, sl, left_ops) = protein_align_ex(
         &query[..seed_q + 1],
@@ -1023,37 +1061,17 @@ pub fn protein_gapped_align(
     let mut score_left = score_l;
     let mut score_right = score_r;
 
-    // NCBI `BLAST_GappedAlignmentWithTraceback` (`blast_gapalign.c:4771-4801`):
-    // rarely (typically when the scoring system changes between the score-only
-    // and traceback stages, as happens with composition-based statistics) it is
-    // possible to compute an optimal alignment with a leading or trailing gap.
-    // Prune these unneeded gaps here and update the score and alignment
-    // boundaries. The add-back uses positive-magnitude gap_open/gap_extend (the
-    // DP applied them as negatives), so removing the op cancels them out.
-    // GapAlignOpType convention: Del == gap in query == consumes subject;
-    // Ins == gap in subject == consumes query (matches C eGapAlignDel/eGapAlignIns).
-    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
-        let (op, num) = edit_script.ops[0];
-        score_left += gap_open + num * gap_extend;
-        if op == GapAlignOpType::Del {
-            final_s_start += num as usize;
-        } else {
-            final_q_start += num as usize;
-        }
-        edit_script.ops.remove(0);
-    }
-    while !edit_script.ops.is_empty()
-        && edit_script.ops[edit_script.ops.len() - 1].0 != GapAlignOpType::Sub
-    {
-        let (op, num) = edit_script.ops[edit_script.ops.len() - 1];
-        score_right += gap_open + num * gap_extend;
-        if op == GapAlignOpType::Del {
-            final_s_end -= num as usize;
-        } else {
-            final_q_end -= num as usize;
-        }
-        edit_script.ops.pop();
-    }
+    trim_terminal_gap_ops(
+        &mut edit_script,
+        &mut final_q_start,
+        &mut final_q_end,
+        &mut final_s_start,
+        &mut final_s_end,
+        &mut score_left,
+        &mut score_right,
+        gap_open,
+        gap_extend,
+    );
 
     let total_score = score_left + score_right;
     if edit_script.ops.is_empty() {
@@ -1105,8 +1123,9 @@ pub fn protein_gapped_align_pssm(
         return None;
     }
 
-    let seed_q = seed_q.min(query.len().saturating_sub(1));
-    let seed_s = seed_s.min(subject.len().saturating_sub(1));
+    if seed_q >= query.len() || seed_s >= subject.len() {
+        return None;
+    }
 
     let (score_l, ql, sl, left_ops) = protein_align_ex_scored(
         &query[..seed_q + 1],
@@ -1162,31 +1181,17 @@ pub fn protein_gapped_align_pssm(
     let mut score_left = score_l;
     let mut score_right = score_r;
 
-    // NCBI `BLAST_GappedAlignmentWithTraceback` prunes terminal non-Sub ops
-    // after building the script regardless of the score source. Keep the PSSM
-    // path in lockstep with the square-matrix path above.
-    while !edit_script.ops.is_empty() && edit_script.ops[0].0 != GapAlignOpType::Sub {
-        let (op, num) = edit_script.ops[0];
-        score_left += gap_open + num * gap_extend;
-        if op == GapAlignOpType::Del {
-            final_s_start += num as usize;
-        } else {
-            final_q_start += num as usize;
-        }
-        edit_script.ops.remove(0);
-    }
-    while !edit_script.ops.is_empty()
-        && edit_script.ops[edit_script.ops.len() - 1].0 != GapAlignOpType::Sub
-    {
-        let (op, num) = edit_script.ops[edit_script.ops.len() - 1];
-        score_right += gap_open + num * gap_extend;
-        if op == GapAlignOpType::Del {
-            final_s_end -= num as usize;
-        } else {
-            final_q_end -= num as usize;
-        }
-        edit_script.ops.pop();
-    }
+    trim_terminal_gap_ops(
+        &mut edit_script,
+        &mut final_q_start,
+        &mut final_q_end,
+        &mut final_s_start,
+        &mut final_s_end,
+        &mut score_left,
+        &mut score_right,
+        gap_open,
+        gap_extend,
+    );
     if edit_script.ops.is_empty() {
         return None;
     }
@@ -1299,8 +1304,10 @@ pub fn s_sw_find_final_ends_using_xdrop(
     for &(op, cnt) in &ops {
         edit_script.push(op, cnt);
     }
-    // Preserve the full ALIGN_EX script. NCBI does not trim leading or
-    // trailing gap ops when converting preliminary traceback to GapEditScript.
+    // Preserve the full ALIGN_EX script. NCBI's
+    // `s_SWFindFinalEndsUsingXdrop` only fills the forward preliminary
+    // traceback and returns extents/score; the terminal-gap pruning belongs to
+    // `BLAST_GappedAlignmentWithTraceback`, not this SW-bounded callback.
     if edit_script.ops.is_empty() {
         return None;
     }
@@ -1536,6 +1543,41 @@ mod tests {
     }
 
     #[test]
+    fn test_terminal_gap_trimming_updates_scores_and_endpoints() {
+        let mut edit_script = GapEditScript::new();
+        edit_script.push(GapAlignOpType::Del, 2);
+        edit_script.push(GapAlignOpType::Sub, 3);
+        edit_script.push(GapAlignOpType::Ins, 1);
+
+        let mut q_start = 10usize;
+        let mut q_end = 20usize;
+        let mut s_start = 30usize;
+        let mut s_end = 45usize;
+        let mut score_left = 100;
+        let mut score_right = 200;
+
+        trim_terminal_gap_ops(
+            &mut edit_script,
+            &mut q_start,
+            &mut q_end,
+            &mut s_start,
+            &mut s_end,
+            &mut score_left,
+            &mut score_right,
+            11,
+            1,
+        );
+
+        assert_eq!(edit_script.ops, vec![(GapAlignOpType::Sub, 3)]);
+        assert_eq!(q_start, 10);
+        assert_eq!(q_end, 19);
+        assert_eq!(s_start, 32);
+        assert_eq!(s_end, 45);
+        assert_eq!(score_left, 113);
+        assert_eq!(score_right, 212);
+    }
+
+    #[test]
     fn test_protein_gapped_align_produces_edit_script() {
         let m = simple_blosum62();
         let query = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
@@ -1584,6 +1626,16 @@ mod tests {
     }
 
     #[test]
+    fn test_protein_gapped_align_rejects_out_of_range_seed() {
+        let m = simple_blosum62();
+        let query = vec![1u8, 2, 3];
+        let subject = query.clone();
+
+        assert!(protein_gapped_align(&query, &subject, query.len(), 1, &m, 11, 1, 50).is_none());
+        assert!(protein_gapped_align(&query, &subject, 1, subject.len(), &m, 11, 1, 50).is_none());
+    }
+
+    #[test]
     fn test_protein_gapped_align_pssm_uses_absolute_query_offset() {
         let query = vec![1u8, 2, 3];
         let subject = query.clone();
@@ -1599,6 +1651,25 @@ mod tests {
         assert_eq!(result.query_start, 0);
         assert_eq!(result.query_end, query.len());
         assert_eq!(result.num_ident, query.len() as i32);
+    }
+
+    #[test]
+    fn test_protein_gapped_align_pssm_rejects_out_of_range_seed() {
+        let query = vec![1u8, 2, 3];
+        let subject = query.clone();
+        let mut pssm = vec![vec![-20; AA_SIZE]; query.len()];
+        for (pos, &aa) in query.iter().enumerate() {
+            pssm[pos][aa as usize] = 8;
+        }
+
+        assert!(
+            protein_gapped_align_pssm(&query, &subject, query.len(), 1, 0, &pssm, 11, 1, 50)
+                .is_none()
+        );
+        assert!(
+            protein_gapped_align_pssm(&query, &subject, 1, subject.len(), 0, &pssm, 11, 1, 50)
+                .is_none()
+        );
     }
 
     #[test]

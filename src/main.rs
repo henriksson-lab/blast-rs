@@ -5017,8 +5017,8 @@ fn apply_blastn_linked_sum_stats_to_hsps(
     len_adj_minus: i32,
 ) {
     use blast_rs::{
-        blast_link_hsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
-        LinkScoreBlock, QueryInfo, BLASTN,
+        blast_link_hsp_list, BlastHSP, BlastHSPList, BlastSeg, LinkHSPParameters, LinkScoreBlock,
+        QueryInfo, BLASTN,
     };
 
     if hsps.len() <= 1 {
@@ -5042,39 +5042,49 @@ fn apply_blastn_linked_sum_stats_to_hsps(
     };
     let link_params = LinkHSPParameters::default();
 
-    let mut hsp_list = LinkBlastHspList {
+    let mut hsp_list = BlastHSPList {
         oid: 0,
         query_index: 0,
         hsp_array: hsps
             .iter()
-            .enumerate()
-            .map(|(source_index, hsp)| LinkBlastHsp {
-                source_index,
-                score: hsp.score,
-                num_ident: hsp.num_ident,
-                bit_score: hsp.bit_score,
-                evalue: hsp.evalue,
-                query: LinkBlastSeg {
-                    frame: 1,
-                    offset: hsp.query_start,
-                    end: hsp.query_end,
-                    gapped_start: hsp.query_start,
-                },
-                subject: LinkBlastSeg {
-                    frame: if hsp.context == 1 { -1 } else { 1 },
-                    offset: hsp.subject_start,
-                    end: hsp.subject_end,
-                    gapped_start: hsp.subject_start,
-                },
-                context: hsp.context,
-                num: 1,
-                xsum: 0.0,
+            .map(|hsp| {
+                Some(BlastHSP {
+                    score: hsp.score,
+                    num_ident: hsp.num_ident,
+                    bit_score: hsp.bit_score,
+                    evalue: hsp.evalue,
+                    query: BlastSeg {
+                        frame: 1,
+                        offset: hsp.query_start,
+                        end: hsp.query_end,
+                        gapped_start: hsp.query_start,
+                    },
+                    subject: BlastSeg {
+                        frame: if hsp.context == 1 { -1 } else { 1 },
+                        offset: hsp.subject_start,
+                        end: hsp.subject_end,
+                        gapped_start: hsp.subject_start,
+                    },
+                    context: hsp.context,
+                    gap_info: None,
+                    num: 1,
+                    xsum: 0.0,
+                    num_gaps: hsp.gap_opens,
+                    comp_adjustment_method: 0,
+                    pat_info: None,
+                    num_positives: 0,
+                    map_info: None,
+                })
             })
             .collect(),
+        hspcnt: hsps.len() as i32,
+        allocated: hsps.len() as i32,
+        hsp_max: i32::MAX,
+        do_not_reallocate: false,
         best_evalue: f64::INFINITY,
     };
 
-    blast_link_hsps(
+    blast_link_hsp_list(
         BLASTN,
         &mut hsp_list,
         &query_info,
@@ -5084,10 +5094,47 @@ fn apply_blastn_linked_sum_stats_to_hsps(
         false,
     );
 
-    for linked in &hsp_list.hsp_array {
-        if let Some(hsp) = hsps.get_mut(linked.source_index) {
-            hsp.evalue = linked.evalue;
-            hsp.bit_score = linked.bit_score;
+    let mut remaining: Vec<Option<blast_rs::search::SearchHsp>> =
+        std::mem::take(hsps).into_iter().map(Some).collect();
+    for linked in hsp_list.hsp_array.into_iter().flatten() {
+        let mut selected = None;
+        for (idx, candidate) in remaining.iter().enumerate() {
+            let Some(candidate) = candidate.as_ref() else {
+                continue;
+            };
+            if (
+                candidate.score,
+                candidate.context,
+                1i16,
+                candidate.query_start,
+                candidate.query_end,
+                candidate.query_start,
+                if candidate.context == 1 { -1i16 } else { 1i16 },
+                candidate.subject_start,
+                candidate.subject_end,
+                candidate.subject_start,
+            ) == (
+                linked.score,
+                linked.context,
+                linked.query.frame,
+                linked.query.offset,
+                linked.query.end,
+                linked.query.gapped_start,
+                linked.subject.frame,
+                linked.subject.offset,
+                linked.subject.end,
+                linked.subject.gapped_start,
+            ) {
+                selected = Some(idx);
+                break;
+            }
+        }
+        if let Some(idx) = selected {
+            if let Some(mut hsp) = remaining[idx].take() {
+                hsp.evalue = linked.evalue;
+                hsp.bit_score = linked.bit_score;
+                hsps.push(hsp);
+            }
         }
     }
 }

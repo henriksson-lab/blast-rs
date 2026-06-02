@@ -109,10 +109,8 @@ pub use api::{
 
 // Re-export core types and database builders at crate root (matching old API)
 pub use db::{make_db, make_nucleotide_db, make_protein_db, BlastDb, DbType};
-pub use link_hsps::{
-    blast_link_hsps, LinkBlastHsp, LinkBlastHspList, LinkBlastSeg, LinkHSPParameters,
-    LinkScoreBlock,
-};
+pub use hspstream::{BlastHSP, BlastHSPList, BlastSeg};
+pub use link_hsps::{blast_link_hsp_list, LinkHSPParameters, LinkScoreBlock};
 pub use matrix::AA_FREQUENCIES as BACKGROUND_FREQ;
 pub use program::BLASTN;
 pub use pssm::Pssm;

@@ -42,6 +42,181 @@ pub struct Hsp {
     pub map_info: Option<BlastHSPMappingInfo>,
 }
 
+/// NCBI: `BlastSeg` (`blast_hits.h:96`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlastSeg {
+    pub frame: i16,
+    pub offset: i32,
+    pub end: i32,
+    pub gapped_start: i32,
+}
+
+impl BlastSeg {
+    fn from_query_hsp(hsp: &Hsp) -> Self {
+        Self {
+            frame: hsp.query_frame as i16,
+            offset: hsp.query_offset,
+            end: hsp.query_end,
+            gapped_start: hsp.query_gapped_start,
+        }
+    }
+
+    fn from_subject_hsp(hsp: &Hsp) -> Self {
+        Self {
+            frame: hsp.subject_frame as i16,
+            offset: hsp.subject_offset,
+            end: hsp.subject_end,
+            gapped_start: hsp.subject_gapped_start,
+        }
+    }
+}
+
+/// NCBI: `SPHIHspInfo` (`blast_hits.h:104`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SPHIHspInfo {
+    pub index: i32,
+    pub length: i32,
+}
+
+impl From<PhiPatInfo> for SPHIHspInfo {
+    fn from(value: PhiPatInfo) -> Self {
+        Self {
+            index: value.index as i32,
+            length: value.length,
+        }
+    }
+}
+
+impl From<SPHIHspInfo> for PhiPatInfo {
+    fn from(value: SPHIHspInfo) -> Self {
+        Self {
+            index: value.index.max(0) as usize,
+            length: value.length,
+        }
+    }
+}
+
+/// NCBI: `BlastHSP` (`blast_hits.h:124`).
+///
+/// This is the upstream-shaped internal HSP. Existing Rust pipeline code still
+/// uses [`Hsp`] in several places; conversion is intentionally explicit so the
+/// translated traceback/CBS/evalue/link/reap path can migrate to `BlastHSP`
+/// without carrying public API-shaped data through the core.
+#[derive(Debug, Clone)]
+pub struct BlastHSP {
+    pub score: i32,
+    pub num_ident: i32,
+    pub bit_score: f64,
+    pub evalue: f64,
+    pub query: BlastSeg,
+    pub subject: BlastSeg,
+    pub context: i32,
+    pub gap_info: Option<crate::gapinfo::GapEditScript>,
+    pub num: i32,
+    pub xsum: f64,
+    pub num_gaps: i32,
+    pub comp_adjustment_method: i16,
+    pub pat_info: Option<SPHIHspInfo>,
+    pub num_positives: i32,
+    pub map_info: Option<BlastHSPMappingInfo>,
+}
+
+impl BlastHSP {
+    pub fn from_legacy_hsp(hsp: Hsp) -> Self {
+        Self {
+            score: hsp.score,
+            num_ident: hsp.num_ident,
+            bit_score: hsp.bit_score,
+            evalue: hsp.evalue,
+            query: BlastSeg::from_query_hsp(&hsp),
+            subject: BlastSeg::from_subject_hsp(&hsp),
+            context: hsp.context,
+            gap_info: hsp.edit_script,
+            num: 0,
+            xsum: 0.0,
+            num_gaps: hsp.num_gaps,
+            comp_adjustment_method: hsp.comp_adjustment_method as i16,
+            pat_info: hsp.pat_info.map(Into::into),
+            num_positives: 0,
+            map_info: hsp.map_info,
+        }
+    }
+
+    pub fn into_legacy_hsp(self) -> Hsp {
+        Hsp {
+            score: self.score,
+            num_ident: self.num_ident,
+            bit_score: self.bit_score,
+            evalue: self.evalue,
+            query_offset: self.query.offset,
+            query_end: self.query.end,
+            query_gapped_start: self.query.gapped_start,
+            subject_offset: self.subject.offset,
+            subject_end: self.subject.end,
+            subject_gapped_start: self.subject.gapped_start,
+            context: self.context,
+            query_frame: self.query.frame as i32,
+            subject_frame: self.subject.frame as i32,
+            num_gaps: self.num_gaps,
+            comp_adjustment_method: self.comp_adjustment_method as i32,
+            edit_script: self.gap_info,
+            pat_info: self.pat_info.map(Into::into),
+            map_info: self.map_info,
+        }
+    }
+}
+
+/// NCBI: `BlastHSPList` (`blast_hits.h:146`).
+#[derive(Debug, Clone)]
+pub struct BlastHSPList {
+    pub oid: i32,
+    pub query_index: i32,
+    pub hsp_array: Vec<Option<BlastHSP>>,
+    pub hspcnt: i32,
+    pub allocated: i32,
+    pub hsp_max: i32,
+    pub do_not_reallocate: bool,
+    pub best_evalue: f64,
+}
+
+impl BlastHSPList {
+    pub fn from_legacy_hsp_list(list: HspList) -> Self {
+        let hsp_array: Vec<Option<BlastHSP>> = list
+            .hsps
+            .into_iter()
+            .map(BlastHSP::from_legacy_hsp)
+            .map(Some)
+            .collect();
+        let hspcnt = hsp_array.len() as i32;
+        Self {
+            oid: list.oid,
+            query_index: 0,
+            allocated: hspcnt,
+            hsp_array,
+            hspcnt,
+            hsp_max: list.hsp_max,
+            do_not_reallocate: false,
+            best_evalue: list.best_evalue,
+        }
+    }
+
+    pub fn into_legacy_hsp_list(self) -> HspList {
+        let hspcnt = self.hspcnt.max(0) as usize;
+        HspList {
+            oid: self.oid,
+            hsps: self
+                .hsp_array
+                .into_iter()
+                .take(hspcnt)
+                .flatten()
+                .map(BlastHSP::into_legacy_hsp)
+                .collect(),
+            best_evalue: self.best_evalue,
+            hsp_max: self.hsp_max,
+        }
+    }
+}
+
 /// PHI-BLAST pattern metadata stored on an HSP.
 ///
 /// This mirrors the C `hsp->pat_info` fields used by
@@ -284,12 +459,10 @@ pub fn blast_hsp_get_target_translation<'a>(
         .as_ref()
         .map(|blk| blk.length.max(0))
         .unwrap_or(0);
-    let needs_partial_translation = target_t.partial
-        && (target_t.translations[context].is_none()
-            || start != 0
-            || stop < subject_length / crate::util::CODON_LENGTH as i32 - 3);
+    let needs_partial_window = target_t.partial
+        && (start != 0 || stop < subject_length / crate::util::CODON_LENGTH as i32 - 3);
 
-    if needs_partial_translation {
+    if needs_partial_window {
         const K_MAX_TRANSLATION: i32 = 99;
         let subject_blk = target_t.subject_blk.as_ref()?;
         let subject_seq = subject_blk
@@ -321,34 +494,37 @@ pub fn blast_hsp_get_target_translation<'a>(
         let nucl_length_usize = nucl_length as usize;
         let nucl_seq = subject_seq.get(nucl_shift..nucl_shift + nucl_length_usize)?;
 
-        let old_cached_width = stop - start;
-        range[2 * context] = start_shift;
-        start = start_shift;
-        if translation_length > old_cached_width || target_t.translations[context].is_none() {
-            target_t.translations[context] = Some(vec![0; translation_length.max(0) as usize + 2]);
-        }
+        if start_shift < start || start_shift + translation_length > stop {
+            let old_cached_width = stop - start;
+            range[2 * context] = start_shift;
+            start = start_shift;
+            if translation_length > old_cached_width || target_t.translations[context].is_none() {
+                target_t.translations[context] =
+                    Some(vec![0; translation_length.max(0) as usize + 2]);
+            }
 
-        let rev = if hsp.subject_frame < 0 {
-            crate::util::get_reverse_nucl_sequence(nucl_seq, nucl_length_usize)
-        } else {
-            Vec::new()
-        };
-        let translation = target_t.translations[context].as_mut()?;
-        let length = crate::util::blast_get_translation(
-            nucl_seq,
-            &rev,
-            nucl_length_usize,
-            hsp.subject_frame,
-            translation,
-            &target_t.gen_code_string,
-        ) as i32;
-        range[2 * context + 1] = start_shift + length;
-        stop = range[2 * context + 1];
+            let rev = if hsp.subject_frame < 0 {
+                crate::util::get_reverse_nucl_sequence(nucl_seq, nucl_length_usize)
+            } else {
+                Vec::new()
+            };
+            let translation = target_t.translations[context].as_mut()?;
+            let length = crate::util::blast_get_translation(
+                nucl_seq,
+                &rev,
+                nucl_length_usize,
+                hsp.subject_frame,
+                translation,
+                &target_t.gen_code_string,
+            ) as i32;
+            range[2 * context + 1] = start_shift + length;
+            stop = range[2 * context + 1];
 
-        if hsp.subject_offset >= 0 {
-            translation[0] = crate::util::FENCE_SENTRY;
-            if let Some(slot) = translation.get_mut(length as usize + 1) {
-                *slot = crate::util::FENCE_SENTRY;
+            if hsp.subject_offset >= 0 {
+                translation[0] = crate::util::FENCE_SENTRY;
+                if let Some(slot) = translation.get_mut(length as usize + 1) {
+                    *slot = crate::util::FENCE_SENTRY;
+                }
             }
         }
     }
@@ -1905,15 +2081,20 @@ pub fn s_hsp_list_post_traceback_update(
             link_gbp_db_length: None,
             recompute_evalues_before_uneven_linking: false,
         };
-        let _ = crate::blast_kappa::blast_link_hsps_for_kappa(
-            hsp_list,
+        let source_list = std::mem::replace(hsp_list, HspList::new(0));
+        let source_hsp_max = source_list.hsp_max;
+        let mut blast_hsp_list = BlastHSPList::from_legacy_hsp_list(source_list);
+        let _ = crate::link_hsps::blast_link_hsp_list(
             program_number,
-            subject_length,
+            &mut blast_hsp_list,
             query_info,
+            subject_length,
             &link_score_block,
             link_hsp_params,
             k_gapped,
         );
+        *hsp_list = blast_hsp_list.into_legacy_hsp_list();
+        hsp_list.hsp_max = source_hsp_max;
     } else {
         let kbp_array = if k_gapped && !sbp.kbp_gap.is_empty() {
             &sbp.kbp_gap
@@ -2270,6 +2451,57 @@ pub struct HitList {
     pub worst_evalue: f64,
 }
 
+/// NCBI: `BlastHitList` (`blast_hits.h:161`).
+#[derive(Debug, Clone)]
+pub struct BlastHitList {
+    pub hsplist_count: i32,
+    pub hsplist_max: i32,
+    pub worst_evalue: f64,
+    pub low_score: i32,
+    pub heapified: bool,
+    pub hsplist_array: Vec<Option<BlastHSPList>>,
+    pub hsplist_current: i32,
+    pub num_hits: i32,
+}
+
+impl BlastHitList {
+    pub fn from_legacy_hit_list(hitlist: HitList) -> Self {
+        let hsplist_array: Vec<Option<BlastHSPList>> = hitlist
+            .hsp_lists
+            .into_iter()
+            .map(BlastHSPList::from_legacy_hsp_list)
+            .map(Some)
+            .collect();
+        let hsplist_count = hsplist_array.iter().filter(|list| list.is_some()).count() as i32;
+        Self {
+            hsplist_count,
+            hsplist_max: hitlist.hsplist_max,
+            worst_evalue: hitlist.worst_evalue,
+            low_score: hitlist.low_score,
+            heapified: false,
+            hsplist_current: hsplist_array.len() as i32,
+            hsplist_array,
+            num_hits: 0,
+        }
+    }
+
+    pub fn into_legacy_hit_list(self) -> HitList {
+        let hsplist_count = self.hsplist_count.max(0) as usize;
+        HitList {
+            hsp_lists: self
+                .hsplist_array
+                .into_iter()
+                .take(hsplist_count)
+                .flatten()
+                .map(BlastHSPList::into_legacy_hsp_list)
+                .collect(),
+            hsplist_max: self.hsplist_max,
+            low_score: self.low_score,
+            worst_evalue: self.worst_evalue,
+        }
+    }
+}
+
 impl HitList {
     /// blast-rs: Rust convenience constructor for owned hit lists; not a direct NCBI C port.
     pub fn new() -> Self {
@@ -2564,6 +2796,39 @@ pub fn evalue_compare_hsp_lists(a: &HspList, b: &HspList) -> std::cmp::Ordering 
 #[derive(Debug, Clone)]
 pub struct HspResults {
     pub hitlists: Vec<Option<HitList>>,
+}
+
+/// NCBI: `BlastHSPResults` (`blast_hits.h:173`).
+#[derive(Debug, Clone)]
+pub struct BlastHSPResults {
+    pub num_queries: i32,
+    pub hitlist_array: Vec<Option<BlastHitList>>,
+}
+
+impl BlastHSPResults {
+    pub fn from_legacy_hsp_results(results: HspResults) -> Self {
+        let hitlist_array: Vec<Option<BlastHitList>> = results
+            .hitlists
+            .into_iter()
+            .map(|hitlist| hitlist.map(BlastHitList::from_legacy_hit_list))
+            .collect();
+        Self {
+            num_queries: hitlist_array.len() as i32,
+            hitlist_array,
+        }
+    }
+
+    pub fn into_legacy_hsp_results(self) -> HspResults {
+        let num_queries = self.num_queries.max(0) as usize;
+        HspResults {
+            hitlists: self
+                .hitlist_array
+                .into_iter()
+                .take(num_queries)
+                .map(|hitlist| hitlist.map(BlastHitList::into_legacy_hit_list))
+                .collect(),
+        }
+    }
 }
 
 /// Rust ownership equivalent of traceback MT `SThreadLocalData`.
@@ -3388,6 +3653,129 @@ pub fn blast_hsp_list_purge_hsps_with_common_endpoints_with_options(
     active.append(&mut extras);
     hsp_list.hsps = active;
     hsp_list.best_evalue = s_blast_get_best_evalue(hsp_list);
+    c_return_count as i16
+}
+
+/// `BlastHSPList`-shaped counterpart of
+/// `Blast_HSPListPurgeHSPsWithCommonEndpoints` (`blast_hits.c:2455`).
+///
+/// This keeps the upstream `BlastHSP` fields intact, including `num`, so
+/// translated traceback metadata survives the purge without converting through
+/// the legacy Rust `HspList` adapter.
+pub fn blast_hsp_list_purge_blast_hsps_with_common_endpoints_with_options(
+    program_number: crate::program::ProgramType,
+    hsp_list: Option<&mut BlastHSPList>,
+    purge: bool,
+) -> i16 {
+    let Some(hsp_list) = hsp_list else {
+        return 0;
+    };
+    let hspcnt = (hsp_list.hspcnt.max(0) as usize).min(hsp_list.hsp_array.len());
+    if hspcnt == 0 {
+        hsp_list.hsp_array.clear();
+        hsp_list.hspcnt = 0;
+        hsp_list.allocated = 0;
+        hsp_list.best_evalue = i32::MAX as f64;
+        return 0;
+    }
+    let active_count = hsp_list.hsp_array.iter().take(hspcnt).flatten().count();
+    if active_count <= 1 {
+        hsp_list.hsp_array = hsp_list
+            .hsp_array
+            .drain(..hspcnt)
+            .flatten()
+            .map(Some)
+            .collect();
+        hsp_list.hspcnt = active_count as i32;
+        hsp_list.allocated = hsp_list.hspcnt;
+        hsp_list.best_evalue = hsp_list
+            .hsp_array
+            .iter()
+            .flatten()
+            .map(|hsp| hsp.evalue)
+            .fold(i32::MAX as f64, f64::min);
+        return active_count as i16;
+    }
+    if crate::program::blast_program_is_phi_blast(program_number) {
+        hsp_list.hsp_array = hsp_list
+            .hsp_array
+            .drain(..hspcnt)
+            .flatten()
+            .map(Some)
+            .collect();
+        hsp_list.hspcnt = active_count as i32;
+        hsp_list.allocated = hsp_list.hspcnt;
+        hsp_list.best_evalue = hsp_list
+            .hsp_array
+            .iter()
+            .flatten()
+            .map(|hsp| hsp.evalue)
+            .fold(i32::MAX as f64, f64::min);
+        return active_count as i16;
+    }
+    let trim_blastn = program_number == crate::program::BLASTN && !purge;
+    debug_assert!(
+        !trim_blastn,
+        "BlastHSPList purge does not trim BLASTN traceback scripts"
+    );
+    let mut active: Vec<BlastHSP> = hsp_list.hsp_array.drain(..hspcnt).flatten().collect();
+    let mut c_return_count = active.len();
+
+    active.sort_by(|a, b| {
+        a.context
+            .cmp(&b.context)
+            .then_with(|| a.query.offset.cmp(&b.query.offset))
+            .then_with(|| a.subject.offset.cmp(&b.subject.offset))
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| b.query.end.cmp(&a.query.end))
+            .then_with(|| b.subject.end.cmp(&a.subject.end))
+    });
+    let mut index = 0;
+    while index < active.len() {
+        while index + 1 < active.len()
+            && active[index].context == active[index + 1].context
+            && active[index].query.offset == active[index + 1].query.offset
+            && active[index].subject.offset == active[index + 1].subject.offset
+            && active[index].subject.frame == active[index + 1].subject.frame
+        {
+            c_return_count = c_return_count.saturating_sub(1);
+            active.remove(index + 1);
+        }
+        index += 1;
+    }
+
+    if active.len() > 1 {
+        active.sort_by(|a, b| {
+            a.context
+                .cmp(&b.context)
+                .then_with(|| a.query.end.cmp(&b.query.end))
+                .then_with(|| a.subject.end.cmp(&b.subject.end))
+                .then_with(|| b.score.cmp(&a.score))
+                .then_with(|| b.query.offset.cmp(&a.query.offset))
+                .then_with(|| b.subject.offset.cmp(&a.subject.offset))
+        });
+        let mut index = 0;
+        while index < active.len() {
+            while index + 1 < active.len()
+                && active[index].context == active[index + 1].context
+                && active[index].query.end == active[index + 1].query.end
+                && active[index].subject.end == active[index + 1].subject.end
+                && active[index].subject.frame == active[index + 1].subject.frame
+            {
+                c_return_count = c_return_count.saturating_sub(1);
+                active.remove(index + 1);
+            }
+            index += 1;
+        }
+    }
+
+    hsp_list.best_evalue = active
+        .iter()
+        .map(|hsp| hsp.evalue)
+        .fold(i32::MAX as f64, f64::min);
+    hsp_list.hspcnt = active.len() as i32;
+    hsp_list.allocated = hsp_list.hspcnt;
+    hsp_list.hsp_array = active.into_iter().map(Some).collect();
     c_return_count as i16
 }
 
@@ -7665,6 +8053,138 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(100, 0, 0, 4, 4), (95, 2, 2, 8, 8), (90, 4, 4, 8, 8)]
         );
+    }
+
+    #[test]
+    fn blast_hsp_list_adapter_uses_hspcnt_not_allocated_slots() {
+        let mut active = BlastHSP::from_legacy_hsp(make_hsp(50, 1.0e-20));
+        active.num = 7;
+        let mut inactive = BlastHSP::from_legacy_hsp(make_hsp(90, 1.0e-40));
+        inactive.num = 99;
+
+        let list = BlastHSPList {
+            oid: 42,
+            query_index: 0,
+            hsp_array: vec![Some(active), Some(inactive)],
+            hspcnt: 1,
+            allocated: 2,
+            hsp_max: 10,
+            do_not_reallocate: false,
+            best_evalue: 1.0e-20,
+        };
+
+        let legacy = list.into_legacy_hsp_list();
+
+        assert_eq!(legacy.hsps.len(), 1);
+        assert_eq!(legacy.hsps[0].score, 50);
+    }
+
+    #[test]
+    fn blast_hit_list_adapter_uses_hsplist_count_not_allocated_slots() {
+        let active = BlastHSPList::from_legacy_hsp_list({
+            let mut list = HspList::new(11);
+            list.add_hsp(make_hsp(50, 1.0e-20));
+            list
+        });
+        let inactive = BlastHSPList::from_legacy_hsp_list({
+            let mut list = HspList::new(99);
+            list.add_hsp(make_hsp(90, 1.0e-40));
+            list
+        });
+
+        let hit_list = BlastHitList {
+            hsplist_count: 1,
+            hsplist_max: 10,
+            worst_evalue: 1.0e-20,
+            low_score: 50,
+            heapified: false,
+            hsplist_array: vec![Some(active), Some(inactive)],
+            hsplist_current: 2,
+            num_hits: 0,
+        };
+
+        let legacy = hit_list.into_legacy_hit_list();
+
+        assert_eq!(legacy.hsp_lists.len(), 1);
+        assert_eq!(legacy.hsp_lists[0].oid, 11);
+        assert_eq!(legacy.hsp_lists[0].hsps[0].score, 50);
+    }
+
+    #[test]
+    fn blast_hsp_results_adapter_uses_num_queries_not_allocated_slots() {
+        let active_hit_list = BlastHitList {
+            hsplist_count: 0,
+            hsplist_max: 10,
+            worst_evalue: 0.0,
+            low_score: i32::MAX,
+            heapified: false,
+            hsplist_array: Vec::new(),
+            hsplist_current: 0,
+            num_hits: 0,
+        };
+        let inactive_hit_list = BlastHitList {
+            hsplist_count: 0,
+            hsplist_max: 10,
+            worst_evalue: 0.0,
+            low_score: i32::MAX,
+            heapified: false,
+            hsplist_array: Vec::new(),
+            hsplist_current: 0,
+            num_hits: 0,
+        };
+
+        let results = BlastHSPResults {
+            num_queries: 1,
+            hitlist_array: vec![Some(active_hit_list), Some(inactive_hit_list)],
+        };
+
+        let legacy = results.into_legacy_hsp_results();
+
+        assert_eq!(legacy.hitlists.len(), 1);
+        assert!(legacy.hitlists[0].is_some());
+    }
+
+    #[test]
+    fn blast_hsp_list_purge_ignores_inactive_allocated_slots_and_preserves_num() {
+        let mut active = BlastHSP::from_legacy_hsp(make_hsp(50, 1.0e-20));
+        active.query.offset = 0;
+        active.subject.offset = 0;
+        active.query.end = 10;
+        active.subject.end = 10;
+        active.subject.frame = 1;
+        active.num = 7;
+
+        let mut inactive_duplicate = active.clone();
+        inactive_duplicate.score = 90;
+        inactive_duplicate.evalue = 1.0e-40;
+        inactive_duplicate.num = 99;
+
+        let mut list = BlastHSPList {
+            oid: 42,
+            query_index: 0,
+            hsp_array: vec![Some(active), Some(inactive_duplicate)],
+            hspcnt: 1,
+            allocated: 2,
+            hsp_max: 10,
+            do_not_reallocate: false,
+            best_evalue: 1.0e-20,
+        };
+
+        assert_eq!(
+            blast_hsp_list_purge_blast_hsps_with_common_endpoints_with_options(
+                crate::program::TBLASTN,
+                Some(&mut list),
+                true,
+            ),
+            1
+        );
+
+        assert_eq!(list.hspcnt, 1);
+        assert_eq!(list.hsp_array.len(), 1);
+        let hsp = list.hsp_array[0].as_ref().expect("active hsp");
+        assert_eq!(hsp.score, 50);
+        assert_eq!(hsp.num, 7);
+        assert_eq!(list.best_evalue, 1.0e-20);
     }
 
     #[test]

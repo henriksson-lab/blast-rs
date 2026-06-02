@@ -252,6 +252,14 @@ pub fn blast_calc_lambda_full_precision(
 pub fn blast_karlin_lambda_nr(sprob: &[f64], obs_min: i32, obs_max: i32, lambda0: f64) -> f64 {
     let low = obs_min;
     let high = obs_max;
+    let range = (high - low + 1).max(0) as usize;
+    let mut score_avg = 0.0f64;
+    for i in 0..range {
+        score_avg += (low + i as i32) as f64 * sprob.get(i).copied().unwrap_or(0.0);
+    }
+    if score_avg >= 0.0 || crate::stat::blast_score_chk(low, high) != 0 {
+        return -1.0;
+    }
 
     // Find greatest common divisor of all scores with nonzero probability
     let mut d = -low;
@@ -414,18 +422,8 @@ pub fn composition_lambda_ratio_with_adjustment(
     // `-1` when the expected score is nonnegative, then clamps the resulting
     // ratio to [LambdaRatioLowerBound, 1]. Keep following that path here
     // rather than treating the case as "no adjustment".
-    let range = (obs_max - obs_min + 1) as usize;
-    let mut avg = 0.0f64;
-    for i in 0..range {
-        avg += (obs_min + i as i32) as f64 * score_probs[i];
-    }
-
     // Compute lambda using Horner's-rule NR (port of s_CalcLambda)
-    let adjusted_lambda = if avg >= 0.0 {
-        -1.0
-    } else {
-        blast_karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda)
-    };
+    let adjusted_lambda = blast_karlin_lambda_nr(&score_probs, obs_min, obs_max, standard_lambda);
 
     let mut ratio = adjusted_lambda / standard_lambda;
     if !p_value_adjustment {
@@ -2433,5 +2431,48 @@ mod tests {
         let ratio = composition_lambda_ratio(&matrix, &glu_comp, &glu_comp, standard_lambda)
             .expect("biased self-pair should produce a lambda ratio");
         assert_eq!(ratio, LAMBDA_RATIO_LOWER_BOUND);
+    }
+
+    #[test]
+    fn blast_karlin_lambda_nr_owns_nonnegative_expected_score_rejection() {
+        let sprob = [0.0, 1.0];
+        assert_eq!(blast_karlin_lambda_nr(&sprob, 0, 1, 0.5), -1.0);
+    }
+
+    #[test]
+    fn blast_composition_pvalue_uses_ncbi_table_interpolation() {
+        let lambda_at_low_cut = COMPO_MIN_LAMBDA + 35.0 * 0.001;
+        assert_eq!(
+            blast_composition_pvalue(lambda_at_low_cut - 0.000_5),
+            P_LAMBDA_TABLE[35]
+        );
+        assert_eq!(
+            blast_composition_pvalue(lambda_at_low_cut),
+            P_LAMBDA_TABLE[35]
+        );
+
+        let interpolated = blast_composition_pvalue(lambda_at_low_cut + 0.000_25);
+        let expected = 0.75 * P_LAMBDA_TABLE[35] + 0.25 * P_LAMBDA_TABLE[36];
+        assert_eq!(interpolated, expected);
+        assert_eq!(
+            blast_composition_pvalue(COMPO_MIN_LAMBDA + 565.0 * 0.001),
+            1.0
+        );
+    }
+
+    #[test]
+    fn blast_overall_pvalue_and_pe_transforms_match_ncbi_formulas() {
+        let p_comp = 0.25;
+        let p_alignment = 0.125;
+        let product = p_comp * p_alignment;
+        assert_eq!(
+            blast_overall_p_value(p_comp, p_alignment),
+            product * (1.0 - product.ln())
+        );
+        assert_eq!(blast_karlin_eto_p(0.0), 0.0);
+        assert_eq!(blast_karlin_pto_e(-0.1), i32::MIN as f64);
+        assert_eq!(blast_karlin_pto_e(1.1), i32::MIN as f64);
+        assert_eq!(blast_karlin_pto_e(1.0), i32::MAX as f64);
+        assert_eq!(blast_karlin_pto_e(0.25), -crate::math::blast_log1p(-0.25));
     }
 }

@@ -905,29 +905,19 @@ pub fn blast_calc_eff_lengths(
         let mut effective_search_space =
             s_get_effective_search_space_for_context(eff_len_options, index);
 
-        let kbp = match kbp_array.get(index) {
-            Some(k) => k,
-            None => {
-                ctx.eff_searchsp = effective_search_space;
-                ctx.length_adjustment = 0;
-                continue;
-            }
-        };
-        let kbp_std = match kbp_std_array.get(index) {
-            Some(k) => k,
-            None => {
-                ctx.eff_searchsp = effective_search_space;
-                ctx.length_adjustment = 0;
-                continue;
-            }
-        };
-
         let query_length = ctx.query_length;
         if !ctx.is_valid || query_length <= 0 {
             ctx.eff_searchsp = effective_search_space;
             ctx.length_adjustment = 0;
             continue;
         }
+
+        let Some(kbp) = kbp_array.get(index) else {
+            return -1;
+        };
+        let Some(kbp_std) = kbp_std_array.get(index) else {
+            return -1;
+        };
 
         let (alpha, beta) = if program_number == BLASTN {
             // C: when reward and penalty are zero, the matrix-only scoring
@@ -1945,6 +1935,51 @@ mod tests {
         assert_eq!(rc, 0);
         assert!(qi.contexts[0].length_adjustment > 0);
         assert!(qi.contexts[0].eff_searchsp > 0);
+    }
+
+    #[test]
+    fn calc_eff_lengths_returns_error_for_valid_context_missing_kbp() {
+        let mut qi = QueryInfo {
+            num_queries: 1,
+            contexts: vec![ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 0,
+        };
+        let scoring = ScoringOptions {
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            gapped_calculation: true,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+        };
+        let eff = EffectiveLengthsParameters {
+            options: EffectiveLengthsOptions::default(),
+            real_db_length: 1_000_000,
+            real_num_seqs: 1000,
+        };
+
+        let rc = blast_calc_eff_lengths(
+            crate::program::BLASTP,
+            &scoring,
+            &eff,
+            &[],
+            &[],
+            "BLOSUM62",
+            &mut qi,
+        );
+
+        assert_eq!(rc, -1);
     }
 
     #[test]

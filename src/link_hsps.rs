@@ -1,11 +1,13 @@
 //! Port of NCBI BLAST+ 2.17.0 `link_hsps.c` — sum-statistics HSP linking.
 //!
-//! This module implements three public entry points used by the NCBI
-//! HSP-linking machinery:
+//! This module exposes the NCBI HSP-list entry point and keeps the translated
+//! link-node machinery internal:
 //!
-//! - [`blast_link_hsps`] — top-level dispatcher on `longest_intron`
-//! - [`s_blast_even_gap_link_hsps`] — small/large gap linking for blastn/tblastx
-//! - [`s_blast_uneven_gap_link_hsps`] — asymmetric gap linking for tblastn/blastx
+//! - [`blast_link_hsp_list`] — `BLAST_LinkHsps` over upstream-shaped
+//!   `BlastHSPList`
+//! - `blast_link_hsps` — internal dispatcher on `longest_intron`
+//! - `s_blast_even_gap_link_hsps` — small/large gap linking for blastn/tblastx
+//! - `s_blast_uneven_gap_link_hsps` — asymmetric gap linking for tblastn/blastx
 //!
 //! The port mirrors the original C very closely. A few adaptations are
 //! unavoidable in safe Rust:
@@ -15,12 +17,9 @@
 //!   `Vec<LinkHspStruct>` and traverse via `prev`/`next: Option<usize>`.
 //!   The `hp_start` sentinel used in the NCBI code lives at index 0.
 //! * `BlastHSPLink.link[eOrderingMethods]` becomes `[Option<usize>; 2]`.
-//! * The NCBI `BlastHSP` structure is reconstructed as a minimal
-//!   self-contained [`LinkBlastHsp`] holding only the fields consulted
-//!   by `link_hsps.c`. The wider active-pipeline `SearchHsp` is not
-//!   used here because it lacks `gapped_start`, `subject.frame`, `num`,
-//!   `evalue` mutation, etc. Callers wiring this module into the
-//!   pipeline would build a `LinkBlastHsp` from their `SearchHsp`.
+//! * The inner Rust translation uses a compact link-local backing record while
+//!   public callers pass the upstream-shaped [`BlastHSPList`] through
+//!   [`blast_link_hsp_list`].
 //!
 //! The port is wired into the active blastn/blastx/tblastn/tblastx sum-statistics
 //! paths, and is also tested against synthetic HSP lists with hand-computed
@@ -33,14 +32,15 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
+use crate::hspstream::{BlastHSP, BlastHSPList};
 use crate::program::{
     blast_query_is_nucleotide, blast_query_is_translated, blast_subject_is_translated, ProgramType,
     BLASTX,
 };
 use crate::queryinfo::QueryInfo;
 use crate::stat::{
-    blast_gap_decay_divisor, blast_large_gap_sum_e, blast_small_gap_sum_e, blast_spouge_sto_e,
-    blast_uneven_gap_sum_e, GumbelBlk, KarlinBlk,
+    blast_gap_decay_divisor, blast_large_gap_sum_e, blast_small_gap_sum_e, blast_uneven_gap_sum_e,
+    GumbelBlk, KarlinBlk,
 };
 
 /// NCBI BLAST constants (`blast_def.h` / `ncbi_std.h`).
@@ -67,7 +67,7 @@ const E_ORDERING_METHODS: usize = 2;
 
 /// Minimal HSP segment (port of `BlastSeg`, `blast_hits.h:96`).
 #[derive(Debug, Clone, Default)]
-pub struct LinkBlastSeg {
+struct LinkBlastSeg {
     pub frame: i32,
     pub offset: i32,
     pub end: i32,
@@ -82,7 +82,7 @@ pub struct LinkBlastSeg {
 /// so callers wiring this module into the pipeline must assemble these
 /// minimal records from their `SearchHsp`s.
 #[derive(Debug, Clone, Default)]
-pub struct LinkBlastHsp {
+struct LinkBlastHsp {
     /// Stable index of the source HSP in the caller's HSP array. NCBI linking
     /// mutates `BlastHSP*` objects in place; Rust adapters copy into this
     /// minimal structure, so they use this field to write linked e-values and
@@ -107,7 +107,7 @@ pub struct LinkBlastHsp {
 
 /// A list of HSPs for one subject (port of `BlastHSPList`, `blast_hits.h:151`).
 #[derive(Debug, Clone, Default)]
-pub struct LinkBlastHspList {
+struct LinkBlastHspList {
     pub oid: i32,
     pub query_index: i32,
     pub hsp_array: Vec<LinkBlastHsp>,
@@ -356,7 +356,7 @@ fn rev_compare_hsps_tbx(h1: &LinkBlastHsp, h2: &LinkBlastHsp) -> std::cmp::Order
 /// sentinel that NCBI allocates separately.
 ///
 /// Returns `0` on success, `-1` on invalid input (matches NCBI).
-pub fn s_blast_even_gap_link_hsps(
+fn s_blast_even_gap_link_hsps(
     program_number: ProgramType,
     hsp_list: &mut LinkBlastHspList,
     query_info: &QueryInfo,
@@ -1468,7 +1468,7 @@ fn s_linked_hsp_set_array_index_query_ends(
 
 /// Greedy uneven-gap HSP linker. Port of
 /// `s_BlastUnevenGapLinkHSPs` (`link_hsps.c:1612`).
-pub fn s_blast_uneven_gap_link_hsps(
+fn s_blast_uneven_gap_link_hsps(
     program: ProgramType,
     hsp_list: &mut LinkBlastHspList,
     query_info: &QueryInfo,
@@ -1643,7 +1643,7 @@ pub fn s_blast_uneven_gap_link_hsps(
 /// Delegates to [`s_blast_even_gap_link_hsps`] (when
 /// `longest_intron <= 0`) or [`s_blast_uneven_gap_link_hsps`] otherwise,
 /// then sorts the resulting HSP array by score and fills `best_evalue`.
-pub fn blast_link_hsps(
+fn blast_link_hsps(
     program_number: ProgramType,
     hsp_list: &mut LinkBlastHspList,
     query_info: &QueryInfo,
@@ -1713,6 +1713,112 @@ pub fn blast_link_hsps(
     0
 }
 
+fn link_hsp_from_blast_hsp(source_index: usize, hsp: &BlastHSP) -> LinkBlastHsp {
+    LinkBlastHsp {
+        source_index,
+        score: hsp.score,
+        num_ident: hsp.num_ident,
+        bit_score: hsp.bit_score,
+        evalue: hsp.evalue,
+        query: LinkBlastSeg {
+            frame: hsp.query.frame as i32,
+            offset: hsp.query.offset,
+            end: hsp.query.end,
+            gapped_start: hsp.query.gapped_start,
+        },
+        subject: LinkBlastSeg {
+            frame: hsp.subject.frame as i32,
+            offset: hsp.subject.offset,
+            end: hsp.subject.end,
+            gapped_start: hsp.subject.gapped_start,
+        },
+        context: hsp.context,
+        num: hsp.num.max(1),
+        xsum: hsp.xsum,
+    }
+}
+
+fn blast_hsp_update_from_link_hsp(hsp: &mut BlastHSP, linked: &LinkBlastHsp) {
+    hsp.score = linked.score;
+    hsp.bit_score = linked.bit_score;
+    hsp.evalue = linked.evalue;
+    hsp.num = linked.num;
+    hsp.xsum = linked.xsum;
+}
+
+/// Port-shaped entry point for `BLAST_LinkHsps` over NCBI `BlastHSPList`.
+///
+/// The linking core below is still the translated `link_hsps.c` algorithm. This
+/// boundary keeps callers on the upstream `BlastHSPList` representation instead
+/// of making them construct a reduced link-only HSP model.
+pub fn blast_link_hsp_list(
+    program_number: ProgramType,
+    hsp_list: &mut BlastHSPList,
+    query_info: &QueryInfo,
+    subject_length: i32,
+    sbp: &LinkScoreBlock,
+    link_hsp_params: &LinkHSPParameters,
+    gapped_calculation: bool,
+) -> i32 {
+    if hsp_list.hspcnt <= 0 {
+        hsp_list.hspcnt = 0;
+        hsp_list.hsp_array.clear();
+        hsp_list.allocated = 0;
+        return 0;
+    }
+
+    let active_count = (hsp_list.hspcnt.max(0) as usize).min(hsp_list.hsp_array.len());
+    let originals: Vec<Option<BlastHSP>> = hsp_list
+        .hsp_array
+        .iter()
+        .take(active_count)
+        .cloned()
+        .collect();
+    let mut link_list = LinkBlastHspList {
+        oid: hsp_list.oid,
+        query_index: hsp_list.query_index,
+        hsp_array: originals
+            .iter()
+            .enumerate()
+            .filter_map(|(source_index, hsp)| {
+                hsp.as_ref()
+                    .map(|hsp| link_hsp_from_blast_hsp(source_index, hsp))
+            })
+            .collect(),
+        best_evalue: hsp_list.best_evalue,
+    };
+    if link_list.hsp_array.is_empty() {
+        hsp_list.hsp_array.clear();
+        hsp_list.hspcnt = 0;
+        hsp_list.allocated = 0;
+        hsp_list.best_evalue = INT4_MAX;
+        return 0;
+    }
+
+    let status = blast_link_hsps(
+        program_number,
+        &mut link_list,
+        query_info,
+        subject_length,
+        sbp,
+        link_hsp_params,
+        gapped_calculation,
+    );
+
+    let mut linked_hsps = Vec::with_capacity(link_list.hsp_array.len());
+    for linked in link_list.hsp_array {
+        if let Some(mut hsp) = originals.get(linked.source_index).and_then(Clone::clone) {
+            blast_hsp_update_from_link_hsp(&mut hsp, &linked);
+            linked_hsps.push(Some(hsp));
+        }
+    }
+    hsp_list.hsp_array = linked_hsps;
+    hsp_list.hspcnt = hsp_list.hsp_array.len() as i32;
+    hsp_list.allocated = hsp_list.hspcnt;
+    hsp_list.best_evalue = link_list.best_evalue;
+    status
+}
+
 fn blast_hsp_list_get_evalues_for_linking(
     program_number: ProgramType,
     hsp_list: &mut LinkBlastHspList,
@@ -1722,65 +1828,75 @@ fn blast_hsp_list_get_evalues_for_linking(
     link_hsp_params: &LinkHSPParameters,
     gapped_calculation: bool,
 ) {
-    for hsp in &mut hsp_list.hsp_array {
-        let context = hsp.context.max(0) as usize;
-        let Some(context_info) = query_info.contexts.get(context) else {
-            continue;
-        };
-        // NCBI `BLAST_LinkHsps` passes the raw subject length into
-        // `Blast_HSPListGetEvalues`; translated-subject programs pass
-        // `subject_length / CODON_LENGTH` through to Spouge unchanged. The
-        // effective search space already lives in `query_info`.
-        let subject_stat_length = if blast_subject_is_translated(program_number) {
-            (subject_length / CODON_LENGTH).max(1)
-        } else {
-            subject_length.max(1)
-        };
-        let kbp = if gapped_calculation {
-            sbp.kbp_gap
-                .get(context)
-                .or_else(|| sbp.kbp_gap.first())
-                .or_else(|| sbp.kbp.get(context))
-                .or_else(|| sbp.kbp.first())
-        } else {
-            sbp.kbp
-                .get(context)
-                .or_else(|| sbp.kbp.first())
-                .or_else(|| sbp.kbp_gap.get(context))
-                .or_else(|| sbp.kbp_gap.first())
-        };
-        let Some(kbp) = kbp else {
-            continue;
-        };
-        let query_length = context_info.query_length.max(1);
-        if gapped_calculation {
-            if let Some(gbp) = sbp.gbp.as_ref() {
-                let mut gbp = gbp.clone();
-                // Keep the Gumbel block's db_length UNSCALED (NCBI passes the
-                // original gbp through; only `n_` is reduced for translated
-                // programs). `link_gbp_db_length` is the unscaled DB length.
-                if let Some(db_length) = sbp.link_gbp_db_length {
-                    gbp.db_length = db_length.max(1);
-                }
-                hsp.evalue = blast_spouge_sto_e(
-                    hsp.score,
-                    Some(kbp),
-                    Some(&gbp),
-                    query_length,
-                    subject_stat_length,
-                );
-                hsp.evalue /= blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
-                continue;
-            }
-        }
-        let searchsp = if context_info.eff_searchsp > 0 {
-            context_info.eff_searchsp as f64
-        } else {
-            query_length as f64 * subject_stat_length as f64
-        };
-        hsp.evalue = kbp.raw_to_evalue(hsp.score, searchsp);
-        hsp.evalue /= blast_gap_decay_divisor(link_hsp_params.gap_decay_rate, 1);
+    let mut score_block = crate::stat::blast_score_blk_new(
+        crate::encoding::BLASTAA_SEQ_CODE,
+        query_info.contexts.len() as i32,
+    )
+    .expect("link-HSP evalue score block");
+    score_block.kbp = sbp.kbp.clone();
+    score_block.kbp_gap = sbp.kbp_gap.clone();
+    score_block.gbp = sbp.gbp.clone();
+    score_block.round_down = if gapped_calculation {
+        sbp.kbp_gap.iter().any(|kbp| kbp.round_down)
+    } else {
+        sbp.kbp.iter().any(|kbp| kbp.round_down)
+    };
+    score_block.number_of_contexts = query_info.contexts.len() as i32;
+    if let (Some(gbp), Some(db_length)) = (score_block.gbp.as_mut(), sbp.link_gbp_db_length) {
+        gbp.db_length = db_length.max(1);
     }
+
+    let mut adapted = crate::hspstream::HspList {
+        oid: hsp_list.oid,
+        hsps: hsp_list
+            .hsp_array
+            .iter()
+            .map(|hsp| crate::hspstream::Hsp {
+                score: hsp.score,
+                num_ident: hsp.num_ident,
+                bit_score: hsp.bit_score,
+                evalue: hsp.evalue,
+                query_offset: hsp.query.offset,
+                query_end: hsp.query.end,
+                query_gapped_start: hsp.query.gapped_start,
+                subject_offset: hsp.subject.offset,
+                subject_end: hsp.subject.end,
+                subject_gapped_start: hsp.subject.gapped_start,
+                context: hsp.context,
+                query_frame: hsp.query.frame,
+                subject_frame: hsp.subject.frame,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: None,
+                pat_info: None,
+                map_info: None,
+            })
+            .collect(),
+        best_evalue: hsp_list.best_evalue,
+        hsp_max: i32::MAX,
+    };
+
+    let subject_stat_length = if blast_subject_is_translated(program_number) {
+        (subject_length / CODON_LENGTH).max(1)
+    } else {
+        subject_length.max(1)
+    };
+    let _ = crate::blast_kappa::blast_hsp_list_get_evalues(
+        program_number,
+        query_info,
+        subject_stat_length,
+        &mut adapted,
+        gapped_calculation,
+        false,
+        &score_block,
+        link_hsp_params.gap_decay_rate,
+        1.0,
+    );
+
+    for (linked, adapted_hsp) in hsp_list.hsp_array.iter_mut().zip(adapted.hsps.iter()) {
+        linked.evalue = adapted_hsp.evalue;
+    }
+    hsp_list.best_evalue = adapted.best_evalue;
 }
 
 // ---------------------------------------------------------------------------
@@ -1792,6 +1908,7 @@ mod tests {
     use super::*;
     use crate::program::{BLASTN, TBLASTN};
     use crate::queryinfo::ContextInfo;
+    use crate::stat::blast_spouge_sto_e;
 
     fn make_hsp(
         context: i32,
@@ -1823,6 +1940,44 @@ mod tests {
             context,
             num: 1,
             xsum: 0.0,
+        }
+    }
+
+    fn make_blast_hsp(
+        context: i32,
+        q_off: i32,
+        q_end: i32,
+        s_off: i32,
+        s_end: i32,
+        score: i32,
+        frame: i32,
+    ) -> BlastHSP {
+        BlastHSP {
+            score,
+            num_ident: q_end - q_off,
+            bit_score: 0.0,
+            evalue: 10.0,
+            query: crate::hspstream::BlastSeg {
+                frame: 1,
+                offset: q_off,
+                end: q_end,
+                gapped_start: q_off,
+            },
+            subject: crate::hspstream::BlastSeg {
+                frame: frame as i16,
+                offset: s_off,
+                end: s_end,
+                gapped_start: s_off,
+            },
+            context,
+            gap_info: None,
+            num: 1,
+            xsum: 0.0,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            pat_info: None,
+            num_positives: 0,
+            map_info: None,
         }
     }
 
@@ -1864,6 +2019,66 @@ mod tests {
             kbp_gap: vec![kb; n_contexts],
             ..LinkScoreBlock::default()
         }
+    }
+
+    #[test]
+    fn blast_link_hsp_list_ignores_inactive_allocated_slots() {
+        let qi = one_context_query_info(1, 100);
+        let sbp = simple_score_block(1);
+        let params = LinkHSPParameters {
+            gap_prob: 0.5,
+            gap_size: 40,
+            overlap_size: 9,
+            gap_decay_rate: 0.5,
+            cutoff_small_gap: 0,
+            cutoff_big_gap: 0,
+            longest_intron: 0,
+        };
+        let active = make_blast_hsp(0, 10, 40, 10, 40, 70, 1);
+        let mut inactive = make_blast_hsp(0, 50, 80, 50, 80, 90, 1);
+        inactive.evalue = 1.0e-40;
+        let mut hsp_list = BlastHSPList {
+            oid: 0,
+            query_index: 0,
+            hsp_array: vec![Some(active), Some(inactive)],
+            hspcnt: 1,
+            allocated: 2,
+            hsp_max: 10,
+            do_not_reallocate: false,
+            best_evalue: 10.0,
+        };
+
+        let rc = blast_link_hsp_list(BLASTN, &mut hsp_list, &qi, 300, &sbp, &params, true);
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hspcnt, 1);
+        assert_eq!(hsp_list.hsp_array.len(), 1);
+        assert_eq!(hsp_list.hsp_array[0].as_ref().unwrap().score, 70);
+    }
+
+    #[test]
+    fn blast_link_hsp_list_compacts_null_active_prefix_to_empty() {
+        let qi = one_context_query_info(1, 100);
+        let sbp = simple_score_block(1);
+        let params = LinkHSPParameters::default();
+        let mut hsp_list = BlastHSPList {
+            oid: 0,
+            query_index: 0,
+            hsp_array: vec![None, Some(make_blast_hsp(0, 50, 80, 50, 80, 90, 1))],
+            hspcnt: 1,
+            allocated: 2,
+            hsp_max: 10,
+            do_not_reallocate: false,
+            best_evalue: 1.0e-40,
+        };
+
+        let rc = blast_link_hsp_list(BLASTN, &mut hsp_list, &qi, 300, &sbp, &params, true);
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hspcnt, 0);
+        assert_eq!(hsp_list.allocated, 0);
+        assert!(hsp_list.hsp_array.is_empty());
+        assert_eq!(hsp_list.best_evalue, INT4_MAX);
     }
 
     #[test]
@@ -2197,6 +2412,90 @@ mod tests {
     }
 
     #[test]
+    fn blast_link_hsp_list_ignores_allocated_slots_past_hspcnt() {
+        let mut qi = one_context_query_info(1, 100);
+        qi.contexts[0].eff_searchsp = 10_000;
+        let mut sbp = simple_score_block(1);
+        sbp.recompute_evalues_before_uneven_linking = true;
+        let expected = sbp.kbp_gap[0].raw_to_evalue(70, 10_000.0) / blast_gap_decay_divisor(0.5, 1);
+        let mut hsp_list = BlastHSPList {
+            oid: 7,
+            query_index: 0,
+            hsp_array: vec![
+                Some(make_blast_hsp(0, 10, 40, 10, 40, 70, 1)),
+                Some(make_blast_hsp(0, 100, 130, 100, 130, 200, 1)),
+            ],
+            hspcnt: 1,
+            allocated: 2,
+            hsp_max: i32::MAX,
+            do_not_reallocate: false,
+            best_evalue: 123.0,
+        };
+        let params = LinkHSPParameters {
+            gap_prob: 0.5,
+            gap_size: 40,
+            overlap_size: 9,
+            gap_decay_rate: 0.5,
+            cutoff_small_gap: 0,
+            cutoff_big_gap: 0,
+            longest_intron: 500,
+        };
+
+        let rc = blast_link_hsp_list(BLASTN, &mut hsp_list, &qi, 300, &sbp, &params, true);
+
+        assert_eq!(rc, 0);
+        assert_eq!(hsp_list.hspcnt, 1);
+        assert_eq!(hsp_list.allocated, 1);
+        let only_hsp = hsp_list.hsp_array[0].as_ref().unwrap();
+        assert_eq!(only_hsp.score, 70);
+        assert!((only_hsp.evalue - expected).abs() < 1.0e-300);
+        assert_eq!(hsp_list.best_evalue, only_hsp.evalue);
+    }
+
+    #[test]
+    fn blast_link_hsp_adapter_preserves_original_hsp_coordinates() {
+        let mut hsp = make_blast_hsp(0, 10, 40, 20, 50, 70, 1);
+        let original_query = hsp.query;
+        let original_subject = hsp.subject;
+        let original_context = hsp.context;
+        let original_num_ident = hsp.num_ident;
+        let linked = LinkBlastHsp {
+            source_index: 0,
+            score: 77,
+            num_ident: 999,
+            bit_score: 12.5,
+            evalue: 1.0e-9,
+            query: LinkBlastSeg {
+                frame: -1,
+                offset: 100,
+                end: 160,
+                gapped_start: 120,
+            },
+            subject: LinkBlastSeg {
+                frame: -2,
+                offset: 300,
+                end: 480,
+                gapped_start: 330,
+            },
+            context: 4,
+            num: 3,
+            xsum: 42.0,
+        };
+
+        blast_hsp_update_from_link_hsp(&mut hsp, &linked);
+
+        assert_eq!(hsp.query, original_query);
+        assert_eq!(hsp.subject, original_subject);
+        assert_eq!(hsp.context, original_context);
+        assert_eq!(hsp.num_ident, original_num_ident);
+        assert_eq!(hsp.score, 77);
+        assert_eq!(hsp.bit_score, 12.5);
+        assert_eq!(hsp.evalue, 1.0e-9);
+        assert_eq!(hsp.num, 3);
+        assert_eq!(hsp.xsum, 42.0);
+    }
+
+    #[test]
     fn test_tblastn_singleton_sum_stats_refresh_uses_c_translated_lengths() {
         let qi = one_context_query_info(1, 16);
         let mut kbp = KarlinBlk::default();
@@ -2215,7 +2514,7 @@ mod tests {
             kbp: vec![kbp.clone()],
             kbp_gap: vec![kbp],
             gbp: Some(gbp),
-            link_gbp_db_length: Some(60),
+            link_gbp_db_length: Some(20),
             recompute_evalues_before_uneven_linking: true,
         };
         let params = LinkHSPParameters {
@@ -2234,19 +2533,20 @@ mod tests {
             best_evalue: 1.0,
         };
 
-        let rc = blast_link_hsps(TBLASTN, &mut hsp_list, &qi, 60, &sbp, &params, true);
+        let rc = blast_link_hsps(TBLASTN, &mut hsp_list, &qi, 20, &sbp, &params, true);
 
         assert_eq!(rc, 0);
         assert_eq!(hsp_list.hsp_array.len(), 1);
         let evalue = hsp_list.hsp_array[0].evalue;
-        // Faithful NCBI path (`Blast_HSPListGetEvalues`, `link_hsps.c:1791`):
-        //   n_ = subject_length / CODON_LENGTH = 60 / 3 = 20
-        //   gbp.db_length = link_gbp_db_length (unscaled) = 60
-        // (No derived translated-subject length, no db_length rescaling.)
+        // Faithful NCBI path (`linkhsp_unit_test.cpp` sets TBLASTN
+        // `m_SubjectLength = kNuclLength / 3`, then `BLAST_LinkHsps` still
+        // enters the translated-subject division at `link_hsps.c:1791`):
+        //   n_ = subject_length / CODON_LENGTH = 20 / 3
+        //   gbp.db_length = translated database length
         let mut gbp = sbp.gbp.clone().unwrap();
-        gbp.db_length = 60; // link_gbp_db_length, used unscaled
+        gbp.db_length = 20;
         let expected =
-            blast_spouge_sto_e(63, Some(&sbp.kbp_gap[0]), Some(&gbp), 16, 60 / CODON_LENGTH)
+            blast_spouge_sto_e(63, Some(&sbp.kbp_gap[0]), Some(&gbp), 16, 20 / CODON_LENGTH)
                 / blast_gap_decay_divisor(crate::stat::BLAST_GAP_DECAY_RATE_GAPPED, 1);
         assert!(
             (evalue - expected).abs() <= expected * 1.0e-12,

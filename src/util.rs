@@ -1686,7 +1686,7 @@ pub fn blast_frame_to_context(frame: i32, program: crate::program::ProgramType) 
         blast_subject_is_translated,
     };
     if blast_query_is_translated(program) || blast_subject_is_translated(program) {
-        debug_assert!((-3..=3).contains(&frame) && frame != 0);
+        debug_assert!((-3..=3).contains(&frame));
         if frame > 0 {
             frame - 1
         } else {

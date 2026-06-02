@@ -422,8 +422,8 @@ fn real_data_tblastn_prot30_seqn_cbs2_documents_current_composition_gap() {
     ));
 
     assert_eq!(ncbi_set.len(), 71);
-    assert_eq!(rs_set.len(), 79);
-    assert_eq!(diff_counts(&ncbi_set, &rs_set), (9, 17));
+    assert_eq!(rs_set.len(), 78);
+    assert_eq!(diff_counts(&ncbi_set, &rs_set), (9, 16));
 }
 
 #[test]
