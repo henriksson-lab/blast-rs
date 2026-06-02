@@ -5632,6 +5632,8 @@ mod tests {
         assert_eq!(info.right_edge, 0);
         info.edits = crate::gapinfo::jumper_edits_block_new(1);
         info.subject_overhangs = Some(crate::gapinfo::SequenceOverhangs {
+            left_len: 0,
+            right_len: 0,
             left: Some(vec![1, 2]),
             right: Some(vec![3, 4]),
         });

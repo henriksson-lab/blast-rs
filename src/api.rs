@@ -6033,7 +6033,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     }
 
     let mut results: Vec<SearchResult> = results.into_iter().flatten().collect();
-    if translated_sum_stats {
+    if translated_sum_stats && !(params.comp_adjust == 0 && !params.ungapped) {
         apply_blastx_linked_sum_stats(
             &mut results,
             &query_info,
@@ -6609,7 +6609,7 @@ pub fn blastx_batch(
                 .into_iter()
                 .flatten()
                 .collect();
-            if translated_sum_stats {
+            if translated_sum_stats && !(params.comp_adjust == 0 && !params.ungapped) {
                 apply_blastx_linked_sum_stats(
                     &mut qres,
                     &qplans[qi].query_info,

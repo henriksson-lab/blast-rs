@@ -1057,6 +1057,7 @@ fn mapper_trim_map_info(
                 ) {
                     left[old_len..old_len + bases.len()].copy_from_slice(bases);
                 }
+                overhangs.left_len = left.len() as i32;
 
                 let mut offset: i32 = 0;
                 if let Some(edits) = info.edits.as_ref() {
@@ -1115,6 +1116,7 @@ fn mapper_trim_map_info(
                 }
             }
             overhangs.right = Some(right);
+            overhangs.right_len = overhangs.right.as_ref().map_or(0, Vec::len) as i32;
         }
     }
 
@@ -1175,6 +1177,7 @@ fn mapper_trim_map_info(
             }
         }
         edits.edits.truncate(k);
+        edits.num_edits = edits.edits.len() as i32;
     }
 }
 
@@ -1871,12 +1874,14 @@ fn merge_hsp_map_info(
         if let Some(second_edits) = second_info.edits.as_ref() {
             edits.edits.extend_from_slice(&second_edits.edits);
         }
+        edits.num_edits = edits.edits.len() as i32;
         info.right_edge = second_info.right_edge;
         if let Some(overhangs) = info.subject_overhangs.as_mut() {
             overhangs.right = second_info
                 .subject_overhangs
                 .as_ref()
                 .and_then(|second_overhangs| second_overhangs.right.clone());
+            overhangs.right_len = overhangs.right.as_ref().map_or(0, Vec::len) as i32;
         }
     }
 
@@ -4388,6 +4393,7 @@ mod tests {
         let mut edited_a = hsp(50, 0, 0, 0, 10);
         edited_a.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 8,
                     query_base: 0,
@@ -4423,6 +4429,7 @@ mod tests {
         let mut first = hsp(40, 0, 0, 0, 10);
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![
                     JumperEdit {
                         query_pos: 5,
@@ -4447,6 +4454,7 @@ mod tests {
         second.query_end = 15;
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![
                     JumperEdit {
                         query_pos: 4,
@@ -4518,6 +4526,7 @@ mod tests {
         );
         edited.hsps.as_mut().unwrap().hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 4,
                     query_base: b'A',
@@ -4688,6 +4697,7 @@ mod tests {
         )]));
         hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 6,
                     query_base: 1,
@@ -4695,6 +4705,8 @@ mod tests {
                 }],
             }),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: Some(vec![1]),
                 right: Some(vec![2]),
             }),
@@ -4782,6 +4794,7 @@ mod tests {
         ]));
         hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![
                     JumperEdit {
                         query_pos: 2,
@@ -4801,6 +4814,8 @@ mod tests {
                 ],
             }),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: Some(vec![2]),
                 right: None,
             }),
@@ -4849,6 +4864,7 @@ mod tests {
         ]));
         hsp.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![
                     JumperEdit {
                         query_pos: 6,
@@ -4873,6 +4889,8 @@ mod tests {
                 ],
             }),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: None,
                 right: Some(vec![3]),
             }),
@@ -5265,6 +5283,7 @@ mod tests {
         )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 4,
                     query_base: 1,
@@ -5272,6 +5291,8 @@ mod tests {
                 }],
             }),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: Some(vec![3, 2]),
                 right: Some(vec![2, 3, 1]),
             }),
@@ -5282,6 +5303,7 @@ mod tests {
         });
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 16,
                     query_base: 0,
@@ -5289,6 +5311,8 @@ mod tests {
                 }],
             }),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: Some(vec![0]),
                 right: Some(vec![1, 0]),
             }),
@@ -5499,6 +5523,8 @@ mod tests {
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: None,
                 right: Some(vec![0, 0, 0]),
             }),
@@ -5984,6 +6010,8 @@ mod tests {
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: None,
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: None,
                 right: Some(vec![0, 0, 0]),
             }),
@@ -6571,6 +6599,7 @@ mod tests {
         )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![
                     JumperEdit {
                         query_pos: 4,
@@ -6656,6 +6685,7 @@ mod tests {
         )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![
                     JumperEdit {
                         query_pos: 10,
@@ -6685,6 +6715,7 @@ mod tests {
         )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 10,
                     query_base: 0,
@@ -6742,6 +6773,7 @@ mod tests {
         )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![
                     JumperEdit {
                         query_pos: 8,
@@ -6811,6 +6843,7 @@ mod tests {
         )]));
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 9,
                     query_base: 2,
@@ -6833,6 +6866,7 @@ mod tests {
         )]));
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock {
+                num_edits: 0,
                 edits: vec![JumperEdit {
                     query_pos: 8,
                     query_base: 1,
@@ -7163,6 +7197,8 @@ mod tests {
         first.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock::default()),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: None,
                 right: Some(vec![2, 3, 0, 0, 0, 0]),
             }),
@@ -7182,6 +7218,8 @@ mod tests {
         second.map_info = Some(crate::hspstream::BlastHSPMappingInfo {
             edits: Some(crate::gapinfo::JumperEditsBlock::default()),
             subject_overhangs: Some(crate::gapinfo::SequenceOverhangs {
+                left_len: 0,
+                right_len: 0,
                 left: Some(vec![0, 2, 0, 0, 0, 0]),
                 right: None,
             }),

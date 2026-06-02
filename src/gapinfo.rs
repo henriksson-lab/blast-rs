@@ -405,6 +405,8 @@ pub const JUMPER_DEFAULT: [Jump; 15] = [
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JumperPrelimEditBlock {
+    pub num_ops: i32,
+    pub num_allocated: i32,
     pub edit_ops: Vec<JumperOpType>,
 }
 
@@ -424,11 +426,14 @@ pub struct JumperEdit {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JumperEditsBlock {
+    pub num_edits: i32,
     pub edits: Vec<JumperEdit>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SequenceOverhangs {
+    pub left_len: i32,
+    pub right_len: i32,
     pub left: Option<Vec<u8>>,
     pub right: Option<Vec<u8>>,
 }
@@ -880,6 +885,8 @@ pub fn jumper_prelim_edit_block_new(size: i32) -> Option<JumperPrelimEditBlock> 
         return None;
     }
     Some(JumperPrelimEditBlock {
+        num_ops: 0,
+        num_allocated: size,
         edit_ops: Vec::with_capacity(size as usize),
     })
 }
@@ -903,11 +910,15 @@ pub fn jumper_prelim_edit_block_add(block: &mut JumperPrelimEditBlock, op: Jumpe
         if let Some(last) = block.edit_ops.last_mut() {
             if *last > 0 {
                 *last += op;
+                block.num_ops = block.edit_ops.len() as i32;
+                block.num_allocated = block.edit_ops.capacity() as i32;
                 return 0;
             }
         }
     }
     block.edit_ops.push(op);
+    block.num_ops = block.edit_ops.len() as i32;
+    block.num_allocated = block.edit_ops.capacity() as i32;
     0
 }
 
@@ -954,6 +965,10 @@ pub fn s_reset_jumper_prelim_edit_blocks(
     };
     left.edit_ops.clear();
     right.edit_ops.clear();
+    left.num_ops = 0;
+    right.num_ops = 0;
+    left.num_allocated = left.edit_ops.capacity() as i32;
+    right.num_allocated = right.edit_ops.capacity() as i32;
 }
 
 /// NCBI: s_GetSeqPositions (jumper.c:277).
@@ -1184,6 +1199,8 @@ pub fn s_shift_gaps(
     };
 
     let mut combined = JumperPrelimEditBlock {
+        num_ops: 0,
+        num_allocated: right.edit_ops.capacity().max(right.edit_ops.len()) as i32,
         edit_ops: Vec::with_capacity(right.edit_ops.capacity().max(right.edit_ops.len())),
     };
     for &op in left.edit_ops.iter().rev() {
@@ -1227,6 +1244,10 @@ pub fn s_shift_gaps(
     }
 
     left.edit_ops.clear();
+    left.num_ops = 0;
+    left.num_allocated = left.edit_ops.capacity() as i32;
+    combined.num_ops = combined.edit_ops.len() as i32;
+    combined.num_allocated = combined.edit_ops.capacity() as i32;
     jumper.right_prelim_block = Some(combined);
     0
 }
@@ -1294,6 +1315,8 @@ pub fn s_trim_extension(
     if jops.edit_ops.len() == 1 && jops.edit_ops[0] <= 0 {
         jops.edit_ops.clear();
     }
+    jops.num_ops = jops.edit_ops.len() as i32;
+    jops.num_allocated = jops.edit_ops.capacity() as i32;
 }
 
 /// blast-rs: Rust ownership equivalent of NCBI `JumperEditsBlockFree`; not a direct NCBI C port.
@@ -1307,6 +1330,7 @@ pub fn jumper_edits_block_new(num: i32) -> Option<JumperEditsBlock> {
         return None;
     }
     Some(JumperEditsBlock {
+        num_edits: 0,
         edits: Vec::with_capacity(num as usize),
     })
 }
@@ -1480,6 +1504,7 @@ pub fn jumper_find_edits(
     let mut q_pos = query_start;
     let mut s_pos = subject_start;
     let mut edits = JumperEditsBlock {
+        num_edits: 0,
         edits: Vec::with_capacity(left_ext.edit_ops.len() + right_ext.edit_ops.len()),
     };
 
@@ -1556,6 +1581,7 @@ pub fn jumper_find_edits(
     if q_pos != query_stop || s_pos != subject_stop {
         return None;
     }
+    edits.num_edits = edits.edits.len() as i32;
     Some(edits)
 }
 
@@ -1632,6 +1658,7 @@ pub fn s_save_subject_overhangs(
                     crate::encoding::ncbi2na_base_at(subject, start.saturating_add(i) as usize)
                 })
                 .collect::<Vec<_>>();
+            overhangs.left_len = left.len() as i32;
             overhangs.left = Some(left);
         }
     }
@@ -1654,6 +1681,7 @@ pub fn s_save_subject_overhangs(
                     )
                 })
                 .collect::<Vec<_>>();
+            overhangs.right_len = right.len() as i32;
             overhangs.right = Some(right);
         }
     }
@@ -1724,6 +1752,7 @@ pub fn s_create_hsp_for_word_hit(
             });
         }
     }
+    edits.num_edits = edits.edits.len() as i32;
     hsp.num_ident = length - edits.edits.len() as i32;
     map_info.edits = Some(edits);
     jumper_find_splice_signals(&hsp, &mut map_info, query_len, subject, subject_len);
@@ -2900,6 +2929,8 @@ pub fn jumper_extend_right_with_traceback(
         *ungapped_ext_len = cp;
     }
 
+    edit_script.num_ops = edit_script.edit_ops.len() as i32;
+    edit_script.num_allocated = edit_script.edit_ops.capacity() as i32;
     (
         s_compute_extension_score(
             edit_script,
@@ -3336,6 +3367,8 @@ pub fn jumper_extend_right_compressed_with_traceback(
         *ungapped_ext_len = cp;
     }
 
+    edit_script.num_ops = edit_script.edit_ops.len() as i32;
+    edit_script.num_allocated = edit_script.edit_ops.capacity() as i32;
     (
         s_compute_extension_score(
             edit_script,
@@ -3457,6 +3490,8 @@ pub fn jumper_extend_left_compressed_with_traceback(
         false,
     );
 
+    edit_script.num_ops = edit_script.edit_ops.len() as i32;
+    edit_script.num_allocated = edit_script.edit_ops.capacity() as i32;
     (
         s_compute_extension_score(
             edit_script,
@@ -3627,6 +3662,8 @@ pub fn jumper_extend_right_compressed_with_traceback_optimal(
         *ungapped_ext_len = cpstop;
     }
 
+    edit_script.num_ops = edit_script.edit_ops.len() as i32;
+    edit_script.num_allocated = edit_script.edit_ops.capacity() as i32;
     (best_score, cpstop, cqstop)
 }
 
@@ -3780,6 +3817,8 @@ pub fn jumper_extend_left_compressed_with_traceback_optimal(
     }
 
     edit_script.edit_ops.truncate(num_ops);
+    edit_script.num_ops = edit_script.edit_ops.len() as i32;
+    edit_script.num_allocated = edit_script.edit_ops.capacity() as i32;
     (
         best_score,
         query_offset.saturating_sub(cpstop),
@@ -3902,6 +3941,8 @@ pub fn jumper_gapped_alignment_compressed_with_traceback(
     if offset_adjustment != 0 && !left_ext_done {
         if let Some(block) = jumper.left_prelim_block.as_mut() {
             block.edit_ops.push(offset_adjustment);
+            block.num_ops = block.edit_ops.len() as i32;
+            block.num_allocated = block.edit_ops.capacity() as i32;
         }
         *num_identical = num_identical.saturating_add(offset_adjustment);
         score = score.saturating_add(offset_adjustment.saturating_mul(score_params.reward));
@@ -7483,6 +7524,8 @@ mod tests {
         assert!(jumper_edits_block_free(Some(edits)).is_none());
 
         let overhangs = SequenceOverhangs {
+            left_len: 0,
+            right_len: 0,
             left: Some(vec![1, 2]),
             right: Some(vec![3]),
         };
@@ -7551,6 +7594,8 @@ mod tests {
 
         assert_eq!(s_compute_extension_score(&right, 2, -3, -5, -1), -5);
         let scored = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: vec![
                 2,
                 JUMPER_INSERTION,
@@ -7562,6 +7607,7 @@ mod tests {
         assert_eq!(s_compute_extension_score(&scored, 2, -3, -5, -1), -12);
 
         let mut base = Some(JumperEditsBlock {
+            num_edits: 0,
             edits: vec![JumperEdit {
                 query_pos: 1,
                 query_base: 2,
@@ -7569,6 +7615,7 @@ mod tests {
             }],
         });
         let mut append = Some(JumperEditsBlock {
+            num_edits: 0,
             edits: vec![JumperEdit {
                 query_pos: 4,
                 query_base: 5,
@@ -8154,6 +8201,8 @@ mod tests {
         let query = [0u8, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
         let mut script = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: vec![JUMPER_INSERTION, JUMPER_DELETION],
         };
         let mut score = 10;
@@ -8185,8 +8234,14 @@ mod tests {
         let query = [0u8, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
         let mut jumper = JumperGapAlign {
-            left_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![2] }),
+            left_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
+                edit_ops: vec![2],
+            }),
             right_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
                 edit_ops: vec![3, JUMPER_DELETION],
             }),
             table: Vec::new(),
@@ -8238,7 +8293,11 @@ mod tests {
 
         let mut missing_left = JumperGapAlign {
             left_prelim_block: None,
-            right_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![4] }),
+            right_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
+                edit_ops: vec![4],
+            }),
             table: Vec::new(),
         };
         assert_eq!(
@@ -8264,7 +8323,11 @@ mod tests {
         );
 
         let mut missing_right = JumperGapAlign {
-            left_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![4] }),
+            left_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
+                edit_ops: vec![4],
+            }),
             right_prelim_block: None,
             table: Vec::new(),
         };
@@ -8310,6 +8373,8 @@ mod tests {
     #[test]
     fn jumper_trim_extension_tracks_c_pointer_arithmetic() {
         let mut script = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: vec![1, JUMPER_MISMATCH, 2],
         };
         let mut cp = 10;
@@ -8323,6 +8388,8 @@ mod tests {
         assert_eq!(num_identical, 1);
 
         let mut left_script = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: vec![1, JUMPER_INSERTION],
         };
         s_trim_extension(
@@ -8340,6 +8407,8 @@ mod tests {
     #[test]
     fn jumper_trim_extension_handles_noop_and_single_gap_edges() {
         let mut script = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: vec![JUMPER_DELETION],
         };
         let mut cp = 3;
@@ -8390,6 +8459,8 @@ mod tests {
         let query = [0u8, 9, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let subject = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
         let mut script = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: Vec::new(),
         };
         let mut num_identical = 0;
@@ -8720,6 +8791,8 @@ mod tests {
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
         let left = JumperPrelimEditBlock::default();
         let right = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: vec![1, JUMPER_MISMATCH, JUMPER_INSERTION, JUMPER_DELETION, 1],
         };
 
@@ -8752,7 +8825,11 @@ mod tests {
         let query = [0u8, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
         let empty = JumperPrelimEditBlock::default();
-        let one_match = JumperPrelimEditBlock { edit_ops: vec![1] };
+        let one_match = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
+            edit_ops: vec![1],
+        };
 
         assert!(jumper_find_edits(&query, &subject, -1, 0, 1, 1, &empty, &empty).is_none());
         assert!(jumper_find_edits(&query, &subject, 0, -1, 1, 1, &empty, &empty).is_none());
@@ -8760,6 +8837,8 @@ mod tests {
         assert!(jumper_find_edits(&query, &[], 0, 0, 1, 1, &empty, &empty).is_none());
 
         let invalid = JumperPrelimEditBlock {
+            num_ops: 0,
+            num_allocated: 0,
             edit_ops: vec![-99],
         };
         assert!(jumper_find_edits(&query, &subject, 0, 0, 0, 0, &empty, &invalid).is_none());
@@ -8899,6 +8978,8 @@ mod tests {
         };
         let mut map_info = crate::hspstream::blast_hsp_mapping_info_new();
         map_info.subject_overhangs = Some(SequenceOverhangs {
+            left_len: 0,
+            right_len: 0,
             left: Some(vec![1, 2]),
             right: Some(vec![3]),
         });
@@ -9116,7 +9197,11 @@ mod tests {
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
         let mut jumper = JumperGapAlign {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
-            right_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![4] }),
+            right_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
+                edit_ops: vec![4],
+            }),
             table: Vec::new(),
         };
 
@@ -9163,7 +9248,11 @@ mod tests {
         let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
         let mut jumper = JumperGapAlign {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
-            right_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![6] }),
+            right_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
+                edit_ops: vec![6],
+            }),
             table: Vec::new(),
         };
 
@@ -9204,7 +9293,11 @@ mod tests {
 
         let mut missing_left = JumperGapAlign {
             left_prelim_block: None,
-            right_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![4] }),
+            right_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
+                edit_ops: vec![4],
+            }),
             table: Vec::new(),
         };
         assert!(s_create_hsp(
@@ -9257,7 +9350,11 @@ mod tests {
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
         let mut jumper = JumperGapAlign {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
-            right_prelim_block: Some(JumperPrelimEditBlock { edit_ops: vec![4] }),
+            right_prelim_block: Some(JumperPrelimEditBlock {
+                num_ops: 0,
+                num_allocated: 0,
+                edit_ops: vec![4],
+            }),
             table: Vec::new(),
         };
 
