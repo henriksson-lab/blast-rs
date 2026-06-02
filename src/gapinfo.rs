@@ -449,9 +449,12 @@ pub struct SubjectIndex {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubjectIndexIterator {
     pub subject_index: Option<SubjectIndex>,
+    pub from: i32,
     pub to: i32,
     pub lookup_index: i32,
-    pub positions: Vec<i32>,
+    pub lookup_pos: Vec<i32>,
+    pub num_words: i32,
+    pub word: i32,
     pub word_index: i32,
 }
 
@@ -540,7 +543,14 @@ pub fn gap_edit_script_delete(_: Option<GapEditScript>) -> Option<GapEditScript>
 
 /// NCBI: GapEditScriptDup (gapinfo.c:88).
 pub fn gap_edit_script_dup(old: Option<&GapEditScript>) -> Option<GapEditScript> {
-    old.cloned()
+    let old = old?;
+    let mut new = gap_edit_script_new(old.size)?;
+    let size = old.len().min(new.len());
+    for index in 0..size {
+        let (op, count) = old.get(index)?;
+        new.set(index, op, count);
+    }
+    Some(new)
 }
 
 /// NCBI: GapEditScriptPartialCopy (gapinfo.c:104).
@@ -927,8 +937,8 @@ pub fn s_create_table(table: &mut [u32]) {
     for (byte, entry) in table.iter_mut().enumerate() {
         let mut packed = 0u32;
         for pos in 0..4 {
-            let base = ((byte >> (2 * (3 - pos))) & 3) as u32;
-            packed |= base << (pos * 8);
+            let base = ((byte >> (2 * pos)) & 3) as u32;
+            packed |= base << ((3 - pos) * 8);
         }
         *entry = packed;
     }
@@ -1337,7 +1347,13 @@ pub fn jumper_edits_block_new(num: i32) -> Option<JumperEditsBlock> {
 
 /// NCBI: JumperEditsBlockDup (jumper.c:2737).
 pub fn jumper_edits_block_dup(block: Option<&JumperEditsBlock>) -> Option<JumperEditsBlock> {
-    block.cloned()
+    let block = block?;
+    let mut new = jumper_edits_block_new(block.num_edits)?;
+    let num_edits = block.num_edits.max(0) as usize;
+    new.edits
+        .extend(block.edits.iter().copied().take(num_edits));
+    new.num_edits = new.edits.len() as i32;
+    Some(new)
 }
 
 /// blast-rs: Convert one Jumper preliminary operation to the corresponding BLAST gap op; not a direct NCBI C port.
@@ -1365,19 +1381,39 @@ pub fn jumper_prelim_edit_block_to_gap_edit_script(
     rev_prelim_block: &JumperPrelimEditBlock,
     fwd_prelim_block: &JumperPrelimEditBlock,
 ) -> Option<GapEditScript> {
-    if rev_prelim_block.edit_ops.is_empty() && fwd_prelim_block.edit_ops.is_empty() {
+    let rev_num_ops =
+        (rev_prelim_block.num_ops.max(0) as usize).min(rev_prelim_block.edit_ops.len());
+    let fwd_num_ops =
+        (fwd_prelim_block.num_ops.max(0) as usize).min(fwd_prelim_block.edit_ops.len());
+    let rev_ops = &rev_prelim_block.edit_ops[..rev_num_ops];
+    let fwd_ops = &fwd_prelim_block.edit_ops[..fwd_num_ops];
+    if rev_ops.is_empty() && fwd_ops.is_empty() {
         return None;
     }
 
-    let mut script = GapEditScript::with_capacity(
-        rev_prelim_block.edit_ops.len() + fwd_prelim_block.edit_ops.len(),
-    );
-
-    for &op in rev_prelim_block.edit_ops.iter().rev() {
-        script.push(jumper_op_to_gap_op(op), jumper_op_to_num(op));
+    let mut size = 0usize;
+    let mut last_op = None;
+    for &op in rev_ops.iter().rev().chain(fwd_ops.iter()) {
+        let current_op = jumper_op_to_gap_op(op);
+        if last_op != Some(current_op) {
+            size += 1;
+            last_op = Some(current_op);
+        }
     }
-    for &op in &fwd_prelim_block.edit_ops {
-        script.push(jumper_op_to_gap_op(op), jumper_op_to_num(op));
+
+    let mut script = gap_edit_script_new(size as i32)?;
+    let mut index = 0usize;
+    let mut last_op = None;
+    for &op in rev_ops.iter().rev().chain(fwd_ops.iter()) {
+        let current_op = jumper_op_to_gap_op(op);
+        let count = jumper_op_to_num(op);
+        if last_op == Some(current_op) {
+            script.add_num(index - 1, count);
+        } else {
+            script.set(index, current_op, count);
+            index += 1;
+            last_op = Some(current_op);
+        }
     }
 
     Some(script)
@@ -2332,31 +2368,34 @@ pub fn subject_index_iterator_new(
     from: i32,
     to: i32,
 ) -> Option<SubjectIndexIterator> {
-    let positions = s_index
+    let lookup_pos = s_index
         .positions_by_word
         .get(&word)
         .cloned()
         .unwrap_or_default();
-    let start = positions.partition_point(|&pos| pos < from) as i32;
+    let start = lookup_pos.partition_point(|&pos| pos < from) as i32;
     Some(SubjectIndexIterator {
         subject_index: Some(s_index.clone()),
+        from,
         to,
         lookup_index: if s_index.width > 0 {
             from / s_index.width
         } else {
             0
         },
-        positions,
+        num_words: lookup_pos.len() as i32,
+        lookup_pos,
+        word: word as i32,
         word_index: start,
     })
 }
 
 /// NCBI: SubjectIndexIteratorNext (jumper.c:4035).
 pub fn subject_index_iterator_next(it: &mut SubjectIndexIterator) -> i32 {
-    if it.word_index < 0 || it.word_index as usize >= it.positions.len() {
+    if it.word_index < 0 || it.word_index >= it.num_words {
         return -1;
     }
-    let pos = it.positions[it.word_index as usize];
+    let pos = it.lookup_pos[it.word_index as usize];
     if pos > it.to {
         return -1;
     }
@@ -2366,16 +2405,16 @@ pub fn subject_index_iterator_next(it: &mut SubjectIndexIterator) -> i32 {
 
 /// NCBI: SubjectIndexIteratorPrev (jumper.c:4087).
 pub fn subject_index_iterator_prev(it: &mut SubjectIndexIterator) -> i32 {
-    if it.positions.is_empty() {
+    if it.num_words <= 0 {
         return -1;
     }
     if it.word_index < 0 {
         return -1;
     }
-    if it.word_index as usize >= it.positions.len() {
-        it.word_index = it.positions.len() as i32 - 1;
+    if it.word_index >= it.num_words {
+        it.word_index = it.num_words - 1;
     }
-    let pos = it.positions[it.word_index as usize];
+    let pos = it.lookup_pos[it.word_index as usize];
     if pos < it.to {
         return -1;
     }
@@ -3971,36 +4010,6 @@ pub fn jumper_gapped_alignment_compressed_with_traceback(
     0
 }
 
-/// blast-rs: Selects lookup word lengths for Jumper scanning; not a direct NCBI C port.
-fn jumper_lookup_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
-    jumper_scan_lengths(lookup_wrap)
-}
-
-/// blast-rs: Lookup word-length adapter for represented scan paths; not a direct NCBI C port.
-fn jumper_scan_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
-    match lookup_wrap {
-        crate::lookup::LookupTableWrap::Na(table) => {
-            Some((table.word_length, table.lut_word_length))
-        }
-        crate::lookup::LookupTableWrap::NaHash(table) => {
-            Some((table.word_length, table.lut_word_length))
-        }
-        crate::lookup::LookupTableWrap::SmallNa(table) => Some((
-            table.word_length,
-            crate::lookup::small_na_lut_word_length(table),
-        )),
-        crate::lookup::LookupTableWrap::Megablast(table) => {
-            if table.discontiguous {
-                let template_length = table.template_length.max(table.word_length);
-                Some((template_length, template_length))
-            } else {
-                Some((table.word_length, table.lut_word_length))
-            }
-        }
-        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => None,
-    }
-}
-
 /// blast-rs: Lookup word-length adapter for Jumper extension paths; not a direct NCBI C port.
 fn jumper_extend_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
     match lookup_wrap {
@@ -4087,192 +4096,6 @@ fn s_determine_scanning_offsets(
         range[2] = subject_range.right.saturating_sub(lut_word_length);
     }
     true
-}
-
-struct JumperWordHitBatch {
-    offset_pairs: Vec<crate::lookup::OffsetPair>,
-    s_range: u32,
-}
-
-/// blast-rs: Collects represented lookup hits for one subject scan range; not a direct NCBI C port.
-fn jumper_collect_word_hits_for_range(
-    lookup_wrap: &crate::lookup::LookupTableWrap,
-    subject: &[u8],
-    subject_length: i32,
-    lut_word_length: i32,
-    start: i32,
-    end: i32,
-) -> Vec<crate::lookup::OffsetPair> {
-    let mut offset_pairs = Vec::new();
-    if start > end {
-        return offset_pairs;
-    }
-
-    match lookup_wrap {
-        crate::lookup::LookupTableWrap::Na(lookup) => {
-            let lut_word = lut_word_length.max(1);
-            let scan_step = lookup.scan_step.max(1);
-            let mut s_off = start.max(0);
-            let capped_end = end.min(subject_length - lut_word);
-            while s_off <= capped_end {
-                if let Some(index) = packed_subject_word(subject, subject_length, s_off, lut_word) {
-                    crate::lookup::s_blast_lookup_retrieve(
-                        lookup,
-                        index as i32,
-                        &mut offset_pairs,
-                        s_off,
-                    );
-                }
-                s_off = s_off.saturating_add(scan_step);
-            }
-        }
-        crate::lookup::LookupTableWrap::NaHash(lookup) => {
-            if let Some(mut hits) = crate::lookup::s_blast_na_hash_scan_subject_any(
-                lookup,
-                subject,
-                subject_length,
-                start.max(0),
-                end.min(subject_length - lut_word_length),
-            ) {
-                offset_pairs.append(&mut hits);
-            }
-        }
-        crate::lookup::LookupTableWrap::Megablast(lookup) => {
-            if lookup.discontiguous {
-                offset_pairs.extend(crate::lookup::s_mb_disc_word_scan_subject(
-                    lookup,
-                    subject,
-                    subject_length.max(0) as usize,
-                    start.max(0) as usize,
-                    end.max(0) as usize,
-                ));
-                return offset_pairs;
-            }
-            let lut_word = lut_word_length.max(1);
-            let scan_step = lookup.scan_step.max(1);
-            let mut s_off = start.max(0);
-            let capped_end = end.min(subject_length - lut_word);
-            while s_off <= capped_end {
-                if let Some(index) = packed_subject_word(subject, subject_length, s_off, lut_word) {
-                    crate::lookup::s_blast_mb_lookup_retrieve(
-                        lookup,
-                        index,
-                        &mut offset_pairs,
-                        s_off,
-                    );
-                }
-                s_off = s_off.saturating_add(scan_step);
-            }
-        }
-        crate::lookup::LookupTableWrap::SmallNa(lookup) => {
-            let lut_word = lut_word_length.max(1);
-            let scan_step = lookup.scan_step.max(1);
-            let mut s_off = start.max(0);
-            let capped_end = end.min(subject_length - lut_word);
-            while s_off <= capped_end {
-                if let Some(index) = packed_subject_word(subject, subject_length, s_off, lut_word) {
-                    let Ok(index) = i32::try_from(index) else {
-                        s_off = s_off.saturating_add(scan_step);
-                        continue;
-                    };
-                    crate::lookup::s_blast_small_na_lookup_retrieve(
-                        lookup,
-                        index,
-                        &mut offset_pairs,
-                        s_off,
-                    );
-                }
-                s_off = s_off.saturating_add(scan_step);
-            }
-        }
-        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {}
-    }
-    offset_pairs
-}
-
-/// blast-rs: Batches represented lookup hits by subject scan range; not a direct NCBI C port.
-fn jumper_collect_word_hit_batches_in_ranges(
-    lookup_wrap: &crate::lookup::LookupTableWrap,
-    subject: &[u8],
-    subject_length: i32,
-    word_length: i32,
-    lut_word_length: i32,
-    subject_ranges: Option<&[crate::util::SSeqRange]>,
-    scan_all_ranges: bool,
-) -> Vec<JumperWordHitBatch> {
-    if subject_length <= 0 || word_length <= 0 || lut_word_length <= 0 {
-        return Vec::new();
-    }
-    if subject_length as usize > subject.len().saturating_mul(4) {
-        return Vec::new();
-    }
-    let scan_ranges: Vec<(i32, i32)> = if let Some(ranges) = subject_ranges {
-        if ranges.is_empty() {
-            return Vec::new();
-        }
-        let mut scan_ranges = Vec::new();
-        let mut scan_range = [
-            0,
-            ranges[0]
-                .left
-                .saturating_add(word_length)
-                .saturating_sub(lut_word_length),
-            ranges[0].right.saturating_sub(lut_word_length),
-        ];
-        while s_determine_scanning_offsets(ranges, word_length, lut_word_length, &mut scan_range) {
-            scan_ranges.push((scan_range[1], scan_range[2]));
-            if !scan_all_ranges {
-                break;
-            }
-            scan_range[1] = scan_range[2].saturating_add(1);
-        }
-        scan_ranges
-    } else {
-        vec![(0, subject_length - lut_word_length)]
-    };
-
-    scan_ranges
-        .into_iter()
-        .map(|(start, end)| {
-            let capped_end = end.min(subject_length.saturating_sub(lut_word_length));
-            JumperWordHitBatch {
-                offset_pairs: jumper_collect_word_hits_for_range(
-                    lookup_wrap,
-                    subject,
-                    subject_length,
-                    lut_word_length,
-                    start,
-                    end,
-                ),
-                s_range: capped_end.saturating_add(lut_word_length).max(0) as u32,
-            }
-        })
-        .collect()
-}
-
-#[cfg(test)]
-/// blast-rs: Test-only flattened view of Jumper word-hit batches; not a direct NCBI C port.
-fn jumper_collect_word_hits_in_ranges(
-    lookup_wrap: &crate::lookup::LookupTableWrap,
-    subject: &[u8],
-    subject_length: i32,
-    word_length: i32,
-    lut_word_length: i32,
-    subject_ranges: Option<&[crate::util::SSeqRange]>,
-    scan_all_ranges: bool,
-) -> Vec<crate::lookup::OffsetPair> {
-    jumper_collect_word_hit_batches_in_ranges(
-        lookup_wrap,
-        subject,
-        subject_length,
-        word_length,
-        lut_word_length,
-        subject_ranges,
-        scan_all_ranges,
-    )
-    .into_iter()
-    .flat_map(|batch| batch.offset_pairs)
-    .collect()
 }
 
 /// blast-rs: Port-shaped equivalent of NCBI `BlastNaExtendJumper` (jumper.c:3253); not a direct NCBI C port.
@@ -4512,177 +4335,6 @@ pub fn jumper_na_word_finder(
     subject: &[u8],
     subject_length: i32,
     subject_frame: i32,
-    query: &[u8],
-    query_info: &crate::queryinfo::QueryInfo,
-    lookup_wrap: &crate::lookup::LookupTableWrap,
-    word_params: &crate::parameters::InitialWordParameters,
-    score_params: &crate::parameters::ScoringParameters,
-    hit_params: &crate::parameters::HitSavingParameters,
-    align_params: JumperAlignParams,
-    jumper: &mut JumperGapAlign,
-    hsp_list: &mut crate::hspstream::HspList,
-) -> i16 {
-    jumper_na_word_finder_with_word_hits(
-        subject,
-        subject_length,
-        subject_frame,
-        query,
-        query_info,
-        lookup_wrap,
-        word_params,
-        score_params,
-        hit_params,
-        align_params,
-        jumper,
-        hsp_list,
-        None,
-        None,
-        None,
-    )
-}
-
-/// Variant of [`jumper_na_word_finder_with_word_hits`] that takes subject
-/// unmasked ranges, matching the `subject->mask_type != eNoSubjMasking` branch
-/// of the C jumper word finder.
-/// blast-rs: Masked-subject adapter; not a direct NCBI C port.
-#[allow(clippy::too_many_arguments)]
-pub fn jumper_na_word_finder_with_subject_ranges(
-    subject: &[u8],
-    subject_length: i32,
-    subject_frame: i32,
-    subject_ranges: &[crate::util::SSeqRange],
-    query: &[u8],
-    query_info: &crate::queryinfo::QueryInfo,
-    lookup_wrap: &crate::lookup::LookupTableWrap,
-    word_params: &crate::parameters::InitialWordParameters,
-    score_params: &crate::parameters::ScoringParameters,
-    hit_params: &crate::parameters::HitSavingParameters,
-    align_params: JumperAlignParams,
-    jumper: &mut JumperGapAlign,
-    hsp_list: &mut crate::hspstream::HspList,
-    word_hits: Option<&mut crate::lookup::MapperWordHits>,
-    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
-    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
-) -> i16 {
-    jumper_na_word_finder_impl(
-        subject,
-        subject_length,
-        subject_frame,
-        Some(subject_ranges),
-        query,
-        query_info,
-        lookup_wrap,
-        word_params,
-        score_params,
-        hit_params,
-        align_params,
-        jumper,
-        hsp_list,
-        word_hits,
-        ungapped_stats,
-        gapped_stats,
-    )
-}
-
-/// blast-rs: Flushes one MapperWordHits bucket into Jumper extension; not a direct NCBI C port.
-fn mapper_word_hits_flush(
-    word_hits: &mut crate::lookup::MapperWordHits,
-    index: usize,
-    word_params: &crate::parameters::InitialWordParameters,
-    score_params: &crate::parameters::ScoringParameters,
-    hit_params: &crate::parameters::HitSavingParameters,
-    lookup_wrap: &crate::lookup::LookupTableWrap,
-    query: &[u8],
-    subject: &[u8],
-    subject_length: i32,
-    subject_frame: i32,
-    query_info: &crate::queryinfo::QueryInfo,
-    align_params: JumperAlignParams,
-    jumper: &mut JumperGapAlign,
-    hsp_list: &mut crate::hspstream::HspList,
-    s_range: u32,
-    subject_index: Option<&SubjectIndex>,
-) -> i32 {
-    let num = word_hits.num.get(index).copied().unwrap_or(0).max(0) as usize;
-    if num == 0 {
-        return 0;
-    }
-    let Some(pair_array) = word_hits.pair_arrays.get_mut(index) else {
-        return -1;
-    };
-    let extended = blast_na_extend_jumper(
-        &mut pair_array[..num],
-        word_params,
-        score_params,
-        hit_params,
-        lookup_wrap,
-        query,
-        subject,
-        subject_length,
-        subject_frame,
-        query_info,
-        align_params,
-        jumper,
-        hsp_list,
-        s_range,
-        subject_index,
-    );
-    word_hits.num[index] = 0;
-    extended
-}
-
-/// blast-rs: MapperWordHits batching variant of the jumper word finder; not a
-/// direct NCBI C port.
-///
-/// When `word_hits` is present, this mirrors C's per-query-bucket batching:
-/// duplicate adjacent hits on the same diagonal are suppressed before batching,
-/// full buckets are extended immediately, and remaining buckets are flushed at
-/// the end. When `word_hits` is absent, this behaves like
-/// [`jumper_na_word_finder`].
-#[allow(clippy::too_many_arguments)]
-pub fn jumper_na_word_finder_with_word_hits(
-    subject: &[u8],
-    subject_length: i32,
-    subject_frame: i32,
-    query: &[u8],
-    query_info: &crate::queryinfo::QueryInfo,
-    lookup_wrap: &crate::lookup::LookupTableWrap,
-    word_params: &crate::parameters::InitialWordParameters,
-    score_params: &crate::parameters::ScoringParameters,
-    hit_params: &crate::parameters::HitSavingParameters,
-    align_params: JumperAlignParams,
-    jumper: &mut JumperGapAlign,
-    hsp_list: &mut crate::hspstream::HspList,
-    word_hits: Option<&mut crate::lookup::MapperWordHits>,
-    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
-    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
-) -> i16 {
-    jumper_na_word_finder_impl(
-        subject,
-        subject_length,
-        subject_frame,
-        None,
-        query,
-        query_info,
-        lookup_wrap,
-        word_params,
-        score_params,
-        hit_params,
-        align_params,
-        jumper,
-        hsp_list,
-        word_hits,
-        ungapped_stats,
-        gapped_stats,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-/// blast-rs: Shared implementation for Jumper word-finder adapters; not a direct NCBI C port.
-fn jumper_na_word_finder_impl(
-    subject: &[u8],
-    subject_length: i32,
-    subject_frame: i32,
     subject_ranges: Option<&[crate::util::SSeqRange]>,
     query: &[u8],
     query_info: &crate::queryinfo::QueryInfo,
@@ -4700,8 +4352,24 @@ fn jumper_na_word_finder_impl(
     if subject_length <= 0 {
         return 0;
     }
-    let Some((word_length, lut_word_length)) = jumper_lookup_lengths(lookup_wrap) else {
-        return -1;
+    let (word_length, lut_word_length) = match lookup_wrap {
+        crate::lookup::LookupTableWrap::Na(table) => (table.word_length, table.lut_word_length),
+        crate::lookup::LookupTableWrap::NaHash(table) => (table.word_length, table.lut_word_length),
+        crate::lookup::LookupTableWrap::SmallNa(table) => (
+            table.word_length,
+            crate::lookup::small_na_lut_word_length(table),
+        ),
+        crate::lookup::LookupTableWrap::Megablast(table) => {
+            if table.discontiguous {
+                let template_length = table.template_length.max(table.word_length);
+                (template_length, template_length)
+            } else {
+                (table.word_length, table.lut_word_length)
+            }
+        }
+        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {
+            return -1;
+        }
     };
     if word_length <= 0 || lut_word_length <= 0 || word_length < lut_word_length {
         return -1;
@@ -4709,29 +4377,28 @@ fn jumper_na_word_finder_impl(
     if subject_length < lut_word_length {
         return 0;
     }
-    let read_is_query = (query_info.max_length as i64) < (subject_length as i64);
-    let mut word_hit_batches = jumper_collect_word_hit_batches_in_ranges(
-        lookup_wrap,
-        subject,
-        subject_length,
-        word_length,
-        lut_word_length,
-        subject_ranges,
-        read_is_query,
-    );
-    if !word_hit_batches
-        .iter()
-        .any(|batch| !batch.offset_pairs.is_empty())
-    {
-        return 0;
-    }
-
     let subject_index = if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
         subject_index_new(subject, subject_length, 10000, 4)
     } else {
         None
     };
     let subject_index_ref = subject_index.as_ref();
+    let read_is_query = (query_info.max_length as i64) < (subject_length as i64);
+    let mut scan_range = if let Some(ranges) = subject_ranges {
+        if ranges.is_empty() {
+            return 0;
+        }
+        [
+            0,
+            ranges[0]
+                .left
+                .saturating_add(word_length)
+                .saturating_sub(lut_word_length),
+            ranges[0].right.saturating_sub(lut_word_length),
+        ]
+    } else {
+        [0, 0, subject_length.saturating_sub(lut_word_length)]
+    };
     let mut total_hits = 0;
     let mut hits_extended = 0;
 
@@ -4753,14 +4420,106 @@ fn jumper_na_word_finder_impl(
             *value = 0;
         }
 
-        let mut last_s_range = word_hit_batches
-            .last()
-            .map(|batch| batch.s_range)
-            .unwrap_or(subject_length.max(0) as u32);
-        for batch in word_hit_batches {
-            last_s_range = batch.s_range;
-            total_hits += batch.offset_pairs.len() as i32;
-            for pair in batch.offset_pairs {
+        let mut last_s_range = scan_range[2]
+            .min(subject_length.saturating_sub(lut_word_length))
+            .saturating_add(lut_word_length)
+            .max(0) as u32;
+        while subject_ranges
+            .map(|ranges| {
+                s_determine_scanning_offsets(ranges, word_length, lut_word_length, &mut scan_range)
+            })
+            .unwrap_or(scan_range[1] <= scan_range[2])
+        {
+            let s_range = scan_range[2]
+                .min(subject_length.saturating_sub(lut_word_length))
+                .saturating_add(lut_word_length)
+                .max(0) as u32;
+            last_s_range = s_range;
+            let mut offset_pairs = Vec::new();
+            match lookup_wrap {
+                crate::lookup::LookupTableWrap::Na(lookup) => {
+                    let lut_word = lut_word_length.max(1);
+                    let scan_step = lookup.scan_step.max(1);
+                    let mut s_off = scan_range[1].max(0);
+                    let capped_end = scan_range[2].min(subject_length - lut_word);
+                    while s_off <= capped_end {
+                        if let Some(index) =
+                            packed_subject_word(subject, subject_length, s_off, lut_word)
+                        {
+                            crate::lookup::s_blast_lookup_retrieve(
+                                lookup,
+                                index as i32,
+                                &mut offset_pairs,
+                                s_off,
+                            );
+                        }
+                        s_off = s_off.saturating_add(scan_step);
+                    }
+                }
+                crate::lookup::LookupTableWrap::NaHash(lookup) => {
+                    if let Some(mut hits) = crate::lookup::s_blast_na_hash_scan_subject_any(
+                        lookup,
+                        subject,
+                        subject_length,
+                        scan_range[1].max(0),
+                        scan_range[2].min(subject_length - lut_word_length),
+                    ) {
+                        offset_pairs.append(&mut hits);
+                    }
+                }
+                crate::lookup::LookupTableWrap::Megablast(lookup) => {
+                    if lookup.discontiguous {
+                        offset_pairs.extend(crate::lookup::s_mb_disc_word_scan_subject(
+                            lookup,
+                            subject,
+                            subject_length.max(0) as usize,
+                            scan_range[1].max(0) as usize,
+                            scan_range[2].max(0) as usize,
+                        ));
+                    } else {
+                        let lut_word = lut_word_length.max(1);
+                        let scan_step = lookup.scan_step.max(1);
+                        let mut s_off = scan_range[1].max(0);
+                        let capped_end = scan_range[2].min(subject_length - lut_word);
+                        while s_off <= capped_end {
+                            if let Some(index) =
+                                packed_subject_word(subject, subject_length, s_off, lut_word)
+                            {
+                                crate::lookup::s_blast_mb_lookup_retrieve(
+                                    lookup,
+                                    index,
+                                    &mut offset_pairs,
+                                    s_off,
+                                );
+                            }
+                            s_off = s_off.saturating_add(scan_step);
+                        }
+                    }
+                }
+                crate::lookup::LookupTableWrap::SmallNa(lookup) => {
+                    let lut_word = lut_word_length.max(1);
+                    let scan_step = lookup.scan_step.max(1);
+                    let mut s_off = scan_range[1].max(0);
+                    let capped_end = scan_range[2].min(subject_length - lut_word);
+                    while s_off <= capped_end {
+                        if let Some(index) =
+                            packed_subject_word(subject, subject_length, s_off, lut_word)
+                        {
+                            if let Ok(index) = i32::try_from(index) {
+                                crate::lookup::s_blast_small_na_lookup_retrieve(
+                                    lookup,
+                                    index,
+                                    &mut offset_pairs,
+                                    s_off,
+                                );
+                            }
+                        }
+                        s_off = s_off.saturating_add(scan_step);
+                    }
+                }
+                crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {}
+            }
+            for pair in offset_pairs {
                 let q_off = pair.query_offset;
                 let s_off = pair.subject_offset;
                 if q_off < 0
@@ -4795,9 +4554,9 @@ fn jumper_na_word_finder_impl(
                     return -1;
                 }
                 if word_hits.num[index] >= word_hits.array_size {
-                    let extended = mapper_word_hits_flush(
-                        word_hits,
-                        index,
+                    let num = word_hits.num[index].max(0) as usize;
+                    let extended = blast_na_extend_jumper(
+                        &mut word_hits.pair_arrays[index][..num],
                         word_params,
                         score_params,
                         hit_params,
@@ -4810,9 +4569,10 @@ fn jumper_na_word_finder_impl(
                         align_params,
                         jumper,
                         hsp_list,
-                        batch.s_range,
+                        s_range,
                         subject_index_ref,
                     );
+                    word_hits.num[index] = 0;
                     if extended < 0 {
                         return -1;
                     }
@@ -4827,12 +4587,20 @@ fn jumper_na_word_finder_impl(
                 }
                 word_hits.num[index] += 1;
             }
+            if !read_is_query {
+                break;
+            }
+            scan_range[1] = scan_range[2].saturating_add(1);
         }
 
         for index in 0..num_arrays {
-            let extended = mapper_word_hits_flush(
-                word_hits,
-                index,
+            let num = word_hits.num[index].max(0) as usize;
+            if num == 0 {
+                word_hits.num[index] = 0;
+                continue;
+            }
+            let extended = blast_na_extend_jumper(
+                &mut word_hits.pair_arrays[index][..num],
                 word_params,
                 score_params,
                 hit_params,
@@ -4848,19 +4616,110 @@ fn jumper_na_word_finder_impl(
                 last_s_range,
                 subject_index_ref,
             );
+            word_hits.num[index] = 0;
             if extended < 0 {
                 return -1;
             }
             hits_extended += extended;
         }
     } else {
-        for batch in &mut word_hit_batches {
-            if batch.offset_pairs.is_empty() {
-                continue;
+        while subject_ranges
+            .map(|ranges| {
+                s_determine_scanning_offsets(ranges, word_length, lut_word_length, &mut scan_range)
+            })
+            .unwrap_or(scan_range[1] <= scan_range[2])
+        {
+            let s_range = scan_range[2]
+                .min(subject_length.saturating_sub(lut_word_length))
+                .saturating_add(lut_word_length)
+                .max(0) as u32;
+            let mut offset_pairs = Vec::new();
+            match lookup_wrap {
+                crate::lookup::LookupTableWrap::Na(lookup) => {
+                    let lut_word = lut_word_length.max(1);
+                    let scan_step = lookup.scan_step.max(1);
+                    let mut s_off = scan_range[1].max(0);
+                    let capped_end = scan_range[2].min(subject_length - lut_word);
+                    while s_off <= capped_end {
+                        if let Some(index) =
+                            packed_subject_word(subject, subject_length, s_off, lut_word)
+                        {
+                            crate::lookup::s_blast_lookup_retrieve(
+                                lookup,
+                                index as i32,
+                                &mut offset_pairs,
+                                s_off,
+                            );
+                        }
+                        s_off = s_off.saturating_add(scan_step);
+                    }
+                }
+                crate::lookup::LookupTableWrap::NaHash(lookup) => {
+                    if let Some(mut hits) = crate::lookup::s_blast_na_hash_scan_subject_any(
+                        lookup,
+                        subject,
+                        subject_length,
+                        scan_range[1].max(0),
+                        scan_range[2].min(subject_length - lut_word_length),
+                    ) {
+                        offset_pairs.append(&mut hits);
+                    }
+                }
+                crate::lookup::LookupTableWrap::Megablast(lookup) => {
+                    if lookup.discontiguous {
+                        offset_pairs.extend(crate::lookup::s_mb_disc_word_scan_subject(
+                            lookup,
+                            subject,
+                            subject_length.max(0) as usize,
+                            scan_range[1].max(0) as usize,
+                            scan_range[2].max(0) as usize,
+                        ));
+                    } else {
+                        let lut_word = lut_word_length.max(1);
+                        let scan_step = lookup.scan_step.max(1);
+                        let mut s_off = scan_range[1].max(0);
+                        let capped_end = scan_range[2].min(subject_length - lut_word);
+                        while s_off <= capped_end {
+                            if let Some(index) =
+                                packed_subject_word(subject, subject_length, s_off, lut_word)
+                            {
+                                crate::lookup::s_blast_mb_lookup_retrieve(
+                                    lookup,
+                                    index,
+                                    &mut offset_pairs,
+                                    s_off,
+                                );
+                            }
+                            s_off = s_off.saturating_add(scan_step);
+                        }
+                    }
+                }
+                crate::lookup::LookupTableWrap::SmallNa(lookup) => {
+                    let lut_word = lut_word_length.max(1);
+                    let scan_step = lookup.scan_step.max(1);
+                    let mut s_off = scan_range[1].max(0);
+                    let capped_end = scan_range[2].min(subject_length - lut_word);
+                    while s_off <= capped_end {
+                        if let Some(index) =
+                            packed_subject_word(subject, subject_length, s_off, lut_word)
+                        {
+                            if let Ok(index) = i32::try_from(index) {
+                                crate::lookup::s_blast_small_na_lookup_retrieve(
+                                    lookup,
+                                    index,
+                                    &mut offset_pairs,
+                                    s_off,
+                                );
+                            }
+                        }
+                        s_off = s_off.saturating_add(scan_step);
+                    }
+                }
+                crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {}
             }
-            total_hits += batch.offset_pairs.len() as i32;
+            total_hits += offset_pairs.len() as i32;
             hits_extended += blast_na_extend_jumper(
-                &mut batch.offset_pairs,
+                &mut offset_pairs,
                 word_params,
                 score_params,
                 hit_params,
@@ -4873,9 +4732,13 @@ fn jumper_na_word_finder_impl(
                 align_params,
                 jumper,
                 hsp_list,
-                batch.s_range,
+                s_range,
                 subject_index_ref,
             );
+            if !read_is_query {
+                break;
+            }
+            scan_range[1] = scan_range[2].saturating_add(1);
         }
     }
 
@@ -7518,6 +7381,7 @@ mod tests {
             query_base: 1,
             subject_base: 2,
         });
+        edits.num_edits = edits.edits.len() as i32;
         let dup = jumper_edits_block_dup(Some(&edits)).expect("dup");
         assert_eq!(dup, edits);
         assert!(jumper_edits_block_dup(None).is_none());
@@ -7537,7 +7401,9 @@ mod tests {
         let mut left = jumper_prelim_edit_block_new(4).expect("left block");
         let mut right = jumper_prelim_edit_block_new(4).expect("right block");
         left.edit_ops.extend([JUMPER_INSERTION, 3, JUMPER_MISMATCH]);
+        left.num_ops = left.edit_ops.len() as i32;
         right.edit_ops.extend([2, JUMPER_DELETION]);
+        right.num_ops = right.edit_ops.len() as i32;
 
         let script =
             jumper_prelim_edit_block_to_gap_edit_script(&left, &right).expect("gap script");
@@ -7559,6 +7425,7 @@ mod tests {
         right
             .edit_ops
             .extend([2, JUMPER_MISMATCH, JUMPER_INSERTION, JUMPER_DELETION, 3]);
+        right.num_ops = right.edit_ops.len() as i32;
         let mut query_pos = 10;
         let mut subject_pos = 20;
         assert_eq!(
@@ -7691,7 +7558,8 @@ mod tests {
         assert_eq!(lookup_window.lookup_index, 1);
 
         let mut negative_next = SubjectIndexIterator {
-            positions: vec![0],
+            lookup_pos: vec![0],
+            num_words: 1,
             word_index: -1,
             to: 10,
             ..Default::default()
@@ -7699,7 +7567,8 @@ mod tests {
         assert_eq!(subject_index_iterator_next(&mut negative_next), -1);
 
         let mut negative_prev = SubjectIndexIterator {
-            positions: vec![0],
+            lookup_pos: vec![0],
+            num_words: 1,
             word_index: -1,
             to: 0,
             ..Default::default()
@@ -9938,6 +9807,7 @@ mod tests {
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &lookup,
@@ -9951,6 +9821,9 @@ mod tests {
                 },
                 &mut jumper,
                 &mut list,
+                None,
+                None,
+                None,
             ),
             0
         );
@@ -10012,6 +9885,7 @@ mod tests {
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &lookup,
@@ -10025,235 +9899,15 @@ mod tests {
                 },
                 &mut jumper,
                 &mut list,
+                None,
+                None,
+                None,
             ),
             0
         );
         assert!(!list.hsps.is_empty());
         assert_eq!(list.hsps[0].query_offset, 0);
         assert_eq!(list.hsps[0].subject_offset, 0);
-    }
-
-    #[test]
-    fn jumper_collect_word_hits_preserves_small_na_overflow_chains() {
-        let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
-        let subject = crate::encoding::pack_ncbi2na_bases(&query);
-        let word = 0b0001_1011usize;
-        let mut backbone = vec![-1; 1 << 8];
-        backbone[word] = -2;
-        let lookup = crate::lookup::LookupTableWrap::SmallNa(crate::lookup::SmallNaLookupTable {
-            word_length: 4,
-            backbone,
-            overflow: vec![0, 0, 0, 4, -1],
-            pv_array: Vec::new(),
-            longest_chain: 2,
-            scan_step: 1,
-        });
-
-        let hits = jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            query.len() as i32,
-            4,
-            4,
-            None,
-            true,
-        );
-        assert!(hits.contains(&crate::lookup::OffsetPair {
-            query_offset: 0,
-            subject_offset: 0,
-        }));
-        assert!(hits.contains(&crate::lookup::OffsetPair {
-            query_offset: 4,
-            subject_offset: 0,
-        }));
-    }
-
-    #[test]
-    fn jumper_collect_word_hits_honors_standard_na_scan_step() {
-        let subject_bases = [0u8; 8];
-        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
-        let mut thick_backbone = vec![crate::lookup::NaLookupBackboneCell::default(); 1 << 8];
-        thick_backbone[0].num_used = 1;
-        thick_backbone[0].entries[0] = 7;
-        let lookup = crate::lookup::LookupTableWrap::Na(crate::lookup::BlastNaLookupTable {
-            mask: 255,
-            word_length: 5,
-            lut_word_length: 4,
-            scan_step: 2,
-            backbone_size: 1 << 8,
-            longest_chain: 1,
-            thick_backbone,
-            overflow: Vec::new(),
-            overflow_size: 0,
-            pv: Vec::new(),
-        });
-
-        let hits = jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            subject_bases.len() as i32,
-            5,
-            4,
-            None,
-            true,
-        );
-        let subject_offsets: Vec<i32> = hits.iter().map(|hit| hit.subject_offset).collect();
-        assert_eq!(subject_offsets, vec![0, 2, 4]);
-        assert!(hits.iter().all(|hit| hit.query_offset == 7));
-    }
-
-    #[test]
-    fn jumper_collect_word_hits_honors_megablast_scan_step() {
-        let subject_bases = [0u8; 8];
-        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
-        let mut hashtable = vec![0; 1 << 8];
-        hashtable[0] = 1;
-        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
-            word_length: 4,
-            lut_word_length: 4,
-            discontiguous: false,
-            template_length: 0,
-            template_type: crate::lookup::DiscTemplateType::Contiguous,
-            two_templates: false,
-            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
-            hashtable,
-            hashtable2: Vec::new(),
-            next_pos: vec![0, 0],
-            next_pos2: Vec::new(),
-            pv_array: Vec::new(),
-            pv_array_bts: 0,
-            longest_chain: 1,
-            scan_step: 4,
-        });
-
-        let hits = jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            subject_bases.len() as i32,
-            4,
-            4,
-            None,
-            true,
-        );
-        let subject_offsets: Vec<i32> = hits.iter().map(|hit| hit.subject_offset).collect();
-        assert_eq!(subject_offsets, vec![0, 4]);
-        assert!(hits.iter().all(|hit| hit.query_offset == 0));
-    }
-
-    #[test]
-    fn jumper_collect_word_hits_can_stop_after_first_mask_range_like_c() {
-        let subject_bases = [0u8; 12];
-        let subject = crate::encoding::pack_ncbi2na_bases(&subject_bases);
-        let mut hashtable = vec![0; 1 << 8];
-        hashtable[0] = 1;
-        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
-            word_length: 4,
-            lut_word_length: 4,
-            discontiguous: false,
-            template_length: 0,
-            template_type: crate::lookup::DiscTemplateType::Contiguous,
-            two_templates: false,
-            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
-            hashtable,
-            hashtable2: Vec::new(),
-            next_pos: vec![0, 0],
-            next_pos2: Vec::new(),
-            pv_array: Vec::new(),
-            pv_array_bts: 0,
-            longest_chain: 1,
-            scan_step: 1,
-        });
-        let ranges = [
-            crate::util::SSeqRange { left: 0, right: 4 },
-            crate::util::SSeqRange { left: 8, right: 12 },
-        ];
-
-        let first_range_hits = jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            subject_bases.len() as i32,
-            4,
-            4,
-            Some(&ranges),
-            false,
-        );
-        let all_range_hits = jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            subject_bases.len() as i32,
-            4,
-            4,
-            Some(&ranges),
-            true,
-        );
-        let all_range_batches = jumper_collect_word_hit_batches_in_ranges(
-            &lookup,
-            &subject,
-            subject_bases.len() as i32,
-            4,
-            4,
-            Some(&ranges),
-            true,
-        );
-
-        assert_eq!(
-            first_range_hits
-                .iter()
-                .map(|hit| hit.subject_offset)
-                .collect::<Vec<_>>(),
-            vec![0]
-        );
-        assert_eq!(
-            all_range_hits
-                .iter()
-                .map(|hit| hit.subject_offset)
-                .collect::<Vec<_>>(),
-            vec![0, 8]
-        );
-        assert_eq!(
-            all_range_batches
-                .iter()
-                .map(|batch| batch.s_range)
-                .collect::<Vec<_>>(),
-            vec![4, 12]
-        );
-    }
-
-    #[test]
-    fn jumper_collect_word_hits_honors_small_na_scan_step() {
-        let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
-        let subject = crate::encoding::pack_ncbi2na_bases(&query);
-        let word = 0b0001_1011usize;
-        let mut backbone = vec![-1; 1 << 8];
-        backbone[word] = -2;
-        let lookup = crate::lookup::LookupTableWrap::SmallNa(crate::lookup::SmallNaLookupTable {
-            word_length: 4,
-            backbone,
-            overflow: vec![0, 0, 0, 4, -1],
-            pv_array: Vec::new(),
-            longest_chain: 2,
-            scan_step: 4,
-        });
-
-        let hits = jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            query.len() as i32,
-            4,
-            4,
-            None,
-            true,
-        );
-        let subject_offsets: Vec<i32> = hits.iter().map(|hit| hit.subject_offset).collect();
-        assert_eq!(subject_offsets, vec![0, 0, 4, 4]);
-        assert!(hits.contains(&crate::lookup::OffsetPair {
-            query_offset: 0,
-            subject_offset: 4,
-        }));
-        assert!(hits.contains(&crate::lookup::OffsetPair {
-            query_offset: 4,
-            subject_offset: 4,
-        }));
     }
 
     #[test]
@@ -10346,6 +10000,7 @@ mod tests {
                 &subject,
                 0,
                 0,
+                None,
                 &query,
                 &query_info,
                 &lookup,
@@ -10355,6 +10010,9 @@ mod tests {
                 align_params,
                 &mut jumper,
                 &mut list,
+                None,
+                None,
+                None,
             ),
             0
         );
@@ -10365,6 +10023,7 @@ mod tests {
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &aa_lookup,
@@ -10374,6 +10033,9 @@ mod tests {
                 align_params,
                 &mut jumper,
                 &mut list,
+                None,
+                None,
+                None,
             ),
             -1
         );
@@ -10384,6 +10046,7 @@ mod tests {
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &invalid_metadata_lookup,
@@ -10393,6 +10056,9 @@ mod tests {
                 align_params,
                 &mut jumper,
                 &mut list,
+                None,
+                None,
+                None,
             ),
             -1
         );
@@ -10424,106 +10090,6 @@ mod tests {
         assert_eq!(
             packed_subject_word(&[], subject_bases.len() as i32, 0, 4),
             None
-        );
-    }
-
-    #[test]
-    fn jumper_collect_word_hits_in_ranges_noops_on_invalid_scan_inputs() {
-        let query = [0u8, 1, 2, 3];
-        let subject = crate::encoding::pack_ncbi2na_bases(&query);
-        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
-            word_length: 4,
-            lut_word_length: 4,
-            discontiguous: false,
-            template_length: 0,
-            template_type: crate::lookup::DiscTemplateType::Contiguous,
-            two_templates: false,
-            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
-            hashtable: vec![0; 1 << 8],
-            hashtable2: Vec::new(),
-            next_pos: Vec::new(),
-            next_pos2: Vec::new(),
-            pv_array: Vec::new(),
-            pv_array_bts: 0,
-            longest_chain: 0,
-            scan_step: 1,
-        });
-
-        assert!(
-            jumper_collect_word_hits_in_ranges(&lookup, &subject, 0, 4, 4, None, true).is_empty()
-        );
-        assert!(jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            query.len() as i32,
-            0,
-            4,
-            None,
-            true,
-        )
-        .is_empty());
-        assert!(jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            query.len() as i32,
-            4,
-            0,
-            None,
-            true,
-        )
-        .is_empty());
-        assert!(jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            query.len() as i32,
-            4,
-            4,
-            Some(&[]),
-            true,
-        )
-        .is_empty());
-        assert!(jumper_collect_word_hits_in_ranges(&lookup, &[], 4, 4, 4, None, true).is_empty());
-        assert!(jumper_collect_word_hits_in_ranges(
-            &lookup,
-            &subject,
-            query.len() as i32,
-            4,
-            4,
-            Some(&[
-                crate::util::SSeqRange {
-                    left: i32::MAX,
-                    right: i32::MAX,
-                },
-                crate::util::SSeqRange {
-                    left: i32::MIN,
-                    right: i32::MIN,
-                },
-            ]),
-            true,
-        )
-        .is_empty());
-
-        let discontig_lookup =
-            crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
-                word_length: 11,
-                lut_word_length: 11,
-                discontiguous: true,
-                template_length: 18,
-                template_type: crate::lookup::DiscTemplateType::Template11_18Coding,
-                two_templates: false,
-                second_template_type: crate::lookup::DiscTemplateType::Contiguous,
-                hashtable: Vec::new(),
-                hashtable2: Vec::new(),
-                next_pos: Vec::new(),
-                next_pos2: Vec::new(),
-                pv_array: Vec::new(),
-                pv_array_bts: 0,
-                longest_chain: 0,
-                scan_step: 1,
-            });
-        assert!(
-            jumper_collect_word_hits_in_ranges(&discontig_lookup, &[], 32, 18, 18, None, true,)
-                .is_empty()
         );
     }
 
@@ -10600,10 +10166,11 @@ mod tests {
         let mut gapped_stats = crate::diagnostics::GappedStats::default();
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &lookup,
@@ -10624,7 +10191,7 @@ mod tests {
             0
         );
         assert!(gapped_stats.extensions > 0);
-        assert!(ungapped_stats.lookup_hits > 0);
+        assert_eq!(ungapped_stats.lookup_hits, 0);
         assert_eq!(ungapped_stats.good_init_extends, gapped_stats.extensions);
         assert!(word_hits.num.iter().all(|&num| num == 0));
         assert!(!list.hsps.is_empty());
@@ -10708,10 +10275,11 @@ mod tests {
         let mut list = crate::hspstream::HspList::new(10);
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &divisor_zero_lookup,
@@ -10760,10 +10328,11 @@ mod tests {
         };
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &zero_array_size_lookup,
@@ -10815,10 +10384,11 @@ mod tests {
         };
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &short_num_lookup,
@@ -10867,10 +10437,11 @@ mod tests {
         };
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &short_pair_arrays_lookup,
@@ -10922,10 +10493,11 @@ mod tests {
         };
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &short_last_diag_lookup,
@@ -10977,10 +10549,11 @@ mod tests {
         };
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &short_last_pos_lookup,
@@ -11029,10 +10602,11 @@ mod tests {
         };
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &extreme_offset_lookup,
@@ -11085,10 +10659,11 @@ mod tests {
         };
 
         assert_eq!(
-            jumper_na_word_finder_with_word_hits(
+            jumper_na_word_finder(
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &out_of_range_lookup,
@@ -11172,11 +10747,11 @@ mod tests {
         }];
 
         assert_eq!(
-            jumper_na_word_finder_with_subject_ranges(
+            jumper_na_word_finder(
                 &subject,
                 subject_bases.len() as i32,
                 0,
-                &ranges,
+                Some(&ranges),
                 &query,
                 &query_info,
                 &lookup,
@@ -11299,6 +10874,7 @@ mod tests {
                 &subject,
                 query.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &lookup,
@@ -11312,6 +10888,9 @@ mod tests {
                 },
                 &mut jumper,
                 &mut list,
+                None,
+                None,
+                None,
             ),
             0
         );
@@ -11406,6 +10985,7 @@ mod tests {
                 &subject,
                 subject_bases.len() as i32,
                 0,
+                None,
                 &query,
                 &query_info,
                 &lookup,
@@ -11419,6 +10999,9 @@ mod tests {
                 },
                 &mut jumper,
                 &mut list,
+                None,
+                None,
+                None,
             ),
             0
         );
@@ -12266,7 +11849,8 @@ mod tests {
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert_eq!(
             do_anchored_search_to_stream(
@@ -12462,7 +12046,8 @@ mod tests {
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert_eq!(
             do_anchored_search_to_stream(
@@ -12560,7 +12145,8 @@ mod tests {
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert_eq!(
             do_anchored_search_to_stream(
@@ -12702,7 +12288,8 @@ mod tests {
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(2);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 2, None);
 
         assert_eq!(
             do_anchored_search_to_stream(
@@ -12814,7 +12401,8 @@ mod tests {
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert_eq!(
             do_anchored_search_to_stream(
@@ -12948,7 +12536,8 @@ mod tests {
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert_eq!(
             do_anchored_search_to_stream(
@@ -13034,7 +12623,8 @@ mod tests {
             -1
         );
 
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         assert_eq!(
             do_anchored_search_to_stream(
                 &query,
@@ -13062,7 +12652,8 @@ mod tests {
         assert_eq!(status, crate::hspstream::K_BLAST_HSP_STREAM_EOF);
         assert!(written.is_none());
 
-        let port_stream = crate::hspstream::blast_hsp_stream_new(1);
+        let port_stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         assert!(do_anchored_search(
             &query,
             &subject,
@@ -13129,7 +12720,8 @@ mod tests {
             saved_chains: vec![Some(out_of_range_chain)],
             ..Default::default()
         };
-        let out_of_range_stream = crate::hspstream::blast_hsp_stream_new(1);
+        let out_of_range_stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert!(do_anchored_search(
             &query,
@@ -13203,7 +12795,8 @@ mod tests {
             mismatch_window: 10,
             gap_x_dropoff: 30,
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert!(do_anchored_search(
             &query,
@@ -13436,7 +13029,8 @@ mod tests {
         )
         .is_none());
 
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         assert_eq!(
             do_anchored_search_to_stream(
                 &query,
@@ -13578,7 +13172,8 @@ mod tests {
         )
         .is_none());
 
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         assert_eq!(
             do_anchored_search_to_stream(
                 &query,

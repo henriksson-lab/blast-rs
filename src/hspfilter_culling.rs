@@ -119,8 +119,8 @@ impl<'a> BlastHSPCullingData<'a> {
             };
             let mut node = LinkedHsp {
                 hsp,
-                context_id: cid,
-                subject_id: oid,
+                cid: cid,
+                sid: oid,
                 begin,
                 end,
                 merit: self.params.culling_max,
@@ -179,7 +179,7 @@ impl<'a> BlastHSPCullingData<'a> {
             let mut cull = s_rip_hsp_off_ctree(tree_slot);
             while let Some(node) = cull.take() {
                 cull = node.next;
-                let sid = node.subject_id;
+                let sid = node.sid;
                 let hsp = node.hsp;
                 // Look for an existing HspList by subject OID.
                 let mut found = false;
@@ -1284,9 +1284,9 @@ pub fn blast_hsp_pipe_info_add(
 pub struct LinkedHsp {
     pub hsp: Hsp,
     /// Context id (NCBI: `cid`).
-    pub context_id: i32,
+    pub cid: i32,
     /// Subject OID (NCBI: `sid`).
-    pub subject_id: i32,
+    pub sid: i32,
     /// Query offset on the plus strand.
     pub begin: i32,
     /// Query end on the plus strand.
@@ -1305,8 +1305,8 @@ impl LinkedHsp {
     pub fn s_hsp_copy(&self) -> LinkedHsp {
         LinkedHsp {
             hsp: self.hsp.clone(),
-            context_id: self.context_id,
-            subject_id: self.subject_id,
+            cid: self.cid,
+            sid: self.sid,
             begin: self.begin,
             end: self.end,
             merit: self.merit,
@@ -1360,8 +1360,8 @@ pub fn s_dominate_test(p: &LinkedHsp, y: &LinkedHsp) -> bool {
         if s1 != s2 {
             return s1 > s2;
         }
-        if p.subject_id != y.subject_id {
-            return p.subject_id < y.subject_id;
+        if p.sid != y.sid {
+            return p.sid < y.sid;
         }
         if p.hsp.subject_offset > y.hsp.subject_offset {
             return false;
@@ -1418,8 +1418,8 @@ fn s_process_hsp_list_impl(
         node.begin == y.begin
             && node.end == y.end
             && node.hsp.score == y.hsp.score
-            && node.subject_id == y.subject_id
-            && node.context_id == y.context_id
+            && node.sid == y.sid
+            && node.cid == y.cid
     }
     let mut num = 0i32;
     let mut skipped_self = !skip_first_match;
@@ -1864,8 +1864,8 @@ mod tests {
                 pat_info: None,
                 map_info: None,
             },
-            context_id: 0,
-            subject_id: sid,
+            cid: 0,
+            sid: sid,
             begin,
             end,
             merit: 1,
@@ -1915,8 +1915,8 @@ mod tests {
     }
 
     #[test]
-    fn dominate_test_tied_uses_subject_id() {
-        // Identical begin/end/score → tiebreak by subject_id (lower wins).
+    fn dominate_test_tied_uses_sid() {
+        // Identical begin/end/score → tiebreak by sid (lower wins).
         let p = mk(100, 0, 100, 5);
         let y = mk(100, 0, 100, 9);
         assert!(s_dominate_test(&p, &y)); // 5 < 9 → p dominates
@@ -1969,9 +1969,9 @@ mod tests {
 
         assert_eq!(remaining, 2);
         let head = list.as_ref().expect("first survivor");
-        assert_eq!(head.subject_id, 1);
+        assert_eq!(head.sid, 1);
         let tail = head.next.as_ref().expect("second survivor");
-        assert_eq!(tail.subject_id, 3);
+        assert_eq!(tail.sid, 3);
         assert!(tail.next.is_none());
     }
 
@@ -3009,12 +3009,12 @@ mod tests {
         // Spanning HSP stays.
         assert!(node.hsp_list.is_some());
         let stays = node.hsp_list.as_ref().unwrap();
-        assert_eq!(stays.subject_id, 3);
+        assert_eq!(stays.sid, 3);
         // Left and right children populated.
         let left = node.left.as_ref().expect("left");
-        assert_eq!(left.hsp_list.as_ref().unwrap().subject_id, 1);
+        assert_eq!(left.hsp_list.as_ref().unwrap().sid, 1);
         let right = node.right.as_ref().expect("right");
-        assert_eq!(right.hsp_list.as_ref().unwrap().subject_id, 2);
+        assert_eq!(right.hsp_list.as_ref().unwrap().sid, 2);
     }
 
     #[test]
@@ -3083,8 +3083,8 @@ mod tests {
                 pat_info: None,
                 map_info: None,
             },
-            context_id: 0,
-            subject_id: 5,
+            cid: 0,
+            sid: 5,
             begin: 0,
             end: 100,
             merit: 3,
@@ -3092,7 +3092,7 @@ mod tests {
         };
         a.next = Some(Box::new(s_hsp_copy(&a)));
         let copy = s_hsp_copy(&a);
-        assert_eq!(copy.subject_id, 5);
+        assert_eq!(copy.sid, 5);
         assert_eq!(copy.merit, 3);
         // Detached: `next` should be None even though `a` had a next.
         assert!(copy.next.is_none());

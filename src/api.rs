@@ -476,8 +476,8 @@ fn api_hsp_as_culling_node(hsp: &Hsp, subject_oid: u32) -> crate::hspfilter_cull
             pat_info: None,
             map_info: None,
         },
-        context_id: hsp.query_frame,
-        subject_id: subject_oid as i32,
+        cid: hsp.query_frame,
+        sid: subject_oid as i32,
         begin: query_start,
         end: query_end,
         merit: 1,
@@ -5289,7 +5289,8 @@ fn process_blastx_frame_hsps(
         let mut matrix_vec: Vec<Vec<i32>> = matrix.iter().map(|row| row.to_vec()).collect();
         let mut kbp_gap = vec![prot_kbp.clone(); query_info.contexts.len().max(1)];
         let mut saved = crate::blast_kappa::BlastKappaSavedParameters::default();
-        let mut results = crate::hspstream::HspResults::new(query_info.contexts.len().max(1) as i32);
+        let mut results =
+            crate::hspstream::HspResults::new(query_info.contexts.len().max(1) as i32);
         let subject = crate::blast_kappa::BlastRedoInMemorySubject {
             subject_source: subj_aa,
             reward: 0,
@@ -6773,7 +6774,8 @@ fn process_tblastn_frame_hsps(
         let mut matrix_vec: Vec<Vec<i32>> = matrix.iter().map(|row| row.to_vec()).collect();
         let mut kbp_gap = vec![prot_kbp.clone(); query_info.contexts.len().max(1)];
         let mut saved = crate::blast_kappa::BlastKappaSavedParameters::default();
-        let mut results = crate::hspstream::HspResults::new(query_info.contexts.len().max(1) as i32);
+        let mut results =
+            crate::hspstream::HspResults::new(query_info.contexts.len().max(1) as i32);
         let subject = crate::blast_kappa::BlastRedoInMemorySubject {
             subject_source: subject_ncbi4na,
             reward: 0,
@@ -6804,9 +6806,10 @@ fn process_tblastn_frame_hsps(
         if status != 0 {
             return out_hsps;
         }
-        this_match
-            .hsp_array
-            .retain(|hsp| hsp.as_ref().is_some_and(|hsp| hsp.evalue <= params.evalue_threshold));
+        this_match.hsp_array.retain(|hsp| {
+            hsp.as_ref()
+                .is_some_and(|hsp| hsp.evalue <= params.evalue_threshold)
+        });
         this_match.hspcnt = this_match.hsp_array.len() as i32;
         return this_match
             .hsp_array
@@ -7322,8 +7325,9 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     }
                     let scaled_gap_open =
                         crate::math::blast_nint(params.gap_open as f64 * COMPO_ADJUST_SCALE_FACTOR);
-                    let scaled_gap_extend =
-                        crate::math::blast_nint(params.gap_extend as f64 * COMPO_ADJUST_SCALE_FACTOR);
+                    let scaled_gap_extend = crate::math::blast_nint(
+                        params.gap_extend as f64 * COMPO_ADJUST_SCALE_FACTOR,
+                    );
                     let scaled_x_drop_final =
                         crate::math::blast_nint(x_drop_final as f64 * COMPO_ADJUST_SCALE_FACTOR);
                     let align_params = crate::blast_kappa::blast_redo_align_params_new(
@@ -7828,8 +7832,11 @@ pub fn tblastn_batch(
 
     // Per OID (parallel): translate subject once, scan 6 frames against the
     // concatenated-query lookup, attribute each hit to its query, gapped + body.
-    let per_oid: Vec<Vec<(usize, SearchResult, i32)>> =
-        map_database_oids_init(db, params, ProteinScratch::new, |scratch, oid| {
+    let per_oid: Vec<Vec<(usize, SearchResult, i32)>> = map_database_oids_init(
+        db,
+        params,
+        ProteinScratch::new,
+        |scratch, oid| {
             let mut out: Vec<(usize, SearchResult, i32)> = Vec::new();
             let subject_packed = db.get_sequence(oid);
             let subject_len = db.get_seq_len(oid) as usize;
@@ -8125,11 +8132,10 @@ pub fn tblastn_batch(
                                 is_ooframe: false,
                                 program_number: crate::program::UNDEFINED,
                             };
-                            let mut scoring =
-                                crate::parameters::ScoringParameters::from_options(
-                                    &scoring_options,
-                                    1.0,
-                                );
+                            let mut scoring = crate::parameters::ScoringParameters::from_options(
+                                &scoring_options,
+                                1.0,
+                            );
                             let mut matrix_vec: Vec<Vec<i32>> =
                                 matrix.iter().map(|row| row.to_vec()).collect();
                             let mut kbp_gap =
@@ -8353,7 +8359,8 @@ pub fn tblastn_batch(
                 }
             }
             out
-        });
+        },
+    );
 
     let mut results: Vec<Vec<SearchResult>> = (0..queries.len()).map(|_| Vec::new()).collect();
     let mut subject_stat_lengths: Vec<Vec<i32>> = (0..queries.len()).map(|_| Vec::new()).collect();

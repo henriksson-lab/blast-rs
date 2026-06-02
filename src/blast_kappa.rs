@@ -3061,6 +3061,7 @@ mod struct_tests {
             subject_start: 10,
             subject_stop: 60,
             edit_script: Some(script),
+            ..BlastGapAlignWorkspace::default()
         };
         let copy = ws.s_blast_gap_align_struct_copy();
         assert_eq!(copy.score, 100);
@@ -3103,6 +3104,122 @@ mod struct_tests {
         let mut internal_slot = blast_gap_align_struct_new(7);
         s_blast_gap_align_struct_free(&mut internal_slot);
         assert!(internal_slot.is_none());
+    }
+
+    #[test]
+    fn blast_gap_align_struct_new_initializes_dp_workspace_from_full_params() {
+        let scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                matrix_path: None,
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                shift_pen: i16::MAX as i32,
+                gapped_calculation: true,
+                complexity_adjusted_scoring: false,
+                matrix_name: None,
+                is_ooframe: false,
+                program_number: crate::program::BLASTN,
+            },
+            1.0,
+        );
+        let mut options = crate::options::ExtensionOptions::new_blastn();
+        options.prelim_gap_ext = crate::options::PrelimGapExt::DynProgScoreOnly;
+        options.max_mismatches = 4;
+        options.mismatch_window = 9;
+        let extension = crate::parameters::ExtensionParameters {
+            options,
+            gap_x_dropoff: 33,
+            gap_x_dropoff_final: 80,
+            gap_trigger: 22,
+        };
+
+        let workspace =
+            blast_gap_align_struct_new((&scoring, &extension, 1234, true)).expect("workspace");
+
+        assert!(workspace.position_based);
+        assert_eq!(workspace.gap_x_dropoff, 33);
+        assert_eq!(workspace.max_mismatches, 4);
+        assert_eq!(workspace.mismatch_window, 9);
+        assert_eq!(workspace.dp_mem_alloc, 1000);
+        assert!(workspace.fwd_prelim_tback.is_some());
+        assert!(workspace.rev_prelim_tback.is_some());
+        assert!(workspace.greedy_align_mem.is_none());
+    }
+
+    #[test]
+    fn blast_gap_align_struct_new_initializes_greedy_and_chaining_workspace() {
+        let scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                matrix_path: None,
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                shift_pen: i16::MAX as i32,
+                gapped_calculation: true,
+                complexity_adjusted_scoring: false,
+                matrix_name: None,
+                is_ooframe: false,
+                program_number: crate::program::BLASTN,
+            },
+            1.0,
+        );
+        let mut options = crate::options::ExtensionOptions::new_blastn();
+        options.prelim_gap_ext = crate::options::PrelimGapExt::GreedyScoreOnly;
+        options.chaining = true;
+        let extension = crate::parameters::ExtensionParameters {
+            options,
+            gap_x_dropoff: 25,
+            gap_x_dropoff_final: 80,
+            gap_trigger: 22,
+        };
+
+        let workspace =
+            blast_gap_align_struct_new((&scoring, &extension, 5_000, false)).expect("workspace");
+
+        assert_eq!(workspace.gap_x_dropoff, 25);
+        assert!(workspace.greedy_align_mem.is_some());
+        assert!(workspace.chaining.is_some());
+        assert_eq!(workspace.dp_mem_alloc, 0);
+        assert!(workspace.jumper.is_none());
+    }
+
+    #[test]
+    fn blast_gap_align_struct_new_initializes_jumper_zero_xdrop_like_c() {
+        let scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                matrix_path: None,
+                reward: 1,
+                penalty: -3,
+                gap_open: 5,
+                gap_extend: 2,
+                shift_pen: i16::MAX as i32,
+                gapped_calculation: true,
+                complexity_adjusted_scoring: false,
+                matrix_name: None,
+                is_ooframe: false,
+                program_number: crate::program::BLASTN,
+            },
+            1.0,
+        );
+        let mut options = crate::options::ExtensionOptions::new_blastn();
+        options.prelim_gap_ext = crate::options::PrelimGapExt::JumperWithTraceback;
+        let extension = crate::parameters::ExtensionParameters {
+            options,
+            gap_x_dropoff: 0,
+            gap_x_dropoff_final: 80,
+            gap_trigger: 22,
+        };
+
+        let workspace =
+            blast_gap_align_struct_new((&scoring, &extension, 0, false)).expect("workspace");
+
+        assert_eq!(workspace.gap_x_dropoff, 21);
+        assert!(workspace.jumper.is_some());
+        assert!(workspace.greedy_align_mem.is_none());
+        assert_eq!(workspace.dp_mem_alloc, 0);
     }
 
     #[test]
@@ -3347,6 +3464,170 @@ mod struct_tests {
         assert_eq!(kbp[0].lambda, original_kbp.lambda);
         assert_eq!(kbp[0].log_k, original_kbp.log_k);
         assert_eq!(mtx[1][1], original_matrix_value);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_rejects_blosum62_20_without_composition_before_rescale() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 10,
+                eff_searchsp: 100,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 10,
+            min_length: 0,
+        };
+        let original_kbp = crate::stat::KarlinBlk {
+            lambda: 0.267,
+            k: 0.041,
+            log_k: 0.041_f64.ln(),
+            h: 0.14,
+            round_down: true,
+        };
+        let mut kbp = vec![original_kbp.clone()];
+        let mut mtx = vec![vec![0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+        mtx[1][1] = 4;
+        let mut scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                matrix_path: None,
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                shift_pen: i16::MAX as i32,
+                gapped_calculation: true,
+                complexity_adjusted_scoring: false,
+                matrix_name: Some("BLOSUM62_20".to_string()),
+                is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
+            },
+            1.0,
+        );
+        let original_gap_open = scoring.gap_open;
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 352,
+                gap_extend: 32,
+                decline_align: i32::MIN,
+                x_dropoff: 2078,
+                context: None,
+            },
+            CompoAdjustMode::NoCompositionBasedStats,
+            SCALING_FACTOR,
+            false,
+            false,
+            false,
+            0,
+            0,
+            10.0,
+            false,
+            0.0,
+        );
+        let mut saved = BlastKappaSavedParameters::s_saved_parameters_new(
+            0,
+            1,
+            CompoAdjustMode::NoCompositionBasedStats,
+            false,
+        );
+        let mut hsp_list = HspList::new(7);
+        let mut results = crate::hspstream::HspResults::new(1);
+
+        let rc = blast_redo_alignment_core_mt(
+            crate::program::BLASTP,
+            1,
+            &[],
+            &qi,
+            &mut kbp,
+            &mut mtx,
+            &mut scoring,
+            &params,
+            &mut saved,
+            &mut hsp_list,
+            BlastRedoAlignmentSource::ExistingMatchOnly,
+            &mut results,
+        );
+
+        assert_eq!(rc, -1);
+        assert_eq!(scoring.gap_open, original_gap_open);
+        assert_eq!(kbp[0].lambda, original_kbp.lambda);
+        assert_eq!(mtx[1][1], 4);
+    }
+
+    #[test]
+    fn blast_redo_alignment_core_mt_preflight_clamps_position_based_adjustment_mode() {
+        let qi = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 3,
+                eff_searchsp: 9,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 3,
+            min_length: 0,
+        };
+        let scoring = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions {
+                matrix_path: None,
+                reward: 0,
+                penalty: 0,
+                gap_open: 11,
+                gap_extend: 1,
+                shift_pen: i16::MAX as i32,
+                gapped_calculation: true,
+                complexity_adjusted_scoring: false,
+                matrix_name: Some("BLOSUM62".to_string()),
+                is_ooframe: false,
+                program_number: crate::program::UNDEFINED,
+            },
+            1.0,
+        );
+        let params = blast_redo_align_params_new(
+            BlastMatrixInfo::default(),
+            BlastCompoGappingParams {
+                gap_open: 11,
+                gap_extend: 1,
+                decline_align: i32::MIN,
+                x_dropoff: 0,
+                context: None,
+            },
+            CompoAdjustMode::CompositionMatrixAdjust,
+            SCALING_FACTOR,
+            true,
+            false,
+            false,
+            0,
+            0,
+            10.0,
+            false,
+            0.0,
+        );
+        let matrix = vec![vec![0i32; crate::matrix::AA_SIZE]; 3];
+
+        let effective = blast_redo_alignment_core_mt_effective_params(
+            &[1, 2, 3],
+            &qi,
+            &scoring,
+            &matrix,
+            &params,
+        )
+        .expect("effective params");
+
+        assert_eq!(
+            effective.compo_adjust_mode,
+            CompoAdjustMode::CompositionBasedStats
+        );
     }
 
     #[test]
@@ -14964,13 +15245,22 @@ pub fn sw_find_final_ends_using_xdrop(
 /// ownership transitions.
 #[derive(Debug, Clone, Default)]
 pub struct BlastGapAlignWorkspace {
+    pub position_based: bool,
     pub gap_x_dropoff: i32,
+    pub max_mismatches: i32,
+    pub mismatch_window: i32,
     pub score: i32,
     pub query_start: i32,
     pub query_stop: i32,
     pub subject_start: i32,
     pub subject_stop: i32,
     pub edit_script: Option<crate::gapinfo::GapEditScript>,
+    pub fwd_prelim_tback: Option<crate::gapinfo::GapPrelimEditBlock>,
+    pub rev_prelim_tback: Option<crate::gapinfo::GapPrelimEditBlock>,
+    pub greedy_align_mem: Option<crate::greedy::SGreedyAlignMem>,
+    pub dp_mem_alloc: i32,
+    pub jumper: Option<crate::gapinfo::JumperGapAlign>,
+    pub chaining: Option<crate::extend::ChainingStruct>,
 }
 
 impl BlastGapAlignWorkspace {
@@ -14992,13 +15282,22 @@ impl BlastGapAlignWorkspace {
         };
 
         let mut dst = BlastGapAlignWorkspace::default();
+        dst.position_based = self.position_based;
         dst.gap_x_dropoff = self.gap_x_dropoff;
+        dst.max_mismatches = self.max_mismatches;
+        dst.mismatch_window = self.mismatch_window;
         dst.score = self.score;
         dst.query_start = self.query_start;
         dst.query_stop = self.query_stop;
         dst.subject_start = self.subject_start;
         dst.subject_stop = self.subject_stop;
         dst.edit_script = None;
+        dst.fwd_prelim_tback = self.fwd_prelim_tback.clone();
+        dst.rev_prelim_tback = self.rev_prelim_tback.clone();
+        dst.greedy_align_mem = self.greedy_align_mem.clone();
+        dst.dp_mem_alloc = self.dp_mem_alloc;
+        dst.jumper = self.jumper.clone();
+        dst.chaining = self.chaining.clone();
         if let Some(script) = copied_script {
             dst.edit_script = Some(script);
         }
@@ -15006,18 +15305,140 @@ impl BlastGapAlignWorkspace {
     }
 }
 
-/// blast-rs: Ownership-shaped port boundary for `BLAST_GapAlignStructNew`
-/// (`blast_gapalign.c:292`) over modeled Rust workspace fields; not a direct NCBI C port.
-pub fn blast_gap_align_struct_new(gap_x_dropoff: i32) -> Option<BlastGapAlignWorkspace> {
+/// Inputs consumed by [`blast_gap_align_struct_new`].
+///
+/// This is the Rust ownership equivalent of the non-output arguments to NCBI
+/// `BLAST_GapAlignStructNew`: scoring parameters, extension parameters, max
+/// subject length, score-block position-specific state, and the output slot.
+#[derive(Clone, Copy)]
+pub struct BlastGapAlignNewParams<'a> {
+    pub scoring: Option<&'a crate::parameters::ScoringParameters>,
+    pub extension: Option<&'a crate::parameters::ExtensionParameters>,
+    pub max_subject_length: u32,
+    pub position_based: bool,
+    pub legacy_gap_x_dropoff: i32,
+}
+
+impl From<i32> for BlastGapAlignNewParams<'_> {
+    fn from(gap_x_dropoff: i32) -> Self {
+        Self {
+            scoring: None,
+            extension: None,
+            max_subject_length: 0,
+            position_based: false,
+            legacy_gap_x_dropoff: gap_x_dropoff,
+        }
+    }
+}
+
+/// NCBI: `BLAST_GapAlignStructNew` (`blast_gapalign.c:293`).
+///
+/// Allocates and initializes the modeled `BlastGapAlignStruct` fields used by
+/// the kappa/traceback ports. When full scoring/extension parameters are
+/// supplied, this follows the C branch structure exactly: DP score-only gets a
+/// 1000-cell allocation, greedy preliminary extension owns a greedy workspace
+/// capped by the C max-subject formula, jumper traceback owns a jumper
+/// workspace and computes the C fallback x-drop when the requested x-drop is
+/// zero, chaining owns a chaining workspace, and both preliminary traceback
+/// blocks are created on success.
+///
+/// Passing a raw `i32` preserves the historical blast-rs call shape for code
+/// that only had an x-drop value available.
+pub fn blast_gap_align_struct_new<'a, P>(params: P) -> Option<BlastGapAlignWorkspace>
+where
+    P: Into<BlastGapAlignNewParams<'a>>,
+{
+    let params = params.into();
     let mut workspace = BlastGapAlignWorkspace::default();
-    workspace.gap_x_dropoff = gap_x_dropoff.max(0);
-    workspace.score = 0;
-    workspace.query_start = 0;
-    workspace.query_stop = 0;
-    workspace.subject_start = 0;
-    workspace.subject_stop = 0;
-    workspace.edit_script = None;
+    workspace.position_based = params.position_based;
+
+    if let Some(extension) = params.extension {
+        workspace.gap_x_dropoff = extension.gap_x_dropoff;
+        workspace.max_mismatches = extension.options.max_mismatches;
+        workspace.mismatch_window = extension.options.mismatch_window;
+
+        if extension.options.prelim_gap_ext != crate::options::PrelimGapExt::JumperWithTraceback {
+            if extension.options.prelim_gap_ext == crate::options::PrelimGapExt::DynProgScoreOnly {
+                workspace.dp_mem_alloc = 1000;
+            } else {
+                let scoring = params.scoring?;
+                let max_subject_length =
+                    blast_gap_align_greedy_max_subject_length(params.max_subject_length);
+                workspace.greedy_align_mem = Some(crate::greedy::s_blast_greedy_align_mem_alloc(
+                    scoring.reward,
+                    scoring.penalty,
+                    scoring.gap_open,
+                    scoring.gap_extend,
+                    max_subject_length as i32,
+                    extension.gap_x_dropoff,
+                )?);
+            }
+        } else {
+            let scoring = params.scoring?;
+            workspace.jumper = Some(crate::gapinfo::jumper_gap_align_new(200)?);
+            if extension.gap_x_dropoff == 0 {
+                workspace.gap_x_dropoff =
+                    3 * (-scoring.penalty).max(scoring.gap_open + scoring.gap_extend);
+            }
+        }
+
+        if extension.options.chaining {
+            workspace.chaining = crate::extend::chaining_struct_new();
+            workspace.chaining.as_ref()?;
+        }
+    } else {
+        workspace.gap_x_dropoff = params.legacy_gap_x_dropoff.max(0);
+    }
+
+    workspace.fwd_prelim_tback = Some(crate::gapinfo::gap_prelim_edit_block_new());
+    workspace.rev_prelim_tback = Some(crate::gapinfo::gap_prelim_edit_block_new());
     Some(workspace)
+}
+
+impl<'a> From<&'a crate::parameters::ExtensionParameters> for BlastGapAlignNewParams<'a> {
+    fn from(extension: &'a crate::parameters::ExtensionParameters) -> Self {
+        Self {
+            scoring: None,
+            extension: Some(extension),
+            max_subject_length: 0,
+            position_based: false,
+            legacy_gap_x_dropoff: 0,
+        }
+    }
+}
+
+impl<'a>
+    From<(
+        &'a crate::parameters::ScoringParameters,
+        &'a crate::parameters::ExtensionParameters,
+        u32,
+        bool,
+    )> for BlastGapAlignNewParams<'a>
+{
+    fn from(
+        value: (
+            &'a crate::parameters::ScoringParameters,
+            &'a crate::parameters::ExtensionParameters,
+            u32,
+            bool,
+        ),
+    ) -> Self {
+        Self {
+            scoring: Some(value.0),
+            extension: Some(value.1),
+            max_subject_length: value.2,
+            position_based: value.3,
+            legacy_gap_x_dropoff: 0,
+        }
+    }
+}
+
+fn blast_gap_align_greedy_max_subject_length(max_subject_length: u32) -> u32 {
+    const MAX_DBSEQ_LEN: u32 = 5_000_000;
+    const GREEDY_MAX_COST_FRACTION: u32 = 2;
+    const GREEDY_MAX_COST: u32 = 1000;
+
+    GREEDY_MAX_COST.min(max_subject_length.min(MAX_DBSEQ_LEN) / GREEDY_MAX_COST_FRACTION + 1)
 }
 
 /// NCBI: s_BlastGapAlignStruct_Free (blast_kappa.c:2532).
@@ -15025,7 +15446,10 @@ pub fn blast_gap_align_struct_new(gap_x_dropoff: i32) -> Option<BlastGapAlignWor
 /// over the modeled Rust workspace fields.
 pub fn s_blast_gap_align_struct_free(slot: &mut Option<BlastGapAlignWorkspace>) {
     if let Some(workspace) = slot.as_mut() {
+        workspace.position_based = false;
         workspace.gap_x_dropoff = 0;
+        workspace.max_mismatches = 0;
+        workspace.mismatch_window = 0;
         workspace.score = 0;
         workspace.query_start = 0;
         workspace.query_stop = 0;
@@ -15033,6 +15457,12 @@ pub fn s_blast_gap_align_struct_free(slot: &mut Option<BlastGapAlignWorkspace>) 
         workspace.subject_stop = 0;
         workspace.edit_script =
             crate::gapinfo::gap_edit_script_delete(workspace.edit_script.take());
+        workspace.fwd_prelim_tback = None;
+        workspace.rev_prelim_tback = None;
+        workspace.greedy_align_mem = None;
+        workspace.dp_mem_alloc = 0;
+        workspace.jumper = crate::gapinfo::jumper_gap_align_free(workspace.jumper.take());
+        workspace.chaining = crate::extend::chaining_struct_free(&mut workspace.chaining);
     }
     *slot = None;
 }
@@ -15147,86 +15577,17 @@ pub fn blast_redo_alignment_core_mt(
     source: BlastRedoAlignmentSource<'_>,
     results: &mut crate::hspstream::HspResults,
 ) -> i32 {
-    match source {
-        BlastRedoAlignmentSource::Callback(subject) => {
-            return blast_redo_alignment_core_mt_with_callbacks(
-                program,
-                num_threads,
-                query,
-                query_info,
-                kbp_gap,
-                matrix,
-                scoring,
-                align_params,
-                saved,
-                this_match,
-                subject,
-                results,
-            );
-        }
-        BlastRedoAlignmentSource::InMemorySubject(subject) => {
-            return blast_redo_alignment_core_mt_in_memory_subject(
-                program,
-                num_threads,
-                query,
-                query_info,
-                kbp_gap,
-                matrix,
-                scoring,
-                align_params,
-                saved,
-                this_match,
-                results,
-                subject,
-            );
-        }
-        BlastRedoAlignmentSource::InMemorySubjects(matches) => {
-            return blast_redo_alignment_core_mt_in_memory_subjects(
-                program,
-                num_threads,
-                query,
-                query_info,
-                kbp_gap,
-                matrix,
-                scoring,
-                align_params,
-                saved,
-                matches,
-                results,
-            );
-        }
-        BlastRedoAlignmentSource::SeqSrcSubjects {
-            seqsrc,
-            matches,
-            config,
-        } => {
-            return blast_redo_alignment_core_mt_seqsrc_subjects(
-                program,
-                num_threads,
-                query,
-                query_info,
-                kbp_gap,
-                matrix,
-                scoring,
-                align_params,
-                saved,
-                seqsrc,
-                matches,
-                config,
-                results,
-            );
-        }
-        BlastRedoAlignmentSource::ExistingMatchOnly => {}
-    }
-
-    if align_params.callbacks.is_some()
-        || !matches!(
-            align_params.compo_adjust_mode,
-            CompoAdjustMode::NoCompositionBasedStats
-        )
-    {
-        return -1;
-    }
+    let align_params = match blast_redo_alignment_core_mt_effective_params(
+        query,
+        query_info,
+        scoring,
+        matrix,
+        align_params,
+    ) {
+        Ok(params) => params,
+        Err(status) => return status,
+    };
+    let align_params = &align_params;
 
     let query_length = query_info.max_length as i32;
     let record_status = record_initial_search(
@@ -15253,20 +15614,308 @@ pub fn blast_redo_alignment_core_mt(
         align_params.local_scaling_factor,
     );
 
-    let status = if this_match.hsps.is_empty() {
-        0
-    } else {
-        this_match.sort_by_score();
-        this_match.best_evalue = this_match
-            .hsps
-            .iter()
-            .map(|hsp| hsp.evalue)
-            .fold(i32::MAX as f64, f64::min);
-        let per_query = s_blast_redo_alignment_group_hsps_by_query(program, query_info, this_match);
-        let mut touched_queries =
-            s_blast_redo_alignment_update_hitlists(per_query, align_params, this_match, results);
-        s_blast_redo_alignment_finalize_touched_hitlists(&mut touched_queries, results);
-        0
+    let status = match source {
+        BlastRedoAlignmentSource::Callback(subject) => {
+            blast_redo_alignment_core_one_match_with_callbacks_inner(
+                program,
+                query,
+                query_info,
+                kbp_gap,
+                align_params,
+                this_match,
+                subject,
+                results,
+            )
+        }
+        BlastRedoAlignmentSource::InMemorySubject(subject) => {
+            blast_redo_alignment_core_one_match_in_memory_inner(
+                program,
+                query,
+                query_info,
+                kbp_gap,
+                align_params,
+                this_match,
+                results,
+                None,
+                None,
+                subject,
+            )
+        }
+        BlastRedoAlignmentSource::InMemorySubjects(matches) => {
+            if matches.is_empty() {
+                *results = crate::hspstream::HspResults::new(query_info.num_queries as i32);
+                0
+            } else if !materialized_redo_program_is_supported(program) {
+                -1
+            } else {
+                let num_queries = query_info.num_queries.max(0) as usize;
+                let heap_cfg = matches[0].subject;
+                let num_workers = (num_threads.max(1) as usize).min(matches.len().max(1));
+                let mut worker_heaps =
+                    vec![
+                        vec![
+                            BlastCompoHeap::new(heap_cfg.hitlist_size, heap_cfg.inclusion_ethresh);
+                            num_queries
+                        ];
+                        num_workers
+                    ];
+                let mut status = 0;
+
+                for (item_index, item) in matches.iter_mut().enumerate() {
+                    let worker_index = item_index % num_workers;
+                    let heaps = &mut worker_heaps[worker_index];
+                    if blast_compo_early_termination(item.hsp_list.best_evalue, heaps, num_queries)
+                    {
+                        continue;
+                    }
+
+                    let mut local_results = crate::hspstream::HspResults::new(num_queries as i32);
+                    status = blast_redo_alignment_core_one_match_in_memory_inner(
+                        program,
+                        query,
+                        query_info,
+                        kbp_gap,
+                        align_params,
+                        &mut item.hsp_list,
+                        &mut local_results,
+                        Some(&heaps[..]),
+                        None,
+                        item.subject,
+                    );
+                    if status != 0 {
+                        break;
+                    }
+
+                    for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
+                        if query_index >= heaps.len() {
+                            continue;
+                        }
+                        if let Some(hitlist) = hitlist {
+                            for hsp_list in hitlist.hsp_lists {
+                                let _discarded = heaps[query_index].insert(hsp_list);
+                            }
+                        }
+                    }
+                }
+
+                if status == 0 {
+                    let mut heaps =
+                        vec![
+                            BlastCompoHeap::new(heap_cfg.hitlist_size, heap_cfg.inclusion_ethresh);
+                            num_queries
+                        ];
+                    merge_compo_thread_heaps(&mut heaps, &mut worker_heaps);
+                    *results = fill_results_from_compo_heaps(&mut heaps);
+                }
+                status
+            }
+        }
+        BlastRedoAlignmentSource::SeqSrcSubjects {
+            seqsrc,
+            matches,
+            config,
+        } => {
+            if matches.is_empty() {
+                *results = crate::hspstream::HspResults::new(query_info.num_queries as i32);
+                0
+            } else if !materialized_redo_program_is_supported(program) {
+                -1
+            } else {
+                let num_queries = query_info.num_queries.max(0) as usize;
+                let num_workers = (num_threads.max(1) as usize).min(matches.len().max(1));
+                let mut worker_heaps =
+                    vec![
+                        vec![
+                            BlastCompoHeap::new(config.hitlist_size, config.inclusion_ethresh);
+                            num_queries
+                        ];
+                        num_workers
+                    ];
+                let encoding = seqsrc_encoding_for_redo_program(program);
+                let mut status = 0;
+
+                for (item_index, hsp_list) in matches.iter_mut().enumerate() {
+                    let worker_index = item_index % num_workers;
+                    let heaps = &mut worker_heaps[worker_index];
+                    if blast_compo_early_termination(hsp_list.best_evalue, heaps, num_queries) {
+                        continue;
+                    }
+
+                    if program == crate::program::TBLASTN {
+                        let mut matching_seq = BlastCompoMatchingSequence::default();
+                        if s_matching_sequence_initialize(
+                            &mut matching_seq,
+                            program,
+                            seqsrc,
+                            1,
+                            hsp_list.oid,
+                            None,
+                        ) != 0
+                        {
+                            status = -1;
+                            break;
+                        }
+                        let subject_sequence = {
+                            let Some(local_data) = matching_seq.local_data.as_ref() else {
+                                matching_sequence_release(&mut matching_seq);
+                                status = -1;
+                                break;
+                            };
+                            let Some(subject_blk) = local_data.seq_arg.seq.as_ref() else {
+                                matching_sequence_release(&mut matching_seq);
+                                status = -1;
+                                break;
+                            };
+                            let Some(sequence) = subject_blk.sequence.as_deref() else {
+                                matching_sequence_release(&mut matching_seq);
+                                status = -1;
+                                break;
+                            };
+                            if subject_blk.length < 0
+                                || subject_blk.length as usize > sequence.len()
+                            {
+                                matching_sequence_release(&mut matching_seq);
+                                status = -1;
+                                break;
+                            }
+                            &sequence[..subject_blk.length as usize]
+                        };
+                        let mut local_results =
+                            crate::hspstream::HspResults::new(num_queries as i32);
+                        status = blast_redo_alignment_core_one_match_in_memory_inner(
+                            program,
+                            query,
+                            query_info,
+                            kbp_gap,
+                            align_params,
+                            hsp_list,
+                            &mut local_results,
+                            Some(&heaps[..]),
+                            None,
+                            BlastRedoInMemorySubject {
+                                subject_source: subject_sequence,
+                                reward: config.reward,
+                                penalty: config.penalty,
+                                genetic_code: config.genetic_code,
+                                smith_waterman: config.smith_waterman,
+                                expect_value: config.expect_value,
+                                hitlist_size: config.hitlist_size,
+                                inclusion_ethresh: config.inclusion_ethresh,
+                                link_context: config.link_context,
+                            },
+                        );
+                        matching_sequence_release(&mut matching_seq);
+                        if status != 0 {
+                            break;
+                        }
+
+                        for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate()
+                        {
+                            if query_index >= heaps.len() {
+                                continue;
+                            }
+                            if let Some(hitlist) = hitlist {
+                                for hsp_list in hitlist.hsp_lists {
+                                    let _discarded = heaps[query_index].insert(hsp_list);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    let Some(seq_data) = seqsrc.get_sequence(&crate::seqsrc::GetSeqArg {
+                        oid: hsp_list.oid,
+                        encoding,
+                        ..crate::seqsrc::GetSeqArg::default()
+                    }) else {
+                        status = -1;
+                        break;
+                    };
+                    if seq_data.length < 0 || seq_data.length as usize > seq_data.sequence.len() {
+                        status = -1;
+                        break;
+                    }
+                    let subject_sequence = &seq_data.sequence[..seq_data.length as usize];
+                    let mut local_results = crate::hspstream::HspResults::new(num_queries as i32);
+                    status = blast_redo_alignment_core_one_match_in_memory_inner(
+                        program,
+                        query,
+                        query_info,
+                        kbp_gap,
+                        align_params,
+                        hsp_list,
+                        &mut local_results,
+                        Some(&heaps[..]),
+                        None,
+                        BlastRedoInMemorySubject {
+                            subject_source: subject_sequence,
+                            reward: config.reward,
+                            penalty: config.penalty,
+                            genetic_code: config.genetic_code,
+                            smith_waterman: config.smith_waterman,
+                            expect_value: config.expect_value,
+                            hitlist_size: config.hitlist_size,
+                            inclusion_ethresh: config.inclusion_ethresh,
+                            link_context: config.link_context,
+                        },
+                    );
+                    if status != 0 {
+                        break;
+                    }
+
+                    for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
+                        if query_index >= heaps.len() {
+                            continue;
+                        }
+                        if let Some(hitlist) = hitlist {
+                            for hsp_list in hitlist.hsp_lists {
+                                let _discarded = heaps[query_index].insert(hsp_list);
+                            }
+                        }
+                    }
+                }
+
+                if status == 0 {
+                    let mut heaps =
+                        vec![
+                            BlastCompoHeap::new(config.hitlist_size, config.inclusion_ethresh);
+                            num_queries
+                        ];
+                    merge_compo_thread_heaps(&mut heaps, &mut worker_heaps);
+                    *results = fill_results_from_compo_heaps(&mut heaps);
+                }
+                status
+            }
+        }
+        BlastRedoAlignmentSource::ExistingMatchOnly => {
+            if align_params.callbacks.is_some()
+                || !matches!(
+                    align_params.compo_adjust_mode,
+                    CompoAdjustMode::NoCompositionBasedStats
+                )
+            {
+                -1
+            } else if this_match.hsps.is_empty() {
+                0
+            } else {
+                this_match.sort_by_score();
+                this_match.best_evalue = this_match
+                    .hsps
+                    .iter()
+                    .map(|hsp| hsp.evalue)
+                    .fold(i32::MAX as f64, f64::min);
+                let per_query =
+                    s_blast_redo_alignment_group_hsps_by_query(program, query_info, this_match);
+                let mut touched_queries = s_blast_redo_alignment_update_hitlists(
+                    per_query,
+                    align_params,
+                    this_match,
+                    results,
+                );
+                s_blast_redo_alignment_finalize_touched_hitlists(&mut touched_queries, results);
+                0
+            }
+        }
     };
 
     restore_search(
@@ -15280,6 +15929,51 @@ pub fn blast_redo_alignment_core_mt(
     );
 
     status
+}
+
+/// NCBI: entry validation and local composition-mode adjustment at the start
+/// of `Blast_RedoAlignmentCore_MT`.
+fn blast_redo_alignment_core_mt_effective_params(
+    query: &[u8],
+    query_info: &crate::queryinfo::QueryInfo,
+    scoring: &crate::parameters::ScoringParameters,
+    matrix: &[Vec<i32>],
+    align_params: &BlastRedoAlignParams,
+) -> Result<BlastRedoAlignParams, i32> {
+    let mut effective = align_params.clone();
+    let matrix_name = scoring.options.matrix_name.as_deref().unwrap_or("");
+
+    if matrix_name.eq_ignore_ascii_case("BLOSUM62_20")
+        && matches!(
+            effective.compo_adjust_mode,
+            CompoAdjustMode::NoCompositionBasedStats
+        )
+    {
+        return Err(-1);
+    }
+
+    if effective.position_based {
+        if effective.compo_adjust_mode as u8 > CompoAdjustMode::CompositionBasedStats as u8 {
+            effective.compo_adjust_mode = CompoAdjustMode::CompositionBasedStats;
+        }
+        if query_info.num_queries != 1 {
+            return Err(-1);
+        }
+        if !query.is_empty() && query.len() != query_info.max_length as usize {
+            return Err(-1);
+        }
+        if !matrix.is_empty() && matrix.len() < query_info.max_length as usize {
+            return Err(-1);
+        }
+    }
+
+    if effective.compo_adjust_mode as u8 > CompoAdjustMode::CompositionBasedStats as u8
+        && crate::matrix::get_matrix_freq_ratios_with_scale(matrix_name).is_none()
+    {
+        return Err(-1);
+    }
+
+    Ok(effective)
 }
 
 /// NCBI: score ordering and best-evalue refresh for an HSP list.

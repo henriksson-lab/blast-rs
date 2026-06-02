@@ -16979,8 +16979,8 @@ fn tabular_hit_as_culling_node(
             pat_info: None,
             map_info: None,
         },
-        context_id: hit.qframe,
-        subject_id: subject_ranks
+        cid: hit.qframe,
+        sid: subject_ranks
             .get(&hit.subject_id)
             .copied()
             .unwrap_or_default(),

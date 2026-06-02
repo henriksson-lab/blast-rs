@@ -3542,6 +3542,216 @@ fn mapper_extend_hsp(
     0
 }
 
+/// NCBI: s_ExtendAlignment (`hspfilter_mapper.c:2795`).
+#[allow(clippy::too_many_arguments)]
+pub fn s_extend_alignment(
+    hsp: &mut Hsp,
+    query: Option<&[u8]>,
+    query_from: i32,
+    query_to: i32,
+    subject_from: i32,
+    subject_to: i32,
+    score_options: Option<&ScoringOptions>,
+    is_left: bool,
+) -> i32 {
+    let Some(query) = query else {
+        return -1;
+    };
+    let Some(score_options) = score_options else {
+        return -1;
+    };
+    let Some(map_info) = hsp.map_info.as_ref() else {
+        return -1;
+    };
+    let Some(overhangs) = map_info.subject_overhangs.as_ref() else {
+        return -1;
+    };
+    let (o_len, o_seq) = if is_left {
+        (overhangs.left_len, overhangs.left.as_deref())
+    } else {
+        (overhangs.right_len, overhangs.right.as_deref())
+    };
+    let Some(o_seq) = o_seq else {
+        return -1;
+    };
+    if o_len <= 0 || o_len as usize > o_seq.len() {
+        return -1;
+    }
+    if query_from < 0
+        || query_to < query_from - 1
+        || subject_from < 0
+        || subject_to < subject_from - 1
+    {
+        return -1;
+    }
+    let query_gap = if query_to >= query_from {
+        query_to - query_from + 1
+    } else {
+        0
+    };
+    let subject_gap = if subject_to >= subject_from {
+        subject_to - subject_from + 1
+    } else {
+        0
+    };
+    if query_gap < 0
+        || subject_gap < 0
+        || query_from as usize > query.len()
+        || query_from.saturating_add(query_gap) as usize > query.len()
+        || subject_from >= o_len
+        || subject_from.saturating_add(subject_gap) > o_len
+    {
+        return -1;
+    }
+    if query_gap == 0 && subject_gap == 0 {
+        return 0;
+    }
+
+    let subject = crate::encoding::pack_ncbi2na_bases(&o_seq[..o_len as usize]);
+    let Some(mut gap_align) = crate::gapinfo::jumper_gap_align_new(o_len.saturating_mul(2)) else {
+        return -1;
+    };
+    let Some(right_prelim) = gap_align.right_prelim_block.as_mut() else {
+        return -1;
+    };
+
+    let query_start = query_from as usize;
+    let query_end = query_start + query_gap as usize;
+    let subject_start = subject_from as usize;
+    let subject_end = subject_start + subject_gap as usize;
+    let mut num_identical = 0;
+    let mut ungapped_ext_len = 0;
+    let (status, mut query_ext_len, mut subject_ext_len) = if query_gap > 0 && subject_gap > 0 {
+        crate::gapinfo::jumper_extend_right_with_traceback(
+            &query[query_start..query_end],
+            &o_seq[subject_start..subject_end],
+            1,
+            0,
+            0,
+            0,
+            20,
+            20,
+            right_prelim,
+            &mut num_identical,
+            false,
+            &mut ungapped_ext_len,
+        )
+    } else {
+        (0, 0, 0)
+    };
+    if status < 0 || query_ext_len > query_gap || subject_ext_len > subject_gap {
+        return -1;
+    }
+
+    while query_ext_len < query_gap {
+        if crate::gapinfo::jumper_prelim_edit_block_add(
+            right_prelim,
+            crate::gapinfo::JUMPER_INSERTION,
+        ) != 0
+        {
+            return -1;
+        }
+        query_ext_len += 1;
+    }
+    while subject_ext_len < subject_gap {
+        if crate::gapinfo::jumper_prelim_edit_block_add(
+            right_prelim,
+            crate::gapinfo::JUMPER_DELETION,
+        ) != 0
+        {
+            return -1;
+        }
+        subject_ext_len += 1;
+    }
+
+    let Some(left_prelim) = gap_align.left_prelim_block.as_ref() else {
+        return -1;
+    };
+    let Some(extension_script) =
+        crate::gapinfo::jumper_prelim_edit_block_to_gap_edit_script(left_prelim, right_prelim)
+    else {
+        return -1;
+    };
+    let Some(extension_edits) = crate::gapinfo::jumper_find_edits(
+        query,
+        &subject,
+        query_from,
+        subject_from,
+        query_from.saturating_add(query_ext_len),
+        subject_from.saturating_add(subject_ext_len),
+        left_prelim,
+        right_prelim,
+    ) else {
+        return -1;
+    };
+
+    if is_left {
+        let mut prefix = Some(extension_script);
+        let mut current = hsp.edit_script.take();
+        hsp.edit_script = crate::gapinfo::gap_edit_script_combine(&mut prefix, &mut current);
+    } else {
+        let mut current = hsp.edit_script.take();
+        let mut suffix = Some(extension_script);
+        hsp.edit_script = crate::gapinfo::gap_edit_script_combine(&mut current, &mut suffix);
+    }
+    if hsp.edit_script.is_none() {
+        return -1;
+    }
+
+    let Some(map_info) = hsp.map_info.as_mut() else {
+        return -1;
+    };
+    if is_left {
+        let mut prefix = Some(extension_edits);
+        let mut current = map_info.edits.take();
+        map_info.edits = if current.is_some() {
+            crate::gapinfo::jumper_edits_block_combine(&mut prefix, &mut current)
+        } else {
+            prefix
+        };
+    } else {
+        let mut current = map_info.edits.take();
+        let mut suffix = Some(extension_edits);
+        map_info.edits = if current.is_some() {
+            crate::gapinfo::jumper_edits_block_combine(&mut current, &mut suffix)
+        } else {
+            suffix
+        };
+    }
+    if map_info.edits.is_none() {
+        return -1;
+    }
+
+    if is_left {
+        hsp.query_offset = hsp.query_offset.saturating_sub(query_ext_len);
+        hsp.subject_offset = hsp.subject_offset.saturating_sub(subject_ext_len);
+        hsp.query_gapped_start = hsp.query_offset;
+        hsp.subject_gapped_start = hsp.subject_offset;
+    } else {
+        hsp.query_end = hsp.query_end.saturating_add(query_ext_len);
+        hsp.subject_end = hsp.subject_end.saturating_add(subject_ext_len);
+    }
+
+    hsp.score = mapper_compute_alignment_score(
+        hsp,
+        score_options.penalty,
+        score_options.gap_open,
+        score_options.gap_extend,
+    );
+    hsp.num_gaps = hsp
+        .edit_script
+        .as_ref()
+        .map(|script| {
+            script
+                .iter()
+                .filter(|(op, _)| !matches!(op, GapAlignOpType::Sub | GapAlignOpType::Decline))
+                .map(|(_, count)| count)
+                .sum()
+        })
+        .unwrap_or(0);
+    0
+}
+
 fn mapper_query_base(query: &[u8], pos: i32, query_len: i32) -> Option<u8> {
     if pos < 0 || pos >= query_len {
         return None;
@@ -3684,7 +3894,24 @@ pub fn s_find_splice_junctions_for_gap(
                 }
                 let query_ext = second.query_offset.saturating_sub(first.query_end);
                 let subject_ext = second_len.saturating_sub(i.saturating_add(2));
-                let status = mapper_extend_hsp(second, query_ext, subject_ext, true, score_opts);
+                {
+                    let info = second
+                        .map_info
+                        .get_or_insert_with(crate::hspstream::blast_hsp_mapping_info_new);
+                    let overhangs = info.subject_overhangs.get_or_insert_with(Default::default);
+                    overhangs.left_len = second_left.len() as i32;
+                    overhangs.left = Some(second_left.to_vec());
+                }
+                let status = s_extend_alignment(
+                    second,
+                    Some(query),
+                    second.query_offset.saturating_sub(query_ext),
+                    second.query_offset.saturating_sub(1),
+                    0,
+                    subject_ext.saturating_sub(1),
+                    Some(score_opts),
+                    true,
+                );
                 if status == 0 {
                     mapper_set_splice_signal(first, second, signal);
                 }
@@ -3764,7 +3991,24 @@ pub fn s_find_splice_junctions_for_gap(
                     }
                 }
                 let query_ext = second.query_offset.saturating_sub(first.query_end);
-                let status = mapper_extend_hsp(first, query_ext, i, false, score_opts);
+                {
+                    let info = first
+                        .map_info
+                        .get_or_insert_with(crate::hspstream::blast_hsp_mapping_info_new);
+                    let overhangs = info.subject_overhangs.get_or_insert_with(Default::default);
+                    overhangs.right_len = first_right.len() as i32;
+                    overhangs.right = Some(first_right.to_vec());
+                }
+                let status = s_extend_alignment(
+                    first,
+                    Some(query),
+                    first.query_end,
+                    first.query_end.saturating_add(query_ext).saturating_sub(1),
+                    0,
+                    i.saturating_sub(1),
+                    Some(score_opts),
+                    false,
+                );
                 if status == 0 {
                     mapper_set_splice_signal(first, second, signal);
                 }

@@ -63,14 +63,50 @@ pub struct BlastExtendWord {
     pub hash_table: Option<BlastDiagHash>,
 }
 
+/// NCBI `BlastWordFinderType` callback selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlastWordFinderType {
+    #[default]
+    None,
+    PhiBlast,
+    Protein,
+    Rps,
+    Nucleotide,
+    IndexedMegablast,
+}
+
+/// NCBI `BlastGetGappedScoreType` callback selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlastGetGappedScoreType {
+    #[default]
+    Standard,
+    PhiBlast,
+    SmithWaterman,
+}
+
+/// NCBI `JumperGappedType` callback selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JumperGappedType {
+    #[default]
+    None,
+    Jumper,
+    ShortReadIndexed,
+}
+
 /// Rust owner for the NCBI `BlastCoreAuxStruct` search scratch bundle.
 #[derive(Debug, Default)]
+#[allow(non_snake_case)]
 pub struct BlastCoreAuxStruct {
+    pub WordFinder: BlastWordFinderType,
+    pub GetGappedScore: BlastGetGappedScoreType,
+    pub JumperGapped: JumperGappedType,
     pub ewp: Option<BlastExtendWord>,
     pub init_hitlist: Option<InitHitList>,
-    pub seqsrc_oid_array: Vec<i32>,
-    pub seqsrc_oid_status: Vec<i16>,
-    pub mapper_word_hits: Vec<InitHsp>,
+    pub offset_pairs: Vec<crate::lookup::OffsetPair>,
+    pub mapper_wordhits: Option<crate::lookup::MapperWordHits>,
+    pub translation_buffer: Option<Vec<u8>>,
+    pub translation_table: Option<Vec<u8>>,
+    pub translation_table_rc: Option<Vec<u8>>,
 }
 
 /// Initial hit from word finding (before ungapped extension).
@@ -248,6 +284,397 @@ pub fn blast_get_ungapped_hsp_list(
         };
         if let Some(hsp_list) = hsp_list.as_mut() {
             crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+        }
+    }
+
+    crate::hspstream::blast_hsp_list_sort_by_score(hsp_list.as_mut());
+    0
+}
+
+/// Port state for `BLAST_GetGappedScore` (`blast_gapalign.c:3739`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlastGappedStats {
+    pub extensions: i32,
+}
+
+fn cutoff_for_context(
+    program_number: crate::program::ProgramType,
+    subject: &crate::util::BlastSequenceBlk,
+    context: i32,
+    hit_params: &crate::parameters::HitSavingParameters,
+) -> i32 {
+    let cutoff_index = if crate::program::blast_program_is_rps_blast(program_number) {
+        subject.oid
+    } else {
+        context
+    };
+    hit_params
+        .cutoffs
+        .get(cutoff_index.max(0) as usize)
+        .map(|cutoffs| cutoffs.cutoff_score)
+        .unwrap_or(hit_params.cutoff_score_min)
+}
+
+fn subject_unpacked_sequence(subject: &crate::util::BlastSequenceBlk) -> Option<&[u8]> {
+    subject.sequence.as_deref()
+}
+
+fn blast_get_gapped_score_nt_dynprog(
+    query_tmp: &crate::util::BlastSequenceBlk,
+    subject: &crate::util::BlastSequenceBlk,
+    gap_align: &mut crate::protein::BlastGapAlignStruct,
+    score_params: &crate::parameters::ScoringParameters,
+    ext_params: &crate::parameters::ExtensionParameters,
+    init_hsp: &mut InitHsp,
+    s_end: i32,
+    ungapped_score: i32,
+) -> i16 {
+    let Some(query_sequence) = query_tmp.sequence.as_ref() else {
+        return 1;
+    };
+    let Some(subject_sequence) = subject_unpacked_sequence(subject) else {
+        return 1;
+    };
+
+    if s_end >= init_hsp.subject_offset.saturating_add(8) {
+        init_hsp.subject_offset = init_hsp.subject_offset.saturating_add(3);
+        init_hsp.query_offset = init_hsp.query_offset.saturating_add(3);
+    }
+
+    let seed_q = init_hsp.query_offset.max(0) as usize;
+    let seed_s = init_hsp.subject_offset.max(0) as usize;
+    if seed_q >= query_sequence.len() || seed_s >= subject_sequence.len() {
+        return 1;
+    }
+
+    let (score, query_start, query_stop, subject_start, subject_stop) =
+        crate::traceback::s_blast_dyn_prog_nt_gapped_alignment_decoded_extents(
+            query_sequence,
+            subject_sequence,
+            seed_q,
+            seed_s,
+            score_params.reward,
+            score_params.penalty,
+            score_params.gap_open,
+            score_params.gap_extend,
+            ext_params.gap_x_dropoff,
+            ungapped_score,
+        );
+
+    gap_align.score = score;
+    gap_align.query_start = query_start as i32;
+    gap_align.query_stop = query_stop as i32;
+    gap_align.subject_start = subject_start as i32;
+    gap_align.subject_stop = subject_stop as i32;
+    gap_align.edit_script = None;
+    0
+}
+
+fn blast_get_gapped_score_nt_greedy(
+    query_tmp: &crate::util::BlastSequenceBlk,
+    subject: &crate::util::BlastSequenceBlk,
+    gap_align: &mut crate::protein::BlastGapAlignStruct,
+    score_params: &crate::parameters::ScoringParameters,
+    ext_params: &crate::parameters::ExtensionParameters,
+    init_hsp: &mut InitHsp,
+) -> i16 {
+    let Some(query_sequence) = query_tmp.sequence.as_ref() else {
+        return 1;
+    };
+    let Some(subject_sequence) = subject_unpacked_sequence(subject) else {
+        return 1;
+    };
+
+    if let Some(ungapped_data) = init_hsp.ungapped_data.as_ref() {
+        init_hsp.query_offset = ungapped_data.q_start + ungapped_data.length / 2;
+        init_hsp.subject_offset = ungapped_data.s_start + ungapped_data.length / 2;
+    }
+
+    let seed_q = init_hsp.query_offset.max(0) as usize;
+    let seed_s = init_hsp.subject_offset.max(0) as usize;
+    if seed_q >= query_sequence.len() || seed_s >= subject_sequence.len() {
+        return 1;
+    }
+
+    match crate::greedy::greedy_align(
+        query_sequence,
+        subject_sequence,
+        seed_q,
+        seed_s,
+        score_params.reward,
+        score_params.penalty,
+        ext_params.gap_x_dropoff,
+    ) {
+        Some((score, query_start, query_stop, subject_start, subject_stop, edit_script)) => {
+            gap_align.score = score;
+            gap_align.query_start = query_start as i32;
+            gap_align.query_stop = query_stop as i32;
+            gap_align.subject_start = subject_start as i32;
+            gap_align.subject_stop = subject_stop as i32;
+            gap_align.greedy_query_seed_start = init_hsp.query_offset;
+            gap_align.greedy_subject_seed_start = init_hsp.subject_offset;
+            gap_align.edit_script = Some(edit_script);
+            init_hsp.query_offset = gap_align.greedy_query_seed_start;
+            init_hsp.subject_offset = gap_align.greedy_subject_seed_start;
+            0
+        }
+        None => {
+            gap_align.score = i32::MIN;
+            0
+        }
+    }
+}
+
+/// Port of `BLAST_GetGappedScore` (`blast_gapalign.c:3739`).
+pub fn blast_get_gapped_score(
+    program_number: crate::program::ProgramType,
+    query: Option<&crate::util::BlastSequenceBlk>,
+    query_info: Option<&crate::queryinfo::QueryInfo>,
+    subject: Option<&crate::util::BlastSequenceBlk>,
+    gap_align: Option<&mut crate::protein::BlastGapAlignStruct>,
+    score_params: Option<&crate::parameters::ScoringParameters>,
+    ext_params: Option<&crate::parameters::ExtensionParameters>,
+    hit_params: Option<&crate::parameters::HitSavingParameters>,
+    _word_params: Option<&crate::parameters::InitialWordParameters>,
+    init_hitlist: Option<&mut InitHitList>,
+    hsp_list: &mut Option<crate::hspstream::HspList>,
+    mut gapped_stats: Option<&mut BlastGappedStats>,
+    _fence_hit: Option<&mut bool>,
+) -> i16 {
+    let (
+        Some(query),
+        Some(query_info),
+        Some(subject),
+        Some(gap_align),
+        Some(score_params),
+        Some(ext_params),
+        Some(hit_params),
+        Some(init_hitlist),
+    ) = (
+        query,
+        query_info,
+        subject,
+        gap_align,
+        score_params,
+        ext_params,
+        hit_params,
+        init_hitlist,
+    )
+    else {
+        return 1;
+    };
+
+    if init_hitlist.total() == 0 {
+        return 0;
+    }
+
+    let is_prot = program_number != crate::program::BLASTN
+        && program_number != crate::program::PHI_BLASTN
+        && program_number != crate::program::MAPPING;
+    let is_greedy =
+        ext_params.options.prelim_gap_ext == crate::options::PrelimGapExt::GreedyScoreOnly;
+
+    if ext_params.options.chaining
+        && is_prot
+        && score_params.options.matrix_name.as_deref() == Some("BLOSUM62")
+    {
+        // Requires `s_ChainingAlignment` plus the C score-block/chaining state
+        // on `BlastGapAlignStruct`; those types are not available here yet.
+        return crate::util::BLASTERR_INVALIDPARAM as i16;
+    }
+
+    if hit_params.restricted_align && is_prot && !score_params.options.is_ooframe {
+        // The approximate protein-alignment redo loop mutates the interval tree
+        // and HSP list across queries. Nucleotide gapped alignment does not
+        // consume the restricted-alignment flag in NCBI `BLAST_GetGappedScore`.
+        return crate::util::BLASTERR_INVALIDPARAM as i16;
+    }
+
+    if crate::program::blast_query_is_protein(program_number)
+        || crate::program::blast_query_is_translated(program_number)
+        || crate::program::blast_subject_is_translated(program_number)
+    {
+        // Protein, translated, RPS PSSM switching, and out-of-frame alignment
+        // need `s_BlastProtGappedAlignment` and live `BlastScoreBlk` mutation.
+        return crate::util::BLASTERR_INVALIDPARAM as i16;
+    }
+
+    if hsp_list.is_none() {
+        let k_hsp_num_max =
+            crate::hspstream::blast_hsp_num_max(true, hit_params.options.hsp_num_max);
+        let mut new_list = crate::hspstream::blast_hsp_list_new(k_hsp_num_max);
+        new_list.oid = subject.oid;
+        *hsp_list = Some(new_list);
+    }
+
+    let init_hsp_array = init_hitlist.hits.clone();
+    let mut interval_tree =
+        crate::itree::IntervalTree::new(query.length.saturating_add(1), subject.length + 1);
+    let mut found_high_score = vec![false; query_info.num_queries.max(0) as usize];
+    if !hit_params.low_score.is_empty() {
+        for init_hsp in &init_hsp_array {
+            let query_index = crate::queryinfo::blast_get_query_index_from_query_offset(
+                init_hsp.query_offset,
+                program_number,
+                query_info,
+            );
+            if let Some(ungapped_data) = init_hsp.ungapped_data.as_ref() {
+                let low_score = hit_params
+                    .low_score
+                    .get(query_index.max(0) as usize)
+                    .copied()
+                    .unwrap_or(i32::MAX);
+                if ungapped_data.score > low_score {
+                    if let Some(found) = found_high_score.get_mut(query_index.max(0) as usize) {
+                        *found = true;
+                    }
+                }
+            }
+        }
+    }
+
+    for mut init_hsp in init_hsp_array {
+        let mut query_tmp = crate::util::BlastSequenceBlk::default();
+        let context = s_adjust_hsp_offsets_and_get_query_data(
+            query,
+            query_info,
+            &mut init_hsp,
+            &mut query_tmp,
+        );
+        let Some(context_info) = query_info.contexts.get(context.max(0) as usize) else {
+            continue;
+        };
+        let query_index =
+            crate::queryinfo::blast_get_query_index_from_context(context, program_number);
+
+        if !hit_params.low_score.is_empty()
+            && !found_high_score
+                .get(query_index.max(0) as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let (q_start, q_end, s_start, s_end, score) =
+            if let Some(ungapped_data) = init_hsp.ungapped_data.as_ref() {
+                (
+                    ungapped_data.q_start,
+                    ungapped_data.q_start + ungapped_data.length,
+                    ungapped_data.s_start,
+                    ungapped_data.s_start + ungapped_data.length,
+                    ungapped_data.score,
+                )
+            } else {
+                (
+                    init_hsp.query_offset,
+                    init_hsp.query_offset,
+                    init_hsp.subject_offset,
+                    init_hsp.subject_offset,
+                    i32::MIN,
+                )
+            };
+
+        let preliminary_hsp = crate::hspstream::Hsp {
+            score,
+            num_ident: 0,
+            bit_score: 0.0,
+            evalue: f64::MAX,
+            query_offset: q_start,
+            query_end: q_end,
+            query_gapped_start: init_hsp.query_offset,
+            subject_offset: s_start,
+            subject_end: s_end,
+            subject_gapped_start: init_hsp.subject_offset,
+            context,
+            query_frame: context_info.frame,
+            subject_frame: subject.frame as i32,
+            num_gaps: 0,
+            comp_adjustment_method: 0,
+            edit_script: None,
+            pat_info: None,
+            map_info: None,
+        };
+        if crate::itree::blast_interval_tree_contains_hsp(
+            &interval_tree,
+            &preliminary_hsp,
+            context,
+            hit_params.options.min_diag_separation,
+        ) {
+            continue;
+        }
+
+        let cutoff = cutoff_for_context(program_number, subject, context, hit_params);
+        if let Some(stats) = gapped_stats.as_deref_mut() {
+            stats.extensions += 1;
+        }
+
+        if init_hsp.ungapped_data.is_none() {
+            return crate::util::BLASTERR_INVALIDPARAM as i16;
+        }
+
+        let status = if is_greedy {
+            blast_get_gapped_score_nt_greedy(
+                &query_tmp,
+                subject,
+                gap_align,
+                score_params,
+                ext_params,
+                &mut init_hsp,
+            )
+        } else {
+            blast_get_gapped_score_nt_dynprog(
+                &query_tmp,
+                subject,
+                gap_align,
+                score_params,
+                ext_params,
+                &mut init_hsp,
+                s_end,
+                score,
+            )
+        };
+        if status != 0 {
+            return status;
+        }
+
+        if gap_align.score >= cutoff {
+            let new_hsp = crate::hspstream::Hsp {
+                score: gap_align.score,
+                num_ident: 0,
+                bit_score: 0.0,
+                evalue: f64::MAX,
+                query_offset: gap_align.query_start,
+                query_end: gap_align.query_stop,
+                query_gapped_start: init_hsp.query_offset,
+                subject_offset: gap_align.subject_start,
+                subject_end: gap_align.subject_stop,
+                subject_gapped_start: init_hsp.subject_offset,
+                context,
+                query_frame: context_info.frame,
+                subject_frame: subject.frame as i32,
+                num_gaps: 0,
+                comp_adjustment_method: 0,
+                edit_script: gap_align.edit_script.take(),
+                pat_info: None,
+                map_info: None,
+            };
+            if let Some(hsp_list) = hsp_list.as_mut() {
+                let tree_status = crate::itree::blast_interval_tree_add_hsp(
+                    &new_hsp,
+                    &mut interval_tree,
+                    context,
+                );
+                if tree_status != 0 {
+                    return tree_status as i16;
+                }
+                let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+                if status != 0 {
+                    return status as i16;
+                }
+            }
+        } else if is_greedy {
+            gap_align.edit_script = None;
         }
     }
 
@@ -460,9 +887,11 @@ pub fn s_blast_core_aux_struct_free(
     if let Some(aux) = aux_struct.as_mut() {
         let _ = blast_extend_word_free(&mut aux.ewp);
         let _ = blast_init_hit_list_free(&mut aux.init_hitlist);
-        aux.seqsrc_oid_array.clear();
-        aux.seqsrc_oid_status.clear();
-        aux.mapper_word_hits.clear();
+        aux.offset_pairs.clear();
+        let _ = crate::lookup::mapper_word_hits_free(&mut aux.mapper_wordhits);
+        aux.translation_buffer = None;
+        aux.translation_table = None;
+        aux.translation_table_rc = None;
     }
     *aux_struct = None;
     None
@@ -1018,18 +1447,22 @@ mod tests {
     #[test]
     fn blast_core_aux_struct_free_clears_owned_scratch() {
         let mut aux = Some(BlastCoreAuxStruct {
+            WordFinder: BlastWordFinderType::Nucleotide,
+            GetGappedScore: BlastGetGappedScoreType::Standard,
+            JumperGapped: JumperGappedType::None,
             ewp: Some(BlastExtendWord {
                 diag_table: s_blast_diag_table_new(16, false, 8),
                 hash_table: None,
             }),
             init_hitlist: blast_init_hit_list_new(),
-            seqsrc_oid_array: vec![1, 2, 3],
-            seqsrc_oid_status: vec![0, 1],
-            mapper_word_hits: vec![InitHsp {
+            offset_pairs: vec![crate::lookup::OffsetPair {
                 query_offset: 3,
                 subject_offset: 5,
-                ungapped_data: None,
             }],
+            mapper_wordhits: None,
+            translation_buffer: Some(vec![1, 2, 3]),
+            translation_table: Some(vec![4, 5, 6]),
+            translation_table_rc: Some(vec![7, 8, 9]),
         });
         aux.as_mut()
             .unwrap()
@@ -1207,6 +1640,374 @@ mod tests {
         assert!(hsp_list.as_ref().unwrap().hsps.is_empty());
         // NCBI `s_BlastGetBestEvalue` seeds with `(double)INT4_MAX`.
         assert_eq!(hsp_list.as_ref().unwrap().best_evalue, i32::MAX as f64);
+    }
+
+    #[test]
+    fn test_blast_get_gapped_score_blastn_saves_hsp() {
+        let query_info = crate::queryinfo::QueryInfo::new_blastn(&[8]);
+        let query = crate::util::BlastSequenceBlk {
+            sequence: Some(vec![0, 1, 2, 3, 0, 1, 2, 3]),
+            length: 8,
+            ..Default::default()
+        };
+        let subject = crate::util::BlastSequenceBlk {
+            sequence: Some(vec![0, 1, 2, 3, 0, 1, 2, 3]),
+            length: 8,
+            frame: 1,
+            oid: 17,
+            ..Default::default()
+        };
+        let mut gap_align = crate::protein::BlastGapAlignStruct::default();
+        let score_params = crate::parameters::ScoringParameters {
+            options: crate::options::ScoringOptions::new_blastn(),
+            reward: 2,
+            penalty: -3,
+            gap_open: 5,
+            gap_extend: 2,
+            shift_pen: i16::MAX as i32,
+            scale_factor: 1.0,
+        };
+        let ext_params = crate::parameters::ExtensionParameters {
+            options: crate::options::ExtensionOptions::new_blastn(),
+            gap_x_dropoff: 20,
+            gap_x_dropoff_final: 20,
+            gap_trigger: 0,
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            cutoffs: vec![
+                crate::parameters::BlastGappedCutoffs {
+                    cutoff_score: 1,
+                    cutoff_score_max: 1,
+                };
+                query_info.contexts.len()
+            ],
+            ..Default::default()
+        };
+        let word_params = InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 20,
+            cutoff_score_min: 1,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: InitialWordParameters::build_nucl_score_table(2, -3),
+        };
+        let mut init_hitlist = InitHitList::new();
+        init_hitlist.add(InitHsp {
+            query_offset: 1,
+            subject_offset: 1,
+            ungapped_data: Some(UngappedData {
+                q_start: 0,
+                s_start: 0,
+                length: 8,
+                score: 16,
+            }),
+        });
+
+        let mut hsp_list = None;
+        let mut stats = BlastGappedStats::default();
+        assert_eq!(
+            blast_get_gapped_score(
+                crate::program::BLASTN,
+                Some(&query),
+                Some(&query_info),
+                Some(&subject),
+                Some(&mut gap_align),
+                Some(&score_params),
+                Some(&ext_params),
+                Some(&hit_params),
+                Some(&word_params),
+                Some(&mut init_hitlist),
+                &mut hsp_list,
+                Some(&mut stats),
+                None,
+            ),
+            0
+        );
+
+        let hsp_list = hsp_list.expect("gapped HSP list");
+        assert_eq!(stats.extensions, 1);
+        assert_eq!(hsp_list.oid, 17);
+        assert_eq!(hsp_list.hsps.len(), 1);
+        assert_eq!(hsp_list.hsps[0].score, 16);
+        assert_eq!(hsp_list.hsps[0].query_offset, 0);
+        assert_eq!(hsp_list.hsps[0].subject_offset, 0);
+        assert_eq!(hsp_list.hsps[0].query_gapped_start, 1);
+        assert_eq!(hsp_list.hsps[0].subject_gapped_start, 1);
+        assert_eq!(hsp_list.hsps[0].context, 0);
+        assert_eq!(hsp_list.hsps[0].subject_frame, 1);
+    }
+
+    fn blastn_gapped_score_fixture() -> (
+        crate::queryinfo::QueryInfo,
+        crate::util::BlastSequenceBlk,
+        crate::util::BlastSequenceBlk,
+        crate::parameters::ScoringParameters,
+        crate::parameters::ExtensionParameters,
+        crate::parameters::HitSavingParameters,
+        InitialWordParameters,
+    ) {
+        let query_info = crate::queryinfo::QueryInfo::new_blastn(&[8]);
+        let query = crate::util::BlastSequenceBlk {
+            sequence: Some(vec![0, 1, 2, 3, 0, 1, 2, 3]),
+            length: 8,
+            ..Default::default()
+        };
+        let subject = crate::util::BlastSequenceBlk {
+            sequence: Some(vec![0, 1, 2, 3, 0, 1, 2, 3]),
+            length: 8,
+            frame: 1,
+            oid: 17,
+            ..Default::default()
+        };
+        let score_params = crate::parameters::ScoringParameters {
+            options: crate::options::ScoringOptions::new_blastn(),
+            reward: 2,
+            penalty: -3,
+            gap_open: 5,
+            gap_extend: 2,
+            shift_pen: i16::MAX as i32,
+            scale_factor: 1.0,
+        };
+        let ext_params = crate::parameters::ExtensionParameters {
+            options: crate::options::ExtensionOptions::new_blastn(),
+            gap_x_dropoff: 20,
+            gap_x_dropoff_final: 20,
+            gap_trigger: 0,
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            cutoffs: vec![
+                crate::parameters::BlastGappedCutoffs {
+                    cutoff_score: 1,
+                    cutoff_score_max: 1,
+                };
+                query_info.contexts.len()
+            ],
+            ..Default::default()
+        };
+        let word_params = InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 20,
+            cutoff_score_min: 1,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: InitialWordParameters::build_nucl_score_table(2, -3),
+        };
+        (
+            query_info,
+            query,
+            subject,
+            score_params,
+            ext_params,
+            hit_params,
+            word_params,
+        )
+    }
+
+    #[test]
+    fn test_blast_get_gapped_score_skips_interval_contained_duplicate() {
+        let (query_info, query, subject, score_params, ext_params, hit_params, word_params) =
+            blastn_gapped_score_fixture();
+        let mut gap_align = crate::protein::BlastGapAlignStruct::default();
+        let mut init_hitlist = InitHitList::new();
+        init_hitlist.add(InitHsp {
+            query_offset: 1,
+            subject_offset: 1,
+            ungapped_data: Some(UngappedData {
+                q_start: 0,
+                s_start: 0,
+                length: 8,
+                score: 16,
+            }),
+        });
+        init_hitlist.add(InitHsp {
+            query_offset: 3,
+            subject_offset: 3,
+            ungapped_data: Some(UngappedData {
+                q_start: 2,
+                s_start: 2,
+                length: 3,
+                score: 6,
+            }),
+        });
+
+        let mut hsp_list = None;
+        let mut stats = BlastGappedStats::default();
+        assert_eq!(
+            blast_get_gapped_score(
+                crate::program::BLASTN,
+                Some(&query),
+                Some(&query_info),
+                Some(&subject),
+                Some(&mut gap_align),
+                Some(&score_params),
+                Some(&ext_params),
+                Some(&hit_params),
+                Some(&word_params),
+                Some(&mut init_hitlist),
+                &mut hsp_list,
+                Some(&mut stats),
+                None,
+            ),
+            0
+        );
+
+        assert_eq!(stats.extensions, 1);
+        assert_eq!(hsp_list.expect("gapped HSP list").hsps.len(), 1);
+    }
+
+    #[test]
+    fn test_blast_get_gapped_score_greedy_nucleotide_branch() {
+        let (query_info, query, subject, score_params, mut ext_params, hit_params, word_params) =
+            blastn_gapped_score_fixture();
+        ext_params.options.prelim_gap_ext = crate::options::PrelimGapExt::GreedyScoreOnly;
+        let mut gap_align = crate::protein::BlastGapAlignStruct::default();
+        let mut init_hitlist = InitHitList::new();
+        init_hitlist.add(InitHsp {
+            query_offset: 1,
+            subject_offset: 1,
+            ungapped_data: Some(UngappedData {
+                q_start: 0,
+                s_start: 0,
+                length: 8,
+                score: 16,
+            }),
+        });
+
+        let mut hsp_list = None;
+        assert_eq!(
+            blast_get_gapped_score(
+                crate::program::BLASTN,
+                Some(&query),
+                Some(&query_info),
+                Some(&subject),
+                Some(&mut gap_align),
+                Some(&score_params),
+                Some(&ext_params),
+                Some(&hit_params),
+                Some(&word_params),
+                Some(&mut init_hitlist),
+                &mut hsp_list,
+                None,
+                None,
+            ),
+            0
+        );
+
+        let hsps = hsp_list.expect("gapped HSP list").hsps;
+        assert_eq!(hsps.len(), 1);
+        assert!(hsps[0].score >= 16);
+        assert!(hsps[0].edit_script.is_some());
+    }
+
+    #[test]
+    fn test_blast_get_gapped_score_blastn_restricted_align_does_not_block_nt() {
+        let (query_info, query, subject, score_params, ext_params, mut hit_params, word_params) =
+            blastn_gapped_score_fixture();
+        hit_params.restricted_align = true;
+        let mut gap_align = crate::protein::BlastGapAlignStruct::default();
+        let mut init_hitlist = InitHitList::new();
+        init_hitlist.add(InitHsp {
+            query_offset: 1,
+            subject_offset: 1,
+            ungapped_data: Some(UngappedData {
+                q_start: 0,
+                s_start: 0,
+                length: 8,
+                score: 16,
+            }),
+        });
+
+        let mut hsp_list = None;
+        assert_eq!(
+            blast_get_gapped_score(
+                crate::program::BLASTN,
+                Some(&query),
+                Some(&query_info),
+                Some(&subject),
+                Some(&mut gap_align),
+                Some(&score_params),
+                Some(&ext_params),
+                Some(&hit_params),
+                Some(&word_params),
+                Some(&mut init_hitlist),
+                &mut hsp_list,
+                None,
+                None,
+            ),
+            0
+        );
+        assert_eq!(hsp_list.expect("gapped HSP list").hsps.len(), 1);
+    }
+
+    #[test]
+    fn test_blast_get_gapped_score_protein_branch_explicitly_unsupported() {
+        let (query_info, query, subject, score_params, ext_params, hit_params, word_params) =
+            blastn_gapped_score_fixture();
+        let mut gap_align = crate::protein::BlastGapAlignStruct::default();
+        let mut init_hitlist = InitHitList::new();
+        init_hitlist.add(InitHsp {
+            query_offset: 1,
+            subject_offset: 1,
+            ungapped_data: Some(UngappedData {
+                q_start: 0,
+                s_start: 0,
+                length: 8,
+                score: 16,
+            }),
+        });
+        let mut hsp_list = None;
+
+        assert_eq!(
+            blast_get_gapped_score(
+                crate::program::BLASTP,
+                Some(&query),
+                Some(&query_info),
+                Some(&subject),
+                Some(&mut gap_align),
+                Some(&score_params),
+                Some(&ext_params),
+                Some(&hit_params),
+                Some(&word_params),
+                Some(&mut init_hitlist),
+                &mut hsp_list,
+                None,
+                None,
+            ),
+            crate::util::BLASTERR_INVALIDPARAM as i16
+        );
+    }
+
+    #[test]
+    fn test_blast_get_gapped_score_requires_ungapped_data_for_nucleotide_prelim() {
+        let (query_info, query, subject, score_params, ext_params, hit_params, word_params) =
+            blastn_gapped_score_fixture();
+        let mut gap_align = crate::protein::BlastGapAlignStruct::default();
+        let mut init_hitlist = InitHitList::new();
+        init_hitlist.add(InitHsp {
+            query_offset: 1,
+            subject_offset: 1,
+            ungapped_data: None,
+        });
+        let mut hsp_list = None;
+
+        assert_eq!(
+            blast_get_gapped_score(
+                crate::program::BLASTN,
+                Some(&query),
+                Some(&query_info),
+                Some(&subject),
+                Some(&mut gap_align),
+                Some(&score_params),
+                Some(&ext_params),
+                Some(&hit_params),
+                Some(&word_params),
+                Some(&mut init_hitlist),
+                &mut hsp_list,
+                None,
+                None,
+            ),
+            crate::util::BLASTERR_INVALIDPARAM as i16
+        );
     }
 
     #[test]

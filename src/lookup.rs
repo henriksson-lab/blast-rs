@@ -6359,7 +6359,8 @@ mod tests {
             }]
         );
 
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let mut init_hitlist = crate::extend::InitHitList::new();
         let mut stats = crate::diagnostics::UngappedStats::default();
         assert_eq!(
@@ -6486,7 +6487,8 @@ mod tests {
         assert_eq!(profile_db.lookup.rps_pssm.len(), offsets[2] as usize + 1);
         assert_eq!(profile_db.lookup.rps_pssm[offsets[2] as usize], vec![0; 26]);
 
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let mut init_hitlist = crate::extend::InitHitList::new();
         let mut stats = crate::diagnostics::UngappedStats::default();
         assert_eq!(
@@ -6710,7 +6712,8 @@ mod tests {
             }]
         );
 
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let mut init_hitlist = crate::extend::InitHitList::new();
         let mut stats = crate::diagnostics::UngappedStats::default();
         assert_eq!(
@@ -7314,7 +7317,8 @@ mod tests {
 
     #[test]
     fn rps_word_finder_empty_payload_adapter_leaves_stream_writable() {
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let scan = RpsWordFinderScan::default();
 
         assert_eq!(
@@ -7352,7 +7356,8 @@ mod tests {
                 },
             ],
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
 
         assert_eq!(
             blast_rps_word_finder_scan_write_hsp_stream(&scan, &stream, 0, 0, 1),
@@ -7444,7 +7449,8 @@ mod tests {
             lookup.rps_pssm[query_offset][*residue as usize] = 5;
         }
 
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let mut init_hitlist = crate::extend::InitHitList::new();
         let mut stats = crate::diagnostics::UngappedStats::default();
 
@@ -7529,7 +7535,8 @@ mod tests {
             bucket_array: vec![RpsBucket::default()],
         };
         let subject = vec![25u8; 16];
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let mut init_hitlist = crate::extend::InitHitList::new();
         let mut stats = crate::diagnostics::UngappedStats::default();
 
@@ -7695,7 +7702,8 @@ mod tests {
             entries: vec![Some(vec![1, 2]), None, Some(valid_profile)],
             encodings: std::sync::Mutex::new(Vec::new()),
         };
-        let stream = crate::hspstream::blast_hsp_stream_new(1);
+        let stream =
+            crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let mut init_hitlist = crate::extend::InitHitList::new();
         let mut stats = crate::diagnostics::UngappedStats::default();
 

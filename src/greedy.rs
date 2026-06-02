@@ -358,6 +358,99 @@ fn s_get_next_non_affine_tback(last_seq2_off: &[Vec<i32>], d: usize, diag: usize
     }
 }
 
+/// NCBI: s_GetNextAffineTbackFromMatch (`greedy_align.c:151`).
+fn s_get_next_affine_tback_from_match(
+    last_seq2_off: &[Vec<SGreedyOffset>],
+    diag_lower: &[i32],
+    diag_upper: &[i32],
+    d: &mut i32,
+    diag: i32,
+    op_cost: i32,
+) -> (GapAlignOpType, i32) {
+    let last_d = *d - op_cost;
+    if last_d >= 0
+        && (last_d as usize) < last_seq2_off.len()
+        && (last_d as usize) < diag_lower.len()
+        && diag >= diag_lower[last_d as usize]
+        && diag <= diag_upper[last_d as usize]
+    {
+        let new_seq2_index = last_seq2_off[last_d as usize][diag as usize].match_off;
+        let current = last_seq2_off[*d as usize][diag as usize];
+        if new_seq2_index >= current.insert_off.max(current.delete_off) {
+            *d -= op_cost;
+            return (GapAlignOpType::Sub, new_seq2_index);
+        }
+    }
+
+    let current = last_seq2_off[*d as usize][diag as usize];
+    if current.insert_off > current.delete_off {
+        (GapAlignOpType::Ins, current.insert_off)
+    } else {
+        (GapAlignOpType::Del, current.delete_off)
+    }
+}
+
+/// NCBI: s_GetNextAffineTbackFromIndel (`greedy_align.c:201`).
+pub fn s_get_next_affine_tback_from_indel(
+    last_seq2_off: &[Vec<SGreedyOffset>],
+    diag_lower: &[i32],
+    diag_upper: &[i32],
+    d: &mut i32,
+    diag: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    i_or_d: GapAlignOpType,
+) -> GapAlignOpType {
+    const K_INVALID_OFFSET: i32 = -2;
+    let new_diag = if i_or_d == GapAlignOpType::Ins {
+        diag - 1
+    } else {
+        diag + 1
+    };
+    let gap_open_extend = gap_open + gap_extend;
+    let last_d_extend = *d - gap_extend;
+    let new_seq2_index = if last_d_extend >= 0
+        && new_diag >= 0
+        && (last_d_extend as usize) < last_seq2_off.len()
+        && (last_d_extend as usize) < diag_lower.len()
+        && new_diag >= diag_lower[last_d_extend as usize]
+        && new_diag <= diag_upper[last_d_extend as usize]
+    {
+        let row = &last_seq2_off[last_d_extend as usize];
+        let Some(cell) = row.get(new_diag as usize) else {
+            *d -= gap_extend;
+            return i_or_d;
+        };
+        if i_or_d == GapAlignOpType::Ins {
+            cell.insert_off
+        } else {
+            cell.delete_off
+        }
+    } else {
+        K_INVALID_OFFSET
+    };
+
+    let last_d_open = *d - gap_open_extend;
+    if last_d_open >= 0
+        && new_diag >= 0
+        && (last_d_open as usize) < last_seq2_off.len()
+        && (last_d_open as usize) < diag_lower.len()
+        && new_diag >= diag_lower[last_d_open as usize]
+        && new_diag <= diag_upper[last_d_open as usize]
+    {
+        if let Some(cell) = last_seq2_off[last_d_open as usize].get(new_diag as usize) {
+            if new_seq2_index < cell.match_off {
+                *d -= gap_open_extend;
+                return GapAlignOpType::Sub;
+            }
+        }
+    }
+
+    debug_assert!(new_seq2_index != K_INVALID_OFFSET);
+    *d -= gap_extend;
+    i_or_d
+}
+
 // NCBI: Blast_PrelimEditBlockToGapEditScript (blast_gapalign.c:2482).
 fn blast_prelim_edit_block_to_gap_edit_script(
     rev_prelim_tback: &PrelimEditBlock,
@@ -898,6 +991,332 @@ fn blast_greedy_align_one_side(
     Some((best_dist as i32, seq1_align_len, seq2_align_len, ops, seed))
 }
 
+// NCBI: BLAST_AffineGreedyAlign (greedy_align.c:773), specialized to one side.
+fn blast_affine_greedy_align_one_side(
+    seq1: &[u8],
+    seq2: &[u8],
+    reverse: bool,
+    xdrop_threshold: i32,
+    mut match_score: i32,
+    mut mismatch_cost: i32,
+    mut in_gap_open: i32,
+    mut in_gap_extend: i32,
+    max_dist: usize,
+) -> Option<(i32, usize, usize, PrelimEditBlock, GreedySeed)> {
+    if match_score % 2 == 1 {
+        match_score *= 2;
+        mismatch_cost *= 2;
+        in_gap_open *= 2;
+        in_gap_extend *= 2;
+    }
+    if in_gap_open == 0 && in_gap_extend == 0 {
+        return blast_greedy_align_one_side(
+            seq1,
+            seq2,
+            reverse,
+            xdrop_threshold,
+            match_score,
+            mismatch_cost,
+            max_dist,
+        );
+    }
+
+    let len1 = seq1.len();
+    let len2 = seq2.len();
+    let match_score_half = match_score / 2;
+    let mut op_cost = match_score + mismatch_cost;
+    let mut gap_open = in_gap_open;
+    let mut gap_extend = in_gap_extend + match_score_half;
+    let score_common_factor = blast_gdb3(&mut op_cost, &mut gap_open, &mut gap_extend);
+    if score_common_factor <= 0 || op_cost <= 0 || gap_extend <= 0 {
+        return None;
+    }
+    let gap_open_extend = gap_open + gap_extend;
+    let max_penalty = op_cost.max(gap_open_extend);
+    let max_dist_i32 = max_dist as i32;
+    let scaled_max_dist = max_dist_i32.checked_mul(gap_extend)?;
+    if scaled_max_dist < 0 {
+        return None;
+    }
+    let scaled_max_dist_usize = scaled_max_dist as usize;
+    let diag_origin = max_dist + 2;
+    let width = max_dist * 2 + 6;
+    let xdrop_offset = ((xdrop_threshold + match_score_half) / score_common_factor + 1).max(1);
+
+    let index = s_find_first_mismatch(seq1, seq2, len1, len2, 0, 0, reverse);
+    let mut seq1_align_len = index;
+    let mut seq2_align_len = index;
+    let mut seq1_index = index as i32;
+    let mut seed = GreedySeed {
+        start_q: 0,
+        start_s: 0,
+        match_length: index,
+    };
+    if index == len1 || index == len2 {
+        let mut ops = PrelimEditBlock::default();
+        ops.add(GapAlignOpType::Sub, index as i32);
+        return Some((
+            index as i32 * match_score,
+            seq1_align_len,
+            seq2_align_len,
+            ops,
+            seed,
+        ));
+    }
+
+    let mut last_seq2_off = vec![vec![SGreedyOffset::default(); width]; scaled_max_dist_usize + 1];
+    let bounds_len = scaled_max_dist_usize + 1;
+    let mut diag_lower = vec![0i32; bounds_len];
+    let mut diag_upper = vec![0i32; bounds_len];
+    let mut max_score = vec![0i32; scaled_max_dist_usize + xdrop_offset as usize + 1];
+
+    last_seq2_off[0][diag_origin].match_off = seq1_index;
+    last_seq2_off[0][diag_origin].insert_off = INVALID_OFFSET;
+    last_seq2_off[0][diag_origin].delete_off = INVALID_OFFSET;
+    max_score[xdrop_offset as usize] = seq1_index * match_score;
+    diag_lower[0] = diag_origin as i32;
+    diag_upper[0] = diag_origin as i32;
+
+    let mut best_dist = 0i32;
+    let mut best_diag = 0i32;
+    let mut curr_diag_lower = diag_origin as i32 - 1;
+    let mut curr_diag_upper = diag_origin as i32 + 1;
+    let mut end1_diag = 0i32;
+    let mut end2_diag = 0i32;
+    let mut num_nonempty_dist = 1i32;
+    let mut d = 1i32;
+    let mut converged = false;
+
+    let lower_at = |diag_lower: &[i32], dist: i32| -> i32 {
+        if dist < 0 {
+            i32::MAX / 2
+        } else {
+            diag_lower[dist as usize]
+        }
+    };
+    let upper_at = |diag_upper: &[i32], dist: i32| -> i32 {
+        if dist < 0 {
+            -(i32::MAX / 2)
+        } else {
+            diag_upper[dist as usize]
+        }
+    };
+
+    while d <= scaled_max_dist {
+        let mut curr_extent = 0i32;
+        let mut curr_seq2_index = 0i32;
+        let mut curr_diag = 0i32;
+        let tmp_diag_lower = curr_diag_lower;
+        let tmp_diag_upper = curr_diag_upper;
+
+        let numerator = max_score[d as usize] + score_common_factor * d - xdrop_threshold;
+        let mut xdrop_score = ceil_div_i32(numerator, match_score_half);
+        if xdrop_score < 0 {
+            xdrop_score = 0;
+        }
+
+        for k in tmp_diag_lower..=tmp_diag_upper {
+            let row = d as usize;
+            let mut seq2_index = INVALID_OFFSET;
+            let open_d = d - gap_open_extend;
+            if k + 1 <= upper_at(&diag_upper, open_d) && k + 1 >= lower_at(&diag_lower, open_d) {
+                seq2_index = last_seq2_off[open_d as usize][(k + 1) as usize].match_off;
+            }
+            let extend_d = d - gap_extend;
+            if k + 1 <= upper_at(&diag_upper, extend_d)
+                && k + 1 >= lower_at(&diag_lower, extend_d)
+                && seq2_index < last_seq2_off[extend_d as usize][(k + 1) as usize].delete_off
+            {
+                seq2_index = last_seq2_off[extend_d as usize][(k + 1) as usize].delete_off;
+            }
+            last_seq2_off[row][k as usize].delete_off = if seq2_index == INVALID_OFFSET {
+                INVALID_OFFSET
+            } else {
+                seq2_index + 1
+            };
+
+            seq2_index = INVALID_OFFSET;
+            if k - 1 <= upper_at(&diag_upper, open_d) && k - 1 >= lower_at(&diag_lower, open_d) {
+                seq2_index = last_seq2_off[open_d as usize][(k - 1) as usize].match_off;
+            }
+            if k - 1 <= upper_at(&diag_upper, extend_d)
+                && k - 1 >= lower_at(&diag_lower, extend_d)
+                && seq2_index < last_seq2_off[extend_d as usize][(k - 1) as usize].insert_off
+            {
+                seq2_index = last_seq2_off[extend_d as usize][(k - 1) as usize].insert_off;
+            }
+            last_seq2_off[row][k as usize].insert_off = seq2_index;
+
+            seq2_index = last_seq2_off[row][k as usize]
+                .insert_off
+                .max(last_seq2_off[row][k as usize].delete_off);
+            let sub_d = d - op_cost;
+            if k <= upper_at(&diag_upper, sub_d) && k >= lower_at(&diag_lower, sub_d) {
+                seq2_index =
+                    seq2_index.max(last_seq2_off[sub_d as usize][k as usize].match_off + 1);
+            }
+
+            seq1_index = seq2_index + k - diag_origin as i32;
+            if seq2_index < 0 || seq1_index + seq2_index < xdrop_score {
+                if k == curr_diag_lower {
+                    curr_diag_lower += 1;
+                } else {
+                    last_seq2_off[row][k as usize].match_off = INVALID_OFFSET;
+                }
+                continue;
+            }
+            curr_diag_upper = k;
+
+            let matched = s_find_first_mismatch(
+                seq1,
+                seq2,
+                len1,
+                len2,
+                seq1_index as usize,
+                seq2_index as usize,
+                reverse,
+            );
+            if matched > seed.match_length {
+                seed.start_q = seq1_index as usize;
+                seed.start_s = seq2_index as usize;
+                seed.match_length = matched;
+            }
+            seq1_index += matched as i32;
+            seq2_index += matched as i32;
+
+            last_seq2_off[row][k as usize].match_off = seq2_index;
+            if seq1_index + seq2_index > curr_extent {
+                curr_extent = seq1_index + seq2_index;
+                curr_seq2_index = seq2_index;
+                curr_diag = k;
+            }
+
+            if seq1_index as usize == len1 {
+                curr_diag_upper = k;
+                end1_diag = k - 1;
+            }
+            if seq2_index as usize == len2 {
+                curr_diag_lower = k;
+                end2_diag = k + 1;
+            }
+        }
+
+        let curr_score = curr_extent * match_score_half - d * score_common_factor;
+        let max_idx = d as usize + xdrop_offset as usize;
+        if curr_score > max_score[max_idx - 1] {
+            max_score[max_idx] = curr_score;
+            best_dist = d;
+            best_diag = curr_diag;
+            seq2_align_len = curr_seq2_index as usize;
+            seq1_align_len = (curr_seq2_index + best_diag - diag_origin as i32) as usize;
+        } else {
+            max_score[max_idx] = max_score[max_idx - 1];
+        }
+
+        if curr_diag_lower <= curr_diag_upper {
+            num_nonempty_dist += 1;
+            diag_lower[d as usize] = curr_diag_lower;
+            diag_upper[d as usize] = curr_diag_upper;
+        } else {
+            diag_lower[d as usize] = i32::MAX / 2;
+            diag_upper[d as usize] = -(i32::MAX / 2);
+        }
+
+        if d - max_penalty >= 0
+            && diag_lower[(d - max_penalty) as usize] <= diag_upper[(d - max_penalty) as usize]
+        {
+            num_nonempty_dist -= 1;
+        }
+        if num_nonempty_dist == 0 {
+            converged = true;
+            break;
+        }
+
+        d += 1;
+        if d > scaled_max_dist {
+            break;
+        }
+        curr_diag_lower = lower_at(&diag_lower, d - gap_open_extend)
+            .min(lower_at(&diag_lower, d - gap_extend))
+            - 1;
+        curr_diag_lower = curr_diag_lower.min(lower_at(&diag_lower, d - op_cost));
+        if end2_diag > 0 {
+            curr_diag_lower = curr_diag_lower.max(end2_diag);
+        }
+        curr_diag_upper = upper_at(&diag_upper, d - gap_open_extend)
+            .max(upper_at(&diag_upper, d - gap_extend))
+            + 1;
+        curr_diag_upper = curr_diag_upper.max(upper_at(&diag_upper, d - op_cost));
+        if end1_diag > 0 {
+            curr_diag_upper = curr_diag_upper.min(end1_diag);
+        }
+    }
+
+    if !converged {
+        return None;
+    }
+
+    let mut ops = PrelimEditBlock::default();
+    d = best_dist;
+    let mut seq2_index = seq2_align_len as i32;
+    let mut state = GapAlignOpType::Sub;
+    while d > 0 {
+        if state == GapAlignOpType::Sub {
+            let (new_state, new_seq2_index) = s_get_next_affine_tback_from_match(
+                &last_seq2_off,
+                &diag_lower,
+                &diag_upper,
+                &mut d,
+                best_diag,
+                op_cost,
+            );
+            debug_assert!(seq2_index > new_seq2_index);
+            ops.add(GapAlignOpType::Sub, seq2_index - new_seq2_index);
+            seq2_index = new_seq2_index;
+            state = new_state;
+        } else if state == GapAlignOpType::Ins {
+            ops.add(GapAlignOpType::Ins, 1);
+            state = s_get_next_affine_tback_from_indel(
+                &last_seq2_off,
+                &diag_lower,
+                &diag_upper,
+                &mut d,
+                best_diag,
+                gap_open,
+                gap_extend,
+                GapAlignOpType::Ins,
+            );
+            best_diag -= 1;
+        } else {
+            ops.add(GapAlignOpType::Del, 1);
+            state = s_get_next_affine_tback_from_indel(
+                &last_seq2_off,
+                &diag_lower,
+                &diag_upper,
+                &mut d,
+                best_diag,
+                gap_open,
+                gap_extend,
+                GapAlignOpType::Del,
+            );
+            best_diag += 1;
+            seq2_index -= 1;
+        }
+    }
+    ops.add(
+        GapAlignOpType::Sub,
+        last_seq2_off[0][diag_origin].match_off.max(0),
+    );
+
+    Some((
+        max_score[best_dist as usize + xdrop_offset as usize],
+        seq1_align_len,
+        seq2_align_len,
+        ops,
+        seed,
+    ))
+}
+
 /// blast-rs: Seeded non-affine greedy alignment helper; not a direct NCBI C
 /// port.
 ///
@@ -1169,6 +1588,36 @@ mod tests {
         );
         assert_eq!(mem.diag_bounds.len(), 2 * (12 + 1 + 8));
         assert_eq!(mem.max_score.len(), 35);
+    }
+
+    #[test]
+    fn affine_greedy_traceback_uses_indel_state_for_query_gap() {
+        let q: Vec<u8> = [0, 1, 2, 3, 0, 1, 2, 3].to_vec();
+        let s: Vec<u8> = [0, 1, 2, 3, 0, 0, 1, 2, 3].to_vec();
+        let (_, q_len, s_len, ops, _) =
+            blast_affine_greedy_align_one_side(&q, &s, false, 20, 2, 3, 1, 1, 16)
+                .expect("affine greedy traceback");
+
+        assert_eq!((q_len, s_len), (8, 9));
+        assert!(ops
+            .edit_ops
+            .iter()
+            .any(|op| op.op_type == GapAlignOpType::Del && op.num == 1));
+    }
+
+    #[test]
+    fn affine_greedy_traceback_uses_indel_state_for_subject_gap() {
+        let q: Vec<u8> = [0, 1, 2, 3, 0, 0, 1, 2, 3].to_vec();
+        let s: Vec<u8> = [0, 1, 2, 3, 0, 1, 2, 3].to_vec();
+        let (_, q_len, s_len, ops, _) =
+            blast_affine_greedy_align_one_side(&q, &s, false, 20, 2, 3, 1, 1, 16)
+                .expect("affine greedy traceback");
+
+        assert_eq!((q_len, s_len), (9, 8));
+        assert!(ops
+            .edit_ops
+            .iter()
+            .any(|op| op.op_type == GapAlignOpType::Ins && op.num == 1));
     }
 
     #[test]

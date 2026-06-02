@@ -24,8 +24,9 @@ use crate::program::{
 };
 use crate::queryinfo::QueryInfo;
 use crate::seqsrc::{
-    blast_seq_src_get_num_seqs, blast_seq_src_get_num_seqs_stats, blast_seq_src_get_seq_len,
-    blast_seq_src_get_tot_len, blast_seq_src_get_tot_len_stats, BlastSeqSource,
+    blast_seq_src_get_max_seq_len, blast_seq_src_get_min_seq_len, blast_seq_src_get_num_seqs,
+    blast_seq_src_get_num_seqs_stats, blast_seq_src_get_seq_len, blast_seq_src_get_tot_len,
+    blast_seq_src_get_tot_len_stats, BlastSeqSource,
 };
 use crate::stat::{
     blast_compute_length_adjustment, blast_get_nucl_alpha_beta, blast_gumbel_blk_calc,
@@ -36,32 +37,13 @@ use crate::stat::{
 };
 use crate::util::{BlastSequenceBlk, SSeqRange};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlastAuxWordFinder {
-    None,
-    PhiBlast,
-    Protein,
-    Rps,
-    Nucleotide,
-    IndexedMegablast,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlastAuxGappedPath {
-    Standard,
-    PhiBlast,
-    SmithWaterman,
-    Jumper,
-    ShortReadIndexed,
-}
+pub use crate::extend::BlastGetGappedScoreType as BlastAuxGappedPath;
+pub use crate::extend::BlastWordFinderType as BlastAuxWordFinder;
+pub use crate::extend::JumperGappedType;
 
 #[derive(Debug)]
 pub struct BlastSetupAuxStructures {
     pub core: crate::extend::BlastCoreAuxStruct,
-    pub word_finder: BlastAuxWordFinder,
-    pub gapped_path: BlastAuxGappedPath,
-    pub offset_pairs: Vec<crate::lookup::OffsetPair>,
-    pub mapper_wordhits: Option<crate::lookup::MapperWordHits>,
     pub na_extend_choice: Option<crate::lookup::NaExtendChoice>,
 }
 
@@ -69,6 +51,167 @@ pub struct BlastSetupAuxStructures {
 pub const BLAST_REWARD: i32 = 1;
 /// `BLAST_PENALTY` (`blast_options.h:151`).
 pub const BLAST_PENALTY: i32 = -3;
+
+/// NCBI: BLAST_GapAlignSetUp (`blast_setup.c:888`).
+#[allow(clippy::too_many_arguments)]
+pub fn blast_gap_align_set_up(
+    program_number: ProgramType,
+    seq_src: Option<&dyn BlastSeqSource>,
+    scoring_options: &ScoringOptions,
+    eff_len_options: &EffectiveLengthsOptions,
+    ext_options: &ExtensionOptions,
+    hit_options: &HitSavingOptions,
+    query_info: &mut QueryInfo,
+    sbp: &mut BlastScoreBlk,
+    score_params: &mut Option<crate::parameters::ScoringParameters>,
+    ext_params: &mut Option<crate::parameters::ExtensionParameters>,
+    hit_params: &mut Option<HitSavingParameters>,
+    eff_len_params: &mut Option<EffectiveLengthsParameters>,
+    gap_align: &mut Option<crate::blast_kappa::BlastGapAlignWorkspace>,
+) -> i16 {
+    let mut total_length = -1_i64;
+    let mut num_seqs = -1_i32;
+
+    if let Some(seq_src) = seq_src {
+        total_length = blast_seq_src_get_tot_len_stats(seq_src);
+        if total_length <= 0 {
+            total_length = blast_seq_src_get_tot_len(seq_src);
+        }
+
+        if let Some(gbp) = sbp.gbp.as_mut() {
+            let dbl = if eff_len_options.db_length > 0 {
+                eff_len_options.db_length
+            } else {
+                total_length
+            };
+            gbp.db_length = if blast_subject_is_translated(program_number) {
+                dbl / crate::util::CODON_LENGTH as i64
+            } else {
+                dbl
+            };
+        }
+
+        if total_length > 0 {
+            num_seqs = blast_seq_src_get_num_seqs_stats(seq_src);
+            if num_seqs <= 0 {
+                num_seqs = blast_seq_src_get_num_seqs(seq_src);
+            }
+        } else {
+            let oid = 0;
+            total_length = blast_seq_src_get_seq_len(seq_src, oid) as i64;
+            if total_length < 0 {
+                total_length = -1;
+            }
+            num_seqs = 1;
+        }
+    }
+
+    let status = crate::parameters::blast_effective_lengths_parameters_new(
+        eff_len_options,
+        total_length,
+        num_seqs,
+        eff_len_params,
+    );
+    if status != 0 {
+        return status;
+    }
+    let Some(eff_params) = eff_len_params.as_ref() else {
+        return -1;
+    };
+    let kbp_array = if scoring_options.gapped_calculation && !sbp.kbp_gap_std.is_empty() {
+        sbp.kbp_gap_std.as_slice()
+    } else {
+        sbp.kbp.as_slice()
+    };
+    let status = blast_calc_eff_lengths(
+        program_number,
+        scoring_options,
+        eff_params,
+        kbp_array,
+        sbp.kbp_std.as_slice(),
+        sbp.name.as_deref().unwrap_or(""),
+        query_info,
+    );
+    if status != 0 {
+        let _ = crate::parameters::blast_effective_lengths_parameters_free(eff_len_params);
+        return status as i16;
+    }
+
+    let status = crate::parameters::blast_scoring_parameters_new(
+        Some(scoring_options),
+        Some(sbp),
+        score_params,
+    );
+    if status != 0 {
+        let _ = crate::parameters::blast_effective_lengths_parameters_free(eff_len_params);
+        let _ = crate::parameters::blast_scoring_parameters_free(score_params);
+        return status;
+    }
+
+    let status = crate::parameters::blast_extension_parameters_new(
+        program_number,
+        ext_options,
+        sbp,
+        query_info,
+        ext_params,
+    );
+    if status != 0 {
+        let _ = crate::parameters::blast_effective_lengths_parameters_free(eff_len_params);
+        *score_params = None;
+        let _ = crate::parameters::blast_scoring_parameters_free(score_params);
+        let _ = crate::parameters::blast_extension_parameters_free(ext_params);
+        return status;
+    }
+
+    let min_subject_length = if sbp.gbp.is_some() {
+        let Some(seq_src) = seq_src else {
+            return crate::diagnostics::BLASTERR_SUBJECT_LENGTH_INVALID;
+        };
+        let mut len = blast_seq_src_get_min_seq_len(seq_src);
+        if blast_subject_is_translated(program_number) {
+            len /= crate::util::CODON_LENGTH as i32;
+        }
+        len
+    } else if num_seqs != 0 {
+        (total_length / num_seqs as i64) as i32
+    } else {
+        -1
+    };
+    if min_subject_length <= 0 {
+        return crate::diagnostics::BLASTERR_SUBJECT_LENGTH_INVALID;
+    }
+
+    let composition_based_stats = ext_params
+        .as_ref()
+        .map_or(ext_options.composition_based_stats, |params| {
+            params.options.composition_based_stats
+        });
+    let status = crate::parameters::blast_hit_saving_parameters_new(
+        program_number,
+        hit_options,
+        sbp,
+        query_info,
+        min_subject_length,
+        composition_based_stats,
+        hit_params,
+    );
+    if status != 0 {
+        return status;
+    }
+
+    let max_subject_length = seq_src.map_or(0, blast_seq_src_get_max_seq_len).max(0) as u32;
+    let _ = max_subject_length;
+    let gap_x_dropoff = ext_params
+        .as_ref()
+        .map_or(ext_options.gap_x_dropoff as i32, |params| {
+            params.gap_x_dropoff
+        });
+    *gap_align = crate::blast_kappa::blast_gap_align_struct_new(gap_x_dropoff);
+    if gap_align.is_none() {
+        return -1;
+    }
+    0
+}
 
 /// NCBI: BlastSetup_Validate (blast_setup.c:535).
 ///
@@ -596,36 +739,41 @@ pub fn s_blast_set_up_aux_structures(
         None
     };
 
-    let gapped_path = if phi_lookup {
+    let get_gapped_score = if phi_lookup {
         BlastAuxGappedPath::PhiBlast
     } else if smith_waterman {
         BlastAuxGappedPath::SmithWaterman
-    } else if jumper && read_indexed_db {
-        BlastAuxGappedPath::ShortReadIndexed
-    } else if jumper {
-        BlastAuxGappedPath::Jumper
     } else {
         BlastAuxGappedPath::Standard
     };
 
+    let jumper_gapped = if jumper && read_indexed_db {
+        JumperGappedType::ShortReadIndexed
+    } else if jumper {
+        JumperGappedType::Jumper
+    } else {
+        JumperGappedType::None
+    };
+
     *aux_struct_ptr = Some(BlastSetupAuxStructures {
         core: crate::extend::BlastCoreAuxStruct {
+            WordFinder: word_finder,
+            GetGappedScore: get_gapped_score,
+            JumperGapped: jumper_gapped,
             ewp: Some(ewp),
             init_hitlist: crate::extend::blast_init_hit_list_new(),
-            seqsrc_oid_array: Vec::new(),
-            seqsrc_oid_status: Vec::new(),
-            mapper_word_hits: Vec::new(),
+            offset_pairs: vec![
+                crate::lookup::OffsetPair {
+                    query_offset: 0,
+                    subject_offset: 0,
+                };
+                offset_array_size
+            ],
+            mapper_wordhits,
+            translation_buffer: None,
+            translation_table: None,
+            translation_table_rc: None,
         },
-        word_finder,
-        gapped_path,
-        offset_pairs: vec![
-            crate::lookup::OffsetPair {
-                query_offset: 0,
-                subject_offset: 0,
-            };
-            offset_array_size
-        ],
-        mapper_wordhits,
         na_extend_choice,
     });
 
@@ -1230,6 +1378,93 @@ mod tests {
 
         assert_ne!(alpha, fallback_alpha);
         assert_ne!(beta, 0.0);
+    }
+
+    #[test]
+    fn gap_align_set_up_updates_gumbel_db_length_and_allocates_outputs() {
+        let src = SetupSeqSrc {
+            seqs: vec![vec![b'A'; 300], vec![b'C'; 150]],
+            total_stats: 900,
+            num_stats: 2,
+        };
+        let mut query_info = QueryInfo {
+            num_queries: 1,
+            contexts: vec![ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: 0,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 1,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 100,
+        };
+        let scoring = ScoringOptions {
+            matrix_path: None,
+            reward: 0,
+            penalty: 0,
+            gap_open: 11,
+            gap_extend: 1,
+            shift_pen: i16::MAX as i32,
+            gapped_calculation: true,
+            complexity_adjusted_scoring: false,
+            matrix_name: Some("BLOSUM62".to_string()),
+            is_ooframe: false,
+            program_number: crate::program::TBLASTN,
+        };
+        let eff_options = EffectiveLengthsOptions {
+            db_length: 1_200,
+            ..EffectiveLengthsOptions::default()
+        };
+        let ext_options = ExtensionOptions::new_blastp();
+        let hit_options = HitSavingOptions::default();
+        let kbp = protein_kbp();
+        let mut sbp =
+            crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1).expect("sbp");
+        sbp.name = Some("BLOSUM62".to_string());
+        sbp.kbp = vec![kbp.clone()];
+        sbp.kbp_std = vec![kbp.clone()];
+        sbp.kbp_gap = vec![kbp.clone()];
+        sbp.kbp_gap_std = vec![kbp.clone()];
+
+        let mut score_params = None;
+        let mut ext_params = None;
+        let mut hit_params = None;
+        let mut eff_len_params = None;
+        let mut gap_align = None;
+
+        assert_eq!(
+            blast_gap_align_set_up(
+                crate::program::TBLASTN,
+                Some(&src),
+                &scoring,
+                &eff_options,
+                &ext_options,
+                &hit_options,
+                &mut query_info,
+                &mut sbp,
+                &mut score_params,
+                &mut ext_params,
+                &mut hit_params,
+                &mut eff_len_params,
+                &mut gap_align,
+            ),
+            0
+        );
+
+        assert_eq!(
+            sbp.gbp.as_ref().map(|gbp| gbp.db_length),
+            Some(1_200 / crate::util::CODON_LENGTH as i64)
+        );
+        assert!(score_params.is_some());
+        assert!(ext_params.is_some());
+        assert!(hit_params.is_some());
+        assert!(eff_len_params.is_some());
+        assert!(gap_align.is_some());
+        assert!(query_info.contexts[0].eff_searchsp > 0);
     }
 
     #[test]
@@ -1838,10 +2073,11 @@ mod tests {
         );
 
         let aux = aux.expect("aux structures");
-        assert_eq!(aux.word_finder, BlastAuxWordFinder::Nucleotide);
-        assert_eq!(aux.gapped_path, BlastAuxGappedPath::Standard);
+        assert_eq!(aux.core.WordFinder, BlastAuxWordFinder::Nucleotide);
+        assert_eq!(aux.core.GetGappedScore, BlastAuxGappedPath::Standard);
+        assert_eq!(aux.core.JumperGapped, JumperGappedType::None);
         assert_eq!(
-            aux.offset_pairs.len(),
+            aux.core.offset_pairs.len(),
             crate::lookup::get_offset_array_size(&lookup) as usize
         );
         assert!(aux
@@ -1853,7 +2089,7 @@ mod tests {
         assert!(aux.na_extend_choice.is_some_and(
             |choice| choice.lookup_callback == Some(crate::lookup::NaLookupCallback::SmallNa)
         ));
-        assert!(aux.mapper_wordhits.is_none());
+        assert!(aux.core.mapper_wordhits.is_none());
     }
 
     #[test]
@@ -1909,9 +2145,10 @@ mod tests {
         );
 
         let aux = aux.expect("aux structures");
-        assert_eq!(aux.word_finder, BlastAuxWordFinder::None);
-        assert_eq!(aux.gapped_path, BlastAuxGappedPath::ShortReadIndexed);
-        let mapper = aux.mapper_wordhits.expect("mapper word hits");
+        assert_eq!(aux.core.WordFinder, BlastAuxWordFinder::None);
+        assert_eq!(aux.core.GetGappedScore, BlastAuxGappedPath::Standard);
+        assert_eq!(aux.core.JumperGapped, JumperGappedType::ShortReadIndexed);
+        let mapper = aux.core.mapper_wordhits.expect("mapper word hits");
         assert_eq!(mapper.num_arrays, 10);
         assert_eq!(mapper.divisor, 501);
     }
