@@ -452,6 +452,29 @@ fn protein_score_matrix_for_gapped_score(
     }
 }
 
+/// NCBI: `s_BlastProtGappedAlignment` (`blast_gapalign.c:4298`).
+fn s_blast_prot_gapped_alignment(
+    query: &[u8],
+    subject: &[u8],
+    seed_q: usize,
+    seed_s: usize,
+    matrix: &[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
+    gap_open: i32,
+    gap_extend: i32,
+    x_drop_gapped: i32,
+) -> Option<crate::protein::ProteinGappedResult> {
+    crate::protein::protein_gapped_align(
+        query,
+        subject,
+        seed_q,
+        seed_s,
+        matrix,
+        gap_open,
+        gap_extend,
+        x_drop_gapped,
+    )
+}
+
 /// Port of `BLAST_GetGappedScore` (`blast_gapalign.c:3739`).
 pub fn blast_get_gapped_score(
     program_number: crate::program::ProgramType,
@@ -543,8 +566,22 @@ pub fn blast_get_gapped_score(
     } else {
         vec![true; init_hsp_array.len()]
     };
-    let mut interval_tree =
-        crate::itree::IntervalTree::new(query.length.saturating_add(1), subject.length + 1);
+    let subject_tree_max = if crate::program::blast_subject_is_translated(program_number)
+        && score_params.options.is_ooframe
+    {
+        2 * (subject
+            .length
+            .saturating_add(crate::util::CODON_LENGTH as i32))
+        + 1
+    } else {
+        subject.length + 1
+    };
+    let mut interval_tree = Some(crate::itree::blast_interval_tree_init(
+        0,
+        query.length.saturating_add(1),
+        0,
+        subject_tree_max,
+    ));
     let mut found_high_score = vec![false; query_info.num_queries.max(0) as usize];
     if !hit_params.low_score.is_empty() {
         for init_hsp in &init_hsp_array {
@@ -635,7 +672,7 @@ pub fn blast_get_gapped_score(
             map_info: None,
         };
         if crate::itree::blast_interval_tree_contains_hsp(
-            &interval_tree,
+            interval_tree.as_ref().expect("interval tree"),
             &preliminary_hsp,
             context,
             hit_params.options.min_diag_separation,
@@ -682,7 +719,7 @@ pub fn blast_get_gapped_score(
                 s_len,
                 matrix,
             );
-            let Some(prelim) = crate::protein::protein_gapped_align(
+            let Some(prelim) = s_blast_prot_gapped_alignment(
                 query_seq,
                 subject_seq,
                 seed_q,
@@ -727,38 +764,34 @@ pub fn blast_get_gapped_score(
         }
 
         if gap_align.score >= cutoff {
-            let new_hsp = crate::hspstream::Hsp {
-                score: gap_align.score,
-                num_ident: 0,
-                bit_score: 0.0,
-                evalue: f64::MAX,
-                query_offset: gap_align.query_start,
-                query_end: gap_align.query_stop,
-                query_gapped_start: init_hsp.query_offset,
-                subject_offset: gap_align.subject_start,
-                subject_end: gap_align.subject_stop,
-                subject_gapped_start: init_hsp.subject_offset,
+            let new_hsp = crate::hspstream::blast_hsp_init(
+                gap_align.query_start,
+                gap_align.query_stop,
+                gap_align.subject_start,
+                gap_align.subject_stop,
+                init_hsp.query_offset,
+                init_hsp.subject_offset,
                 context,
-                query_frame: context_info.frame,
-                subject_frame: subject.frame as i32,
-                num_gaps: 0,
-                comp_adjustment_method: 0,
-                edit_script: gap_align.edit_script.take(),
-                pat_info: None,
-                map_info: None,
-            };
+                context_info.frame as i16,
+                subject.frame,
+                gap_align.score,
+                gap_align.edit_script.take(),
+            );
             if let Some(hsp_list) = hsp_list.as_mut() {
+                let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+                if status != 0 {
+                    return status as i16;
+                }
+                let Some(saved_hsp) = hsp_list.hsps.last() else {
+                    return crate::diagnostics::BLASTERR_MEMORY;
+                };
                 let tree_status = crate::itree::blast_interval_tree_add_hsp(
-                    &new_hsp,
-                    &mut interval_tree,
+                    saved_hsp,
+                    interval_tree.as_mut().expect("interval tree"),
                     context,
                 );
                 if tree_status != 0 {
                     return tree_status as i16;
-                }
-                let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
-                if status != 0 {
-                    return status as i16;
                 }
             }
         } else if is_greedy {
@@ -766,6 +799,7 @@ pub fn blast_get_gapped_score(
         }
     }
 
+    let _ = crate::itree::blast_interval_tree_free(&mut interval_tree);
     crate::hspstream::blast_hsp_list_sort_by_score(hsp_list.as_mut());
     0
 }

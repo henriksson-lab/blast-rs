@@ -1877,9 +1877,12 @@ fn blast_hsp_list_purge_hsps_with_common_endpoints_protein_hits(
     purge_hsps_with_common_endpoints(hits);
 }
 
-/// NCBI: BLAST_GetGappedScore (blast_gapalign.c:3739).
-/// naming: Public Rust wrapper is the snake_case form over Rust ProteinHit data.
-pub fn blast_get_gapped_score(
+/// blast-rs: API-local preliminary protein gapping over `ProteinHit` values.
+///
+/// The C-shaped `BLAST_GetGappedScore` translation lives in `crate::extend`;
+/// this helper remains only while the public translated-search paths still
+/// carry preliminary hits as `ProteinHit` rather than `BlastHSPList`.
+fn protein_prelim_gapped_hits(
     query_aa: &[u8],
     subj_aa: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -3928,7 +3931,7 @@ fn blast_run_preliminary_search(
     let preliminary_hsps = if params.ungapped {
         Vec::new()
     } else {
-        blast_get_gapped_score(
+        protein_prelim_gapped_hits(
             query_aa,
             subj_aa,
             matrix,
@@ -6123,7 +6126,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         );
                     }
                 } else {
-                    let phits = blast_get_gapped_score(
+                    let phits = protein_prelim_gapped_hits(
                         prot,
                         subj_aa,
                         &matrix,
@@ -6688,7 +6691,7 @@ pub fn blastx_batch(
                         );
                         prelim_tree_query = Some(qi);
                     }
-                    let phits = blast_get_gapped_score(
+                    let phits = protein_prelim_gapped_hits(
                         prot,
                         subj_aa,
                         &matrix,
@@ -7531,7 +7534,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     &mut scratch.diag_table,
                 );
                 scratch.diag_table.exit(prot.len());
-                let phits = blast_get_gapped_score(
+                let phits = protein_prelim_gapped_hits(
                     &query_aa,
                     prot_eval,
                     &matrix,
@@ -8261,7 +8264,7 @@ pub fn tblastn_batch(
                             }
                         }
                     } else {
-                        let phits = blast_get_gapped_score(
+                        let phits = protein_prelim_gapped_hits(
                             &p.aa,
                             prot,
                             &matrix,

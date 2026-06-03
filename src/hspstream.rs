@@ -42,6 +42,47 @@ pub struct Hsp {
     pub map_info: Option<BlastHSPMappingInfo>,
 }
 
+/// NCBI: `Blast_HSPInit` (`blast_hits.c:151`).
+#[allow(clippy::too_many_arguments)]
+pub fn blast_hsp_init(
+    query_start: i32,
+    query_end: i32,
+    subject_start: i32,
+    subject_end: i32,
+    query_gapped_start: i32,
+    subject_gapped_start: i32,
+    query_context: i32,
+    query_frame: i16,
+    subject_frame: i16,
+    score: i32,
+    gap_edit: Option<crate::gapinfo::GapEditScript>,
+) -> Hsp {
+    let num_gaps = gap_edit
+        .as_ref()
+        .map(gap_edit_script_num_gap_opens)
+        .unwrap_or(0);
+    Hsp {
+        score,
+        num_ident: 0,
+        bit_score: 0.0,
+        evalue: 0.0,
+        query_offset: query_start,
+        query_end,
+        query_gapped_start,
+        subject_offset: subject_start,
+        subject_end,
+        subject_gapped_start,
+        context: query_context,
+        query_frame: query_frame as i32,
+        subject_frame: subject_frame as i32,
+        num_gaps,
+        comp_adjustment_method: 0,
+        edit_script: gap_edit,
+        pat_info: None,
+        map_info: None,
+    }
+}
+
 /// NCBI: `BlastSeg` (`blast_hits.h:96`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlastSeg {

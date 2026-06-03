@@ -1968,27 +1968,27 @@ pub fn s_find_splice_junctions(
         // keeps that control flow local without fighting Rust's borrow checker;
         // the pointer is always derived from the live owned chain list.
         unsafe {
-            while (*h_ptr).next.is_some() {
+            while let Some(next_box) = (*h_ptr).next.as_deref_mut() {
                 let h = &mut *h_ptr;
-                let (query_gap, overlaps_query, can_short_merge, score_pair) = {
-                    let next = h.next.as_ref().expect("checked above");
-                    let query_gap = next.hsp.query_offset as i64 - h.hsp.query_end as i64;
-                    let subject_gap = next.hsp.subject_offset as i64 - h.hsp.subject_end as i64;
-                    let right_overhang_len = h
-                        .hsp
-                        .map_info
-                        .as_ref()
-                        .and_then(|info| info.subject_overhangs.as_ref())
-                        .and_then(|overhangs| overhangs.right.as_ref())
-                        .map_or(0, |right| right.len() as i64);
-                    (
-                        query_gap,
-                        next.hsp.query_offset <= h.hsp.query_end
-                            && next.hsp.query_offset > h.hsp.query_offset,
-                        subject_gap - query_gap < 30 && subject_gap < right_overhang_len,
-                        h.hsp.score > 50 && next.hsp.score > 50,
-                    )
+                let next_ptr = next_box as *mut HSPContainer;
+                let next = &mut *next_ptr;
+                let query_gap = next.hsp.query_offset as i64 - h.hsp.query_end as i64;
+                let subject_gap = next.hsp.subject_offset as i64 - h.hsp.subject_end as i64;
+                let right_overhang_len = match &h.hsp.map_info {
+                    Some(info) => match &info.subject_overhangs {
+                        Some(overhangs) => match &overhangs.right {
+                            Some(right) => right.len() as i64,
+                            None => 0,
+                        },
+                        None => 0,
+                    },
+                    None => 0,
                 };
+                let overlaps_query = next.hsp.query_offset <= h.hsp.query_end
+                    && next.hsp.query_offset > h.hsp.query_offset;
+                let can_short_merge =
+                    subject_gap - query_gap < 30 && subject_gap < right_overhang_len;
+                let score_pair = h.hsp.score > 50 && next.hsp.score > 50;
 
                 if can_short_merge {
                     if query_gap > 1 {
@@ -1998,137 +1998,138 @@ pub fn s_find_splice_junctions(
                             return status;
                         }
                     }
-                    let old_next_start = h.next.as_ref().map(|next| next.hsp.query_offset);
+                    let old_next_start = next.hsp.query_offset;
                     let status = s_intron_to_gap(h, Some(query), Some(scoring_opts));
                     if status != 0 {
                         return status;
                     }
-                    if h.next.as_ref().map(|next| next.hsp.query_offset) == old_next_start {
-                        h_ptr = h.next.as_deref_mut().expect("checked above") as *mut HSPContainer;
+                    let merged = match h.next.as_deref_mut() {
+                        Some(new_next) => new_next.hsp.query_offset != old_next_start,
+                        None => true,
+                    };
+                    if !merged {
+                        h_ptr = match h.next.as_deref_mut() {
+                            Some(new_next) => new_next as *mut HSPContainer,
+                            None => break,
+                        };
                     }
                     continue;
                 }
 
                 if overlaps_query {
-                    let status = {
-                        let next = h.next.as_deref_mut().expect("checked above");
-                        s_find_splice_junctions_for_overlaps(
-                            &mut h.hsp,
-                            &mut next.hsp,
-                            Some(query),
-                            query_len,
-                            !score_pair,
-                        )
-                    };
+                    let status = s_find_splice_junctions_for_overlaps(
+                        &mut h.hsp,
+                        &mut next.hsp,
+                        Some(query),
+                        query_len,
+                        !score_pair,
+                    );
                     if status != 0 {
                         return status;
                     }
-                    let has_splice = h
-                        .hsp
-                        .map_info
-                        .as_ref()
-                        .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
+                    let has_splice = match &h.hsp.map_info {
+                        Some(info) => info.right_edge & MAPPER_SPLICE_SIGNAL != 0,
+                        None => false,
+                    };
                     if has_splice {
-                        let should_merge = h
-                            .next
-                            .as_ref()
-                            .is_some_and(|next| next.hsp.subject_offset - h.hsp.subject_end < 30);
+                        let should_merge = next.hsp.subject_offset - h.hsp.subject_end < 30;
                         if should_merge {
-                            let old_next_start = h.next.as_ref().map(|next| next.hsp.query_offset);
+                            let old_next_start = next.hsp.query_offset;
                             let status = s_intron_to_gap(h, Some(query), Some(scoring_opts));
                             if status != 0 {
                                 return status;
                             }
-                            if h.next.as_ref().map(|next| next.hsp.query_offset) != old_next_start {
+                            let merged = match h.next.as_deref_mut() {
+                                Some(new_next) => new_next.hsp.query_offset != old_next_start,
+                                None => true,
+                            };
+                            if merged {
                                 continue;
                             }
                         }
                     } else {
-                        let status = {
-                            let next = h.next.as_deref_mut().expect("checked above");
-                            s_trim_overlap(&mut h.hsp, &mut next.hsp, Some(query))
-                        };
+                        let status = s_trim_overlap(&mut h.hsp, &mut next.hsp, Some(query));
                         if status != 0 {
                             return status;
                         }
                     }
-                    h_ptr = h.next.as_deref_mut().expect("checked above") as *mut HSPContainer;
+                    h_ptr = match h.next.as_deref_mut() {
+                        Some(new_next) => new_next as *mut HSPContainer,
+                        None => break,
+                    };
                     continue;
                 }
 
                 if query_gap > 0 {
-                    let can_try_gap_splice = h
-                        .hsp
-                        .map_info
-                        .as_ref()
-                        .and_then(|info| info.subject_overhangs.as_ref())
-                        .and_then(|overhangs| overhangs.right.as_ref())
-                        .is_some_and(|right| query_gap < right.len() as i64)
-                        && h.next.as_ref().is_some_and(|next| {
-                            next.hsp
-                                .map_info
-                                .as_ref()
-                                .and_then(|info| info.subject_overhangs.as_ref())
-                                .and_then(|overhangs| overhangs.left.as_ref())
-                                .is_some_and(|left| query_gap < left.len() as i64)
-                        });
+                    let left_overhang_len = match &next.hsp.map_info {
+                        Some(info) => match &info.subject_overhangs {
+                            Some(overhangs) => match &overhangs.left {
+                                Some(left) => left.len() as i64,
+                                None => 0,
+                            },
+                            None => 0,
+                        },
+                        None => 0,
+                    };
+                    let can_try_gap_splice =
+                        query_gap < right_overhang_len && query_gap < left_overhang_len;
                     if can_try_gap_splice {
-                        let status = {
-                            let next = h.next.as_deref_mut().expect("checked above");
-                            s_find_splice_junctions_for_gap_using_map_info(
-                                &mut h.hsp,
-                                &mut next.hsp,
-                                Some(query),
-                                query_len,
-                                Some(scoring_opts),
-                            )
-                        };
+                        let status = s_find_splice_junctions_for_gap_using_map_info(
+                            &mut h.hsp,
+                            &mut next.hsp,
+                            Some(query),
+                            query_len,
+                            Some(scoring_opts),
+                        );
                         if status != 0 {
                             return status;
                         }
                     }
-                    let has_splice = h
-                        .hsp
-                        .map_info
-                        .as_ref()
-                        .is_some_and(|info| info.right_edge & MAPPER_SPLICE_SIGNAL != 0);
+                    let has_splice = match &h.hsp.map_info {
+                        Some(info) => info.right_edge & MAPPER_SPLICE_SIGNAL != 0,
+                        None => false,
+                    };
                     if has_splice {
-                        let should_merge = h
-                            .next
-                            .as_ref()
-                            .is_some_and(|next| next.hsp.subject_offset - h.hsp.subject_end < 30);
+                        let should_merge = next.hsp.subject_offset - h.hsp.subject_end < 30;
                         if should_merge {
-                            let old_next_start = h.next.as_ref().map(|next| next.hsp.query_offset);
+                            let old_next_start = next.hsp.query_offset;
                             let status = s_intron_to_gap(h, Some(query), Some(scoring_opts));
                             if status != 0 {
                                 return status;
                             }
-                            if h.next.as_ref().map(|next| next.hsp.query_offset) != old_next_start {
+                            let merged = match h.next.as_deref_mut() {
+                                Some(new_next) => new_next.hsp.query_offset != old_next_start,
+                                None => true,
+                            };
+                            if merged {
                                 continue;
                             }
                         }
-                        h_ptr = h.next.as_deref_mut().expect("checked above") as *mut HSPContainer;
+                        h_ptr = match h.next.as_deref_mut() {
+                            Some(new_next) => new_next as *mut HSPContainer,
+                            None => break,
+                        };
                         continue;
                     }
-                    let status = {
-                        let next = h.next.as_deref_mut().expect("checked above");
-                        s_trim_overlap(&mut h.hsp, &mut next.hsp, Some(query))
-                    };
+                    let status = s_trim_overlap(&mut h.hsp, &mut next.hsp, Some(query));
                     if status != 0 {
                         return status;
                     }
-                    h_ptr = h.next.as_deref_mut().expect("checked above") as *mut HSPContainer;
+                    h_ptr = match h.next.as_deref_mut() {
+                        Some(new_next) => new_next as *mut HSPContainer,
+                        None => break,
+                    };
                     continue;
                 }
 
-                let status = {
-                    let next = h.next.as_deref_mut().expect("checked above");
-                    s_trim_overlap(&mut h.hsp, &mut next.hsp, Some(query))
-                };
+                let status = s_trim_overlap(&mut h.hsp, &mut next.hsp, Some(query));
                 if status != 0 {
                     return status;
                 }
-                h_ptr = h.next.as_deref_mut().expect("checked above") as *mut HSPContainer;
+                h_ptr = match h.next.as_deref_mut() {
+                    Some(new_next) => new_next as *mut HSPContainer,
+                    None => break,
+                };
             }
         }
 
@@ -3752,13 +3753,6 @@ pub fn s_extend_alignment(
     0
 }
 
-fn mapper_query_base(query: &[u8], pos: i32, query_len: i32) -> Option<u8> {
-    if pos < 0 || pos >= query_len {
-        return None;
-    }
-    query.get(pos as usize).copied()
-}
-
 /// Variant of [`s_find_splice_junctions_for_gap`] that reads overhangs from
 /// the C-shaped `hsp->map_info` field now represented on Rust HSPs.
 /// blast-rs: Native helper adapting Rust HSP map-info storage to the C-shaped port.
@@ -3819,11 +3813,21 @@ pub fn s_find_splice_junctions_for_gap(
         return -1;
     };
 
-    let query_len = query_len.max(0).min(query.len() as i32);
-    let query_gap = second.query_offset.saturating_sub(first.query_end);
-    if query_gap < 0 {
+    if query_len < 0 || query_len as usize > query.len() {
+        return -1;
+    }
+    if first_right.len() < 2 || second_left.len() < 2 {
+        return -1;
+    }
+
+    let query_gap_i64 = second.query_offset as i64 - first.query_end as i64;
+    if query_gap_i64 < 0 {
         return 0;
     }
+    if query_gap_i64 > i32::MAX as i64 {
+        return 0;
+    }
+    let query_gap = query_gap_i64 as i32;
     if query_gap > first_right.len() as i32 - 2 || query_gap > second_left.len() as i32 - 2 {
         return 0;
     }
@@ -3831,52 +3835,54 @@ pub fn s_find_splice_junctions_for_gap(
     const SIGNALS: [u8; 2] = [0xb2, 0x71];
     let first_len = first_right.len() as i32;
     let second_len = second_left.len() as i32;
+    let mut found = false;
+    let mut signal = 0u8;
 
-    for q in 0..4 {
-        if first.query_end.saturating_sub(q) <= first.query_offset {
+    let mut q = 0;
+    while !found && q < 4 {
+        if first.query_end - q <= first.query_offset {
             break;
         }
-        let Some(high) = (match q {
-            0 => first_right
-                .first()
-                .zip(first_right.get(1))
-                .map(|(a, b)| (*a << 6) | (*b << 4)),
-            1 => mapper_query_base(query, first.query_end.saturating_sub(1), query_len)
-                .zip(first_right.first().copied())
-                .map(|(a, b)| (a << 6) | (b << 4)),
-            _ => mapper_query_base(query, first.query_end.saturating_sub(q), query_len)
-                .zip(mapper_query_base(
-                    query,
-                    first.query_end.saturating_sub(q).saturating_add(1),
-                    query_len,
-                ))
-                .map(|(a, b)| (a << 6) | (b << 4)),
-        }) else {
-            continue;
-        };
 
-        for &signal in &SIGNALS {
-            if high != (signal & 0xf0) {
+        let mut k = 0;
+        while !found && k < SIGNALS.len() {
+            let mut seq = if q == 0 {
+                (first_right[0] << 6) | (first_right[1] << 4)
+            } else if q == 1 {
+                (query[(first.query_end - 1) as usize] << 6) | (first_right[0] << 4)
+            } else if q > 1 {
+                (query[(first.query_end - q) as usize] << 6)
+                    | (query[(first.query_end - q + 1) as usize] << 4)
+            } else {
+                return -1;
+            };
+
+            if seq != (SIGNALS[k] & 0xf0) {
+                k += 1;
                 continue;
             }
-            let start = second_len
-                .saturating_sub(1)
-                .saturating_sub(query_gap)
-                .saturating_sub(2)
-                .saturating_sub(q);
-            let lo = start.saturating_sub(1).max(0);
-            let hi = start.saturating_add(1).min(second_len.saturating_sub(2));
-            for i in lo..=hi {
-                let low = (second_left[i as usize] << 2) | second_left[i as usize + 1];
-                if high | low != signal {
+
+            let start = second_len - 1 - query_gap - 2 - q;
+            let mut i = if start - 1 > 0 { start - 1 } else { 0 };
+            let hi = if start + 1 < second_len - 2 {
+                start + 1
+            } else {
+                second_len - 2
+            };
+            while i <= hi {
+                seq &= 0xf0;
+                seq |= (second_left[i as usize] << 2) | second_left[(i + 1) as usize];
+                if seq != SIGNALS[k] {
+                    i += 1;
                     continue;
                 }
-                let subject_gap = second_len
-                    .saturating_sub(i.saturating_add(2))
-                    .saturating_add(q);
-                if query_gap.abs_diff(subject_gap) > 1 {
+                let subject_gap = second_len - (i + 2) + q;
+                if query_gap - subject_gap < -1 || query_gap - subject_gap > 1 {
+                    i += 1;
                     continue;
                 }
+
+                found = true;
                 if q > 0 {
                     let status = s_trim_hsp(
                         first,
@@ -3892,8 +3898,6 @@ pub fn s_find_splice_junctions_for_gap(
                         return status;
                     }
                 }
-                let query_ext = second.query_offset.saturating_sub(first.query_end);
-                let subject_ext = second_len.saturating_sub(i.saturating_add(2));
                 {
                     let info = second
                         .map_info
@@ -3905,76 +3909,77 @@ pub fn s_find_splice_junctions_for_gap(
                 let status = s_extend_alignment(
                     second,
                     Some(query),
-                    second.query_offset.saturating_sub(query_ext),
-                    second.query_offset.saturating_sub(1),
-                    0,
-                    subject_ext.saturating_sub(1),
+                    first.query_end,
+                    second.query_offset - 1,
+                    i + 2,
+                    second_len - 1,
                     Some(score_opts),
                     true,
                 );
-                if status == 0 {
-                    mapper_set_splice_signal(first, second, signal);
+                if status != 0 {
+                    return status;
                 }
-                return status;
-            }
-        }
-    }
-
-    for q in 0..4 {
-        if second.query_offset.saturating_add(q) >= second.query_end {
-            break;
-        }
-        let Some(low) = (match q {
-            0 => second_left
-                .get(second_left.len().saturating_sub(2))
-                .zip(second_left.last())
-                .map(|(a, b)| (*a << 2) | *b),
-            1 => second_left
-                .last()
-                .copied()
-                .zip(mapper_query_base(query, second.query_offset, query_len))
-                .map(|(a, b)| (a << 2) | b),
-            _ => mapper_query_base(
-                query,
-                second.query_offset.saturating_add(q).saturating_sub(2),
-                query_len,
-            )
-            .zip(mapper_query_base(
-                query,
-                second.query_offset.saturating_add(q).saturating_sub(1),
-                query_len,
-            ))
-            .map(|(a, b)| (a << 2) | b),
-        }) else {
-            continue;
-        };
-
-        for &signal in &SIGNALS {
-            if low != (signal & 0x0f) {
-                continue;
-            }
-            if q > 1
-                && second
-                    .map_info
-                    .as_ref()
-                    .and_then(|info| info.edits.as_ref())
-                    .and_then(|edits| edits.edits.first())
-                    .is_some_and(|edit| edit.query_pos < q - 2)
-            {
+                signal = seq;
                 break;
             }
-            let end = query_gap.saturating_add(q);
-            let lo = end.saturating_sub(1).max(0);
-            let hi = end.saturating_add(1).min(first_len.saturating_sub(2));
-            for i in lo..=hi {
-                let high = (first_right[i as usize] << 6) | (first_right[i as usize + 1] << 4);
-                if high | low != signal {
+            k += 1;
+        }
+        q += 1;
+    }
+
+    q = 0;
+    while !found && q < 4 {
+        if second.query_offset + q >= second.query_end {
+            break;
+        }
+
+        let mut k = 0;
+        while !found && k < SIGNALS.len() {
+            let mut seq = if q == 0 {
+                (second_left[(second_len - 2) as usize] << 2)
+                    | second_left[(second_len - 1) as usize]
+            } else if q == 1 {
+                (second_left[(second_len - 1) as usize] << 2) | query[second.query_offset as usize]
+            } else if q > 1 {
+                if let Some(info) = second.map_info.as_ref() {
+                    if let Some(edits) = info.edits.as_ref() {
+                        if !edits.edits.is_empty() && edits.edits[0].query_pos < q - 2 {
+                            break;
+                        }
+                    }
+                }
+                (query[(second.query_offset + q - 2) as usize] << 2)
+                    | query[(second.query_offset + q + 1 - 2) as usize]
+            } else {
+                return -1;
+            };
+
+            if seq != (SIGNALS[k] & 0x0f) {
+                k += 1;
+                continue;
+            }
+
+            let end = query_gap + q;
+            let mut i = if end - 1 > 0 { end - 1 } else { 0 };
+            let hi = if end + 1 < first_len - 2 {
+                end + 1
+            } else {
+                first_len - 2
+            };
+            while i <= hi {
+                seq &= 0x0f;
+                seq |= (first_right[i as usize] << 6) | (first_right[(i + 1) as usize] << 4);
+                if seq != SIGNALS[k] {
+                    i += 1;
                     continue;
                 }
-                let subject_gap = i.saturating_sub(q);
-                if query_gap.abs_diff(subject_gap) > 1 {
+                let subject_gap = i - q;
+                if query_gap - subject_gap < -1 || query_gap - subject_gap > 1 {
+                    i += 1;
                     continue;
                 }
+
+                found = true;
                 if q > 0 {
                     let status = s_trim_hsp(
                         second,
@@ -3990,7 +3995,6 @@ pub fn s_find_splice_junctions_for_gap(
                         return status;
                     }
                 }
-                let query_ext = second.query_offset.saturating_sub(first.query_end);
                 {
                     let info = first
                         .map_info
@@ -4003,21 +4007,29 @@ pub fn s_find_splice_junctions_for_gap(
                     first,
                     Some(query),
                     first.query_end,
-                    first.query_end.saturating_add(query_ext).saturating_sub(1),
+                    second.query_offset - 1,
                     0,
-                    i.saturating_sub(1),
+                    i - 1,
                     Some(score_opts),
                     false,
                 );
-                if status == 0 {
-                    mapper_set_splice_signal(first, second, signal);
+                if status != 0 {
+                    return status;
                 }
-                return status;
+                signal = seq;
+                break;
             }
+            k += 1;
         }
+        q += 1;
     }
 
-    mapper_clear_splice_signal(first, second);
+    if found {
+        mapper_set_splice_signal(first, second, signal);
+    } else {
+        mapper_clear_splice_signal(first, second);
+    }
+
     0
 }
 

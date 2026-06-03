@@ -2311,90 +2311,92 @@ pub fn s_blast_na_hash_lookup_retrieve_hits(
     s_off: i32,
     offset_pairs: &mut Vec<OffsetPair>,
 ) -> i32 {
-    let pv_array_bts = lookup.pv_array_bts.max(0) as usize;
+    let pv_array_bts = if lookup.pv_array_bts > 0 {
+        lookup.pv_array_bts as usize
+    } else {
+        0
+    };
     if !test_pv_bit(&lookup.pv, u64::from(index), pv_array_bts) {
         return 0;
     }
 
     let hashed_index = fnv_hash(&index.to_ne_bytes(), lookup.mask as u32) as usize;
-    let Some(cell) = lookup.thick_backbone.get(hashed_index) else {
+    if hashed_index >= lookup.thick_backbone.len() {
         return 0;
-    };
+    }
+    let cell = &lookup.thick_backbone[hashed_index];
     if cell.num_words <= 0 {
         return 0;
     }
 
-    let before = offset_pairs.len();
+    let mut num_hits = 0;
+    let mut cursor = -1i32;
     if cell.num_words as usize <= NA_WORDS_PER_HASH {
         let mut start = 0usize;
-        for word_index in 0..cell.num_words.max(0) as usize {
-            let num_offsets = cell.num_offsets[word_index].max(0) as usize;
+        let mut word_index = 0usize;
+        while word_index < cell.num_words as usize {
+            let num_offsets = if cell.num_offsets[word_index] > 0 {
+                cell.num_offsets[word_index] as usize
+            } else {
+                0
+            };
             if cell.words[word_index] == index {
                 if num_offsets > 0 {
-                    for offset in cell.offsets.iter().skip(start).take(num_offsets) {
+                    let mut j = 0usize;
+                    while j < num_offsets {
                         offset_pairs.push(OffsetPair {
-                            query_offset: *offset,
+                            query_offset: cell.offsets[start + j],
                             subject_offset: s_off,
                         });
+                        num_hits += 1;
+                        j += 1;
                     }
                 } else {
-                    let cursor = cell.offsets[0].max(0) as usize;
-                    na_hash_lookup_retrieve_overflow_word(
-                        lookup,
-                        cursor,
-                        cell.num_words,
-                        index,
-                        s_off,
-                        offset_pairs,
-                    );
+                    cursor = cell.offsets[0];
                 }
                 break;
             }
-            start = start.saturating_add(num_offsets);
+            start += num_offsets;
+            word_index += 1;
         }
     } else {
-        let cursor = cell.offsets[0].max(0) as usize;
-        na_hash_lookup_retrieve_overflow_word(
-            lookup,
-            cursor,
-            cell.num_words,
-            index,
-            s_off,
-            offset_pairs,
-        );
+        cursor = cell.offsets[0];
     }
 
-    offset_pairs.len().saturating_sub(before) as i32
-}
-
-fn na_hash_lookup_retrieve_overflow_word(
-    lookup: &BlastNaHashLookupTable,
-    mut cursor: usize,
-    num_words: i8,
-    index: u32,
-    s_off: i32,
-    offset_pairs: &mut Vec<OffsetPair>,
-) {
-    for _ in 0..num_words.max(0) {
-        let Some(&word) = lookup.overflow.get(cursor) else {
-            return;
-        };
-        let Some(&num_offsets) = lookup.overflow.get(cursor + 1) else {
-            return;
-        };
-        let num_offsets = num_offsets.max(0) as usize;
-        cursor = cursor.saturating_add(2);
-        if word as u32 == index {
-            for offset in lookup.overflow.iter().skip(cursor).take(num_offsets) {
+    if cursor >= 0 {
+        let mut overflow_index = cursor as usize;
+        let mut k = 0;
+        while k < cell.num_words {
+            if overflow_index + 1 >= lookup.overflow.len() {
+                break;
+            }
+            let word = lookup.overflow[overflow_index] as u32;
+            let num_offsets = lookup.overflow[overflow_index + 1];
+            let num_offsets_usize = if num_offsets > 0 {
+                num_offsets as usize
+            } else {
+                0
+            };
+            if word != index {
+                overflow_index += num_offsets_usize + 2;
+                k += 1;
+                continue;
+            }
+            overflow_index += 2;
+            let mut i = 0usize;
+            while i < num_offsets_usize && overflow_index + i < lookup.overflow.len() {
                 offset_pairs.push(OffsetPair {
-                    query_offset: *offset,
+                    query_offset: lookup.overflow[overflow_index + i],
                     subject_offset: s_off,
                 });
+                num_hits += 1;
+                i += 1;
             }
-            return;
+            break;
         }
-        cursor = cursor.saturating_add(num_offsets);
     }
+
+    num_hits
 }
 
 /// Port of NCBI static `s_BlastNaHashScanSubject_Any`

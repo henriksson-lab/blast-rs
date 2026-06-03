@@ -415,6 +415,11 @@ pub struct JumperGapAlign {
     pub left_prelim_block: Option<JumperPrelimEditBlock>,
     pub right_prelim_block: Option<JumperPrelimEditBlock>,
     pub table: Vec<u32>,
+    pub query_start: i32,
+    pub query_stop: i32,
+    pub subject_start: i32,
+    pub subject_stop: i32,
+    pub score: i32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -962,6 +967,11 @@ pub fn jumper_gap_align_new(size: i32) -> Option<JumperGapAlign> {
         left_prelim_block: Some(left_prelim_block),
         right_prelim_block: Some(right_prelim_block),
         table,
+        query_start: 0,
+        query_stop: 0,
+        subject_start: 0,
+        subject_stop: 0,
+        score: 0,
     })
 }
 
@@ -1756,26 +1766,19 @@ pub fn s_create_hsp_for_word_hit(
 
     let mut edit_script = GapEditScript::new();
     edit_script.push_raw(GapAlignOpType::Sub, length);
-    let mut hsp = crate::hspstream::Hsp {
-        score: length,
-        num_ident: length,
-        bit_score: 0.0,
-        evalue: 0.0,
-        query_offset: q_offset,
-        query_end: q_end,
-        query_gapped_start: q_offset,
-        subject_offset: s_offset,
-        subject_end: s_end,
-        subject_gapped_start: s_offset,
+    let mut hsp = crate::hspstream::blast_hsp_init(
+        q_offset,
+        q_end,
+        s_offset,
+        s_end,
+        q_offset,
+        s_offset,
         context,
-        query_frame,
-        subject_frame,
-        num_gaps: 0,
-        comp_adjustment_method: 0,
-        edit_script: Some(edit_script),
-        pat_info: None,
-        map_info: None,
-    };
+        query_frame as i16,
+        subject_frame as i16,
+        length,
+        Some(edit_script),
+    );
     let mut map_info = crate::hspstream::blast_hsp_mapping_info_new();
     let mut edits = JumperEditsBlock::default();
     for i in 0..length {
@@ -1856,26 +1859,19 @@ pub fn s_create_hsp(
         return None;
     }
     let edit_script = jumper_prelim_edit_block_to_gap_edit_script(left, right);
-    let mut hsp = crate::hspstream::Hsp {
-        score,
-        num_ident: num_identical,
-        bit_score: 0.0,
-        evalue: 0.0,
-        query_offset: query_start,
-        query_end: query_stop,
-        query_gapped_start: query_start,
-        subject_offset: subject_start,
-        subject_end: subject_stop,
-        subject_gapped_start: subject_start,
+    let mut hsp = crate::hspstream::blast_hsp_init(
+        query_start,
+        query_stop,
+        subject_start,
+        subject_stop,
+        query_start,
+        subject_start,
         context,
-        query_frame,
-        subject_frame,
-        num_gaps: 0,
-        comp_adjustment_method: 0,
+        query_frame as i16,
+        subject_frame as i16,
+        score,
         edit_script,
-        pat_info: None,
-        map_info: None,
-    };
+    );
     let mut map_info = crate::hspstream::blast_hsp_mapping_info_new();
     map_info.edits = jumper_find_edits(
         query_seq,
@@ -1978,7 +1974,8 @@ fn s_create_short_read_indexed_hsp(
     Some(hsp)
 }
 
-/// blast-rs: Mapper rescue base matcher with ambiguous-query handling; not a direct NCBI C port.
+#[cfg(test)]
+/// blast-rs: Mapper rescue base matcher with ambiguous-query handling; test mirror of inline C condition.
 fn jumper_base_matches_or_ambiguous(query_base: u8, subject: &[u8], subject_pos: i32) -> bool {
     query_base & 0xfc != 0
         || (subject_pos >= 0
@@ -1986,8 +1983,8 @@ fn jumper_base_matches_or_ambiguous(query_base: u8, subject: &[u8], subject_pos:
             && query_base == crate::encoding::ncbi2na_base_at(subject, subject_pos as usize))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-/// blast-rs: Optional small-word rescue around saved Jumper HSPs; not a direct NCBI C port.
 fn blast_na_extend_jumper_small_word_rescue(
     saved_hsp: &crate::hspstream::Hsp,
     s_index: &SubjectIndex,
@@ -2313,6 +2310,11 @@ fn blast_na_extend_jumper_small_word_rescue(
 pub fn subject_index_iterator_free(
     _: Option<SubjectIndexIterator>,
 ) -> Option<SubjectIndexIterator> {
+    None
+}
+
+/// Rust ownership equivalent of NCBI `SubjectIndexFree`.
+pub fn subject_index_free(_: Option<SubjectIndex>) -> Option<SubjectIndex> {
     None
 }
 
@@ -3999,53 +4001,30 @@ pub fn jumper_gapped_alignment_compressed_with_traceback(
         }
     }
 
-    jumper.table.clear();
-    jumper.table.extend_from_slice(&[
-        score as u32,
-        query_align_start as u32,
-        query_align_stop as u32,
-        subject_align_start as u32,
-        subject_align_stop as u32,
-    ]);
+    jumper.score = score;
+    jumper.query_start = query_align_start;
+    jumper.query_stop = query_align_stop;
+    jumper.subject_start = subject_align_start;
+    jumper.subject_stop = subject_align_stop;
     0
 }
 
-/// blast-rs: Lookup word-length adapter for Jumper extension paths; not a direct NCBI C port.
-fn jumper_extend_lengths(lookup_wrap: &crate::lookup::LookupTableWrap) -> Option<(i32, i32)> {
-    match lookup_wrap {
-        crate::lookup::LookupTableWrap::Na(table) => {
-            Some((table.word_length, table.lut_word_length))
-        }
-        crate::lookup::LookupTableWrap::NaHash(table) => {
-            Some((table.word_length, table.lut_word_length))
-        }
-        crate::lookup::LookupTableWrap::SmallNa(table) => Some((
-            table.word_length,
-            crate::lookup::small_na_lut_word_length(table),
-        )),
-        crate::lookup::LookupTableWrap::Megablast(table) => {
-            Some((table.word_length, table.lut_word_length))
-        }
-        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => None,
-    }
-}
-
-/// blast-rs: Decodes Rust scratch-table alignment outputs; not a direct NCBI C port.
+/// Rust accessor for `BlastGapAlignStruct` alignment result fields.
 fn jumper_alignment_outputs(jumper: &JumperGapAlign) -> Option<(i32, i32, i32, i32, i32)> {
-    let data = &jumper.table;
-    if data.len() < 5 {
+    if jumper.query_stop < jumper.query_start || jumper.subject_stop < jumper.subject_start {
         return None;
     }
     Some((
-        data[0] as i32,
-        data[1] as i32,
-        data[2] as i32,
-        data[3] as i32,
-        data[4] as i32,
+        jumper.score,
+        jumper.query_start,
+        jumper.query_stop,
+        jumper.subject_start,
+        jumper.subject_stop,
     ))
 }
 
-/// blast-rs: Packed-subject word extraction for lookup scanning; not a direct NCBI C port.
+#[cfg(test)]
+/// blast-rs: Packed-subject word extraction test mirror for C inline word construction.
 fn packed_subject_word(
     subject: &[u8],
     subject_length: i32,
@@ -4124,14 +4103,32 @@ pub fn blast_na_extend_jumper(
     s_range: u32,
     subject_index: Option<&SubjectIndex>,
 ) -> i32 {
+    macro_rules! unpack_subject_base {
+        ($sequence:expr, $pos:expr) => {{
+            let pos = $pos as usize;
+            let byte = $sequence[pos / 4];
+            ((byte << (2 * (pos % 4))) >> 6) & 3
+        }};
+    }
     let _ = word_params;
-    let Some((word_length, lut_word_length)) = jumper_extend_lengths(lookup_wrap) else {
-        return -1;
+    let (word_length, lut_word_length) = match lookup_wrap {
+        crate::lookup::LookupTableWrap::Megablast(table) => {
+            (table.word_length, table.lut_word_length)
+        }
+        crate::lookup::LookupTableWrap::Na(table) => (table.word_length, table.lut_word_length),
+        crate::lookup::LookupTableWrap::NaHash(table) => (table.word_length, table.lut_word_length),
+        crate::lookup::LookupTableWrap::SmallNa(table) => (
+            table.word_length,
+            crate::lookup::small_na_lut_word_length(table),
+        ),
+        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {
+            return -1;
+        }
     };
     if word_length <= 0 || lut_word_length <= 0 || word_length < lut_word_length {
         return -1;
     }
-    if subject_length < 0 || subject_length as usize > subject.len().saturating_mul(4) {
+    if subject_length < 0 || subject_length as usize > subject.len() * 4 {
         return 0;
     }
     let ext_to = word_length - lut_word_length;
@@ -4142,9 +4139,12 @@ pub fn blast_na_extend_jumper(
 
     blast_na_extend_jumper_sort_hits(offset_pairs);
 
-    for pair in offset_pairs.iter().copied() {
-        let mut s_offset = pair.subject_offset;
-        let mut q_offset = pair.query_offset;
+    let num_hits = offset_pairs.len();
+    let mut index = 0usize;
+    while index < num_hits {
+        let mut s_offset = offset_pairs[index].subject_offset;
+        let mut q_offset = offset_pairs[index].query_offset;
+        index += 1;
         if q_offset < 0
             || s_offset < 0
             || q_offset >= query.len() as i32
@@ -4165,7 +4165,7 @@ pub fn blast_na_extend_jumper(
             }
             s_off -= 1;
             let q = q_offset - ext_left - 1;
-            let s_base = crate::encoding::ncbi2na_base_at(subject, s_off as usize);
+            let s_base = unpack_subject_base!(subject, s_off);
             if s_base != query[q as usize] {
                 break;
             }
@@ -4174,16 +4174,16 @@ pub fn blast_na_extend_jumper(
 
         if ext_left < ext_to {
             let mut ext_right = 0;
-            s_off = s_offset.saturating_add(lut_word_length);
-            if s_off.saturating_add(ext_to).saturating_sub(ext_left) > s_range as i32 {
+            s_off = s_offset + lut_word_length;
+            if s_off + ext_to - ext_left > s_range as i32 {
                 continue;
             }
-            let mut q = q_offset.saturating_add(lut_word_length);
-            while ext_right < ext_to.saturating_sub(ext_left) {
+            let mut q = q_offset + lut_word_length;
+            while ext_right < ext_to - ext_left {
                 if q < 0 || q >= query.len() as i32 || s_off < 0 || s_off >= subject_length {
                     break;
                 }
-                let s_base = crate::encoding::ncbi2na_base_at(subject, s_off as usize);
+                let s_base = unpack_subject_base!(subject, s_off);
                 if s_base != query[q as usize] {
                     break;
                 }
@@ -4200,22 +4200,20 @@ pub fn blast_na_extend_jumper(
         s_offset -= ext_left;
 
         let context = crate::queryinfo::bsearch_context_info(q_offset, query_info);
-        let Some(context_info) = query_info.contexts.get(context.max(0) as usize) else {
+        if context < 0 || context as usize >= query_info.contexts.len() {
             continue;
-        };
+        }
+        let context_info = &query_info.contexts[context as usize];
         let query_start = context_info.query_offset;
         let local_q_offset = q_offset - query_start;
         if local_q_offset < 0 {
             continue;
         }
         let query_len = context_info.query_length;
-        let query_slice = query
-            .get(query_start.max(0) as usize..)
-            .and_then(|slice| slice.get(..query_len.max(0) as usize))
-            .unwrap_or(&[]);
-        if query_slice.len() < query_len.max(0) as usize {
+        if query_start < 0 || query_len < 0 || query_start + query_len > query.len() as i32 {
             continue;
         }
+        let query_slice = &query[query_start as usize..(query_start + query_len) as usize];
         let mut right_ungapped_ext_len = 0;
         jumper_gapped_alignment_compressed_with_traceback(
             query_slice,
@@ -4234,129 +4232,364 @@ pub fn blast_na_extend_jumper(
         skip_until = q_offset.saturating_add(right_ungapped_ext_len);
         last_diag = diag;
 
-        if let Some((
+        let score = jumper.score;
+        let query_align_start = jumper.query_start;
+        let query_align_stop = jumper.query_stop;
+        let subject_align_start = jumper.subject_start;
+        let subject_align_stop = jumper.subject_stop;
+        if jumper_good_align(
             score,
             query_align_start,
-            mut query_align_stop,
+            query_align_stop,
             subject_align_start,
-            mut subject_align_stop,
-        )) = jumper_alignment_outputs(jumper)
-        {
-            if jumper_good_align(
-                score,
+            subject_align_stop,
+            num_identical,
+            &hit_params.options,
+            query_len,
+        ) {
+            let Some((new_hsp, _)) = s_create_hsp(
+                query_slice,
+                query_len,
+                context,
+                context_info.frame,
+                subject,
+                subject_length,
+                subject_frame,
+                jumper,
                 query_align_start,
                 query_align_stop,
                 subject_align_start,
                 subject_align_stop,
-                num_identical,
-                &hit_params.options,
-                query_len,
-            ) {
-                let mut hsp_score = score;
-                if std::env::var_os("MAPPER_NO_GAP_SHIFT").is_none() {
-                    s_shift_gaps(
-                        jumper,
-                        query_slice,
-                        subject,
-                        query_align_start,
-                        subject_align_start,
-                        &mut query_align_stop,
-                        &mut subject_align_stop,
-                        &mut hsp_score,
-                        query_len,
-                        subject_length,
-                        score_params.penalty,
-                        &mut num_identical,
-                    );
-                }
-                let Some(left) = jumper.left_prelim_block.as_ref() else {
-                    continue;
-                };
-                let Some(right) = jumper.right_prelim_block.as_ref() else {
-                    continue;
-                };
-                if query_align_start < 0
-                    || subject_align_start < 0
-                    || query_align_stop < query_align_start
-                    || subject_align_stop < subject_align_start
-                    || query_align_stop > query_len
-                    || subject_align_stop > subject_length
-                {
-                    continue;
-                }
-                let edit_script = jumper_prelim_edit_block_to_gap_edit_script(left, right);
-                let mut new_hsp = crate::hspstream::Hsp {
-                    score: hsp_score,
-                    num_ident: num_identical,
-                    bit_score: 0.0,
-                    evalue: 0.0,
-                    query_offset: query_align_start,
-                    query_end: query_align_stop,
-                    query_gapped_start: local_q_offset,
-                    subject_offset: subject_align_start,
-                    subject_end: subject_align_stop,
-                    subject_gapped_start: s_offset,
-                    context,
-                    query_frame: context_info.frame,
-                    subject_frame,
-                    num_gaps: 0,
-                    comp_adjustment_method: 0,
-                    edit_script,
-                    pat_info: None,
-                    map_info: None,
-                };
-                let mut map_info = crate::hspstream::blast_hsp_mapping_info_new();
-                map_info.edits = jumper_find_edits(
-                    query_slice,
-                    subject,
-                    query_align_start,
-                    subject_align_start,
-                    query_align_stop,
-                    subject_align_stop,
-                    left,
-                    right,
-                );
-                if hit_params.options.splice {
-                    jumper_find_splice_signals(
-                        &new_hsp,
-                        &mut map_info,
-                        query_len,
-                        subject,
-                        subject_length,
-                    );
-                    s_save_subject_overhangs(
-                        &new_hsp,
-                        &mut map_info,
-                        subject,
-                        subject_length,
-                        query_len,
-                    );
-                }
-                new_hsp.map_info = Some(map_info);
+                score,
+                score_params.penalty,
+                hit_params.options.splice,
+            ) else {
+                continue;
+            };
+            let saved_hsp = new_hsp.clone();
+            let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+            if status != 0 {
+                break;
+            }
+            if std::env::var_os("MAPPER_USE_SMALL_WORDS") != None {
+                if let Some(s_index) = subject_index {
+                    const SUBJECT_INDEX_WORD_LENGTH: i32 = 4;
+                    const K_MIN_SUBJECT_OVERHANG: i32 = 100;
+                    let k_max_intron_length = hit_params.options.longest_intron;
 
-                let saved_hsp = new_hsp.clone();
-                let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
-                if status != 0 {
-                    break;
-                }
-                if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
-                    if let Some(s_index) = subject_index {
-                        let status = blast_na_extend_jumper_small_word_rescue(
-                            &saved_hsp,
-                            s_index,
-                            context,
-                            query_slice,
-                            context_info.frame,
-                            query_len,
-                            subject,
-                            subject_length,
-                            subject_frame,
-                            score_params,
-                            hit_params.options.longest_intron,
-                            hsp_list,
-                        );
-                        if status < 0 {
-                            return -1;
+                    if query_len - saved_hsp.query_end < 16
+                        && query_len - saved_hsp.query_end >= SUBJECT_INDEX_WORD_LENGTH
+                        && subject_length - saved_hsp.subject_end >= K_MIN_SUBJECT_OVERHANG
+                    {
+                        let mut q = saved_hsp.query_end;
+                        let mut round = 0;
+                        let found = false;
+
+                        if query_len - saved_hsp.query_end < -score_params.penalty {
+                            let mut i = 1;
+                            while i < query_len - saved_hsp.query_end {
+                                if query_slice[(saved_hsp.query_end + i) as usize]
+                                    != unpack_subject_base!(subject, saved_hsp.subject_end + i)
+                                {
+                                    break;
+                                }
+                                i += 1;
+                            }
+
+                            if i > 4 || i == query_len - saved_hsp.query_end {
+                                if let Some((word_hsp, _)) = s_create_hsp_for_word_hit(
+                                    saved_hsp.query_end + 1,
+                                    saved_hsp.subject_end + 1,
+                                    i - 1,
+                                    context,
+                                    query_slice,
+                                    context_info.frame,
+                                    subject,
+                                    subject_length,
+                                    subject_frame,
+                                    query_len,
+                                ) {
+                                    if crate::hspstream::blast_hsp_list_save_hsp(hsp_list, word_hsp)
+                                        != 0
+                                    {
+                                        return -1;
+                                    }
+                                }
+                            }
+                        }
+
+                        while !found && q + SUBJECT_INDEX_WORD_LENGTH <= query_len && round < 2 {
+                            while q + SUBJECT_INDEX_WORD_LENGTH <= query_len {
+                                let mut i = 0;
+                                while i < SUBJECT_INDEX_WORD_LENGTH {
+                                    if query_slice[(q + i) as usize] & 0xfc != 0 {
+                                        q = q + i + 1;
+                                        break;
+                                    }
+                                    i += 1;
+                                }
+                                if i == SUBJECT_INDEX_WORD_LENGTH {
+                                    break;
+                                }
+                            }
+
+                            if q + SUBJECT_INDEX_WORD_LENGTH - 1 >= query_len {
+                                break;
+                            }
+
+                            let mut word = ((query_slice[q as usize] as u32) << 6)
+                                | ((query_slice[(q + 1) as usize] as u32) << 4)
+                                | ((query_slice[(q + 2) as usize] as u32) << 2)
+                                | query_slice[(q + 3) as usize] as u32;
+                            let mut i = 4;
+                            while i < SUBJECT_INDEX_WORD_LENGTH {
+                                word = (word << 2) | query_slice[(q + i) as usize] as u32;
+                                i += 1;
+                            }
+                            let from = saved_hsp.subject_end;
+                            let subject_stop = subject_length - (query_len - q + 1);
+                            let to = if from + k_max_intron_length < subject_stop {
+                                from + k_max_intron_length
+                            } else {
+                                subject_stop
+                            };
+                            if let Some(mut it) =
+                                subject_index_iterator_new(s_index, word, from, to)
+                            {
+                                let mut s_pos = subject_index_iterator_next(&mut it);
+                                while s_pos >= 0 {
+                                    let mut qt = q;
+                                    let mut st = s_pos;
+                                    while qt < query_len
+                                        && st < subject_length
+                                        && (query_slice[qt as usize] & 0xfc != 0
+                                            || query_slice[qt as usize]
+                                                == unpack_subject_base!(subject, st))
+                                    {
+                                        qt += 1;
+                                        st += 1;
+                                    }
+
+                                    if qt == query_len {
+                                        let mut qf = q;
+                                        let mut sf = s_pos;
+                                        while qf >= 0
+                                            && sf >= 0
+                                            && (query_slice[qf as usize] & 0xfc != 0
+                                                || query_slice[qf as usize]
+                                                    == unpack_subject_base!(subject, sf))
+                                        {
+                                            qf -= 1;
+                                            sf -= 1;
+                                        }
+                                        qf += 1;
+                                        sf += 1;
+
+                                        if qt - qf >= 5
+                                            && qf <= saved_hsp.query_end + 1
+                                            && qf > saved_hsp.query_offset
+                                        {
+                                            while qf < qt && query_slice[qf as usize] & 0xfc != 0 {
+                                                qf += 1;
+                                                sf += 1;
+                                            }
+                                            while qt > qf
+                                                && query_slice[(qt - 1) as usize] & 0xfc != 0
+                                            {
+                                                qt -= 1;
+                                            }
+
+                                            if qf < qt {
+                                                if let Some((word_hsp, _)) =
+                                                    s_create_hsp_for_word_hit(
+                                                        qf,
+                                                        sf,
+                                                        qt - qf,
+                                                        context,
+                                                        query_slice,
+                                                        context_info.frame,
+                                                        subject,
+                                                        subject_length,
+                                                        subject_frame,
+                                                        query_len,
+                                                    )
+                                                {
+                                                    if crate::hspstream::blast_hsp_list_save_hsp(
+                                                        hsp_list, word_hsp,
+                                                    ) != 0
+                                                    {
+                                                        return -1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    s_pos = subject_index_iterator_next(&mut it);
+                                }
+                                let _ = subject_index_iterator_free(Some(it));
+                            }
+                            q += 1;
+                            round += 1;
+                        }
+                    }
+
+                    if saved_hsp.query_offset < 16
+                        && saved_hsp.query_offset >= SUBJECT_INDEX_WORD_LENGTH
+                        && saved_hsp.subject_offset >= K_MIN_SUBJECT_OVERHANG
+                    {
+                        let mut q = if saved_hsp.query_offset - SUBJECT_INDEX_WORD_LENGTH > 0 {
+                            saved_hsp.query_offset - SUBJECT_INDEX_WORD_LENGTH
+                        } else {
+                            0
+                        };
+                        let mut round = 0;
+                        let found = false;
+
+                        if saved_hsp.query_offset < -score_params.penalty {
+                            let mut i = 2;
+                            while i < saved_hsp.query_offset - 1 {
+                                if query_slice[(saved_hsp.query_offset - i) as usize]
+                                    != unpack_subject_base!(subject, saved_hsp.subject_offset - i)
+                                {
+                                    break;
+                                }
+                                i += 1;
+                            }
+
+                            if i > 4 || i == saved_hsp.query_offset - 1 {
+                                if let Some((word_hsp, _)) = s_create_hsp_for_word_hit(
+                                    saved_hsp.query_offset - 1 - i,
+                                    saved_hsp.subject_offset - 1 - i,
+                                    i,
+                                    context,
+                                    query_slice,
+                                    context_info.frame,
+                                    subject,
+                                    subject_length,
+                                    subject_frame,
+                                    query_len,
+                                ) {
+                                    if crate::hspstream::blast_hsp_list_save_hsp(hsp_list, word_hsp)
+                                        != 0
+                                    {
+                                        return -1;
+                                    }
+                                }
+                            }
+                        }
+
+                        while !found && q >= 0 && round < 2 {
+                            while q >= 0 {
+                                let mut i = 0;
+                                while i < SUBJECT_INDEX_WORD_LENGTH {
+                                    if query_slice[(q + i) as usize] & 0xfc != 0 {
+                                        q = q + i - SUBJECT_INDEX_WORD_LENGTH;
+                                        break;
+                                    }
+                                    i += 1;
+                                }
+                                if i == SUBJECT_INDEX_WORD_LENGTH {
+                                    break;
+                                }
+                            }
+
+                            if q < 0 {
+                                break;
+                            }
+
+                            let mut word = ((query_slice[q as usize] as u32) << 6)
+                                | ((query_slice[(q + 1) as usize] as u32) << 4)
+                                | ((query_slice[(q + 2) as usize] as u32) << 2)
+                                | query_slice[(q + 3) as usize] as u32;
+                            let mut i = 4;
+                            while i < SUBJECT_INDEX_WORD_LENGTH {
+                                word = (word << 2) | query_slice[(q + i) as usize] as u32;
+                                i += 1;
+                            }
+                            let from = saved_hsp.subject_offset - SUBJECT_INDEX_WORD_LENGTH;
+                            let query_stop = q + 1;
+                            let to = if from - k_max_intron_length > query_stop {
+                                from - k_max_intron_length
+                            } else {
+                                query_stop
+                            };
+                            if let Some(mut it) =
+                                subject_index_iterator_new(s_index, word, from, to)
+                            {
+                                let mut s_pos = subject_index_iterator_prev(&mut it);
+                                while s_pos >= 0 {
+                                    let mut k = q;
+                                    let mut s = s_pos;
+                                    while k >= 0
+                                        && s >= 0
+                                        && (query_slice[k as usize] & 0xfc != 0
+                                            || query_slice[k as usize]
+                                                == unpack_subject_base!(subject, s))
+                                    {
+                                        k -= 1;
+                                        s -= 1;
+                                    }
+
+                                    if k == -1 {
+                                        k += 1;
+                                        s += 1;
+                                        let mut qt = q;
+                                        let mut st = s_pos;
+                                        while qt < query_len
+                                            && st < subject_length
+                                            && (query_slice[qt as usize] & 0xfc != 0
+                                                || query_slice[qt as usize]
+                                                    == unpack_subject_base!(subject, st))
+                                        {
+                                            qt += 1;
+                                            st += 1;
+                                        }
+
+                                        if qt - k >= 5
+                                            && s < saved_hsp.subject_offset
+                                            && saved_hsp.query_offset <= qt + 1
+                                        {
+                                            while k < qt && query_slice[k as usize] & 0xfc != 0 {
+                                                k += 1;
+                                                s += 1;
+                                            }
+                                            while qt > k
+                                                && query_slice[(qt - 1) as usize] & 0xfc != 0
+                                            {
+                                                qt -= 1;
+                                            }
+
+                                            if k < qt {
+                                                if let Some((word_hsp, _)) =
+                                                    s_create_hsp_for_word_hit(
+                                                        k,
+                                                        s,
+                                                        qt - k,
+                                                        context,
+                                                        query_slice,
+                                                        context_info.frame,
+                                                        subject,
+                                                        subject_length,
+                                                        subject_frame,
+                                                        query_len,
+                                                    )
+                                                {
+                                                    if crate::hspstream::blast_hsp_list_save_hsp(
+                                                        hsp_list, word_hsp,
+                                                    ) != 0
+                                                    {
+                                                        return -1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    s_pos = subject_index_iterator_prev(&mut it);
+                                }
+                                let _ = subject_index_iterator_free(Some(it));
+                            }
+                            q -= 1;
+                            round += 1;
                         }
                     }
                 }
@@ -4539,21 +4772,6 @@ fn jumper_na_word_finder_scan_subject(
     }
 }
 
-/// Rust safety equivalent of C's `MapperWordHits` shape assertions.
-fn mapper_word_hits_is_valid(
-    word_hits: &crate::lookup::MapperWordHits,
-    context_count: usize,
-) -> bool {
-    let num_arrays = word_hits.num_arrays.max(0) as usize;
-    word_hits.array_size > 0
-        && word_hits.num_arrays > 0
-        && word_hits.divisor > 0
-        && num_arrays <= word_hits.pair_arrays.len()
-        && num_arrays <= word_hits.num.len()
-        && word_hits.last_diag.len() >= context_count
-        && word_hits.last_pos.len() >= context_count
-}
-
 /// blast-rs: Port-shaped equivalent of NCBI `JumperNaWordFinder`
 /// (na_ungapped.c:1995); delegates hit extension to [`blast_na_extend_jumper`].
 #[allow(clippy::too_many_arguments)]
@@ -4601,30 +4819,34 @@ pub fn jumper_na_word_finder(
     if subject_length < lut_word_length {
         return 0;
     }
-    let subject_index = if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
+    let subject_index = if std::env::var_os("MAPPER_USE_SMALL_WORDS") != None {
         subject_index_new(subject, subject_length, 10000, 4)
     } else {
         None
     };
-    let mut scan_range = [0, 0, subject_length.saturating_sub(lut_word_length)];
+    let mut scan_range = [0, 0, subject_length - lut_word_length];
     if let Some(ranges) = subject_ranges {
         if ranges.is_empty() {
             return 0;
         }
-        scan_range[1] = ranges[0]
-            .left
-            .saturating_add(word_length)
-            .saturating_sub(lut_word_length);
-        scan_range[2] = ranges[0].right.saturating_sub(lut_word_length);
+        scan_range[1] = ranges[0].left + word_length - lut_word_length;
+        scan_range[2] = ranges[0].right - lut_word_length;
     }
     let read_is_query = (query_info.max_length as i64) < (subject_length as i64);
     let subject_index_ref = subject_index.as_ref();
 
     if let Some(word_hits) = word_hits {
-        if !mapper_word_hits_is_valid(word_hits, query_info.contexts.len()) {
+        let num_arrays = word_hits.num_arrays as usize;
+        if word_hits.array_size <= 0
+            || word_hits.num_arrays <= 0
+            || word_hits.divisor <= 0
+            || num_arrays > word_hits.pair_arrays.len()
+            || num_arrays > word_hits.num.len()
+            || word_hits.last_diag.len() < query_info.contexts.len()
+            || word_hits.last_pos.len() < query_info.contexts.len()
+        {
             return -1;
         }
-        let num_arrays = word_hits.num_arrays as usize;
         for value in &mut word_hits.num {
             *value = 0;
         }
@@ -4632,12 +4854,15 @@ pub fn jumper_na_word_finder(
             *value = 0;
         }
 
-        while subject_ranges
-            .map(|ranges| {
+        loop {
+            let scanning = if let Some(ranges) = subject_ranges {
                 s_determine_scanning_offsets(ranges, word_length, lut_word_length, &mut scan_range)
-            })
-            .unwrap_or(scan_range[1] <= scan_range[2])
-        {
+            } else {
+                scan_range[1] <= scan_range[2]
+            };
+            if !scanning {
+                break;
+            }
             let offset_pairs = jumper_na_word_finder_scan_subject(
                 lookup_wrap,
                 subject,
@@ -4665,10 +4890,7 @@ pub fn jumper_na_word_finder(
                 let last_p = word_hits.last_pos[context_index];
                 word_hits.last_diag[context_index] = diag;
                 word_hits.last_pos[context_index] = s_off;
-                if last_p != 0
-                    && last_d == diag
-                    && s_off.saturating_sub(last_p) < lut_word_length.saturating_add(1)
-                {
+                if last_p != 0 && last_d == diag && s_off - last_p < lut_word_length + 1 {
                     continue;
                 }
 
@@ -4677,7 +4899,11 @@ pub fn jumper_na_word_finder(
                     return -1;
                 }
                 if word_hits.num[index] >= word_hits.array_size {
-                    let num = word_hits.num[index].max(0) as usize;
+                    let num = if word_hits.num[index] > 0 {
+                        word_hits.num[index] as usize
+                    } else {
+                        0
+                    };
                     let extended = blast_na_extend_jumper(
                         &mut word_hits.pair_arrays[index][..num],
                         word_params,
@@ -4692,7 +4918,11 @@ pub fn jumper_na_word_finder(
                         align_params,
                         jumper,
                         hsp_list,
-                        (scan_range[2] + lut_word_length).max(0) as u32,
+                        if scan_range[2] + lut_word_length > 0 {
+                            (scan_range[2] + lut_word_length) as u32
+                        } else {
+                            0
+                        },
                         subject_index_ref,
                     );
                     word_hits.num[index] = 0;
@@ -4702,7 +4932,11 @@ pub fn jumper_na_word_finder(
                     hits_extended += extended;
                 }
 
-                let slot = word_hits.num[index].max(0) as usize;
+                let slot = if word_hits.num[index] > 0 {
+                    word_hits.num[index] as usize
+                } else {
+                    0
+                };
                 if slot < word_hits.pair_arrays[index].len() {
                     word_hits.pair_arrays[index][slot] = pair;
                 } else {
@@ -4713,11 +4947,15 @@ pub fn jumper_na_word_finder(
             if !read_is_query {
                 break;
             }
-            scan_range[1] = scan_range[2].saturating_add(1);
+            scan_range[1] = scan_range[2] + 1;
         }
 
         for index in 0..num_arrays {
-            let num = word_hits.num[index].max(0) as usize;
+            let num = if word_hits.num[index] > 0 {
+                word_hits.num[index] as usize
+            } else {
+                0
+            };
             if num > 0 {
                 let extended = blast_na_extend_jumper(
                     &mut word_hits.pair_arrays[index][..num],
@@ -4733,7 +4971,11 @@ pub fn jumper_na_word_finder(
                     align_params,
                     jumper,
                     hsp_list,
-                    (scan_range[2] + lut_word_length).max(0) as u32,
+                    if scan_range[2] + lut_word_length > 0 {
+                        (scan_range[2] + lut_word_length) as u32
+                    } else {
+                        0
+                    },
                     subject_index_ref,
                 );
                 word_hits.num[index] = 0;
@@ -4745,12 +4987,15 @@ pub fn jumper_na_word_finder(
             word_hits.num[index] = 0;
         }
     } else {
-        while subject_ranges
-            .map(|ranges| {
+        loop {
+            let scanning = if let Some(ranges) = subject_ranges {
                 s_determine_scanning_offsets(ranges, word_length, lut_word_length, &mut scan_range)
-            })
-            .unwrap_or(scan_range[1] <= scan_range[2])
-        {
+            } else {
+                scan_range[1] <= scan_range[2]
+            };
+            if !scanning {
+                break;
+            }
             let mut offset_pairs = jumper_na_word_finder_scan_subject(
                 lookup_wrap,
                 subject,
@@ -4773,7 +5018,11 @@ pub fn jumper_na_word_finder(
                 align_params,
                 jumper,
                 hsp_list,
-                (scan_range[2] + lut_word_length).max(0) as u32,
+                if scan_range[2] + lut_word_length > 0 {
+                    (scan_range[2] + lut_word_length) as u32
+                } else {
+                    0
+                },
                 subject_index_ref,
             );
             if extended < 0 {
@@ -4783,26 +5032,27 @@ pub fn jumper_na_word_finder(
             if !read_is_query {
                 break;
             }
-            scan_range[1] = scan_range[2].saturating_add(1);
+            scan_range[1] = scan_range[2] + 1;
         }
     }
 
-    crate::diagnostics::blast_ungapped_stats_update(
-        ungapped_stats.as_deref_mut(),
-        total_hits,
-        0,
-        0,
-    );
+    let ungapped_stats_for_update = match &mut ungapped_stats {
+        Some(stats) => Some(&mut **stats),
+        None => None,
+    };
+    crate::diagnostics::blast_ungapped_stats_update(ungapped_stats_for_update, total_hits, 0, 0);
     if let Some(gapped_stats) = gapped_stats {
         gapped_stats.extensions = hits_extended;
-        if let Some(ungapped_stats) = ungapped_stats.as_deref_mut() {
+        if let Some(ungapped_stats) = ungapped_stats {
             ungapped_stats.good_init_extends = hits_extended;
         }
     }
+    let _ = subject_index_free(subject_index);
     0
 }
 
-/// blast-rs: Extracts an unambiguous word from unpacked query bases; not a direct NCBI C port.
+#[cfg(test)]
+/// blast-rs: Extracts an unambiguous word from unpacked query bases for tests.
 fn unpacked_query_word(query: &[u8], start: i32, word_size: i32) -> Option<u32> {
     if start < 0 || word_size <= 0 {
         return None;
@@ -4842,8 +5092,15 @@ pub fn do_anchored_scan(
     align_params: JumperAlignParams,
     hsp_list: &mut crate::hspstream::HspList,
 ) -> i32 {
+    macro_rules! unpack_subject_base {
+        ($sequence:expr, $pos:expr) => {{
+            let pos = $pos as usize;
+            let byte = $sequence[pos / 4];
+            ((byte << (2 * (pos % 4))) >> 6) & 3
+        }};
+    }
     const WORD_SIZE: i32 = 12;
-    const MAX_NUM_MATCHES: usize = 100;
+    const MAX_NUM_MATCHES: usize = 10;
     if query_len <= 0
         || query_len as usize > query_seq.len()
         || query_from < 0
@@ -4854,77 +5111,96 @@ pub fn do_anchored_scan(
         return 0;
     }
     let is_right = subject_from < subject_to;
-    let big_word_size = if is_right {
-        query_len
-            .saturating_sub(query_from)
-            .saturating_sub(5)
-            .max(WORD_SIZE)
-            .min(24)
+    let mut big_word_size = if is_right {
+        query_len - query_from - 5
     } else {
-        query_from.saturating_sub(5).max(WORD_SIZE).min(24)
+        query_from - 5
     };
+    if big_word_size < WORD_SIZE {
+        big_word_size = WORD_SIZE;
+    }
+    if big_word_size > 24 {
+        big_word_size = 24;
+    }
     let scan_step = if is_right {
-        big_word_size.saturating_sub(WORD_SIZE).saturating_add(1)
+        big_word_size - WORD_SIZE + 1
     } else {
-        big_word_size
-            .saturating_sub(WORD_SIZE)
-            .saturating_add(1)
-            .saturating_neg()
+        -(big_word_size - WORD_SIZE + 1)
     };
     let scan_to = if is_right {
-        subject_to.min(subject_len.saturating_sub(1))
+        let last_subject_pos = subject_len - 1;
+        if subject_to < last_subject_pos {
+            subject_to
+        } else {
+            last_subject_pos
+        }
     } else {
         subject_to
     };
 
     if (is_right
-        && (query_len.saturating_sub(query_from).saturating_add(1) < big_word_size
-            || scan_to.saturating_sub(subject_from) < big_word_size))
+        && ((query_len as i64) - (query_from as i64) + 1 < big_word_size as i64
+            || (scan_to as i64) - (subject_from as i64) < big_word_size as i64))
         || (!is_right
-            && (query_from < big_word_size || subject_from.saturating_sub(scan_to) < big_word_size))
+            && (query_from < big_word_size
+                || (subject_from as i64) - (scan_to as i64) < big_word_size as i64))
     {
         return 0;
     }
 
-    let mut words = Vec::<(u32, i32)>::new();
+    let mut word = [0u32; MAX_NUM_MATCHES];
+    let mut query_pos = [0i32; MAX_NUM_MATCHES];
+    let mut num_words = 0usize;
     if is_right {
         let mut q = query_from;
-        while q + big_word_size < query_len && words.len() < MAX_NUM_MATCHES {
+        while q + big_word_size < query_len && num_words < MAX_NUM_MATCHES {
             while q + big_word_size <= query_len {
                 let mut ok = true;
-                for i in 0..big_word_size {
-                    if query_seq[(q + i) as usize] & 0xfc != 0 {
-                        q += i + 1;
+                let mut j = 0;
+                while j < big_word_size {
+                    if query_seq[(q + j) as usize] & 0xfc != 0 {
+                        q = q + j + 1;
                         ok = false;
                         break;
                     }
+                    j += 1;
                 }
                 if ok {
                     break;
                 }
                 q += 1;
             }
-            if q.saturating_add(big_word_size).saturating_sub(1) >= query_len {
+            if q + big_word_size - 1 >= query_len {
                 break;
             }
-            if let Some(word) = unpacked_query_word(query_seq, q, WORD_SIZE) {
-                if word != 0 && word != 0x00ff_ffff {
-                    words.push((word, q));
-                }
+            word[num_words] = ((query_seq[q as usize] as u32) << 6)
+                | ((query_seq[(q + 1) as usize] as u32) << 4)
+                | ((query_seq[(q + 2) as usize] as u32) << 2)
+                | query_seq[(q + 3) as usize] as u32;
+            let mut j = 4;
+            while j < WORD_SIZE {
+                word[num_words] = (word[num_words] << 2) | query_seq[(q + j) as usize] as u32;
+                j += 1;
+            }
+            if word[num_words] != 0 && word[num_words] != 0x00ff_ffff {
+                query_pos[num_words] = q;
+                num_words += 1;
             }
             q += 1;
         }
     } else {
         let mut q = query_from - big_word_size;
-        while q >= 0 && words.len() < MAX_NUM_MATCHES {
+        while q >= 0 && num_words < MAX_NUM_MATCHES {
             while q >= 0 {
                 let mut ok = true;
-                for i in 0..big_word_size {
-                    if query_seq[(q + i) as usize] & 0xfc != 0 {
-                        q = q.saturating_sub(big_word_size).saturating_add(i);
+                let mut j = 0;
+                while j < big_word_size {
+                    if query_seq[(q + j) as usize] & 0xfc != 0 {
+                        q = q - big_word_size + j;
                         ok = false;
                         break;
                     }
+                    j += 1;
                 }
                 if ok {
                     break;
@@ -4934,49 +5210,82 @@ pub fn do_anchored_scan(
             if q < 0 {
                 break;
             }
-            if let Some(word) = unpacked_query_word(query_seq, q, WORD_SIZE) {
-                if word != 0 && word != 0x00ff_ffff {
-                    words.push((word, q));
-                }
+            word[num_words] = ((query_seq[q as usize] as u32) << 6)
+                | ((query_seq[(q + 1) as usize] as u32) << 4)
+                | ((query_seq[(q + 2) as usize] as u32) << 2)
+                | query_seq[(q + 3) as usize] as u32;
+            let mut j = 4;
+            while j < WORD_SIZE {
+                word[num_words] = (word[num_words] << 2) | query_seq[(q + j) as usize] as u32;
+                j += 1;
+            }
+            if word[num_words] != 0 && word[num_words] != 0x00ff_ffff {
+                query_pos[num_words] = q;
+                num_words += 1;
             }
             q -= 1;
         }
     }
 
-    if words.is_empty() {
+    if num_words == 0 {
         return 0;
     }
 
     let mut best_score = 0;
     let mut best_hsp = None;
+    let mut num_matches = 0;
     let mut i = subject_from;
     while (subject_from < scan_to && i < scan_to) || (subject_from > scan_to && i > scan_to) {
-        let Some(index) = packed_subject_word(subject, subject_len, i, WORD_SIZE) else {
+        if num_matches > MAX_NUM_MATCHES {
+            break;
+        }
+        if i < 0 || i + WORD_SIZE > subject_len {
             i += scan_step;
             continue;
+        }
+        let s = i as usize / 4;
+        let mut w =
+            ((subject[s] as u32) << 16) | ((subject[s + 1] as u32) << 8) | subject[s + 2] as u32;
+        let mut last_idx = 3usize;
+        let num_bytes = WORD_SIZE as usize / 4;
+        while last_idx < num_bytes {
+            w = (w << 8) | subject[s + last_idx] as u32;
+            last_idx += 1;
+        }
+        let index = if i % 4 != 0 {
+            w = (w << 8) | subject[s + last_idx] as u32;
+            let shift = 2 * (4 - (i % 4));
+            (w >> shift) & ((1u32 << (2 * WORD_SIZE)) - 1)
+        } else {
+            w & ((1u32 << (2 * WORD_SIZE)) - 1)
         };
-        let Some((_, q_offset)) = words
-            .iter()
-            .find(|(word, _)| *word as i64 == index)
-            .copied()
-        else {
-            i += scan_step;
-            continue;
-        };
-        let mut k = WORD_SIZE;
-        while k < big_word_size {
-            if query_seq[(q_offset + k) as usize]
-                != crate::encoding::ncbi2na_base_at(subject, (i + k) as usize)
-            {
+
+        let mut k = 0usize;
+        while k < num_words {
+            if index == word[k] {
                 break;
             }
             k += 1;
         }
-        if k < big_word_size {
+        if k >= num_words {
+            i += scan_step;
+            continue;
+        }
+        let q_offset = query_pos[k];
+        let s_offset = i;
+        let mut j = WORD_SIZE;
+        while j < big_word_size {
+            if query_seq[(q_offset + j) as usize] != unpack_subject_base!(subject, s_offset + j) {
+                break;
+            }
+            j += 1;
+        }
+        if j < big_word_size {
             i += scan_step;
             continue;
         }
 
+        num_matches += 1;
         let mut num_identical = 0;
         let mut right_ungapped_ext_len = 0;
         if jumper_gapped_alignment_compressed_with_traceback(
@@ -4985,7 +5294,7 @@ pub fn do_anchored_scan(
             query_len,
             subject_len,
             q_offset,
-            i,
+            s_offset,
             jumper,
             score_params,
             align_params,
@@ -4996,23 +5305,13 @@ pub fn do_anchored_scan(
             i += scan_step;
             continue;
         }
-        let Some((
-            score,
-            query_align_start,
-            query_align_stop,
-            subject_align_start,
-            subject_align_stop,
-        )) = jumper_alignment_outputs(jumper)
-        else {
-            i += scan_step;
-            continue;
-        };
-        if score > best_score {
-            best_score = score;
-            let query_frame = query_info
-                .contexts
-                .get(context.max(0) as usize)
-                .map_or(0, |ctx| ctx.frame);
+        if jumper.score > best_score {
+            best_score = jumper.score;
+            let query_frame = if context >= 0 && (context as usize) < query_info.contexts.len() {
+                query_info.contexts[context as usize].frame
+            } else {
+                0
+            };
             if let Some((hsp, _)) = s_create_hsp(
                 query_seq,
                 query_len,
@@ -5022,11 +5321,11 @@ pub fn do_anchored_scan(
                 subject_len,
                 subject_frame,
                 jumper,
-                query_align_start,
-                query_align_stop,
-                subject_align_start,
-                subject_align_stop,
-                score,
+                jumper.query_start,
+                jumper.query_stop,
+                jumper.subject_start,
+                jumper.subject_stop,
+                jumper.score,
                 score_params.penalty,
                 hit_params.options.splice,
             ) {
@@ -8073,6 +8372,7 @@ mod tests {
                 edit_ops: vec![3, JUMPER_DELETION],
             }),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut query_stop = 4;
         let mut subject_stop = 5;
@@ -8127,6 +8427,7 @@ mod tests {
                 edit_ops: vec![4],
             }),
             table: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(
             s_shift_gaps(
@@ -8158,6 +8459,7 @@ mod tests {
             }),
             right_prelim_block: None,
             table: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(
             s_shift_gaps(
@@ -8545,6 +8847,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut num_identical = 17;
         let mut right_ungapped_ext_len = 19;
@@ -9031,6 +9334,7 @@ mod tests {
                 edit_ops: vec![4],
             }),
             table: Vec::new(),
+            ..Default::default()
         };
 
         let (hsp, map_info) = s_create_hsp(
@@ -9082,6 +9386,7 @@ mod tests {
                 edit_ops: vec![6],
             }),
             table: Vec::new(),
+            ..Default::default()
         };
 
         let (hsp, map_info) = s_create_hsp(
@@ -9127,6 +9432,7 @@ mod tests {
                 edit_ops: vec![4],
             }),
             table: Vec::new(),
+            ..Default::default()
         };
         assert!(s_create_hsp(
             &query,
@@ -9151,6 +9457,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: None,
             table: Vec::new(),
+            ..Default::default()
         };
         assert!(s_create_hsp(
             &query,
@@ -9184,6 +9491,7 @@ mod tests {
                 edit_ops: vec![4],
             }),
             table: Vec::new(),
+            ..Default::default()
         };
 
         assert!(s_create_hsp(
@@ -9342,6 +9650,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(7);
 
@@ -9375,7 +9684,7 @@ mod tests {
     }
 
     #[test]
-    fn blast_na_extend_jumper_keeps_seed_as_gapped_start() {
+    fn blast_na_extend_jumper_uses_aligned_starts_as_gapped_start() {
         let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let subject = crate::encoding::pack_ncbi2na_bases(&query);
         let mut pairs = vec![crate::lookup::OffsetPair {
@@ -9430,6 +9739,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(7);
 
@@ -9459,8 +9769,8 @@ mod tests {
         assert_eq!(list.hsps.len(), 1);
         assert_eq!(list.hsps[0].query_offset, 0);
         assert_eq!(list.hsps[0].subject_offset, 0);
-        assert_eq!(list.hsps[0].query_gapped_start, 4);
-        assert_eq!(list.hsps[0].subject_gapped_start, 4);
+        assert_eq!(list.hsps[0].query_gapped_start, 0);
+        assert_eq!(list.hsps[0].subject_gapped_start, 0);
     }
 
     #[test]
@@ -9521,6 +9831,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(7);
 
@@ -9629,6 +9940,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(7);
 
@@ -9847,6 +10159,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(9);
 
@@ -9925,6 +10238,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(9);
 
@@ -10035,6 +10349,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let align_params = JumperAlignParams {
             max_mismatches: 5,
@@ -10196,6 +10511,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(10);
         let mut word_hits = crate::lookup::MapperWordHits {
@@ -10319,6 +10635,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(10);
 
@@ -10787,6 +11104,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(11);
         let ranges = [crate::util::SSeqRange {
@@ -10914,6 +11232,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(12);
 
@@ -11025,6 +11344,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(12);
 
@@ -11072,16 +11392,61 @@ mod tests {
     }
 
     #[test]
-    fn jumper_alignment_outputs_rejects_short_scratch_table() {
+    fn jumper_alignment_outputs_reads_gap_align_fields() {
         let mut jumper = JumperGapAlign {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
-            table: vec![10, 1, 2, 3],
+            query_start: 2,
+            query_stop: 1,
+            subject_start: 3,
+            subject_stop: 4,
+            score: 10,
+            ..Default::default()
         };
         assert!(jumper_alignment_outputs(&jumper).is_none());
 
-        jumper.table.push(4);
+        jumper.query_start = 1;
+        jumper.query_stop = 2;
         assert_eq!(jumper_alignment_outputs(&jumper), Some((10, 1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn jumper_traceback_preserves_packed_lookup_table() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let score_params = crate::parameters::ScoringParameters::from_options(
+            &crate::options::ScoringOptions::new_blastn(),
+            1.0,
+        );
+        let mut jumper = jumper_gap_align_new(16).expect("jumper");
+        let table = jumper.table.clone();
+        let mut num_identical = 0;
+        let mut right_ungapped_ext_len = 0;
+
+        assert_eq!(
+            jumper_gapped_alignment_compressed_with_traceback(
+                &query,
+                &subject,
+                query.len() as i32,
+                query.len() as i32,
+                4,
+                4,
+                &mut jumper,
+                &score_params,
+                JumperAlignParams {
+                    max_mismatches: 5,
+                    mismatch_window: 10,
+                    gap_x_dropoff: 30,
+                },
+                &mut num_identical,
+                &mut right_ungapped_ext_len,
+            ),
+            0
+        );
+
+        assert_eq!(jumper.table, table);
+        assert_eq!(jumper.score, 12);
+        assert_eq!((jumper.query_start, jumper.subject_start), (0, 0));
     }
 
     #[test]
@@ -11109,6 +11474,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(11);
 
@@ -11180,6 +11546,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let align_params = JumperAlignParams {
             max_mismatches: 5,
@@ -11259,6 +11626,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         for query in [vec![0u8; 32], vec![4u8; 32]] {
@@ -11317,6 +11685,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut list = crate::hspstream::HspList::new(11);
 
@@ -11494,6 +11863,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         let list = do_anchored_search(
@@ -11575,6 +11945,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         let list = do_anchored_search(
@@ -11661,6 +12032,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         let list = do_anchored_search(
@@ -11740,6 +12112,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         let list = do_anchored_search(
@@ -11823,6 +12196,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         assert!(do_anchored_search(
@@ -11896,6 +12270,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let stream =
             crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
@@ -11991,6 +12366,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         let list = do_anchored_search(
@@ -12093,6 +12469,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let stream =
             crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
@@ -12192,6 +12569,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let stream =
             crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
@@ -12335,6 +12713,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let stream =
             crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 2, None);
@@ -12448,6 +12827,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let stream =
             crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
@@ -12583,6 +12963,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let stream =
             crate::hspstream::blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
@@ -12645,6 +13026,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -12837,6 +13219,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let align_params = JumperAlignParams {
             max_mismatches: 5,
@@ -13052,6 +13435,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let align_params = JumperAlignParams {
             max_mismatches: 5,
@@ -13195,6 +13579,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let align_params = JumperAlignParams {
             max_mismatches: 5,
@@ -14018,6 +14403,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14085,6 +14471,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -14151,6 +14538,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14219,6 +14607,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14284,6 +14673,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14366,6 +14756,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14431,6 +14822,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14498,6 +14890,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14563,6 +14956,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14632,6 +15026,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14700,6 +15095,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
 
@@ -14769,6 +15165,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut fallback_called = false;
         let mut get_results_called = false;
@@ -14840,6 +15237,7 @@ mod tests {
             left_prelim_block: Some(JumperPrelimEditBlock::default()),
             right_prelim_block: Some(JumperPrelimEditBlock::default()),
             table: Vec::new(),
+            ..Default::default()
         };
         let mut stats = crate::diagnostics::GappedStats::default();
         let mut callback_seen = None;

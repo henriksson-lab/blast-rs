@@ -665,11 +665,11 @@ rust  = "s_restricted_gapped_align"
 other = "s_RestrictedGappedAlign"
 
 [[entries]]
-rust  = "get_start_for_gapped_alignment"
+rust  = "blast_get_start_for_gapped_alignment"
 other = "BlastGetStartForGappedAlignmentNucl"
 
 [[entries]]
-rust  = "get_start_for_gapped_alignment"
+rust  = "blast_get_start_for_gapped_alignment"
 other = "BlastGetStartForGappedAlignment"
 
 [[entries]]
@@ -1197,10 +1197,6 @@ rust  = "blast_init_hit_list_sort_by_score"
 other = "Blast_InitHitListSortByScore"
 
 [[entries]]
-rust  = "blast_init_protein_hits_sort_by_score"
-other = "Blast_InitHitListSortByScore"
-
-[[entries]]
 rust  = "blast_init_hit_list_is_sorted_by_score"
 other = "Blast_InitHitListIsSortedByScore"
 
@@ -1545,15 +1541,7 @@ rust  = "blast_interval_tree_add_hsp"
 other = "BlastIntervalTreeAddHSP"
 
 [[entries]]
-rust  = "blast_interval_tree_add_protein_hit"
-other = "BlastIntervalTreeAddHSP"
-
-[[entries]]
 rust  = "blast_interval_tree_contains_hsp"
-other = "BlastIntervalTreeContainsHSP"
-
-[[entries]]
-rust  = "blast_interval_tree_contains_protein_hit"
 other = "BlastIntervalTreeContainsHSP"
 
 [[entries]]
@@ -2001,7 +1989,7 @@ rust  = "blast_hsp_list_sort_by_score"
 other = "Blast_HSPListSortByScore"
 
 [[entries]]
-rust  = "blast_hsp_init_protein_hit"
+rust  = "blast_hsp_init"
 other = "Blast_HSPInit"
 
 [[entries]]
@@ -5454,10 +5442,6 @@ rust  = "bsearch_context_info"
 other = "BSearchContextInfo"
 
 [[entries]]
-rust  = "context_start_for_offset"
-other = "BSearchContextInfo"
-
-[[entries]]
 rust  = "blast_hsp_culling_pipe_run"
 other = "s_BlastHSPCullingPipeRun"
 
@@ -5805,6 +5789,14 @@ other = "s_CreateHSPForWordHit"
 [[entries]]
 rust  = "s_create_hsp"
 other = "s_CreateHSP"
+
+[[entries]]
+rust  = "s_determine_scanning_offsets"
+other = "s_DetermineScanningOffsets"
+
+[[entries]]
+rust  = "subject_index_free"
+other = "SubjectIndexFree"
 
 [[entries]]
 # Audit caveat: Rust indexes subject words directly in a BTreeMap rather than
