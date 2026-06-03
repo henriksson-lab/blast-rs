@@ -1213,6 +1213,10 @@ rust  = "s_blast_prot_gapped_alignment"
 other = "s_BlastProtGappedAlignment"
 
 [[entries]]
+rust  = "blast_greedy_gapped_alignment"
+other = "BLAST_GreedyGappedAlignment"
+
+[[entries]]
 rust  = "blast_gapped_alignment_with_traceback"
 other = "BLAST_GappedAlignmentWithTraceback"
 

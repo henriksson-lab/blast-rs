@@ -1740,11 +1740,12 @@ fn s_blast_prot_gapped_alignment(
     )
 }
 
-/// NCBI: BLAST_GappedAlignmentWithTraceback (`blast_gapalign.c`).
+/// blast-rs: protein traceback helper over the local protein DP result.
 ///
-/// The Rust aligner returns the edit script together with the score, so this is
-/// a callgraph-preserving wrapper over the same DP used by traceback.
-fn blast_gapped_alignment_with_traceback(
+/// The real C-named `BLAST_GappedAlignmentWithTraceback` port lives in
+/// `crate::traceback`; this helper exists only for API paths that still operate
+/// directly on protein slices and `ProteinGappedResult`.
+fn protein_gapped_alignment_with_traceback_result(
     query_aa: &[u8],
     subj_aa: &[u8],
     seed_q: usize,
@@ -1764,48 +1765,6 @@ fn blast_gapped_alignment_with_traceback(
         gap_extend,
         x_drop_final,
     )
-}
-
-fn protein_hit_query_interval(hit: &crate::protein_lookup::ProteinHit) -> crate::itree::Interval {
-    crate::itree::Interval::new(hit.query_start as i32, hit.query_end as i32)
-}
-
-fn protein_hit_subject_interval(hit: &crate::protein_lookup::ProteinHit) -> crate::itree::Interval {
-    crate::itree::Interval::new(hit.subject_start as i32, hit.subject_end as i32)
-}
-
-/// NCBI: BlastIntervalTreeContainsHSP (`blast_itree.c`), preserving the
-/// query-index and subject-frame metadata used by translated searches.
-fn blast_interval_tree_contains_protein_hit_with_metadata(
-    tree: &crate::itree::IntervalTree,
-    hit: &crate::protein_lookup::ProteinHit,
-    query_index: i32,
-    subject_frame: i32,
-) -> bool {
-    tree.is_contained_with_metadata(
-        protein_hit_query_interval(hit),
-        protein_hit_subject_interval(hit),
-        hit.score,
-        query_index,
-        subject_frame,
-    )
-}
-
-/// NCBI: BlastIntervalTreeAddHSP (`blast_itree.c:511`), preserving translated
-/// search metadata.
-fn blast_interval_tree_add_protein_hit_with_metadata(
-    tree: &mut crate::itree::IntervalTree,
-    hit: &crate::protein_lookup::ProteinHit,
-    query_index: i32,
-    subject_frame: i32,
-) {
-    tree.insert_with_metadata(
-        protein_hit_query_interval(hit),
-        protein_hit_subject_interval(hit),
-        hit.score,
-        query_index,
-        subject_frame,
-    );
 }
 
 /// NCBI: Blast_HSPInit (`blast_hits.c:151`), specialized to the local
@@ -1890,15 +1849,15 @@ fn protein_prelim_gapped_hits(
     gap_open: i32,
     gap_extend: i32,
     x_drop_gapped: i32,
-    _x_drop_final: i32,
     word_cutoff: i32,
     hit_cutoff: i32,
     chaining_enabled: bool,
     scratch: &mut ProteinScratch,
     reset_tree: bool,
     query_index: i32,
+    query_frame: i32,
     subject_frame: i32,
-) -> Vec<crate::protein_lookup::ProteinHit> {
+) -> Vec<crate::hspstream::BlastHSP> {
     let mut hits = Vec::new();
     // Mirror NCBI's `BLAST_GetGappedScore` flow: sort the init-hit list inside
     // this function (`Blast_InitHitListSortByScore`). NCBI only
@@ -1928,9 +1887,10 @@ fn protein_prelim_gapped_hits(
         if seed.score < word_cutoff.max(1) || !*keep {
             continue;
         }
-        if blast_interval_tree_contains_protein_hit_with_metadata(
-            tree,
-            seed,
+        if tree.is_contained_with_metadata(
+            crate::itree::Interval::new(seed.query_start as i32, seed.query_end as i32),
+            crate::itree::Interval::new(seed.subject_start as i32, seed.subject_end as i32),
+            seed.score,
             query_index,
             subject_frame,
         ) {
@@ -1968,21 +1928,34 @@ fn protein_prelim_gapped_hits(
             continue;
         }
         let prelim_hit = blast_hsp_init_protein_hit(&prelim, seed_q, seed_s, true);
-        if blast_interval_tree_contains_protein_hit_with_metadata(
-            tree,
-            &prelim_hit,
+        if tree.is_contained_with_metadata(
+            crate::itree::Interval::new(prelim_hit.query_start as i32, prelim_hit.query_end as i32),
+            crate::itree::Interval::new(
+                prelim_hit.subject_start as i32,
+                prelim_hit.subject_end as i32,
+            ),
+            prelim_hit.score,
             query_index,
             subject_frame,
         ) {
             continue;
         }
-        blast_interval_tree_add_protein_hit_with_metadata(
-            tree,
-            &prelim_hit,
+        tree.insert_with_metadata(
+            crate::itree::Interval::new(prelim_hit.query_start as i32, prelim_hit.query_end as i32),
+            crate::itree::Interval::new(
+                prelim_hit.subject_start as i32,
+                prelim_hit.subject_end as i32,
+            ),
+            prelim_hit.score,
             query_index,
             subject_frame,
         );
-        hits.push(prelim_hit);
+        hits.push(protein_hit_to_blast_hsp(
+            prelim_hit,
+            query_index,
+            query_frame,
+            subject_frame,
+        ));
     }
     hits
 }
@@ -2032,6 +2005,74 @@ pub fn blast_traceback_from_hsp_list(
     for (row_index, row) in matrix.iter_mut().enumerate() {
         row.copy_from_slice(&sbp.matrix.data[row_index][..AA_SIZE]);
     }
+    let compute_num_identities_for_traceback_hsp = |
+        hsp: &mut crate::hspstream::BlastHSP,
+        query: &[u8],
+        subject: &[u8],
+    | {
+        let q_off = hsp.query.offset.max(0) as usize;
+        let s_off = hsp.subject.offset.max(0) as usize;
+        let q_length = (hsp.query.end - hsp.query.offset).max(0) as usize;
+        let s_length = (hsp.subject.end - hsp.subject.offset).max(0) as usize;
+        let mut q = q_off;
+        let mut s = s_off;
+        let mut num_ident = 0i32;
+        let mut num_pos = 0i32;
+
+        if let Some(script) = hsp.gap_info.as_ref() {
+            for (op, count) in script.iter() {
+                match op {
+                    crate::gapinfo::GapAlignOpType::Sub => {
+                        for _ in 0..count {
+                            if q < query.len() && s < subject.len() {
+                                if query[q] == subject[s] {
+                                    num_ident += 1;
+                                } else {
+                                    let qi = query[q] as usize;
+                                    let si = subject[s] as usize;
+                                    if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
+                                        num_pos += 1;
+                                    }
+                                }
+                            }
+                            q += 1;
+                            s += 1;
+                        }
+                    }
+                    crate::gapinfo::GapAlignOpType::Del
+                    | crate::gapinfo::GapAlignOpType::Del1
+                    | crate::gapinfo::GapAlignOpType::Del2 => {
+                        s += count.max(0) as usize;
+                    }
+                    crate::gapinfo::GapAlignOpType::Ins
+                    | crate::gapinfo::GapAlignOpType::Ins1
+                    | crate::gapinfo::GapAlignOpType::Ins2 => {
+                        q += count.max(0) as usize;
+                    }
+                    crate::gapinfo::GapAlignOpType::Decline => {}
+                }
+            }
+        } else if q_length == s_length {
+            for _ in 0..q_length {
+                if q < query.len() && s < subject.len() {
+                    if query[q] == subject[s] {
+                        num_ident += 1;
+                    } else {
+                        let qi = query[q] as usize;
+                        let si = subject[s] as usize;
+                        if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
+                            num_pos += 1;
+                        }
+                    }
+                }
+                q += 1;
+                s += 1;
+            }
+        }
+
+        hsp.num_ident = num_ident;
+        hsp.num_positives = num_ident + num_pos;
+    };
 
     if crate::program::blast_subject_is_translated(program_number) {
         let gen_code = gen_code_string
@@ -2071,11 +2112,11 @@ pub fn blast_traceback_from_hsp_list(
                 keep[idx] = false;
                 continue;
             };
-            let mut hit = blast_hsp_to_protein_hit(hsp);
             let subject_frame = hsp.subject.frame as i32;
-            if blast_interval_tree_contains_protein_hit_with_metadata(
-                tb_tree,
-                &hit,
+            if tb_tree.is_contained_with_metadata(
+                crate::itree::Interval::new(hsp.query.offset, hsp.query.end),
+                crate::itree::Interval::new(hsp.subject.offset, hsp.subject.end),
+                hsp.score,
                 hsp_list.query_index,
                 subject_frame,
             ) {
@@ -2083,10 +2124,9 @@ pub fn blast_traceback_from_hsp_list(
                 continue;
             }
 
-            let legacy_hsp = hsp.clone().into_legacy_hsp();
             let Some(view) = crate::hspstream::blast_hsp_get_target_translation(
                 &mut target_t,
-                Some(&legacy_hsp),
+                Some(hsp),
             ) else {
                 keep[idx] = false;
                 continue;
@@ -2107,15 +2147,17 @@ pub fn blast_traceback_from_hsp_list(
                 continue;
             }
 
-            let local_seed_s = hit.gapped_start_s as i32 - translation_start;
+            let query_gapped_start = hsp.query.gapped_start;
+            let subject_gapped_start = hsp.subject.gapped_start;
+            let local_seed_s = subject_gapped_start - translation_start;
             if local_seed_s < 0 {
                 keep[idx] = false;
                 continue;
             }
-            let Some(gr) = blast_gapped_alignment_with_traceback(
+            let Some(gr) = protein_gapped_alignment_with_traceback_result(
                 &query[..query_blk.length as usize],
                 &translated_subject,
-                hit.gapped_start_q,
+                query_gapped_start.max(0) as usize,
                 local_seed_s as usize,
                 &matrix,
                 score_params.gap_open,
@@ -2126,34 +2168,26 @@ pub fn blast_traceback_from_hsp_list(
                 continue;
             };
 
-            let q_slice = &query[gr.query_start..gr.query_end];
-            let s_slice = &translated_subject[gr.subject_start..gr.subject_end];
             let edit_script = gr.edit_script.clone();
-            let (qseq, sseq) =
-                gr.edit_script
-                    .render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
-            blast_hsp_update_with_traceback_protein_hit(&mut hit, gr, qseq, sseq);
-            blast_hsp_update_from_protein_hit(hsp, hit.clone());
+            hsp.score = gr.score;
+            hsp.query.offset = gr.query_start as i32;
+            hsp.query.end = gr.query_end as i32;
+            hsp.query.gapped_start = query_gapped_start;
+            hsp.subject.offset = gr.subject_start as i32;
+            hsp.subject.end = gr.subject_end as i32;
+            hsp.subject.gapped_start = local_seed_s;
             hsp.gap_info = Some(edit_script);
             hsp.subject.frame = subject_frame as i16;
-            s_compute_num_identities_blast_hsp(
+            compute_num_identities_for_traceback_hsp(
                 hsp,
                 &query[..query_blk.length as usize],
                 &translated_subject,
-                Some(&matrix),
             );
-            hit.subject_start = hit
-                .subject_start
-                .saturating_add(translation_start.max(0) as usize);
-            hit.subject_end = hit
-                .subject_end
-                .saturating_add(translation_start.max(0) as usize);
-            hit.gapped_start_s = hit
-                .gapped_start_s
-                .saturating_add(translation_start.max(0) as usize);
-            blast_hsp_update_from_protein_hit(hsp, hit);
+            hsp.subject.offset = hsp.subject.offset.saturating_add(translation_start.max(0));
+            hsp.subject.end = hsp.subject.end.saturating_add(translation_start.max(0));
+            hsp.subject.gapped_start = subject_gapped_start;
             hsp.subject.frame = subject_frame as i16;
-            if s_hsp_test_blast_hsp(
+            if crate::hspstream::s_hsp_test(
                 hsp,
                 &hit_params.options,
                 hsp.gap_info
@@ -2164,10 +2198,10 @@ pub fn blast_traceback_from_hsp_list(
                 keep[idx] = false;
                 continue;
             }
-            let accepted_hit = blast_hsp_to_protein_hit(hsp);
-            blast_interval_tree_add_protein_hit_with_metadata(
-                tb_tree,
-                &accepted_hit,
+            tb_tree.insert_with_metadata(
+                crate::itree::Interval::new(hsp.query.offset, hsp.query.end),
+                crate::itree::Interval::new(hsp.subject.offset, hsp.subject.end),
+                hsp.score,
                 hsp_list.query_index,
                 subject_frame,
             );
@@ -2203,7 +2237,7 @@ pub fn blast_traceback_from_hsp_list(
         return -1;
     }
 
-    sort_blast_hsp_list_by_score(hsp_list);
+    crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
     scratch
         .tb_tree
         .reset_for_query(query_blk.length + 1, subject_blk.length + 1);
@@ -2214,22 +2248,22 @@ pub fn blast_traceback_from_hsp_list(
             keep[idx] = false;
             continue;
         };
-        let mut hit = blast_hsp_to_protein_hit(hsp);
         let subject_frame = hsp.subject.frame as i32;
-        if blast_interval_tree_contains_protein_hit_with_metadata(
-            tb_tree,
-            &hit,
+        if tb_tree.is_contained_with_metadata(
+            crate::itree::Interval::new(hsp.query.offset, hsp.query.end),
+            crate::itree::Interval::new(hsp.subject.offset, hsp.subject.end),
+            hsp.score,
             hsp_list.query_index,
             subject_frame,
         ) {
             keep[idx] = false;
             continue;
         }
-        let Some(gr) = blast_gapped_alignment_with_traceback(
+        let Some(gr) = protein_gapped_alignment_with_traceback_result(
             &query[..query_blk.length as usize],
             &subject[..subject_blk.length as usize],
-            hit.gapped_start_q,
-            hit.gapped_start_s,
+            hsp.query.gapped_start.max(0) as usize,
+            hsp.subject.gapped_start.max(0) as usize,
             &matrix,
             score_params.gap_open,
             score_params.gap_extend,
@@ -2238,22 +2272,23 @@ pub fn blast_traceback_from_hsp_list(
             keep[idx] = false;
             continue;
         };
-        let q_slice = &query[gr.query_start..gr.query_end];
-        let s_slice = &subject[gr.subject_start..gr.subject_end];
         let edit_script = gr.edit_script.clone();
-        let (qseq, sseq) =
-            gr.edit_script
-                .render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
-        blast_hsp_update_with_traceback_protein_hit(&mut hit, gr, qseq, sseq);
-        blast_hsp_update_from_protein_hit(hsp, hit);
+        let query_gapped_start = hsp.query.gapped_start;
+        let subject_gapped_start = hsp.subject.gapped_start;
+        hsp.score = gr.score;
+        hsp.query.offset = gr.query_start as i32;
+        hsp.query.end = gr.query_end as i32;
+        hsp.query.gapped_start = query_gapped_start;
+        hsp.subject.offset = gr.subject_start as i32;
+        hsp.subject.end = gr.subject_end as i32;
+        hsp.subject.gapped_start = subject_gapped_start;
         hsp.gap_info = Some(edit_script);
-        s_compute_num_identities_blast_hsp(
+        compute_num_identities_for_traceback_hsp(
             hsp,
             &query[..query_blk.length as usize],
             &subject[..subject_blk.length as usize],
-            Some(&matrix),
         );
-        if s_hsp_test_blast_hsp(
+        if crate::hspstream::s_hsp_test(
             hsp,
             &hit_params.options,
             hsp.gap_info
@@ -2264,10 +2299,10 @@ pub fn blast_traceback_from_hsp_list(
             keep[idx] = false;
             continue;
         }
-        let accepted_hit = blast_hsp_to_protein_hit(hsp);
-        blast_interval_tree_add_protein_hit_with_metadata(
-            tb_tree,
-            &accepted_hit,
+        tb_tree.insert_with_metadata(
+            crate::itree::Interval::new(hsp.query.offset, hsp.query.end),
+            crate::itree::Interval::new(hsp.subject.offset, hsp.subject.end),
+            hsp.score,
             hsp_list.query_index,
             subject_frame,
         );
@@ -2285,7 +2320,7 @@ pub fn blast_traceback_from_hsp_list(
         Some(hsp_list),
         true,
     );
-    sort_blast_hsp_list_by_score(hsp_list);
+    crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
     hsp_list.hspcnt = hsp_list.hsp_array.len() as i32;
     hsp_list.allocated = hsp_list.hsp_array.len() as i32;
     hsp_list.best_evalue = hsp_list
@@ -2323,13 +2358,19 @@ fn blast_traceback_from_protein_hit_hsp_list(
     let tb_tree = &mut scratch.tb_tree;
     let mut keep = vec![true; hits.len()];
     for (idx, ph) in hits.iter_mut().enumerate() {
-        if blast_interval_tree_contains_protein_hit_with_metadata(tb_tree, ph, 0, 0) {
+        if tb_tree.is_contained_with_metadata(
+            crate::itree::Interval::new(ph.query_start as i32, ph.query_end as i32),
+            crate::itree::Interval::new(ph.subject_start as i32, ph.subject_end as i32),
+            ph.score,
+            0,
+            0,
+        ) {
             keep[idx] = false;
             continue;
         }
         let seed_q = ph.gapped_start_q;
         let seed_s = ph.gapped_start_s;
-        let Some(gr) = blast_gapped_alignment_with_traceback(
+        let Some(gr) = protein_gapped_alignment_with_traceback_result(
             query_aa,
             subj_aa,
             seed_q,
@@ -2348,7 +2389,13 @@ fn blast_traceback_from_protein_hit_hsp_list(
             gr.edit_script
                 .render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
         blast_hsp_update_with_traceback_protein_hit(ph, gr, qseq, sseq);
-        blast_interval_tree_add_protein_hit_with_metadata(tb_tree, ph, 0, 0);
+        tb_tree.insert_with_metadata(
+            crate::itree::Interval::new(ph.query_start as i32, ph.query_end as i32),
+            crate::itree::Interval::new(ph.subject_start as i32, ph.subject_end as i32),
+            ph.score,
+            0,
+            0,
+        );
     }
     let mut idx = 0usize;
     hits.retain(|_| {
@@ -2365,12 +2412,7 @@ fn compare_blast_hsps_by_score(
     a: &crate::hspstream::BlastHSP,
     b: &crate::hspstream::BlastHSP,
 ) -> std::cmp::Ordering {
-    b.score
-        .cmp(&a.score)
-        .then_with(|| a.subject.offset.cmp(&b.subject.offset))
-        .then_with(|| b.subject.end.cmp(&a.subject.end))
-        .then_with(|| a.query.offset.cmp(&b.query.offset))
-        .then_with(|| b.query.end.cmp(&a.query.end))
+    crate::hspstream::score_compare_blast_hsps(Some(a), Some(b))
 }
 
 #[allow(dead_code)]
@@ -2451,91 +2493,6 @@ fn blast_hsp_get_adjusted_offsets(
     };
 
     (q_start, q_end, s_start, s_end)
-}
-
-/// NCBI: s_HSPTest (blast_hits.c:993), specialized to `BlastHSP`.
-fn s_hsp_test_blast_hsp(
-    hsp: &crate::hspstream::BlastHSP,
-    hit_options: &crate::options::HitSavingOptions,
-    align_length: i32,
-) -> bool {
-    (hsp.num_ident as f64 * 100.0 < align_length as f64 * hit_options.percent_identity)
-        || align_length < hit_options.min_hit_length
-}
-
-/// NCBI: s_Blast_HSPGetNumIdentitiesAndPositives / s_ComputeNumIdentities.
-fn s_compute_num_identities_blast_hsp(
-    hsp: &mut crate::hspstream::BlastHSP,
-    query: &[u8],
-    subject: &[u8],
-    matrix: Option<&[[i32; AA_SIZE]; AA_SIZE]>,
-) {
-    let q_off = hsp.query.offset.max(0) as usize;
-    let s_off = hsp.subject.offset.max(0) as usize;
-    let q_length = (hsp.query.end - hsp.query.offset).max(0) as usize;
-    let s_length = (hsp.subject.end - hsp.subject.offset).max(0) as usize;
-    let mut q = q_off;
-    let mut s = s_off;
-    let mut num_ident = 0i32;
-    let mut num_pos = 0i32;
-    let mut align_length = 0i32;
-
-    if let Some(script) = hsp.gap_info.as_ref() {
-        for (op, count) in script.iter() {
-            align_length += count;
-            match op {
-                crate::gapinfo::GapAlignOpType::Sub => {
-                    for _ in 0..count {
-                        if q < query.len() && s < subject.len() {
-                            if query[q] == subject[s] {
-                                num_ident += 1;
-                            } else if let Some(matrix) = matrix {
-                                let qi = query[q] as usize;
-                                let si = subject[s] as usize;
-                                if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
-                                    num_pos += 1;
-                                }
-                            }
-                        }
-                        q += 1;
-                        s += 1;
-                    }
-                }
-                crate::gapinfo::GapAlignOpType::Del
-                | crate::gapinfo::GapAlignOpType::Del1
-                | crate::gapinfo::GapAlignOpType::Del2 => {
-                    s += count.max(0) as usize;
-                }
-                crate::gapinfo::GapAlignOpType::Ins
-                | crate::gapinfo::GapAlignOpType::Ins1
-                | crate::gapinfo::GapAlignOpType::Ins2 => {
-                    q += count.max(0) as usize;
-                }
-                crate::gapinfo::GapAlignOpType::Decline => {}
-            }
-        }
-    } else if q_length == s_length {
-        align_length = q_length as i32;
-        for _ in 0..q_length {
-            if q < query.len() && s < subject.len() {
-                if query[q] == subject[s] {
-                    num_ident += 1;
-                } else if let Some(matrix) = matrix {
-                    let qi = query[q] as usize;
-                    let si = subject[s] as usize;
-                    if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
-                        num_pos += 1;
-                    }
-                }
-            }
-            q += 1;
-            s += 1;
-        }
-    }
-
-    hsp.num_ident = num_ident;
-    hsp.num_positives = num_ident + num_pos;
-    let _ = align_length;
 }
 
 /// NCBI: s_UpdateReevaluatedHSPUngapped (blast_hits.c:664), specialized to
@@ -2628,40 +2585,6 @@ fn protein_hit_to_blast_hsp(
         num_positives: 0,
         map_info: None,
     }
-}
-
-fn blast_hsp_to_protein_hit(hsp: &crate::hspstream::BlastHSP) -> crate::protein_lookup::ProteinHit {
-    crate::protein_lookup::ProteinHit {
-        query_start: hsp.query.offset.max(0) as usize,
-        query_end: hsp.query.end.max(hsp.query.offset).max(0) as usize,
-        subject_start: hsp.subject.offset.max(0) as usize,
-        subject_end: hsp.subject.end.max(hsp.subject.offset).max(0) as usize,
-        score: hsp.score,
-        num_ident: hsp.num_ident,
-        align_length: (hsp.query.end - hsp.query.offset).max(0),
-        mismatches: 0,
-        gap_opens: 0,
-        qseq: None,
-        sseq: None,
-        scaled_score: None,
-        adjusted_evalue: None,
-        gapped_start_q: hsp.query.gapped_start.max(0) as usize,
-        gapped_start_s: hsp.subject.gapped_start.max(0) as usize,
-    }
-}
-
-fn blast_hsp_update_from_protein_hit(
-    hsp: &mut crate::hspstream::BlastHSP,
-    hit: crate::protein_lookup::ProteinHit,
-) {
-    hsp.score = hit.score;
-    hsp.num_ident = hit.num_ident;
-    hsp.query.offset = hit.query_start as i32;
-    hsp.query.end = hit.query_end as i32;
-    hsp.query.gapped_start = hit.gapped_start_q as i32;
-    hsp.subject.offset = hit.subject_start as i32;
-    hsp.subject.end = hit.subject_end as i32;
-    hsp.subject.gapped_start = hit.gapped_start_s as i32;
 }
 
 fn tblastn_link_internal_hsps_to_api_hsps(
@@ -2789,22 +2712,6 @@ fn tblastn_blast_hsp_to_api_hsp(hsp: &crate::hspstream::BlastHSP, prot_kbp: &Kar
         num_links: hsp.num.max(1),
         comp_adjust_method: hsp.comp_adjustment_method as u8,
     }
-}
-
-fn sort_blast_hsp_list_by_score(hsp_list: &mut crate::hspstream::BlastHSPList) {
-    hsp_list
-        .hsp_array
-        .sort_by(|a, b| match (a.as_ref(), b.as_ref()) {
-            (Some(a), Some(b)) => compare_blast_hsps_by_score(a, b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        });
-    hsp_list.hspcnt = hsp_list
-        .hsp_array
-        .iter()
-        .filter(|hsp| hsp.is_some())
-        .count() as i32;
 }
 
 /// NCBI: `Blast_HSPListPurgeHSPsWithCommonEndpoints`, specialized to BLASTX
@@ -3035,7 +2942,7 @@ fn blastx_traceback_subject_hsp_list(
     scratch: &mut ProteinScratch,
     max_query_prot_len: usize,
 ) {
-    sort_blast_hsp_list_by_score(hsp_list);
+    crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
     scratch
         .tb_tree
         .reset_for_query(max_query_prot_len as i32 + 1, subj_aa.len() as i32 + 1);
@@ -3053,10 +2960,10 @@ fn blastx_traceback_subject_hsp_list(
         }
         let item_query_range = (frame_offsets[item_context] + 1).max(0) as usize
             ..frame_offsets[item_context + 1].max(0) as usize;
-        let mut hit = blast_hsp_to_protein_hit(hsp);
-        if blast_interval_tree_contains_protein_hit_with_metadata(
-            tb_tree,
-            &hit,
+        if tb_tree.is_contained_with_metadata(
+            crate::itree::Interval::new(hsp.query.offset, hsp.query.end),
+            crate::itree::Interval::new(hsp.subject.offset, hsp.subject.end),
+            hsp.score,
             item_context as i32,
             0,
         ) {
@@ -3064,13 +2971,13 @@ fn blastx_traceback_subject_hsp_list(
             continue;
         }
         let query_prot = &translation_buffer[item_query_range];
-        let seed_q = hit.gapped_start_q;
-        let seed_s = hit.gapped_start_s;
-        let Some(gr) = blast_gapped_alignment_with_traceback(
+        let query_gapped_start = hsp.query.gapped_start;
+        let subject_gapped_start = hsp.subject.gapped_start;
+        let Some(gr) = protein_gapped_alignment_with_traceback_result(
             query_prot,
             subj_aa,
-            seed_q,
-            seed_s,
+            query_gapped_start.max(0) as usize,
+            subject_gapped_start.max(0) as usize,
             matrix,
             gap_open,
             gap_extend,
@@ -3079,14 +2986,21 @@ fn blastx_traceback_subject_hsp_list(
             keep[idx] = false;
             continue;
         };
-        let q_slice = &query_prot[gr.query_start..gr.query_end];
-        let s_slice = &subj_aa[gr.subject_start..gr.subject_end];
-        let (qseq, sseq) =
-            gr.edit_script
-                .render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
-        blast_hsp_update_with_traceback_protein_hit(&mut hit, gr, qseq, sseq);
-        blast_interval_tree_add_protein_hit_with_metadata(tb_tree, &hit, item_context as i32, 0);
-        blast_hsp_update_from_protein_hit(hsp, hit.clone());
+        hsp.score = gr.score;
+        hsp.query.offset = gr.query_start as i32;
+        hsp.query.end = gr.query_end as i32;
+        hsp.query.gapped_start = query_gapped_start;
+        hsp.subject.offset = gr.subject_start as i32;
+        hsp.subject.end = gr.subject_end as i32;
+        hsp.subject.gapped_start = subject_gapped_start;
+        hsp.gap_info = Some(gr.edit_script);
+        tb_tree.insert_with_metadata(
+            crate::itree::Interval::new(hsp.query.offset, hsp.query.end),
+            crate::itree::Interval::new(hsp.subject.offset, hsp.subject.end),
+            hsp.score,
+            item_context as i32,
+            0,
+        );
     }
     let mut idx = 0usize;
     hsp_list.hsp_array.retain(|_| {
@@ -3096,7 +3010,7 @@ fn blastx_traceback_subject_hsp_list(
     });
 
     purge_blastx_hsp_list_with_common_endpoints(hsp_list);
-    sort_blast_hsp_list_by_score(hsp_list);
+    crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
 }
 
 /// NCBI: Blast_TracebackFromHSPList over one translated subject HSP list.
@@ -3105,8 +3019,6 @@ fn blastx_traceback_subject_hsp_list(
 #[allow(clippy::too_many_arguments)]
 fn tblastn_traceback_subject_hsp_list(
     query_aa: &[u8],
-    translation_buffer: &[u8],
-    frame_offsets: &[u32],
     subject_source_ncbi4na: &[u8],
     gen_code_string: &[u8; 64],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
@@ -3189,47 +3101,10 @@ fn tblastn_traceback_subject_hsp_list(
             let Some(hsp) = hsp_slot.as_mut() else {
                 continue;
             };
-            let Some(ctx) = translated_frame_to_context(hsp.subject.frame as i32) else {
-                continue;
-            };
-            if ctx + 1 >= frame_offsets.len() {
-                continue;
-            }
-            let prot_range =
-                (frame_offsets[ctx] + 1).max(0) as usize..frame_offsets[ctx + 1].max(0) as usize;
-            let mut hit = blast_hsp_to_protein_hit(&hsp);
-            if let Some(edit_script) = hsp.gap_info.as_ref() {
-                let q_start = hsp.query.offset.max(0) as usize;
-                let q_end = hsp.query.end.max(hsp.query.offset).max(0) as usize;
-                let prot = &translation_buffer[prot_range.clone()];
-                let range_start = prot_range.start as i32;
-                let mut s_start_i = hsp.subject.offset;
-                let mut s_end_i = hsp.subject.end.max(hsp.subject.offset);
-                if s_end_i as usize > prot.len() && s_start_i >= range_start {
-                    s_start_i -= range_start;
-                    s_end_i -= range_start;
-                }
-                let s_start = s_start_i.max(0) as usize;
-                let s_end = s_end_i.max(s_start_i).max(0) as usize;
-                if q_end <= query_aa.len() && s_end <= prot.len() {
-                    let q_slice = &query_aa[q_start..q_end];
-                    let s_slice = &prot[s_start..s_end];
-                    let (qseq, sseq) =
-                        edit_script.render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
-                    let (align_length, num_ident, gap_opens) =
-                        edit_script.count_identities(q_slice, s_slice);
-                    hit.qseq = Some(qseq);
-                    hit.sseq = Some(sseq);
-                    hit.align_length = align_length;
-                    hit.num_ident = num_ident;
-                    hit.gap_opens = gap_opens;
-                    hit.mismatches = (align_length - num_ident - gap_opens).max(0);
-                }
-            }
             hsp.num = 0;
         }
         purge_tblastn_hsp_list_with_common_endpoints(hsp_list);
-        sort_blast_hsp_list_by_score(hsp_list);
+        crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
         return stat_length;
     }
 
@@ -3885,7 +3760,7 @@ fn blast_run_preliminary_search(
     gap_open: i32,
     gap_extend: i32,
     x_drop_gapped: i32,
-    x_drop_final: i32,
+    _x_drop_final: i32,
     min_subject_length: i32,
     params: &SearchParams,
     ungapped_hits: Vec<crate::protein_lookup::ProteinHit>,
@@ -3931,23 +3806,82 @@ fn blast_run_preliminary_search(
     let preliminary_hsps = if params.ungapped {
         Vec::new()
     } else {
-        protein_prelim_gapped_hits(
-            query_aa,
-            subj_aa,
-            matrix,
-            &chained_ungapped_hits,
-            gap_open,
-            gap_extend,
-            x_drop_gapped,
-            x_drop_final,
-            adjusted_cutoff,
-            hit_cutoff,
-            false,
-            scratch,
-            true,
-            0,
-            0,
-        )
+        let mut hits = Vec::new();
+        let mut sorted_hits = chained_ungapped_hits.clone();
+        sorted_hits.sort_by(compare_protein_hits_by_score);
+        scratch
+            .prelim_tree
+            .reset_for_query(query_aa.len() as i32 + 1, subj_aa.len() as i32 + 1);
+        let tree = &mut scratch.prelim_tree;
+        for seed in &sorted_hits {
+            if seed.score < adjusted_cutoff {
+                continue;
+            }
+            if tree.is_contained_with_metadata(
+                crate::itree::Interval::new(seed.query_start as i32, seed.query_end as i32),
+                crate::itree::Interval::new(seed.subject_start as i32, seed.subject_end as i32),
+                seed.score,
+                0,
+                0,
+            ) {
+                continue;
+            }
+            let (seed_q, seed_s) = crate::protein::blast_get_start_for_gapped_alignment(
+                query_aa,
+                subj_aa,
+                seed.query_start,
+                seed.query_end.saturating_sub(seed.query_start),
+                seed.subject_start,
+                seed.subject_end.saturating_sub(seed.subject_start),
+                matrix,
+            );
+            let Some(prelim) = s_blast_prot_gapped_alignment(
+                query_aa,
+                subj_aa,
+                seed_q,
+                seed_s,
+                matrix,
+                gap_open,
+                gap_extend,
+                x_drop_gapped,
+            ) else {
+                continue;
+            };
+            if prelim.score < hit_cutoff.max(1) {
+                continue;
+            }
+            let prelim_hit = blast_hsp_init_protein_hit(&prelim, seed_q, seed_s, true);
+            if tree.is_contained_with_metadata(
+                crate::itree::Interval::new(
+                    prelim_hit.query_start as i32,
+                    prelim_hit.query_end as i32,
+                ),
+                crate::itree::Interval::new(
+                    prelim_hit.subject_start as i32,
+                    prelim_hit.subject_end as i32,
+                ),
+                prelim_hit.score,
+                0,
+                0,
+            ) {
+                continue;
+            }
+            tree.insert_with_metadata(
+                crate::itree::Interval::new(
+                    prelim_hit.query_start as i32,
+                    prelim_hit.query_end as i32,
+                ),
+                crate::itree::Interval::new(
+                    prelim_hit.subject_start as i32,
+                    prelim_hit.subject_end as i32,
+                ),
+                prelim_hit.score,
+                0,
+                0,
+            );
+            hits.push(prelim_hit);
+        }
+        hits
     };
     BlastPreliminarySearchResult {
         prelim_evalue,
@@ -5406,7 +5340,7 @@ fn blastn_api_stats(
 /// subject (frame-oriented nucleotide query coords); the caller pushes them.
 #[allow(clippy::too_many_arguments)]
 fn process_blastx_frame_hsps(
-    phits: Vec<crate::protein_lookup::ProteinHit>,
+    hsps: Vec<crate::hspstream::BlastHSP>,
     query_data: &[u8],
     prot: &[u8],
     frame: i32,
@@ -5429,7 +5363,7 @@ fn process_blastx_frame_hsps(
 ) -> Vec<Hsp> {
     let mut out_hsps: Vec<Hsp> = Vec::new();
     let matrix_name = protein_matrix_name(params.matrix);
-    if phits.is_empty() {
+    if hsps.is_empty() {
         return out_hsps;
     }
     if params.comp_adjust > 0 {
@@ -5439,11 +5373,11 @@ fn process_blastx_frame_hsps(
             .map(|ctx| ctx.query_index)
             .unwrap_or(0);
         let mut this_match = blast_hsp_list_new(query_index);
-        for hit in phits {
-            blast_hsp_list_push(
-                &mut this_match,
-                protein_hit_to_blast_hsp(hit, query_context as i32, frame, 0),
-            );
+        for mut hsp in hsps {
+            hsp.context = query_context as i32;
+            hsp.query.frame = frame as i16;
+            hsp.subject.frame = 0;
+            blast_hsp_list_push(&mut this_match, hsp);
         }
 
         let mut matrix_info = crate::blast_kappa::BlastMatrixInfo::default();
@@ -5641,15 +5575,12 @@ fn process_blastx_frame_hsps(
         }
         return out_hsps;
     }
-    let (final_phits, use_adj_matrix, lambda_ratio_opt, comp_adjust_method_id) =
-        (phits, false, None::<f64>, 0);
-    for mut ph in final_phits {
+    let final_hsps = hsps;
+    let use_adj_matrix = false;
+    let lambda_ratio_opt = None::<f64>;
+    for hsp in final_hsps {
         if params.comp_adjust > 0 {
-            if let Some(scaled_score) = ph.scaled_score {
-                if scaled_score < composition_scaled_cutoff(hit_cutoff) {
-                    continue;
-                }
-            } else if ph.score < hit_cutoff {
+            if hsp.score < hit_cutoff {
                 continue;
             }
         }
@@ -5658,14 +5589,12 @@ fn process_blastx_frame_hsps(
         // block via simple Karlin (not the gapped kbp, not Spouge). The gapped
         // path keeps the gapped `prot_kbp`.
         let bit_score = if params.ungapped {
-            ungapped_kbp.raw_to_bit(ph.score)
+            ungapped_kbp.raw_to_bit(hsp.score)
         } else {
-            prot_kbp.raw_to_bit(ph.score)
+            prot_kbp.raw_to_bit(hsp.score)
         };
-        let (e_score_i32, e_lambda) = match ph.scaled_score {
-            Some(s) if params.comp_adjust > 0 => (s, prot_kbp.lambda / COMPO_ADJUST_SCALE_FACTOR),
-            _ => (ph.score, prot_kbp.lambda),
-        };
+        let e_score_i32 = hsp.score;
+        let e_lambda = prot_kbp.lambda;
         let e_kbp = crate::stat::KarlinBlk {
             lambda: e_lambda,
             k: prot_kbp.k,
@@ -5673,11 +5602,9 @@ fn process_blastx_frame_hsps(
             h: prot_kbp.h,
             round_down: prot_kbp.round_down,
         };
-        let evalue = if let Some(adjusted_evalue) = ph.adjusted_evalue {
-            adjusted_evalue
-        } else if params.ungapped {
+        let evalue = if params.ungapped {
             // Ungapped: simple Karlin with the per-frame ungapped kbp.
-            ungapped_kbp.raw_to_evalue(ph.score, search_space)
+            ungapped_kbp.raw_to_evalue(hsp.score, search_space)
         } else if let Some(ref gbp) = gumbel_blk {
             let mut base_ev = crate::stat::blast_spouge_sto_e(
                 e_score_i32,
@@ -5738,46 +5665,75 @@ fn process_blastx_frame_hsps(
             }
         };
         let (query_start, query_end) =
-            crate::util::protein_to_oriented_nuc_coords(ph.query_start, ph.query_end, frame);
+            crate::util::protein_to_oriented_nuc_coords(
+                hsp.query.offset.max(0) as usize,
+                hsp.query.end.max(hsp.query.offset).max(0) as usize,
+                frame,
+            );
         let (query_gapped_start, _) = crate::util::protein_to_oriented_nuc_coords(
-            ph.gapped_start_q,
-            ph.gapped_start_q.saturating_add(1),
+            hsp.query.gapped_start.max(0) as usize,
+            hsp.query.gapped_start.max(0) as usize + 1,
             frame,
         );
-        let (q_aln, s_aln) = match (ph.qseq.take(), ph.sseq.take()) {
-            (Some(qs), Some(ss)) => (qs.into_bytes(), ss.into_bytes()),
-            _ => (Vec::new(), Vec::new()),
+        let q_start_aa = hsp.query.offset.max(0) as usize;
+        let q_end_aa = hsp.query.end.max(hsp.query.offset).max(0) as usize;
+        let s_start = hsp.subject.offset.max(0) as usize;
+        let s_end = hsp.subject.end.max(hsp.subject.offset).max(0) as usize;
+        let (q_aln, s_aln, align_length, num_gaps) = if let Some(script) = hsp.gap_info.as_ref() {
+            if q_end_aa <= prot.len() && s_end <= subj_aa.len() {
+                let q_slice = &prot[q_start_aa..q_end_aa];
+                let s_slice = &subj_aa[s_start..s_end];
+                let (qs, ss) = script.render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
+                (
+                    qs.into_bytes(),
+                    ss.into_bytes(),
+                    script.alignment_length().max(0) as usize,
+                    crate::blast_kappa::gap_edit_script_num_gap_opens(script).max(0) as usize,
+                )
+            } else {
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    q_end_aa.saturating_sub(q_start_aa),
+                    0,
+                )
+            }
+        } else {
+            (
+                Vec::new(),
+                Vec::new(),
+                q_end_aa.saturating_sub(q_start_aa),
+                0,
+            )
         };
         out_hsps.push(Hsp {
-            score: ph.score,
+            score: hsp.score,
             bit_score,
             evalue,
             query_start,
             query_end,
-            subject_start: ph.subject_start,
-            subject_end: ph.subject_end,
+            subject_start: s_start,
+            subject_end: s_end,
             query_gapped_start,
-            subject_gapped_start: ph.gapped_start_s,
-            query_link_start: ph.query_start,
-            query_link_end: ph.query_end,
-            query_link_gapped_start: ph.gapped_start_q,
-            subject_link_start: ph.subject_start,
-            subject_link_end: ph.subject_end,
-            subject_link_gapped_start: ph.gapped_start_s,
-            link_score: ph.scaled_score,
-            link_lambda: ph
-                .scaled_score
-                .map(|_| prot_kbp.lambda / COMPO_ADJUST_SCALE_FACTOR),
-            num_identities: ph.num_ident as usize,
-            num_gaps: ph.gap_opens as usize,
-            alignment_length: ph.align_length as usize,
+            subject_gapped_start: hsp.subject.gapped_start.max(0) as usize,
+            query_link_start: q_start_aa,
+            query_link_end: q_end_aa,
+            query_link_gapped_start: hsp.query.gapped_start.max(0) as usize,
+            subject_link_start: s_start,
+            subject_link_end: s_end,
+            subject_link_gapped_start: hsp.subject.gapped_start.max(0) as usize,
+            link_score: None,
+            link_lambda: None,
+            num_identities: hsp.num_ident.max(0) as usize,
+            num_gaps,
+            alignment_length: align_length,
             query_aln: q_aln,
             midline: Vec::new(),
             subject_aln: s_aln,
             query_frame: frame,
             subject_frame: 0,
             num_links: 1,
-            comp_adjust_method: comp_adjust_method_id,
+            comp_adjust_method: hsp.comp_adjustment_method as u8,
         });
     }
     out_hsps
@@ -6086,8 +6042,12 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                                 .collect(),
                         );
                     });
+                    let hsps: Vec<_> = ug
+                        .into_iter()
+                        .map(|hit| protein_hit_to_blast_hsp(hit, ctx as i32, frame, 0))
+                        .collect();
                     for hsp in process_blastx_frame_hsps(
-                        ug,
+                        hsps,
                         &translation_buffer,
                         prot,
                         frame,
@@ -6126,7 +6086,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         );
                     }
                 } else {
-                    let phits = protein_prelim_gapped_hits(
+                    let hsps = protein_prelim_gapped_hits(
                         prot,
                         subj_aa,
                         &matrix,
@@ -6134,20 +6094,17 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         params.gap_open,
                         params.gap_extend,
                         x_drop_gapped,
-                        x_drop_final,
                         blastx_seed_cutoff.max(1),
                         blastx_hit_cutoff.max(1),
                         params.chaining && params.matrix == MatrixType::Blosum62,
                         &mut scratch,
                         false,
                         ctx as i32,
+                        frame,
                         0,
                     );
-                    for hit in phits {
-                        blast_hsp_list_push(
-                            &mut subject_internal_hsps,
-                            protein_hit_to_blast_hsp(hit, ctx as i32, frame, 0),
-                        );
+                    for hsp in hsps {
+                        blast_hsp_list_push(&mut subject_internal_hsps, hsp);
                     }
                 }
             }
@@ -6233,12 +6190,12 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         group_end += 1;
                     }
                     let prot = &translation_buffer[query_range.clone()];
-                    let phits: Vec<_> = subject_internal_hsps.hsp_array[group_start..group_end]
+                    let hsps: Vec<_> = subject_internal_hsps.hsp_array[group_start..group_end]
                         .iter()
-                        .filter_map(|item| item.as_ref().map(blast_hsp_to_protein_hit))
+                        .filter_map(|item| item.as_ref().cloned())
                         .collect();
                     for hsp in process_blastx_frame_hsps(
-                        phits,
+                        hsps,
                         &translation_buffer,
                         prot,
                         frame,
@@ -6651,8 +6608,12 @@ pub fn blastx_batch(
                         );
                         title = Some(String::from_utf8_lossy(db.get_header(oid)).to_string());
                     }
+                    let hsps: Vec<_> = ug
+                        .into_iter()
+                        .map(|hit| protein_hit_to_blast_hsp(hit, ctx as i32, frame, 0))
+                        .collect();
                     for hsp in process_blastx_frame_hsps(
-                        ug,
+                        hsps,
                         &qplans[qi].translation,
                         prot,
                         frame,
@@ -6691,7 +6652,7 @@ pub fn blastx_batch(
                         );
                         prelim_tree_query = Some(qi);
                     }
-                    let phits = protein_prelim_gapped_hits(
+                    let hsps = protein_prelim_gapped_hits(
                         prot,
                         subj_aa,
                         &matrix,
@@ -6699,20 +6660,17 @@ pub fn blastx_batch(
                         params.gap_open,
                         params.gap_extend,
                         x_drop_gapped,
-                        x_drop_final,
                         blastx_seed_cutoff.max(1),
                         blastx_hit_cutoff.max(1),
                         params.chaining && params.matrix == MatrixType::Blosum62,
                         &mut scratch,
                         false,
                         ctx as i32,
+                        frame,
                         0,
                     );
-                    for hit in phits {
-                        blast_hsp_list_push(
-                            &mut per_query_internal_hsps[qi],
-                            protein_hit_to_blast_hsp(hit, ctx as i32, frame, 0),
-                        );
+                    for hsp in hsps {
+                        blast_hsp_list_push(&mut per_query_internal_hsps[qi], hsp);
                     }
                 }
             }
@@ -6802,12 +6760,12 @@ pub fn blastx_batch(
                             group_end += 1;
                         }
                         let prot = &qplans[qi].translation[query_range.clone()];
-                        let phits: Vec<_> = items[group_start..group_end]
+                        let hsps: Vec<_> = items[group_start..group_end]
                             .iter()
-                            .filter_map(|item| item.as_ref().map(blast_hsp_to_protein_hit))
+                            .filter_map(|item| item.as_ref().cloned())
                             .collect();
                         for hsp in process_blastx_frame_hsps(
-                            phits,
+                            hsps,
                             &qplans[qi].translation,
                             prot,
                             frame,
@@ -6898,7 +6856,7 @@ pub fn blastx_batch(
 /// frame's HSPs (subject coords frame-oriented to nucleotide); caller accumulates.
 #[allow(clippy::too_many_arguments)]
 fn process_tblastn_frame_hsps(
-    phits: Vec<crate::protein_lookup::ProteinHit>,
+    hsps: Vec<crate::hspstream::BlastHSP>,
     query_aa: &[u8],
     _prot: &[u8],
     subject_source_ncbi4na: Option<&[u8]>,
@@ -6922,7 +6880,7 @@ fn process_tblastn_frame_hsps(
 ) -> Vec<Hsp> {
     let mut out_hsps: Vec<Hsp> = Vec::new();
     let matrix_name = protein_matrix_name(params.matrix);
-    if phits.is_empty() {
+    if hsps.is_empty() {
         return out_hsps;
     }
     if !params.ungapped && params.comp_adjust > 0 {
@@ -6930,11 +6888,11 @@ fn process_tblastn_frame_hsps(
             return out_hsps;
         };
         let mut this_match = blast_hsp_list_new(query_context as i32);
-        for hit in phits {
-            blast_hsp_list_push(
-                &mut this_match,
-                protein_hit_to_blast_hsp(hit, query_context as i32, 0, frame),
-            );
+        for mut hsp in hsps {
+            hsp.context = query_context as i32;
+            hsp.query.frame = 0;
+            hsp.subject.frame = frame as i16;
+            blast_hsp_list_push(&mut this_match, hsp);
         }
         this_match.query_index = query_context as i32;
         let mut matrix_info = crate::blast_kappa::BlastMatrixInfo::default();
@@ -7071,25 +7029,18 @@ fn process_tblastn_frame_hsps(
             .map(|hsp| tblastn_blast_hsp_to_api_hsp(&hsp, prot_kbp))
             .collect();
     }
-    let final_phits = phits;
+    let final_hsps = hsps;
     let use_adj_matrix = false;
     let lambda_ratio_opt = None::<f64>;
-    let comp_adjust_method_id = 0;
-    for mut ph in final_phits {
+    for hsp in final_hsps {
         if !params.ungapped {
-            if let Some(scaled_score) = ph.scaled_score {
-                if scaled_score < composition_scaled_cutoff(hit_cutoff) {
-                    continue;
-                }
-            } else if ph.score < hit_cutoff {
+            if hsp.score < hit_cutoff {
                 continue;
             }
         }
-        let bit_score = prot_kbp.raw_to_bit(ph.score);
-        let (e_score_i32, e_lambda) = match ph.scaled_score {
-            Some(s) if params.comp_adjust > 0 => (s, prot_kbp.lambda / COMPO_ADJUST_SCALE_FACTOR),
-            _ => (ph.score, prot_kbp.lambda),
-        };
+        let bit_score = prot_kbp.raw_to_bit(hsp.score);
+        let e_score_i32 = hsp.score;
+        let e_lambda = prot_kbp.lambda;
         let e_kbp = crate::stat::KarlinBlk {
             lambda: e_lambda,
             k: prot_kbp.k,
@@ -7097,9 +7048,7 @@ fn process_tblastn_frame_hsps(
             h: prot_kbp.h,
             round_down: prot_kbp.round_down,
         };
-        let evalue = if let Some(adjusted_evalue) = ph.adjusted_evalue {
-            adjusted_evalue
-        } else if let Some(ref gbp) = gumbel_blk {
+        let evalue = if let Some(ref gbp) = gumbel_blk {
             let base_ev = if params.comp_adjust == 0 {
                 // NCBI applies sum-stats gap-decay divisor for
                 // translated programs regardless of comp_adjust
@@ -7192,46 +7141,75 @@ fn process_tblastn_frame_hsps(
             }
         };
         let (subject_start, subject_end) =
-            crate::util::protein_to_oriented_nuc_coords(ph.subject_start, ph.subject_end, frame);
+            crate::util::protein_to_oriented_nuc_coords(
+                hsp.subject.offset.max(0) as usize,
+                hsp.subject.end.max(hsp.subject.offset).max(0) as usize,
+                frame,
+            );
         let (subject_gapped_start, _) = crate::util::protein_to_oriented_nuc_coords(
-            ph.gapped_start_s,
-            ph.gapped_start_s.saturating_add(1),
+            hsp.subject.gapped_start.max(0) as usize,
+            hsp.subject.gapped_start.max(0) as usize + 1,
             frame,
         );
-        let (q_aln, s_aln) = match (ph.qseq.take(), ph.sseq.take()) {
-            (Some(qs), Some(ss)) => (qs.into_bytes(), ss.into_bytes()),
-            _ => (Vec::new(), Vec::new()),
+        let q_start = hsp.query.offset.max(0) as usize;
+        let q_end = hsp.query.end.max(hsp.query.offset).max(0) as usize;
+        let s_start = hsp.subject.offset.max(0) as usize;
+        let s_end = hsp.subject.end.max(hsp.subject.offset).max(0) as usize;
+        let (q_aln, s_aln, align_length, num_gaps) = if let Some(script) = hsp.gap_info.as_ref() {
+            if q_end <= query_aa.len() && s_end <= _prot.len() {
+                let q_slice = &query_aa[q_start..q_end];
+                let s_slice = &_prot[s_start..s_end];
+                let (qs, ss) = script.render_alignment(q_slice, s_slice, ncbistdaa_to_aminoacid_char);
+                (
+                    qs.into_bytes(),
+                    ss.into_bytes(),
+                    script.alignment_length().max(0) as usize,
+                    crate::blast_kappa::gap_edit_script_num_gap_opens(script).max(0) as usize,
+                )
+            } else {
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    q_end.saturating_sub(q_start),
+                    0,
+                )
+            }
+        } else {
+            (
+                Vec::new(),
+                Vec::new(),
+                q_end.saturating_sub(q_start),
+                0,
+            )
         };
         let hsp = Hsp {
-            score: ph.score,
+            score: hsp.score,
             bit_score,
             evalue,
-            query_start: ph.query_start,
-            query_end: ph.query_end,
+            query_start: q_start,
+            query_end: q_end,
             subject_start,
             subject_end,
-            query_gapped_start: ph.gapped_start_q,
+            query_gapped_start: hsp.query.gapped_start.max(0) as usize,
             subject_gapped_start,
-            query_link_start: ph.query_start,
-            query_link_end: ph.query_end,
-            query_link_gapped_start: ph.gapped_start_q,
-            subject_link_start: ph.subject_start,
-            subject_link_end: ph.subject_end,
-            subject_link_gapped_start: ph.gapped_start_s,
-            link_score: ph.scaled_score,
-            link_lambda: ph
-                .scaled_score
-                .map(|_| prot_kbp.lambda / COMPO_ADJUST_SCALE_FACTOR),
-            num_identities: ph.num_ident as usize,
-            num_gaps: ph.gap_opens as usize,
-            alignment_length: ph.align_length as usize,
+            query_link_start: q_start,
+            query_link_end: q_end,
+            query_link_gapped_start: hsp.query.gapped_start.max(0) as usize,
+            subject_link_start: s_start,
+            subject_link_end: s_end,
+            subject_link_gapped_start: hsp.subject.gapped_start.max(0) as usize,
+            link_score: None,
+            link_lambda: None,
+            num_identities: hsp.num_ident.max(0) as usize,
+            num_gaps,
+            alignment_length: align_length,
             query_aln: q_aln,
             midline: Vec::new(),
             subject_aln: s_aln,
             query_frame: 0,
             subject_frame: frame,
             num_links: 1,
-            comp_adjust_method: comp_adjust_method_id,
+            comp_adjust_method: hsp.comp_adjustment_method as u8,
         };
         out_hsps.push(hsp);
     }
@@ -7478,8 +7456,12 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 if phits.is_empty() {
                     continue;
                 }
+                let hsps: Vec<_> = phits
+                    .into_iter()
+                    .map(|hit| protein_hit_to_blast_hsp(hit, 0, 0, frame))
+                    .collect();
                 for hsp in process_tblastn_frame_hsps(
-                    phits,
+                    hsps,
                     &query_aa,
                     prot_eval,
                     Some(&subject_ncbi4na),
@@ -7534,7 +7516,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     &mut scratch.diag_table,
                 );
                 scratch.diag_table.exit(prot.len());
-                let phits = protein_prelim_gapped_hits(
+                let hsps = protein_prelim_gapped_hits(
                     &query_aa,
                     prot_eval,
                     &matrix,
@@ -7542,20 +7524,17 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     params.gap_open,
                     params.gap_extend,
                     x_drop_gapped,
-                    x_drop_final,
                     tblastn_seed_cutoff,
                     tblastn_hit_cutoff,
                     params.chaining && params.matrix == MatrixType::Blosum62,
                     scratch,
                     false,
                     0,
+                    0,
                     frame,
                 );
-                for hit in phits {
-                    blast_hsp_list_push(
-                        &mut subject_internal_hsps,
-                        protein_hit_to_blast_hsp(hit, 0, 0, frame),
-                    );
+                for hsp in hsps {
+                    blast_hsp_list_push(&mut subject_internal_hsps, hsp);
                 }
             }
         }
@@ -7728,8 +7707,6 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             }
             subject_stat_length = tblastn_traceback_subject_hsp_list(
                 &query_aa,
-                &translation_buffer,
-                &frame_offsets,
                 &subject_ncbi4na,
                 crate::util::lookup_genetic_code(params.db_gencode),
                 &matrix,
@@ -7811,12 +7788,12 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                     group_end += 1;
                 }
                 let prot_eval = &translation_buffer[prot_range.clone()];
-                let phits: Vec<_> = subject_internal_hsps.hsp_array[group_start..group_end]
+                let hsps: Vec<_> = subject_internal_hsps.hsp_array[group_start..group_end]
                     .iter()
-                    .filter_map(|item| item.as_ref().map(blast_hsp_to_protein_hit))
+                    .filter_map(|item| item.as_ref().cloned())
                     .collect();
                 for hsp in process_tblastn_frame_hsps(
-                    phits,
+                    hsps,
                     &query_aa,
                     prot_eval,
                     Some(&subject_ncbi4na),
@@ -8219,8 +8196,12 @@ pub fn tblastn_batch(
                         if ug.is_empty() {
                             continue;
                         }
+                        let hsps: Vec<_> = ug
+                            .into_iter()
+                            .map(|hit| protein_hit_to_blast_hsp(hit, 0, 0, frame))
+                            .collect();
                         for hsp in process_tblastn_frame_hsps(
-                            ug,
+                            hsps,
                             &p.aa,
                             prot,
                             Some(&subject_ncbi4na),
@@ -8264,7 +8245,7 @@ pub fn tblastn_batch(
                             }
                         }
                     } else {
-                        let phits = protein_prelim_gapped_hits(
+                        let hsps = protein_prelim_gapped_hits(
                             &p.aa,
                             prot,
                             &matrix,
@@ -8272,20 +8253,17 @@ pub fn tblastn_batch(
                             params.gap_open,
                             params.gap_extend,
                             x_drop_gapped,
-                            x_drop_final,
                             p.seed_cutoff,
                             p.hit_cutoff,
                             params.chaining && params.matrix == MatrixType::Blosum62,
                             scratch,
                             false,
                             qi as i32,
+                            0,
                             frame,
                         );
-                        for hit in phits {
-                            blast_hsp_list_push(
-                                &mut per_query_internal_hsps[qi],
-                                protein_hit_to_blast_hsp(hit, qi as i32, 0, frame),
-                            );
+                        for hsp in hsps {
+                            blast_hsp_list_push(&mut per_query_internal_hsps[qi], hsp);
                         }
                     }
                 }
@@ -8479,8 +8457,6 @@ pub fn tblastn_batch(
                     }
                     per_query_stat_length[qi] = tblastn_traceback_subject_hsp_list(
                         &p.aa,
-                        &translation_buffer,
-                        &frame_offsets,
                         &subject_ncbi4na,
                         db_code,
                         &matrix,
@@ -8563,12 +8539,12 @@ pub fn tblastn_batch(
                             group_end += 1;
                         }
                         let prot = &translation_buffer[prot_range.clone()];
-                        let phits: Vec<_> = items[group_start..group_end]
+                        let hsps: Vec<_> = items[group_start..group_end]
                             .iter()
-                            .filter_map(|item| item.as_ref().map(blast_hsp_to_protein_hit))
+                            .filter_map(|item| item.as_ref().cloned())
                             .collect();
                         for hsp in process_tblastn_frame_hsps(
-                            phits,
+                            hsps,
                             &p.aa,
                             prot,
                             Some(&subject_ncbi4na),
@@ -8690,24 +8666,29 @@ fn process_tblastx_pair_internal_hsps(
         if ph.score < save_cutoff {
             continue;
         }
-        let mut target_hsp = crate::hspstream::Hsp {
+        let mut target_hsp = crate::hspstream::BlastHSP {
             score: ph.score,
             num_ident: ph.num_ident,
             bit_score: 0.0,
             evalue: 0.0,
-            query_offset: ph.query_start as i32,
-            query_end: ph.query_end as i32,
-            query_gapped_start: ph.gapped_start_q as i32,
-            subject_offset: ph.subject_start as i32,
-            subject_end: ph.subject_end as i32,
-            subject_gapped_start: ph.gapped_start_s as i32,
+            query: crate::hspstream::BlastSeg {
+                frame: qframe as i16,
+                offset: ph.query_start as i32,
+                end: ph.query_end as i32,
+                gapped_start: ph.gapped_start_q as i32,
+            },
+            subject: crate::hspstream::BlastSeg {
+                frame: sframe as i16,
+                offset: ph.subject_start as i32,
+                end: ph.subject_end as i32,
+                gapped_start: ph.gapped_start_s as i32,
+            },
             context: 0,
-            query_frame: qframe,
-            subject_frame: sframe,
-            num_gaps: 0,
+            gap_info: None,
+            num: 0,
             comp_adjustment_method: 0,
-            edit_script: None,
             pat_info: None,
+            num_positives: 0,
             map_info: None,
         };
         let target_view = target_t.as_mut().and_then(|target| {
@@ -8725,9 +8706,9 @@ fn process_tblastx_pair_internal_hsps(
         ) {
             continue;
         }
-        target_hsp.subject_offset = ph.subject_start as i32;
-        target_hsp.subject_end = ph.subject_end as i32;
-        target_hsp.subject_gapped_start = ph.gapped_start_s as i32;
+        target_hsp.subject.offset = ph.subject_start as i32;
+        target_hsp.subject.end = ph.subject_end as i32;
+        target_hsp.subject.gapped_start = ph.gapped_start_s as i32;
         out.push(crate::hspstream::Hsp {
             score: ph.score,
             num_ident: ph.num_ident,
@@ -8803,7 +8784,34 @@ fn tblastx_internal_hsp_to_api_hsp(
 ) -> Option<Hsp> {
     let target_view = target_t
         .as_mut()
-        .and_then(|target| crate::hspstream::blast_hsp_get_target_translation(target, Some(hsp)))?;
+        .and_then(|target| {
+            let target_hsp = crate::hspstream::BlastHSP {
+                score: hsp.score,
+                num_ident: hsp.num_ident,
+                bit_score: hsp.bit_score,
+                evalue: hsp.evalue,
+                query: crate::hspstream::BlastSeg {
+                    frame: hsp.query_frame as i16,
+                    offset: hsp.query_offset,
+                    end: hsp.query_end,
+                    gapped_start: hsp.query_gapped_start,
+                },
+                subject: crate::hspstream::BlastSeg {
+                    frame: hsp.subject_frame as i16,
+                    offset: hsp.subject_offset,
+                    end: hsp.subject_end,
+                    gapped_start: hsp.subject_gapped_start,
+                },
+                context: hsp.context,
+                gap_info: hsp.edit_script.clone(),
+                num: 0,
+                comp_adjustment_method: hsp.comp_adjustment_method as i16,
+                pat_info: hsp.pat_info.clone().map(Into::into),
+                num_positives: 0,
+                map_info: hsp.map_info.clone(),
+            };
+            crate::hspstream::blast_hsp_get_target_translation(target, Some(&target_hsp))
+        })?;
     let q_start = hsp.query_offset.max(0) as usize;
     let q_end = hsp.query_end.max(hsp.query_offset) as usize;
     let s_start = hsp.subject_offset.max(0) as usize;
@@ -12085,21 +12093,6 @@ mod tests {
     }
 
     #[test]
-    fn c_leaf_compute_num_identities_walks_gap_script() {
-        let mut hsp = internal_blast_hsp(10, 0, 4, 0, 3);
-        hsp.gap_info = Some(crate::gapinfo::GapEditScript::from_ops(vec![
-            (crate::gapinfo::GapAlignOpType::Sub, 2),
-            (crate::gapinfo::GapAlignOpType::Ins, 1),
-            (crate::gapinfo::GapAlignOpType::Sub, 1),
-        ]));
-
-        s_compute_num_identities_blast_hsp(&mut hsp, &[1, 2, 9, 3], &[1, 4, 3], None);
-
-        assert_eq!(hsp.num_ident, 2);
-        assert_eq!(hsp.num_positives, 2);
-    }
-
-    #[test]
     fn c_leaf_hsp_test_matches_c_thresholds() {
         let mut hsp = internal_blast_hsp(64, 0, 4, 0, 4);
         hsp.num_ident = 2;
@@ -12109,7 +12102,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(s_hsp_test_blast_hsp(&hsp, &options, 4));
+        assert!(crate::hspstream::s_hsp_test(&hsp, &options, 4));
     }
 
     #[test]

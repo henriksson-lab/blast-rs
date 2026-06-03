@@ -940,7 +940,7 @@ pub fn s_blast_hsp_best_hit_final(
         let mut hitlist = crate::hspstream::blast_hit_list_new(data.num_hsps[qid]);
         let _ = s_export_to_hitlist(qid, data, &mut hitlist);
         for list in hitlist.hsp_lists.iter_mut() {
-            let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(list));
+            list.hsps.sort_by(crate::hspstream::score_compare_hsps);
         }
         let _ = crate::hspstream::blast_hit_list_sort_by_evalue(&mut hitlist);
         let target = results.hitlists[qid].get_or_insert_with(|| {
@@ -1157,7 +1157,9 @@ pub fn s_blast_hspcollector_run(
             let Some(mut split_list) = split_list else {
                 continue;
             };
-            let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(&mut split_list));
+            split_list
+                .hsps
+                .sort_by(crate::hspstream::score_compare_hsps);
             let hitlist = results.hitlists[query_index].get_or_insert_with(|| {
                 crate::hspstream::blast_hit_list_new(data.params.prelim_hitlist_size)
             });

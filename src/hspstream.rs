@@ -191,32 +191,6 @@ impl BlastHSP {
         }
     }
 
-    pub fn into_legacy_hsp(self) -> Hsp {
-        Hsp {
-            score: self.score,
-            num_ident: self.num_ident,
-            bit_score: self.bit_score,
-            evalue: self.evalue,
-            query_offset: self.query.offset,
-            query_end: self.query.end,
-            query_gapped_start: self.query.gapped_start,
-            subject_offset: self.subject.offset,
-            subject_end: self.subject.end,
-            subject_gapped_start: self.subject.gapped_start,
-            context: self.context,
-            query_frame: self.query.frame as i32,
-            subject_frame: self.subject.frame as i32,
-            num_gaps: self
-                .gap_info
-                .as_ref()
-                .map(gap_edit_script_num_gap_opens)
-                .unwrap_or(0),
-            comp_adjustment_method: self.comp_adjustment_method as i32,
-            edit_script: self.gap_info,
-            pat_info: self.pat_info.map(Into::into),
-            map_info: self.map_info,
-        }
-    }
 }
 
 /// NCBI: `BlastHSPList` (`blast_hits.h:146`).
@@ -262,7 +236,30 @@ impl BlastHSPList {
                 .into_iter()
                 .take(hspcnt)
                 .flatten()
-                .map(BlastHSP::into_legacy_hsp)
+                .map(|hsp| Hsp {
+                    score: hsp.score,
+                    num_ident: hsp.num_ident,
+                    bit_score: hsp.bit_score,
+                    evalue: hsp.evalue,
+                    query_offset: hsp.query.offset,
+                    query_end: hsp.query.end,
+                    query_gapped_start: hsp.query.gapped_start,
+                    subject_offset: hsp.subject.offset,
+                    subject_end: hsp.subject.end,
+                    subject_gapped_start: hsp.subject.gapped_start,
+                    context: hsp.context,
+                    query_frame: hsp.query.frame as i32,
+                    subject_frame: hsp.subject.frame as i32,
+                    num_gaps: hsp
+                        .gap_info
+                        .as_ref()
+                        .map(gap_edit_script_num_gap_opens)
+                        .unwrap_or(0),
+                    comp_adjustment_method: hsp.comp_adjustment_method as i32,
+                    edit_script: hsp.gap_info,
+                    pat_info: hsp.pat_info.map(Into::into),
+                    map_info: hsp.map_info,
+                })
                 .collect(),
             best_evalue: self.best_evalue,
             hsp_max: self.hsp_max,
@@ -493,10 +490,11 @@ pub fn s_blast_hsp_get_oof_num_identities_and_positives(
 /// slice start.
 pub fn blast_hsp_get_target_translation<'a>(
     target_t: &'a mut crate::util::SBlastTargetTranslation,
-    hsp: Option<&Hsp>,
+    hsp: Option<&BlastHSP>,
 ) -> Option<BlastTargetTranslationView<'a>> {
     let hsp = hsp?;
-    let context = crate::util::blast_frame_to_context(hsp.subject_frame, target_t.program_number);
+    let context =
+        crate::util::blast_frame_to_context(hsp.subject.frame as i32, target_t.program_number);
     if context < 0 {
         return None;
     }
@@ -524,12 +522,12 @@ pub fn blast_hsp_get_target_translation<'a>(
             .as_deref()
             .or_else(|| subject_blk.sequence_start.as_deref())?;
 
-        let (nucl_start, mut nucl_end) = if hsp.subject_offset < 0 {
+        let (nucl_start, mut nucl_end) = if hsp.subject.offset < 0 {
             (0, subject_length)
         } else {
             (
-                (3 * hsp.subject_offset - K_MAX_TRANSLATION).max(0),
-                subject_length.min(3 * hsp.subject_end + K_MAX_TRANSLATION),
+                (3 * hsp.subject.offset - K_MAX_TRANSLATION).max(0),
+                subject_length.min(3 * hsp.subject.end + K_MAX_TRANSLATION),
             )
         };
         if subject_length - nucl_end <= 21 {
@@ -539,7 +537,7 @@ pub fn blast_hsp_get_target_translation<'a>(
         let nucl_length = (nucl_end - nucl_start).max(0);
         let translation_length = 1 + nucl_length / crate::util::CODON_LENGTH as i32;
         let start_shift = nucl_start / crate::util::CODON_LENGTH as i32;
-        let nucl_shift = if hsp.subject_frame < 0 {
+        let nucl_shift = if hsp.subject.frame < 0 {
             subject_length - nucl_start - nucl_length
         } else {
             nucl_start
@@ -557,7 +555,7 @@ pub fn blast_hsp_get_target_translation<'a>(
                     Some(vec![0; translation_length.max(0) as usize + 2]);
             }
 
-            let rev = if hsp.subject_frame < 0 {
+            let rev = if hsp.subject.frame < 0 {
                 crate::util::get_reverse_nucl_sequence(nucl_seq, nucl_length_usize)
             } else {
                 Vec::new()
@@ -567,14 +565,14 @@ pub fn blast_hsp_get_target_translation<'a>(
                 nucl_seq,
                 &rev,
                 nucl_length_usize,
-                hsp.subject_frame,
+                hsp.subject.frame as i32,
                 translation,
                 &target_t.gen_code_string,
             ) as i32;
             range[2 * context + 1] = start_shift + length;
             stop = range[2 * context + 1];
 
-            if hsp.subject_offset >= 0 {
+            if hsp.subject.offset >= 0 {
                 translation[0] = crate::util::FENCE_SENTRY;
                 if let Some(slot) = translation.get_mut(length as usize + 1) {
                     *slot = crate::util::FENCE_SENTRY;
@@ -760,14 +758,15 @@ pub fn blast_hsp_get_partial_subject_translation(
 }
 
 /// NCBI: s_HSPTest (blast_hits.c:993).
-pub fn s_hsp_test(hsp: &Hsp, hit_options: &HitSavingOptions, align_length: i32) -> bool {
+pub fn s_hsp_test(hsp: &BlastHSP, hit_options: &HitSavingOptions, align_length: i32) -> bool {
     (hsp.num_ident as f64 * 100.0 < align_length as f64 * hit_options.percent_identity)
         || align_length < hit_options.min_hit_length
 }
 
 /// NCBI: Blast_HSPTest (blast_hits.c:1027).
 pub fn blast_hsp_test(hsp: &Hsp, hit_options: &HitSavingOptions, align_length: i32) -> bool {
-    s_hsp_test(hsp, hit_options, align_length)
+    let blast_hsp = BlastHSP::from_legacy_hsp(hsp.clone());
+    s_hsp_test(&blast_hsp, hit_options, align_length)
 }
 
 /// NCBI: Blast_HSPGetQueryCoverage (blast_hits.c:1066).
@@ -914,21 +913,18 @@ pub fn blast_hsp_list_swap(list1: &mut HspList, list2: &mut HspList) {
 }
 
 /// NCBI: Blast_HSPListSortByScore (blast_hits.c:1374).
-///
-/// NCBI checks `Blast_HSPListIsSortedByScore` first and skips the sort when
-/// the list is already sorted; we mirror that here so already-sorted lists
-/// avoid an O(n log n) pass.
-pub fn blast_hsp_list_sort_by_score(hsp_list: Option<&mut HspList>) -> i32 {
+pub fn blast_hsp_list_sort_by_score(hsp_list: Option<&mut BlastHSPList>) -> i32 {
     let Some(hsp_list) = hsp_list else {
         return 0;
     };
-    if hsp_list.hsps.len() <= 1 {
+    if hsp_list.hsp_array.len() <= 1 {
+        hsp_list.hspcnt = hsp_list.hsp_array.iter().filter(|hsp| hsp.is_some()).count() as i32;
         return 0;
     }
-    if blast_hsp_list_is_sorted_by_score(Some(hsp_list)) {
-        return 0;
-    }
-    hsp_list.hsps.sort_by(score_compare_hsps);
+    hsp_list
+        .hsp_array
+        .sort_by(|a, b| score_compare_blast_hsps(a.as_ref(), b.as_ref()));
+    hsp_list.hspcnt = hsp_list.hsp_array.iter().filter(|hsp| hsp.is_some()).count() as i32;
     0
 }
 
@@ -2124,7 +2120,7 @@ where
 /// linker is reconstructed from the Rust `BlastScoreBlk` view.
 pub fn s_hsp_list_post_traceback_update(
     program_number: crate::program::ProgramType,
-    hsp_list: &mut HspList,
+    hsp_list: &mut BlastHSPList,
     query_info: &crate::queryinfo::QueryInfo,
     score_params: &crate::parameters::ScoringParameters,
     hit_params: &crate::parameters::HitSavingParameters,
@@ -2132,7 +2128,27 @@ pub fn s_hsp_list_post_traceback_update(
     subject_length: i32,
 ) -> i16 {
     let k_gapped = score_params.options.gapped_calculation;
-    s_blast_hsp_list_rps_update(program_number, hsp_list);
+    if crate::program::blast_program_is_rps_blast(program_number) {
+        for hsp in hsp_list.hsp_array.iter_mut().flatten() {
+            std::mem::swap(&mut hsp.query, &mut hsp.subject);
+            if let Some(edit_script) = hsp.gap_info.as_mut() {
+                for index in 0..edit_script.len() {
+                    let (op, count) = edit_script.get(index).unwrap_or((GapAlignOpType::Sub, 0));
+                    let new_op = match op {
+                        GapAlignOpType::Ins => GapAlignOpType::Del,
+                        GapAlignOpType::Del => GapAlignOpType::Ins,
+                        other => other,
+                    };
+                    edit_script.set(index, new_op, count);
+                }
+            }
+            if program_number == crate::program::RPS_TBLASTN {
+                hsp.context =
+                    crate::util::blast_frame_to_context(hsp.query.frame as i32, program_number);
+            }
+        }
+        hsp_list.hsp_array.sort_by(|a, b| score_compare_blast_hsps(a.as_ref(), b.as_ref()));
+    }
 
     if let Some(link_hsp_params) = hit_params.link_hsp_params.as_ref() {
         let link_score_block = crate::link_hsps::LinkScoreBlock {
@@ -2142,49 +2158,80 @@ pub fn s_hsp_list_post_traceback_update(
             link_gbp_db_length: None,
             recompute_evalues_before_uneven_linking: false,
         };
-        let source_list = std::mem::replace(hsp_list, HspList::new(0));
-        let source_hsp_max = source_list.hsp_max;
-        let mut blast_hsp_list = BlastHSPList::from_legacy_hsp_list(source_list);
         let _ = crate::link_hsps::blast_link_hsp_list(
             program_number,
-            &mut blast_hsp_list,
+            hsp_list,
             query_info,
             subject_length,
             &link_score_block,
             link_hsp_params,
             k_gapped,
         );
-        *hsp_list = blast_hsp_list.into_legacy_hsp_list();
-        hsp_list.hsp_max = source_hsp_max;
     } else {
         let scale_factor = if crate::program::blast_program_is_rps_blast(program_number) {
             score_params.scale_factor
         } else {
             1.0
         };
+        let source_query_index = hsp_list.query_index;
+        let source_hsp_max = hsp_list.hsp_max;
+        let mut legacy_list = std::mem::replace(
+            hsp_list,
+            BlastHSPList {
+                oid: -1,
+                query_index: source_query_index,
+                hsp_array: Vec::new(),
+                hspcnt: 0,
+                allocated: 0,
+                hsp_max: source_hsp_max,
+                do_not_reallocate: false,
+                best_evalue: i32::MAX as f64,
+            },
+        )
+        .into_legacy_hsp_list();
         let _ = crate::blast_kappa::blast_hsp_list_get_evalues(
             program_number,
             query_info,
             subject_length,
-            hsp_list,
+            &mut legacy_list,
             k_gapped,
             false,
             sbp,
             0.0,
             scale_factor,
         );
+        *hsp_list = BlastHSPList::from_legacy_hsp_list(legacy_list);
+        hsp_list.query_index = source_query_index;
+        hsp_list.hsp_max = source_hsp_max;
     }
 
-    let _ = blast_hsp_list_reap_by_evalue(Some(hsp_list), &hit_params.options);
-    s_hsp_list_rescale_scores(hsp_list, score_params.scale_factor);
+    hsp_list
+        .hsp_array
+        .retain(|hsp| hsp.as_ref().is_some_and(|hsp| hsp.evalue <= hit_params.options.expect_value));
+    hsp_list.hspcnt = hsp_list.hsp_array.len() as i32;
+    hsp_list.allocated = hsp_list.hspcnt;
+    for hsp in hsp_list.hsp_array.iter_mut().flatten() {
+        hsp.score = ((hsp.score as f64 + 0.5 * score_params.scale_factor)
+            / score_params.scale_factor) as i32;
+    }
+    hsp_list.hsp_array.sort_by(|a, b| score_compare_blast_hsps(a.as_ref(), b.as_ref()));
 
     let kbp_array = if k_gapped && !sbp.kbp_gap.is_empty() {
         &sbp.kbp_gap
     } else {
         &sbp.kbp
     };
-    let _ = crate::stat::blast_hsp_list_get_bit_scores(Some(hsp_list), k_gapped, kbp_array);
-    hsp_list.best_evalue = s_blast_get_best_evalue(hsp_list);
+    for hsp in hsp_list.hsp_array.iter_mut().flatten() {
+        if let Some(ctx_kbp) = kbp_array.get(hsp.context.max(0) as usize) {
+            hsp.bit_score =
+                (hsp.score as f64 * ctx_kbp.lambda - ctx_kbp.log_k) / crate::math::NCBIMATH_LN2;
+        }
+    }
+    hsp_list.best_evalue = hsp_list
+        .hsp_array
+        .iter()
+        .filter_map(|hsp| hsp.as_ref().map(|hsp| hsp.evalue))
+        .fold(i32::MAX as f64, f64::min);
     0
 }
 
@@ -2371,6 +2418,24 @@ pub fn score_compare_hsps(a: &Hsp, b: &Hsp) -> std::cmp::Ordering {
         .then_with(|| b.subject_end.cmp(&a.subject_end))
         .then_with(|| a.query_offset.cmp(&b.query_offset))
         .then_with(|| b.query_end.cmp(&a.query_end))
+}
+
+pub fn score_compare_blast_hsps(
+    a: Option<&BlastHSP>,
+    b: Option<&BlastHSP>,
+) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => b
+            .score
+            .cmp(&a.score)
+            .then_with(|| a.subject.offset.cmp(&b.subject.offset))
+            .then_with(|| b.subject.end.cmp(&a.subject.end))
+            .then_with(|| a.query.offset.cmp(&b.query.offset))
+            .then_with(|| b.query.end.cmp(&a.query.end)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 /// NCBI: s_QueryOffsetCompareHSPs (blast_hits.c:2268).
@@ -4920,7 +4985,7 @@ pub fn blast_hsp_stream_merge(
 
     for hitlist in dst.hitlists.iter_mut().flatten() {
         for hsplist in &mut hitlist.hsp_lists {
-            let _ = blast_hsp_list_sort_by_score(Some(hsplist));
+            hsplist.hsps.sort_by(score_compare_hsps);
         }
     }
     0
@@ -6185,9 +6250,10 @@ mod tests {
             min_hit_length: 10,
             ..HitSavingOptions::default()
         };
-        assert!(!s_hsp_test(&hsp, &hit_options, 18));
+        let blast_hsp = BlastHSP::from_legacy_hsp(hsp.clone());
+        assert!(!s_hsp_test(&blast_hsp, &hit_options, 18));
         assert!(!blast_hsp_test(&hsp, &hit_options, 18));
-        assert!(s_hsp_test(&hsp, &hit_options, 9));
+        assert!(s_hsp_test(&blast_hsp, &hit_options, 9));
 
         let strict_identity = HitSavingOptions {
             percent_identity: 60.0,
@@ -6253,10 +6319,10 @@ mod tests {
             range: Some(vec![0; 2 * crate::util::NUM_FRAMES]),
             subject_blk: Some(subject_blk),
         };
-        let mut translated_hsp = make_hsp(40, 1e-8);
-        translated_hsp.subject_frame = 1;
-        translated_hsp.subject_offset = 1;
-        translated_hsp.subject_end = 3;
+        let mut translated_hsp = BlastHSP::from_legacy_hsp(make_hsp(40, 1e-8));
+        translated_hsp.subject.frame = 1;
+        translated_hsp.subject.offset = 1;
+        translated_hsp.subject.end = 3;
         let view = blast_hsp_get_target_translation(&mut target, Some(&translated_hsp))
             .expect("translation view");
         assert_eq!(view.pointer_offset, 1);
@@ -6302,8 +6368,8 @@ mod tests {
         target.translations[0] = Some(vec![10, 11, 12, 13, 14, 15]);
         target.range.as_mut().unwrap()[0] = 2;
         target.range.as_mut().unwrap()[1] = 5;
-        let mut hsp = make_hsp(30, 1.0e-6);
-        hsp.subject_frame = 1;
+        let mut hsp = BlastHSP::from_legacy_hsp(make_hsp(30, 1.0e-6));
+        hsp.subject.frame = 1;
 
         let view = blast_hsp_get_target_translation(&mut target, Some(&hsp)).expect("view");
         assert_eq!(view.pointer_offset, -1);
@@ -6350,8 +6416,8 @@ mod tests {
         target.range.as_mut().unwrap()[2] = 1;
         target.range.as_mut().unwrap()[3] = 3;
 
-        let mut hsp = make_hsp(30, 1.0e-6);
-        hsp.subject_frame = -1;
+        let mut hsp = BlastHSP::from_legacy_hsp(make_hsp(30, 1.0e-6));
+        hsp.subject.frame = -1;
 
         let view = blast_hsp_get_target_translation(&mut target, Some(&hsp)).expect("view");
         assert_eq!(view.pointer_offset, 0);
@@ -6379,10 +6445,10 @@ mod tests {
         target.range.as_mut().unwrap()[1] = 200;
         target.translations[0] = Some(vec![0; 102]);
 
-        let mut hsp = make_hsp(30, 1.0e-6);
-        hsp.subject_frame = 1;
-        hsp.subject_offset = 20;
-        hsp.subject_end = 80;
+        let mut hsp = BlastHSP::from_legacy_hsp(make_hsp(30, 1.0e-6));
+        hsp.subject.frame = 1;
+        hsp.subject.offset = 20;
+        hsp.subject.end = 80;
 
         let view = blast_hsp_get_target_translation(&mut target, Some(&hsp)).expect("view");
         assert_eq!(view.pointer_offset, 1);
@@ -7005,7 +7071,16 @@ mod tests {
 
     #[test]
     fn test_blast_hsp_list_sort_by_score_matches_c_order() {
-        let mut list = blast_hsp_list_new(0);
+        let mut list = BlastHSPList {
+            oid: 0,
+            query_index: 0,
+            hsp_array: Vec::new(),
+            hspcnt: 0,
+            allocated: 0,
+            hsp_max: 0,
+            do_not_reallocate: false,
+            best_evalue: f64::MAX,
+        };
         let mut hsp_a = make_hsp(40, 1e-4);
         hsp_a.subject_offset = 10;
         hsp_a.subject_end = 20;
@@ -7021,14 +7096,21 @@ mod tests {
         hsp_c.subject_end = 30;
         hsp_c.query_offset = 9;
         hsp_c.query_end = 19;
-        list.hsps = vec![hsp_a, hsp_b, hsp_c];
-        list.best_evalue = s_blast_get_best_evalue(&list);
+        list.hsp_array = vec![
+            Some(BlastHSP::from_legacy_hsp(hsp_a)),
+            Some(BlastHSP::from_legacy_hsp(hsp_b)),
+            Some(BlastHSP::from_legacy_hsp(hsp_c)),
+        ];
+        list.hspcnt = list.hsp_array.len() as i32;
+        list.allocated = list.hspcnt;
+        list.best_evalue = 1e-6;
 
         assert_eq!(blast_hsp_list_sort_by_score(Some(&mut list)), 0);
         let ordered: Vec<(i32, i32, i32)> = list
-            .hsps
+            .hsp_array
             .iter()
-            .map(|hsp| (hsp.score, hsp.subject_offset, hsp.subject_end))
+            .filter_map(|hsp| hsp.as_ref())
+            .map(|hsp| (hsp.score, hsp.subject.offset, hsp.subject.end))
             .collect();
         assert_eq!(ordered, vec![(60, 30, 40), (40, 5, 30), (40, 10, 20)]);
         assert_eq!(list.best_evalue, 1e-6);
@@ -7365,10 +7447,11 @@ mod tests {
         sbp.kbp[0] = kbp.clone();
         sbp.kbp_gap = vec![kbp.clone()];
 
-        let mut list = blast_hsp_list_new(0);
-        list.oid = 7;
-        let _ = blast_hsp_list_save_hsp(&mut list, make_hsp(50, f64::MAX));
-        let _ = blast_hsp_list_save_hsp(&mut list, make_hsp(5, f64::MAX));
+        let mut legacy = blast_hsp_list_new(0);
+        legacy.oid = 7;
+        let _ = blast_hsp_list_save_hsp(&mut legacy, make_hsp(50, f64::MAX));
+        let _ = blast_hsp_list_save_hsp(&mut legacy, make_hsp(5, f64::MAX));
+        let mut list = BlastHSPList::from_legacy_hsp_list(legacy);
 
         assert_eq!(
             s_hsp_list_post_traceback_update(
@@ -7383,9 +7466,10 @@ mod tests {
             0
         );
 
-        assert_eq!(list.hsps.len(), 1);
-        assert_eq!(list.hsps[0].score, 25);
-        assert!((list.hsps[0].bit_score - kbp.raw_to_bit(25)).abs() < 1e-12);
+        assert_eq!(list.hsp_array.len(), 1);
+        let hsp = list.hsp_array[0].as_ref().expect("hsp");
+        assert_eq!(hsp.score, 25);
+        assert!((hsp.bit_score - kbp.raw_to_bit(25)).abs() < 1e-12);
         assert!(list.best_evalue <= 1e-6);
     }
 
@@ -7430,13 +7514,14 @@ mod tests {
         sbp.kbp = vec![kbp0.clone(), kbp1.clone()];
         sbp.kbp_gap = vec![kbp0.clone(), kbp1.clone()];
 
-        let mut list = blast_hsp_list_new(0);
+        let mut legacy = blast_hsp_list_new(0);
         let mut context0 = make_hsp(20, f64::MAX);
         context0.context = 0;
         let mut context1 = make_hsp(20, f64::MAX);
         context1.context = 1;
-        let _ = blast_hsp_list_save_hsp(&mut list, context0);
-        let _ = blast_hsp_list_save_hsp(&mut list, context1);
+        let _ = blast_hsp_list_save_hsp(&mut legacy, context0);
+        let _ = blast_hsp_list_save_hsp(&mut legacy, context1);
+        let mut list = BlastHSPList::from_legacy_hsp_list(legacy);
 
         assert_eq!(
             s_hsp_list_post_traceback_update(
@@ -7452,8 +7537,9 @@ mod tests {
         );
 
         let by_context = |context| {
-            list.hsps
+            list.hsp_array
                 .iter()
+                .flatten()
                 .find(|hsp| hsp.context == context)
                 .expect("context hsp")
         };
@@ -7496,10 +7582,11 @@ mod tests {
         sbp.kbp = vec![kbp.clone()];
         sbp.kbp_gap = vec![kbp.clone()];
 
-        let mut list = blast_hsp_list_new(0);
+        let mut legacy = blast_hsp_list_new(0);
         let mut hsp = make_hsp(12, f64::MAX);
         hsp.context = 4;
-        let _ = blast_hsp_list_save_hsp(&mut list, hsp);
+        let _ = blast_hsp_list_save_hsp(&mut legacy, hsp);
+        let mut list = BlastHSPList::from_legacy_hsp_list(legacy);
 
         assert_eq!(
             s_hsp_list_post_traceback_update(
@@ -7514,10 +7601,11 @@ mod tests {
             0
         );
 
-        assert_eq!(list.hsps.len(), 1);
-        assert_eq!(list.hsps[0].context, 4);
-        assert!((list.hsps[0].evalue - kbp.raw_to_evalue(12, 75.0)).abs() < 1e-12);
-        assert_eq!(list.hsps[0].bit_score, 12.0 * 0.9);
+        assert_eq!(list.hsp_array.len(), 1);
+        let hsp = list.hsp_array[0].as_ref().expect("hsp");
+        assert_eq!(hsp.context, 4);
+        assert!((hsp.evalue - kbp.raw_to_evalue(12, 75.0)).abs() < 1e-12);
+        assert_eq!(hsp.bit_score, 12.0 * 0.9);
     }
 
     #[test]
@@ -8674,6 +8762,13 @@ mod tests {
     fn blast_hsp_list_adapter_uses_hspcnt_not_allocated_slots() {
         let mut active = BlastHSP::from_legacy_hsp(make_hsp(50, 1.0e-20));
         active.num = 7;
+        active.gap_info = Some(crate::gapinfo::GapEditScript::from_ops(vec![
+            (GapAlignOpType::Sub, 2),
+            (GapAlignOpType::Del2, 1),
+            (GapAlignOpType::Ins1, 1),
+            (GapAlignOpType::Del, 3),
+            (GapAlignOpType::Ins, 2),
+        ]));
         let mut inactive = BlastHSP::from_legacy_hsp(make_hsp(90, 1.0e-40));
         inactive.num = 99;
 
@@ -8692,22 +8787,7 @@ mod tests {
 
         assert_eq!(legacy.hsps.len(), 1);
         assert_eq!(legacy.hsps[0].score, 50);
-    }
-
-    #[test]
-    fn blast_hsp_adapter_counts_only_c_gap_open_ops() {
-        let mut hsp = BlastHSP::from_legacy_hsp(make_hsp(50, 1.0e-20));
-        hsp.gap_info = Some(crate::gapinfo::GapEditScript::from_ops(vec![
-            (GapAlignOpType::Sub, 2),
-            (GapAlignOpType::Del2, 1),
-            (GapAlignOpType::Ins1, 1),
-            (GapAlignOpType::Del, 3),
-            (GapAlignOpType::Ins, 2),
-        ]));
-
-        let legacy = hsp.into_legacy_hsp();
-
-        assert_eq!(legacy.num_gaps, 2);
+        assert_eq!(legacy.hsps[0].num_gaps, 2);
     }
 
     #[test]

@@ -1523,6 +1523,24 @@ pub fn greedy_align(
     ))
 }
 
+/// NCBI: `BLAST_GreedyGappedAlignment` (`blast_gapalign.c:2787`).
+///
+/// This decoded-subject boundary mirrors the represented Rust callers. The C
+/// function also has packed-subject/fence-hit plumbing that is not wired here.
+pub fn blast_greedy_gapped_alignment(
+    query: &[u8],
+    subject: &[u8],
+    q_seed: usize,
+    s_seed: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+) -> Option<(i32, usize, usize, usize, usize, GapEditScript)> {
+    greedy_align(
+        query, subject, q_seed, s_seed, reward, penalty, x_dropoff,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

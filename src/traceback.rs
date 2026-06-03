@@ -2068,7 +2068,9 @@ pub fn phi_get_gapped_score(
         }
     }
 
-    let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
+    hsp_list
+        .hsps
+        .sort_by(crate::hspstream::score_compare_hsps);
     0
 }
 
@@ -2416,7 +2418,9 @@ pub fn s_phi_traceback_from_hsp_list(
     }
     hsp_list.hsps = retained;
 
-    let _ = crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
+    hsp_list
+        .hsps
+        .sort_by(crate::hspstream::score_compare_hsps);
     let _ = crate::hspstream::blast_hsp_list_purge_null_hsps(Some(hsp_list));
     let occurrence_offsets: Vec<i32> = pattern_info
         .occurrences
