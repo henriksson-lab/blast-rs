@@ -301,55 +301,6 @@ pub struct BlastGappedStats {
     pub extensions: i32,
 }
 
-fn cutoff_for_context(
-    program_number: crate::program::ProgramType,
-    subject: &crate::util::BlastSequenceBlk,
-    context: i32,
-    hit_params: &crate::parameters::HitSavingParameters,
-) -> i32 {
-    let cutoff_index = if crate::program::blast_program_is_rps_blast(program_number) {
-        subject.oid
-    } else {
-        context
-    };
-    hit_params
-        .cutoffs
-        .get(cutoff_index.max(0) as usize)
-        .map(|cutoffs| cutoffs.cutoff_score)
-        .unwrap_or(hit_params.cutoff_score_min)
-}
-
-fn subject_unpacked_sequence(subject: &crate::util::BlastSequenceBlk) -> Option<&[u8]> {
-    subject.sequence.as_deref()
-}
-
-fn protein_score_matrix_for_gapped_score(
-    gap_align: &crate::protein::BlastGapAlignStruct,
-    score_params: &crate::parameters::ScoringParameters,
-) -> Option<[[i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]> {
-    if let Some(sbp) = gap_align.sbp.as_ref() {
-        if sbp.matrix.data.len() >= crate::matrix::AA_SIZE
-            && sbp
-                .matrix
-                .data
-                .iter()
-                .take(crate::matrix::AA_SIZE)
-                .all(|row| row.len() >= crate::matrix::AA_SIZE)
-        {
-            let mut matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
-            for (row_index, row) in matrix.iter_mut().enumerate() {
-                row.copy_from_slice(&sbp.matrix.data[row_index][..crate::matrix::AA_SIZE]);
-            }
-            return Some(matrix);
-        }
-    }
-
-    match score_params.options.matrix_name.as_deref() {
-        None | Some("BLOSUM62") => Some(crate::matrix::BLOSUM62),
-        _ => None,
-    }
-}
-
 /// NCBI: `s_BlastProtGappedAlignment` (`blast_gapalign.c:4298`).
 fn s_blast_prot_gapped_alignment(
     query: &[u8],
@@ -425,10 +376,29 @@ pub fn blast_get_gapped_score(
         ext_params.options.prelim_gap_ext == crate::options::PrelimGapExt::GreedyScoreOnly;
 
     let protein_matrix = if is_prot {
-        let Some(matrix) = protein_score_matrix_for_gapped_score(gap_align, score_params) else {
-            return crate::util::BLASTERR_INVALIDPARAM as i16;
-        };
-        Some(matrix)
+        if let Some(sbp) = gap_align.sbp.as_ref() {
+            if sbp.matrix.data.len() >= crate::matrix::AA_SIZE
+                && sbp
+                    .matrix
+                    .data
+                    .iter()
+                    .take(crate::matrix::AA_SIZE)
+                    .all(|row| row.len() >= crate::matrix::AA_SIZE)
+            {
+                let mut matrix = [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE];
+                for (row_index, row) in matrix.iter_mut().enumerate() {
+                    row.copy_from_slice(&sbp.matrix.data[row_index][..crate::matrix::AA_SIZE]);
+                }
+                Some(matrix)
+            } else {
+                return crate::util::BLASTERR_INVALIDPARAM as i16;
+            }
+        } else {
+            match score_params.options.matrix_name.as_deref() {
+                None | Some("BLOSUM62") => Some(crate::matrix::BLOSUM62),
+                _ => return crate::util::BLASTERR_INVALIDPARAM as i16,
+            }
+        }
     } else {
         None
     };
@@ -578,7 +548,16 @@ pub fn blast_get_gapped_score(
             continue;
         }
 
-        let cutoff = cutoff_for_context(program_number, subject, context, hit_params);
+        let cutoff_index = if crate::program::blast_program_is_rps_blast(program_number) {
+            subject.oid
+        } else {
+            context
+        };
+        let cutoff = hit_params
+            .cutoffs
+            .get(cutoff_index.max(0) as usize)
+            .map(|cutoffs| cutoffs.cutoff_score)
+            .unwrap_or(hit_params.cutoff_score_min);
         if let Some(stats) = gapped_stats.as_deref_mut() {
             stats.extensions += 1;
         }
@@ -640,7 +619,7 @@ pub fn blast_get_gapped_score(
             let Some(query_sequence) = query_tmp.sequence.as_ref() else {
                 return crate::util::BLASTERR_INVALIDPARAM as i16;
             };
-            let Some(subject_sequence) = subject_unpacked_sequence(subject) else {
+            let Some(subject_sequence) = subject.sequence.as_deref() else {
                 return crate::util::BLASTERR_INVALIDPARAM as i16;
             };
             if let Some(ungapped_data) = init_hsp.ungapped_data.as_ref() {
@@ -683,7 +662,7 @@ pub fn blast_get_gapped_score(
             let Some(query_sequence) = query_tmp.sequence.as_ref() else {
                 return 1;
             };
-            let Some(subject_sequence) = subject_unpacked_sequence(subject) else {
+            let Some(subject_sequence) = subject.sequence.as_deref() else {
                 return 1;
             };
             if s_end >= init_hsp.subject_offset.saturating_add(8) {

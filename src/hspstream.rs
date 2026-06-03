@@ -206,67 +206,6 @@ pub struct BlastHSPList {
     pub best_evalue: f64,
 }
 
-impl BlastHSPList {
-    pub fn from_legacy_hsp_list(list: HspList) -> Self {
-        let hsp_array: Vec<Option<BlastHSP>> = list
-            .hsps
-            .into_iter()
-            .map(BlastHSP::from_legacy_hsp)
-            .map(Some)
-            .collect();
-        let hspcnt = hsp_array.len() as i32;
-        Self {
-            oid: list.oid,
-            query_index: 0,
-            allocated: hspcnt,
-            hsp_array,
-            hspcnt,
-            hsp_max: list.hsp_max,
-            do_not_reallocate: false,
-            best_evalue: list.best_evalue,
-        }
-    }
-
-    pub fn into_legacy_hsp_list(self) -> HspList {
-        let hspcnt = self.hspcnt.max(0) as usize;
-        HspList {
-            oid: self.oid,
-            hsps: self
-                .hsp_array
-                .into_iter()
-                .take(hspcnt)
-                .flatten()
-                .map(|hsp| Hsp {
-                    score: hsp.score,
-                    num_ident: hsp.num_ident,
-                    bit_score: hsp.bit_score,
-                    evalue: hsp.evalue,
-                    query_offset: hsp.query.offset,
-                    query_end: hsp.query.end,
-                    query_gapped_start: hsp.query.gapped_start,
-                    subject_offset: hsp.subject.offset,
-                    subject_end: hsp.subject.end,
-                    subject_gapped_start: hsp.subject.gapped_start,
-                    context: hsp.context,
-                    query_frame: hsp.query.frame as i32,
-                    subject_frame: hsp.subject.frame as i32,
-                    num_gaps: hsp
-                        .gap_info
-                        .as_ref()
-                        .map(gap_edit_script_num_gap_opens)
-                        .unwrap_or(0),
-                    comp_adjustment_method: hsp.comp_adjustment_method as i32,
-                    edit_script: hsp.gap_info,
-                    pat_info: hsp.pat_info.map(Into::into),
-                    map_info: hsp.map_info,
-                })
-                .collect(),
-            best_evalue: self.best_evalue,
-            hsp_max: self.hsp_max,
-        }
-    }
-}
-
 /// PHI-BLAST pattern metadata stored on an HSP.
 ///
 /// This mirrors the C `hsp->pat_info` fields used by
@@ -2175,7 +2114,7 @@ pub fn s_hsp_list_post_traceback_update(
         };
         let source_query_index = hsp_list.query_index;
         let source_hsp_max = hsp_list.hsp_max;
-        let mut legacy_list = std::mem::replace(
+        let source_list = std::mem::replace(
             hsp_list,
             BlastHSPList {
                 oid: -1,
@@ -2187,8 +2126,43 @@ pub fn s_hsp_list_post_traceback_update(
                 do_not_reallocate: false,
                 best_evalue: i32::MAX as f64,
             },
-        )
-        .into_legacy_hsp_list();
+        );
+        let hspcnt = source_list.hspcnt.max(0) as usize;
+        let mut legacy_list = HspList {
+            oid: source_list.oid,
+            hsps: source_list
+                .hsp_array
+                .into_iter()
+                .take(hspcnt)
+                .flatten()
+                .map(|hsp| Hsp {
+                    score: hsp.score,
+                    num_ident: hsp.num_ident,
+                    bit_score: hsp.bit_score,
+                    evalue: hsp.evalue,
+                    query_offset: hsp.query.offset,
+                    query_end: hsp.query.end,
+                    query_gapped_start: hsp.query.gapped_start,
+                    subject_offset: hsp.subject.offset,
+                    subject_end: hsp.subject.end,
+                    subject_gapped_start: hsp.subject.gapped_start,
+                    context: hsp.context,
+                    query_frame: hsp.query.frame as i32,
+                    subject_frame: hsp.subject.frame as i32,
+                    num_gaps: hsp
+                        .gap_info
+                        .as_ref()
+                        .map(gap_edit_script_num_gap_opens)
+                        .unwrap_or(0),
+                    comp_adjustment_method: hsp.comp_adjustment_method as i32,
+                    edit_script: hsp.gap_info,
+                    pat_info: hsp.pat_info.map(Into::into),
+                    map_info: hsp.map_info,
+                })
+                .collect(),
+            best_evalue: source_list.best_evalue,
+            hsp_max: source_list.hsp_max,
+        };
         let _ = crate::blast_kappa::blast_hsp_list_get_evalues(
             program_number,
             query_info,
@@ -2200,7 +2174,23 @@ pub fn s_hsp_list_post_traceback_update(
             0.0,
             scale_factor,
         );
-        *hsp_list = BlastHSPList::from_legacy_hsp_list(legacy_list);
+        let hsp_array: Vec<Option<BlastHSP>> = legacy_list
+            .hsps
+            .into_iter()
+            .map(BlastHSP::from_legacy_hsp)
+            .map(Some)
+            .collect();
+        let hspcnt = hsp_array.len() as i32;
+        *hsp_list = BlastHSPList {
+            oid: legacy_list.oid,
+            query_index: source_query_index,
+            allocated: hspcnt,
+            hsp_array,
+            hspcnt,
+            hsp_max: legacy_list.hsp_max,
+            do_not_reallocate: false,
+            best_evalue: legacy_list.best_evalue,
+        };
         hsp_list.query_index = source_query_index;
         hsp_list.hsp_max = source_hsp_max;
     }
@@ -2583,44 +2573,6 @@ pub struct BlastHitList {
     pub num_hits: i32,
 }
 
-impl BlastHitList {
-    pub fn from_legacy_hit_list(hitlist: HitList) -> Self {
-        let hsplist_array: Vec<Option<BlastHSPList>> = hitlist
-            .hsp_lists
-            .into_iter()
-            .map(BlastHSPList::from_legacy_hsp_list)
-            .map(Some)
-            .collect();
-        let hsplist_count = hsplist_array.iter().filter(|list| list.is_some()).count() as i32;
-        Self {
-            hsplist_count,
-            hsplist_max: hitlist.hsplist_max,
-            worst_evalue: hitlist.worst_evalue,
-            low_score: hitlist.low_score,
-            heapified: false,
-            hsplist_current: hsplist_array.len() as i32,
-            hsplist_array,
-            num_hits: 0,
-        }
-    }
-
-    pub fn into_legacy_hit_list(self) -> HitList {
-        let hsplist_count = self.hsplist_count.max(0) as usize;
-        HitList {
-            hsp_lists: self
-                .hsplist_array
-                .into_iter()
-                .take(hsplist_count)
-                .flatten()
-                .map(BlastHSPList::into_legacy_hsp_list)
-                .collect(),
-            hsplist_max: self.hsplist_max,
-            low_score: self.low_score,
-            worst_evalue: self.worst_evalue,
-        }
-    }
-}
-
 impl HitList {
     /// blast-rs: Rust convenience constructor for owned hit lists; not a direct NCBI C port.
     pub fn new() -> Self {
@@ -2922,32 +2874,6 @@ pub struct HspResults {
 pub struct BlastHSPResults {
     pub num_queries: i32,
     pub hitlist_array: Vec<Option<BlastHitList>>,
-}
-
-impl BlastHSPResults {
-    pub fn from_legacy_hsp_results(results: HspResults) -> Self {
-        let hitlist_array: Vec<Option<BlastHitList>> = results
-            .hitlists
-            .into_iter()
-            .map(|hitlist| hitlist.map(BlastHitList::from_legacy_hit_list))
-            .collect();
-        Self {
-            num_queries: hitlist_array.len() as i32,
-            hitlist_array,
-        }
-    }
-
-    pub fn into_legacy_hsp_results(self) -> HspResults {
-        let num_queries = self.num_queries.max(0) as usize;
-        HspResults {
-            hitlists: self
-                .hitlist_array
-                .into_iter()
-                .take(num_queries)
-                .map(|hitlist| hitlist.map(BlastHitList::into_legacy_hit_list))
-                .collect(),
-        }
-    }
 }
 
 /// Rust ownership equivalent of traceback MT `SThreadLocalData`.
@@ -4140,12 +4066,64 @@ impl HspStream {
                 *self.writer_initialized.lock().unwrap() = true;
             }
             if let Some(run_fn) = writer.run_fn_ptr {
-                let mut blast_list = BlastHSPList::from_legacy_hsp_list(hsp_list);
+                let source_list = hsp_list;
+                let hsp_array: Vec<Option<BlastHSP>> = source_list
+                    .hsps
+                    .into_iter()
+                    .map(BlastHSP::from_legacy_hsp)
+                    .map(Some)
+                    .collect();
+                let hspcnt = hsp_array.len() as i32;
+                let mut blast_list = BlastHSPList {
+                    oid: source_list.oid,
+                    query_index: 0,
+                    allocated: hspcnt,
+                    hsp_array,
+                    hspcnt,
+                    hsp_max: source_list.hsp_max,
+                    do_not_reallocate: false,
+                    best_evalue: source_list.best_evalue,
+                };
                 let status = run_fn(writer.data.as_mut(), &mut blast_list);
                 if status != 0 {
                     return K_BLAST_HSP_STREAM_ERROR;
                 }
-                hsp_list = blast_list.into_legacy_hsp_list();
+                let hspcnt = blast_list.hspcnt.max(0) as usize;
+                hsp_list = HspList {
+                    oid: blast_list.oid,
+                    hsps: blast_list
+                        .hsp_array
+                        .into_iter()
+                        .take(hspcnt)
+                        .flatten()
+                        .map(|hsp| Hsp {
+                            score: hsp.score,
+                            num_ident: hsp.num_ident,
+                            bit_score: hsp.bit_score,
+                            evalue: hsp.evalue,
+                            query_offset: hsp.query.offset,
+                            query_end: hsp.query.end,
+                            query_gapped_start: hsp.query.gapped_start,
+                            subject_offset: hsp.subject.offset,
+                            subject_end: hsp.subject.end,
+                            subject_gapped_start: hsp.subject.gapped_start,
+                            context: hsp.context,
+                            query_frame: hsp.query.frame as i32,
+                            subject_frame: hsp.subject.frame as i32,
+                            num_gaps: hsp
+                                .gap_info
+                                .as_ref()
+                                .map(gap_edit_script_num_gap_opens)
+                                .unwrap_or(0),
+                            comp_adjustment_method: hsp.comp_adjustment_method as i32,
+                            edit_script: hsp.gap_info,
+                            pat_info: hsp.pat_info.map(Into::into),
+                            map_info: hsp.map_info,
+                        })
+                        .collect(),
+                    best_evalue: blast_list.best_evalue,
+                    hsp_max: blast_list.hsp_max,
+                };
             }
         }
         drop(writer);
@@ -4239,10 +4217,119 @@ fn s_apply_hsp_pipe_to_results(pipe: &mut BlastHSPPipe, results: &mut HspResults
     let Some(run_fn) = pipe.run_fn_ptr else {
         return 0;
     };
-    let mut blast_results = BlastHSPResults::from_legacy_hsp_results(results.clone());
+    let mut blast_results = BlastHSPResults {
+        num_queries: results.hitlists.len() as i32,
+        hitlist_array: results
+            .hitlists
+            .clone()
+            .into_iter()
+            .map(|hitlist| {
+                hitlist.map(|hitlist| {
+                    let hsplist_array: Vec<Option<BlastHSPList>> = hitlist
+                        .hsp_lists
+                        .into_iter()
+                        .map(|list| {
+                            let hsp_array: Vec<Option<BlastHSP>> = list
+                                .hsps
+                                .into_iter()
+                                .map(BlastHSP::from_legacy_hsp)
+                                .map(Some)
+                                .collect();
+                            let hspcnt = hsp_array.len() as i32;
+                            Some(BlastHSPList {
+                                oid: list.oid,
+                                query_index: 0,
+                                allocated: hspcnt,
+                                hsp_array,
+                                hspcnt,
+                                hsp_max: list.hsp_max,
+                                do_not_reallocate: false,
+                                best_evalue: list.best_evalue,
+                            })
+                        })
+                        .collect();
+                    let hsplist_count =
+                        hsplist_array.iter().filter(|list| list.is_some()).count() as i32;
+                    BlastHitList {
+                        hsplist_count,
+                        hsplist_max: hitlist.hsplist_max,
+                        worst_evalue: hitlist.worst_evalue,
+                        low_score: hitlist.low_score,
+                        heapified: false,
+                        hsplist_current: hsplist_array.len() as i32,
+                        hsplist_array,
+                        num_hits: 0,
+                    }
+                })
+            })
+            .collect(),
+    };
     let status = run_fn(pipe.data.as_mut(), &mut blast_results);
     if status == 0 {
-        *results = blast_results.into_legacy_hsp_results();
+        let num_queries = blast_results.num_queries.max(0) as usize;
+        *results = HspResults {
+            hitlists: blast_results
+                .hitlist_array
+                .into_iter()
+                .take(num_queries)
+                .map(|hitlist| {
+                    hitlist.map(|hitlist| {
+                        let hsplist_count = hitlist.hsplist_count.max(0) as usize;
+                        HitList {
+                            hsp_lists: hitlist
+                                .hsplist_array
+                                .into_iter()
+                                .take(hsplist_count)
+                                .flatten()
+                                .map(|list| {
+                                    let hspcnt = list.hspcnt.max(0) as usize;
+                                    HspList {
+                                        oid: list.oid,
+                                        hsps: list
+                                            .hsp_array
+                                            .into_iter()
+                                            .take(hspcnt)
+                                            .flatten()
+                                            .map(|hsp| Hsp {
+                                                score: hsp.score,
+                                                num_ident: hsp.num_ident,
+                                                bit_score: hsp.bit_score,
+                                                evalue: hsp.evalue,
+                                                query_offset: hsp.query.offset,
+                                                query_end: hsp.query.end,
+                                                query_gapped_start: hsp.query.gapped_start,
+                                                subject_offset: hsp.subject.offset,
+                                                subject_end: hsp.subject.end,
+                                                subject_gapped_start: hsp.subject.gapped_start,
+                                                context: hsp.context,
+                                                query_frame: hsp.query.frame as i32,
+                                                subject_frame: hsp.subject.frame as i32,
+                                                num_gaps: hsp
+                                                    .gap_info
+                                                    .as_ref()
+                                                    .map(gap_edit_script_num_gap_opens)
+                                                    .unwrap_or(0),
+                                                comp_adjustment_method: hsp
+                                                    .comp_adjustment_method
+                                                    as i32,
+                                                edit_script: hsp.gap_info,
+                                                pat_info: hsp.pat_info.map(Into::into),
+                                                map_info: hsp.map_info,
+                                            })
+                                            .collect(),
+                                        best_evalue: list.best_evalue,
+                                        hsp_max: list.hsp_max,
+                                    }
+                                })
+                                .collect(),
+                            hsplist_max: hitlist.hsplist_max,
+                            low_score: hitlist.low_score,
+                            worst_evalue: hitlist.worst_evalue,
+                        }
+                    })
+                })
+                .collect(),
+        };
     }
     status
 }
@@ -7451,7 +7538,23 @@ mod tests {
         legacy.oid = 7;
         let _ = blast_hsp_list_save_hsp(&mut legacy, make_hsp(50, f64::MAX));
         let _ = blast_hsp_list_save_hsp(&mut legacy, make_hsp(5, f64::MAX));
-        let mut list = BlastHSPList::from_legacy_hsp_list(legacy);
+        let hsp_array: Vec<Option<BlastHSP>> = legacy
+            .hsps
+            .into_iter()
+            .map(BlastHSP::from_legacy_hsp)
+            .map(Some)
+            .collect();
+        let hspcnt = hsp_array.len() as i32;
+        let mut list = BlastHSPList {
+            oid: legacy.oid,
+            query_index: 0,
+            allocated: hspcnt,
+            hsp_array,
+            hspcnt,
+            hsp_max: legacy.hsp_max,
+            do_not_reallocate: false,
+            best_evalue: legacy.best_evalue,
+        };
 
         assert_eq!(
             s_hsp_list_post_traceback_update(
@@ -7521,7 +7624,23 @@ mod tests {
         context1.context = 1;
         let _ = blast_hsp_list_save_hsp(&mut legacy, context0);
         let _ = blast_hsp_list_save_hsp(&mut legacy, context1);
-        let mut list = BlastHSPList::from_legacy_hsp_list(legacy);
+        let hsp_array: Vec<Option<BlastHSP>> = legacy
+            .hsps
+            .into_iter()
+            .map(BlastHSP::from_legacy_hsp)
+            .map(Some)
+            .collect();
+        let hspcnt = hsp_array.len() as i32;
+        let mut list = BlastHSPList {
+            oid: legacy.oid,
+            query_index: 0,
+            allocated: hspcnt,
+            hsp_array,
+            hspcnt,
+            hsp_max: legacy.hsp_max,
+            do_not_reallocate: false,
+            best_evalue: legacy.best_evalue,
+        };
 
         assert_eq!(
             s_hsp_list_post_traceback_update(
@@ -7586,7 +7705,23 @@ mod tests {
         let mut hsp = make_hsp(12, f64::MAX);
         hsp.context = 4;
         let _ = blast_hsp_list_save_hsp(&mut legacy, hsp);
-        let mut list = BlastHSPList::from_legacy_hsp_list(legacy);
+        let hsp_array: Vec<Option<BlastHSP>> = legacy
+            .hsps
+            .into_iter()
+            .map(BlastHSP::from_legacy_hsp)
+            .map(Some)
+            .collect();
+        let hspcnt = hsp_array.len() as i32;
+        let mut list = BlastHSPList {
+            oid: legacy.oid,
+            query_index: 0,
+            allocated: hspcnt,
+            hsp_array,
+            hspcnt,
+            hsp_max: legacy.hsp_max,
+            do_not_reallocate: false,
+            best_evalue: legacy.best_evalue,
+        };
 
         assert_eq!(
             s_hsp_list_post_traceback_update(
@@ -8756,103 +8891,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(100, 0, 0, 4, 4), (95, 2, 2, 8, 8), (90, 4, 4, 8, 8)]
         );
-    }
-
-    #[test]
-    fn blast_hsp_list_adapter_uses_hspcnt_not_allocated_slots() {
-        let mut active = BlastHSP::from_legacy_hsp(make_hsp(50, 1.0e-20));
-        active.num = 7;
-        active.gap_info = Some(crate::gapinfo::GapEditScript::from_ops(vec![
-            (GapAlignOpType::Sub, 2),
-            (GapAlignOpType::Del2, 1),
-            (GapAlignOpType::Ins1, 1),
-            (GapAlignOpType::Del, 3),
-            (GapAlignOpType::Ins, 2),
-        ]));
-        let mut inactive = BlastHSP::from_legacy_hsp(make_hsp(90, 1.0e-40));
-        inactive.num = 99;
-
-        let list = BlastHSPList {
-            oid: 42,
-            query_index: 0,
-            hsp_array: vec![Some(active), Some(inactive)],
-            hspcnt: 1,
-            allocated: 2,
-            hsp_max: 10,
-            do_not_reallocate: false,
-            best_evalue: 1.0e-20,
-        };
-
-        let legacy = list.into_legacy_hsp_list();
-
-        assert_eq!(legacy.hsps.len(), 1);
-        assert_eq!(legacy.hsps[0].score, 50);
-        assert_eq!(legacy.hsps[0].num_gaps, 2);
-    }
-
-    #[test]
-    fn blast_hit_list_adapter_uses_hsplist_count_not_allocated_slots() {
-        let active = BlastHSPList::from_legacy_hsp_list({
-            let mut list = HspList::new(11);
-            list.add_hsp(make_hsp(50, 1.0e-20));
-            list
-        });
-        let inactive = BlastHSPList::from_legacy_hsp_list({
-            let mut list = HspList::new(99);
-            list.add_hsp(make_hsp(90, 1.0e-40));
-            list
-        });
-
-        let hit_list = BlastHitList {
-            hsplist_count: 1,
-            hsplist_max: 10,
-            worst_evalue: 1.0e-20,
-            low_score: 50,
-            heapified: false,
-            hsplist_array: vec![Some(active), Some(inactive)],
-            hsplist_current: 2,
-            num_hits: 0,
-        };
-
-        let legacy = hit_list.into_legacy_hit_list();
-
-        assert_eq!(legacy.hsp_lists.len(), 1);
-        assert_eq!(legacy.hsp_lists[0].oid, 11);
-        assert_eq!(legacy.hsp_lists[0].hsps[0].score, 50);
-    }
-
-    #[test]
-    fn blast_hsp_results_adapter_uses_num_queries_not_allocated_slots() {
-        let active_hit_list = BlastHitList {
-            hsplist_count: 0,
-            hsplist_max: 10,
-            worst_evalue: 0.0,
-            low_score: i32::MAX,
-            heapified: false,
-            hsplist_array: Vec::new(),
-            hsplist_current: 0,
-            num_hits: 0,
-        };
-        let inactive_hit_list = BlastHitList {
-            hsplist_count: 0,
-            hsplist_max: 10,
-            worst_evalue: 0.0,
-            low_score: i32::MAX,
-            heapified: false,
-            hsplist_array: Vec::new(),
-            hsplist_current: 0,
-            num_hits: 0,
-        };
-
-        let results = BlastHSPResults {
-            num_queries: 1,
-            hitlist_array: vec![Some(active_hit_list), Some(inactive_hit_list)],
-        };
-
-        let legacy = results.into_legacy_hsp_results();
-
-        assert_eq!(legacy.hitlists.len(), 1);
-        assert!(legacy.hitlists[0].is_some());
     }
 
     #[test]
