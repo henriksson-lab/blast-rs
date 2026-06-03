@@ -4136,6 +4136,7 @@ pub fn blast_na_extend_jumper(
     }
     let ext_to = word_length - lut_word_length;
     let mut hits_extended = 0;
+    let mut num_identical = 0;
     let mut skip_until = 0;
     let mut last_diag = 0i64;
 
@@ -4158,11 +4159,13 @@ pub fn blast_na_extend_jumper(
 
         let mut ext_left = 0;
         let mut s_off = s_offset;
-        while ext_left < ext_to && ext_left < s_offset && q_offset - ext_left > 0 {
+        while ext_left < ext_to && ext_left < s_offset {
+            if q_offset - ext_left <= 0 {
+                break;
+            }
             s_off -= 1;
             let q = q_offset - ext_left - 1;
-            let s_byte = subject[(s_off / 4) as usize];
-            let s_base = ((s_byte << (2 * (s_off % 4))) >> 6) & 3;
+            let s_base = crate::encoding::ncbi2na_base_at(subject, s_off as usize);
             if s_base != query[q as usize] {
                 break;
             }
@@ -4180,8 +4183,7 @@ pub fn blast_na_extend_jumper(
                 if q < 0 || q >= query.len() as i32 || s_off < 0 || s_off >= subject_length {
                     break;
                 }
-                let s_byte = subject[(s_off / 4) as usize];
-                let s_base = ((s_byte << (2 * (s_off % 4))) >> 6) & 3;
+                let s_base = crate::encoding::ncbi2na_base_at(subject, s_off as usize);
                 if s_base != query[q as usize] {
                     break;
                 }
@@ -4214,9 +4216,8 @@ pub fn blast_na_extend_jumper(
         if query_slice.len() < query_len.max(0) as usize {
             continue;
         }
-        let mut num_identical = 0;
         let mut right_ungapped_ext_len = 0;
-        let status = jumper_gapped_alignment_compressed_with_traceback(
+        jumper_gapped_alignment_compressed_with_traceback(
             query_slice,
             subject,
             query_len,
@@ -4229,80 +4230,135 @@ pub fn blast_na_extend_jumper(
             &mut num_identical,
             &mut right_ungapped_ext_len,
         );
-        if status != 0 {
-            continue;
-        }
         hits_extended += 1;
-        skip_until = local_q_offset
-            .saturating_add(query_start)
-            .saturating_add(right_ungapped_ext_len);
+        skip_until = q_offset.saturating_add(right_ungapped_ext_len);
         last_diag = diag;
 
-        let Some((
+        if let Some((
             score,
             query_align_start,
-            query_align_stop,
+            mut query_align_stop,
             subject_align_start,
-            subject_align_stop,
+            mut subject_align_stop,
         )) = jumper_alignment_outputs(jumper)
-        else {
-            continue;
-        };
-        if !jumper_good_align(
-            score,
-            query_align_start,
-            query_align_stop,
-            subject_align_start,
-            subject_align_stop,
-            num_identical,
-            &hit_params.options,
-            query_len,
-        ) {
-            continue;
-        }
-        let Some((new_hsp, _map_info)) = s_create_hsp(
-            query_slice,
-            query_len,
-            context,
-            context_info.frame,
-            subject,
-            subject_length,
-            subject_frame,
-            jumper,
-            query_align_start,
-            query_align_stop,
-            subject_align_start,
-            subject_align_stop,
-            score,
-            score_params.penalty,
-            hit_params.options.splice,
-        ) else {
-            continue;
-        };
-
-        let saved_hsp = new_hsp.clone();
-        let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
-        if status != 0 {
-            break;
-        }
-        if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
-            if let Some(s_index) = subject_index {
-                let status = blast_na_extend_jumper_small_word_rescue(
-                    &saved_hsp,
-                    s_index,
+        {
+            if jumper_good_align(
+                score,
+                query_align_start,
+                query_align_stop,
+                subject_align_start,
+                subject_align_stop,
+                num_identical,
+                &hit_params.options,
+                query_len,
+            ) {
+                let mut hsp_score = score;
+                if std::env::var_os("MAPPER_NO_GAP_SHIFT").is_none() {
+                    s_shift_gaps(
+                        jumper,
+                        query_slice,
+                        subject,
+                        query_align_start,
+                        subject_align_start,
+                        &mut query_align_stop,
+                        &mut subject_align_stop,
+                        &mut hsp_score,
+                        query_len,
+                        subject_length,
+                        score_params.penalty,
+                        &mut num_identical,
+                    );
+                }
+                let Some(left) = jumper.left_prelim_block.as_ref() else {
+                    continue;
+                };
+                let Some(right) = jumper.right_prelim_block.as_ref() else {
+                    continue;
+                };
+                if query_align_start < 0
+                    || subject_align_start < 0
+                    || query_align_stop < query_align_start
+                    || subject_align_stop < subject_align_start
+                    || query_align_stop > query_len
+                    || subject_align_stop > subject_length
+                {
+                    continue;
+                }
+                let edit_script = jumper_prelim_edit_block_to_gap_edit_script(left, right);
+                let mut new_hsp = crate::hspstream::Hsp {
+                    score: hsp_score,
+                    num_ident: num_identical,
+                    bit_score: 0.0,
+                    evalue: 0.0,
+                    query_offset: query_align_start,
+                    query_end: query_align_stop,
+                    query_gapped_start: local_q_offset,
+                    subject_offset: subject_align_start,
+                    subject_end: subject_align_stop,
+                    subject_gapped_start: s_offset,
                     context,
-                    query_slice,
-                    context_info.frame,
-                    query_len,
-                    subject,
-                    subject_length,
+                    query_frame: context_info.frame,
                     subject_frame,
-                    score_params,
-                    hit_params.options.longest_intron,
-                    hsp_list,
+                    num_gaps: 0,
+                    comp_adjustment_method: 0,
+                    edit_script,
+                    pat_info: None,
+                    map_info: None,
+                };
+                let mut map_info = crate::hspstream::blast_hsp_mapping_info_new();
+                map_info.edits = jumper_find_edits(
+                    query_slice,
+                    subject,
+                    query_align_start,
+                    subject_align_start,
+                    query_align_stop,
+                    subject_align_stop,
+                    left,
+                    right,
                 );
-                if status < 0 {
-                    return -1;
+                if hit_params.options.splice {
+                    jumper_find_splice_signals(
+                        &new_hsp,
+                        &mut map_info,
+                        query_len,
+                        subject,
+                        subject_length,
+                    );
+                    s_save_subject_overhangs(
+                        &new_hsp,
+                        &mut map_info,
+                        subject,
+                        subject_length,
+                        query_len,
+                    );
+                }
+                new_hsp.map_info = Some(map_info);
+
+                let saved_hsp = new_hsp.clone();
+                let status = crate::hspstream::blast_hsp_list_save_hsp(hsp_list, new_hsp);
+                if status != 0 {
+                    break;
+                }
+                if std::env::var_os("MAPPER_USE_SMALL_WORDS").is_some() {
+                    if let Some(s_index) = subject_index {
+                        let status = blast_na_extend_jumper_small_word_rescue(
+                            &saved_hsp,
+                            s_index,
+                            context,
+                            query_slice,
+                            context_info.frame,
+                            query_len,
+                            subject,
+                            subject_length,
+                            subject_frame,
+                            score_params,
+                            hit_params.options.longest_intron,
+                            hsp_list,
+                        );
+                        if status < 0 {
+                            return -1;
+                        }
+                    }
                 }
             }
         }
@@ -4323,13 +4379,183 @@ fn blast_na_extend_jumper_sort_hits(offset_pairs: &mut [crate::lookup::OffsetPai
     });
 }
 
+fn s_blast_na_scan_subject_plain(
+    lookup: &crate::lookup::BlastNaLookupTable,
+    subject: &[u8],
+    subject_length: i32,
+    scan_start: i32,
+    scan_end: i32,
+) -> Vec<crate::lookup::OffsetPair> {
+    let lut_word = lookup.lut_word_length.max(1);
+    let scan_step = lookup.scan_step.max(1);
+    let mut offset_pairs = Vec::new();
+    let mut s_off = scan_start.max(0);
+    let capped_end = scan_end.min(subject_length - lut_word);
+    while s_off <= capped_end {
+        let mut index = 0i64;
+        let mut valid_word = true;
+        for i in 0..lut_word {
+            let base_pos = s_off.saturating_add(i);
+            if base_pos < 0 || base_pos >= subject_length {
+                valid_word = false;
+                break;
+            }
+            index =
+                (index << 2) | crate::encoding::ncbi2na_base_at(subject, base_pos as usize) as i64;
+        }
+        if valid_word {
+            crate::lookup::s_blast_lookup_retrieve(lookup, index as i32, &mut offset_pairs, s_off);
+        }
+        s_off = s_off.saturating_add(scan_step);
+    }
+    offset_pairs
+}
+
+fn s_blast_mb_scan_subject_contiguous(
+    lookup: &crate::lookup::MbLookupTable,
+    subject: &[u8],
+    subject_length: i32,
+    scan_start: i32,
+    scan_end: i32,
+) -> Vec<crate::lookup::OffsetPair> {
+    let lut_word = lookup.lut_word_length.max(1);
+    let scan_step = lookup.scan_step.max(1);
+    let mut offset_pairs = Vec::new();
+    let mut s_off = scan_start.max(0);
+    let capped_end = scan_end.min(subject_length - lut_word);
+    while s_off <= capped_end {
+        let mut index = 0i64;
+        let mut valid_word = true;
+        for i in 0..lut_word {
+            let base_pos = s_off.saturating_add(i);
+            if base_pos < 0 || base_pos >= subject_length {
+                valid_word = false;
+                break;
+            }
+            index =
+                (index << 2) | crate::encoding::ncbi2na_base_at(subject, base_pos as usize) as i64;
+        }
+        if valid_word {
+            crate::lookup::s_blast_mb_lookup_retrieve(lookup, index, &mut offset_pairs, s_off);
+        }
+        s_off = s_off.saturating_add(scan_step);
+    }
+    offset_pairs
+}
+
+fn s_blast_small_na_scan_subject(
+    lookup: &crate::lookup::SmallNaLookupTable,
+    subject: &[u8],
+    subject_length: i32,
+    scan_start: i32,
+    scan_end: i32,
+) -> Vec<crate::lookup::OffsetPair> {
+    let lut_word = crate::lookup::small_na_lut_word_length(lookup).max(1);
+    let scan_step = lookup.scan_step.max(1);
+    let mut offset_pairs = Vec::new();
+    let mut s_off = scan_start.max(0);
+    let capped_end = scan_end.min(subject_length - lut_word);
+    while s_off <= capped_end {
+        let mut index = 0i64;
+        let mut valid_word = true;
+        for i in 0..lut_word {
+            let base_pos = s_off.saturating_add(i);
+            if base_pos < 0 || base_pos >= subject_length {
+                valid_word = false;
+                break;
+            }
+            index =
+                (index << 2) | crate::encoding::ncbi2na_base_at(subject, base_pos as usize) as i64;
+        }
+        if valid_word {
+            if let Ok(index) = i32::try_from(index) {
+                crate::lookup::s_blast_small_na_lookup_retrieve(
+                    lookup,
+                    index,
+                    &mut offset_pairs,
+                    s_off,
+                );
+            }
+        }
+        s_off = s_off.saturating_add(scan_step);
+    }
+    offset_pairs
+}
+
+fn jumper_na_word_finder_scan_subject(
+    lookup_wrap: &crate::lookup::LookupTableWrap,
+    subject: &[u8],
+    subject_length: i32,
+    scan_range: [i32; 3],
+    lut_word_length: i32,
+) -> Vec<crate::lookup::OffsetPair> {
+    match lookup_wrap {
+        crate::lookup::LookupTableWrap::Na(lookup) => s_blast_na_scan_subject_plain(
+            lookup,
+            subject,
+            subject_length,
+            scan_range[1],
+            scan_range[2],
+        ),
+        crate::lookup::LookupTableWrap::NaHash(lookup) => {
+            crate::lookup::s_blast_na_hash_scan_subject_any(
+                lookup,
+                subject,
+                subject_length,
+                scan_range[1].max(0),
+                scan_range[2].min(subject_length - lut_word_length),
+            )
+            .unwrap_or_default()
+        }
+        crate::lookup::LookupTableWrap::Megablast(lookup) => {
+            if lookup.discontiguous {
+                crate::lookup::s_mb_disc_word_scan_subject(
+                    lookup,
+                    subject,
+                    subject_length.max(0) as usize,
+                    scan_range[1].max(0) as usize,
+                    scan_range[2].max(0) as usize,
+                )
+            } else {
+                s_blast_mb_scan_subject_contiguous(
+                    lookup,
+                    subject,
+                    subject_length,
+                    scan_range[1],
+                    scan_range[2],
+                )
+            }
+        }
+        crate::lookup::LookupTableWrap::SmallNa(lookup) => s_blast_small_na_scan_subject(
+            lookup,
+            subject,
+            subject_length,
+            scan_range[1],
+            scan_range[2],
+        ),
+        crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {
+            Vec::new()
+        }
+    }
+}
+
+/// Rust safety equivalent of C's `MapperWordHits` shape assertions.
+fn mapper_word_hits_is_valid(
+    word_hits: &crate::lookup::MapperWordHits,
+    context_count: usize,
+) -> bool {
+    let num_arrays = word_hits.num_arrays.max(0) as usize;
+    word_hits.array_size > 0
+        && word_hits.num_arrays > 0
+        && word_hits.divisor > 0
+        && num_arrays <= word_hits.pair_arrays.len()
+        && num_arrays <= word_hits.num.len()
+        && word_hits.last_diag.len() >= context_count
+        && word_hits.last_pos.len() >= context_count
+}
+
 /// blast-rs: Port-shaped equivalent of NCBI `JumperNaWordFinder`
-/// (na_ungapped.c:1995) for the represented contiguous lookup-table path; not a direct NCBI C port.
-///
-/// C obtains hits by dispatching through the selected `scansub_callback`; Rust
-/// performs the same represented work directly for the current typed
-/// `LookupTableWrap`, then delegates all hit extension and HSP saving to
-/// [`blast_na_extend_jumper`].
+/// (na_ungapped.c:1995); delegates hit extension to [`blast_na_extend_jumper`].
 #[allow(clippy::too_many_arguments)]
 pub fn jumper_na_word_finder(
     subject: &[u8],
@@ -4349,9 +4575,8 @@ pub fn jumper_na_word_finder(
     mut ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
     gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
 ) -> i16 {
-    if subject_length <= 0 {
-        return 0;
-    }
+    let mut total_hits = 0;
+    let mut hits_extended = 0;
     let (word_length, lut_word_length) = match lookup_wrap {
         crate::lookup::LookupTableWrap::Na(table) => (table.word_length, table.lut_word_length),
         crate::lookup::LookupTableWrap::NaHash(table) => (table.word_length, table.lut_word_length),
@@ -4361,8 +4586,7 @@ pub fn jumper_na_word_finder(
         ),
         crate::lookup::LookupTableWrap::Megablast(table) => {
             if table.discontiguous {
-                let template_length = table.template_length.max(table.word_length);
-                (template_length, template_length)
+                (table.template_length, table.template_length)
             } else {
                 (table.word_length, table.lut_word_length)
             }
@@ -4382,37 +4606,25 @@ pub fn jumper_na_word_finder(
     } else {
         None
     };
-    let subject_index_ref = subject_index.as_ref();
-    let read_is_query = (query_info.max_length as i64) < (subject_length as i64);
-    let mut scan_range = if let Some(ranges) = subject_ranges {
+    let mut scan_range = [0, 0, subject_length.saturating_sub(lut_word_length)];
+    if let Some(ranges) = subject_ranges {
         if ranges.is_empty() {
             return 0;
         }
-        [
-            0,
-            ranges[0]
-                .left
-                .saturating_add(word_length)
-                .saturating_sub(lut_word_length),
-            ranges[0].right.saturating_sub(lut_word_length),
-        ]
-    } else {
-        [0, 0, subject_length.saturating_sub(lut_word_length)]
-    };
-    let mut total_hits = 0;
-    let mut hits_extended = 0;
+        scan_range[1] = ranges[0]
+            .left
+            .saturating_add(word_length)
+            .saturating_sub(lut_word_length);
+        scan_range[2] = ranges[0].right.saturating_sub(lut_word_length);
+    }
+    let read_is_query = (query_info.max_length as i64) < (subject_length as i64);
+    let subject_index_ref = subject_index.as_ref();
 
     if let Some(word_hits) = word_hits {
-        let num_arrays = word_hits.num_arrays.max(0) as usize;
-        if word_hits.array_size <= 0
-            || word_hits.num_arrays <= 0
-            || num_arrays > word_hits.pair_arrays.len()
-            || num_arrays > word_hits.num.len()
-            || word_hits.last_diag.len() < query_info.contexts.len()
-            || word_hits.last_pos.len() < query_info.contexts.len()
-        {
+        if !mapper_word_hits_is_valid(word_hits, query_info.contexts.len()) {
             return -1;
         }
+        let num_arrays = word_hits.num_arrays as usize;
         for value in &mut word_hits.num {
             *value = 0;
         }
@@ -4420,105 +4632,19 @@ pub fn jumper_na_word_finder(
             *value = 0;
         }
 
-        let mut last_s_range = scan_range[2]
-            .min(subject_length.saturating_sub(lut_word_length))
-            .saturating_add(lut_word_length)
-            .max(0) as u32;
         while subject_ranges
             .map(|ranges| {
                 s_determine_scanning_offsets(ranges, word_length, lut_word_length, &mut scan_range)
             })
             .unwrap_or(scan_range[1] <= scan_range[2])
         {
-            let s_range = scan_range[2]
-                .min(subject_length.saturating_sub(lut_word_length))
-                .saturating_add(lut_word_length)
-                .max(0) as u32;
-            last_s_range = s_range;
-            let mut offset_pairs = Vec::new();
-            match lookup_wrap {
-                crate::lookup::LookupTableWrap::Na(lookup) => {
-                    let lut_word = lut_word_length.max(1);
-                    let scan_step = lookup.scan_step.max(1);
-                    let mut s_off = scan_range[1].max(0);
-                    let capped_end = scan_range[2].min(subject_length - lut_word);
-                    while s_off <= capped_end {
-                        if let Some(index) =
-                            packed_subject_word(subject, subject_length, s_off, lut_word)
-                        {
-                            crate::lookup::s_blast_lookup_retrieve(
-                                lookup,
-                                index as i32,
-                                &mut offset_pairs,
-                                s_off,
-                            );
-                        }
-                        s_off = s_off.saturating_add(scan_step);
-                    }
-                }
-                crate::lookup::LookupTableWrap::NaHash(lookup) => {
-                    if let Some(mut hits) = crate::lookup::s_blast_na_hash_scan_subject_any(
-                        lookup,
-                        subject,
-                        subject_length,
-                        scan_range[1].max(0),
-                        scan_range[2].min(subject_length - lut_word_length),
-                    ) {
-                        offset_pairs.append(&mut hits);
-                    }
-                }
-                crate::lookup::LookupTableWrap::Megablast(lookup) => {
-                    if lookup.discontiguous {
-                        offset_pairs.extend(crate::lookup::s_mb_disc_word_scan_subject(
-                            lookup,
-                            subject,
-                            subject_length.max(0) as usize,
-                            scan_range[1].max(0) as usize,
-                            scan_range[2].max(0) as usize,
-                        ));
-                    } else {
-                        let lut_word = lut_word_length.max(1);
-                        let scan_step = lookup.scan_step.max(1);
-                        let mut s_off = scan_range[1].max(0);
-                        let capped_end = scan_range[2].min(subject_length - lut_word);
-                        while s_off <= capped_end {
-                            if let Some(index) =
-                                packed_subject_word(subject, subject_length, s_off, lut_word)
-                            {
-                                crate::lookup::s_blast_mb_lookup_retrieve(
-                                    lookup,
-                                    index,
-                                    &mut offset_pairs,
-                                    s_off,
-                                );
-                            }
-                            s_off = s_off.saturating_add(scan_step);
-                        }
-                    }
-                }
-                crate::lookup::LookupTableWrap::SmallNa(lookup) => {
-                    let lut_word = lut_word_length.max(1);
-                    let scan_step = lookup.scan_step.max(1);
-                    let mut s_off = scan_range[1].max(0);
-                    let capped_end = scan_range[2].min(subject_length - lut_word);
-                    while s_off <= capped_end {
-                        if let Some(index) =
-                            packed_subject_word(subject, subject_length, s_off, lut_word)
-                        {
-                            if let Ok(index) = i32::try_from(index) {
-                                crate::lookup::s_blast_small_na_lookup_retrieve(
-                                    lookup,
-                                    index,
-                                    &mut offset_pairs,
-                                    s_off,
-                                );
-                            }
-                        }
-                        s_off = s_off.saturating_add(scan_step);
-                    }
-                }
-                crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {}
-            }
+            let offset_pairs = jumper_na_word_finder_scan_subject(
+                lookup_wrap,
+                subject,
+                subject_length,
+                scan_range,
+                lut_word_length,
+            );
             for pair in offset_pairs {
                 let q_off = pair.query_offset;
                 let s_off = pair.subject_offset;
@@ -4546,9 +4672,6 @@ pub fn jumper_na_word_finder(
                     continue;
                 }
 
-                if word_hits.divisor <= 0 {
-                    return -1;
-                }
                 let index = (q_off / word_hits.divisor) as usize;
                 if index >= num_arrays {
                     return -1;
@@ -4569,7 +4692,7 @@ pub fn jumper_na_word_finder(
                         align_params,
                         jumper,
                         hsp_list,
-                        s_range,
+                        (scan_range[2] + lut_word_length).max(0) as u32,
                         subject_index_ref,
                     );
                     word_hits.num[index] = 0;
@@ -4595,32 +4718,31 @@ pub fn jumper_na_word_finder(
 
         for index in 0..num_arrays {
             let num = word_hits.num[index].max(0) as usize;
-            if num == 0 {
+            if num > 0 {
+                let extended = blast_na_extend_jumper(
+                    &mut word_hits.pair_arrays[index][..num],
+                    word_params,
+                    score_params,
+                    hit_params,
+                    lookup_wrap,
+                    query,
+                    subject,
+                    subject_length,
+                    subject_frame,
+                    query_info,
+                    align_params,
+                    jumper,
+                    hsp_list,
+                    (scan_range[2] + lut_word_length).max(0) as u32,
+                    subject_index_ref,
+                );
                 word_hits.num[index] = 0;
-                continue;
+                if extended < 0 {
+                    return -1;
+                }
+                hits_extended += extended;
             }
-            let extended = blast_na_extend_jumper(
-                &mut word_hits.pair_arrays[index][..num],
-                word_params,
-                score_params,
-                hit_params,
-                lookup_wrap,
-                query,
-                subject,
-                subject_length,
-                subject_frame,
-                query_info,
-                align_params,
-                jumper,
-                hsp_list,
-                last_s_range,
-                subject_index_ref,
-            );
             word_hits.num[index] = 0;
-            if extended < 0 {
-                return -1;
-            }
-            hits_extended += extended;
         }
     } else {
         while subject_ranges
@@ -4629,96 +4751,15 @@ pub fn jumper_na_word_finder(
             })
             .unwrap_or(scan_range[1] <= scan_range[2])
         {
-            let s_range = scan_range[2]
-                .min(subject_length.saturating_sub(lut_word_length))
-                .saturating_add(lut_word_length)
-                .max(0) as u32;
-            let mut offset_pairs = Vec::new();
-            match lookup_wrap {
-                crate::lookup::LookupTableWrap::Na(lookup) => {
-                    let lut_word = lut_word_length.max(1);
-                    let scan_step = lookup.scan_step.max(1);
-                    let mut s_off = scan_range[1].max(0);
-                    let capped_end = scan_range[2].min(subject_length - lut_word);
-                    while s_off <= capped_end {
-                        if let Some(index) =
-                            packed_subject_word(subject, subject_length, s_off, lut_word)
-                        {
-                            crate::lookup::s_blast_lookup_retrieve(
-                                lookup,
-                                index as i32,
-                                &mut offset_pairs,
-                                s_off,
-                            );
-                        }
-                        s_off = s_off.saturating_add(scan_step);
-                    }
-                }
-                crate::lookup::LookupTableWrap::NaHash(lookup) => {
-                    if let Some(mut hits) = crate::lookup::s_blast_na_hash_scan_subject_any(
-                        lookup,
-                        subject,
-                        subject_length,
-                        scan_range[1].max(0),
-                        scan_range[2].min(subject_length - lut_word_length),
-                    ) {
-                        offset_pairs.append(&mut hits);
-                    }
-                }
-                crate::lookup::LookupTableWrap::Megablast(lookup) => {
-                    if lookup.discontiguous {
-                        offset_pairs.extend(crate::lookup::s_mb_disc_word_scan_subject(
-                            lookup,
-                            subject,
-                            subject_length.max(0) as usize,
-                            scan_range[1].max(0) as usize,
-                            scan_range[2].max(0) as usize,
-                        ));
-                    } else {
-                        let lut_word = lut_word_length.max(1);
-                        let scan_step = lookup.scan_step.max(1);
-                        let mut s_off = scan_range[1].max(0);
-                        let capped_end = scan_range[2].min(subject_length - lut_word);
-                        while s_off <= capped_end {
-                            if let Some(index) =
-                                packed_subject_word(subject, subject_length, s_off, lut_word)
-                            {
-                                crate::lookup::s_blast_mb_lookup_retrieve(
-                                    lookup,
-                                    index,
-                                    &mut offset_pairs,
-                                    s_off,
-                                );
-                            }
-                            s_off = s_off.saturating_add(scan_step);
-                        }
-                    }
-                }
-                crate::lookup::LookupTableWrap::SmallNa(lookup) => {
-                    let lut_word = lut_word_length.max(1);
-                    let scan_step = lookup.scan_step.max(1);
-                    let mut s_off = scan_range[1].max(0);
-                    let capped_end = scan_range[2].min(subject_length - lut_word);
-                    while s_off <= capped_end {
-                        if let Some(index) =
-                            packed_subject_word(subject, subject_length, s_off, lut_word)
-                        {
-                            if let Ok(index) = i32::try_from(index) {
-                                crate::lookup::s_blast_small_na_lookup_retrieve(
-                                    lookup,
-                                    index,
-                                    &mut offset_pairs,
-                                    s_off,
-                                );
-                            }
-                        }
-                        s_off = s_off.saturating_add(scan_step);
-                    }
-                }
-                crate::lookup::LookupTableWrap::Aa(_) | crate::lookup::LookupTableWrap::Rps(_) => {}
-            }
+            let mut offset_pairs = jumper_na_word_finder_scan_subject(
+                lookup_wrap,
+                subject,
+                subject_length,
+                scan_range,
+                lut_word_length,
+            );
             total_hits += offset_pairs.len() as i32;
-            hits_extended += blast_na_extend_jumper(
+            let extended = blast_na_extend_jumper(
                 &mut offset_pairs,
                 word_params,
                 score_params,
@@ -4732,9 +4773,13 @@ pub fn jumper_na_word_finder(
                 align_params,
                 jumper,
                 hsp_list,
-                s_range,
+                (scan_range[2] + lut_word_length).max(0) as u32,
                 subject_index_ref,
             );
+            if extended < 0 {
+                return -1;
+            }
+            hits_extended += extended;
             if !read_is_query {
                 break;
             }
@@ -5249,52 +5294,12 @@ fn do_anchored_search_build_list(
 /// runs the same diagonal hash suppression and ungapped extension filter as the
 /// normal megablast path. Rust models the callbacks as closures that fill the
 /// supplied [`crate::extend::InitHitList`].
-#[allow(clippy::too_many_arguments)]
-pub fn mb_indexed_word_finder<CheckOid, GetResults>(
-    subject: &[u8],
-    subject_len: i32,
-    subject_oid: i32,
-    subject_chunk: i32,
-    query: &[u8],
-    query_info: &crate::queryinfo::QueryInfo,
-    word_params: &crate::parameters::InitialWordParameters,
-    score_params: &crate::parameters::ScoringParameters,
-    init_hitlist: &mut crate::extend::InitHitList,
-    check_index_oid: CheckOid,
-    get_results: GetResults,
-    ungapped_stats: Option<&mut crate::diagnostics::UngappedStats>,
-) -> i16
-where
-    CheckOid: FnMut(i32) -> bool,
-    GetResults: FnMut(i32, i32, &mut crate::extend::InitHitList) -> u32,
-{
-    mb_indexed_word_finder_with_fallback(
-        subject,
-        subject_len,
-        subject_oid,
-        subject_chunk,
-        query,
-        query_info,
-        word_params,
-        score_params,
-        init_hitlist,
-        check_index_oid,
-        get_results,
-        || 0,
-        ungapped_stats,
-    )
-}
-
-/// blast-rs: C-shaped indexed megablast dispatcher with explicit fallback; not
-/// a direct NCBI C port.
+/// blast-rs: C-shaped indexed megablast dispatcher with explicit fallback.
 ///
 /// Upstream falls back to `BlastNaWordFinder` when the indexed database reports
-/// that an OID is not indexed. The narrow [`mb_indexed_word_finder`] helper
-/// preserves its historical return-zero behavior by passing an empty fallback;
-/// callers that carry the normal nucleotide word-finder state should use this
-/// variant and route `fallback` to their represented `BlastNaWordFinder` path.
+/// that an OID is not indexed. Rust models that callback as `fallback`.
 #[allow(clippy::too_many_arguments)]
-pub fn mb_indexed_word_finder_with_fallback<CheckOid, GetResults, Fallback>(
+pub fn mb_indexed_word_finder<CheckOid, GetResults, Fallback>(
     subject: &[u8],
     subject_len: i32,
     subject_oid: i32,
@@ -5706,58 +5711,12 @@ pub fn megablast_index_fill_init_hitlist(
 ///
 /// For indexed subjects, C consumes indexed initial hits and immediately runs
 /// Jumper gapped traceback per non-redundant diagonal.
-#[allow(clippy::too_many_arguments)]
-pub fn short_read_indexed_word_finder<CheckOid, GetResults>(
-    subject: &[u8],
-    subject_len: i32,
-    subject_frame: i32,
-    subject_oid: i32,
-    subject_chunk: i32,
-    query: &[u8],
-    query_info: &crate::queryinfo::QueryInfo,
-    score_params: &crate::parameters::ScoringParameters,
-    hit_params: &crate::parameters::HitSavingParameters,
-    align_params: JumperAlignParams,
-    init_hitlist: &mut crate::extend::InitHitList,
-    hsp_list: &mut crate::hspstream::HspList,
-    jumper: &mut JumperGapAlign,
-    check_index_oid: CheckOid,
-    get_results: GetResults,
-    gapped_stats: Option<&mut crate::diagnostics::GappedStats>,
-) -> i16
-where
-    CheckOid: FnMut(i32) -> bool,
-    GetResults: FnMut(i32, i32, &mut crate::extend::InitHitList) -> u32,
-{
-    short_read_indexed_word_finder_with_fallback(
-        subject,
-        subject_len,
-        subject_frame,
-        subject_oid,
-        subject_chunk,
-        query,
-        query_info,
-        score_params,
-        hit_params,
-        align_params,
-        init_hitlist,
-        hsp_list,
-        jumper,
-        check_index_oid,
-        get_results,
-        || 0,
-        gapped_stats,
-    )
-}
-
-/// blast-rs: C-shaped indexed short-read dispatcher with explicit fallback; not
-/// a direct NCBI C port.
+/// blast-rs: C-shaped indexed short-read dispatcher with explicit fallback.
 ///
 /// Upstream falls back to `JumperNaWordFinder` when an OID is not indexed. This
-/// wrapper exposes that branch explicitly without forcing the indexed callback
-/// helper to know about lookup-table state.
+/// branch is represented by the `fallback` callback.
 #[allow(clippy::too_many_arguments)]
-pub fn short_read_indexed_word_finder_with_fallback<CheckOid, GetResults, Fallback>(
+pub fn short_read_indexed_word_finder<CheckOid, GetResults, Fallback>(
     subject: &[u8],
     subject_len: i32,
     subject_frame: i32,
@@ -9413,6 +9372,95 @@ mod tests {
         assert_eq!(list.hsps[0].query_offset, 0);
         assert_eq!(list.hsps[0].subject_offset, 0);
         assert!(list.hsps[0].score > 0);
+    }
+
+    #[test]
+    fn blast_na_extend_jumper_keeps_seed_as_gapped_start() {
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let subject = crate::encoding::pack_ncbi2na_bases(&query);
+        let mut pairs = vec![crate::lookup::OffsetPair {
+            query_offset: 4,
+            subject_offset: 4,
+        }];
+        let lookup = crate::lookup::LookupTableWrap::Megablast(crate::lookup::MbLookupTable {
+            word_length: 4,
+            lut_word_length: 4,
+            discontiguous: false,
+            template_length: 0,
+            template_type: crate::lookup::DiscTemplateType::Contiguous,
+            two_templates: false,
+            second_template_type: crate::lookup::DiscTemplateType::Contiguous,
+            hashtable: Vec::new(),
+            hashtable2: Vec::new(),
+            next_pos: Vec::new(),
+            next_pos2: Vec::new(),
+            pv_array: Vec::new(),
+            pv_array_bts: 0,
+            longest_chain: 0,
+            scan_step: 1,
+        });
+        let scoring_options = crate::options::ScoringOptions::new_blastn();
+        let score_params =
+            crate::parameters::ScoringParameters::from_options(&scoring_options, 1.0);
+        let word_params = crate::parameters::InitialWordParameters {
+            options: crate::options::InitialWordOptions::new_blastn(),
+            x_dropoff_max: 0,
+            cutoff_score_min: 0,
+            cutoffs: Vec::new(),
+            ungapped_extension: true,
+            nucl_score_table: crate::parameters::InitialWordParameters::build_nucl_score_table(
+                score_params.reward,
+                score_params.penalty,
+            ),
+        };
+        let hit_params = crate::parameters::HitSavingParameters {
+            options: crate::options::HitSavingOptions {
+                cutoff_score: 1,
+                ..Default::default()
+            },
+            cutoff_score_min: 0,
+            low_score: Vec::new(),
+            cutoffs: Vec::new(),
+            link_hsp_params: None,
+            prelim_evalue: 10.0,
+            ..Default::default()
+        };
+        let query_info = crate::queryinfo::QueryInfo::new_blastp(&[query.len()]);
+        let mut jumper = JumperGapAlign {
+            left_prelim_block: Some(JumperPrelimEditBlock::default()),
+            right_prelim_block: Some(JumperPrelimEditBlock::default()),
+            table: Vec::new(),
+        };
+        let mut list = crate::hspstream::HspList::new(7);
+
+        let extended = blast_na_extend_jumper(
+            &mut pairs,
+            &word_params,
+            &score_params,
+            &hit_params,
+            &lookup,
+            &query,
+            &subject,
+            query.len() as i32,
+            0,
+            &query_info,
+            JumperAlignParams {
+                max_mismatches: 5,
+                mismatch_window: 10,
+                gap_x_dropoff: 30,
+            },
+            &mut jumper,
+            &mut list,
+            query.len() as u32,
+            None,
+        );
+
+        assert_eq!(extended, 1);
+        assert_eq!(list.hsps.len(), 1);
+        assert_eq!(list.hsps[0].query_offset, 0);
+        assert_eq!(list.hsps[0].subject_offset, 0);
+        assert_eq!(list.hsps[0].query_gapped_start, 4);
+        assert_eq!(list.hsps[0].subject_gapped_start, 4);
     }
 
     #[test]
@@ -13304,7 +13352,8 @@ mod tests {
                 |oid, chunk, list| {
                     megablast_index_fill_init_hitlist(&volume, oid, chunk, &query_keys, list)
                 },
-                None,
+                || 0,
+                None
             ),
             0
         );
@@ -13364,7 +13413,8 @@ mod tests {
                 &mut init_hitlist,
                 |oid| holder.has_oid(oid),
                 |oid, chunk, list| holder.fill_init_hitlist(oid, chunk, list),
-                None,
+                || 0,
+                None
             ),
             0
         );
@@ -13451,7 +13501,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 1, 1, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13503,7 +13554,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13550,7 +13602,8 @@ mod tests {
                 &mut init_hitlist,
                 |oid| oid == 5,
                 |_oid, _chunk, _list| 4,
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13604,7 +13657,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13644,7 +13698,7 @@ mod tests {
         let mut fallback_called = false;
         let mut get_results_called = false;
 
-        let status = mb_indexed_word_finder_with_fallback(
+        let status = mb_indexed_word_finder(
             &subject,
             query.len() as i32,
             5,
@@ -13714,7 +13768,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 1, 1, None);
                     0
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13770,7 +13825,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13822,7 +13878,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 99, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13871,7 +13928,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13921,7 +13979,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 99, 0, None);
                     u32::MAX
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -13986,7 +14045,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14051,7 +14111,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                None,
+                || 0,
+                None
             ),
             0
         );
@@ -14118,7 +14179,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 1, 1, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14184,7 +14246,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14250,7 +14313,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, i32::MIN, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14329,7 +14393,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, i32::MIN, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14393,7 +14458,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14459,7 +14525,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     u32::MAX
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14520,7 +14587,8 @@ mod tests {
                 &mut jumper,
                 |oid| oid == 8,
                 |_oid, _chunk, _list| 4,
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14591,7 +14659,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14658,7 +14727,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 0, 0, None);
                     4
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );
@@ -14703,7 +14773,7 @@ mod tests {
         let mut fallback_called = false;
         let mut get_results_called = false;
 
-        let status = short_read_indexed_word_finder_with_fallback(
+        let status = short_read_indexed_word_finder(
             &subject,
             query.len() as i32,
             0,
@@ -14799,7 +14869,8 @@ mod tests {
                     let _ = crate::extend::blast_save_initial_hit(list, 1, 1, None);
                     0
                 },
-                Some(&mut stats),
+                || 0,
+                Some(&mut stats)
             ),
             0
         );

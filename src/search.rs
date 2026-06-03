@@ -3146,7 +3146,7 @@ fn s_blast_na_scan_subject_any_packed(
         let reduced_nucl_cutoff_score = ((word_cutoff as f64) * 0.8) as i32;
         let previous_word_save_cutoff =
             PACKED_WORD_SAVE_CUTOFF.with(|cutoff| cutoff.replace(word_cutoff));
-        blast_na_word_finder_scan_lookup_packed(
+        jumper_na_word_finder_packed(
             prepared.word_size,
             lookup,
             scratch,
@@ -3293,10 +3293,10 @@ fn s_blast_na_hash_scan_subject_any_packed(
     )
 }
 
-// blast-rs: packed-subject dispatch analogue of the NCBI nucleotide word
-// finder scan path; not a direct NCBI C port.
+// NCBI: JumperNaWordFinder (`na_ungapped.c`), represented here for the
+// packed-subject contiguous nucleotide lookup path.
 #[allow(clippy::too_many_arguments)]
-fn blast_na_word_finder_scan_lookup_packed(
+fn jumper_na_word_finder_packed(
     word_size: usize,
     lookup: &NaLookup<'_>,
     scratch: &mut PackedDiagScratch,
@@ -3319,30 +3319,19 @@ fn blast_na_word_finder_scan_lookup_packed(
     // the active `last_hit` `DiagStore`; this is a no-op for the default window 0.
     init_blastn_two_hit_store(&scratch.last_hit);
     if std::env::var_os("BLAST_RS_USE_PACKED_SPECIALIZED").is_none() {
-        packed_scan_step1(
+        jumper_na_word_finder_scan_any_packed(
+            word_size,
+            lookup,
+            scratch,
             subject_packed,
             subject_len,
             end,
-            lookup.lut_word,
-            lookup.lut_mask,
-            lookup.scan_start,
-            lookup.scan_step,
-            lookup.query,
-            lookup.query_masked,
-            lookup.has_query_mask,
-            word_size,
-            &lookup.lut,
-            &lookup.next,
-            &lookup.pv,
-            &mut scratch.last_hit,
-            lookup.diag_mask,
             reward,
             penalty,
             x_dropoff,
             kbp,
             search_space,
             evalue_threshold,
-            lookup.context,
             nucl_score_table,
             reduced_nucl_cutoff_score,
             hsps,
@@ -3350,6 +3339,93 @@ fn blast_na_word_finder_scan_lookup_packed(
         return;
     }
 
+    jumper_na_word_finder_dispatch_packed(
+        word_size,
+        lookup,
+        scratch,
+        subject_packed,
+        subject_len,
+        end,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn jumper_na_word_finder_scan_any_packed(
+    word_size: usize,
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
+    packed_scan_step1(
+        subject_packed,
+        subject_len,
+        end,
+        lookup.lut_word,
+        lookup.lut_mask,
+        lookup.scan_start,
+        lookup.scan_step,
+        lookup.query,
+        lookup.query_masked,
+        lookup.has_query_mask,
+        word_size,
+        &lookup.lut,
+        &lookup.next,
+        &lookup.pv,
+        &mut scratch.last_hit,
+        lookup.diag_mask,
+        reward,
+        penalty,
+        x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        lookup.context,
+        nucl_score_table,
+        reduced_nucl_cutoff_score,
+        hsps,
+    );
+}
+
+// blast-rs: packed-subject dispatch analogue of the NCBI nucleotide word
+// finder scan callback selection.
+#[allow(clippy::too_many_arguments)]
+fn jumper_na_word_finder_dispatch_packed(
+    word_size: usize,
+    lookup: &NaLookup<'_>,
+    scratch: &mut PackedDiagScratch,
+    subject_packed: &[u8],
+    subject_len: usize,
+    end: usize,
+    reward: i32,
+    penalty: i32,
+    x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    nucl_score_table: &[i32; 256],
+    reduced_nucl_cutoff_score: i32,
+    hsps: &mut Vec<SearchHsp>,
+) {
     let mb_scan = s_mb_choose_scan_subject(lookup);
     if lookup.lut_word >= 9 {
         match mb_scan {
@@ -6772,48 +6848,42 @@ pub fn blastn_gapped_search_nomask(
     )
 }
 
-pub fn blastn_gapped_search_nomask_with_split_xdrop(
+// NCBI: Blast_RunPreliminarySearch (`blast_engine.c`), specialized to decoded
+// blastn and returning the preliminary ungapped HSP list used by full search.
+#[allow(clippy::too_many_arguments)]
+fn blast_run_preliminary_search_decoded_with_split_xdrop(
+    prepared: &PreparedBlastnQuery<'_>,
     query_plus: &[u8],
     query_minus: &[u8],
     query_plus_nomask: &[u8],
     query_minus_nomask: &[u8],
     subject: &[u8],
-    word_size: usize,
     reward: i32,
     penalty: i32,
     gap_open: i32,
     gap_extend: i32,
     ungapped_x_dropoff: i32,
-    prelim_x_dropoff: i32,
-    traceback_x_dropoff: i32,
     kbp: &KarlinBlk,
     search_space: f64,
     evalue_threshold: f64,
-) -> Vec<SearchHsp> {
-    let prepared = PreparedBlastnQuery::new_with_nomask(
-        query_plus,
-        query_minus,
-        query_plus_nomask,
-        query_minus_nomask,
-        word_size,
+) -> (Vec<SearchHsp>, i32) {
+    let min_diag_separation = min_diag_separation_for_gapped(
+        prepared.word_size,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
     );
-    // Soft masking: the lookup table is built from the masked queries (`query_plus`
-    // / `query_minus` — seeds in masked regions are skipped), but the ungapped
-    // EXTENSION must use the unmasked queries so the alignment can extend through
-    // DUST-masked low-complexity regions. NCBI's default `-soft_masking true`
-    // produces exactly this behaviour; using the masked buffer for extension
-    // collapses to hard masking and drops most repeat-copy HSPs whose seed lies
-    // outside the mask but whose alignment extends into it (the regular blastn
-    // `-task blastn` recall gap).
-    let min_diag_separation =
-        min_diag_separation_for_gapped(word_size, reward, penalty, gap_open, gap_extend);
+    // Soft masking: the lookup table is built from the masked queries, while
+    // ungapped extension uses the unmasked queries so alignments can extend
+    // through DUST-masked low-complexity regions as in NCBI soft masking.
     let ungapped = blastn_ungapped_search_with_nomask_min_diag(
         query_plus,
         query_minus,
         query_plus_nomask,
         query_minus_nomask,
         subject,
-        word_size,
+        prepared.word_size,
         reward,
         penalty,
         ungapped_x_dropoff,
@@ -6823,10 +6893,33 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
         min_diag_separation,
     );
 
+    (ungapped, min_diag_separation)
+}
+
+// NCBI: Blast_RunFullSearch (`blast_engine.c`), specialized to decoded blastn
+// after preliminary ungapped HSP collection.
+#[allow(clippy::too_many_arguments)]
+fn blast_run_full_search_decoded_with_split_xdrop(
+    prepared: &PreparedBlastnQuery<'_>,
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    prelim_x_dropoff: i32,
+    traceback_x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+    ungapped: Vec<SearchHsp>,
+    min_diag_separation: i32,
+) -> Vec<SearchHsp> {
     let mut candidates = Vec::new();
 
     collect_decoded_gapped_candidates(
-        &prepared,
+        prepared,
         &ungapped,
         &mut candidates,
         query_plus_nomask,
@@ -6857,6 +6950,108 @@ pub fn blastn_gapped_search_nomask_with_split_xdrop(
         search_space,
         evalue_threshold,
         min_diag_separation,
+    )
+}
+
+// Rust public API entry path, kept as a caller around the C-shaped preliminary
+// and full-search stages above.
+#[allow(clippy::too_many_arguments)]
+fn blast_run_decoded_gapped_search_with_split_xdrop(
+    prepared: &PreparedBlastnQuery<'_>,
+    query_plus: &[u8],
+    query_minus: &[u8],
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    ungapped_x_dropoff: i32,
+    prelim_x_dropoff: i32,
+    traceback_x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    let (ungapped, min_diag_separation) = blast_run_preliminary_search_decoded_with_split_xdrop(
+        prepared,
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
+        subject,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        ungapped_x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+    );
+
+    blast_run_full_search_decoded_with_split_xdrop(
+        prepared,
+        query_plus_nomask,
+        query_minus_nomask,
+        subject,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        prelim_x_dropoff,
+        traceback_x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
+        ungapped,
+        min_diag_separation,
+    )
+}
+
+pub fn blastn_gapped_search_nomask_with_split_xdrop(
+    query_plus: &[u8],
+    query_minus: &[u8],
+    query_plus_nomask: &[u8],
+    query_minus_nomask: &[u8],
+    subject: &[u8],
+    word_size: usize,
+    reward: i32,
+    penalty: i32,
+    gap_open: i32,
+    gap_extend: i32,
+    ungapped_x_dropoff: i32,
+    prelim_x_dropoff: i32,
+    traceback_x_dropoff: i32,
+    kbp: &KarlinBlk,
+    search_space: f64,
+    evalue_threshold: f64,
+) -> Vec<SearchHsp> {
+    let prepared = PreparedBlastnQuery::new_with_nomask(
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
+        word_size,
+    );
+    blast_run_decoded_gapped_search_with_split_xdrop(
+        &prepared,
+        query_plus,
+        query_minus,
+        query_plus_nomask,
+        query_minus_nomask,
+        subject,
+        reward,
+        penalty,
+        gap_open,
+        gap_extend,
+        ungapped_x_dropoff,
+        prelim_x_dropoff,
+        traceback_x_dropoff,
+        kbp,
+        search_space,
+        evalue_threshold,
     )
 }
 
@@ -8403,6 +8598,7 @@ fn blastn_preliminary_search_packed_prepared_with_split_xdrop(
     )
 }
 
+// NCBI: BLAST_PreliminarySearchEngine (`blast_engine.c`), packed blastn path.
 #[allow(clippy::too_many_arguments)]
 fn blast_preliminary_search_engine_packed_prepared_with_split_xdrop(
     prepared: &PreparedBlastnQuery<'_>,
@@ -8442,6 +8638,7 @@ fn blast_preliminary_search_engine_packed_prepared_with_split_xdrop(
     )
 }
 
+// NCBI: Blast_RunPreliminarySearchWithInterrupt (`blast_engine.c`), packed blastn path.
 #[allow(clippy::too_many_arguments)]
 fn blast_run_preliminary_search_with_interrupt_packed_prepared_with_split_xdrop(
     prepared: &PreparedBlastnQuery<'_>,
@@ -8481,6 +8678,7 @@ fn blast_run_preliminary_search_with_interrupt_packed_prepared_with_split_xdrop(
     )
 }
 
+// NCBI: Blast_RunPreliminarySearch (`blast_engine.c`), packed blastn path.
 #[allow(clippy::too_many_arguments)]
 fn blast_run_preliminary_search_packed_prepared_with_split_xdrop(
     prepared: &PreparedBlastnQuery<'_>,
@@ -8583,6 +8781,7 @@ fn blastn_full_search_packed_prepared_with_split_xdrop(
     )
 }
 
+// NCBI: Blast_RunFullSearch (`blast_engine.c`), packed blastn path.
 #[allow(clippy::too_many_arguments)]
 fn blast_run_full_search_packed_prepared_with_split_xdrop(
     prepared: &PreparedBlastnQuery<'_>,

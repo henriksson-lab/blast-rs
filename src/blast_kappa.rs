@@ -3631,7 +3631,7 @@ mod struct_tests {
     }
 
     #[test]
-    fn blast_redo_alignment_core_mt_with_callbacks_redoes_position_based_matches() {
+    fn blast_redo_alignment_core_mt_callback_source_redoes_position_based_matches() {
         let query = vec![1u8; 8];
         let qi = crate::queryinfo::QueryInfo {
             num_queries: 1,
@@ -3745,7 +3745,7 @@ mod struct_tests {
             let mut hsp_list = make_hsp_list();
             let mut results = crate::hspstream::HspResults::new(1);
 
-            let rc = blast_redo_alignment_core_mt_with_callbacks(
+            let rc = blast_redo_alignment_core_mt(
                 crate::program::PSI_BLAST,
                 1,
                 &query,
@@ -3756,14 +3756,14 @@ mod struct_tests {
                 &params,
                 &mut saved,
                 &mut hsp_list,
-                BlastRedoCallbackSubjectConfig {
+                BlastRedoAlignmentSource::Callback(BlastRedoCallbackSubjectConfig {
                     subject_length: query.len() as i32,
                     smith_waterman,
                     expect_value: 10.0,
                     hitlist_size: 10,
                     inclusion_ethresh: 10.0,
                     link_context: None,
-                },
+                }),
                 &mut results,
             );
 
@@ -3791,7 +3791,7 @@ mod struct_tests {
     }
 
     #[test]
-    fn blast_redo_alignment_core_mt_with_callbacks_uses_link_hsp_context() {
+    fn blast_redo_alignment_core_mt_callback_source_uses_link_hsp_context() {
         let query = vec![0u8; 8];
         let qi = crate::queryinfo::QueryInfo {
             num_queries: 1,
@@ -3905,7 +3905,7 @@ mod struct_tests {
         });
         let mut results = crate::hspstream::HspResults::new(1);
 
-        let rc = blast_redo_alignment_core_mt_with_callbacks(
+        let rc = blast_redo_alignment_core_mt(
             crate::program::BLASTP,
             1,
             &query,
@@ -3916,14 +3916,14 @@ mod struct_tests {
             &params,
             &mut saved,
             &mut hsp_list,
-            BlastRedoCallbackSubjectConfig {
+            BlastRedoAlignmentSource::Callback(BlastRedoCallbackSubjectConfig {
                 subject_length: query.len() as i32,
                 smith_waterman: false,
                 expect_value: 10.0,
                 hitlist_size: 10,
                 inclusion_ethresh: 10.0,
                 link_context: Some(&link_context),
-            },
+            }),
             &mut results,
         );
 
@@ -15494,6 +15494,12 @@ pub enum BlastRedoAlignmentSource<'a> {
     Callback(BlastRedoCallbackSubjectConfig<'a>),
     /// One materialized subject block and one HSP list.
     InMemorySubject(BlastRedoInMemorySubject<'a>),
+    /// Materialized subject with a C-shaped `BlastHSPList` preserving
+    /// `query_index` through redo/update.
+    InMemorySubjectHspList {
+        hsp_list: &'a mut crate::hspstream::BlastHSPList,
+        subject: BlastRedoInMemorySubject<'a>,
+    },
     /// Materialized equivalent of C's stream loop over multiple subject HSP lists.
     InMemorySubjects(&'a mut [BlastRedoInMemorySubjectMatch<'a>]),
     /// `BlastSeqSrc`-backed branch: fetch each subject by OID, then redo it.
@@ -15641,6 +15647,35 @@ pub fn blast_redo_alignment_core_mt(
                 subject,
             )
         }
+        BlastRedoAlignmentSource::InMemorySubjectHspList { hsp_list, subject } => {
+            let source_query_index = hsp_list.query_index;
+            let placeholder = crate::hspstream::BlastHSPList {
+                oid: -1,
+                query_index: source_query_index,
+                hsp_array: Vec::new(),
+                hspcnt: 0,
+                allocated: 0,
+                hsp_max: 0,
+                do_not_reallocate: false,
+                best_evalue: i32::MAX as f64,
+            };
+            let mut legacy_match = std::mem::replace(hsp_list, placeholder).into_legacy_hsp_list();
+            let status = blast_redo_alignment_core_one_match_in_memory_inner(
+                program,
+                query,
+                query_info,
+                kbp_gap,
+                align_params,
+                &mut legacy_match,
+                results,
+                None,
+                Some(source_query_index),
+                subject,
+            );
+            *hsp_list = crate::hspstream::BlastHSPList::from_legacy_hsp_list(legacy_match);
+            hsp_list.query_index = source_query_index;
+            status
+        }
         BlastRedoAlignmentSource::InMemorySubjects(matches) => {
             if matches.is_empty() {
                 *results = crate::hspstream::HspResults::new(query_info.num_queries as i32);
@@ -15687,13 +15722,14 @@ pub fn blast_redo_alignment_core_mt(
                     }
 
                     for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
-                        if query_index >= heaps.len() {
+                        let Some(heap) = heaps.get_mut(query_index) else {
                             continue;
-                        }
-                        if let Some(hitlist) = hitlist {
-                            for hsp_list in hitlist.hsp_lists {
-                                let _discarded = heaps[query_index].insert(hsp_list);
-                            }
+                        };
+                        let Some(hitlist) = hitlist else {
+                            continue;
+                        };
+                        for hsp_list in hitlist.hsp_lists {
+                            let _discarded = heap.insert(hsp_list);
                         }
                     }
                 }
@@ -15811,13 +15847,14 @@ pub fn blast_redo_alignment_core_mt(
 
                         for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate()
                         {
-                            if query_index >= heaps.len() {
+                            let Some(heap) = heaps.get_mut(query_index) else {
                                 continue;
-                            }
-                            if let Some(hitlist) = hitlist {
-                                for hsp_list in hitlist.hsp_lists {
-                                    let _discarded = heaps[query_index].insert(hsp_list);
-                                }
+                            };
+                            let Some(hitlist) = hitlist else {
+                                continue;
+                            };
+                            for hsp_list in hitlist.hsp_lists {
+                                let _discarded = heap.insert(hsp_list);
                             }
                         }
                         continue;
@@ -15864,13 +15901,14 @@ pub fn blast_redo_alignment_core_mt(
                     }
 
                     for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
-                        if query_index >= heaps.len() {
+                        let Some(heap) = heaps.get_mut(query_index) else {
                             continue;
-                        }
-                        if let Some(hitlist) = hitlist {
-                            for hsp_list in hitlist.hsp_lists {
-                                let _discarded = heaps[query_index].insert(hsp_list);
-                            }
+                        };
+                        let Some(hitlist) = hitlist else {
+                            continue;
+                        };
+                        for hsp_list in hitlist.hsp_lists {
+                            let _discarded = heap.insert(hsp_list);
                         }
                     }
                 }
@@ -16193,7 +16231,7 @@ pub struct BlastRpsRedoProfileConfig<'a> {
 }
 
 /// External callback-backed subject settings for
-/// [`blast_redo_alignment_core_mt_with_callbacks`].
+/// [`blast_redo_alignment_core_mt`].
 ///
 /// This models the `Blast_RedoAlignmentCore_MT` branch where the redo driver
 /// does not own a materialized subject buffer and must retrieve query/subject
@@ -16454,78 +16492,6 @@ pub fn blast_rps_redo_alignment_core_profile(
     0
 }
 
-/// blast-rs: Callback-backed branch of `Blast_RedoAlignmentCore_MT`; not a complete direct NCBI C port.
-///
-/// Callback-backed branch of `Blast_RedoAlignmentCore_MT`.
-///
-/// The compatibility translation [`blast_redo_alignment_core_mt`] preserves the
-/// no-subject/no-composition pass-through. This helper covers the faithful
-/// external-driver branch once callers provide the C-style callback table in
-/// [`BlastRedoAlignParams::callbacks`]: convert the incoming HSP list to
-/// distinct alignments, run ordinary or Smith-Waterman callback redo, rebuild
-/// the HSP list, evaluate/purge, normalize, and feed the per-query results.
-/// Position-specific/PSSM ordinary and Smith-Waterman callback redo are routed
-/// through the already-ported PSSM helpers.
-#[allow(clippy::too_many_arguments)]
-pub fn blast_redo_alignment_core_mt_with_callbacks(
-    program: ProgramType,
-    _num_threads: u32,
-    query: &[u8],
-    query_info: &crate::queryinfo::QueryInfo,
-    kbp_gap: &mut [crate::stat::KarlinBlk],
-    matrix: &mut [Vec<i32>],
-    scoring: &mut crate::parameters::ScoringParameters,
-    align_params: &BlastRedoAlignParams,
-    saved: &mut BlastKappaSavedParameters,
-    this_match: &mut HspList,
-    subject: BlastRedoCallbackSubjectConfig<'_>,
-    results: &mut crate::hspstream::HspResults,
-) -> i32 {
-    let query_length = query_info.max_length as i32;
-    let record_status = record_initial_search(
-        saved,
-        kbp_gap,
-        matrix,
-        scoring,
-        query_length,
-        align_params.compo_adjust_mode,
-        align_params.position_based,
-    );
-    if record_status != 0 {
-        return record_status;
-    }
-
-    rescale_search(
-        kbp_gap,
-        scoring,
-        query_info.contexts.len() as i32,
-        align_params.local_scaling_factor,
-    );
-
-    let status = blast_redo_alignment_core_one_match_with_callbacks_inner(
-        program,
-        query,
-        query_info,
-        kbp_gap,
-        align_params,
-        this_match,
-        subject,
-        results,
-    );
-
-    restore_search(
-        saved,
-        kbp_gap,
-        matrix,
-        scoring,
-        query_length,
-        align_params.position_based,
-        align_params.compo_adjust_mode,
-    );
-
-    status
-}
-
 /// blast-rs: Materialized-subject branch of `Blast_RedoAlignmentCore_MT`; not a complete direct NCBI C port.
 ///
 /// Materialized-subject branch of `Blast_RedoAlignmentCore_MT`.
@@ -16709,13 +16675,14 @@ pub fn blast_redo_alignment_core_mt_in_memory_subjects(
             }
 
             for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
-                if query_index >= heaps.len() {
+                let Some(heap) = heaps.get_mut(query_index) else {
                     continue;
-                }
-                if let Some(hitlist) = hitlist {
-                    for hsp_list in hitlist.hsp_lists {
-                        let _discarded = heaps[query_index].insert(hsp_list);
-                    }
+                };
+                let Some(hitlist) = hitlist else {
+                    continue;
+                };
+                for hsp_list in hitlist.hsp_lists {
+                    let _discarded = heap.insert(hsp_list);
                 }
             }
         }
@@ -16888,13 +16855,14 @@ pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
                 }
 
                 for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
-                    if query_index >= heaps.len() {
+                    let Some(heap) = heaps.get_mut(query_index) else {
                         continue;
-                    }
-                    if let Some(hitlist) = hitlist {
-                        for hsp_list in hitlist.hsp_lists {
-                            let _discarded = heaps[query_index].insert(hsp_list);
-                        }
+                    };
+                    let Some(hitlist) = hitlist else {
+                        continue;
+                    };
+                    for hsp_list in hitlist.hsp_lists {
+                        let _discarded = heap.insert(hsp_list);
                     }
                 }
                 continue;
@@ -16941,13 +16909,14 @@ pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
             }
 
             for (query_index, hitlist) in local_results.hitlists.into_iter().enumerate() {
-                if query_index >= heaps.len() {
+                let Some(heap) = heaps.get_mut(query_index) else {
                     continue;
-                }
-                if let Some(hitlist) = hitlist {
-                    for hsp_list in hitlist.hsp_lists {
-                        let _discarded = heaps[query_index].insert(hsp_list);
-                    }
+                };
+                let Some(hitlist) = hitlist else {
+                    continue;
+                };
+                for hsp_list in hitlist.hsp_lists {
+                    let _discarded = heap.insert(hsp_list);
                 }
             }
         }
@@ -16977,139 +16946,63 @@ pub fn blast_redo_alignment_core_mt_seqsrc_subjects(
     status
 }
 
-/// NCBI-shaped materialized-subject branch when the caller still has a
-/// `BlastHSPList`.
-///
-/// C `Blast_RedoAlignmentCore_MT` carries `BlastHSPList.query_index` into the
-/// redo/update phase. This preserves that owner query while the remaining redo
-/// internals still operate on legacy `HspList` alignment nodes.
+fn composition_test_index_for_redo(params: &BlastRedoAlignParams) -> i32 {
+    let _ = params;
+    // C passes `extendParams->options->unifiedP` into
+    // `Blast_RedoOneMatch`. `BlastExtensionOptionsNew` zero-initializes that
+    // field, and this Rust parameter struct does not yet carry an explicit
+    // `unifiedP` option. Do not derive it from `compositionBasedStats`; CBS2
+    // (`compositionBasedStats == 2`) and the unified-p-value switch are
+    // independent fields.
+    0
+}
+
+/// NCBI: callback-backed one-match body inside `Blast_RedoAlignmentCore_MT`.
 #[allow(clippy::too_many_arguments)]
-pub fn blast_redo_alignment_core_mt_in_memory_subject_hsp_list(
+fn blast_redo_alignment_core_one_match_with_callbacks_inner(
     program: ProgramType,
-    _num_threads: u32,
     query: &[u8],
     query_info: &crate::queryinfo::QueryInfo,
-    kbp_gap: &mut [crate::stat::KarlinBlk],
-    matrix: &mut [Vec<i32>],
-    scoring: &mut crate::parameters::ScoringParameters,
+    kbp_gap: &[crate::stat::KarlinBlk],
     align_params: &BlastRedoAlignParams,
-    saved: &mut BlastKappaSavedParameters,
-    this_match: &mut crate::hspstream::BlastHSPList,
+    this_match: &mut HspList,
+    subject: BlastRedoCallbackSubjectConfig<'_>,
     results: &mut crate::hspstream::HspResults,
-    subject: BlastRedoInMemorySubject<'_>,
 ) -> i32 {
-    let source_query_index = this_match.query_index;
-    let placeholder = crate::hspstream::BlastHSPList {
-        oid: -1,
-        query_index: source_query_index,
-        hsp_array: Vec::new(),
-        hspcnt: 0,
-        allocated: 0,
-        hsp_max: 0,
-        do_not_reallocate: false,
-        best_evalue: i32::MAX as f64,
-    };
-    let mut legacy_match = std::mem::replace(this_match, placeholder).into_legacy_hsp_list();
-    let query_length = query_info.max_length as i32;
-    let record_status = record_initial_search(
-        saved,
-        kbp_gap,
-        matrix,
-        scoring,
-        query_length,
-        align_params.compo_adjust_mode,
-        align_params.position_based,
-    );
-    if record_status != 0 {
-        *this_match = crate::hspstream::BlastHSPList::from_legacy_hsp_list(legacy_match);
-        this_match.query_index = source_query_index;
-        return record_status;
-    }
-
-    rescale_search(
-        kbp_gap,
-        scoring,
-        query_info.contexts.len() as i32,
-        align_params.local_scaling_factor,
-    );
-
-    let status = blast_redo_alignment_core_one_match_in_memory_inner(
-        program,
-        query,
-        query_info,
-        kbp_gap,
-        align_params,
-        &mut legacy_match,
-        results,
-        None,
-        Some(source_query_index),
-        subject,
-    );
-
-    restore_search(
-        saved,
-        kbp_gap,
-        matrix,
-        scoring,
-        query_length,
-        align_params.position_based,
-        align_params.compo_adjust_mode,
-    );
-
-    *this_match = crate::hspstream::BlastHSPList::from_legacy_hsp_list(legacy_match);
-    this_match.query_index = source_query_index;
-    status
-}
-
-#[derive(Clone, Copy)]
-struct BlastRedoOneMatchCallbackPlan {
-    num_contexts: usize,
-    num_frames: usize,
-    query_index: i32,
-    context_index: usize,
-}
-
-/// NCBI: argument and context validation phase of `Blast_RedoAlignmentCore_MT`.
-fn blast_redo_alignment_core_one_match_with_callbacks_validate(
-    program: ProgramType,
-    query_info: &crate::queryinfo::QueryInfo,
-    align_params: &BlastRedoAlignParams,
-    this_match: &HspList,
-) -> Result<BlastRedoOneMatchCallbackPlan, i32> {
     if align_params.callbacks.is_none() {
-        return Err(-1);
+        return -1;
     }
     if this_match.hsps.is_empty() {
-        return Err(0);
+        return 0;
     }
     if !materialized_redo_program_is_supported(program) {
-        return Err(-1);
+        return -1;
     }
     if !matches!(
         align_params.compo_adjust_mode,
         CompoAdjustMode::NoCompositionBasedStats
     ) && program == crate::program::BLASTN
     {
-        return Err(-1);
+        return -1;
     }
     if !matches!(
         align_params.compo_adjust_mode,
         CompoAdjustMode::NoCompositionBasedStats
     ) && !composition_redo_program_is_supported(program)
     {
-        return Err(-1);
+        return -1;
     }
     if align_params.position_based
         && (align_params.query_is_translated
             || align_params.subject_is_translated
             || program == crate::program::BLASTN)
     {
-        return Err(-1);
+        return -1;
     }
 
     let num_contexts = query_info.contexts.len();
     if num_contexts == 0 {
-        return Err(-1);
+        return -1;
     }
     let num_frames = materialized_num_contexts_per_query(program, query_info);
     let first_context = this_match.hsps[0].context.max(0) as usize;
@@ -17124,27 +17017,13 @@ fn blast_redo_alignment_core_one_match_with_callbacks_validate(
             )
         });
     if query_index < 0 {
-        return Err(-1);
+        return -1;
     }
     let context_index = query_index as usize * num_frames;
     if context_index >= num_contexts {
-        return Err(-1);
+        return -1;
     }
 
-    Ok(BlastRedoOneMatchCallbackPlan {
-        num_contexts,
-        num_frames,
-        query_index,
-        context_index,
-    })
-}
-
-/// NCBI: `ResultHspToDistinctAlign` phase of `Blast_RedoAlignmentCore_MT`.
-fn blast_redo_alignment_core_one_match_with_callbacks_distinct_alignments(
-    this_match: &HspList,
-    context_index: usize,
-    local_scaling_factor: f64,
-) -> Result<([Option<Box<BlastCompoAlignment>>; 6], [i32; 6]), i32> {
     let mut incoming_align_set: [Option<Box<BlastCompoAlignment>>; 6] = Default::default();
     let mut num_aligns = [0i32; 6];
     let rc = result_hsp_to_distinct_align(
@@ -17152,198 +17031,153 @@ fn blast_redo_alignment_core_one_match_with_callbacks_distinct_alignments(
         &mut num_aligns,
         &this_match.hsps,
         context_index as i32,
-        local_scaling_factor,
+        align_params.local_scaling_factor,
     );
     if rc != 0 {
-        return Err(rc);
-    }
-    Ok((incoming_align_set, num_aligns))
-}
-
-/// NCBI: per-frame composition redo plus `HspListFromDistinctAlignments`.
-#[allow(clippy::too_many_arguments)]
-fn blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
-    program: ProgramType,
-    query_info: &crate::queryinfo::QueryInfo,
-    kbp_gap: &[crate::stat::KarlinBlk],
-    align_params: &BlastRedoAlignParams,
-    subject: BlastRedoCallbackSubjectConfig<'_>,
-    matching_seq: &BlastCompoMatchingSequence,
-    compo_query_info: &[BlastCompoQueryInfo],
-    incoming_aligns: &Option<Box<BlastCompoAlignment>>,
-    num_aligns: i32,
-    frame_index: usize,
-    context_index: usize,
-    num_contexts: usize,
-    alignments: &mut [Option<Box<BlastCompoAlignment>>],
-    redone: &mut HspList,
-    pvalue_for_this_pair: &mut f64,
-    lambda_ratio: &mut f64,
-) -> i32 {
-    if incoming_aligns.is_none() {
-        return 0;
-    }
-    let context = context_index + frame_index;
-    if context >= num_contexts || context >= kbp_gap.len() {
-        return -1;
+        return rc;
     }
 
-    let status = if subject.smith_waterman {
-        let significant_matches =
-            vec![
-                BlastCompoHeap::new(subject.hitlist_size, subject.inclusion_ethresh);
-                compo_query_info.len()
-            ];
-        *pvalue_for_this_pair = -1.0;
-        *lambda_ratio = 1.0;
-        if align_params.position_based {
-            let mut adjusted_pssm = Vec::new();
-            blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustment(
-                alignments,
-                align_params,
-                incoming_aligns,
-                num_aligns,
-                kbp_gap[context].lambda,
-                kbp_gap[context].log_k,
-                matching_seq,
-                compo_query_info,
-                &significant_matches,
-                &mut adjusted_pssm,
-                pvalue_for_this_pair,
-                composition_test_index_for_redo(align_params),
-                lambda_ratio,
-            )
-        } else {
-            let mut adjusted_matrix = match square_matrix_from_vec(&align_params.matrix_info.matrix)
-            {
-                Some(matrix) => matrix,
-                None => [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
-            };
-            let workspace = if matches!(
-                align_params.compo_adjust_mode,
-                CompoAdjustMode::CompositionMatrixAdjust
-            ) {
-                Some(BlastCompositionWorkspace::blosum62())
-            } else {
-                None
-            };
-            blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
-                alignments,
-                align_params,
-                incoming_aligns,
-                num_aligns,
-                kbp_gap[context].lambda,
-                kbp_gap[context].log_k,
-                matching_seq,
-                compo_query_info,
-                &significant_matches,
-                &mut adjusted_matrix,
-                workspace.as_ref(),
-                pvalue_for_this_pair,
-                composition_test_index_for_redo(align_params),
-                lambda_ratio,
-            )
+    let compo_query_info = get_query_info(query, query_info, program == crate::program::BLASTX);
+    let matching_seq = matching_sequence_initialize(subject.subject_length, this_match.oid, 0);
+    let mut alignments = vec![None; num_contexts];
+    let mut redone = HspList::new(this_match.oid);
+    let mut pvalue_for_this_pair = -1.0;
+
+    for frame_index in 0..num_frames {
+        let incoming_aligns = &incoming_align_set[frame_index];
+        if incoming_aligns.is_none() {
+            continue;
         }
-    } else {
-        *pvalue_for_this_pair = -1.0;
-        *lambda_ratio = 1.0;
-        if align_params.position_based {
-            let mut adjusted_pssm = Vec::new();
-            blast_redo_one_match_with_callbacks_and_position_adjustment(
-                alignments,
-                align_params,
-                incoming_aligns,
-                num_aligns,
-                kbp_gap[context].lambda,
-                matching_seq,
-                compo_query_info,
-                &mut adjusted_pssm,
-                pvalue_for_this_pair,
-                composition_test_index_for_redo(align_params),
-                lambda_ratio,
-            )
-        } else {
-            let mut adjusted_matrix = match square_matrix_from_vec(&align_params.matrix_info.matrix)
-            {
-                Some(matrix) => matrix,
-                None => [[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE],
-            };
-            let workspace = if matches!(
-                align_params.compo_adjust_mode,
-                CompoAdjustMode::CompositionMatrixAdjust
-            ) {
-                Some(BlastCompositionWorkspace::blosum62())
-            } else {
-                None
-            };
-            blast_redo_one_match_with_callbacks_and_adjustment(
-                alignments,
-                align_params,
-                incoming_aligns,
-                num_aligns,
-                kbp_gap[context].lambda,
-                matching_seq,
-                compo_query_info,
-                &mut adjusted_matrix,
-                workspace.as_ref(),
-                pvalue_for_this_pair,
-                composition_test_index_for_redo(align_params),
-                lambda_ratio,
-            )
+        let context = context_index + frame_index;
+        if context >= num_contexts || context >= kbp_gap.len() {
+            return -1;
         }
-    };
-    if status != 0 {
-        return status;
-    }
 
-    if alignments[context].is_some() {
-        let qframe = if crate::program::blast_query_is_translated(program) {
-            let f = frame_index as i32;
-            if f < 3 {
-                f + 1
+        let status = if subject.smith_waterman {
+            let significant_matches =
+                vec![
+                    BlastCompoHeap::new(subject.hitlist_size, subject.inclusion_ethresh);
+                    compo_query_info.len()
+                ];
+            pvalue_for_this_pair = -1.0;
+            let mut lambda_ratio = 1.0;
+            if align_params.position_based {
+                let mut adjusted_pssm = Vec::new();
+                blast_redo_one_match_smith_waterman_with_callbacks_and_position_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    &significant_matches,
+                    &mut adjusted_pssm,
+                    &mut pvalue_for_this_pair,
+                    composition_test_index_for_redo(align_params),
+                    &mut lambda_ratio,
+                )
             } else {
-                2 - f
+                let mut adjusted_matrix = square_matrix_from_vec(&align_params.matrix_info.matrix)
+                    .unwrap_or([[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]);
+                let workspace = if matches!(
+                    align_params.compo_adjust_mode,
+                    CompoAdjustMode::CompositionMatrixAdjust
+                ) {
+                    Some(BlastCompositionWorkspace::blosum62())
+                } else {
+                    None
+                };
+                blast_redo_one_match_smith_waterman_with_callbacks_and_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    kbp_gap[context].log_k,
+                    &matching_seq,
+                    &compo_query_info,
+                    &significant_matches,
+                    &mut adjusted_matrix,
+                    workspace.as_ref(),
+                    &mut pvalue_for_this_pair,
+                    composition_test_index_for_redo(align_params),
+                    &mut lambda_ratio,
+                )
             }
         } else {
-            query_info.contexts[context].frame
+            pvalue_for_this_pair = -1.0;
+            let mut lambda_ratio = 1.0;
+            if align_params.position_based {
+                let mut adjusted_pssm = Vec::new();
+                blast_redo_one_match_with_callbacks_and_position_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    &matching_seq,
+                    &compo_query_info,
+                    &mut adjusted_pssm,
+                    &mut pvalue_for_this_pair,
+                    composition_test_index_for_redo(align_params),
+                    &mut lambda_ratio,
+                )
+            } else {
+                let mut adjusted_matrix = square_matrix_from_vec(&align_params.matrix_info.matrix)
+                    .unwrap_or([[0i32; crate::matrix::AA_SIZE]; crate::matrix::AA_SIZE]);
+                let workspace = if matches!(
+                    align_params.compo_adjust_mode,
+                    CompoAdjustMode::CompositionMatrixAdjust
+                ) {
+                    Some(BlastCompositionWorkspace::blosum62())
+                } else {
+                    None
+                };
+                blast_redo_one_match_with_callbacks_and_adjustment(
+                    &mut alignments,
+                    align_params,
+                    incoming_aligns,
+                    num_aligns[frame_index],
+                    kbp_gap[context].lambda,
+                    &matching_seq,
+                    &compo_query_info,
+                    &mut adjusted_matrix,
+                    workspace.as_ref(),
+                    &mut pvalue_for_this_pair,
+                    composition_test_index_for_redo(align_params),
+                    &mut lambda_ratio,
+                )
+            }
         };
-        let (status, _tags) = hsp_list_from_distinct_alignments(
-            redone,
-            &mut alignments[context],
-            matching_seq.index,
-            qframe,
-        );
         if status != 0 {
             return status;
         }
+
+        if alignments[context].is_some() {
+            let qframe = if crate::program::blast_query_is_translated(program) {
+                let f = frame_index as i32;
+                if f < 3 {
+                    f + 1
+                } else {
+                    2 - f
+                }
+            } else {
+                query_info.contexts[context].frame
+            };
+            let (status, _tags) = hsp_list_from_distinct_alignments(
+                &mut redone,
+                &mut alignments[context],
+                matching_seq.index,
+                qframe,
+            );
+            if status != 0 {
+                return status;
+            }
+        }
     }
 
-    0
-}
-
-fn composition_test_index_for_redo(params: &BlastRedoAlignParams) -> i32 {
-    let _ = params;
-    // C passes `extendParams->options->unifiedP` into
-    // `Blast_RedoOneMatch`. `BlastExtensionOptionsNew` zero-initializes that
-    // field, and this Rust parameter struct does not yet carry an explicit
-    // `unifiedP` option. Do not derive it from `compositionBasedStats`; CBS2
-    // (`compositionBasedStats == 2`) and the unified-p-value switch are
-    // independent fields.
-    0
-}
-
-/// NCBI: `s_HitlistEvaluateAndPurge` phase for callback-backed redo.
-#[allow(clippy::too_many_arguments)]
-fn blast_redo_alignment_core_one_match_with_callbacks_evaluate(
-    program: ProgramType,
-    query_info: &crate::queryinfo::QueryInfo,
-    kbp_gap: &[crate::stat::KarlinBlk],
-    align_params: &BlastRedoAlignParams,
-    subject: BlastRedoCallbackSubjectConfig<'_>,
-    redone: &mut HspList,
-    context_index: usize,
-    pvalue_for_this_pair: f64,
-) -> (usize, f64) {
     if redone.hsps.len() > 1 {
         s_hitlist_reap_contained(&mut redone.hsps);
     }
@@ -17357,7 +17191,7 @@ fn blast_redo_alignment_core_one_match_with_callbacks_evaluate(
         .unwrap_or_else(|| context_index.min(query_info.contexts.len() - 1));
     let ctx = &query_info.contexts[eval_context];
     let (_best_score, best_evalue) = s_hitlist_evaluate_and_purge(
-        redone,
+        &mut redone,
         subject.subject_length,
         program,
         ctx.query_length,
@@ -17369,38 +17203,21 @@ fn blast_redo_alignment_core_one_match_with_callbacks_evaluate(
         subject.expect_value,
         align_params.do_link_hsps,
     );
-    (eval_context, best_evalue)
-}
 
-/// NCBI: accepted/rejected hit-list update phase of `Blast_RedoAlignmentCore_MT`.
-#[allow(clippy::too_many_arguments)]
-fn blast_redo_alignment_core_one_match_with_callbacks_update_results(
-    query_index: i32,
-    eval_context: usize,
-    best_evalue: f64,
-    query_info: &[BlastCompoQueryInfo],
-    kbp_gap: &[crate::stat::KarlinBlk],
-    align_params: &BlastRedoAlignParams,
-    subject: BlastRedoCallbackSubjectConfig<'_>,
-    matching_seq: &BlastCompoMatchingSequence,
-    redone: &mut HspList,
-    this_match: &mut HspList,
-    results: &mut crate::hspstream::HspResults,
-) -> i32 {
     if best_evalue <= subject.expect_value {
         if let Some(kbp) = kbp_gap.get(eval_context) {
             s_hsp_list_normalize_scores(
-                redone,
+                &mut redone,
                 kbp.lambda,
                 kbp.log_k,
                 align_params.local_scaling_factor,
             );
         }
         if compute_num_identities_with_callbacks(
-            redone,
+            &mut redone,
             align_params,
-            matching_seq,
-            query_info,
+            &matching_seq,
+            &compo_query_info,
             subject.subject_length,
         ) != 0
         {
@@ -17415,7 +17232,7 @@ fn blast_redo_alignment_core_one_match_with_callbacks_update_results(
         if hitlist.hsp_lists.len() < subject.hitlist_size.max(0) as usize
             || best_evalue <= subject.inclusion_ethresh
         {
-            hitlist.blast_hit_list_update(redone.clone());
+            hitlist.blast_hit_list_update(redone);
             hitlist.sort_by_evalue();
         }
     } else {
@@ -17425,94 +17242,6 @@ fn blast_redo_alignment_core_one_match_with_callbacks_update_results(
     }
 
     0
-}
-
-/// blast-rs: Shared callback-backed one-match redo/evaluate path; not a direct NCBI C port.
-#[allow(clippy::too_many_arguments)]
-fn blast_redo_alignment_core_one_match_with_callbacks_inner(
-    program: ProgramType,
-    query: &[u8],
-    query_info: &crate::queryinfo::QueryInfo,
-    kbp_gap: &[crate::stat::KarlinBlk],
-    align_params: &BlastRedoAlignParams,
-    this_match: &mut HspList,
-    subject: BlastRedoCallbackSubjectConfig<'_>,
-    results: &mut crate::hspstream::HspResults,
-) -> i32 {
-    let plan = match blast_redo_alignment_core_one_match_with_callbacks_validate(
-        program,
-        query_info,
-        align_params,
-        this_match,
-    ) {
-        Ok(plan) => plan,
-        Err(status) => return status,
-    };
-    let (incoming_align_set, num_aligns) =
-        match blast_redo_alignment_core_one_match_with_callbacks_distinct_alignments(
-            this_match,
-            plan.context_index,
-            align_params.local_scaling_factor,
-        ) {
-            Ok(converted) => converted,
-            Err(status) => return status,
-        };
-
-    let compo_query_info = get_query_info(query, query_info, program == crate::program::BLASTX);
-    let matching_seq = matching_sequence_initialize(subject.subject_length, this_match.oid, 0);
-    let mut alignments = vec![None; plan.num_contexts];
-    let mut redone = HspList::new(this_match.oid);
-    let mut pvalue_for_this_pair = -1.0;
-    let mut lambda_ratio = 1.0;
-
-    for frame_index in 0..plan.num_frames {
-        let status = blast_redo_alignment_core_one_match_with_callbacks_redo_frame(
-            program,
-            query_info,
-            kbp_gap,
-            align_params,
-            subject,
-            &matching_seq,
-            &compo_query_info,
-            &incoming_align_set[frame_index],
-            num_aligns[frame_index],
-            frame_index,
-            plan.context_index,
-            plan.num_contexts,
-            &mut alignments,
-            &mut redone,
-            &mut pvalue_for_this_pair,
-            &mut lambda_ratio,
-        );
-        if status != 0 {
-            return status;
-        }
-    }
-
-    let (eval_context, best_evalue) = blast_redo_alignment_core_one_match_with_callbacks_evaluate(
-        program,
-        query_info,
-        kbp_gap,
-        align_params,
-        subject,
-        &mut redone,
-        plan.context_index,
-        pvalue_for_this_pair,
-    );
-
-    blast_redo_alignment_core_one_match_with_callbacks_update_results(
-        plan.query_index,
-        eval_context,
-        best_evalue,
-        &compo_query_info,
-        kbp_gap,
-        align_params,
-        subject,
-        &matching_seq,
-        &mut redone,
-        this_match,
-        results,
-    )
 }
 
 /// blast-rs: Callback-backed identity recomputation helper; not a direct NCBI C port.
@@ -17608,7 +17337,7 @@ fn compute_num_identities_with_callbacks(
     0
 }
 
-/// blast-rs: Shared materialized one-match redo/evaluate path; not a direct NCBI C port.
+/// NCBI: materialized-subject `Blast_RedoAlignmentCore_MT` one-match phase.
 #[allow(clippy::too_many_arguments)]
 fn blast_redo_alignment_core_one_match_in_memory_inner(
     program: ProgramType,
@@ -17692,7 +17421,6 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
     let mut alignments = vec![None; num_contexts];
     let mut redone = HspList::new(this_match.oid);
     let mut pvalue_for_this_pair = -1.0;
-    let mut _lambda_ratio = 1.0;
 
     for frame_index in 0..num_frames {
         let incoming_aligns = &incoming_align_set[frame_index];
@@ -17703,6 +17431,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         if context >= num_contexts || context >= kbp_gap.len() {
             return -1;
         }
+
         let status = if subject.smith_waterman {
             let owned_significant_matches;
             let significant_matches = if let Some(matches) = significant_matches_for_sw {
@@ -17737,13 +17466,13 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                     &matching_seq,
                     &compo_query_info,
                     subject.subject_source,
-                    &significant_matches,
+                    significant_matches,
                     &nucleotide_matrix,
                 )
             } else if align_params.position_based {
                 let mut adjusted_pssm = Vec::new();
                 pvalue_for_this_pair = -1.0;
-                _lambda_ratio = 1.0;
+                let mut lambda_ratio = 1.0;
                 blast_redo_one_match_smith_waterman_in_memory_protein_position_adjustment(
                     &mut alignments,
                     align_params,
@@ -17755,12 +17484,12 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                     &compo_query_info,
                     program,
                     subject.subject_source,
-                    &significant_matches,
+                    significant_matches,
                     subject.genetic_code,
                     &mut adjusted_pssm,
                     &mut pvalue_for_this_pair,
                     composition_test_index_for_redo(align_params),
-                    &mut _lambda_ratio,
+                    &mut lambda_ratio,
                 )
             } else if no_composition {
                 blast_redo_one_match_smith_waterman_in_memory_protein(
@@ -17774,7 +17503,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                     &compo_query_info,
                     program,
                     subject.subject_source,
-                    &significant_matches,
+                    significant_matches,
                     subject.genetic_code,
                 )
             } else {
@@ -17789,7 +17518,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                     None
                 };
                 pvalue_for_this_pair = -1.0;
-                _lambda_ratio = 1.0;
+                let mut lambda_ratio = 1.0;
                 blast_redo_one_match_smith_waterman_in_memory_protein_with_adjustment(
                     &mut alignments,
                     align_params,
@@ -17801,13 +17530,13 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                     &compo_query_info,
                     program,
                     subject.subject_source,
-                    &significant_matches,
+                    significant_matches,
                     subject.genetic_code,
                     &mut adjusted_matrix,
                     workspace.as_ref(),
                     &mut pvalue_for_this_pair,
                     composition_test_index_for_redo(align_params),
-                    &mut _lambda_ratio,
+                    &mut lambda_ratio,
                 )
             }
         } else if no_composition {
@@ -17828,7 +17557,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         } else if align_params.position_based {
             let mut adjusted_pssm = Vec::new();
             pvalue_for_this_pair = -1.0;
-            _lambda_ratio = 1.0;
+            let mut lambda_ratio = 1.0;
             blast_redo_one_match_in_memory_with_position_adjustment(
                 &mut alignments,
                 align_params,
@@ -17843,7 +17572,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                 &mut adjusted_pssm,
                 &mut pvalue_for_this_pair,
                 composition_test_index_for_redo(align_params),
-                &mut _lambda_ratio,
+                &mut lambda_ratio,
             )
         } else {
             let mut adjusted_matrix = square_matrix_from_vec(&align_params.matrix_info.matrix)
@@ -17857,7 +17586,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                 None
             };
             pvalue_for_this_pair = -1.0;
-            _lambda_ratio = 1.0;
+            let mut lambda_ratio = 1.0;
             blast_redo_one_match_in_memory_with_adjustment(
                 &mut alignments,
                 align_params,
@@ -17873,7 +17602,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
                 workspace.as_ref(),
                 &mut pvalue_for_this_pair,
                 composition_test_index_for_redo(align_params),
-                &mut _lambda_ratio,
+                &mut lambda_ratio,
             )
         };
         if status != 0 {
@@ -17906,7 +17635,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
     if redone.hsps.len() > 1 {
         s_hitlist_reap_contained(&mut redone.hsps);
     }
-    let fallback_eval_context = redone
+    let eval_context = redone
         .hsps
         .first()
         .and_then(|hsp| {
@@ -17914,9 +17643,9 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
             (context < query_info.contexts.len()).then_some(context)
         })
         .unwrap_or_else(|| context_index.min(query_info.contexts.len() - 1));
-    let ctx = &query_info.contexts[fallback_eval_context];
+    let ctx = &query_info.contexts[eval_context];
     let kbp_for_eval = if align_params.do_link_hsps {
-        kbp_gap.get(fallback_eval_context)
+        kbp_gap.get(eval_context)
     } else {
         let mut best_evalue = i32::MAX as f64;
         for hsp in &mut redone.hsps {
@@ -17924,13 +17653,13 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
             let Some(hsp_ctx) = query_info
                 .contexts
                 .get(hsp_context)
-                .or_else(|| query_info.contexts.get(fallback_eval_context))
+                .or_else(|| query_info.contexts.get(eval_context))
             else {
                 continue;
             };
             let Some(kbp) = kbp_gap
                 .get(hsp_context)
-                .or_else(|| kbp_gap.get(fallback_eval_context))
+                .or_else(|| kbp_gap.get(eval_context))
             else {
                 continue;
             };
@@ -17942,7 +17671,7 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         redone.best_evalue = best_evalue;
         None
     };
-    let (best_score, best_evalue) = s_hitlist_evaluate_and_purge(
+    let (_best_score, best_evalue) = s_hitlist_evaluate_and_purge(
         &mut redone,
         subject.subject_source.len() as i32,
         program,
@@ -17955,14 +17684,13 @@ fn blast_redo_alignment_core_one_match_in_memory_inner(
         subject.expect_value,
         align_params.do_link_hsps,
     );
-    let _ = best_score;
 
     if best_evalue <= subject.expect_value {
         for hsp in &mut redone.hsps {
             let hsp_context = hsp.context.max(0) as usize;
             if let Some(kbp) = kbp_gap
                 .get(hsp_context)
-                .or_else(|| kbp_gap.get(fallback_eval_context))
+                .or_else(|| kbp_gap.get(eval_context))
             {
                 s_hsp_normalize_score(
                     hsp,
@@ -22397,9 +22125,7 @@ impl BlastCompoHeapRecord {
 /// NCBI: BlastCompo_Heap (compo_heap.h:82).
 ///
 /// The member set mirrors C: `n`, `capacity`, `heapThreshold`, `ecutoff`,
-/// `worstEvalue`, plus the split `array` / `heapArray` storage. The remaining
-/// method bodies are transitional and should be ported next to the C
-/// heapify-up/down routines now that the fields exist.
+/// `worstEvalue`, plus the split `array` / `heapArray` storage.
 #[derive(Debug, Clone, Default)]
 pub struct BlastCompoHeap {
     pub n: i32,
@@ -22430,39 +22156,30 @@ impl BlastCompoHeap {
         }
     }
 
-    /// Transitional accessor while call sites move to C `array`/`heapArray`.
     fn records(&self) -> &[BlastCompoHeapRecord] {
-        if self.heap_array.is_empty() {
-            &self.array
-        } else {
-            &self.heap_array
-        }
+        &self.array
     }
 
-    /// Transitional accessor while call sites move to C `array`/`heapArray`.
     fn records_mut(&mut self) -> &mut Vec<BlastCompoHeapRecord> {
-        if self.heap_array.is_empty() {
-            &mut self.array
-        } else {
-            &mut self.heap_array
-        }
+        &mut self.array
     }
 
-    /// blast-rs: Worst-evalue accessor for Rust heap state; not a direct NCBI C port.
-    ///
     /// Worst (largest) e-value currently in the heap, or `+∞` if empty.
     pub fn worst_evalue(&self) -> f64 {
-        let records = self.records();
-        records
-            .iter()
-            .map(|r| r.best_evalue)
-            .fold(f64::NEG_INFINITY, f64::max)
-            .max(f64::NEG_INFINITY)
-            .max(if records.is_empty() {
-                f64::INFINITY
-            } else {
-                f64::NEG_INFINITY
-            })
+        self.worst_evalue
+    }
+
+    fn refresh_state(&mut self) {
+        self.n = self.array.len() as i32;
+        self.heap_array.clear();
+        self.worst_evalue = if self.array.is_empty() {
+            f64::INFINITY
+        } else {
+            self.array
+                .iter()
+                .map(|record| record.best_evalue)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
     }
 
     /// blast-rs: Local heap tie-break helper; not a direct NCBI C port.
@@ -22558,16 +22275,14 @@ impl BlastCompoHeap {
             || (evalue <= self.ecutoff && self.worst_evalue() <= self.ecutoff)
         {
             self.records_mut().push(new_record);
-            self.n = self.records().len() as i32;
-            self.worst_evalue = self.worst_evalue();
+            self.refresh_state();
             return None;
         }
 
         if let Some(worst_idx) = self.worst_record_index() {
             if Self::record_worse_than(&self.records()[worst_idx], evalue, score, subject_index) {
                 let discarded = std::mem::replace(&mut self.records_mut()[worst_idx], new_record);
-                self.n = self.records().len() as i32;
-                self.worst_evalue = self.worst_evalue();
+                self.refresh_state();
                 return Some(discarded.into_hsp_list());
             }
         }
@@ -22591,8 +22306,7 @@ impl BlastCompoHeap {
     pub fn pop_worst(&mut self) -> Option<HspList> {
         let worst_idx = self.worst_record_index()?;
         let record = self.records_mut().swap_remove(worst_idx);
-        self.n = self.records().len() as i32;
-        self.worst_evalue = self.worst_evalue();
+        self.refresh_state();
         Some(record.into_hsp_list())
     }
 }
