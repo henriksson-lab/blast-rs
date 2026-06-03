@@ -2408,8 +2408,14 @@ pub fn s_phi_traceback_from_hsp_list(
             return status;
         }
         if gap_align.score >= hit_params.cutoff_score_min {
-            let _ =
-                crate::hspstream::blast_hsp_update_with_traceback(Some(gap_align), Some(&mut hsp));
+            hsp.score = gap_align.score;
+            hsp.query_offset = gap_align.query_start;
+            hsp.subject_offset = gap_align.subject_start;
+            hsp.query_end = gap_align.query_stop;
+            hsp.subject_end = gap_align.subject_stop;
+            if gap_align.edit_script.is_some() {
+                hsp.edit_script = gap_align.edit_script.take();
+            }
             retained.push(hsp);
         } else {
             gap_align.edit_script =

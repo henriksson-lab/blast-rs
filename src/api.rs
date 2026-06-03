@@ -1842,9 +1842,11 @@ fn blast_hsp_list_purge_hsps_with_common_endpoints_protein_hits(
 /// this helper remains only while the public translated-search paths still
 /// carry preliminary hits as `ProteinHit` rather than `BlastHSPList`.
 fn protein_prelim_gapped_hsp_list(
+    program_number: crate::program::ProgramType,
     query_aa: &[u8],
     subj_aa: &[u8],
     matrix: &[[i32; AA_SIZE]; AA_SIZE],
+    matrix_name: &str,
     ungapped_hits: &[crate::protein_lookup::ProteinHit],
     hsp_list: &mut crate::hspstream::BlastHSPList,
     gap_open: i32,
@@ -1890,7 +1892,7 @@ fn protein_prelim_gapped_hsp_list(
         gap_extend,
         ..crate::parameters::ScoringParameters::default()
     };
-    score_params.options.matrix_name = Some("BLOSUM62".to_string());
+    score_params.options.matrix_name = Some(matrix_name.to_string());
     let mut ext_options = crate::options::ExtensionOptions::new_blastp();
     ext_options.chaining = chaining_enabled;
     let ext_params = crate::parameters::ExtensionParameters {
@@ -1954,18 +1956,14 @@ fn protein_prelim_gapped_hsp_list(
             sbp.matrix.data[row][col] = matrix[row][col];
         }
     }
-    sbp.name = Some("BLOSUM62".to_string());
+    sbp.name = Some(matrix_name.to_string());
     let mut gap_align = crate::protein::BlastGapAlignStruct {
         sbp: Some(sbp),
         ..crate::protein::BlastGapAlignStruct::default()
     };
     let mut legacy_hsp_list = None;
     let status = crate::extend::blast_get_gapped_score(
-        if subject_frame != 0 {
-            crate::program::TBLASTN
-        } else {
-            crate::program::BLASTX
-        },
+        program_number,
         Some(&query_blk),
         Some(&query_info),
         Some(&subject_blk),
@@ -2042,75 +2040,6 @@ pub fn blast_traceback_from_hsp_list(
     for (row_index, row) in matrix.iter_mut().enumerate() {
         row.copy_from_slice(&sbp.matrix.data[row_index][..AA_SIZE]);
     }
-    let compute_num_identities_for_traceback_hsp = |
-        hsp: &mut crate::hspstream::BlastHSP,
-        query: &[u8],
-        subject: &[u8],
-    | {
-        let q_off = hsp.query.offset.max(0) as usize;
-        let s_off = hsp.subject.offset.max(0) as usize;
-        let q_length = (hsp.query.end - hsp.query.offset).max(0) as usize;
-        let s_length = (hsp.subject.end - hsp.subject.offset).max(0) as usize;
-        let mut q = q_off;
-        let mut s = s_off;
-        let mut num_ident = 0i32;
-        let mut num_pos = 0i32;
-
-        if let Some(script) = hsp.gap_info.as_ref() {
-            for (op, count) in script.iter() {
-                match op {
-                    crate::gapinfo::GapAlignOpType::Sub => {
-                        for _ in 0..count {
-                            if q < query.len() && s < subject.len() {
-                                if query[q] == subject[s] {
-                                    num_ident += 1;
-                                } else {
-                                    let qi = query[q] as usize;
-                                    let si = subject[s] as usize;
-                                    if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
-                                        num_pos += 1;
-                                    }
-                                }
-                            }
-                            q += 1;
-                            s += 1;
-                        }
-                    }
-                    crate::gapinfo::GapAlignOpType::Del
-                    | crate::gapinfo::GapAlignOpType::Del1
-                    | crate::gapinfo::GapAlignOpType::Del2 => {
-                        s += count.max(0) as usize;
-                    }
-                    crate::gapinfo::GapAlignOpType::Ins
-                    | crate::gapinfo::GapAlignOpType::Ins1
-                    | crate::gapinfo::GapAlignOpType::Ins2 => {
-                        q += count.max(0) as usize;
-                    }
-                    crate::gapinfo::GapAlignOpType::Decline => {}
-                }
-            }
-        } else if q_length == s_length {
-            for _ in 0..q_length {
-                if q < query.len() && s < subject.len() {
-                    if query[q] == subject[s] {
-                        num_ident += 1;
-                    } else {
-                        let qi = query[q] as usize;
-                        let si = subject[s] as usize;
-                        if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
-                            num_pos += 1;
-                        }
-                    }
-                }
-                q += 1;
-                s += 1;
-            }
-        }
-
-        hsp.num_ident = num_ident;
-        hsp.num_positives = num_ident + num_pos;
-    };
-
     if crate::program::blast_subject_is_translated(program_number) {
         let gen_code = gen_code_string
             .copied()
@@ -2131,14 +2060,7 @@ pub fn blast_traceback_from_hsp_list(
             return -1;
         };
 
-        hsp_list
-            .hsp_array
-            .sort_by(|a, b| match (a.as_ref(), b.as_ref()) {
-                (Some(a), Some(b)) => compare_blast_hsps_by_score(a, b),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            });
+        crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
         scratch
             .tb_tree
             .reset_for_query(query_blk.length + 1, (subject_blk.length / 3).max(1) + 1);
@@ -2205,20 +2127,21 @@ pub fn blast_traceback_from_hsp_list(
                 continue;
             };
 
-            let edit_script = gr.edit_script.clone();
-            hsp.score = gr.score;
-            hsp.query.offset = gr.query_start as i32;
-            hsp.query.end = gr.query_end as i32;
+            gap_align.score = gr.score;
+            gap_align.query_start = gr.query_start as i32;
+            gap_align.query_stop = gr.query_end as i32;
+            gap_align.subject_start = gr.subject_start as i32;
+            gap_align.subject_stop = gr.subject_end as i32;
+            gap_align.edit_script = Some(gr.edit_script);
+            crate::hspstream::blast_hsp_update_with_traceback(Some(gap_align), Some(hsp));
             hsp.query.gapped_start = query_gapped_start;
-            hsp.subject.offset = gr.subject_start as i32;
-            hsp.subject.end = gr.subject_end as i32;
             hsp.subject.gapped_start = local_seed_s;
-            hsp.gap_info = Some(edit_script);
             hsp.subject.frame = subject_frame as i16;
-            compute_num_identities_for_traceback_hsp(
+            s_compute_num_identities(
                 hsp,
                 &query[..query_blk.length as usize],
                 &translated_subject,
+                &matrix,
             );
             hsp.subject.offset = hsp.subject.offset.saturating_add(translation_start.max(0));
             hsp.subject.end = hsp.subject.end.saturating_add(translation_start.max(0));
@@ -2257,11 +2180,15 @@ pub fn blast_traceback_from_hsp_list(
             Some(hsp_list),
             true,
         );
-        hsp_list.best_evalue = hsp_list
-            .hsp_array
-            .iter()
-            .filter_map(|hsp| hsp.as_ref().map(|hsp| hsp.evalue))
-            .fold(i32::MAX as f64, f64::min);
+        crate::hspstream::s_hsp_list_post_traceback_update(
+            program_number,
+            hsp_list,
+            query_info,
+            score_params,
+            hit_params,
+            sbp,
+            stat_length,
+        );
         if let Some(out) = stat_length_out {
             *out = stat_length;
         }
@@ -2309,21 +2236,22 @@ pub fn blast_traceback_from_hsp_list(
             keep[idx] = false;
             continue;
         };
-        let edit_script = gr.edit_script.clone();
         let query_gapped_start = hsp.query.gapped_start;
         let subject_gapped_start = hsp.subject.gapped_start;
-        hsp.score = gr.score;
-        hsp.query.offset = gr.query_start as i32;
-        hsp.query.end = gr.query_end as i32;
+        gap_align.score = gr.score;
+        gap_align.query_start = gr.query_start as i32;
+        gap_align.query_stop = gr.query_end as i32;
+        gap_align.subject_start = gr.subject_start as i32;
+        gap_align.subject_stop = gr.subject_end as i32;
+        gap_align.edit_script = Some(gr.edit_script);
+        crate::hspstream::blast_hsp_update_with_traceback(Some(gap_align), Some(hsp));
         hsp.query.gapped_start = query_gapped_start;
-        hsp.subject.offset = gr.subject_start as i32;
-        hsp.subject.end = gr.subject_end as i32;
         hsp.subject.gapped_start = subject_gapped_start;
-        hsp.gap_info = Some(edit_script);
-        compute_num_identities_for_traceback_hsp(
+        s_compute_num_identities(
             hsp,
             &query[..query_blk.length as usize],
             &subject[..subject_blk.length as usize],
+            &matrix,
         );
         if crate::hspstream::s_hsp_test(
             hsp,
@@ -2358,18 +2286,91 @@ pub fn blast_traceback_from_hsp_list(
         true,
     );
     crate::hspstream::blast_hsp_list_sort_by_score(Some(hsp_list));
-    hsp_list.hspcnt = hsp_list.hsp_array.len() as i32;
-    hsp_list.allocated = hsp_list.hsp_array.len() as i32;
-    hsp_list.best_evalue = hsp_list
-        .hsp_array
-        .iter()
-        .filter_map(|hsp| hsp.as_ref().map(|hsp| hsp.evalue))
-        .fold(i32::MAX as f64, f64::min);
+    crate::hspstream::s_hsp_list_post_traceback_update(
+        program_number,
+        hsp_list,
+        query_info,
+        score_params,
+        hit_params,
+        sbp,
+        stat_length,
+    );
     if let Some(out) = stat_length_out {
         *out = stat_length;
     }
 
     0
+}
+
+/// NCBI: s_ComputeNumIdentities (`blast_traceback.c`).
+fn s_compute_num_identities(
+    hsp: &mut crate::hspstream::BlastHSP,
+    query: &[u8],
+    subject: &[u8],
+    matrix: &[[i32; AA_SIZE]; AA_SIZE],
+) {
+    let q_off = hsp.query.offset.max(0) as usize;
+    let s_off = hsp.subject.offset.max(0) as usize;
+    let q_length = (hsp.query.end - hsp.query.offset).max(0) as usize;
+    let s_length = (hsp.subject.end - hsp.subject.offset).max(0) as usize;
+    let mut q = q_off;
+    let mut s = s_off;
+    let mut num_ident = 0i32;
+    let mut num_pos = 0i32;
+
+    if let Some(script) = hsp.gap_info.as_ref() {
+        for (op, count) in script.iter() {
+            match op {
+                crate::gapinfo::GapAlignOpType::Sub => {
+                    for _ in 0..count {
+                        if q < query.len() && s < subject.len() {
+                            if query[q] == subject[s] {
+                                num_ident += 1;
+                            } else {
+                                let qi = query[q] as usize;
+                                let si = subject[s] as usize;
+                                if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
+                                    num_pos += 1;
+                                }
+                            }
+                        }
+                        q += 1;
+                        s += 1;
+                    }
+                }
+                crate::gapinfo::GapAlignOpType::Del
+                | crate::gapinfo::GapAlignOpType::Del1
+                | crate::gapinfo::GapAlignOpType::Del2 => {
+                    s += count.max(0) as usize;
+                }
+                crate::gapinfo::GapAlignOpType::Ins
+                | crate::gapinfo::GapAlignOpType::Ins1
+                | crate::gapinfo::GapAlignOpType::Ins2 => {
+                    q += count.max(0) as usize;
+                }
+                crate::gapinfo::GapAlignOpType::Decline => {}
+            }
+        }
+    } else if q_length == s_length {
+        for _ in 0..q_length {
+            if q < query.len() && s < subject.len() {
+                if query[q] == subject[s] {
+                    num_ident += 1;
+                } else {
+                    let qi = query[q] as usize;
+                    let si = subject[s] as usize;
+                    if qi < AA_SIZE && si < AA_SIZE && matrix[qi][si] > 0 {
+                        num_pos += 1;
+                    }
+                }
+            }
+            q += 1;
+            s += 1;
+        }
+    }
+
+    hsp.num_ident = num_ident;
+    hsp.num_positives = num_ident + num_pos;
 }
 
 /// NCBI: Blast_TracebackFromHSPList (blast_traceback.c:345), specialized to
@@ -2450,86 +2451,6 @@ fn compare_blast_hsps_by_score(
     b: &crate::hspstream::BlastHSP,
 ) -> std::cmp::Ordering {
     crate::hspstream::score_compare_blast_hsps(Some(a), Some(b))
-}
-
-#[allow(dead_code)]
-fn blast_seg_get_translated_offsets_api(
-    offset: i32,
-    end: i32,
-    frame: i32,
-    seq_length: i32,
-) -> (i32, i32) {
-    if frame > 0 {
-        (
-            offset * crate::util::CODON_LENGTH as i32 + frame,
-            end * crate::util::CODON_LENGTH as i32 + frame - 1,
-        )
-    } else if frame < 0 {
-        (
-            seq_length - offset * crate::util::CODON_LENGTH as i32 + frame + 1,
-            seq_length - end * crate::util::CODON_LENGTH as i32 + frame + 2,
-        )
-    } else {
-        (offset + 1, end)
-    }
-}
-
-/// NCBI: Blast_HSPGetAdjustedOffsets (blast_hits.c:1109), specialized to
-/// internal `BlastHSP` records used by this API traceback path.
-#[allow(dead_code)]
-fn blast_hsp_get_adjusted_offsets(
-    program: crate::program::ProgramType,
-    hsp: &crate::hspstream::BlastHSP,
-    query_length: i32,
-    subject_length: i32,
-) -> (i32, i32, i32, i32) {
-    if hsp.gap_info.is_none() {
-        return (
-            hsp.query.offset + 1,
-            hsp.query.end,
-            hsp.subject.offset + 1,
-            hsp.subject.end,
-        );
-    }
-
-    if !crate::program::blast_query_is_translated(program)
-        && !crate::program::blast_subject_is_translated(program)
-    {
-        if hsp.query.frame != hsp.subject.frame {
-            let q_end = query_length - hsp.query.offset;
-            let q_start = q_end - hsp.query.end + hsp.query.offset + 1;
-            return (q_start, q_end, hsp.subject.end, hsp.subject.offset + 1);
-        }
-        return (
-            hsp.query.offset + 1,
-            hsp.query.end,
-            hsp.subject.offset + 1,
-            hsp.subject.end,
-        );
-    }
-
-    let (q_start, q_end) = if crate::program::blast_query_is_translated(program) {
-        blast_seg_get_translated_offsets_api(
-            hsp.query.offset,
-            hsp.query.end,
-            hsp.query.frame as i32,
-            query_length,
-        )
-    } else {
-        (hsp.query.offset + 1, hsp.query.end)
-    };
-    let (s_start, s_end) = if crate::program::blast_subject_is_translated(program) {
-        blast_seg_get_translated_offsets_api(
-            hsp.subject.offset,
-            hsp.subject.end,
-            hsp.subject.frame as i32,
-            subject_length,
-        )
-    } else {
-        (hsp.subject.offset + 1, hsp.subject.end)
-    };
-
-    (q_start, q_end, s_start, s_end)
 }
 
 /// NCBI: s_UpdateReevaluatedHSPUngapped (blast_hits.c:664), specialized to
@@ -3325,6 +3246,7 @@ pub struct SearchParams {
     pub chaining: bool,
     pub soft_masking: bool,
     pub lcase_masking: bool,
+    pub use_sw_tback: bool,
     /// Enable NCBI linked sum-statistics e-value adjustment where the program
     /// supports it. BLASTN enables this by default, matching CLI BLAST+.
     pub sum_stats: bool,
@@ -3407,6 +3329,7 @@ impl SearchParams {
             chaining: true,
             soft_masking: false,
             lcase_masking: false,
+            use_sw_tback: false,
             sum_stats: true,
             ungapped: false,
             thread_pool: None,
@@ -3456,6 +3379,7 @@ impl SearchParams {
             chaining: true,
             soft_masking: true,
             lcase_masking: false,
+            use_sw_tback: false,
             sum_stats: true,
             ungapped: false,
             thread_pool: None,
@@ -3622,6 +3546,11 @@ impl SearchParams {
     /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
     pub fn lcase_masking(mut self, v: bool) -> Self {
         self.lcase_masking = v;
+        self
+    }
+    /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
+    pub fn use_sw_tback(mut self, v: bool) -> Self {
+        self.use_sw_tback = v;
         self
     }
     /// blast-rs: SearchParams builder setter; not a direct NCBI C port.
@@ -5512,7 +5441,7 @@ fn process_blastx_frame_hsps(
             reward: 0,
             penalty: 0,
             genetic_code: crate::util::lookup_genetic_code(params.db_gencode),
-            smith_waterman: false,
+            smith_waterman: params.use_sw_tback,
             expect_value: params.evalue_threshold,
             hitlist_size: params
                 .max_hsps
@@ -5781,12 +5710,17 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         return Vec::new();
     }
     let query_ncbi4na = encode_ncbi4na_sequence(query);
+    let mut query_lookup_raw = query.to_vec();
+    if params.lcase_masking {
+        apply_lowercase_mask_nucleotide(&mut query_lookup_raw);
+    }
+    let query_lookup_ncbi4na = encode_ncbi4na_sequence(&query_lookup_raw);
     let code = crate::util::lookup_genetic_code(params.query_gencode);
     // 1-1 with blast_engine.c:s_BlastSearchEngineCore: call
     // BLAST_GetAllTranslations once, then iterate the 6 contexts via the
     // returned (translation_buffer, frame_offsets) pair.
     let (mut translation_buffer, frame_offsets) =
-        crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), code);
+        crate::util::blast_get_all_translations(&query_lookup_ncbi4na, query_ncbi4na.len(), code);
     if params.filter_low_complexity {
         for ctx in 0..crate::util::NUM_FRAMES {
             let begin = (frame_offsets[ctx] + 1) as usize;
@@ -5801,6 +5735,11 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             }
         }
     }
+    let translation_runtime_buffer = if params.soft_masking {
+        crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), code).0
+    } else {
+        translation_buffer.clone()
+    };
     let matrix = *get_matrix(params.matrix);
     let matrix_name = protein_matrix_name(params.matrix);
     let prot_kbp = protein_kbp_for_matrix(params.matrix, params.gap_open, params.gap_extend);
@@ -5878,7 +5817,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
         if begin >= end {
             continue;
         }
-        let prot: &[u8] = &translation_buffer[begin..end];
+        let prot: &[u8] = &translation_runtime_buffer[begin..end];
         if crate::composition::blast_read_aa_composition(prot, AA_SIZE).1 == 0 {
             continue;
         }
@@ -5914,12 +5853,17 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
     let mut frame_plans: Vec<(usize, usize, i32, f64, usize)> = Vec::new();
     for ctx in 0..crate::util::NUM_FRAMES {
         let frame = crate::util::blast_context_to_frame(ctx as u32);
+        if matches!(params.strand.as_str(), "plus" if frame < 0)
+            || matches!(params.strand.as_str(), "minus" if frame > 0)
+        {
+            continue;
+        }
         let begin = (frame_offsets[ctx] + 1) as usize;
         let end = frame_offsets[ctx + 1] as usize;
         if begin >= end {
             continue;
         }
-        let prot: &[u8] = &translation_buffer[begin..end];
+        let prot: &[u8] = &translation_runtime_buffer[begin..end];
         if prot.len() < word_size {
             continue;
         }
@@ -6029,7 +5973,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                 if frame_ungapped.is_empty() {
                     continue;
                 }
-                let prot: &[u8] = &translation_buffer[begin..end];
+                let prot: &[u8] = &translation_runtime_buffer[begin..end];
                 // H2: per-frame ungapped Karlin block for gap_trigger and
                 // ungapped-HSP statistics.
                 let frame_ungapped_kbp = &ungapped_kbp_array[ctx];
@@ -6085,7 +6029,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                         .collect();
                     for hsp in process_blastx_frame_hsps(
                         hsps,
-                        &translation_buffer,
+                        &translation_runtime_buffer,
                         prot,
                         frame,
                         subj_aa,
@@ -6124,9 +6068,11 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                     }
                 } else {
                     protein_prelim_gapped_hsp_list(
+                        crate::program::BLASTX,
                         prot,
                         subj_aa,
                         &matrix,
+                        protein_matrix_name(params.matrix),
                         &frame_ungapped,
                         &mut subject_internal_hsps,
                         params.gap_open,
@@ -6143,7 +6089,7 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
             }
             if !params.ungapped && subject_internal_hsps.hspcnt > 0 {
                 blastx_traceback_subject_hsp_list(
-                    &translation_buffer,
+                    &translation_runtime_buffer,
                     &frame_offsets,
                     subj_aa,
                     &matrix,
@@ -6222,14 +6168,14 @@ pub fn blastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchRe
                     {
                         group_end += 1;
                     }
-                    let prot = &translation_buffer[query_range.clone()];
+                    let prot = &translation_runtime_buffer[query_range.clone()];
                     let hsps: Vec<_> = subject_internal_hsps.hsp_array[group_start..group_end]
                         .iter()
                         .filter_map(|item| item.as_ref().cloned())
                         .collect();
                     for hsp in process_blastx_frame_hsps(
                         hsps,
-                        &translation_buffer,
+                        &translation_runtime_buffer,
                         prot,
                         frame,
                         subj_aa,
@@ -6367,7 +6313,8 @@ pub fn blastx_batch(
     let kbp_array = vec![prot_kbp.clone(); crate::util::NUM_FRAMES];
 
     struct QPlan {
-        translation: Vec<u8>,
+        lookup_translation: Vec<u8>,
+        runtime_translation: Vec<u8>,
         frame_offsets: Vec<u32>,
         query_info: crate::queryinfo::QueryInfo,
         frames: Vec<(usize, usize, i32, f64, usize)>,
@@ -6379,7 +6326,8 @@ pub fn blastx_batch(
         .map(|q| {
             if q.len() < 3 {
                 return QPlan {
-                    translation: Vec::new(),
+                    lookup_translation: Vec::new(),
+                    runtime_translation: Vec::new(),
                     frame_offsets: vec![0; crate::util::NUM_FRAMES + 1],
                     query_info: crate::queryinfo::QueryInfo::new_blastp(&[]),
                     frames: Vec::new(),
@@ -6388,15 +6336,23 @@ pub fn blastx_batch(
                 };
             }
             let query_ncbi4na = encode_ncbi4na_sequence(q);
-            let (mut translation, frame_offsets) =
-                crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), code);
+            let mut query_lookup_raw = q.to_vec();
+            if params.lcase_masking {
+                apply_lowercase_mask_nucleotide(&mut query_lookup_raw);
+            }
+            let query_lookup_ncbi4na = encode_ncbi4na_sequence(&query_lookup_raw);
+            let (mut lookup_translation, frame_offsets) = crate::util::blast_get_all_translations(
+                &query_lookup_ncbi4na,
+                query_ncbi4na.len(),
+                code,
+            );
             if params.filter_low_complexity {
                 for ctx in 0..crate::util::NUM_FRAMES {
                     let begin = (frame_offsets[ctx] + 1) as usize;
                     let end = frame_offsets[ctx + 1] as usize;
                     if begin < end {
                         apply_seg_ncbistdaa_with_options(
-                            &mut translation[begin..end],
+                            &mut lookup_translation[begin..end],
                             params.seg_window,
                             params.seg_locut,
                             params.seg_hicut,
@@ -6404,6 +6360,11 @@ pub fn blastx_batch(
                     }
                 }
             }
+            let runtime_translation = if params.soft_masking {
+                crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), code).0
+            } else {
+                lookup_translation.clone()
+            };
             let mut query_info =
                 crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&frame_offsets);
             let ideal_ungapped_kbp =
@@ -6415,7 +6376,7 @@ pub fn blastx_batch(
                 if begin >= end {
                     continue;
                 }
-                let prot: &[u8] = &translation[begin..end];
+                let prot: &[u8] = &runtime_translation[begin..end];
                 if crate::composition::blast_read_aa_composition(prot, AA_SIZE).1 == 0 {
                     continue;
                 }
@@ -6442,12 +6403,17 @@ pub fn blastx_batch(
             let mut frames = Vec::new();
             for ctx in 0..crate::util::NUM_FRAMES {
                 let frame = crate::util::blast_context_to_frame(ctx as u32);
+                if matches!(params.strand.as_str(), "plus" if frame < 0)
+                    || matches!(params.strand.as_str(), "minus" if frame > 0)
+                {
+                    continue;
+                }
                 let begin = (frame_offsets[ctx] + 1) as usize;
                 let end = frame_offsets[ctx + 1] as usize;
                 if begin >= end {
                     continue;
                 }
-                let prot: &[u8] = &translation[begin..end];
+                let prot: &[u8] = &runtime_translation[begin..end];
                 if prot.len() < word_size {
                     continue;
                 }
@@ -6458,7 +6424,8 @@ pub fn blastx_batch(
                 frames.push((begin, end, frame, search_space, ctx));
             }
             QPlan {
-                translation,
+                lookup_translation,
+                runtime_translation,
                 frame_offsets: frame_offsets.to_vec(),
                 link_avg_query_length: query_info_average_context_length(&query_info),
                 query_info,
@@ -6487,7 +6454,7 @@ pub fn blastx_batch(
     for (gi, &(qi, fj)) in flat.iter().enumerate() {
         let (b, e, _, _, _) = qplans[qi].frames[fj];
         let off = attrib_info.contexts[gi].query_offset as usize;
-        concat[off..off + (e - b)].copy_from_slice(&qplans[qi].translation[b..e]);
+        concat[off..off + (e - b)].copy_from_slice(&qplans[qi].lookup_translation[b..e]);
     }
     let lookup = if flat.is_empty() {
         None
@@ -6521,6 +6488,47 @@ pub fn blastx_batch(
             }
         })
         .collect();
+
+    let blastx_global_query_info = if params.ungapped {
+        None
+    } else {
+        let mut contexts = Vec::with_capacity(qplans.len() * crate::util::NUM_FRAMES);
+        for (qi, qp) in qplans.iter().enumerate() {
+            for local_ctx in 0..crate::util::NUM_FRAMES {
+                let mut ctx = qp.query_info.contexts[local_ctx].clone();
+                ctx.query_index = qi as i32;
+                ctx.frame = crate::util::blast_context_to_frame(local_ctx as u32);
+                contexts.push(ctx);
+            }
+        }
+        let mut max_length = 0u32;
+        let mut min_length = u32::MAX;
+        for ctx in &contexts {
+            let len = ctx.query_length.max(0) as u32;
+            max_length = max_length.max(len);
+            min_length = min_length.min(len);
+        }
+        if min_length == u32::MAX {
+            min_length = 0;
+        }
+        Some(crate::queryinfo::QueryInfo {
+            num_queries: qplans.len() as i32,
+            contexts,
+            max_length,
+            min_length,
+        })
+    };
+    let blastx_hsp_stream = if params.ungapped {
+        None
+    } else {
+        Some(crate::hspstream::blast_hsp_stream_new(
+            crate::program::BLASTX,
+            params.comp_adjust as i32,
+            false,
+            qplans.len() as i32,
+            None,
+        ))
+    };
 
     let mut results: Vec<Vec<Option<SearchResult>>> = (0..queries.len())
         .map(|_| vec![None; db.num_oids as usize])
@@ -6567,24 +6575,13 @@ pub fn blastx_batch(
                 .len())
                 .map(|qi| blast_hsp_list_new(qi as i32))
                 .collect();
-            let max_query_prot_lens: Vec<usize> = qplans
-                .iter()
-                .map(|qp| {
-                    qp.frames
-                        .iter()
-                        .map(|&(begin, end, _, _, _)| end.saturating_sub(begin))
-                        .max()
-                        .unwrap_or(0)
-                        .max(1)
-                })
-                .collect();
             for (gi, &(qi, fj)) in flat.iter().enumerate() {
                 let frame_ungapped = std::mem::take(&mut per_flat[gi]);
                 if frame_ungapped.is_empty() {
                     continue;
                 }
                 let (begin, end, frame, search_space, ctx) = qplans[qi].frames[fj];
-                let prot: &[u8] = &qplans[qi].translation[begin..end];
+                let prot: &[u8] = &qplans[qi].runtime_translation[begin..end];
                 let frame_gap_trigger_raw = raw_gap_trigger_bits(
                     crate::stat::BLAST_GAP_TRIGGER_PROT,
                     &qplans[qi].ungapped_kbp_array[ctx],
@@ -6646,7 +6643,7 @@ pub fn blastx_batch(
                         .collect();
                     for hsp in process_blastx_frame_hsps(
                         hsps,
-                        &qplans[qi].translation,
+                        &qplans[qi].runtime_translation,
                         prot,
                         frame,
                         subj_aa,
@@ -6678,9 +6675,11 @@ pub fn blastx_batch(
                     }
                 } else {
                     protein_prelim_gapped_hsp_list(
+                        crate::program::BLASTX,
                         prot,
                         subj_aa,
                         &matrix,
+                        protein_matrix_name(params.matrix),
                         &frame_ungapped,
                         &mut per_query_internal_hsps[qi],
                         params.gap_open,
@@ -6700,136 +6699,219 @@ pub fn blastx_batch(
                     if per_query_internal_hsps[qi].hspcnt == 0 {
                         continue;
                     }
-                    blastx_traceback_subject_hsp_list(
-                        &qplans[qi].translation,
-                        &qplans[qi].frame_offsets,
-                        subj_aa,
-                        &matrix,
+                    let mut stream_list = std::mem::replace(
                         &mut per_query_internal_hsps[qi],
-                        params.gap_open,
-                        params.gap_extend,
-                        x_drop_final,
-                        &mut scratch,
-                        max_query_prot_lens[qi],
+                        blast_hsp_list_new(qi as i32),
                     );
-                    per_query_internal_hsps[qi].hsp_array.sort_by(|a, b| {
-                        let Some(a) = a.as_ref() else {
-                            return std::cmp::Ordering::Greater;
-                        };
-                        let Some(b) = b.as_ref() else {
-                            return std::cmp::Ordering::Less;
-                        };
-                        a.context
-                            .cmp(&b.context)
-                            .then((a.query.frame as i32).cmp(&(b.query.frame as i32)))
-                            .then_with(|| compare_blast_hsps_by_score(a, b))
-                    });
-                    let items = std::mem::take(&mut per_query_internal_hsps[qi].hsp_array);
-                    let mut group_start = 0usize;
-                    while group_start < items.len() {
-                        let Some(first) = items[group_start].as_ref() else {
-                            group_start += 1;
-                            continue;
-                        };
-                        let context = first.context.max(0) as usize;
-                        if context + 1 >= qplans[qi].frame_offsets.len() {
-                            group_start += 1;
-                            continue;
-                        }
-                        let frame = first.query.frame as i32;
-                        let query_range = (qplans[qi].frame_offsets[context] + 1).max(0) as usize
-                            ..qplans[qi].frame_offsets[context + 1].max(0) as usize;
-                        let search_space =
-                            qplans[qi].query_info.contexts[context].eff_searchsp.max(1) as f64;
-                        let frame_ungapped_kbp = &qplans[qi].ungapped_kbp_array[context];
-                        let frame_gap_trigger_raw = raw_gap_trigger_bits(
-                            crate::stat::BLAST_GAP_TRIGGER_PROT,
-                            frame_ungapped_kbp,
-                        );
-                        let seed_cutoff = protein_prelim_seed_cutoff(
-                            frame_gap_trigger_raw,
-                            prelim_evalue,
-                            &prot_kbp,
-                            gumbel_blk.as_ref(),
-                            query_range.len() as i32,
-                            avg_subject_length as i32,
-                            search_space,
-                        );
-                        let mut hit_cutoff = protein_eval_cutoff(
-                            prelim_evalue,
-                            &prot_kbp,
-                            gumbel_blk.as_ref(),
-                            query_range.len() as i32,
-                            avg_subject_length as i32,
-                            search_space,
-                        );
-                        if translated_sum_stats {
-                            hit_cutoff = protein_sum_stats_hit_cutoff(
-                                hit_cutoff,
-                                &prot_kbp,
-                                qplans[qi].link_avg_query_length,
-                                avg_subject_length as i32,
-                            );
-                        }
-                        let mut group_end = group_start + 1;
-                        while group_end < items.len()
-                            && items[group_end].as_ref().is_some_and(|hsp| {
-                                hsp.context.max(0) as usize == context
-                                    && hsp.query.frame as i32 == frame
-                            })
-                        {
-                            group_end += 1;
-                        }
-                        let prot = &qplans[qi].translation[query_range.clone()];
-                        let hsps: Vec<_> = items[group_start..group_end]
-                            .iter()
-                            .filter_map(|item| item.as_ref().cloned())
-                            .collect();
-                        for hsp in process_blastx_frame_hsps(
-                            hsps,
-                            &qplans[qi].translation,
-                            prot,
-                            frame,
-                            subj_aa,
-                            subj_len,
-                            &qplans[qi].query_info,
-                            context,
-                            search_space,
-                            &matrix,
-                            &prot_kbp,
-                            &qplans[qi].ungapped_kbp_array[context],
-                            &gumbel_blk,
-                            x_drop_final,
-                            hit_cutoff,
-                            hit_cutoff,
-                            seed_cutoff,
-                            translated_sum_stats,
-                            params,
-                            &mut scratch,
-                        ) {
-                            if accession.is_none() {
-                                accession = Some(
-                                    db.get_accession(oid)
-                                        .unwrap_or_else(|| format!("oid_{}", oid)),
-                                );
-                                title =
-                                    Some(String::from_utf8_lossy(db.get_header(oid)).to_string());
-                            }
-                            push_hsp_for_subject(
-                                &mut results[qi],
-                                oid,
-                                title.as_deref().unwrap(),
-                                accession.as_deref().unwrap(),
-                                subj_len,
-                                &[],
-                                hsp,
-                            );
-                        }
-                        group_start = group_end;
+                    stream_list.oid = oid.min(i32::MAX as u32) as i32;
+                    stream_list.query_index = qi as i32;
+                    let context_base = (qi * crate::util::NUM_FRAMES) as i32;
+                    for hsp in stream_list.hsp_array.iter_mut().flatten() {
+                        hsp.context += context_base;
+                    }
+                    if let Some(stream) = blastx_hsp_stream.as_ref() {
+                        let _ = stream.blast_hspstream_write_blast_hsp_list(qi as i32, stream_list);
                     }
                 }
             }
         }
+    }
+
+    if let (Some(stream), Some(global_query_info)) =
+        (blastx_hsp_stream.as_ref(), blastx_global_query_info.as_ref())
+    {
+        let mut stream_scratch = ProteinScratch::new();
+        let mut hit_options = crate::options::HitSavingOptions::default();
+        hit_options.hitlist_size = params.max_target_seqs.min(i32::MAX as usize) as i32;
+        hit_options.program_number = crate::program::BLASTX;
+        let _ = crate::hspstream::blast_run_traceback_search_with_interrupt(
+            crate::program::BLASTX,
+            Some(stream),
+            Some(global_query_info),
+            &hit_options,
+            global_query_info.max_length as i32,
+            true,
+            params.comp_adjust > 0,
+            |hsp_list| {
+                let Some(first) = hsp_list
+                    .hsp_array
+                    .iter()
+                    .take(hsp_list.hspcnt.max(0) as usize)
+                    .flatten()
+                    .next()
+                else {
+                    return 0;
+                };
+                let global_context = first.context.max(0) as usize;
+                let qi = global_context / crate::util::NUM_FRAMES;
+                if qi >= qplans.len() {
+                    hsp_list.hsp_array.clear();
+                    hsp_list.hspcnt = 0;
+                    return 0;
+                }
+                let context_base = (qi * crate::util::NUM_FRAMES) as i32;
+                let oid = hsp_list.oid;
+                if oid < 0 || oid as u32 >= db.num_oids {
+                    hsp_list.hsp_array.clear();
+                    hsp_list.hspcnt = 0;
+                    return 0;
+                }
+                let subj_raw = db.get_sequence(oid as u32);
+                let subj_len = db.get_seq_len(oid as u32) as usize;
+                let subj_aa = &subj_raw[..subj_len];
+                let mut traceback_list = blast_hsp_list_new(qi as i32);
+                traceback_list.oid = oid;
+                let input_hspcnt = hsp_list.hspcnt.max(0) as usize;
+                for hsp in std::mem::take(&mut hsp_list.hsp_array)
+                    .into_iter()
+                    .take(input_hspcnt)
+                    .flatten()
+                {
+                    let mut blast_hsp = hsp;
+                    blast_hsp.context -= context_base;
+                    blast_hsp_list_push(&mut traceback_list, blast_hsp);
+                }
+                hsp_list.hspcnt = 0;
+                blastx_traceback_subject_hsp_list(
+                    &qplans[qi].runtime_translation,
+                    &qplans[qi].frame_offsets,
+                    subj_aa,
+                    &matrix,
+                    &mut traceback_list,
+                    params.gap_open,
+                    params.gap_extend,
+                    x_drop_final,
+                    &mut stream_scratch,
+                    qplans[qi]
+                        .frames
+                        .iter()
+                        .map(|&(begin, end, _, _, _): &(usize, usize, i32, f64, usize)| {
+                            end.saturating_sub(begin)
+                        })
+                        .max()
+                        .unwrap_or(0)
+                        .max(1),
+                );
+                traceback_list.hsp_array.sort_by(|a, b| {
+                    let Some(a) = a.as_ref() else {
+                        return std::cmp::Ordering::Greater;
+                    };
+                    let Some(b) = b.as_ref() else {
+                        return std::cmp::Ordering::Less;
+                    };
+                    a.context
+                        .cmp(&b.context)
+                        .then((a.query.frame as i32).cmp(&(b.query.frame as i32)))
+                        .then_with(|| compare_blast_hsps_by_score(a, b))
+                });
+                let items = std::mem::take(&mut traceback_list.hsp_array);
+                let mut group_start = 0usize;
+                while group_start < items.len() {
+                    let Some(first) = items[group_start].as_ref() else {
+                        group_start += 1;
+                        continue;
+                    };
+                    let context = first.context.max(0) as usize;
+                    if context + 1 >= qplans[qi].frame_offsets.len() {
+                        group_start += 1;
+                        continue;
+                    }
+                    let frame = first.query.frame as i32;
+                    let query_range = (qplans[qi].frame_offsets[context] + 1).max(0) as usize
+                        ..qplans[qi].frame_offsets[context + 1].max(0) as usize;
+                    let search_space =
+                        qplans[qi].query_info.contexts[context].eff_searchsp.max(1) as f64;
+                    let frame_ungapped_kbp = &qplans[qi].ungapped_kbp_array[context];
+                    let frame_gap_trigger_raw = raw_gap_trigger_bits(
+                        crate::stat::BLAST_GAP_TRIGGER_PROT,
+                        frame_ungapped_kbp,
+                    );
+                    let seed_cutoff = protein_prelim_seed_cutoff(
+                        frame_gap_trigger_raw,
+                        prelim_evalue,
+                        &prot_kbp,
+                        gumbel_blk.as_ref(),
+                        query_range.len() as i32,
+                        avg_subject_length as i32,
+                        search_space,
+                    );
+                    let mut hit_cutoff = protein_eval_cutoff(
+                        prelim_evalue,
+                        &prot_kbp,
+                        gumbel_blk.as_ref(),
+                        query_range.len() as i32,
+                        avg_subject_length as i32,
+                        search_space,
+                    );
+                    if translated_sum_stats {
+                        hit_cutoff = protein_sum_stats_hit_cutoff(
+                            hit_cutoff,
+                            &prot_kbp,
+                            qplans[qi].link_avg_query_length,
+                            avg_subject_length as i32,
+                        );
+                    }
+                    let mut group_end = group_start + 1;
+                    while group_end < items.len()
+                        && items[group_end].as_ref().is_some_and(|hsp| {
+                            hsp.context.max(0) as usize == context
+                                && hsp.query.frame as i32 == frame
+                        })
+                    {
+                        group_end += 1;
+                    }
+                    let prot = &qplans[qi].runtime_translation[query_range.clone()];
+                    let hsps: Vec<_> = items[group_start..group_end]
+                        .iter()
+                        .filter_map(|item| item.as_ref().cloned())
+                        .collect();
+                    for hsp in process_blastx_frame_hsps(
+                        hsps,
+                        &qplans[qi].runtime_translation,
+                        prot,
+                        frame,
+                        subj_aa,
+                        subj_len,
+                        &qplans[qi].query_info,
+                        context,
+                        search_space,
+                        &matrix,
+                        &prot_kbp,
+                        &qplans[qi].ungapped_kbp_array[context],
+                        &gumbel_blk,
+                        x_drop_final,
+                        hit_cutoff,
+                        hit_cutoff,
+                        seed_cutoff,
+                        translated_sum_stats,
+                        params,
+                        &mut stream_scratch,
+                    ) {
+                        let accession = db
+                            .get_accession(oid as u32)
+                            .unwrap_or_else(|| format!("oid_{}", oid));
+                        let title =
+                            String::from_utf8_lossy(db.get_header(oid as u32)).to_string();
+                        push_hsp_for_subject(
+                            &mut results[qi],
+                            oid as u32,
+                            &title,
+                            &accession,
+                            subj_len,
+                            &[],
+                            hsp,
+                        );
+                    }
+                    group_start = group_end;
+                }
+                hsp_list.hsp_array.clear();
+                hsp_list.hspcnt = 0;
+                0
+            },
+            None,
+            None,
+            params.num_threads,
+        );
     }
 
     (0..queries.len())
@@ -7009,7 +7091,7 @@ fn process_tblastn_frame_hsps(
             reward: 0,
             penalty: 0,
             genetic_code: crate::util::lookup_genetic_code(params.db_gencode),
-            smith_waterman: false,
+            smith_waterman: params.use_sw_tback,
             expect_value: params.evalue_threshold,
             hitlist_size: params
                 .max_hsps
@@ -7446,6 +7528,11 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
 
         for ctx in 0..crate::util::NUM_FRAMES {
             let frame = crate::util::blast_context_to_frame(ctx as u32);
+            if matches!(params.strand.as_str(), "plus" if frame < 0)
+                || matches!(params.strand.as_str(), "minus" if frame > 0)
+            {
+                continue;
+            }
             let begin = (frame_offsets[ctx] + 1) as usize;
             let end = frame_offsets[ctx + 1] as usize;
             if begin >= end {
@@ -7538,9 +7625,11 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                 );
                 scratch.diag_table.exit(prot.len());
                 protein_prelim_gapped_hsp_list(
+                    crate::program::TBLASTN,
                     &query_aa,
                     prot_eval,
                     &matrix,
+                    protein_matrix_name(params.matrix),
                     &ungapped_hits,
                     &mut subject_internal_hsps,
                     params.gap_open,
@@ -7655,7 +7744,7 @@ pub fn tblastn(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
                         reward: 0,
                         penalty: 0,
                         genetic_code: db_code,
-                        smith_waterman: false,
+                        smith_waterman: params.use_sw_tback,
                         expect_value: params.evalue_threshold,
                         hitlist_size: max_hsps.unwrap_or(crate::options::HITLIST_SIZE as usize)
                             as i32,
@@ -8147,6 +8236,11 @@ pub fn tblastn_batch(
                 .collect();
             for ctx in 0..crate::util::NUM_FRAMES {
                 let frame = crate::util::blast_context_to_frame(ctx as u32);
+                if matches!(params.strand.as_str(), "plus" if frame < 0)
+                    || matches!(params.strand.as_str(), "minus" if frame > 0)
+                {
+                    continue;
+                }
                 let begin = (frame_offsets[ctx] + 1) as usize;
                 let end = frame_offsets[ctx + 1] as usize;
                 if begin >= end {
@@ -8263,9 +8357,11 @@ pub fn tblastn_batch(
                         }
                     } else {
                         protein_prelim_gapped_hsp_list(
+                            crate::program::TBLASTN,
                             &p.aa,
                             prot,
                             &matrix,
+                            protein_matrix_name(params.matrix),
                             &ungapped,
                             &mut per_query_internal_hsps[qi],
                             params.gap_open,
@@ -8398,7 +8494,7 @@ pub fn tblastn_batch(
                                 reward: 0,
                                 penalty: 0,
                                 genetic_code: db_code,
-                                smith_waterman: false,
+                                smith_waterman: params.use_sw_tback,
                                 expect_value: params.evalue_threshold,
                                 hitlist_size: max_hsps
                                     .unwrap_or(crate::options::HITLIST_SIZE as usize)
@@ -9068,9 +9164,14 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
         return Vec::new();
     }
     let query_ncbi4na = encode_ncbi4na_sequence(query);
+    let mut query_lookup_raw = query.to_vec();
+    if params.lcase_masking {
+        apply_lowercase_mask_nucleotide(&mut query_lookup_raw);
+    }
+    let query_lookup_ncbi4na = encode_ncbi4na_sequence(&query_lookup_raw);
     let q_code = crate::util::lookup_genetic_code(params.query_gencode);
     let (query_translation, query_offsets) =
-        crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), q_code);
+        crate::util::blast_get_all_translations(&query_lookup_ncbi4na, query_ncbi4na.len(), q_code);
     // NCBI tblastx applies SEG to the translated query: extension uses the
     // masked bytes (X has slightly-negative matrix entries which contain
     // X-drop in low-complexity), but identity-counting uses the ORIGINAL
@@ -9079,7 +9180,6 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     // which was NOT modified by NCBI's soft-mask path). We mirror that
     // by keeping the unmasked copy for post-extension identity recount and
     // mutating the working buffer with X for the scan path.
-    let query_translation_unmasked = query_translation.clone();
     let mut query_translation = query_translation;
     if params.filter_low_complexity {
         for ctx in 0..crate::util::NUM_FRAMES {
@@ -9095,6 +9195,11 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
             }
         }
     }
+    let query_translation_unmasked = if params.soft_masking {
+        crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), q_code).0
+    } else {
+        query_translation.clone()
+    };
     let matrix = *get_matrix(params.matrix);
     let matrix_name = protein_matrix_name(params.matrix);
     let word_size = params.word_size.clamp(2, 7);
@@ -9132,6 +9237,11 @@ pub fn tblastx(db: &BlastDb, query: &[u8], params: &SearchParams) -> Vec<SearchR
     let mut kbp_array = vec![ungapped_kbp.clone(); crate::util::NUM_FRAMES];
     for q_ctx in 0..crate::util::NUM_FRAMES {
         let qframe = crate::util::blast_context_to_frame(q_ctx as u32);
+        if matches!(params.strand.as_str(), "plus" if qframe < 0)
+            || matches!(params.strand.as_str(), "minus" if qframe > 0)
+        {
+            continue;
+        }
         let q_begin = (query_offsets[q_ctx] + 1) as usize;
         let q_end = query_offsets[q_ctx + 1] as usize;
         if q_begin >= q_end {
@@ -9620,9 +9730,13 @@ pub fn tblastx_batch(
         }
         let query_base = global_query_base;
         let query_ncbi4na = encode_ncbi4na_sequence(q);
+        let mut query_lookup_raw = q.to_vec();
+        if params.lcase_masking {
+            apply_lowercase_mask_nucleotide(&mut query_lookup_raw);
+        }
+        let query_lookup_ncbi4na = encode_ncbi4na_sequence(&query_lookup_raw);
         let (query_translation, query_offsets) =
-            crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), q_code);
-        let query_translation_unmasked = query_translation.clone();
+            crate::util::blast_get_all_translations(&query_lookup_ncbi4na, query_ncbi4na.len(), q_code);
         let mut query_translation = query_translation;
         if params.filter_low_complexity {
             for ctx in 0..crate::util::NUM_FRAMES {
@@ -9638,6 +9752,11 @@ pub fn tblastx_batch(
                 }
             }
         }
+        let query_translation_unmasked = if params.soft_masking {
+            crate::util::blast_get_all_translations(&query_ncbi4na, query_ncbi4na.len(), q_code).0
+        } else {
+            query_translation.clone()
+        };
 
         let mut query_info_calc =
             crate::queryinfo::QueryInfo::new_translated_query_from_offsets(&query_offsets);
@@ -9653,6 +9772,11 @@ pub fn tblastx_batch(
         let mut tmps: Vec<Tmp> = Vec::new();
         for q_ctx in 0..crate::util::NUM_FRAMES {
             let qframe = crate::util::blast_context_to_frame(q_ctx as u32);
+            if matches!(params.strand.as_str(), "plus" if qframe < 0)
+                || matches!(params.strand.as_str(), "minus" if qframe > 0)
+            {
+                continue;
+            }
             let q_begin = (query_offsets[q_ctx] + 1) as usize;
             let q_end = query_offsets[q_ctx + 1] as usize;
             if q_begin >= q_end {
@@ -12100,7 +12224,12 @@ mod tests {
         )]));
 
         assert_eq!(
-            blast_hsp_get_adjusted_offsets(crate::program::TBLASTN, &hsp, 20, 30),
+            crate::hspstream::blast_hsp_get_adjusted_offsets_blast_hsp(
+                crate::program::TBLASTN,
+                &hsp,
+                20,
+                30,
+            ),
             (3, 7, 26, 18)
         );
     }

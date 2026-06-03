@@ -275,8 +275,8 @@ struct BlastnArgs {
     window_size: Option<String>,
 
     /// Soft masking (filter query but use for lookup)
-    #[arg(long = "soft_masking", default_value = "true")]
-    soft_masking: String,
+    #[arg(long = "soft_masking")]
+    soft_masking: Option<String>,
 
     /// Use sum statistics
     #[arg(long = "sum_stats", alias = "sum-stats")]
@@ -2735,8 +2735,10 @@ fn validate_remote_options(args: &BlastnArgs) {
 }
 
 fn validate_boolean_options(program: &str, args: &BlastnArgs) {
-    if !is_ncbi_bool(&args.soft_masking) {
-        emit_program_usage_conversion_error(program, "soft_masking", &args.soft_masking);
+    if let Some(value) = args.soft_masking.as_deref() {
+        if !is_ncbi_bool(value) {
+            emit_program_usage_conversion_error(program, "soft_masking", value);
+        }
     }
     if let Some(value) = args.sum_stats.as_deref() {
         if !is_ncbi_bool(value) {
@@ -2921,7 +2923,7 @@ fn ncbi_bool_enabled(value: Option<&str>, default: bool) -> bool {
 fn blastn_xml_filter(args: &BlastnArgs) -> &'static str {
     match (
         args.dust != "no",
-        ncbi_bool_enabled(Some(&args.soft_masking), true),
+        ncbi_bool_enabled(args.soft_masking.as_deref(), true),
     ) {
         (true, true) => "L;m;",
         (true, false) => "L;",
@@ -5793,6 +5795,10 @@ fn build_blastp_params_with_seg_default(
     }
     params.sum_stats = !args.ungapped && ncbi_bool_enabled(args.sum_stats.as_deref(), true);
     params.ungapped = args.ungapped;
+    params.soft_masking = ncbi_bool_enabled(args.soft_masking.as_deref(), false);
+    params.lcase_masking = args.lcase_masking;
+    params.strand = args.strand.clone();
+    params.use_sw_tback = args.use_sw_tback;
     params.max_target_seqs = args.effective_max_target_seqs() as usize;
     params.max_hsps = args.max_hsps_value().map(|max| max as usize);
     let culling_limit = args.culling_limit();
@@ -6092,23 +6098,6 @@ fn validate_protein_scoring_combo(args: &BlastnArgs) {
     std::process::exit(1);
 }
 
-/// Drop HSPs whose query-frame strand does not match `-strand`. blastx/tblastx
-/// translate the nucleotide query in all six frames; `-strand plus` keeps only
-/// the +1..+3 frames and `-strand minus` only -1..-3 (`both` keeps all). BLAST
-/// computes e-values per query context, so the surviving frames' statistics are
-/// identical whether or not the excluded frames were searched — filtering the
-/// output therefore matches NCBI's strand-restricted search exactly.
-fn filter_results_by_query_strand(results: &mut [blast_rs::api::SearchResult], strand: &str) {
-    let wanted = match strand {
-        "plus" => 1i32,
-        "minus" => -1i32,
-        _ => return,
-    };
-    for result in results.iter_mut() {
-        result.hsps.retain(|hsp| hsp.query_frame.signum() == wanted);
-    }
-}
-
 fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let query_file = open_input_file("query", query_path(args));
     let queries = parse_fasta_with_default_id(query_file, "Query_1");
@@ -6142,9 +6131,14 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         subject_search_count = subjects.len().min(i32::MAX as usize) as i32;
         subject_xml_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
         let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Protein)?;
-        for qrec in &queries {
-            let mut results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
-            filter_results_by_query_strand(&mut results, &args.strand);
+        let query_slices: Vec<&[u8]> = queries
+            .iter()
+            .map(|qrec| qrec.sequence.as_slice())
+            .collect();
+        for (qrec, results) in queries
+            .iter()
+            .zip(blast_rs::api::blastx_batch(&db, &query_slices, &params))
+        {
             all_hits.extend(search_result_hsps_to_tabular_hits(
                 &qrec.id,
                 qrec.sequence.len(),
@@ -6168,9 +6162,14 @@ fn run_blastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         if db.db_type != DbType::Protein {
             return Err("blastx requires a protein database".into());
         }
-        for qrec in &queries {
-            let mut results = blast_rs::api::blastx(&db, &qrec.sequence, &params);
-            filter_results_by_query_strand(&mut results, &args.strand);
+        let query_slices: Vec<&[u8]> = queries
+            .iter()
+            .map(|qrec| qrec.sequence.as_slice())
+            .collect();
+        for (qrec, results) in queries
+            .iter()
+            .zip(blast_rs::api::blastx_batch(&db, &query_slices, &params))
+        {
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
@@ -6993,8 +6992,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
         subject_xml_metadata = blastp_subject_xml_hit_metadata(&subjects, args.parse_deflines);
         let (_scratch, db) = make_subject_db_from_fasta(&subjects, DbType::Nucleotide)?;
         for qrec in &queries {
-            let mut results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
-            filter_results_by_query_strand(&mut results, &args.strand);
+            let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
             all_hits.extend(search_result_hsps_to_tabular_hits(
                 &qrec.id,
                 qrec.sequence.len(),
@@ -7019,8 +7017,7 @@ fn run_tblastx(args: &BlastnArgs) -> Result<(), Box<dyn std::error::Error>> {
             return Err("tblastx requires a nucleotide database".into());
         }
         for qrec in &queries {
-            let mut results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
-            filter_results_by_query_strand(&mut results, &args.strand);
+            let results = blast_rs::api::tblastx(&db, &qrec.sequence, &params);
             for result in &results {
                 let subject_id =
                     db_output_subject_id(&db, result.subject_oid, &result.subject_accession);
@@ -7684,7 +7681,7 @@ fn run_blastn_rust(
     // seeding but remain available for extension. With `-soft_masking false`,
     // the masked buffer is also the runtime query, which makes the mask hard.
     let apply_dust = args.dust != "no";
-    let soft_masking = ncbi_bool_enabled(Some(&args.soft_masking), true);
+    let soft_masking = ncbi_bool_enabled(args.soft_masking.as_deref(), true);
 
     // Pre-compute invariant values outside the per-query loop. The per-query
     // loop body shadows `cutoff_score` / `ungapped_x_dropoff` /
@@ -10372,7 +10369,7 @@ fn run_blastn_subject(
             apply_lowercase_mask(raw_query, &mut query_plus);
         }
         let query_minus = blast_rs::encoding::reverse_complement_blastna_sequence(&query_plus);
-        if !ncbi_bool_enabled(Some(&args.soft_masking), true) {
+        if !ncbi_bool_enabled(args.soft_masking.as_deref(), true) {
             query_plus_nomask.clone_from(&query_plus);
             query_minus_nomask.clone_from(&query_minus);
         }
@@ -17650,6 +17647,53 @@ mod tests {
         let params = build_translated_blastp_params(&args);
 
         assert_eq!(params.max_intron_length, 300);
+    }
+
+    #[test]
+    fn test_translated_cli_propagates_masking_strand_and_sw_traceback_params() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastx",
+            "--query",
+            "tests/fixtures/query_random_200.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+            "--soft_masking",
+            "false",
+            "--lcase_masking",
+            "--strand",
+            "minus",
+            "--use_sw_tback",
+        ]);
+        let Commands::Blastx(args) = cli.command else {
+            panic!("expected blastx command");
+        };
+
+        let params = build_translated_blastp_params(&args);
+
+        assert!(!params.soft_masking);
+        assert!(params.lcase_masking);
+        assert_eq!(params.strand, "minus");
+        assert!(params.use_sw_tback);
+    }
+
+    #[test]
+    fn test_translated_cli_soft_masking_default_is_false() {
+        let cli = Cli::parse_from([
+            "blast-cli",
+            "blastx",
+            "--query",
+            "tests/fixtures/query_random_200.fa",
+            "--subject",
+            "tests/fixtures/protein_subject.fa",
+        ]);
+        let Commands::Blastx(args) = cli.command else {
+            panic!("expected blastx command");
+        };
+
+        let params = build_translated_blastp_params(&args);
+
+        assert!(!params.soft_masking);
     }
 
     #[test]

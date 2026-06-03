@@ -5390,7 +5390,10 @@ pub fn do_anchored_search(
 
     if let Some(stream) = hsp_stream {
         let query_index = query_index_for_hsp_list(&hsp_list, query_info);
-        let _ = stream.blast_hspstream_write(query_index, hsp_list.clone());
+        let _ = stream.blast_hspstream_write_blast_hsp_list(
+            query_index,
+            crate::hspstream::blast_hsp_list_from_legacy_hsp_list(hsp_list.clone(), query_index),
+        );
     }
 
     if hsp_list.hsps.is_empty() {
@@ -5445,7 +5448,10 @@ pub fn do_anchored_search_to_stream(
         return -1;
     };
     let query_index = query_index_for_hsp_list(&hsp_list, query_info);
-    stream.blast_hspstream_write(query_index, hsp_list) as i16
+    stream.blast_hspstream_write_blast_hsp_list(
+        query_index,
+        crate::hspstream::blast_hsp_list_from_legacy_hsp_list(hsp_list, query_index),
+    ) as i16
 }
 
 /// blast-rs: Maps a recovered HSP list back to a query index; not a direct NCBI C port.

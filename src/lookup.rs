@@ -133,7 +133,10 @@ pub fn blast_rps_word_finder_scan_write_hsp_stream(
     let Some(hsp_list) = blast_rps_word_finder_scan_to_hsp_list(scan, profile_oid, hsp_max) else {
         return 0;
     };
-    stream.blast_hspstream_write(query_index, hsp_list)
+    stream.blast_hspstream_write_blast_hsp_list(
+        query_index,
+        crate::hspstream::blast_hsp_list_from_legacy_hsp_list(hsp_list, query_index),
+    )
 }
 
 /// blast-rs: bounded RPS driver adapter from an owned lookup table and subject
@@ -286,7 +289,10 @@ pub fn blast_rps_profile_database_scan_query_write_hsp_stream(
             hsp_max,
             profile_start,
         ) {
-            let status = stream.blast_hspstream_write(query_index, hsp_list);
+            let status = stream.blast_hspstream_write_blast_hsp_list(
+                query_index,
+                crate::hspstream::blast_hsp_list_from_legacy_hsp_list(hsp_list, query_index),
+            );
             if status != 0 {
                 return status;
             }
@@ -6403,9 +6409,9 @@ mod tests {
                 assert_eq!(profile_index, 1);
                 assert!((karlin_k.expect("RPS K") - 0.30).abs() < 1e-12);
                 assert_eq!(hsp_list.oid, 1);
-                assert_eq!(hsp_list.hsps[0].score, 50);
-                assert_eq!(hsp_list.hsps[0].query_offset, 3);
-                assert_eq!(hsp_list.hsps[0].subject_offset, 3);
+                assert_eq!(hsp_list.hsp_array[0].as_ref().unwrap().score, 50);
+                assert_eq!(hsp_list.hsp_array[0].as_ref().unwrap().query.offset, 3);
+                assert_eq!(hsp_list.hsp_array[0].as_ref().unwrap().subject.offset, 3);
                 0
             },
             None,
@@ -7328,7 +7334,13 @@ mod tests {
             0
         );
         assert_eq!(
-            stream.blast_hspstream_write(0, crate::hspstream::HspList::new(7)),
+            stream.blast_hspstream_write_blast_hsp_list(
+                0,
+                crate::hspstream::blast_hsp_list_from_legacy_hsp_list(
+                    crate::hspstream::HspList::new(7),
+                    0,
+                ),
+            ),
             0
         );
     }
@@ -7393,11 +7405,11 @@ mod tests {
             |hsp_list, _gap_data, profile_index, karlin_k| {
                 assert_eq!(profile_index, 0);
                 assert!((karlin_k.expect("RPS K") - 0.30).abs() < 1e-12);
-                assert_eq!(hsp_list.hsps.len(), 1);
-                let hsp = &hsp_list.hsps[0];
+                assert_eq!(hsp_list.hspcnt as usize, 1);
+                let hsp = hsp_list.hsp_array[0].as_ref().unwrap();
                 assert_eq!(hsp.score, 45);
-                assert_eq!(hsp.query_offset, 6);
-                assert_eq!(hsp.subject_offset, 2);
+                assert_eq!(hsp.query.offset, 6);
+                assert_eq!(hsp.subject.offset, 2);
                 0
             },
             None,
@@ -7503,8 +7515,8 @@ mod tests {
             Some(&mut results),
             |hsp_list, _gap_data, profile_index, _karlin_k| {
                 assert_eq!(profile_index, 0);
-                assert_eq!(hsp_list.hsps.len(), 1);
-                assert_eq!(hsp_list.hsps[0].score, 50);
+                assert_eq!(hsp_list.hspcnt as usize, 1);
+                assert_eq!(hsp_list.hsp_array[0].as_ref().unwrap().score, 50);
                 0
             },
             None,
@@ -7767,7 +7779,7 @@ mod tests {
                 assert_eq!(profile_index, 2);
                 assert!((karlin_k.expect("RPS K") - 0.36).abs() < 1e-12);
                 assert_eq!(hsp_list.oid, 2);
-                assert_eq!(hsp_list.hsps[0].score, 50);
+                assert_eq!(hsp_list.hsp_array[0].as_ref().unwrap().score, 50);
                 0
             },
             None,

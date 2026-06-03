@@ -191,6 +191,32 @@ impl BlastHSP {
         }
     }
 
+    pub fn into_legacy_hsp(self) -> Hsp {
+        Hsp {
+            score: self.score,
+            num_ident: self.num_ident,
+            bit_score: self.bit_score,
+            evalue: self.evalue,
+            query_offset: self.query.offset,
+            query_end: self.query.end,
+            query_gapped_start: self.query.gapped_start,
+            subject_offset: self.subject.offset,
+            subject_end: self.subject.end,
+            subject_gapped_start: self.subject.gapped_start,
+            context: self.context,
+            query_frame: self.query.frame as i32,
+            subject_frame: self.subject.frame as i32,
+            num_gaps: self
+                .gap_info
+                .as_ref()
+                .map(gap_edit_script_num_gap_opens)
+                .unwrap_or(0),
+            comp_adjustment_method: self.comp_adjustment_method as i32,
+            edit_script: self.gap_info,
+            pat_info: self.pat_info.map(Into::into),
+            map_info: self.map_info,
+        }
+    }
 }
 
 /// NCBI: `BlastHSPList` (`blast_hits.h:146`).
@@ -204,6 +230,120 @@ pub struct BlastHSPList {
     pub hsp_max: i32,
     pub do_not_reallocate: bool,
     pub best_evalue: f64,
+}
+
+impl BlastHSPList {
+    pub fn into_legacy_hsp_list(self) -> HspList {
+        let hspcnt = self.hspcnt.max(0) as usize;
+        HspList {
+            oid: self.oid,
+            hsps: self
+                .hsp_array
+                .into_iter()
+                .take(hspcnt)
+                .flatten()
+                .map(BlastHSP::into_legacy_hsp)
+                .collect(),
+            best_evalue: self.best_evalue,
+            hsp_max: self.hsp_max,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.hspcnt <= 0
+            || self
+                .hsp_array
+                .iter()
+                .take(self.hspcnt.max(0) as usize)
+                .all(Option::is_none)
+    }
+}
+
+pub(crate) fn blast_hsp_list_from_legacy_hsp_list(
+    hsp_list: HspList,
+    query_index: i32,
+) -> BlastHSPList {
+    let hsp_array: Vec<Option<BlastHSP>> = hsp_list
+        .hsps
+        .into_iter()
+        .map(BlastHSP::from_legacy_hsp)
+        .map(Some)
+        .collect();
+    let hspcnt = hsp_array.len() as i32;
+    BlastHSPList {
+        oid: hsp_list.oid,
+        query_index,
+        hsp_array,
+        hspcnt,
+        allocated: hspcnt,
+        hsp_max: hsp_list.hsp_max,
+        do_not_reallocate: false,
+        best_evalue: hsp_list.best_evalue,
+    }
+}
+
+fn hsp_results_from_blast_hsp_results(results: BlastHSPResults) -> HspResults {
+    let num_queries = results.num_queries.max(0) as usize;
+    HspResults {
+        hitlists: results
+            .hitlist_array
+            .into_iter()
+            .take(num_queries)
+            .map(|hitlist| {
+                hitlist.map(|hitlist| {
+                    let hsplist_count = hitlist.hsplist_count.max(0) as usize;
+                    HitList {
+                        hsp_lists: hitlist
+                            .hsplist_array
+                            .into_iter()
+                            .take(hsplist_count)
+                            .flatten()
+                            .map(BlastHSPList::into_legacy_hsp_list)
+                            .collect(),
+                        hsplist_max: hitlist.hsplist_max,
+                        low_score: hitlist.low_score,
+                        worst_evalue: hitlist.worst_evalue,
+                    }
+                })
+            })
+            .collect(),
+    }
+}
+
+fn blast_hsp_results_from_hsp_results(results: HspResults) -> BlastHSPResults {
+    BlastHSPResults {
+        num_queries: results.hitlists.len() as i32,
+        hitlist_array: results
+            .hitlists
+            .into_iter()
+            .enumerate()
+            .map(|(query_index, hitlist)| {
+                hitlist.map(|hitlist| {
+                    let hsplist_array: Vec<Option<BlastHSPList>> = hitlist
+                        .hsp_lists
+                        .into_iter()
+                        .map(|list| {
+                            Some(blast_hsp_list_from_legacy_hsp_list(
+                                list,
+                                query_index as i32,
+                            ))
+                        })
+                        .collect();
+                    BlastHitList {
+                        hsplist_count: hsplist_array.iter().filter(|list| list.is_some()).count()
+                            as i32,
+                        hsplist_max: hitlist.hsplist_max,
+                        worst_evalue: hitlist.worst_evalue,
+                        low_score: hitlist.low_score,
+                        heapified: false,
+                        hsplist_current: hsplist_array.len() as i32,
+                        hsplist_array,
+                        num_hits: 0,
+                    }
+                })
+            })
+            .collect(),
+    }
 }
 
 /// PHI-BLAST pattern metadata stored on an HSP.
@@ -536,13 +676,13 @@ fn blast_seg_get_translated_offsets(
 ) -> (i32, i32) {
     if frame > 0 {
         (
-            offset * crate::util::CODON_LENGTH as i32 + frame - 1,
-            end * crate::util::CODON_LENGTH as i32 + frame - 2,
+            offset * crate::util::CODON_LENGTH as i32 + frame,
+            end * crate::util::CODON_LENGTH as i32 + frame - 1,
         )
     } else if frame < 0 {
         (
-            seq_length - offset * crate::util::CODON_LENGTH as i32 + frame,
-            seq_length - end * crate::util::CODON_LENGTH as i32 + frame + 1,
+            seq_length - offset * crate::util::CODON_LENGTH as i32 + frame + 1,
+            seq_length - end * crate::util::CODON_LENGTH as i32 + frame + 2,
         )
     } else {
         (offset + 1, end)
@@ -596,15 +736,71 @@ pub fn blast_hsp_get_adjusted_offsets(
         (hsp.query_offset + 1, hsp.query_end)
     };
     let (s_start, s_end) = if crate::program::blast_subject_is_translated(program) {
-        let (_, s_end) = blast_seg_get_translated_offsets(
+        blast_seg_get_translated_offsets(
             hsp.subject_offset,
             hsp.subject_end,
             hsp.subject_frame,
             subject_length,
-        );
-        (q_start, s_end)
+        )
     } else {
         (hsp.subject_offset + 1, hsp.subject_end)
+    };
+
+    (q_start, q_end, s_start, s_end)
+}
+
+/// NCBI: Blast_HSPGetAdjustedOffsets (blast_hits.c:1109), for upstream-shaped
+/// `BlastHSP` records used by traceback/CBS paths.
+pub fn blast_hsp_get_adjusted_offsets_blast_hsp(
+    program: crate::program::ProgramType,
+    hsp: &BlastHSP,
+    query_length: i32,
+    subject_length: i32,
+) -> (i32, i32, i32, i32) {
+    if hsp.gap_info.is_none() {
+        return (
+            hsp.query.offset + 1,
+            hsp.query.end,
+            hsp.subject.offset + 1,
+            hsp.subject.end,
+        );
+    }
+
+    if !crate::program::blast_query_is_translated(program)
+        && !crate::program::blast_subject_is_translated(program)
+    {
+        if hsp.query.frame != hsp.subject.frame {
+            let q_end = query_length - hsp.query.offset;
+            let q_start = q_end - hsp.query.end + hsp.query.offset + 1;
+            return (q_start, q_end, hsp.subject.end, hsp.subject.offset + 1);
+        }
+        return (
+            hsp.query.offset + 1,
+            hsp.query.end,
+            hsp.subject.offset + 1,
+            hsp.subject.end,
+        );
+    }
+
+    let (q_start, q_end) = if crate::program::blast_query_is_translated(program) {
+        blast_seg_get_translated_offsets(
+            hsp.query.offset,
+            hsp.query.end,
+            hsp.query.frame as i32,
+            query_length,
+        )
+    } else {
+        (hsp.query.offset + 1, hsp.query.end)
+    };
+    let (s_start, s_end) = if crate::program::blast_subject_is_translated(program) {
+        blast_seg_get_translated_offsets(
+            hsp.subject.offset,
+            hsp.subject.end,
+            hsp.subject.frame as i32,
+            subject_length,
+        )
+    } else {
+        (hsp.subject.offset + 1, hsp.subject.end)
     };
 
     (q_start, q_end, s_start, s_end)
@@ -870,21 +1066,20 @@ pub fn blast_hsp_list_sort_by_score(hsp_list: Option<&mut BlastHSPList>) -> i32 
 /// NCBI: Blast_HSPUpdateWithTraceback (blast_traceback.c:78).
 pub fn blast_hsp_update_with_traceback(
     gap_align: Option<&mut crate::blast_kappa::BlastGapAlignWorkspace>,
-    hsp: Option<&mut Hsp>,
+    hsp: Option<&mut BlastHSP>,
 ) -> i16 {
     let (Some(gap_align), Some(hsp)) = (gap_align, hsp) else {
         return -1;
     };
 
     hsp.score = gap_align.score;
-    hsp.query_offset = gap_align.query_start;
-    hsp.subject_offset = gap_align.subject_start;
-    hsp.query_end = gap_align.query_stop;
-    hsp.subject_end = gap_align.subject_stop;
+    hsp.query.offset = gap_align.query_start;
+    hsp.subject.offset = gap_align.subject_start;
+    hsp.query.end = gap_align.query_stop;
+    hsp.subject.end = gap_align.subject_stop;
     if gap_align.edit_script.is_some() {
-        hsp.edit_script = gap_align.edit_script.take();
+        hsp.gap_info = gap_align.edit_script.take();
     }
-
     0
 }
 
@@ -1235,24 +1430,6 @@ pub fn blast_hsp_lists_merge(
     0
 }
 
-/// blast-rs: Convenience wrapper around `blast_hsp_lists_merge`; not a direct NCBI C port.
-pub fn blast_hsp_lists_merge_simple(
-    hsp_list: &mut Option<HspList>,
-    combined_hsp_list: &mut Option<HspList>,
-    hsp_num_max: i32,
-) -> i32 {
-    blast_hsp_lists_merge(
-        hsp_list,
-        combined_hsp_list,
-        hsp_num_max,
-        None,
-        0,
-        0,
-        true,
-        false,
-    )
-}
-
 /// NCBI: Blast_HSPListPHIGetBitScores (blast_hits.c:1934).
 /// naming: Rust spells HSP/PHI as separate snake_case tokens.
 /// NCBI reads `lambda` and `paramC` from
@@ -1410,6 +1587,46 @@ pub fn s_blast_hsp_list_rps_update(program: crate::program::ProgramType, hsp_lis
     }
 
     hsp_list.hsps.sort_by(score_compare_hsps);
+}
+
+fn s_blast_hsp_rps_update_blast_hsp(hsp: &mut BlastHSP) {
+    let Some(edit_script) = hsp.gap_info.as_mut() else {
+        return;
+    };
+    for index in 0..edit_script.len() {
+        let (op, count) = edit_script.get(index).unwrap_or((GapAlignOpType::Sub, 0));
+        let new_op = match op {
+            GapAlignOpType::Ins => GapAlignOpType::Del,
+            GapAlignOpType::Del => GapAlignOpType::Ins,
+            other => other,
+        };
+        edit_script.set(index, new_op, count);
+    }
+}
+
+fn s_blast_hsp_list_rps_update_blast_hsp_list(
+    program: crate::program::ProgramType,
+    hsp_list: &mut BlastHSPList,
+) {
+    if !crate::program::blast_program_is_rps_blast(program) {
+        return;
+    }
+
+    for hsp in hsp_list
+        .hsp_array
+        .iter_mut()
+        .take(hsp_list.hspcnt.max(0) as usize)
+        .flatten()
+    {
+        std::mem::swap(&mut hsp.query, &mut hsp.subject);
+        s_blast_hsp_rps_update_blast_hsp(hsp);
+
+        if program == crate::program::RPS_TBLASTN {
+            hsp.context = crate::util::blast_frame_to_context(hsp.query.frame as i32, program);
+        }
+    }
+
+    let _ = blast_hsp_list_sort_by_score(Some(hsp_list));
 }
 
 /// Native RPS profile database magic from NCBI `blast_rps.h`.
@@ -1919,7 +2136,7 @@ pub fn s_rps_compute_traceback<T>(
     progress_info: Option<&mut crate::util::SBlastProgress>,
 ) -> i16
 where
-    T: FnMut(&mut HspList, &RpsGapAlignData, usize, Option<f64>) -> i16,
+    T: FnMut(&mut BlastHSPList, &RpsGapAlignData, usize, Option<f64>) -> i16,
 {
     s_rps_compute_traceback_with_composition(
         program_number,
@@ -1954,7 +2171,7 @@ pub fn s_rps_compute_traceback_with_composition<T>(
     mut progress_info: Option<&mut crate::util::SBlastProgress>,
 ) -> i16
 where
-    T: FnMut(&mut HspList, &RpsGapAlignData, usize, Option<f64>) -> i16,
+    T: FnMut(&mut BlastHSPList, &RpsGapAlignData, usize, Option<f64>) -> i16,
 {
     let Some(stream) = hsp_stream else {
         return -1;
@@ -1972,14 +2189,19 @@ where
     if let Some(progress) = progress_info.as_deref_mut() {
         progress.stage = crate::util::EBlastStage::TracebackSearch;
     }
+    let close_tback_pipes = |results: &mut HspResults| {
+        let mut blast_results = blast_hsp_results_from_hsp_results(results.clone());
+        BlastHSPStreamTBackClose(Some(stream), Some(&mut blast_results));
+        *results = hsp_results_from_blast_hsp_results(blast_results);
+    };
 
     loop {
-        let (read_status, maybe_hsp_list) = blast_hsp_stream_read(Some(stream));
+        let (read_status, maybe_hsp_list) = blast_hsp_stream_read_blast_hsp_list(Some(stream));
         if read_status == K_BLAST_HSP_STREAM_EOF {
             break;
         }
         if read_status != K_BLAST_HSP_STREAM_SUCCESS {
-            BlastHSPStreamTBackClose(Some(stream), Some(&mut *results));
+            close_tback_pipes(results);
             return read_status as i16;
         }
 
@@ -1987,7 +2209,7 @@ where
             (interrupt_search.as_deref_mut(), progress_info.as_deref())
         {
             if interrupt(progress) {
-                BlastHSPStreamTBackClose(Some(stream), Some(&mut *results));
+                close_tback_pipes(results);
                 let _ = blast_hsp_results_sort_by_evalue(results);
                 return crate::diagnostics::BLASTERR_INTERRUPTED;
             }
@@ -2022,28 +2244,28 @@ where
 
         let status = traceback_hsp_list(&mut hsp_list, &gap_data, profile_index, karlin_k);
         if status != 0 {
-            BlastHSPStreamTBackClose(Some(stream), Some(&mut *results));
+            close_tback_pipes(results);
             return status;
         }
 
-        s_blast_hsp_list_rps_update(program_number, &mut hsp_list);
-        if hsp_list.hsps.is_empty() {
+        s_blast_hsp_list_rps_update_blast_hsp_list(program_number, &mut hsp_list);
+        if hsp_list.is_empty() {
             continue;
         }
-        let query_index = query_index_for_hsp_list(&hsp_list, query_info);
-        let insert_status = blast_hsp_results_insert_hsp_list(
+        let query_index = query_index_for_blast_hsp_list(&hsp_list, query_info);
+        let insert_status = blast_hsp_results_insert_blast_hsp_list(
             results,
             query_index,
             hsp_list,
             hit_options.hitlist_size,
         );
         if insert_status != 0 {
-            BlastHSPStreamTBackClose(Some(stream), Some(&mut *results));
+            close_tback_pipes(results);
             return insert_status as i16;
         }
     }
 
-    BlastHSPStreamTBackClose(Some(stream), Some(&mut *results));
+    close_tback_pipes(results);
     let _ = blast_hsp_results_sort_by_evalue(results);
     0
 }
@@ -2715,14 +2937,6 @@ pub fn blast_hit_list_merge(
     0
 }
 
-/// blast-rs: Convenience wrapper around `blast_hit_list_merge`; not a direct NCBI C port.
-pub fn blast_hit_list_merge_simple(
-    old_hit_list: &mut Option<HitList>,
-    combined_hit_list: &mut Option<HitList>,
-) -> i32 {
-    blast_hit_list_merge(old_hit_list, combined_hit_list, 0, None, 0, true)
-}
-
 /// NCBI: Blast_HitListHSPListsFree (blast_hits.c:3155).
 /// 1-1 translation for
 /// the Rust vector-backed representation.
@@ -2898,7 +3112,7 @@ pub struct SThreadLocalDataArray {
 
 #[derive(Debug, Clone, Default)]
 pub struct BlastHspStreamResultBatch {
-    pub hsplist_array: Vec<Option<HspList>>,
+    pub hsplist_array: Vec<Option<BlastHSPList>>,
     pub num_hsplists: i32,
 }
 
@@ -3144,7 +3358,7 @@ pub fn Blast_HSPStreamResultBatchReset(
     let batch = batch?;
     let num_hsplists = batch.num_hsplists.max(0) as usize;
     for slot in batch.hsplist_array.iter_mut().take(num_hsplists) {
-        let _ = blast_hsp_list_free(slot);
+        *slot = None;
     }
     batch.num_hsplists = 0;
     Some(batch)
@@ -3248,12 +3462,250 @@ pub fn blast_hsp_results_insert_hsp_list(
     hitlist.blast_hit_list_update(hsp_list)
 }
 
+pub fn blast_hsp_results_insert_blast_hsp_list(
+    results: &mut HspResults,
+    query_index: i32,
+    hsp_list: BlastHSPList,
+    hitlist_size: i32,
+) -> i32 {
+    blast_hsp_results_insert_hsp_list(
+        results,
+        query_index,
+        hsp_list.into_legacy_hsp_list(),
+        hitlist_size,
+    )
+}
+
 /// 1-1 port of `Blast_HSPResultsSortByEvalue` (`blast_hits.c:3383`) for the
 /// Rust `HspResults` shape.
 pub fn blast_hsp_results_sort_by_evalue(results: &mut HspResults) -> i32 {
     for hitlist in results.hitlists.iter_mut().flatten() {
         let _ = blast_hit_list_sort_by_evalue(hitlist);
         s_blast_hit_list_purge(Some(hitlist));
+    }
+    0
+}
+
+fn s_blast_get_best_evalue_blast_hsp_list(hsp_list: &BlastHSPList) -> f64 {
+    hsp_list
+        .hsp_array
+        .iter()
+        .take(hsp_list.hspcnt.max(0) as usize)
+        .flatten()
+        .map(|hsp| hsp.evalue)
+        .fold(i32::MAX as f64, f64::min)
+}
+
+fn first_blast_hsp(hsp_list: &BlastHSPList) -> Option<&BlastHSP> {
+    hsp_list
+        .hsp_array
+        .iter()
+        .take(hsp_list.hspcnt.max(0) as usize)
+        .flatten()
+        .next()
+}
+
+fn evalue_compare_blast_hsp_lists(
+    a: &BlastHSPList,
+    b: &BlastHSPList,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => return Equal,
+        (true, false) => return Greater,
+        (false, true) => return Less,
+        (false, false) => {}
+    }
+    let by_evalue = evalue_comp(a.best_evalue, b.best_evalue);
+    if by_evalue != Equal {
+        return by_evalue;
+    }
+    let top_a = first_blast_hsp(a).map_or(i32::MIN, |hsp| hsp.score);
+    let top_b = first_blast_hsp(b).map_or(i32::MIN, |hsp| hsp.score);
+    let by_score = top_b.cmp(&top_a);
+    if by_score != Equal {
+        return by_score;
+    }
+    b.oid.cmp(&a.oid)
+}
+
+fn blast_hit_list_new_blast(hitlist_size: i32) -> BlastHitList {
+    BlastHitList {
+        hsplist_count: 0,
+        hsplist_max: hitlist_size,
+        worst_evalue: 0.0,
+        low_score: i32::MAX,
+        heapified: false,
+        hsplist_array: Vec::new(),
+        hsplist_current: 0,
+        num_hits: 0,
+    }
+}
+
+fn s_blast_hit_list_purge_blast(hitlist: &mut BlastHitList) {
+    let limit = hitlist.hsplist_count.max(0) as usize;
+    if let Some(first_empty) = hitlist
+        .hsplist_array
+        .iter()
+        .take(limit)
+        .position(|hsp_list| hsp_list.as_ref().is_none_or(BlastHSPList::is_empty))
+    {
+        hitlist.hsplist_array.truncate(first_empty);
+        hitlist.hsplist_count = first_empty as i32;
+        hitlist.hsplist_current = hitlist.hsplist_count;
+    }
+}
+
+fn blast_hit_list_sort_by_evalue_blast(hitlist: &mut BlastHitList) -> i32 {
+    let count = hitlist.hsplist_count.max(0) as usize;
+    if count > 1 {
+        hitlist.hsplist_array[..count].sort_by(|a, b| match (a.as_ref(), b.as_ref()) {
+            (Some(a), Some(b)) => evalue_compare_blast_hsp_lists(a, b),
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+    }
+    s_blast_hit_list_purge_blast(hitlist);
+    0
+}
+
+fn s_blast_hit_list_insert_hsp_list_in_heap_blast(
+    hitlist: &mut BlastHitList,
+    hsp_list: BlastHSPList,
+) {
+    if hitlist.hsplist_array.is_empty() {
+        hitlist.hsplist_array.push(Some(hsp_list));
+    } else {
+        hitlist.hsplist_array[0] = Some(hsp_list);
+        if hitlist.hsplist_array.len() >= 2 {
+            let lim = hitlist.hsplist_array.len() / 2 - 1;
+            let last = hitlist.hsplist_array.len() - 1;
+            s_heapify(&mut hitlist.hsplist_array, 0, lim, last, |a, b| {
+                match (a.as_ref(), b.as_ref()) {
+                    (Some(a), Some(b)) => evalue_compare_blast_hsp_lists(a, b),
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+        }
+    }
+    if let Some(worst) = hitlist.hsplist_array.first().and_then(|list| list.as_ref()) {
+        hitlist.worst_evalue = worst.best_evalue;
+        hitlist.low_score = first_blast_hsp(worst).map_or(i32::MAX, |hsp| hsp.score);
+    }
+    hitlist.hsplist_count = hitlist.hsplist_array.iter().filter(|list| list.is_some()).count() as i32;
+    hitlist.hsplist_current = hitlist.hsplist_count;
+}
+
+fn blast_hit_list_update_blast(hitlist: &mut BlastHitList, mut hsp_list: BlastHSPList) -> i32 {
+    hsp_list.best_evalue = s_blast_get_best_evalue_blast_hsp_list(&hsp_list);
+    if hsp_list.is_empty() {
+        return 0;
+    }
+    let max = hitlist.hsplist_max.max(0) as usize;
+    let count = hitlist.hsplist_count.max(0) as usize;
+    if max == 0 || count < max {
+        hitlist.low_score = hitlist
+            .low_score
+            .min(first_blast_hsp(&hsp_list).map_or(i32::MAX, |hsp| hsp.score));
+        hitlist.worst_evalue = hitlist.worst_evalue.max(hsp_list.best_evalue);
+        hitlist.hsplist_array.push(Some(hsp_list));
+        hitlist.hsplist_count = hitlist.hsplist_array.iter().filter(|list| list.is_some()).count() as i32;
+        hitlist.hsplist_current = hitlist.hsplist_count;
+        if max != 0 && hitlist.hsplist_count as usize == max {
+            for list in hitlist.hsplist_array.iter_mut().flatten() {
+                list.best_evalue = s_blast_get_best_evalue_blast_hsp_list(list);
+            }
+            s_create_heap(&mut hitlist.hsplist_array, evalue_compare_blast_hsp_lists_option);
+            if let Some(worst) = hitlist.hsplist_array.first().and_then(|list| list.as_ref()) {
+                hitlist.worst_evalue = worst.best_evalue;
+                hitlist.low_score = first_blast_hsp(worst).map_or(i32::MAX, |hsp| hsp.score);
+            }
+            hitlist.heapified = true;
+        }
+        return 0;
+    }
+
+    hsp_list
+        .hsp_array
+        .sort_by(|a, b| crate::hspstream::score_compare_blast_hsps(a.as_ref(), b.as_ref()));
+    hsp_list.best_evalue = s_blast_get_best_evalue_blast_hsp_list(&hsp_list);
+    if let Some(Some(worst)) = hitlist.hsplist_array.first() {
+        if !evalue_compare_blast_hsp_lists(worst, &hsp_list).is_lt() {
+            s_blast_hit_list_insert_hsp_list_in_heap_blast(hitlist, hsp_list);
+        }
+    }
+    0
+}
+
+fn evalue_compare_blast_hsp_lists_option(
+    a: &Option<BlastHSPList>,
+    b: &Option<BlastHSPList>,
+) -> std::cmp::Ordering {
+    match (a.as_ref(), b.as_ref()) {
+        (Some(a), Some(b)) => evalue_compare_blast_hsp_lists(a, b),
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn blast_hsp_results_new_blast(num_queries: i32) -> BlastHSPResults {
+    BlastHSPResults {
+        num_queries,
+        hitlist_array: (0..num_queries.max(0)).map(|_| None).collect(),
+    }
+}
+
+fn blast_hsp_results_insert_blast_hsp_list_native(
+    results: &mut BlastHSPResults,
+    query_index: i32,
+    hsp_list: BlastHSPList,
+    hitlist_size: i32,
+) -> i32 {
+    if hsp_list.is_empty() {
+        return 0;
+    }
+    let idx = query_index as usize;
+    if idx >= results.hitlist_array.len() {
+        return 1;
+    }
+    let hitlist = results.hitlist_array[idx]
+        .get_or_insert_with(|| blast_hit_list_new_blast(hitlist_size));
+    blast_hit_list_update_blast(hitlist, hsp_list)
+}
+
+fn blast_hsp_results_sort_by_evalue_blast(results: &mut BlastHSPResults) -> i32 {
+    for hitlist in results.hitlist_array.iter_mut().flatten() {
+        let _ = blast_hit_list_sort_by_evalue_blast(hitlist);
+    }
+    0
+}
+
+fn blast_hsp_results_reverse_sort_blast(results: &mut BlastHSPResults) -> i32 {
+    for hitlist in results.hitlist_array.iter_mut().flatten() {
+        let count = hitlist.hsplist_count.max(0) as usize;
+        if count > 1 {
+            hitlist.hsplist_array[..count].sort_by(|a, b| match (a.as_ref(), b.as_ref()) {
+                (Some(a), Some(b)) => evalue_compare_blast_hsp_lists(b, a),
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            });
+        }
+        s_blast_hit_list_purge_blast(hitlist);
+    }
+    0
+}
+
+fn blast_hsp_results_reverse_order_blast(results: &mut BlastHSPResults) -> i32 {
+    for hitlist in results.hitlist_array.iter_mut().flatten() {
+        let count = hitlist.hsplist_count.max(0) as usize;
+        if count > 1 {
+            hitlist.hsplist_array[..count].reverse();
+        }
     }
     0
 }
@@ -4025,7 +4477,7 @@ pub fn s_filter_blast_results(
 /// Thread-safe HSP stream for collecting results during parallel search.
 pub struct HspStream {
     program: crate::program::ProgramType,
-    results: Mutex<HspResults>,
+    results: Mutex<BlastHSPResults>,
     sorted_hsplists: Mutex<Vec<SortedHspList>>,
     results_sorted: Mutex<bool>,
     sort_by_score: Mutex<Option<SortByScoreState>>,
@@ -4046,17 +4498,20 @@ struct SortByScoreState {
 #[derive(Debug, Clone)]
 struct SortedHspList {
     query_index: usize,
-    hsp_list: HspList,
+    hsp_list: BlastHSPList,
 }
 
 impl HspStream {
-    /// blast-rs: Thread-safe Rust writer method for owned HSP lists; not a direct NCBI C port.
-    pub fn blast_hspstream_write(&self, query_index: i32, hsp_list: HspList) -> i32 {
+    /// Port-shaped stream write for upstream `BlastHSPList` payloads.
+    pub fn blast_hspstream_write_blast_hsp_list(
+        &self,
+        query_index: i32,
+        mut hsp_list: BlastHSPList,
+    ) -> i32 {
         if *self.results_sorted.lock().unwrap() {
             return K_BLAST_HSP_STREAM_ERROR;
         }
 
-        let mut hsp_list = hsp_list;
         let mut writer = self.writer.lock().unwrap();
         if let Some(writer) = writer.as_mut() {
             if !*self.writer_initialized.lock().unwrap() {
@@ -4066,71 +4521,21 @@ impl HspStream {
                 *self.writer_initialized.lock().unwrap() = true;
             }
             if let Some(run_fn) = writer.run_fn_ptr {
-                let source_list = hsp_list;
-                let hsp_array: Vec<Option<BlastHSP>> = source_list
-                    .hsps
-                    .into_iter()
-                    .map(BlastHSP::from_legacy_hsp)
-                    .map(Some)
-                    .collect();
-                let hspcnt = hsp_array.len() as i32;
-                let mut blast_list = BlastHSPList {
-                    oid: source_list.oid,
-                    query_index: 0,
-                    allocated: hspcnt,
-                    hsp_array,
-                    hspcnt,
-                    hsp_max: source_list.hsp_max,
-                    do_not_reallocate: false,
-                    best_evalue: source_list.best_evalue,
-                };
-                let status = run_fn(writer.data.as_mut(), &mut blast_list);
+                let status = run_fn(writer.data.as_mut(), &mut hsp_list);
                 if status != 0 {
                     return K_BLAST_HSP_STREAM_ERROR;
                 }
-                let hspcnt = blast_list.hspcnt.max(0) as usize;
-                hsp_list = HspList {
-                    oid: blast_list.oid,
-                    hsps: blast_list
-                        .hsp_array
-                        .into_iter()
-                        .take(hspcnt)
-                        .flatten()
-                        .map(|hsp| Hsp {
-                            score: hsp.score,
-                            num_ident: hsp.num_ident,
-                            bit_score: hsp.bit_score,
-                            evalue: hsp.evalue,
-                            query_offset: hsp.query.offset,
-                            query_end: hsp.query.end,
-                            query_gapped_start: hsp.query.gapped_start,
-                            subject_offset: hsp.subject.offset,
-                            subject_end: hsp.subject.end,
-                            subject_gapped_start: hsp.subject.gapped_start,
-                            context: hsp.context,
-                            query_frame: hsp.query.frame as i32,
-                            subject_frame: hsp.subject.frame as i32,
-                            num_gaps: hsp
-                                .gap_info
-                                .as_ref()
-                                .map(gap_edit_script_num_gap_opens)
-                                .unwrap_or(0),
-                            comp_adjustment_method: hsp.comp_adjustment_method as i32,
-                            edit_script: hsp.gap_info,
-                            pat_info: hsp.pat_info.map(Into::into),
-                            map_info: hsp.map_info,
-                        })
-                        .collect(),
-                    best_evalue: blast_list.best_evalue,
-                    hsp_max: blast_list.hsp_max,
-                };
             }
         }
         drop(writer);
 
         let mut results = self.results.lock().unwrap();
-        let insertion_status =
-            blast_hsp_results_insert_hsp_list(&mut results, query_index, hsp_list, 0);
+        let insertion_status = blast_hsp_results_insert_blast_hsp_list_native(
+            &mut results,
+            query_index,
+            hsp_list,
+            0,
+        );
         if insertion_status != 0 {
             return insertion_status;
         }
@@ -4140,13 +4545,13 @@ impl HspStream {
 
     /// blast-rs: Rust ownership extractor for collected stream results; not a direct NCBI C port.
     pub fn into_results(self) -> HspResults {
-        let mut results = self.results.into_inner().unwrap();
+        let mut results = hsp_results_from_blast_hsp_results(self.results.into_inner().unwrap());
         for sorted in self.sorted_hsplists.into_inner().unwrap() {
             if sorted.query_index >= results.hitlists.len() {
-                continue;
+                results.hitlists.resize_with(sorted.query_index + 1, || None);
             }
             let hitlist = results.hitlists[sorted.query_index].get_or_insert_with(HitList::new);
-            hitlist.hsp_lists.push(sorted.hsp_list);
+            hitlist.hsp_lists.push(sorted.hsp_list.into_legacy_hsp_list());
         }
         results
     }
@@ -4173,7 +4578,7 @@ pub fn blast_hsp_stream_new(
     };
     HspStream {
         program,
-        results: Mutex::new(HspResults::new(num_queries)),
+        results: Mutex::new(blast_hsp_results_new_blast(num_queries)),
         sorted_hsplists: Mutex::new(Vec::with_capacity(100)),
         results_sorted: Mutex::new(false),
         sort_by_score: Mutex::new(sort_by_score),
@@ -4184,6 +4589,29 @@ pub fn blast_hsp_stream_new(
         pre_pipes: Mutex::new(Vec::new()),
         tback_pipes: Mutex::new(Vec::new()),
     }
+}
+
+/// blast-rs: Port-shaped reset corresponding to `BlastHSPStreamReset`; not a direct NCBI C port.
+///
+/// Clears collected/read state so the stream can accept another search pass.
+/// Registered pipes and the writer object remain attached; writer init/final
+/// state is reset because close finalizes a search pass, not the writer's
+/// ownership lifetime.
+pub fn blast_hsp_stream_reset(stream: Option<&HspStream>) -> i32 {
+    let Some(stream) = stream else {
+        return K_BLAST_HSP_STREAM_ERROR;
+    };
+    let num_queries = stream.results.lock().unwrap().hitlist_array.len() as i32;
+    *stream.results.lock().unwrap() = blast_hsp_results_new_blast(num_queries);
+    stream.sorted_hsplists.lock().unwrap().clear();
+    *stream.results_sorted.lock().unwrap() = false;
+    *stream.closed.lock().unwrap() = false;
+    *stream.writer_initialized.lock().unwrap() = false;
+    *stream.writer_finalized.lock().unwrap() = false;
+    if let Some(sort_state) = stream.sort_by_score.lock().unwrap().as_mut() {
+        sort_state.first_query_index = 0;
+    }
+    K_BLAST_HSP_STREAM_SUCCESS
 }
 
 /// blast-rs: Rust ownership equivalent of the C HSP-stream free routine; not a direct NCBI C port.
@@ -4201,7 +4629,8 @@ pub fn blast_hsp_stream_free(stream: &mut Option<HspStream>) -> Option<HspStream
             }
         }
         let mut results = stream.results.lock().unwrap();
-        results.hitlists.clear();
+        results.hitlist_array.clear();
+        results.num_queries = 0;
     }
     let _ = stream.take();
     None
@@ -4213,125 +4642,15 @@ pub fn s_sort_hsp_list_by_oid(left: &HspList, right: &HspList) -> i32 {
     right.oid - left.oid
 }
 
-fn s_apply_hsp_pipe_to_results(pipe: &mut BlastHSPPipe, results: &mut HspResults) -> i32 {
+fn s_sort_blast_hsp_list_by_oid(left: &BlastHSPList, right: &BlastHSPList) -> i32 {
+    right.oid - left.oid
+}
+
+fn s_apply_hsp_pipe_to_results(pipe: &mut BlastHSPPipe, results: &mut BlastHSPResults) -> i32 {
     let Some(run_fn) = pipe.run_fn_ptr else {
         return 0;
     };
-    let mut blast_results = BlastHSPResults {
-        num_queries: results.hitlists.len() as i32,
-        hitlist_array: results
-            .hitlists
-            .clone()
-            .into_iter()
-            .map(|hitlist| {
-                hitlist.map(|hitlist| {
-                    let hsplist_array: Vec<Option<BlastHSPList>> = hitlist
-                        .hsp_lists
-                        .into_iter()
-                        .map(|list| {
-                            let hsp_array: Vec<Option<BlastHSP>> = list
-                                .hsps
-                                .into_iter()
-                                .map(BlastHSP::from_legacy_hsp)
-                                .map(Some)
-                                .collect();
-                            let hspcnt = hsp_array.len() as i32;
-                            Some(BlastHSPList {
-                                oid: list.oid,
-                                query_index: 0,
-                                allocated: hspcnt,
-                                hsp_array,
-                                hspcnt,
-                                hsp_max: list.hsp_max,
-                                do_not_reallocate: false,
-                                best_evalue: list.best_evalue,
-                            })
-                        })
-                        .collect();
-                    let hsplist_count =
-                        hsplist_array.iter().filter(|list| list.is_some()).count() as i32;
-                    BlastHitList {
-                        hsplist_count,
-                        hsplist_max: hitlist.hsplist_max,
-                        worst_evalue: hitlist.worst_evalue,
-                        low_score: hitlist.low_score,
-                        heapified: false,
-                        hsplist_current: hsplist_array.len() as i32,
-                        hsplist_array,
-                        num_hits: 0,
-                    }
-                })
-            })
-            .collect(),
-    };
-    let status = run_fn(pipe.data.as_mut(), &mut blast_results);
-    if status == 0 {
-        let num_queries = blast_results.num_queries.max(0) as usize;
-        *results = HspResults {
-            hitlists: blast_results
-                .hitlist_array
-                .into_iter()
-                .take(num_queries)
-                .map(|hitlist| {
-                    hitlist.map(|hitlist| {
-                        let hsplist_count = hitlist.hsplist_count.max(0) as usize;
-                        HitList {
-                            hsp_lists: hitlist
-                                .hsplist_array
-                                .into_iter()
-                                .take(hsplist_count)
-                                .flatten()
-                                .map(|list| {
-                                    let hspcnt = list.hspcnt.max(0) as usize;
-                                    HspList {
-                                        oid: list.oid,
-                                        hsps: list
-                                            .hsp_array
-                                            .into_iter()
-                                            .take(hspcnt)
-                                            .flatten()
-                                            .map(|hsp| Hsp {
-                                                score: hsp.score,
-                                                num_ident: hsp.num_ident,
-                                                bit_score: hsp.bit_score,
-                                                evalue: hsp.evalue,
-                                                query_offset: hsp.query.offset,
-                                                query_end: hsp.query.end,
-                                                query_gapped_start: hsp.query.gapped_start,
-                                                subject_offset: hsp.subject.offset,
-                                                subject_end: hsp.subject.end,
-                                                subject_gapped_start: hsp.subject.gapped_start,
-                                                context: hsp.context,
-                                                query_frame: hsp.query.frame as i32,
-                                                subject_frame: hsp.subject.frame as i32,
-                                                num_gaps: hsp
-                                                    .gap_info
-                                                    .as_ref()
-                                                    .map(gap_edit_script_num_gap_opens)
-                                                    .unwrap_or(0),
-                                                comp_adjustment_method: hsp
-                                                    .comp_adjustment_method
-                                                    as i32,
-                                                edit_script: hsp.gap_info,
-                                                pat_info: hsp.pat_info.map(Into::into),
-                                                map_info: hsp.map_info,
-                                            })
-                                            .collect(),
-                                        best_evalue: list.best_evalue,
-                                        hsp_max: list.hsp_max,
-                                    }
-                                })
-                                .collect(),
-                            hsplist_max: hitlist.hsplist_max,
-                            low_score: hitlist.low_score,
-                            worst_evalue: hitlist.worst_evalue,
-                        }
-                    })
-                })
-                .collect(),
-        };
-    }
-    status
+    run_fn(pipe.data.as_mut(), results)
 }
 
 /// blast-rs: Rust lifecycle equivalent of static `s_FinalizeWriter`; not a direct NCBI C port.
@@ -4387,9 +4706,9 @@ pub fn blast_hsp_stream_close(stream: Option<&HspStream>) {
 
     if let Some(sort_state) = *stream.sort_by_score.lock().unwrap() {
         if sort_state.sort_on_read {
-            let _ = blast_hsp_results_reverse_sort(&mut results);
+            let _ = blast_hsp_results_reverse_sort_blast(&mut results);
         } else {
-            let _ = blast_hsp_results_reverse_order(&mut results);
+            let _ = blast_hsp_results_reverse_order_blast(&mut results);
         }
         *stream.results_sorted.lock().unwrap() = true;
         *stream.closed.lock().unwrap() = true;
@@ -4397,19 +4716,26 @@ pub fn blast_hsp_stream_close(stream: Option<&HspStream>) {
     }
 
     let mut sorted_hsplists = stream.sorted_hsplists.lock().unwrap();
-    for (query_index, hitlist) in results.hitlists.iter_mut().enumerate() {
+    sorted_hsplists.clear();
+    for (query_index, hitlist) in results.hitlist_array.iter_mut().enumerate() {
         let Some(hitlist) = hitlist else {
             continue;
         };
-        for hsp_list in hitlist.hsp_lists.drain(..) {
+        for hsp_list in hitlist
+            .hsplist_array
+            .drain(..hitlist.hsplist_count.max(0) as usize)
+            .flatten()
+        {
             sorted_hsplists.push(SortedHspList {
                 query_index,
                 hsp_list,
             });
         }
+        hitlist.hsplist_count = 0;
+        hitlist.hsplist_current = 0;
     }
     sorted_hsplists
-        .sort_by(|left, right| s_sort_hsp_list_by_oid(&left.hsp_list, &right.hsp_list).cmp(&0));
+        .sort_by(|left, right| s_sort_blast_hsp_list_by_oid(&left.hsp_list, &right.hsp_list).cmp(&0));
     *stream.results_sorted.lock().unwrap() = true;
     *stream.closed.lock().unwrap() = true;
 }
@@ -4420,7 +4746,9 @@ pub fn blast_hsp_stream_close(stream: Option<&HspStream>) {
 /// and then pops from its end. The Rust stream keeps ownership in
 /// `HspResults`, so this removes the same lowest-OID list after the close-time
 /// descending OID sort.
-pub fn blast_hsp_stream_read(stream: Option<&HspStream>) -> (i32, Option<HspList>) {
+pub fn blast_hsp_stream_read_blast_hsp_list(
+    stream: Option<&HspStream>,
+) -> (i32, Option<BlastHSPList>) {
     let Some(stream) = stream else {
         return (K_BLAST_HSP_STREAM_ERROR, None);
     };
@@ -4435,35 +4763,49 @@ pub fn blast_hsp_stream_read(stream: Option<&HspStream>) -> (i32, Option<HspList
         };
         let mut results = stream.results.lock().unwrap();
         let mut query_index = sort_state.first_query_index;
-        while query_index < results.hitlists.len() {
-            if results.hitlists[query_index]
+        while query_index < results.hitlist_array.len() {
+            if results.hitlist_array[query_index]
                 .as_ref()
-                .is_some_and(|hitlist| !hitlist.hsp_lists.is_empty())
+                .is_some_and(|hitlist| hitlist.hsplist_count > 0)
             {
                 break;
             }
             query_index += 1;
         }
-        if query_index >= results.hitlists.len() {
+        if query_index >= results.hitlist_array.len() {
             return (K_BLAST_HSP_STREAM_EOF, None);
         }
         sort_state.first_query_index = query_index;
-        let hitlist = results.hitlists[query_index]
+        let hitlist = results.hitlist_array[query_index]
             .as_mut()
             .expect("selected hitlist");
-        let hsp_list = hitlist.hsp_lists.pop();
-        if hitlist.hsp_lists.is_empty() {
+        let hsp_list = hitlist.hsplist_array.pop().flatten();
+        hitlist.hsplist_count = hitlist.hsplist_array.iter().filter(|slot| slot.is_some()).count() as i32;
+        hitlist.hsplist_current = hitlist.hsplist_count;
+        if hitlist.hsplist_count == 0 {
             sort_state.first_query_index += 1;
-            results.hitlists[query_index] = None;
+            results.hitlist_array[query_index] = None;
         }
-        return (K_BLAST_HSP_STREAM_SUCCESS, hsp_list);
+        return (
+            K_BLAST_HSP_STREAM_SUCCESS,
+            hsp_list,
+        );
     }
 
     let mut sorted_hsplists = stream.sorted_hsplists.lock().unwrap();
     let Some(sorted) = sorted_hsplists.pop() else {
         return (K_BLAST_HSP_STREAM_EOF, None);
     };
-    (K_BLAST_HSP_STREAM_SUCCESS, Some(sorted.hsp_list))
+    (
+        K_BLAST_HSP_STREAM_SUCCESS,
+        Some(sorted.hsp_list),
+    )
+}
+
+#[cfg(test)]
+pub fn blast_hsp_stream_read(stream: Option<&HspStream>) -> (i32, Option<HspList>) {
+    let (status, hsp_list) = blast_hsp_stream_read_blast_hsp_list(stream);
+    (status, hsp_list.map(BlastHSPList::into_legacy_hsp_list))
 }
 
 fn blast_hsp_stream_batch_read_score_sorted(
@@ -4476,43 +4818,60 @@ fn blast_hsp_stream_batch_read_score_sorted(
         return K_BLAST_HSP_STREAM_EOF;
     };
     let mut query_index = sort_state.first_query_index;
-    while query_index < results.hitlists.len() {
-        if results.hitlists[query_index]
+    while query_index < results.hitlist_array.len() {
+        if results.hitlist_array[query_index]
             .as_ref()
-            .is_some_and(|hitlist| !hitlist.hsp_lists.is_empty())
+            .is_some_and(|hitlist| hitlist.hsplist_count > 0)
         {
             break;
         }
         query_index += 1;
     }
-    if query_index >= results.hitlists.len() {
+    if query_index >= results.hitlist_array.len() {
         return K_BLAST_HSP_STREAM_EOF;
     }
     sort_state.first_query_index = query_index;
-    let hitlist = results.hitlists[query_index]
+    let hitlist = results.hitlist_array[query_index]
         .as_mut()
         .expect("selected hitlist");
-    let Some(target_oid) = hitlist.hsp_lists.last().map(|list| list.oid) else {
+    let Some(target_oid) = hitlist
+        .hsplist_array
+        .iter()
+        .rev()
+        .flatten()
+        .next()
+        .map(|list| list.oid)
+    else {
         return K_BLAST_HSP_STREAM_EOF;
     };
     let mut out = Vec::new();
-    while hitlist
-        .hsp_lists
-        .last()
-        .is_some_and(|hsp_list| hsp_list.oid == target_oid)
-    {
-        out.push(hitlist.hsp_lists.pop().expect("checked last"));
+    while hitlist.hsplist_array.last().is_some_and(|slot| {
+        slot.as_ref().is_none_or(|hsp_list| hsp_list.oid == target_oid)
+    }) {
+        if let Some(hsp_list) = hitlist.hsplist_array.pop().flatten() {
+            if hsp_list.oid == target_oid {
+                out.push(hsp_list);
+            } else {
+                hitlist.hsplist_array.push(Some(hsp_list));
+                break;
+            }
+        }
     }
     out.reverse();
-    if hitlist.hsp_lists.is_empty() {
+    hitlist.hsplist_count = hitlist.hsplist_array.iter().filter(|slot| slot.is_some()).count() as i32;
+    hitlist.hsplist_current = hitlist.hsplist_count;
+    if hitlist.hsplist_count == 0 {
         sort_state.first_query_index += 1;
-        results.hitlists[query_index] = None;
+        results.hitlist_array[query_index] = None;
     }
     fill_hsp_stream_batch(batch, out);
     K_BLAST_HSP_STREAM_SUCCESS
 }
 
-fn fill_hsp_stream_batch(batch: &mut BlastHspStreamResultBatch, out: Vec<HspList>) {
+fn fill_hsp_stream_batch(
+    batch: &mut BlastHspStreamResultBatch,
+    out: Vec<BlastHSPList>,
+) {
     if batch.hsplist_array.len() < out.len() {
         batch.hsplist_array.resize_with(out.len(), || None);
     }
@@ -4561,7 +4920,8 @@ pub fn blast_hsp_stream_batch_read(
         .last()
         .is_some_and(|sorted| sorted.hsp_list.oid == target_oid)
     {
-        out.push(sorted_hsplists.pop().expect("checked last").hsp_list);
+        let sorted = sorted_hsplists.pop().expect("checked last");
+        out.push(sorted.hsp_list);
     }
 
     out.reverse();
@@ -4580,8 +4940,13 @@ pub fn s_blast_hsp_stream_count_num_oids(stream: Option<&HspStream>) -> u32 {
     let mut oids = std::collections::BTreeSet::new();
     if stream.sort_by_score.lock().unwrap().is_some() {
         let results = stream.results.lock().unwrap();
-        for hitlist in results.hitlists.iter().flatten() {
-            for hsp_list in &hitlist.hsp_lists {
+        for hitlist in results.hitlist_array.iter().flatten() {
+            for hsp_list in hitlist
+                .hsplist_array
+                .iter()
+                .take(hitlist.hsplist_count.max(0) as usize)
+                .flatten()
+            {
                 oids.insert(hsp_list.oid);
             }
         }
@@ -4607,7 +4972,7 @@ pub fn blast_hsp_stream_to_hsp_stream_results_batch(
 
     let num_oids = s_blast_hsp_stream_count_num_oids(Some(stream));
     let mut batches = s_blast_hsp_stream_results_batch_array_new(num_oids);
-    let num_queries = stream.results.lock().unwrap().hitlists.len() as i32;
+    let num_queries = stream.results.lock().unwrap().hitlist_array.len() as i32;
 
     loop {
         let mut batch = blast_hsp_stream_result_batch_init(num_queries);
@@ -4630,11 +4995,6 @@ pub fn blast_hsp_stream_to_hsp_stream_results_batch(
     (K_BLAST_HSP_STREAM_SUCCESS, Some(batches))
 }
 
-/// blast-rs: Port-shaped close corresponding to `BlastHSPStreamSimpleClose`; not a direct NCBI C port.
-pub fn blast_hsp_stream_simple_close(stream: Option<&HspStream>) {
-    blast_hsp_stream_close(stream);
-}
-
 /// blast-rs: Port-shaped close corresponding to `BlastHSPStreamMappingClose`; not a direct NCBI C port.
 ///
 /// Audit note: Rust's stream does not carry C's mapper writer/vtable payload,
@@ -4655,7 +5015,10 @@ pub fn blast_hsp_stream_mapping_close(stream: Option<&HspStream>) {
 /// Applies traceback-stage pipes to traceback results. Like the C function,
 /// this does not close or sort the HSP stream.
 #[allow(non_snake_case)]
-pub fn BlastHSPStreamTBackClose(stream: Option<&HspStream>, results: Option<&mut HspResults>) {
+pub fn BlastHSPStreamTBackClose(
+    stream: Option<&HspStream>,
+    results: Option<&mut BlastHSPResults>,
+) {
     let Some(stream) = stream else {
         return;
     };
@@ -4678,10 +5041,16 @@ pub fn BlastHSPStreamTBackClose(stream: Option<&HspStream>, results: Option<&mut
 }
 
 /// blast-rs: HSP-list to query-index mapping helper for Rust results insertion; not a direct NCBI C port.
-fn query_index_for_hsp_list(hsp_list: &HspList, query_info: &crate::queryinfo::QueryInfo) -> i32 {
+fn query_index_for_blast_hsp_list(
+    hsp_list: &BlastHSPList,
+    query_info: &crate::queryinfo::QueryInfo,
+) -> i32 {
     hsp_list
-        .hsps
-        .first()
+        .hsp_array
+        .iter()
+        .take(hsp_list.hspcnt.max(0) as usize)
+        .flatten()
+        .next()
         .and_then(|hsp| query_info.contexts.get(hsp.context.max(0) as usize))
         .map_or(0, |ctx| ctx.query_index)
 }
@@ -4739,7 +5108,7 @@ pub fn blast_compute_traceback<T>(
     mut progress_info: Option<&mut crate::util::SBlastProgress>,
 ) -> (i16, Option<HspResults>)
 where
-    T: FnMut(&mut HspList) -> i16,
+    T: FnMut(&mut BlastHSPList) -> i16,
 {
     let Some(stream) = hsp_stream else {
         return (crate::util::BLASTERR_INVALIDPARAM, None);
@@ -4752,10 +5121,10 @@ where
         progress.stage = crate::util::EBlastStage::TracebackSearch;
     }
 
-    let mut results = HspResults::new(query_info.num_queries);
+    let mut blast_results = blast_hsp_results_new_blast(query_info.num_queries);
     let (batch_status, batches) = blast_hsp_stream_to_hsp_stream_results_batch(Some(stream));
     if batch_status != K_BLAST_HSP_STREAM_SUCCESS {
-        BlastHSPStreamTBackClose(Some(stream), Some(&mut results));
+        BlastHSPStreamTBackClose(Some(stream), Some(&mut blast_results));
         return (batch_status as i16, None);
     }
 
@@ -4780,19 +5149,19 @@ where
             {
                 let status = traceback_hsp_list(&mut hsp_list);
                 if status != 0 {
-                    BlastHSPStreamTBackClose(Some(stream), Some(&mut results));
+                    BlastHSPStreamTBackClose(Some(stream), Some(&mut blast_results));
                     return (status, None);
                 }
-                if !hsp_list.hsps.is_empty() {
-                    let query_index = query_index_for_hsp_list(&hsp_list, query_info);
-                    let insert_status = blast_hsp_results_insert_hsp_list(
-                        &mut results,
+                if hsp_list.hspcnt > 0 {
+                    let query_index = query_index_for_blast_hsp_list(&hsp_list, query_info);
+                    let insert_status = blast_hsp_results_insert_blast_hsp_list_native(
+                        &mut blast_results,
                         query_index,
                         hsp_list,
                         hit_options.hitlist_size,
                     );
                     if insert_status != 0 {
-                        BlastHSPStreamTBackClose(Some(stream), Some(&mut results));
+                        BlastHSPStreamTBackClose(Some(stream), Some(&mut blast_results));
                         return (insert_status as i16, None);
                     }
                 }
@@ -4800,11 +5169,13 @@ where
         }
     }
 
-    BlastHSPStreamTBackClose(Some(stream), Some(&mut results));
+    BlastHSPStreamTBackClose(Some(stream), Some(&mut blast_results));
 
     if interrupted {
         return (crate::diagnostics::BLASTERR_INTERRUPTED, None);
     }
+
+    let mut results = hsp_results_from_blast_hsp_results(blast_results);
 
     if hit_options.mask_level < 101 {
         let _ =
@@ -4854,7 +5225,7 @@ pub fn blast_run_traceback_search<T>(
     num_threads: usize,
 ) -> (i16, Option<HspResults>)
 where
-    T: FnMut(&mut HspList) -> i16,
+    T: FnMut(&mut BlastHSPList) -> i16,
 {
     blast_run_traceback_search_with_interrupt(
         program_number,
@@ -4892,7 +5263,7 @@ pub fn blast_run_traceback_search_with_interrupt<T>(
     num_threads: usize,
 ) -> (i16, Option<HspResults>)
 where
-    T: FnMut(&mut HspList) -> i16,
+    T: FnMut(&mut BlastHSPList) -> i16,
 {
     let Some(stream) = hsp_stream else {
         return (crate::util::BLASTERR_INVALIDPARAM, None);
@@ -4952,18 +5323,26 @@ pub fn blast_hsp_stream_merge(
     s_finalize_writer(Some(stream2));
 
     if squery_blk.is_none() {
-        let src = stream1.results.lock().unwrap();
-        let mut dst = stream2.results.lock().unwrap();
-        if dst.hitlists.len() < src.hitlists.len() {
-            dst.hitlists.resize_with(src.hitlists.len(), || None);
+        let src = hsp_results_from_blast_hsp_results(stream1.results.lock().unwrap().clone());
+        let mut dst_legacy = hsp_results_from_blast_hsp_results(stream2.results.lock().unwrap().clone());
+        if dst_legacy.hitlists.len() < src.hitlists.len() {
+            dst_legacy.hitlists.resize_with(src.hitlists.len(), || None);
         }
         for (query_index, src_hitlist) in src.hitlists.iter().enumerate() {
             let Some(src_hitlist) = src_hitlist else {
                 continue;
             };
             let mut incoming = Some(src_hitlist.clone());
-            let _ = blast_hit_list_merge_simple(&mut incoming, &mut dst.hitlists[query_index]);
+            let _ = blast_hit_list_merge(
+                &mut incoming,
+                &mut dst_legacy.hitlists[query_index],
+                0,
+                None,
+                0,
+                true,
+            );
         }
+        *stream2.results.lock().unwrap() = blast_hsp_results_from_hsp_results(dst_legacy);
         return 0;
     }
 
@@ -4988,8 +5367,8 @@ pub fn blast_hsp_stream_merge(
     let chunk_overlap_size = split_query_blk_get_chunk_overlap_size(squery_blk) as i32;
     let allow_gap = split_query_blk_allow_gap(squery_blk);
 
-    let src = stream1.results.lock().unwrap();
-    let mut dst = stream2.results.lock().unwrap();
+    let src = hsp_results_from_blast_hsp_results(stream1.results.lock().unwrap().clone());
+    let mut dst = hsp_results_from_blast_hsp_results(stream2.results.lock().unwrap().clone());
     let global_query_max = query_list
         .iter()
         .copied()
@@ -5075,15 +5454,8 @@ pub fn blast_hsp_stream_merge(
             hsplist.hsps.sort_by(score_compare_hsps);
         }
     }
+    *stream2.results.lock().unwrap() = blast_hsp_results_from_hsp_results(dst);
     0
-}
-
-/// blast-rs: Convenience wrapper around `blast_hsp_stream_merge`; not a direct NCBI C port.
-pub fn blast_hsp_stream_merge_simple(
-    stream1: Option<&HspStream>,
-    stream2: Option<&HspStream>,
-) -> i32 {
-    blast_hsp_stream_merge(None, 0, stream2, stream1, 0)
 }
 
 /// blast-rs: Port-shaped status helper corresponding to `BlastHSPStreamRegisterMTLock`; not a direct NCBI C port.
@@ -5204,6 +5576,18 @@ pub fn s_trim_hit_list(hitlist: Option<&mut HitList>, count: i32) {
     }
 }
 
+fn s_trim_blast_hit_list(hitlist: Option<&mut BlastHitList>, count: i32) {
+    let Some(hitlist) = hitlist else {
+        return;
+    };
+    let count = count.max(0) as usize;
+    if hitlist.hsplist_array.len() > count {
+        hitlist.hsplist_array.truncate(count);
+        hitlist.hsplist_count = hitlist.hsplist_array.iter().filter(|slot| slot.is_some()).count() as i32;
+        hitlist.hsplist_current = hitlist.hsplist_count;
+    }
+}
+
 /// Port of NCBI `BlastHSPCBSStreamClose` (`blast_hspstream.c:816`).
 /// naming: Rust spells HSP/CBS as separate snake_case tokens.
 pub fn blast_hsp_cbs_stream_close(stream: Option<&HspStream>, hitlist_size: i32) {
@@ -5216,15 +5600,23 @@ pub fn blast_hsp_cbs_stream_close(stream: Option<&HspStream>, hitlist_size: i32)
     s_finalize_writer(Some(stream));
     {
         let mut results = stream.results.lock().unwrap();
-        for hitlist in results.hitlists.iter_mut().flatten() {
+        for hitlist in results.hitlist_array.iter_mut().flatten() {
             let ref_hit_num = 500.max(hitlist_size).max(0) as usize;
             let min_buf_size = ref_hit_num + 600;
-            if min_buf_size + 100 >= hitlist.hsp_lists.len() {
+            let count = hitlist.hsplist_count.max(0) as usize;
+            if min_buf_size + 100 >= count {
                 continue;
             }
 
-            let _ = blast_hit_list_sort_by_evalue(hitlist);
-            let best_evalue = hitlist.hsp_lists[ref_hit_num].best_evalue;
+            let _ = blast_hit_list_sort_by_evalue_blast(hitlist);
+            let Some(best_evalue) = hitlist
+                .hsplist_array
+                .get(ref_hit_num)
+                .and_then(|slot| slot.as_ref())
+                .map(|list| list.best_evalue)
+            else {
+                continue;
+            };
             let mut mag = -180_i32;
             if best_evalue != 0.0 {
                 mag = best_evalue.log10() as i32;
@@ -5240,12 +5632,19 @@ pub fn blast_hsp_cbs_stream_close(stream: Option<&HspStream>, hitlist_size: i32)
                 9.9 * 10_f64.powi(mag)
             };
 
-            let max_index = hitlist.hsp_lists.len().saturating_sub(1);
+            let max_index = (hitlist.hsplist_count.max(0) as usize).saturating_sub(1);
             let mut index = min_buf_size;
             while index < max_index {
-                let evalue = hitlist.hsp_lists[index].best_evalue;
+                let Some(evalue) = hitlist
+                    .hsplist_array
+                    .get(index)
+                    .and_then(|slot| slot.as_ref())
+                    .map(|list| list.best_evalue)
+                else {
+                    break;
+                };
                 if evalue != 0.0 && evalue_limit < evalue {
-                    s_trim_hit_list(Some(hitlist), index as i32);
+                    s_trim_blast_hit_list(Some(hitlist), index as i32);
                     break;
                 }
                 index += 100;
@@ -5261,6 +5660,13 @@ mod tests {
     use std::sync::Mutex as TestMutex;
 
     static ENV_LOCK: TestMutex<()> = TestMutex::new(());
+
+    fn write_legacy_hsp_list(stream: &HspStream, query_index: i32, hsp_list: HspList) -> i32 {
+        stream.blast_hspstream_write_blast_hsp_list(
+            query_index,
+            blast_hsp_list_from_legacy_hsp_list(hsp_list, query_index),
+        )
+    }
 
     struct RecordingSeqSrc {
         seqs: Vec<Vec<u8>>,
@@ -5345,7 +5751,7 @@ mod tests {
             pat_info: None,
             map_info: None,
         });
-        stream.blast_hspstream_write(0, list1);
+        write_legacy_hsp_list(&stream, 0, list1);
 
         let mut list2 = HspList::new(5);
         list2.add_hsp(Hsp {
@@ -5368,7 +5774,7 @@ mod tests {
             pat_info: None,
             map_info: None,
         });
-        stream.blast_hspstream_write(0, list2);
+        write_legacy_hsp_list(&stream, 0, list2);
 
         let results = stream.into_results();
         assert!(results.hitlists[0].is_some());
@@ -5465,7 +5871,7 @@ mod tests {
         for &(oid, evalue) in &oids_and_evalues {
             let mut list = HspList::new(oid);
             list.add_hsp(make_hsp(50, evalue));
-            stream.blast_hspstream_write(0, list);
+            write_legacy_hsp_list(&stream, 0, list);
         }
 
         let mut results = stream.into_results();
@@ -5497,14 +5903,14 @@ mod tests {
         list1.add_hsp(make_hsp(20, 1e-3));
         let mut list2 = HspList::new(3);
         list2.add_hsp(make_hsp(30, 1e-4));
-        assert_eq!(stream1.blast_hspstream_write(0, list1), 0);
-        assert_eq!(stream2.blast_hspstream_write(0, list2), 0);
+        assert_eq!(write_legacy_hsp_list(&stream1, 0, list1), 0);
+        assert_eq!(write_legacy_hsp_list(&stream2, 0, list2), 0);
         assert_eq!(
-            blast_hsp_stream_merge_simple(Some(&stream1), Some(&stream2)),
+            blast_hsp_stream_merge(None, 0, Some(&stream2), Some(&stream1), 0),
             0
         );
         blast_hsp_stream_close(Some(&stream1));
-        assert_eq!(stream1.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream1, 0, HspList::new(9)), -1);
 
         let mut results = stream1.into_results();
         let hitlist = results.hitlists[0].as_mut().expect("hitlist");
@@ -5536,10 +5942,10 @@ mod tests {
         src_list.add_hsp(make_hsp(40, 1e-12));
         src_list.add_hsp(make_hsp(20, 1e-5));
 
-        assert_eq!(stream1.blast_hspstream_write(0, dst_list), 0);
-        assert_eq!(stream2.blast_hspstream_write(0, src_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream1, 0, dst_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream2, 0, src_list), 0);
         assert_eq!(
-            blast_hsp_stream_merge_simple(Some(&stream1), Some(&stream2)),
+            blast_hsp_stream_merge(None, 0, Some(&stream2), Some(&stream1), 0),
             0
         );
 
@@ -5569,7 +5975,7 @@ mod tests {
         local_hsp.subject_offset = 100;
         local_hsp.subject_end = 150;
         local_list.hsps = vec![local_hsp];
-        assert_eq!(chunk_stream.blast_hspstream_write(0, local_list), 0);
+        assert_eq!(write_legacy_hsp_list(&chunk_stream, 0, local_list), 0);
 
         let mut global_hitlist = blast_hit_list_new(10);
         let mut global_list = HspList::new(42);
@@ -5582,7 +5988,12 @@ mod tests {
         global_hsp.subject_end = 110;
         global_list.hsps = vec![global_hsp];
         global_hitlist.hsp_lists.push(global_list);
-        global_stream.results.lock().unwrap().hitlists[2] = Some(global_hitlist);
+        global_stream.results.lock().unwrap().hitlist_array[2] =
+            blast_hsp_results_from_hsp_results(HspResults {
+                hitlists: vec![None, None, Some(global_hitlist)],
+            })
+            .hitlist_array
+            .remove(2);
 
         let mut split = crate::split_query::split_query_blk_new(1, true).expect("split query");
         assert_eq!(
@@ -5661,13 +6072,18 @@ mod tests {
         let mut oid1 = HspList::new(1);
         oid1.add_hsp(make_hsp(30, 1e-4));
 
-        assert_eq!(stream.blast_hspstream_write(0, oid5), 0);
-        assert_eq!(stream.blast_hspstream_write(0, oid1), 0);
-        let mut results = HspResults::new(1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, oid5), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, oid1), 0);
+        let mut results = blast_hsp_results_new_blast(1);
         let mut traceback_list = HspList::new(7);
         traceback_list.add_hsp(make_hsp(40, 1e-8));
         assert_eq!(
-            blast_hsp_results_insert_hsp_list(&mut results, 0, traceback_list, 0),
+            blast_hsp_results_insert_blast_hsp_list_native(
+                &mut results,
+                0,
+                blast_hsp_list_from_legacy_hsp_list(traceback_list, 0),
+                0
+            ),
             0
         );
         BlastHSPStreamTBackClose(Some(&stream), Some(&mut results));
@@ -5675,9 +6091,10 @@ mod tests {
         assert_eq!(blast_hsp_stream_pipe_counts(Some(&stream)), Some((0, 0)));
         assert_eq!(PIPE_RUN_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(PIPE_FREE_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let results = hsp_results_from_blast_hsp_results(results);
         let hitlist = results.hitlists[0].as_ref().expect("traceback hitlist");
         assert_eq!(hitlist.hsp_lists[0].oid, 99);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), 0);
         blast_hsp_stream_close(Some(&stream));
         let (status, list) = blast_hsp_stream_read(Some(&stream));
         assert_eq!(status, K_BLAST_HSP_STREAM_SUCCESS);
@@ -5692,7 +6109,7 @@ mod tests {
         list.add_hsp(make_hsp(50, 1e-5));
         list.add_hsp(make_hsp(20, 1e-3));
 
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         blast_hsp_stream_close(Some(&stream));
 
         let (status, list) = blast_hsp_stream_read(Some(&stream));
@@ -5707,6 +6124,47 @@ mod tests {
     }
 
     #[test]
+    fn translated_hsp_stream_into_results_preserves_closed_query_index() {
+        let stream = blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 2, None);
+        let mut list = HspList::new(17);
+        list.add_hsp(make_hsp(40, 1e-8));
+        assert_eq!(write_legacy_hsp_list(&stream, 1, list), 0);
+
+        blast_hsp_stream_close(Some(&stream));
+        let results = stream.into_results();
+        assert!(results.hitlists[0].is_none());
+        assert_eq!(
+            results.hitlists[1]
+                .as_ref()
+                .expect("query 1 hitlist")
+                .hsp_lists[0]
+                .oid,
+            17
+        );
+    }
+
+    #[test]
+    fn translated_hsp_stream_reset_clears_read_state_and_reopens_writes() {
+        let stream = blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
+        let mut first = HspList::new(4);
+        first.add_hsp(make_hsp(20, 1e-3));
+        assert_eq!(write_legacy_hsp_list(&stream, 0, first), 0);
+        blast_hsp_stream_close(Some(&stream));
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(5)), -1);
+
+        assert_eq!(blast_hsp_stream_reset(Some(&stream)), K_BLAST_HSP_STREAM_SUCCESS);
+        let mut second = HspList::new(9);
+        second.add_hsp(make_hsp(30, 1e-4));
+        assert_eq!(write_legacy_hsp_list(&stream, 0, second), 0);
+        blast_hsp_stream_close(Some(&stream));
+
+        let (status, list) = blast_hsp_stream_read(Some(&stream));
+        assert_eq!(status, K_BLAST_HSP_STREAM_SUCCESS);
+        assert_eq!(list.expect("post-reset list").oid, 9);
+        assert_eq!(blast_hsp_stream_read(Some(&stream)).0, K_BLAST_HSP_STREAM_EOF);
+    }
+
+    #[test]
     fn translated_hsp_stream_read_and_batch_read_follow_closed_oid_order() {
         let stream = blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 2, None);
         let mut q0_oid4 = HspList::new(4);
@@ -5716,9 +6174,9 @@ mod tests {
         let mut q1_oid2 = HspList::new(2);
         q1_oid2.add_hsp(make_hsp(40, 1e-5));
 
-        assert_eq!(stream.blast_hspstream_write(0, q0_oid4), 0);
-        assert_eq!(stream.blast_hspstream_write(0, q0_oid2), 0);
-        assert_eq!(stream.blast_hspstream_write(1, q1_oid2), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, q0_oid4), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, q0_oid2), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 1, q1_oid2), 0);
 
         let mut batch = blast_hsp_stream_result_batch_init(1);
         assert_eq!(
@@ -5751,9 +6209,9 @@ mod tests {
         let mut q1_oid2 = HspList::new(2);
         q1_oid2.add_hsp(make_hsp(40, 1e-5));
 
-        assert_eq!(stream.blast_hspstream_write(0, q0_oid4), 0);
-        assert_eq!(stream.blast_hspstream_write(0, q0_oid2), 0);
-        assert_eq!(stream.blast_hspstream_write(1, q1_oid2), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, q0_oid4), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, q0_oid2), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 1, q1_oid2), 0);
 
         let mut batch = blast_hsp_stream_result_batch_init(2);
         assert_eq!(
@@ -5785,17 +6243,18 @@ mod tests {
         for &(oid, evalue) in &[(1, 1e-10), (2, 1e-2), (3, 1e-20)] {
             let mut list = HspList::new(oid);
             list.add_hsp(make_hsp(50, evalue));
-            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+            assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         }
 
         blast_hsp_stream_close(Some(&stream));
 
         assert!(stream.sorted_hsplists.lock().unwrap().is_empty());
-        let hitlist_oids: Vec<i32> = stream.results.lock().unwrap().hitlists[0]
+        let hitlist_oids: Vec<i32> = stream.results.lock().unwrap().hitlist_array[0]
             .as_ref()
             .expect("hitlist")
-            .hsp_lists
+            .hsplist_array
             .iter()
+            .flatten()
             .map(|list| list.oid)
             .collect();
         assert_eq!(hitlist_oids, vec![2, 1, 3]);
@@ -5828,7 +6287,7 @@ mod tests {
         let stream_ref = stream.as_ref().expect("stream");
         let mut list = HspList::new(8);
         list.add_hsp(make_hsp(40, 1e-8));
-        assert_eq!(stream_ref.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream_ref, 0, list), 0);
 
         blast_hsp_stream_close(Some(stream_ref));
         blast_hsp_stream_close(Some(stream_ref));
@@ -5858,9 +6317,9 @@ mod tests {
         let mut q1_oid2 = HspList::new(2);
         q1_oid2.add_hsp(make_hsp(40, 1e-5));
 
-        assert_eq!(stream.blast_hspstream_write(0, q0_oid4), 0);
-        assert_eq!(stream.blast_hspstream_write(0, q0_oid2), 0);
-        assert_eq!(stream.blast_hspstream_write(1, q1_oid2), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, q0_oid4), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, q0_oid2), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 1, q1_oid2), 0);
         assert_eq!(s_blast_hsp_stream_count_num_oids(Some(&stream)), 2);
 
         let (status, batches) = blast_hsp_stream_to_hsp_stream_results_batch(Some(&stream));
@@ -5897,7 +6356,11 @@ mod tests {
         }
         {
             let mut results = stream.results.lock().unwrap();
-            results.hitlists[0] = Some(hitlist);
+            results.hitlist_array[0] = blast_hsp_results_from_hsp_results(HspResults {
+                hitlists: vec![Some(hitlist)],
+            })
+            .hitlist_array
+            .remove(0);
         }
 
         blast_hsp_cbs_stream_close(Some(&stream), 500);
@@ -5943,10 +6406,10 @@ mod tests {
         assert!(writer.run_fn_ptr.is_none());
         assert!(writer.final_fn_ptr.is_none());
         assert!(writer.free_fn_ptr.is_none());
-        blast_hsp_stream_simple_close(Some(&stream));
+        blast_hsp_stream_close(Some(&stream));
         assert_eq!(blast_hsp_stream_pipe_counts(Some(&stream)), Some((0, 1)));
         blast_hsp_stream_mapping_close(Some(&stream));
-        let mut results = HspResults::new(1);
+        let mut results = blast_hsp_results_new_blast(1);
         BlastHSPStreamTBackClose(Some(&stream), Some(&mut results));
         assert_eq!(blast_hsp_stream_pipe_counts(Some(&stream)), Some((0, 0)));
     }
@@ -5959,7 +6422,7 @@ mod tests {
         let stream = blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let mut list = HspList::new(7);
         list.add_hsp(make_hsp(40, 1e-8));
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
 
         let pipe = BlastHSPPipe {
             data: Some(BlastHSPPipeData::Opaque),
@@ -5989,7 +6452,7 @@ mod tests {
         combined.as_mut().unwrap().add_hsp(make_hsp(30, 1e-8));
 
         assert_eq!(
-            blast_hsp_lists_merge_simple(&mut incoming, &mut combined, 10),
+            blast_hsp_lists_merge(&mut incoming, &mut combined, 10, None, 0, 0, true, false),
             0
         );
         assert!(incoming.is_none());
@@ -6004,7 +6467,7 @@ mod tests {
         combined.as_mut().unwrap().add_hsp(make_hsp(40, 1e-12));
         combined.as_mut().unwrap().add_hsp(make_hsp(30, 1e-8));
         assert_eq!(
-            blast_hsp_lists_merge_simple(&mut incoming, &mut combined, 2),
+            blast_hsp_lists_merge(&mut incoming, &mut combined, 2, None, 0, 0, true, false),
             0
         );
         assert!(incoming.is_none());
@@ -6021,7 +6484,16 @@ mod tests {
         let mut combined = Some(HspList::new(7));
         combined.as_mut().unwrap().add_hsp(make_hsp(30, 1e-8));
         assert_eq!(
-            blast_hsp_lists_merge_simple(&mut empty_incoming, &mut combined, 10),
+            blast_hsp_lists_merge(
+                &mut empty_incoming,
+                &mut combined,
+                10,
+                None,
+                0,
+                0,
+                true,
+                false,
+            ),
             0
         );
         assert!(empty_incoming.is_some());
@@ -6099,7 +6571,7 @@ mod tests {
             .blast_hit_list_update(existing);
 
         assert_eq!(
-            blast_hit_list_merge_simple(&mut old_hit, &mut combined_hit),
+            blast_hit_list_merge(&mut old_hit, &mut combined_hit, 0, None, 0, true),
             0
         );
         assert!(old_hit.is_none());
@@ -6180,7 +6652,7 @@ mod tests {
         }
 
         assert_eq!(
-            blast_hit_list_merge_simple(&mut old_hit, &mut combined_hit),
+            blast_hit_list_merge(&mut old_hit, &mut combined_hit, 0, None, 0, true),
             0
         );
 
@@ -6214,7 +6686,7 @@ mod tests {
         let mut list = HspList::new(42);
         list.add_hsp(make_hsp(75, 1e-15));
         list.add_hsp(make_hsp(30, 1e-3));
-        stream.blast_hspstream_write(0, list);
+        write_legacy_hsp_list(&stream, 0, list);
 
         let results = stream.into_results();
 
@@ -6564,7 +7036,7 @@ mod tests {
         )]));
         assert_eq!(
             blast_hsp_get_adjusted_offsets(crate::program::BLASTX, &hsp, 99, 100),
-            (94, 86, 6, 11)
+            (95, 87, 6, 11)
         );
 
         hsp.query_frame = 0;
@@ -6573,7 +7045,7 @@ mod tests {
         hsp.subject_frame = 2;
         assert_eq!(
             blast_hsp_get_adjusted_offsets(crate::program::TBLASTN, &hsp, 20, 120),
-            (2, 4, 2, 15)
+            (2, 4, 8, 16)
         );
 
         hsp.query_offset = 10;
@@ -7091,7 +7563,7 @@ mod tests {
     fn test_hsp_stream_result_batch_lifecycle_and_append() {
         let mut batch = blast_hsp_stream_result_batch_init(2);
         assert_eq!(batch.hsplist_array.len(), 2);
-        batch.hsplist_array[0] = Some(HspList::new(42));
+        batch.hsplist_array[0] = Some(blast_hsp_list_from_legacy_hsp_list(HspList::new(42), 0));
         batch.num_hsplists = 1;
         let mut batch_slot = Some(batch);
 
@@ -8944,7 +9416,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut progress = crate::util::s_blast_progress_new(None);
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
@@ -8959,7 +9431,7 @@ mod tests {
             30,
             true,
             |hsp_list| {
-                hsp_list.hsps[0].score += 5;
+                hsp_list.hsp_array[0].as_mut().unwrap().score += 5;
                 0
             },
             None,
@@ -9006,7 +9478,7 @@ mod tests {
         );
         assert_eq!(status, crate::util::BLASTERR_INVALIDPARAM);
         assert!(results.is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), 0);
     }
 
     #[test]
@@ -9035,7 +9507,7 @@ mod tests {
         let results = results.expect("empty traceback results");
         assert_eq!(results.hitlists.len(), 1);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9047,13 +9519,13 @@ mod tests {
         let mut q0_hsp = make_hsp(20, 1.0e-3);
         q0_hsp.context = 0;
         q0_list.add_hsp(q0_hsp);
-        assert_eq!(stream.blast_hspstream_write(0, q0_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, q0_list), 0);
 
         let mut q1_list = HspList::new(17);
         let mut q1_hsp = make_hsp(30, 1.0e-4);
         q1_hsp.context = 1;
         q1_list.add_hsp(q1_hsp);
-        assert_eq!(stream.blast_hspstream_write(1, q1_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 1, q1_list), 0);
 
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
@@ -9070,7 +9542,7 @@ mod tests {
             40,
             true,
             |hsp_list| {
-                seen_contexts.push(hsp_list.hsps[0].context);
+                seen_contexts.push(hsp_list.hsp_array[0].as_ref().unwrap().context);
                 0
             },
             None,
@@ -9098,7 +9570,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut callback_called = false;
 
         let (status, results) = blast_compute_traceback(
@@ -9110,7 +9582,8 @@ mod tests {
             true,
             |hsp_list| {
                 callback_called = true;
-                hsp_list.hsps.clear();
+                hsp_list.hsp_array.clear();
+                hsp_list.hspcnt = 0;
                 0
             },
             None,
@@ -9121,14 +9594,14 @@ mod tests {
         assert!(callback_called);
         let results = results.expect("results");
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
     fn blast_compute_traceback_skips_stream_empty_lists_without_callback() {
         let stream = blast_hsp_stream_new(crate::program::UNDEFINED, 0, false, 1, None);
         let query_info = crate::queryinfo::QueryInfo::new_blastp(&[30]);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(42)), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(42)), 0);
         let mut callback_called = false;
 
         let (status, results) = blast_compute_traceback(
@@ -9151,7 +9624,7 @@ mod tests {
         assert!(!callback_called);
         let results = results.expect("results");
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9162,7 +9635,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
 
         let (status, results) = blast_compute_traceback(
             crate::program::BLASTP,
@@ -9178,7 +9651,7 @@ mod tests {
 
         assert_eq!(status, 7);
         assert!(results.is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9194,7 +9667,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
 
         let (status, results) = blast_compute_traceback(
             crate::program::BLASTP,
@@ -9210,7 +9683,7 @@ mod tests {
 
         assert_eq!(status, 1);
         assert!(results.is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9235,7 +9708,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
 
         let (status, results) = blast_compute_traceback(
             crate::program::BLASTP,
@@ -9251,7 +9724,7 @@ mod tests {
 
         assert_eq!(status, 1);
         assert!(results.is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9288,7 +9761,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
 
         let (status, results) = blast_compute_traceback(
             crate::program::BLASTP,
@@ -9298,7 +9771,7 @@ mod tests {
             30,
             true,
             |hsp_list| {
-                hsp_list.hsps[0].context = 1;
+                hsp_list.hsp_array[0].as_mut().unwrap().context = 1;
                 0
             },
             None,
@@ -9307,7 +9780,7 @@ mod tests {
 
         assert_eq!(status, 1);
         assert!(results.is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9319,7 +9792,7 @@ mod tests {
             let mut hsp = make_hsp(20 + oid, 1.0e-3);
             hsp.context = 0;
             list.add_hsp(hsp);
-            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+            assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         }
         let hit_options = HitSavingOptions {
             mask_level: 101,
@@ -9353,7 +9826,7 @@ mod tests {
         assert_eq!(interrupt_calls, 2);
         assert_eq!(callback_oids, vec![1]);
         assert_eq!(progress.stage, crate::util::EBlastStage::TracebackSearch);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9365,7 +9838,7 @@ mod tests {
             let mut hsp = make_hsp(20, evalue);
             hsp.context = 0;
             list.add_hsp(hsp);
-            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+            assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         }
         let hit_options = HitSavingOptions {
             hitlist_size: 1,
@@ -9401,7 +9874,7 @@ mod tests {
             let mut hsp = make_hsp(20, evalue);
             hsp.context = 0;
             list.add_hsp(hsp);
-            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+            assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         }
         let hit_options = HitSavingOptions {
             hitlist_size: 2,
@@ -9447,7 +9920,7 @@ mod tests {
         strong.subject_offset = 0;
         strong.subject_end = 100;
         strong_list.add_hsp(strong);
-        assert_eq!(stream.blast_hspstream_write(0, strong_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, strong_list), 0);
 
         let mut weak_list = HspList::new(2);
         let mut weak = make_hsp(10, 1.0e-2);
@@ -9457,7 +9930,7 @@ mod tests {
         weak.subject_offset = 10;
         weak.subject_end = 90;
         weak_list.add_hsp(weak);
-        assert_eq!(stream.blast_hspstream_write(0, weak_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, weak_list), 0);
 
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
@@ -9506,7 +9979,7 @@ mod tests {
         trimmed_before_coverage.query_offset = 0;
         trimmed_before_coverage.query_end = 90;
         kept_list.add_hsp(trimmed_before_coverage);
-        assert_eq!(stream.blast_hspstream_write(0, kept_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, kept_list), 0);
 
         let mut emptied_list = HspList::new(22);
         let mut weak_coverage = make_hsp(50, 1.0e-2);
@@ -9514,7 +9987,7 @@ mod tests {
         weak_coverage.query_offset = 0;
         weak_coverage.query_end = 5;
         emptied_list.add_hsp(weak_coverage);
-        assert_eq!(stream.blast_hspstream_write(0, emptied_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, emptied_list), 0);
 
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
@@ -9577,7 +10050,7 @@ mod tests {
         opposite_outside.query_offset = 10;
         opposite_outside.query_end = 40;
         list.add_hsp(opposite_outside);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
 
         let mut filter_opts = crate::hspfilter_culling::blast_hspfiltering_options_new();
         filter_opts.subject_besthit_opts =
@@ -9629,7 +10102,7 @@ mod tests {
         weak.subject_offset = 10;
         weak.subject_end = 70;
         weak_list.add_hsp(weak);
-        assert_eq!(stream.blast_hspstream_write(0, weak_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, weak_list), 0);
 
         let mut strong_list = HspList::new(11);
         let mut strong = make_hsp(100, 1.0e-30);
@@ -9639,7 +10112,7 @@ mod tests {
         strong.subject_offset = 0;
         strong.subject_end = 80;
         strong_list.add_hsp(strong);
-        assert_eq!(stream.blast_hspstream_write(0, strong_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, strong_list), 0);
 
         let mut filter_opts = crate::hspfilter_culling::blast_hspfiltering_options_new();
         filter_opts.culling_opts =
@@ -9681,7 +10154,7 @@ mod tests {
         hsp.query_offset = 0;
         hsp.query_end = 90;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
             mask_level: 101,
@@ -9747,7 +10220,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let hit_options = HitSavingOptions::default();
         let mut progress = crate::util::s_blast_progress_new(None);
         let mut interrupt = |_progress: &crate::util::SBlastProgress| true;
@@ -9769,7 +10242,7 @@ mod tests {
         assert_eq!(status, crate::diagnostics::BLASTERR_INTERRUPTED);
         assert!(results.is_none());
         assert_eq!(progress.stage, crate::util::EBlastStage::TracebackSearch);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -9780,7 +10253,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
             mask_level: 101,
@@ -9797,7 +10270,7 @@ mod tests {
             true,
             false,
             |_hsp_list| {
-                callback_write_status = stream.blast_hspstream_write(0, HspList::new(9));
+                callback_write_status = write_legacy_hsp_list(&stream, 0, HspList::new(9));
                 0
             },
             0,
@@ -9809,7 +10282,7 @@ mod tests {
         assert_eq!(hitlist.hsp_lists.len(), 1);
         assert_eq!(hitlist.hsp_lists[0].oid, 7);
         assert_eq!(callback_write_status, -1);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(10)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(10)), -1);
     }
 
     #[test]
@@ -9854,7 +10327,7 @@ mod tests {
 
         assert_eq!(status, crate::util::BLASTERR_INVALIDPARAM);
         assert!(results.is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), 0);
     }
 
     #[test]
@@ -9865,7 +10338,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
             mask_level: 101,
@@ -9882,7 +10355,7 @@ mod tests {
             true,
             false,
             |_hsp_list| {
-                callback_write_status = stream.blast_hspstream_write(0, HspList::new(9));
+                callback_write_status = write_legacy_hsp_list(&stream, 0, HspList::new(9));
                 0
             },
             None,
@@ -9893,7 +10366,7 @@ mod tests {
         assert_eq!(status, 0);
         assert!(results.is_some());
         assert_eq!(callback_write_status, -1);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(10)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(10)), -1);
     }
 
     #[test]
@@ -9910,7 +10383,7 @@ mod tests {
             let mut hsp = make_hsp(100 - (index % 10), evalue);
             hsp.context = 0;
             list.add_hsp(hsp);
-            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+            assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         }
         let hit_options = HitSavingOptions {
             hitlist_size: 500,
@@ -9942,7 +10415,7 @@ mod tests {
         let results = results.expect("results");
         let hitlist = results.hitlists[0].as_ref().expect("query hitlist");
         assert_eq!(hitlist.hsp_lists.len(), 500);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9999)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9999)), -1);
     }
 
     fn make_rps_traceback_info() -> RpsTracebackInfo {
@@ -10356,7 +10829,7 @@ mod tests {
             (GapAlignOpType::Del, 1),
         ]));
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let hit_options = HitSavingOptions {
             hitlist_size: 10,
@@ -10379,7 +10852,7 @@ mod tests {
                 // FREQ_RATIO_SCALE = 1e9 (NCBI blast_rps.h:83): 10052 / 1e9.
                 assert!((ratios[2][0] - 1.0052e-5).abs() < 1e-12);
                 assert!((karlin_k.expect("K") - 0.24).abs() < 1e-12);
-                hsp_list.hsps[0].score += 5;
+                hsp_list.hsp_array[0].as_mut().unwrap().score += 5;
                 0
             },
             None,
@@ -10462,7 +10935,7 @@ mod tests {
             ),
             -1
         );
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), 0);
     }
 
     #[test]
@@ -10492,7 +10965,7 @@ mod tests {
         assert!(!callback_called);
         assert_eq!(results.hitlists.len(), 1);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10505,7 +10978,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -10529,7 +11002,7 @@ mod tests {
 
         assert!(!callback_called);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), 0);
     }
 
     #[test]
@@ -10542,7 +11015,7 @@ mod tests {
             let mut hsp = make_hsp(20, evalue);
             hsp.context = 0;
             list.add_hsp(hsp);
-            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+            assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         }
         let mut results = HspResults::new(1);
         let hit_options = HitSavingOptions {
@@ -10581,7 +11054,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
 
         let status = s_rps_compute_traceback(
@@ -10598,7 +11071,7 @@ mod tests {
 
         assert_eq!(status, 7);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10610,7 +11083,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -10623,7 +11096,8 @@ mod tests {
             Some(&mut results),
             |hsp_list, _gap_data, _profile_index, _karlin_k| {
                 callback_called = true;
-                hsp_list.hsps.clear();
+                hsp_list.hsp_array.clear();
+                hsp_list.hspcnt = 0;
                 0
             },
             None,
@@ -10633,7 +11107,7 @@ mod tests {
         assert_eq!(status, 0);
         assert!(callback_called);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10659,7 +11133,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -10681,7 +11155,7 @@ mod tests {
         assert_eq!(status, 1);
         assert!(callback_called);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10719,7 +11193,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
 
         let status = s_rps_compute_traceback(
@@ -10731,7 +11205,7 @@ mod tests {
             Some(&mut results),
             |hsp_list, _gap_data, profile_index, _karlin_k| {
                 assert_eq!(profile_index, 1);
-                hsp_list.hsps[0].context = 1;
+                hsp_list.hsp_array[0].as_mut().unwrap().context = 1;
                 0
             },
             None,
@@ -10740,7 +11214,7 @@ mod tests {
 
         assert_eq!(status, 1);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10752,7 +11226,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut progress = crate::util::s_blast_progress_new(None);
         let mut interrupted = false;
@@ -10779,7 +11253,7 @@ mod tests {
         assert!(interrupted);
         assert_eq!(progress.stage, crate::util::EBlastStage::TracebackSearch);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10792,7 +11266,7 @@ mod tests {
             let mut hsp = make_hsp(20, evalue);
             hsp.context = 0;
             list.add_hsp(hsp);
-            assert_eq!(stream.blast_hspstream_write(0, list), 0);
+            assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         }
         let mut results = HspResults::new(1);
         let mut interrupt_calls = 0usize;
@@ -10828,7 +11302,7 @@ mod tests {
             .map(|list| (list.oid, list.best_evalue))
             .collect();
         assert_eq!(summary, vec![(1, 1.0e-20), (0, 1.0e-2)]);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10840,7 +11314,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -10862,7 +11336,7 @@ mod tests {
         assert_eq!(status, 0);
         assert!(!callback_called);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10874,7 +11348,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -10896,7 +11370,7 @@ mod tests {
         assert_eq!(status, 0);
         assert!(!callback_called);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10919,7 +11393,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -10941,7 +11415,7 @@ mod tests {
         assert_eq!(status, 0);
         assert!(!callback_called);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -10964,13 +11438,13 @@ mod tests {
         let mut invalid_hsp = make_hsp(20, 1.0e-3);
         invalid_hsp.context = 0;
         invalid_list.add_hsp(invalid_hsp);
-        assert_eq!(stream.blast_hspstream_write(0, invalid_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, invalid_list), 0);
 
         let mut valid_list = HspList::new(1);
         let mut valid_hsp = make_hsp(30, 1.0e-12);
         valid_hsp.context = 0;
         valid_list.add_hsp(valid_hsp);
-        assert_eq!(stream.blast_hspstream_write(0, valid_list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, valid_list), 0);
         let mut results = HspResults::new(1);
         let mut callback_profiles = Vec::new();
 
@@ -10998,7 +11472,7 @@ mod tests {
         let hitlist = results.hitlists[0].as_ref().expect("valid profile result");
         assert_eq!(hitlist.hsp_lists.len(), 1);
         assert_eq!(hitlist.hsp_lists[0].oid, 1);
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -11017,7 +11491,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -11039,7 +11513,7 @@ mod tests {
         assert_eq!(status, -1);
         assert!(!callback_called);
         assert!(results.hitlists[0].is_none());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), 0);
     }
 
     #[test]
@@ -11052,7 +11526,7 @@ mod tests {
         let mut hsp = make_hsp(20, 1.0e-3);
         hsp.context = 0;
         list.add_hsp(hsp);
-        assert_eq!(stream.blast_hspstream_write(0, list), 0);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, list), 0);
         let mut results = HspResults::new(1);
         let mut callback_called = false;
 
@@ -11076,7 +11550,7 @@ mod tests {
         assert_eq!(status, 0);
         assert!(callback_called);
         assert!(results.hitlists[0].is_some());
-        assert_eq!(stream.blast_hspstream_write(0, HspList::new(9)), -1);
+        assert_eq!(write_legacy_hsp_list(&stream, 0, HspList::new(9)), -1);
     }
 
     #[test]
@@ -11090,7 +11564,7 @@ mod tests {
         let mut non_cbs_hsp = make_hsp(20, 1.0e-3);
         non_cbs_hsp.query_frame = 1;
         non_cbs_list.add_hsp(non_cbs_hsp);
-        assert_eq!(non_cbs_stream.blast_hspstream_write(0, non_cbs_list), 0);
+        assert_eq!(write_legacy_hsp_list(&non_cbs_stream, 0, non_cbs_list), 0);
         let mut non_cbs_results = HspResults::new(1);
         let mut non_cbs_called = false;
 
@@ -11119,7 +11593,7 @@ mod tests {
         let mut cbs_hsp = make_hsp(20, 1.0e-3);
         cbs_hsp.query_frame = 1;
         cbs_list.add_hsp(cbs_hsp);
-        assert_eq!(cbs_stream.blast_hspstream_write(0, cbs_list), 0);
+        assert_eq!(write_legacy_hsp_list(&cbs_stream, 0, cbs_list), 0);
         let mut cbs_results = HspResults::new(1);
         let mut cbs_called = false;
 
@@ -11148,7 +11622,7 @@ mod tests {
         let mut rps_cbs_list = HspList::new(1);
         let rps_cbs_hsp = make_hsp(20, 1.0e-3);
         rps_cbs_list.add_hsp(rps_cbs_hsp);
-        assert_eq!(rps_cbs_stream.blast_hspstream_write(0, rps_cbs_list), 0);
+        assert_eq!(write_legacy_hsp_list(&rps_cbs_stream, 0, rps_cbs_list), 0);
         let mut rps_cbs_results = HspResults::new(1);
         let mut rps_cbs_called = false;
 

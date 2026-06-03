@@ -3149,6 +3149,20 @@ mod struct_tests {
     }
 
     #[test]
+    fn blast_gap_align_struct_new_rejects_extension_without_scoring_params() {
+        let mut options = crate::options::ExtensionOptions::new_blastn();
+        options.prelim_gap_ext = crate::options::PrelimGapExt::DynProgScoreOnly;
+        let extension = crate::parameters::ExtensionParameters {
+            options,
+            gap_x_dropoff: 33,
+            gap_x_dropoff_final: 80,
+            gap_trigger: 22,
+        };
+
+        assert!(blast_gap_align_struct_new(&extension).is_none());
+    }
+
+    #[test]
     fn blast_gap_align_struct_new_initializes_greedy_and_chaining_workspace() {
         let scoring = crate::parameters::ScoringParameters::from_options(
             &crate::options::ScoringOptions {
@@ -12201,6 +12215,7 @@ mod struct_tests {
             10,    // length_adjustment
             1e9,   // eff_searchsp
             None,  // caller already populated e-values
+            None,
             None,  // no link-HSP context
             -1.0,  // pvalue_for_this_pair: out of [0,1] → skip composition
             0.1,   // max_evalue
@@ -12244,6 +12259,7 @@ mod struct_tests {
             1e9,
             None,
             None,
+            None,
             -1.0,
             0.01, // strict threshold
             false,
@@ -12285,6 +12301,25 @@ mod struct_tests {
         };
         let search_space = 10_000.0;
         let expected_evalue = kbp.raw_to_evalue(70, search_space);
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: search_space as i64,
+                length_adjustment: 10,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 100,
+        };
+        let mut sbp = crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1)
+            .expect("score block");
+        sbp.kbp_gap = vec![kbp.clone()];
+        sbp.gbp = None;
 
         let (best_score, best_evalue) = s_hitlist_evaluate_and_purge(
             &mut list,
@@ -12293,7 +12328,8 @@ mod struct_tests {
             100,
             10,
             search_space,
-            Some(&kbp),
+            Some(&query_info),
+            Some(&sbp),
             None,
             -1.0,
             10.0,
@@ -12342,7 +12378,36 @@ mod struct_tests {
         };
         let search_space = 25_000.0;
 
-        blast_hsp_list_get_evalues_simple(&mut list, &kbp, search_space);
+        let query_info = crate::queryinfo::QueryInfo {
+            num_queries: 1,
+            contexts: vec![crate::queryinfo::ContextInfo {
+                query_offset: 0,
+                query_length: 100,
+                eff_searchsp: search_space as i64,
+                length_adjustment: 0,
+                query_index: 0,
+                frame: 0,
+                is_valid: true,
+                segment_flags: crate::queryinfo::E_NO_SEGMENTS,
+            }],
+            max_length: 100,
+            min_length: 100,
+        };
+        let mut sbp = crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, 1)
+            .expect("score block");
+        sbp.kbp_gap = vec![kbp.clone()];
+        sbp.gbp = None;
+        let _ = blast_hsp_list_get_evalues(
+            crate::program::BLASTP,
+            &query_info,
+            1000,
+            &mut list,
+            true,
+            false,
+            &sbp,
+            0.0,
+            1.0,
+        );
 
         let expected: Vec<(f64, f64)> = [60, 80, 40]
             .into_iter()
@@ -12367,7 +12432,9 @@ mod struct_tests {
                 // NCBI `s_BlastGetBestEvalue` (`blast_hits.c:1742`) seeds with `(double)INT4_MAX`.
                 .fold(i32::MAX as f64, f64::min)
         );
-        blast_hsp_list_get_bit_scores_simple(&mut list, &kbp);
+        for hsp in &mut list.hsps {
+            hsp.bit_score = kbp.raw_to_bit(hsp.score);
+        }
         for (hsp, (_, bit_score)) in list.hsps.iter().zip(expected.iter()) {
             assert_eq!(hsp.bit_score, *bit_score);
         }
@@ -12405,6 +12472,7 @@ mod struct_tests {
             100,
             10,
             1e9,
+            None,
             None,
             None,
             -1.0,
@@ -12592,6 +12660,7 @@ mod struct_tests {
             100,
             0,
             10_000.0,
+            None,
             None,
             Some(&link_context),
             -1.0,
@@ -15156,6 +15225,7 @@ where
     workspace.position_based = params.position_based;
 
     if let Some(extension) = params.extension {
+        let scoring = params.scoring?;
         workspace.gap_x_dropoff = extension.gap_x_dropoff;
         workspace.max_mismatches = extension.options.max_mismatches;
         workspace.mismatch_window = extension.options.mismatch_window;
@@ -15164,7 +15234,6 @@ where
             if extension.options.prelim_gap_ext == crate::options::PrelimGapExt::DynProgScoreOnly {
                 workspace.dp_mem_alloc = 1000;
             } else {
-                let scoring = params.scoring?;
                 let max_subject_length =
                     blast_gap_align_greedy_max_subject_length(params.max_subject_length);
                 workspace.greedy_align_mem = Some(crate::greedy::s_blast_greedy_align_mem_alloc(
@@ -15177,7 +15246,6 @@ where
                 )?);
             }
         } else {
-            let scoring = params.scoring?;
             workspace.jumper = Some(crate::gapinfo::jumper_gap_align_new(200)?);
             if extension.gap_x_dropoff == 0 {
                 workspace.gap_x_dropoff =
@@ -15753,33 +15821,11 @@ pub fn blast_redo_alignment_core_mt(
                 })
                 .unwrap_or_else(|| context_index.min(query_info.contexts.len() - 1));
             let ctx = &query_info.contexts[eval_context];
-            let kbp_for_eval = if align_params.do_link_hsps {
-                kbp_gap.get(eval_context)
-            } else {
-                let mut best_evalue = i32::MAX as f64;
-                for hsp in &mut redone.hsps {
-                    let hsp_context = hsp.context.max(0) as usize;
-                    let Some(hsp_ctx) = query_info
-                        .contexts
-                        .get(hsp_context)
-                        .or_else(|| query_info.contexts.get(eval_context))
-                    else {
-                        continue;
-                    };
-                    let Some(kbp) = kbp_gap
-                        .get(hsp_context)
-                        .or_else(|| kbp_gap.get(eval_context))
-                    else {
-                        continue;
-                    };
-                    hsp.evalue = kbp.raw_to_evalue(hsp.score, hsp_ctx.eff_searchsp as f64);
-                    if hsp.evalue < best_evalue {
-                        best_evalue = hsp.evalue;
-                    }
-                }
-                redone.best_evalue = best_evalue;
-                None
-            };
+            let mut eval_sbp =
+                crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, num_contexts as i32)
+                    .expect("score block");
+            eval_sbp.kbp_gap = kbp_gap.to_vec();
+            eval_sbp.gbp = None;
             let (_best_score, best_evalue) = s_hitlist_evaluate_and_purge(
                 &mut redone,
                 subject.subject_source.len() as i32,
@@ -15787,7 +15833,8 @@ pub fn blast_redo_alignment_core_mt(
                 ctx.query_length,
                 ctx.length_adjustment,
                 ctx.eff_searchsp as f64,
-                kbp_for_eval,
+                Some(query_info),
+                Some(&eval_sbp),
                 subject.link_context,
                 pvalue_for_this_pair,
                 subject.expect_value,
@@ -16094,6 +16141,11 @@ pub fn blast_redo_alignment_core_mt(
                 })
                 .unwrap_or_else(|| context_index.min(query_info.contexts.len() - 1));
             let ctx = &query_info.contexts[eval_context];
+            let mut eval_sbp =
+                crate::stat::blast_score_blk_new(crate::encoding::BLASTAA_SEQ_CODE, num_contexts as i32)
+                    .expect("score block");
+            eval_sbp.kbp_gap = kbp_gap.to_vec();
+            eval_sbp.gbp = None;
             let (_best_score, best_evalue) = s_hitlist_evaluate_and_purge(
                 &mut redone,
                 subject.subject_length,
@@ -16101,7 +16153,8 @@ pub fn blast_redo_alignment_core_mt(
                 ctx.query_length,
                 ctx.length_adjustment,
                 ctx.eff_searchsp as f64,
-                kbp_gap.get(eval_context),
+                Some(query_info),
+                Some(&eval_sbp),
                 subject.link_context,
                 pvalue_for_this_pair,
                 subject.expect_value,
@@ -16569,10 +16622,15 @@ pub fn blast_redo_alignment_core_mt(
                             existing,
                             crate::hspstream::HspList::new(-1),
                         ));
-                        let _ = crate::hspstream::blast_hsp_lists_merge_simple(
+                        let _ = crate::hspstream::blast_hsp_lists_merge(
                             &mut incoming,
                             &mut combined,
                             hsp_num_max,
+                            None,
+                            0,
+                            0,
+                            true,
+                            false,
                         );
                         if let Some(merged) = combined {
                             *existing = merged;
@@ -22253,7 +22311,8 @@ pub fn s_hitlist_evaluate_and_purge(
     query_length: i32,
     length_adjustment: i32,
     eff_searchsp: f64,
-    kbp: Option<&crate::stat::KarlinBlk>,
+    query_info_for_evalues: Option<&crate::queryinfo::QueryInfo>,
+    score_blk_for_evalues: Option<&crate::stat::BlastScoreBlk>,
     link_context: Option<&HitlistLinkContext<'_>>,
     pvalue_for_this_pair: f64,
     max_evalue: f64,
@@ -22349,8 +22408,18 @@ pub fn s_hitlist_evaluate_and_purge(
         }
     }
     if !do_sum_stats {
-        if let Some(kbp) = kbp {
-            blast_hsp_list_get_evalues_simple(hsp_list, kbp, eff_searchsp);
+        if let (Some(query_info), Some(sbp)) = (query_info_for_evalues, score_blk_for_evalues) {
+            let _ = blast_hsp_list_get_evalues(
+                program_number,
+                query_info,
+                subject_length,
+                hsp_list,
+                true,
+                false,
+                sbp,
+                0.0,
+                1.0,
+            );
         }
     }
 
@@ -22401,34 +22470,6 @@ pub fn gap_edit_script_num_gap_opens(script: &crate::gapinfo::GapEditScript) -> 
             )
         })
         .count() as i32
-}
-
-/// blast-rs: Compact compatibility helper for call sites that already collapsed
-/// `BlastScoreBlk`/`BlastQueryInfo` to a single Karlin block and search space.
-///
-pub fn blast_hsp_list_get_evalues_simple(
-    hsp_list: &mut HspList,
-    kbp: &crate::stat::KarlinBlk,
-    search_space: f64,
-) {
-    // NCBI `Blast_HSPListGetEvalues` (`blast_hits.c:1902`) closes with
-    // `s_BlastGetBestEvalue` which seeds with `(double)INT4_MAX`.
-    let mut best_evalue = i32::MAX as f64;
-    for hsp in &mut hsp_list.hsps {
-        hsp.evalue = kbp.raw_to_evalue(hsp.score, search_space);
-        if hsp.evalue < best_evalue {
-            best_evalue = hsp.evalue;
-        }
-    }
-    hsp_list.best_evalue = best_evalue;
-}
-
-/// NCBI: Blast_HSPListGetBitScores (blast_hits.c:1907), compact single-Karlin
-/// adapter for call sites that do not yet carry a full `BlastScoreBlk`.
-pub fn blast_hsp_list_get_bit_scores_simple(hsp_list: &mut HspList, kbp: &crate::stat::KarlinBlk) {
-    for hsp in &mut hsp_list.hsps {
-        hsp.bit_score = kbp.raw_to_bit(hsp.score);
-    }
 }
 
 /// NCBI: Blast_HSPListGetEvalues (blast_hits.c:1811).

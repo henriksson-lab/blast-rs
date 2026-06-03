@@ -200,13 +200,18 @@ pub fn blast_gap_align_set_up(
     }
 
     let max_subject_length = seq_src.map_or(0, blast_seq_src_get_max_seq_len).max(0) as u32;
-    let _ = max_subject_length;
-    let gap_x_dropoff = ext_params
-        .as_ref()
-        .map_or(ext_options.gap_x_dropoff as i32, |params| {
-            params.gap_x_dropoff
-        });
-    *gap_align = crate::blast_kappa::blast_gap_align_struct_new(gap_x_dropoff);
+    let Some(scoring_params) = score_params.as_ref() else {
+        return -1;
+    };
+    let Some(extension_params) = ext_params.as_ref() else {
+        return -1;
+    };
+    *gap_align = crate::blast_kappa::blast_gap_align_struct_new((
+        scoring_params,
+        extension_params,
+        max_subject_length,
+        blast_query_is_pssm(program_number),
+    ));
     if gap_align.is_none() {
         return -1;
     }
@@ -1463,7 +1468,23 @@ mod tests {
         assert!(ext_params.is_some());
         assert!(hit_params.is_some());
         assert!(eff_len_params.is_some());
-        assert!(gap_align.is_some());
+        let gap_align = gap_align.expect("gap align");
+        let ext_params_ref = ext_params.as_ref().expect("extension parameters");
+        assert_eq!(gap_align.gap_x_dropoff, ext_params_ref.gap_x_dropoff);
+        assert_eq!(
+            gap_align.max_mismatches,
+            ext_params_ref.options.max_mismatches
+        );
+        assert_eq!(
+            gap_align.mismatch_window,
+            ext_params_ref.options.mismatch_window
+        );
+        assert!(gap_align.fwd_prelim_tback.is_some());
+        assert!(gap_align.rev_prelim_tback.is_some());
+        assert_eq!(
+            gap_align.greedy_align_mem.as_ref().map(|mem| mem.max_dist),
+            Some(151.min(1000))
+        );
         assert!(query_info.contexts[0].eff_searchsp > 0);
     }
 

@@ -2001,10 +2001,6 @@ rust  = "blast_hsp_update_with_traceback"
 other = "Blast_HSPUpdateWithTraceback"
 
 [[entries]]
-rust  = "blast_hsp_update_with_traceback_protein_hit"
-other = "Blast_HSPUpdateWithTraceback"
-
-[[entries]]
 rust  = "blast_hsp_list_sort_by_evalue"
 other = "Blast_HSPListSortByEvalue"
 
@@ -4379,7 +4375,7 @@ rust  = "blast_hsp_get_num_identities"
 other = "Blast_HSPGetNumIdentitiesAndPositives"
 
 [[entries]]
-rust  = "compute_num_identities_blastp"
+rust  = "s_compute_num_identities"
 other = "s_ComputeNumIdentities"
 
 [[entries]]
