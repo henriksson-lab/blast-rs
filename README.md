@@ -277,7 +277,7 @@ for hit in &results {
 ### Utility functions
 
 ```rust
-use blast_rs::api::{reverse_complement, six_frame_translate, parse_fasta};
+use blast_rs::algo::blast::api::{reverse_complement, six_frame_translate, parse_fasta};
 
 // Reverse complement
 let rc = reverse_complement(b"ATGGCTAGCGATCG");
@@ -313,7 +313,7 @@ for oid in 0..db.num_oids {
 ### Output formatting
 
 ```rust
-use blast_rs::format::{format_tabular, TabularHit};
+use blast_rs::algo::blast::format::{format_tabular, TabularHit};
 use std::io;
 
 let hits: Vec<TabularHit> = /* ... */;

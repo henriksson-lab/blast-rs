@@ -1,22 +1,3 @@
-//! blast-rs: Pure-Rust implementation of NCBI BLAST.
-//!
-//! # Public API
-//!
-//! The high-level API is in the [`api`] module. For convenience, the most
-//! commonly used types and functions are re-exported at the crate root.
-//!
-//! - [`api`] — High-level search functions (`blastp`, `blastn`, `blastx`, etc.)
-//! - [`blastn`] — Builder API for blastn searches
-//! - [`db`] — BLAST database reader/writer
-//! - [`input`] — FASTA parser and sequence encoding
-//! - [`mod@format`] — Output formatting (tabular, pairwise, XML, SAM)
-//! - [`search`] — Core search engine
-//! - [`stat`] — Karlin-Altschul statistics
-//! - [`filter`] — DUST low-complexity masking
-//! - [`protein`] — Protein search utilities
-//! - [`matrix`] — Scoring matrices (BLOSUM62, nucleotide)
-//! - [`util`] — Translation utilities (six-frame, genetic code)
-
 #![allow(clippy::doc_overindented_list_items)]
 #![allow(clippy::duplicated_attributes)]
 #![allow(clippy::field_reassign_with_default)]
@@ -36,78 +17,102 @@
 #![allow(clippy::unnecessary_map_or)]
 #![allow(clippy::unusual_byte_groupings)]
 
-// Public API modules
+pub mod algo;
+
+#[path = "../src.orig/api.rs"]
 pub mod api;
+#[path = "../src.orig/blast_kappa.rs"]
 pub mod blast_kappa;
+#[path = "../src.orig/blast_setup.rs"]
 pub mod blast_setup;
+#[path = "../src.orig/compo_mode_condition.rs"]
 pub mod compo_mode_condition;
+#[path = "../src.orig/composition.rs"]
 pub mod composition;
+#[path = "../src.orig/db/mod.rs"]
+pub mod db;
+#[path = "../src.orig/diagnostics.rs"]
+pub mod diagnostics;
+#[path = "../src.orig/encoding.rs"]
+pub mod encoding;
+#[path = "../src.orig/engine.rs"]
+pub mod engine;
+#[path = "../src.orig/extend.rs"]
+pub mod extend;
+#[path = "../src.orig/filter.rs"]
+pub mod filter;
+#[path = "../src.orig/format/mod.rs"]
+pub mod format;
+#[path = "../src.orig/gapinfo.rs"]
+pub mod gapinfo;
+#[path = "../src.orig/greedy.rs"]
+pub mod greedy;
+#[path = "../src.orig/hits.rs"]
+pub mod hits;
+#[path = "../src.orig/hspfilter_culling.rs"]
 pub mod hspfilter_culling;
+#[path = "../src.orig/hspstream.rs"]
+pub mod hspstream;
+#[path = "../src.orig/index_ungapped.rs"]
+pub mod index_ungapped;
+#[path = "../src.orig/input/mod.rs"]
+pub mod input;
+#[path = "../src.orig/itree.rs"]
+pub mod itree;
+#[path = "../src.orig/link_hsps.rs"]
+pub mod link_hsps;
+#[path = "../src.orig/listnode.rs"]
+pub mod listnode;
+#[path = "../src.orig/lookup.rs"]
+pub mod lookup;
+#[path = "../src.orig/math.rs"]
+pub mod math;
+#[path = "../src.orig/matrix.rs"]
+pub mod matrix;
+#[path = "../src.orig/nlm_linear_algebra.rs"]
 pub mod nlm_linear_algebra;
+#[path = "../src.orig/optimize_target_freq.rs"]
 pub mod optimize_target_freq;
+#[path = "../src.orig/options.rs"]
+pub mod options;
+#[path = "../src.orig/parameters.rs"]
+pub mod parameters;
+#[path = "../src.orig/pattern.rs"]
+pub mod pattern;
+#[path = "../src.orig/program.rs"]
+pub mod program;
+#[path = "../src.orig/protein.rs"]
+pub mod protein;
+#[path = "../src.orig/protein_lookup.rs"]
+pub mod protein_lookup;
+#[path = "../src.orig/pssm.rs"]
+pub mod pssm;
+#[path = "../src.orig/queryinfo.rs"]
+pub mod queryinfo;
+#[path = "../src.orig/rps.rs"]
+pub mod rps;
+#[path = "../src.orig/search.rs"]
+pub mod search;
+#[path = "../src.orig/semi_gapped_align.rs"]
 pub mod semi_gapped_align;
+#[path = "../src.orig/seqsrc.rs"]
+pub mod seqsrc;
+#[path = "../src.orig/sequence.rs"]
+pub mod sequence;
+#[path = "../src.orig/smith_waterman.rs"]
 pub mod smith_waterman;
+#[path = "../src.orig/spliced_hits.rs"]
 pub mod spliced_hits;
+#[path = "../src.orig/split_query.rs"]
+pub mod split_query;
+#[path = "../src.orig/stat.rs"]
+pub mod stat;
+#[path = "../src.orig/traceback.rs"]
+pub mod traceback;
+#[path = "../src.orig/util.rs"]
+pub mod util;
 
-// Re-export high-level API at crate root for convenience
-pub use api::{
-    adjust_evalue,
-    adjust_evalue_with_mode,
-    // Masking
-    apply_dust,
-    apply_lowercase_mask_nucleotide,
-    apply_lowercase_mask_protein,
-    apply_repeat_mask,
-    apply_seg,
-    apply_seg_ncbistdaa,
-    // Search functions (low-level aliases)
-    blast_search,
-    blastn,
-    blastn_search,
-    // Search functions (high-level)
-    blastp,
-    blastp_batch,
-    blastx,
-    blastx_batch,
-    blastx_search,
-    // PSSM functions
-    build_pssm,
-    // Composition
-    composition_ncbistdaa,
-    get_codon_table,
-    get_matrix,
-    lowercase_mask,
-    // Utility functions
-    parse_fasta,
-    psiblast,
-    psiblast_search,
-    repeat_mask,
-    reverse_complement,
-    search_with_pssm,
-    six_frame_translate,
-    six_frame_translate_with_code,
-    tblastn,
-    tblastn_batch,
-    tblastn_search,
-    tblastx,
-    tblastx_batch,
-    tblastx_search,
-    BlastDbBuilder,
-    BlastDefLine,
-    BlastnSearch,
-    Hsp,
-    MatrixType,
-    PsiblastParams,
-    ScoringMatrix,
-    // Types
-    SearchParams,
-    SearchResult,
-    SequenceEntry,
-    Strand,
-    TranslatedFrame,
-};
-
-// Re-export core types and database builders at crate root (matching old API)
+pub use api::*;
 pub use db::{make_db, make_nucleotide_db, make_protein_db, BlastDb, DbType};
 pub use hspstream::{BlastHSP, BlastHSPList, BlastSeg};
 pub use link_hsps::{blast_link_hsp_list, LinkHSPParameters, LinkScoreBlock};
@@ -116,66 +121,3 @@ pub use program::BLASTN;
 pub use pssm::Pssm;
 pub use queryinfo::QueryInfo;
 pub use stat::KarlinBlk as KarlinAltschul;
-// blastn builder (BlastnSearch) is now in the api module.
-pub mod db;
-pub mod filter;
-pub mod format;
-pub mod input;
-pub mod matrix;
-pub mod protein;
-pub mod protein_lookup;
-pub mod pssm;
-pub mod search;
-pub mod stat;
-pub mod traceback;
-pub mod util;
-
-// Internal modules used by the search engine (partially used — allow dead items
-// within them since they're ported from C and not all paths are active yet)
-pub mod gapinfo;
-#[allow(dead_code)]
-pub(crate) mod hspstream;
-#[allow(dead_code)]
-pub(crate) mod index_ungapped;
-#[allow(dead_code)]
-pub(crate) mod itree;
-#[allow(dead_code)]
-pub(crate) mod options;
-
-// Internal modules — ported from C engine, not yet fully wired up.
-// Kept for completeness and future use (e.g. full protein search, engine orchestration).
-#[allow(dead_code)]
-pub(crate) mod diagnostics;
-pub mod encoding;
-#[allow(dead_code)]
-pub(crate) mod engine;
-#[allow(dead_code)]
-pub(crate) mod extend;
-#[allow(dead_code)]
-#[allow(dead_code)]
-pub(crate) mod greedy;
-#[allow(dead_code)]
-pub(crate) mod hits;
-#[allow(dead_code)]
-pub(crate) mod link_hsps;
-#[allow(dead_code)]
-pub(crate) mod listnode;
-#[allow(dead_code)]
-pub(crate) mod lookup;
-pub mod math;
-#[allow(dead_code)]
-pub(crate) mod parameters;
-#[allow(dead_code)]
-pub(crate) mod pattern;
-#[allow(dead_code)]
-pub(crate) mod program;
-#[allow(dead_code)]
-pub(crate) mod queryinfo;
-#[allow(dead_code)]
-pub(crate) mod rps;
-#[allow(dead_code)]
-pub(crate) mod seqsrc;
-#[allow(dead_code)]
-pub(crate) mod sequence;
-#[allow(dead_code)]
-pub(crate) mod split_query;

@@ -320,7 +320,10 @@ fn blastn_cli_reads_subject_from_proc_self_fd_path() {
 }
 
 fn ascii_reverse_complement(seq: &str) -> String {
-    String::from_utf8(blast_rs::api::reverse_complement(seq.as_bytes())).unwrap()
+    String::from_utf8(blast_rs::algo::blast::api::reverse_complement(
+        seq.as_bytes(),
+    ))
+    .unwrap()
 }
 
 fn build_protein_db(entries: Vec<SequenceEntry>) -> (TempDir, blast_rs::db::BlastDb) {
@@ -33007,7 +33010,8 @@ fn test_comp_adjust_srta_p0dpq5_reference_internals() {
     );
     let subj_ncbi = blast_rs::encoding::encode_ncbistdaa_sequence(&subj_rec.sequence);
 
-    let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
+    let matrix =
+        *blast_rs::algo::blast::api::get_matrix(blast_rs::algo::blast::api::MatrixType::Blosum62);
     let ungapped_lambda = 0.3176f64; // BLOSUM62 ungapped
 
     let (qcomp28, qn) = blast_rs::composition::blast_read_aa_composition(&query_ncbi, 28);
@@ -33065,7 +33069,8 @@ fn blast_composition_matrix_adj_short_exact_matches_reference_internals() {
     let query_ncbi = blast_rs::encoding::encode_ncbistdaa_sequence(query);
     let subject_ncbi = blast_rs::encoding::encode_ncbistdaa_sequence(subject);
 
-    let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
+    let matrix =
+        *blast_rs::algo::blast::api::get_matrix(blast_rs::algo::blast::api::MatrixType::Blosum62);
     let (qcomp28, qn) = blast_rs::composition::blast_read_aa_composition(&query_ncbi, 28);
     let (scomp28, sn) = blast_rs::composition::blast_read_aa_composition(&subject_ncbi, 28);
 
@@ -33848,7 +33853,8 @@ fn test_lambda_ratio_biased_sprot_reference() {
     builder.write(&base).unwrap();
     let db = blast_rs::db::BlastDb::open(&base).unwrap();
 
-    let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
+    let matrix =
+        *blast_rs::algo::blast::api::get_matrix(blast_rs::algo::blast::api::MatrixType::Blosum62);
     let ungapped_lambda = 0.3176f64;
 
     let glu_query = b"MEEEEKELEQEKKKLEEEKAEELEEELKKLEQEEVKEEIKELEEKLEEEQKEELKNELEEE";
@@ -33956,7 +33962,8 @@ fn test_karlin_lambda_standard() {
     rr_prob[20] = 0.01330; // W
     rr_prob[22] = 0.03216; // Y
 
-    let matrix = *blast_rs::api::get_matrix(blast_rs::api::MatrixType::Blosum62);
+    let matrix =
+        *blast_rs::algo::blast::api::get_matrix(blast_rs::algo::blast::api::MatrixType::Blosum62);
 
     let lambda = blast_rs::composition::compute_ungapped_lambda_with_bg(&matrix, &rr_prob);
 
