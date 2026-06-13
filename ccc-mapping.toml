@@ -283,6 +283,14 @@ rust  = "list_node_copy_str"
 other = "ListNodeCopyStr"
 
 [[entries]]
+rust  = "list_node_free"
+other = "ListNodeFree"
+
+[[entries]]
+rust  = "list_node_free_data"
+other = "ListNodeFreeData"
+
+[[entries]]
 rust  = "s_blast_aa_scan_subject"
 other = "s_BlastAaScanSubject"
 
@@ -679,7 +687,7 @@ rust  = "blast_greedy_align"
 other = "BLAST_GreedyAlign"
 
 [[entries]]
-rust  = "BLAST_AffineGreedyAlign"
+rust  = "blast_affine_greedy_align"
 other = "BLAST_AffineGreedyAlign"
 
 [[entries]]
@@ -2788,7 +2796,7 @@ rust  = "ScoringMatrix"
 other = "SBlastScoreMatrix"
 
 [[entries]]
-rust  = "build"
+rust  = "blast_aa_lookup_index_query"
 other = "BlastAaLookupIndexQuery"
 
 [[entries]]
@@ -3564,10 +3572,6 @@ rust  = "MbLookupTable"
 other = "BlastMBLookupTable"
 
 [[entries]]
-rust  = "AaLookupTable"
-other = "BlastAaLookupTable"
-
-[[entries]]
 rust  = "BlastRpsInfo"
 other = "BlastRPSInfo"
 
@@ -4233,20 +4237,8 @@ rust  = "true_aa_to_std_target_freqs"
 other = "Blast_TrueAaToStdTargetFreqs"
 
 [[entries]]
-rust  = "find_neighboring_words"
-other = "s_AddNeighboringWords"
-
-[[entries]]
 rust  = "blast_hit_list_update"
 other = "Blast_HitListUpdate"
-
-[[entries]]
-rust  = "score_compare_search_hsps"
-other = "ScoreCompareHSPs"
-
-[[entries]]
-rust  = "score_compare_protein_hits"
-other = "ScoreCompareHSPs"
 
 [[entries]]
 rust  = "compare_search_results"
@@ -4922,10 +4914,7 @@ rust  = "s_full_pass"
 other = "s_FullPass"
 
 [[entries]]
-# Audit caveat: the public Rust entry point is a thin wrapper so callers keep
-# the C name, while the translated linked-list walk lives in this shared body
-# to support the Rust-only host-list self-skip variant.
-rust  = "s_process_hsp_list_impl"
+rust  = "s_process_hsp_list"
 other = "s_ProcessHSPList"
 
 [[entries]]
@@ -4963,10 +4952,6 @@ other = "s_CTreeNodeFree"
 [[entries]]
 rust  = "s_fork_children"
 other = "s_ForkChildren"
-
-[[entries]]
-rust  = "s_debug"
-other = "s_Debug"
 
 [[entries]]
 rust  = "s_mark_down_ctree"
@@ -5163,10 +5148,6 @@ rust  = "clone_chain"
 other = "CloneChain"
 
 [[entries]]
-rust  = "find_partialy_covered_queries"
-other = "FindPartialyCoveredQueries"
-
-[[entries]]
 rust  = "blast_mapping_results_new"
 other = "Blast_MappingResultsNew"
 
@@ -5175,7 +5156,7 @@ rust  = "blast_mapping_results_free"
 other = "Blast_MappingResultsFree"
 
 [[entries]]
-rust  = "blast_hspmapper_params_new"
+rust  = "blast_hsp_mapper_params_new"
 other = "BlastHSPMapperParamsNew"
 
 [[entries]]
@@ -5300,12 +5281,6 @@ rust  = "s_find_splice_junctions_for_overlaps"
 other = "s_FindSpliceJunctionsForOverlaps"
 
 [[entries]]
-# Audit caveat: Rust drops owned values at the cleanup point; the exact C
-# `BlastGapAlignStruct` and `JumperEditsBlock` payloads are not modeled here.
-rust  = "s_extend_alignment_cleanup"
-other = "s_ExtendAlignmentCleanup"
-
-[[entries]]
 # Audit caveat: Rust takes subject overhang slices explicitly because `Hsp`
 # does not carry mapper `map_info`; it ports canonical splice-signal detection
 # plus coordinate/gap-script extension, but not Jumper edit or edge-bit updates.
@@ -5399,7 +5374,7 @@ rust  = "s_compare_chains_by_oid"
 other = "s_CompareChainsByOid"
 
 [[entries]]
-rust  = "s_hspnode_array_copy"
+rust  = "s_hsp_node_array_copy"
 other = "s_HSPNodeArrayCopy"
 
 [[entries]]
@@ -6847,43 +6822,43 @@ other = "s_BlastScoreBlk_Free"
 # same-boundary canonical functions that were previously found by ExactName.
 
 [[entries]]
-rust  = "BlastQueryInfoFree"
+rust  = "blast_query_info_free"
 other = "BlastQueryInfoFree"
 
 [[entries]]
-rust  = "BlastQueryInfoDup"
+rust  = "blast_query_info_dup"
 other = "BlastQueryInfoDup"
 
 [[entries]]
-rust  = "s_GetTranslatedQueryDNALength"
+rust  = "s_get_translated_query_dna_length"
 other = "s_GetTranslatedQueryDNALength"
 
 [[entries]]
-rust  = "BlastQueryInfoGetQueryLength"
+rust  = "blast_query_info_get_query_length"
 other = "BlastQueryInfoGetQueryLength"
 
 [[entries]]
-rust  = "BlastQueryInfoGetEffSearchSpace"
+rust  = "blast_query_info_get_eff_search_space"
 other = "BlastQueryInfoGetEffSearchSpace"
 
 [[entries]]
-rust  = "BlastQueryInfoSetEffSearchSpace"
+rust  = "blast_query_info_set_eff_search_space"
 other = "BlastQueryInfoSetEffSearchSpace"
 
 [[entries]]
-rust  = "QueryInfo_GetSeqBufLen"
+rust  = "query_info_get_seq_buf_len"
 other = "QueryInfo_GetSeqBufLen"
 
 [[entries]]
-rust  = "ContextOffsetsToOffsetArray"
+rust  = "context_offsets_to_offset_array"
 other = "ContextOffsetsToOffsetArray"
 
 [[entries]]
-rust  = "OffsetArrayToContextOffsets"
+rust  = "offset_array_to_context_offsets"
 other = "OffsetArrayToContextOffsets"
 
 [[entries]]
-rust  = "Blast_GetOneQueryStructs"
+rust  = "blast_get_one_query_structs"
 other = "Blast_GetOneQueryStructs"
 
 [[entries]]
