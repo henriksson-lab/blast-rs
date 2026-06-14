@@ -1,3 +1,14 @@
+use std::fmt;
+
+use crate::algo::blast::api::rps_aux::CBlastRPSInfo;
+use crate::algo::blast::core::blast_hspstream::HspStream;
+use crate::algo::blast::core::blast_lookup::LookupTableWrap;
+use crate::algo::blast::core::blast_query_info::BlastQueryInfo;
+use crate::algo::blast::core::blast_seqsrc::BlastSeqSrc;
+use crate::algo::blast::core::blast_stat::BlastScoreBlk;
+use crate::algo::blast::core::blast_util::{BLAST_SequenceBlk, SBlastProgress};
+use crate::algo::blast::core::pattern::PhiPatternSearchBlk;
+
 /// NCBI C++: `CStructWrapper<TData>` (`setup_factory.hpp`).
 pub struct CStructWrapper<TData> {
     pub m_Data: Option<TData>,
@@ -46,6 +57,66 @@ pub fn wrap_struct<TData>(
 ) -> CStructWrapper<TData> {
     CStructWrapper::new(obj, del)
 }
+
+pub type TBlastScoreBlk = CStructWrapper<BlastScoreBlk>;
+pub type TLookupTableWrap = CStructWrapper<LookupTableWrap>;
+pub type TBlastDiagnostics = CStructWrapper<BlastDiagnostics>;
+pub type TBlastHSPStream = CStructWrapper<HspStream>;
+pub type TBlastSeqSrc = CStructWrapper<BlastSeqSrc>;
+pub type TSPHIPatternSearchBlk = CStructWrapper<PhiPatternSearchBlk>;
+pub type TInterruptFnPtr = usize;
+
+/// NCBI C++: `SInternalData` (`setup_factory.hpp`).
+pub struct SInternalData {
+    pub m_Queries: Option<BLAST_SequenceBlk>,
+    pub m_QueryInfo: Option<BlastQueryInfo>,
+    pub m_ScoreBlk: Option<TBlastScoreBlk>,
+    pub m_LookupTable: Option<TLookupTableWrap>,
+    pub m_Diagnostics: Option<TBlastDiagnostics>,
+    pub m_HspStream: Option<TBlastHSPStream>,
+    pub m_SeqSrc: Option<TBlastSeqSrc>,
+    pub m_RpsData: Option<CBlastRPSInfo>,
+    pub m_FnInterrupt: Option<TInterruptFnPtr>,
+    pub m_ProgressMonitor: Option<SBlastProgress>,
+}
+
+impl SInternalData {
+    /// NCBI C++: `SInternalData::SInternalData`.
+    pub fn new() -> Self {
+        Self {
+            m_Queries: None,
+            m_QueryInfo: None,
+            m_ScoreBlk: None,
+            m_LookupTable: None,
+            m_Diagnostics: None,
+            m_HspStream: None,
+            m_SeqSrc: None,
+            m_RpsData: None,
+            m_FnInterrupt: None,
+            m_ProgressMonitor: None,
+        }
+    }
+}
+
+impl fmt::Debug for SInternalData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SInternalData")
+            .field("m_Queries", &self.m_Queries.is_some())
+            .field("m_QueryInfo", &self.m_QueryInfo.is_some())
+            .field("m_ScoreBlk", &self.m_ScoreBlk.is_some())
+            .field("m_LookupTable", &self.m_LookupTable.is_some())
+            .field("m_Diagnostics", &self.m_Diagnostics.is_some())
+            .field("m_HspStream", &self.m_HspStream.is_some())
+            .field("m_SeqSrc", &self.m_SeqSrc.is_some())
+            .field("m_RpsData", &self.m_RpsData.is_some())
+            .field("m_FnInterrupt", &self.m_FnInterrupt.is_some())
+            .field("m_ProgressMonitor", &self.m_ProgressMonitor.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BlastDiagnostics;
 
 /// NCBI C++: `CThreadable` (`setup_factory.hpp`).
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1235,10 +1235,10 @@ mod tests {
 
     fn setup_get_sequence(data: &dyn Any, arg: &mut BlastSeqSrcGetSeqArg) -> i16 {
         let Some(sequence) = setup_data(data).seqs.get(arg.oid.max(0) as usize).cloned() else {
-            arg.seq = None;
+            arg.seq = std::ptr::null_mut();
             return BLAST_SEQSRC_ERROR;
         };
-        arg.seq = Some(BLAST_SequenceBlk {
+        arg.seq = Box::into_raw(Box::new(BLAST_SequenceBlk {
             sequence: Some(sequence),
             sequence_start: None,
             length: sequence.len() as i32,
@@ -1263,12 +1263,17 @@ mod tests {
             seq_ranges_allocated: false,
             mask_type: crate::algo::blast::core::blast_util::SubjectMaskingType::NoSubjMasking,
             bases_offset: 0,
-        });
+        }));
         BLAST_SEQSRC_SUCCESS
     }
 
     fn setup_release_sequence(_data: &dyn Any, arg: &mut BlastSeqSrcGetSeqArg) {
-        arg.seq = None;
+        if !arg.seq.is_null() {
+            unsafe {
+                drop(Box::from_raw(arg.seq));
+            }
+            arg.seq = std::ptr::null_mut();
+        }
     }
 
     fn protein_kbp() -> KarlinBlk {

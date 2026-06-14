@@ -1,0 +1,236 @@
+use std::any::Any;
+
+use crate::algo::blast::api::query_data::{EBlastProgramType, TSeqLocVector};
+use crate::algo::blast::core::blast_encoding::EBlastEncoding;
+use crate::algo::blast::core::blast_seqsrc::{
+    BlastSeqSrc, BlastSeqSrcGetSeqArg, BlastSeqSrcIterator, _blast_seq_src_impl_set_data_structure,
+    BLAST_SEQSRC_EOF, BLAST_SEQSRC_ERROR, BLAST_SEQSRC_MINLENGTH, BLAST_SEQSRC_SUCCESS,
+};
+use crate::algo::blast::core::blast_util::BLAST_SequenceBlk;
+
+#[derive(Debug, Clone)]
+pub struct CMultiSeqInfo {
+    pub is_prot: bool,
+    pub seq_blk_vec: Vec<*mut BLAST_SequenceBlk>,
+    pub max_length: u32,
+    pub avg_length: u32,
+    pub total_length: i64,
+    pub dbscan_mode: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SMultiSeqSrcNewArgs {
+    pub seq_vector: TSeqLocVector,
+    pub program: EBlastProgramType,
+    pub dbscan_mode: bool,
+}
+
+pub fn s_multi_seq_get_max_length(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> i32 {
+    let Some(seq_info) = multiseq_handle.downcast_ref::<CMultiSeqInfo>() else {
+        return 0;
+    };
+
+    if seq_info.max_length > 0 {
+        return seq_info.max_length as i32;
+    }
+
+    seq_info
+        .seq_blk_vec
+        .iter()
+        .filter_map(|&seq_blk| unsafe { seq_blk.as_ref() })
+        .map(|seq_blk| seq_blk.length)
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn s_multi_seq_get_min_length(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> i32 {
+    let Some(seq_info) = multiseq_handle.downcast_ref::<CMultiSeqInfo>() else {
+        return BLAST_SEQSRC_MINLENGTH;
+    };
+
+    seq_info
+        .seq_blk_vec
+        .iter()
+        .filter_map(|&seq_blk| unsafe { seq_blk.as_ref() })
+        .map(|seq_blk| seq_blk.length)
+        .min()
+        .unwrap_or(BLAST_SEQSRC_MINLENGTH)
+        .max(BLAST_SEQSRC_MINLENGTH)
+}
+
+pub fn s_multi_seq_get_avg_length(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> i32 {
+    let Some(seq_info) = multiseq_handle.downcast_ref::<CMultiSeqInfo>() else {
+        return 0;
+    };
+
+    if seq_info.avg_length > 0 {
+        return seq_info.avg_length as i32;
+    }
+
+    let num_seqs = seq_info.seq_blk_vec.len();
+    if num_seqs == 0 {
+        return 0;
+    }
+
+    let total_length: i64 = seq_info
+        .seq_blk_vec
+        .iter()
+        .filter_map(|&seq_blk| unsafe { seq_blk.as_ref() })
+        .map(|seq_blk| seq_blk.length as i64)
+        .sum();
+    (total_length / num_seqs as i64) as i32
+}
+
+pub fn s_multi_seq_get_num_seqs(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> i32 {
+    multiseq_handle
+        .downcast_ref::<CMultiSeqInfo>()
+        .map(|seq_info| seq_info.seq_blk_vec.len() as i32)
+        .unwrap_or(0)
+}
+
+pub fn s_multi_seq_get_num_seqs_stats(
+    _multiseq_handle: &dyn Any,
+    _args: Option<&mut dyn Any>,
+) -> i32 {
+    0
+}
+
+pub fn s_multi_seq_get_tot_len(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> i64 {
+    multiseq_handle
+        .downcast_ref::<CMultiSeqInfo>()
+        .map(|seq_info| seq_info.total_length)
+        .unwrap_or(0)
+}
+
+pub fn s_multi_seq_get_tot_len_stats(
+    _multiseq_handle: &dyn Any,
+    _args: Option<&mut dyn Any>,
+) -> i64 {
+    0
+}
+
+pub fn s_multi_seq_get_name(
+    _multiseq_handle: &dyn Any,
+    _args: Option<&mut dyn Any>,
+) -> Option<String> {
+    Some(String::new())
+}
+
+pub fn s_multi_seq_get_is_prot(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> bool {
+    multiseq_handle
+        .downcast_ref::<CMultiSeqInfo>()
+        .map(|seq_info| seq_info.is_prot)
+        .unwrap_or(false)
+}
+
+pub fn s_multi_seq_get_sequence(multiseq_handle: &dyn Any, args: &mut BlastSeqSrcGetSeqArg) -> i16 {
+    let Some(seq_info) = multiseq_handle.downcast_ref::<CMultiSeqInfo>() else {
+        return BLAST_SEQSRC_ERROR;
+    };
+    if seq_info.seq_blk_vec.is_empty() {
+        return BLAST_SEQSRC_ERROR;
+    }
+
+    let index = args.oid;
+    if index < 0 || index as usize >= seq_info.seq_blk_vec.len() {
+        return BLAST_SEQSRC_EOF as i16;
+    }
+
+    let seq_blk_ptr = seq_info.seq_blk_vec[index as usize];
+    let Some(seq_blk) = (unsafe { seq_blk_ptr.as_ref() }) else {
+        return BLAST_SEQSRC_ERROR;
+    };
+    let mut copied = seq_blk.clone();
+    if args.encoding == EBlastEncoding::Nucleotide {
+        copied.sequence = copied
+            .sequence_start
+            .as_ref()
+            .and_then(|sequence_start| sequence_start.get(1..).map(|seq| seq.to_vec()));
+    } else if args.encoding == EBlastEncoding::Ncbi4na {
+        copied.sequence = copied.sequence_start.clone();
+    }
+    copied.lcase_mask = None;
+    copied.lcase_mask_allocated = false;
+    copied.oid = index;
+
+    unsafe {
+        if args.seq.is_null() {
+            args.seq = Box::into_raw(Box::new(copied));
+        } else {
+            *args.seq = copied;
+        }
+    }
+
+    BLAST_SEQSRC_SUCCESS
+}
+
+pub fn s_multi_seq_release_sequence(_multiseq_handle: &dyn Any, args: &mut BlastSeqSrcGetSeqArg) {
+    if args.seq.is_null() {
+        return;
+    }
+    unsafe {
+        if (*args.seq).sequence_start_allocated {
+            (*args.seq).sequence_start = None;
+            (*args.seq).sequence_start_allocated = false;
+        }
+    }
+}
+
+pub fn s_multi_seq_get_seq_len(multiseq_handle: &dyn Any, args: Option<&mut dyn Any>) -> i32 {
+    let Some(seq_info) = multiseq_handle.downcast_ref::<CMultiSeqInfo>() else {
+        return BLAST_SEQSRC_ERROR as i32;
+    };
+    let Some(index) = args.and_then(|args| args.downcast_ref::<i32>()).copied() else {
+        return BLAST_SEQSRC_ERROR as i32;
+    };
+    if index < 0 {
+        return BLAST_SEQSRC_ERROR as i32;
+    }
+    unsafe {
+        seq_info
+            .seq_blk_vec
+            .get(index as usize)
+            .and_then(|&seq_blk| seq_blk.as_ref())
+            .map(|seq_blk| seq_blk.length)
+            .unwrap_or(BLAST_SEQSRC_ERROR as i32)
+    }
+}
+
+pub fn s_multi_seq_iterator_next(multiseq_handle: &dyn Any, itr: &mut BlastSeqSrcIterator) -> i32 {
+    let status = s_multi_seq_get_next_chunk(multiseq_handle, itr);
+    if status == BLAST_SEQSRC_EOF {
+        return status as i32;
+    }
+
+    let retval = itr.current_pos as i32;
+    itr.current_pos += 1;
+    retval
+}
+
+pub fn s_multi_seq_get_next_chunk(multiseq_handle: &dyn Any, itr: &mut BlastSeqSrcIterator) -> i16 {
+    let Some(seq_info) = multiseq_handle.downcast_ref::<CMultiSeqInfo>() else {
+        return BLAST_SEQSRC_EOF;
+    };
+
+    if itr.current_pos == u32::MAX {
+        itr.current_pos = 0;
+    }
+    if itr.current_pos >= seq_info.seq_blk_vec.len() as u32 {
+        return BLAST_SEQSRC_EOF;
+    }
+
+    BLAST_SEQSRC_SUCCESS
+}
+
+pub fn s_multi_seq_reset_chunk_iter(_multiseq_handle: &dyn Any) {}
+
+pub fn s_multi_seq_src_free(seq_src: &mut BlastSeqSrc) -> Option<()> {
+    _blast_seq_src_impl_set_data_structure(Some(seq_src), None);
+    None
+}
+
+pub fn s_multi_seq_src_copy(seq_src: &mut BlastSeqSrc) -> Option<()> {
+    let data_structure = seq_src.data_structure.clone()?;
+    _blast_seq_src_impl_set_data_structure(Some(seq_src), Some(data_structure));
+    Some(())
+}

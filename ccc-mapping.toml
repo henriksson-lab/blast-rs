@@ -1034,10 +1034,6 @@ rust  = "blast_semi_gapped_align"
 other = "Blast_SemiGappedAlign"
 
 [[entries]]
-rust  = "TracebackResult"
-other = "BlastGapAlignStruct"
-
-[[entries]]
 rust  = "GapAlignOpType"
 other = "EGapAlignOpType"
 
@@ -5050,8 +5046,6 @@ rust  = "s_blast_hsp_best_hit_run"
 other = "s_BlastHSPBestHitRun"
 
 [[entries]]
-# Audit caveat: Rust takes the RPS query index explicitly because its
-# `HspList` does not carry C's raw `query_index` field.
 rust  = "s_blast_hsp_best_hit_run_rps"
 other = "s_BlastHSPBestHitRun_RPS"
 
@@ -6964,3 +6958,489 @@ other = "eDiagHash"
 [[entries]]
 rust  = "ESeedContainerType::EMaxContainerType"
 other = "eMaxContainerType"
+
+# seqsrc_multiseq.cpp — provider callback batch
+[[entries]]
+rust  = "s_multi_seq_get_max_length"
+other = "s_MultiSeqGetMaxLength"
+
+[[entries]]
+rust  = "s_multi_seq_get_min_length"
+other = "s_MultiSeqGetMinLength"
+
+[[entries]]
+rust  = "s_multi_seq_get_avg_length"
+other = "s_MultiSeqGetAvgLength"
+
+[[entries]]
+rust  = "s_multi_seq_get_num_seqs"
+other = "s_MultiSeqGetNumSeqs"
+
+[[entries]]
+rust  = "s_multi_seq_get_num_seqs_stats"
+other = "s_MultiSeqGetNumSeqsStats"
+
+[[entries]]
+rust  = "s_multi_seq_get_tot_len"
+other = "s_MultiSeqGetTotLen"
+
+[[entries]]
+rust  = "s_multi_seq_get_tot_len_stats"
+other = "s_MultiSeqGetTotLenStats"
+
+[[entries]]
+rust  = "s_multi_seq_get_name"
+other = "s_MultiSeqGetName"
+
+[[entries]]
+rust  = "s_multi_seq_get_is_prot"
+other = "s_MultiSeqGetIsProt"
+
+[[entries]]
+rust  = "s_multi_seq_get_sequence"
+other = "s_MultiSeqGetSequence"
+
+[[entries]]
+rust  = "s_multi_seq_release_sequence"
+other = "s_MultiSeqReleaseSequence"
+
+[[entries]]
+rust  = "s_multi_seq_get_seq_len"
+other = "s_MultiSeqGetSeqLen"
+
+[[entries]]
+rust  = "s_multi_seq_iterator_next"
+other = "s_MultiSeqIteratorNext"
+
+[[entries]]
+rust  = "s_multi_seq_reset_chunk_iter"
+other = "s_MultiSeqResetChunkIter"
+
+[[entries]]
+rust  = "s_multi_seq_src_free"
+other = "s_MultiSeqSrcFree"
+
+[[entries]]
+rust  = "s_multi_seq_src_copy"
+other = "s_MultiSeqSrcCopy"
+
+# seqsrc_query_factory.cpp — provider callback batch
+[[entries]]
+rust  = "s_query_factory_get_max_length"
+other = "s_QueryFactoryGetMaxLength"
+
+[[entries]]
+rust  = "s_query_factory_get_min_length"
+other = "s_QueryFactoryGetMinLength"
+
+[[entries]]
+rust  = "s_query_factory_get_avg_length"
+other = "s_QueryFactoryGetAvgLength"
+
+[[entries]]
+rust  = "s_query_factory_get_num_seqs"
+other = "s_QueryFactoryGetNumSeqs"
+
+[[entries]]
+rust  = "s_query_factory_get_num_seqs_stats"
+other = "s_QueryFactoryGetNumSeqsStats"
+
+[[entries]]
+rust  = "s_query_factory_get_tot_len"
+other = "s_QueryFactoryGetTotLen"
+
+[[entries]]
+rust  = "s_query_factory_get_tot_len_stats"
+other = "s_QueryFactoryGetTotLenStats"
+
+[[entries]]
+rust  = "s_query_factory_get_name"
+other = "s_QueryFactoryGetName"
+
+[[entries]]
+rust  = "s_query_factory_get_is_prot"
+other = "s_QueryFactoryGetIsProt"
+
+[[entries]]
+rust  = "s_query_factory_get_sequence"
+other = "s_QueryFactoryGetSequence"
+
+[[entries]]
+rust  = "s_query_factory_release_sequence"
+other = "s_QueryFactoryReleaseSequence"
+
+[[entries]]
+rust  = "s_query_factory_get_seq_len"
+other = "s_QueryFactoryGetSeqLen"
+
+[[entries]]
+rust  = "s_query_factory_iterator_next"
+other = "s_QueryFactoryIteratorNext"
+
+[[entries]]
+rust  = "s_query_factory_reset_chunk_iter"
+other = "s_QueryFactoryResetChunkIter"
+
+[[entries]]
+rust  = "s_query_factory_src_free"
+other = "s_QueryFactorySrcFree"
+
+[[entries]]
+rust  = "s_query_factory_src_copy"
+other = "s_QueryFactorySrcCopy"
+
+# blast_dbindex.cpp — DB-index callback installation batch
+[[entries]]
+rust  = "null_set_using_threads"
+other = "NullSetUsingThreads"
+
+[[entries]]
+rust  = "null_set_num_threads"
+other = "NullSetNumThreads"
+
+[[entries]]
+rust  = "null_set_query_info"
+other = "NullSetQueryInfo"
+
+[[entries]]
+rust  = "null_run_search"
+other = "NullRunSearch"
+
+[[entries]]
+rust  = "indexed_db_set_using_threads"
+other = "IndexedDbSetUsingThreads"
+
+[[entries]]
+rust  = "indexed_db_set_num_threads"
+other = "IndexedDbSetNumThreads"
+
+[[entries]]
+rust  = "indexed_db_set_query_info"
+other = "IndexedDbSetQueryInfo"
+
+[[entries]]
+rust  = "indexed_db_run_search"
+other = "IndexedDbRunSearch"
+
+[[entries]]
+rust  = "set_up_db_index_callbacks"
+other = "SetUpDbIndexCallbacks"
+
+[[entries]]
+rust  = "clear_db_index_callbacks"
+other = "ClearDbIndexCallbacks"
+
+[[entries]]
+rust  = "get_db_index_set_query_info_fn"
+other = "GetDbIndexSetQueryInfoFn"
+
+[[entries]]
+rust  = "get_db_index_set_using_threads_fn"
+other = "GetDbIndexSetUsingThreadsFn"
+
+[[entries]]
+rust  = "get_db_index_set_num_threads_fn"
+other = "GetDbIndexSetNumThreadsFn"
+
+[[entries]]
+rust  = "get_db_index_run_search_fn"
+other = "GetDbIndexRunSearchFn"
+
+[[entries]]
+rust  = "s_mb_idx_end_search_indication"
+other = "s_MB_IdxEndSearchIndication"
+
+[[entries]]
+rust  = "s_mb_idb_check_oid"
+other = "s_MB_IdbCheckOid"
+
+[[entries]]
+rust  = "s_mb_idb_get_results"
+other = "s_MB_IdbGetResults"
+
+# seqsrc_seqdb.cpp — provider callback batch
+[[entries]]
+rust  = "s_seq_db_get_is_prot"
+other = "s_SeqDbGetIsProt"
+
+[[entries]]
+rust  = "s_seq_db_release_sequence"
+other = "s_SeqDbReleaseSequence"
+
+# seqsrc_vdb.c — provider callback batch
+[[entries]]
+rust  = "s_vdbsrc_get_num_seqs"
+other = "s_VDBSRC_GetNumSeqs"
+
+[[entries]]
+rust  = "s_vdbsrc_get_num_seqs_stats"
+other = "s_VDBSRC_GetNumSeqsStats"
+
+[[entries]]
+rust  = "s_vdbsrc_get_tot_len_stats"
+other = "s_VDBSRC_GetTotLenStats"
+
+[[entries]]
+rust  = "s_vdbsrc_get_name"
+other = "s_VDBSRC_GetName"
+
+[[entries]]
+rust  = "s_vdbsrc_release_sequence"
+other = "s_VDBSRC_ReleaseSequence"
+
+[[entries]]
+rust  = "s_vdbsrc_reset_chunk_iterator"
+other = "s_VDBSRC_ResetChunkIterator"
+
+[[entries]]
+rust  = "s_vdbsrc_get_supports_partial_fetching"
+other = "s_VDBSRC_GetSupportsPartialFetching"
+
+# ncbi_core MT_LOCK substrate
+[[entries]]
+rust  = "EMTLock"
+other = "EMT_Lock"
+
+[[entries]]
+rust  = "FMTLockHandler"
+other = "FMT_LOCK_Handler"
+
+[[entries]]
+rust  = "FMTLockCleanup"
+other = "FMT_LOCK_Cleanup"
+
+[[entries]]
+rust  = "mt_lock_create"
+other = "MT_LOCK_Create"
+
+[[entries]]
+rust  = "mt_lock_add_ref"
+other = "MT_LOCK_AddRef"
+
+[[entries]]
+rust  = "mt_lock_delete"
+other = "MT_LOCK_Delete"
+
+[[entries]]
+rust  = "mt_lock_do"
+other = "MT_LOCK_DoInternal"
+
+[[entries]]
+rust  = "mt_lock_do"
+other = "MT_LOCK_Do"
+
+# setup_factory.hpp / prelim_search_runner.hpp — API setup storage batch
+[[entries]]
+rust  = "CStructWrapper"
+other = "CStructWrapper"
+
+[[entries]]
+rust  = "wrap_struct"
+other = "WrapStruct"
+
+[[entries]]
+rust  = "SInternalData"
+other = "SInternalData"
+
+[[entries]]
+rust  = "SInternalData::new"
+other = "SInternalData::SInternalData"
+
+[[entries]]
+rust  = "CThreadable"
+other = "CThreadable"
+
+[[entries]]
+rust  = "SDatabaseScanData"
+other = "SDatabaseScanData"
+
+[[entries]]
+rust  = "CPrelimSearchRunner"
+other = "CPrelimSearchRunner"
+
+[[entries]]
+rust  = "CPrelimSearchThread"
+other = "CPrelimSearchThread"
+
+# blast_results.hpp / blast_seqalign.cpp — API result storage canonicalization
+[[entries]]
+rust  = "CBlastAncillaryData"
+other = "CBlastAncillaryData"
+
+[[entries]]
+rust  = "CSearchResults"
+other = "CSearchResults"
+
+[[entries]]
+rust  = "CSearchResultSet"
+other = "CSearchResultSet"
+
+[[entries]]
+rust  = "SeqAlignConversionContext"
+other = "SeqAlignConversionContext"
+
+# pssm_engine.hpp / seedtop.hpp — API score/lookup storage canonicalization
+[[entries]]
+rust  = "CPssmEngine"
+other = "CPssmEngine"
+
+[[entries]]
+rust  = "CPssmEngineException"
+other = "CPssmEngineException"
+
+[[entries]]
+rust  = "CScorematPssmConverter"
+other = "CScorematPssmConverter"
+
+[[entries]]
+rust  = "CSeedTop"
+other = "CSeedTop"
+
+[[entries]]
+rust  = "SPatternUnit"
+other = "SPatternUnit"
+
+# search_strategy.hpp — API search-strategy storage batch
+[[entries]]
+rust  = "CImportStrategyData"
+other = "CImportStrategyData"
+
+[[entries]]
+rust  = "CExportStrategy"
+other = "CExportStrategy"
+
+[[entries]]
+rust  = "CImportStrategy"
+other = "CImportStrategy"
+
+[[entries]]
+rust  = "CBlast4Request"
+other = "CBlast4Request"
+
+# remote_blast.hpp — API remote BLAST storage batch
+[[entries]]
+rust  = "CRemoteBlast"
+other = "CRemoteBlast"
+
+[[entries]]
+rust  = "CBlast4QueueSearchRequest"
+other = "CBlast4QueueSearchRequest"
+
+[[entries]]
+rust  = "CBlast4Reply"
+other = "CBlast4Reply"
+
+[[entries]]
+rust  = "CBlast4Archive"
+other = "CBlast4Archive"
+
+[[entries]]
+rust  = "CBlast4Database"
+other = "CBlast4Database"
+
+[[entries]]
+rust  = "CBlast4KaBlock"
+other = "CBlast4KaBlock"
+
+[[entries]]
+rust  = "CSeqInterval"
+other = "CSeqInterval"
+
+[[entries]]
+rust  = "CBlast4Parameter"
+other = "CBlast4Parameter"
+
+# local_blast.hpp / traceback_stage.hpp — API stage storage batch
+[[entries]]
+rust  = "CLocalBlast"
+other = "CLocalBlast"
+
+[[entries]]
+rust  = "CBlastTracebackSearch"
+other = "CBlastTracebackSearch"
+
+[[entries]]
+rust  = "EResultType"
+other = "CBlastTracebackSearch::EResultType"
+
+# seqinfosrc*.hpp — API sequence-info source storage batch
+[[entries]]
+rust  = "IBlastSeqInfoSrc"
+other = "IBlastSeqInfoSrc"
+
+[[entries]]
+rust  = "CBioseqSeqInfoSrc"
+other = "CBioseqSeqInfoSrc"
+
+[[entries]]
+rust  = "CSeqDbSeqInfoSrc"
+other = "CSeqDbSeqInfoSrc"
+
+[[entries]]
+rust  = "CSeqVecSeqInfoSrc"
+other = "CSeqVecSeqInfoSrc"
+
+[[entries]]
+rust  = "BlastSeqInfoSrcAuxState"
+other = "BlastSeqInfoSrcAuxState"
+
+# local_db_adapter.hpp / prelim_stage.hpp / remote_search.hpp / uniform_search.hpp — API search-stage storage batch
+[[entries]]
+rust  = "CLocalDbAdapter"
+other = "CLocalDbAdapter"
+
+[[entries]]
+rust  = "CBlastPrelimSearch"
+other = "CBlastPrelimSearch"
+
+[[entries]]
+rust  = "CRemoteSeqSearch"
+other = "CRemoteSeqSearch"
+
+[[entries]]
+rust  = "CRemotePssmSearch"
+other = "CRemotePssmSearch"
+
+[[entries]]
+rust  = "CRemoteSearchFactory"
+other = "CRemoteSearchFactory"
+
+[[entries]]
+rust  = "CRemoteSearchQueryFactory"
+other = "CRemoteSearchQueryFactory"
+
+[[entries]]
+rust  = "CSearchDatabase"
+other = "CSearchDatabase"
+
+[[entries]]
+rust  = "CSearchExceptionErrCode"
+other = "CSearchException::EErrCode"
+
+[[entries]]
+rust  = "EMoleculeType"
+other = "CSearchDatabase::EMoleculeType"
+
+[[entries]]
+rust  = "ESubjectMaskingType"
+other = "ESubjectMaskingType"
+
+[[entries]]
+rust  = "ISearch"
+other = "ISearch"
+
+[[entries]]
+rust  = "ISeqSearch"
+other = "ISeqSearch"
+
+[[entries]]
+rust  = "IPssmSearch"
+other = "IPssmSearch"
+
+[[entries]]
+rust  = "ISearchFactory"
+other = "ISearchFactory"
+
+[[entries]]
+rust  = "CSeqDBGiList"
+other = "CSeqDBGiList"

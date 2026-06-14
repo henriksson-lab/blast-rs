@@ -5,3 +5,8 @@ pub const VDBSRC_OVERFLOW_RV: i32 = -1;
 pub const VDBSRC_CACHE_ITER_BUF_SIZE: usize = 1000;
 
 pub type Oid = i32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VdbOpaqueHandle {
+    pub name: String,
+}
