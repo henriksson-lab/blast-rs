@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::blast_options_builder::CBlast4Parameter;
 use super::blast_options_handle::CBlastOptionsHandle;
 use super::query_data::{CBioseq, CPssmWithParameters, CSeqData, CSeqLoc};
+use super::query_data::{EBlastProgramType, NUCLEOTIDE_QUERY_MASK, TRANSLATED_QUERY_MASK};
 
 /// NCBI C++: `CRemoteBlastException::EErrCode` (`remote_blast.hpp`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,4 +126,72 @@ pub struct CSeqInterval;
 #[derive(Clone, Debug)]
 pub struct CRemoteBlastPssmQuery {
     pub m_Pssm: Option<Arc<CPssmWithParameters>>,
+}
+
+/// NCBI C++: `objects::EBlast4_frame_type`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EBlast4FrameType {
+    NotSet,
+    Plus1,
+    Plus2,
+    Plus3,
+    Minus1,
+    Minus2,
+    Minus3,
+}
+
+/// NCBI C++: `CSeqLocInfo::ETranslationFrame`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ETranslationFrame {
+    NotSet,
+    Plus1,
+    Plus2,
+    Plus3,
+    Minus1,
+    Minus2,
+    Minus3,
+}
+
+/// NCBI C++: `FrameNumber2NetworkFrame`.
+pub fn frame_number_2_network_frame(frame: i32, program: EBlastProgramType) -> EBlast4FrameType {
+    let program = program as u32;
+    if (program & TRANSLATED_QUERY_MASK) != 0 {
+        return match frame {
+            1 => EBlast4FrameType::Plus1,
+            2 => EBlast4FrameType::Plus2,
+            3 => EBlast4FrameType::Plus3,
+            -1 => EBlast4FrameType::Minus1,
+            -2 => EBlast4FrameType::Minus2,
+            -3 => EBlast4FrameType::Minus3,
+            _ => panic!("invalid translated query frame"),
+        };
+    }
+
+    if (program & NUCLEOTIDE_QUERY_MASK) != 0 {
+        debug_assert!(frame == -1 || frame == 1);
+        return EBlast4FrameType::NotSet;
+    }
+
+    EBlast4FrameType::NotSet
+}
+
+/// NCBI C++: `NetworkFrame2FrameNumber`.
+pub fn network_frame_2_frame_number(
+    frame: EBlast4FrameType,
+    program: EBlastProgramType,
+) -> ETranslationFrame {
+    let program = program as u32;
+    if (program & TRANSLATED_QUERY_MASK) != 0 {
+        return match frame {
+            EBlast4FrameType::Plus1 => ETranslationFrame::Plus1,
+            EBlast4FrameType::Plus2 => ETranslationFrame::Plus2,
+            EBlast4FrameType::Plus3 => ETranslationFrame::Plus3,
+            EBlast4FrameType::Minus1 => ETranslationFrame::Minus1,
+            EBlast4FrameType::Minus2 => ETranslationFrame::Minus2,
+            EBlast4FrameType::Minus3 => ETranslationFrame::Minus3,
+            EBlast4FrameType::NotSet => panic!("invalid translated network frame"),
+        };
+    }
+
+    ETranslationFrame::NotSet
 }

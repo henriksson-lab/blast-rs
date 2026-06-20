@@ -1,4 +1,6 @@
 pub mod api {
+    pub mod blast_mtlock;
+    pub use blast_mtlock::*;
     pub use crate::api::*;
 }
 

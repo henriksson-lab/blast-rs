@@ -30,6 +30,28 @@ pub struct CRemotePssmSearch {
 #[derive(Clone, Debug)]
 pub struct CRemoteSearchFactory;
 
+impl CRemoteSearchFactory {
+    pub fn get_seq_search(&self) -> CRemoteSeqSearch {
+        CRemoteSeqSearch {
+            m_SearchOpts: None,
+            m_RemoteBlast: None,
+            m_Queries: None,
+            m_Subject: None,
+            m_Warnings: Vec::new(),
+        }
+    }
+
+    pub fn get_pssm_search(&self) -> CRemotePssmSearch {
+        CRemotePssmSearch {
+            m_SearchOpts: None,
+            m_RemoteBlast: None,
+            m_Pssm: None,
+            m_Subject: None,
+            m_Warnings: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CRemoteSearchQueryFactory {
     pub m_QueryFactory: Option<Arc<IQueryFactory>>,

@@ -6,7 +6,7 @@ use crate::algo::blast::api::query_data::{
 };
 use crate::algo::blast::core::blast_encoding::EBlastEncoding;
 use crate::algo::blast::core::blast_query_info::BlastQueryInfo;
-use crate::algo::blast::core::blast_util::BLAST_SequenceBlk;
+use crate::algo::blast::core::blast_util::{blast_get_number_of_contexts, BLAST_SequenceBlk};
 
 #[derive(Clone, Debug)]
 pub struct CBlastSetupCxxState {
@@ -19,4 +19,15 @@ pub struct CBlastSetupCxxState {
     pub sequence_blk: *mut BLAST_SequenceBlk,
     pub messages: TSearchMessages,
     pub seq_locs: Vec<Arc<CSeqLoc>>,
+}
+
+pub fn get_number_of_contexts(p: EBlastProgramType) -> u32 {
+    let retval = blast_get_number_of_contexts(p as u32);
+    if retval == 0 {
+        panic!(
+            "Cannot get number of contexts for invalid program type: {:?} ({})",
+            p, p as u32
+        );
+    }
+    retval
 }
