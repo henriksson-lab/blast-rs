@@ -29,13 +29,46 @@ pub struct SQueryFactorySrcNewArgs {
     pub program: EBlastProgramType,
 }
 
+impl CQueryFactoryInfo {
+    pub fn get_max_length(&self) -> u32 {
+        self.max_length
+    }
+
+    pub fn get_min_length(&self) -> u32 {
+        self.min_length
+    }
+
+    pub fn get_avg_length(&self) -> u32 {
+        self.avg_length
+    }
+
+    pub fn set_avg_length(&mut self, length: u32) {
+        self.avg_length = length;
+    }
+
+    pub fn get_is_protein(&self) -> bool {
+        self.is_prot
+    }
+
+    pub fn get_num_seqs(&self) -> u32 {
+        self.num_seqs
+    }
+
+    pub fn get_seq_blk(&self, index: u32) -> *mut BLAST_SequenceBlk {
+        if index >= self.get_num_seqs() {
+            panic!("sequence index out of range");
+        }
+        self.seq_blk_vector[index as usize]
+    }
+}
+
 pub fn s_query_factory_get_max_length(
     multiseq_handle: &dyn Any,
     _args: Option<&mut dyn Any>,
 ) -> i32 {
     multiseq_handle
         .downcast_ref::<CQueryFactoryInfo>()
-        .map(|seq_info| seq_info.max_length as i32)
+        .map(|seq_info| seq_info.get_max_length() as i32)
         .unwrap_or(0)
 }
 
@@ -45,7 +78,7 @@ pub fn s_query_factory_get_min_length(
 ) -> i32 {
     multiseq_handle
         .downcast_ref::<CQueryFactoryInfo>()
-        .map(|seq_info| seq_info.min_length as i32)
+        .map(|seq_info| seq_info.get_min_length() as i32)
         .unwrap_or(0)
 }
 
@@ -57,11 +90,11 @@ pub fn s_query_factory_get_avg_length(
         return 0;
     };
 
-    if seq_info.avg_length > 0 {
-        return seq_info.avg_length as i32;
+    if seq_info.get_avg_length() > 0 {
+        return seq_info.get_avg_length() as i32;
     }
 
-    let num_seqs = seq_info.num_seqs;
+    let num_seqs = seq_info.get_num_seqs();
     if num_seqs == 0 {
         return 0;
     }
@@ -78,7 +111,7 @@ pub fn s_query_factory_get_avg_length(
 pub fn s_query_factory_get_num_seqs(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> i32 {
     multiseq_handle
         .downcast_ref::<CQueryFactoryInfo>()
-        .map(|seq_info| seq_info.num_seqs as i32)
+        .map(|seq_info| seq_info.get_num_seqs() as i32)
         .unwrap_or(0)
 }
 
@@ -110,7 +143,7 @@ pub fn s_query_factory_get_name(
 pub fn s_query_factory_get_is_prot(multiseq_handle: &dyn Any, _args: Option<&mut dyn Any>) -> bool {
     multiseq_handle
         .downcast_ref::<CQueryFactoryInfo>()
-        .map(|seq_info| seq_info.is_prot)
+        .map(|seq_info| seq_info.get_is_protein())
         .unwrap_or(false)
 }
 

@@ -54,10 +54,7 @@ impl CSplitQueryBlk {
         self.split_query_blk.num_chunks as usize
     }
 
-    pub fn get_num_queries_for_chunk(
-        &self,
-        chunk_num: usize,
-    ) -> Result<usize, SplitQueryBlkError> {
+    pub fn get_num_queries_for_chunk(&self, chunk_num: usize) -> Result<usize, SplitQueryBlkError> {
         let (rv, retval) = split_query_blk_get_num_queries_for_chunk(
             Some(&self.split_query_blk),
             chunk_num as u32,
@@ -71,8 +68,10 @@ impl CSplitQueryBlk {
     }
 
     pub fn get_query_indices(&self, chunk_num: usize) -> Result<Vec<usize>, SplitQueryBlkError> {
-        let (rv, query_indices) =
-            split_query_blk_get_query_indices_for_chunk(Some(&self.split_query_blk), chunk_num as u32);
+        let (rv, query_indices) = split_query_blk_get_query_indices_for_chunk(
+            Some(&self.split_query_blk),
+            chunk_num as u32,
+        );
         if rv != 0 {
             return Err(SplitQueryBlkError::CoreCall(
                 "SplitQueryBlk_GetQueryIndicesForChunk",
@@ -88,20 +87,25 @@ impl CSplitQueryBlk {
     }
 
     pub fn get_query_contexts(&self, chunk_num: usize) -> Result<Vec<i32>, SplitQueryBlkError> {
-        let (rv, query_contexts) =
-            split_query_blk_get_query_contexts_for_chunk(Some(&self.split_query_blk), chunk_num as u32);
+        let (rv, query_contexts) = split_query_blk_get_query_contexts_for_chunk(
+            Some(&self.split_query_blk),
+            chunk_num as u32,
+        );
         if rv != 0 {
             return Err(SplitQueryBlkError::CoreCall(
                 "SplitQueryBlk_GetQueryContextsForChunk",
             ));
         }
-        let (retval, _num_contexts) = query_contexts.expect("core call returned success without output");
+        let (retval, _num_contexts) =
+            query_contexts.expect("core call returned success without output");
         Ok(retval)
     }
 
     pub fn get_context_offsets(&self, chunk_num: usize) -> Result<Vec<usize>, SplitQueryBlkError> {
-        let (rv, context_offsets) =
-            split_query_blk_get_context_offsets_for_chunk(Some(&self.split_query_blk), chunk_num as u32);
+        let (rv, context_offsets) = split_query_blk_get_context_offsets_for_chunk(
+            Some(&self.split_query_blk),
+            chunk_num as u32,
+        );
         if rv != 0 {
             return Err(SplitQueryBlkError::CoreCall(
                 "SplitQueryBlk_GetContextOffsetsForChunk",
@@ -216,7 +220,11 @@ impl CSplitQueryBlk {
     }
 
     pub fn get_chunk_overlap_size(&self) -> usize {
-        split_query_blk_get_chunk_overlap_size(Some(&self.split_query_blk))
+        let retval = split_query_blk_get_chunk_overlap_size(Some(&self.split_query_blk));
+        if retval == 0 {
+            eprintln!("Warning: Query-splitting Chunk overlap size was not set");
+        }
+        retval
     }
 }
 

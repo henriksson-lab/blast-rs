@@ -48,6 +48,8 @@ pub struct CAutomaticGenCodeSingleton;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EProgram {
     EBlastn,
+    EMegablast,
+    EDiscMegablast,
     EBlastp,
     EBlastx,
     ETblastn,
@@ -58,7 +60,8 @@ pub enum EProgram {
     EPhiBlastp,
     EPsiBlast,
     EPsiTblastn,
-    EDiscMegablast,
+    EDeltaBlast,
+    EVecScreen,
     EMagicBlast,
     EMapper,
     EUnknown,

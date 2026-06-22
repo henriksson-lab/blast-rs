@@ -114,6 +114,63 @@ pub struct ILocalQueryData {
     pub sum_of_sequence_lengths: usize,
 }
 
+impl ILocalQueryData {
+    pub fn x_validate_index(&self, index: usize) {
+        let num_queries = self
+            .query_info
+            .as_ref()
+            .map(|query_info| query_info.num_queries.max(0) as usize)
+            .unwrap_or(0);
+        if index > num_queries {
+            panic!("Index {index} out of range ({num_queries} max)");
+        }
+    }
+
+    pub fn is_valid_query(&self, index: usize) -> bool {
+        self.x_validate_index(index);
+
+        let query_info = self.query_info.as_ref().expect("BlastQueryInfo");
+        let mut all_contexts_valid = true;
+        for context_index in query_info.first_context..=query_info.last_context {
+            let Some(context) = query_info.contexts.get(context_index as usize) else {
+                continue;
+            };
+            if context.query_index == index as i32 && !context.is_valid {
+                all_contexts_valid = false;
+                break;
+            }
+        }
+        all_contexts_valid
+    }
+
+    pub fn is_at_least_one_query_valid(&self) -> bool {
+        let num_queries = self
+            .query_info
+            .as_ref()
+            .map(|query_info| query_info.num_queries.max(0) as usize)
+            .unwrap_or(0);
+        for index in 0..num_queries {
+            if self.is_valid_query(index) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn get_query_messages(&self, index: usize, qmsgs: &mut TQueryMessages) {
+        self.x_validate_index(index);
+        *qmsgs = self.messages[index].clone();
+    }
+
+    pub fn get_messages(&self, messages: &mut TSearchMessages) {
+        *messages = self.messages.clone();
+    }
+
+    pub fn flush_sequence_data(&mut self) {
+        self.seq_blk = None;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IRemoteQueryData {
     pub bioseqs: Option<Arc<CBioseqSet>>,
