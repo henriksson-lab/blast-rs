@@ -4,7 +4,10 @@ Pure-Rust implementation of NCBI BLAST (Basic Local Alignment Search Tool). Prod
 
 Based on [NCBI BLAST+ 2.17.0](https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/) source distribution (`ncbi-blast-2.17.0+-src.tar.gz`, also on [GitHub](https://github.com/ncbi/blast)). The C core algorithms in `src/algo/blast/core/` were ported function-by-function to Rust.
 
-* 2026-05-20: Further auditing done; **more auditing needed. do not use**
+** DO NOT USE. This reposity is left for historic reasons only, for anyone interested in researching agentic translation**
+
+* 2026-06-22: Declaring this translation attempt a no-go with my currently best translation approach (CCC+mix of agents); either the agents get too much freedom and "does their own thing", or CCC prevents the agents from making decent progress. Newer tools are under development and a different approach will be taken
+
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
 
